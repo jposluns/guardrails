@@ -6,35 +6,56 @@
 # never which review cycle, finding or tracker item asked for it. A line that has to quote such a
 # label on purpose carries the allow-marker below, which exempts that one line and no other.
 #
-# Keys: format-version (1), allow-marker (a word of letters, digits and hyphens), and one or more
-# [[shape]] tables with id (lower-case words joined by hyphens, unique), description, regex and an
-# optional ignore-case (a boolean, false when absent). Any other key, a regex that does not compile
-# and a regex that matches an empty line are refused, and the gate then cannot evaluate (exit 2).
+# Keys: format-version (1), allow-marker (a word of letters, digits and hyphens), an optional
+# exclude-paths array, and one or more [[shape]] tables with id (lower-case words joined by hyphens,
+# unique), description, regex and an optional ignore-case (a boolean, false when absent). Any other
+# key, a regex that does not compile and a regex that matches an empty line are refused, and the gate
+# then cannot evaluate (exit 2).
 format-version = 1
 allow-marker = "review-label-allow"
 
+# exclude-paths: the closed, reviewed list of files whose added lines are not judged at all. Each entry
+# is a normalized relative path that must name a regular file in the working tree (a missing path, a
+# directory or a symlink is refused, exit 2). Every entry carries its justification on the line above
+# it; a new entry needs the same review, because a label added anywhere in a listed file is not caught.
+exclude-paths = [
+    # The sibling internal-names gate refuses review-cycle vocabulary, so its source, messages and
+    # self-test vectors have to name it; its own gate covers that file.
+    "tools/check_internal_names.py",
+    # That gate's ratchet baseline: its canonical render writes one count key per shape, the review
+    # and round key among them, and refuses any other spelling, so lowering a count on the normal
+    # label-cleanup path rewrites such a line; the sibling gate holds the file to its closed schema.
+    ".aiqt/tracker-label-baseline.toml",
+    # The gates manifest: the sibling gate's residue is one physical line that has to name the same
+    # vocabulary, so any edit to it rewrites that line. The whole file is excluded, every other gate
+    # residue in it included; this is a disclosed limit of the gate.
+    ".aiqt/core/gates/manifest.toml",
+]
+
+# The test name may start after an underscore and is matched in any case.
 [[shape]]
 id = "review-test-name"
 description = "a test name numbered after a review cycle"
-regex = '\btest_r[0-9]+[a-z]?_'
+regex = '(?<![A-Za-z0-9])test_r[0-9]+[a-z]?_'
+ignore-case = true
 
 # The r is lower case only: an upper-case R and a digit in parentheses is a rule number in this pack's
-# prose ("(R1 execution verbs ...)"), not a review cycle.
+# prose ("(R1 execution verbs ...)"), not a review cycle. Square brackets are matched like parentheses.
 [[shape]]
 id = "review-tag"
-description = "a parenthesised review or QA cycle tag"
-regex = '\((?:r|[Qq][Aa])[0-9]+[a-z]?:?[ ]+(?!(?:and|or|not|in|is|if|else|for)\b)[A-Za-z]'
+description = "a parenthesised or bracketed review or QA cycle tag"
+regex = '[(\[](?:r|[Qq][Aa])[0-9]+[a-z]?:?[ \t]+(?!(?:and|or|not|in|is|if|else|for)\b)[A-Za-z]'
 
 [[shape]]
 id = "round-number"
 description = "a numbered round (a retry round and a count of rounds are not one)"
-regex = '(?<!retry )\bround[ -]?[0-9]+\b(?!\s+of\b)'
+regex = '(?<!retry )\bround[ \t-]?#?[0-9]+\b(?!\s+of\b)'
 ignore-case = true
 
 [[shape]]
 id = "review-cycle-words"
 description = "the words review and round side by side"
-regex = '\breview[ -]round\b'
+regex = '\breview[ \t-]round\b'
 ignore-case = true
 
 [[shape]]
