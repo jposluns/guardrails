@@ -28,7 +28,10 @@ fullwidth digit, a no-break space, a zero-width space, a combining accent, a Cyr
 Arabic-Indic digit does not hide a label; a line holding a NUL byte (a UTF-16 text file, say) is also
 read with its NUL bytes removed. A line carrying the file's allow-marker as a word of its own is a
 deliberate quotation and is exempt; the marker exempts that one line only, and inside a longer word it
-exempts nothing.
+exempts nothing. The marker is tested in every view the shapes are searched in, so a UTF-16 line
+carrying it is exempt like its UTF-8 twin, while a view in which the marker is not a word of its own
+(inside a longer word, or joined to a neighbour once the NUL bytes are removed or a look-alike is
+folded) is still searched.
 
 EXCLUDED PATHS. The configuration's exclude-paths list names the only files whose added lines are not
 judged, each a reviewed exception justified beside it in that file: the sibling gate
@@ -99,7 +102,11 @@ diff has to catch. origin/main is trusted as the protected branch by name: in a 
 checkout it is that checkout's local main, so a commit there that was never pushed, or a labelled
 branch merged into it locally, already sits on the merge base and is not judged (git ls-remote cannot
 settle this, since the clone's remote is that checkout itself, which reports its own main); compare
-with the upstream remote by passing --protected with the upstream branch or commit there. Commit
+with the upstream remote by passing --protected with the upstream branch or commit there. The other
+direction holds too: an origin/main behind the upstream main (a checkout whose local main was not
+updated) puts the merge base further back, so lines the upstream main added since, which a candidate
+based on the newer main holds, are charged to it, a false positive that updating that main or the same
+--protected settles. Commit
 messages and pull request text are outside this gate.
 """
 import sys
@@ -605,12 +612,19 @@ def _line_views(line):
     return views
 
 
+def _unmarked_views(line, marker):
+    """The views of an added line the shapes are searched in: every view of _line_views that does not
+    carry the allow-marker as a word of its own. The marker is tested in each view the shapes read, so a
+    UTF-16 line carrying it (seen only once its NUL bytes are removed) is exempt like its UTF-8 twin,
+    while a view in which the marker sits inside a longer word, or is joined to a neighbour once the NUL
+    bytes are removed or a look-alike is folded, is still searched."""
+    return tuple(view for view in _line_views(line) if not _allowed(view, marker))
+
+
 def judge(added, config):
     findings = []
     for line in added:
-        if _allowed(line.text, config.marker):
-            continue
-        views = _line_views(line)
+        views = _unmarked_views(line, config.marker)
         for shape in config.shapes:
             if any(shape.pattern.search(view) for view in views):
                 findings.append(Finding(line.path, line.number, shape.id, shape.description, line.text))
@@ -627,7 +641,7 @@ def evaluate(root, protected=None, head=None, environ=None):
     protected_sha = _resolve_commit(root, ref, "protected branch")
     head_sha = _resolve_commit(root, "HEAD" if head is None else head, "candidate")
     base = merge_base(root, protected_sha, head_sha)
-    diff =added_lines(read_diff(root, base, None if head is None else head_sha))
+    diff = added_lines(read_diff(root, base, None if head is None else head_sha))
     judged = [line for line in diff.added if not _excluded(line.path, config.excluded)]
     skipped = len(diff.added) - len(judged)
     judged, moved = credit_moves(judged, _credits(diff.deleted, config.excluded))
@@ -844,8 +858,10 @@ def _self_test():
           "the narrowing or the marker is removed; a deleted line, a pre-existing line and a pure rename "
           "are not judged and are once the diff judges them; the working tree is read; every "
           "fail-closed case exits 2 and passes once its refusal is removed; the protected branch is "
-          "derived from GITHUB_BASE_REF, origin/HEAD (origin/main, which an origin/HEAD naming another "
-          "branch is set aside for, and cannot-evaluate without it) and the Actions ref name; excluded "
+          "derived from GITHUB_BASE_REF (ahead of an existing origin/HEAD), origin/HEAD (origin/main, "
+          "which an origin/HEAD naming another branch is set aside for, and cannot-evaluate without it) "
+          "and the Actions ref name; a UTF-16 line carrying the allow-marker passes like its UTF-8 twin "
+          "and one with the marker inside a longer word or none is refused; excluded "
           "files are not judged and every other file is; a moved or reordered line is not charged while "
           "an edited line and an extra copy are; a text file declared binary, a genuine binary and "
           "look-alike characters are read; textconv, an external diff, a submodule log, a GIT_DIR "
@@ -1221,6 +1237,27 @@ def _derivation_rows(tmp, labels):
         code, out = _gate(repo, protected=None)
     check("flip/origin-head-other-branch-without-main-trusted", code == 0 and "0 added line(s)" in out, out)
 
+    # GITHUB_BASE_REF comes before an existing origin/HEAD: here origin/HEAD names origin/main at the
+    # candidate (judging nothing) while the pull request target sits at the base, so only the target
+    # finds the label; the flip reads origin/HEAD first whenever it exists.
+    _fx_git(repo, "update-ref", ORIGIN_PREFIX + "main", _fx_git(repo, "rev-parse", "work"))
+    _fx_git(repo, "update-ref", ORIGIN_PREFIX + "target", base_sha)
+    _fx_git(repo, "symbolic-ref", ORIGIN_HEAD, ORIGIN_PREFIX + "main")
+    target = {BASE_REF_VAR: "target"}
+    code, out = _gate(repo, protected=None, environ=target)
+    check("derive/pull-request-target-before-origin-head", code == 1 and finding in out
+          and "(from GITHUB_BASE_REF)" in out, out)
+    with _patched(protected_ref=_origin_head_first_protected_ref):
+        code, out = _gate(repo, protected=None, environ=target)
+    check("flip/origin-head-before-pull-request-target", code == 0 and "(from origin/HEAD)" in out, out)
+
+
+def _origin_head_first_protected_ref(root, explicit, environ):
+    """A flip of the derivation order: an existing origin/HEAD is read before GITHUB_BASE_REF."""
+    if explicit is None and _git(root, "symbolic-ref", "--quiet", ORIGIN_HEAD).returncode == 0:
+        return _REAL_PROTECTED_REF(root, explicit, {})
+    return _REAL_PROTECTED_REF(root, explicit, environ)
+
 
 def _trusting_origin_head_branch(root, target):
     """A flip of the origin/HEAD derivation: the branch origin/HEAD names is trusted as the protected
@@ -1536,6 +1573,58 @@ def _text_rows(tmp, labels):
     with _patched(_allowed=lambda text, marker: marker in text):
         code, out = _gate(repo)
     check("flip/marker-inside-longer-word-exempts", "marked.py" not in out, out)
+    _wide_marker_rows(tmp, labels)
+
+
+def _text_only_marker_views(line, marker):
+    """A flip of the per-view marker test: the marker is tested on the line's text alone (its NUL bytes
+    kept), and a line carrying it there skips every view."""
+    return () if _allowed(line.text, marker) else _line_views(line)
+
+
+def _any_view_marker_views(line, marker):
+    """A flip of the per-view marker test: a marker that is a word of its own in any view exempts the
+    whole line, even when another view the shapes match joins it to a neighbour."""
+    views = _line_views(line)
+    return () if any(_allowed(view, marker) for view in views) else views
+
+
+def _wide_marker_rows(tmp, labels):
+    """The allow-marker is tested in every view the shapes read: a UTF-16 label line carrying the marker
+    as a word of its own passes like its UTF-8 twin, while a UTF-16 line with the marker inside a longer
+    word, a UTF-16 label with no marker, and a line whose marker is a word of its own only until its NUL
+    byte is removed (then joined to the word before it) are refused."""
+    marker = _REAL_LOAD_CONFIG(ROOT / CONFIG_RELPATH).marker
+    repo = _base_repo(tmp, "wide-marker")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    wide = ("clean line\n" + labels["round-number"] + "  # " + marker + "\n"
+            + labels["round-number"] + "  # x" + marker + "ed\n" + labels["round-number"] + "\n")
+    with open(Path(repo) / "wide-marked.txt", "wb") as handle:
+        handle.write(wide.encode("utf-16"))
+    with open(Path(repo) / "joined.dat", "wb") as handle:
+        handle.write(labels["round-number"].encode("ascii") + b"  # x\x00" + marker.encode("ascii") + b"\n")
+    _commit_all(repo, "UTF-16 lines with and without the marker, and a marker joined by NUL removal")
+    code, out = _gate(repo)
+    check("pass/utf16-allow-marker", "wide-marked.txt:2:" not in out, out)
+    check("refuse/utf16-marker-inside-longer-word", code == 1 and "  wide-marked.txt:3: round-number" in out,
+          out)
+    check("refuse/utf16-label-without-marker", code == 1 and "  wide-marked.txt:4: round-number" in out, out)
+    check("refuse/marker-joined-by-nul-removal", code == 1 and "  joined.dat:1: round-number" in out, out)
+    check("refuse/utf16-marker-findings-only", code == 1 and out.count("  wide-marked.txt:") == 2
+          and out.count("  joined.dat:") == 1, out)
+    with _patched(_unmarked_views=_text_only_marker_views):
+        code, out = _gate(repo)
+    check("flip/utf16-allow-marker-tested-on-text-only",
+          code == 1 and "  wide-marked.txt:2: round-number" in out, out)
+    with _patched(_unmarked_views=_any_view_marker_views):
+        code, out = _gate(repo)
+    check("flip/marker-joined-by-nul-removal-exempts", "joined.dat" not in out, out)
+    with _patched(_allowed=lambda text, marker: marker in text):
+        code, out = _gate(repo)
+    check("flip/utf16-marker-inside-longer-word-exempts", "wide-marked.txt:3:" not in out, out)
+    with _patched(_line_views=lambda line: _views(line.text)):
+        code, out = _gate(repo)
+    check("flip/utf16-label-without-marker-missed-with-nul", "wide-marked.txt:4:" not in out, out)
 
 
 def _with_patterns(patterns):
