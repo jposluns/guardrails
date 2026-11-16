@@ -1890,13 +1890,15 @@ _FOOTER_SOURCES = ("VERSION", "changelog.toml")
 # best-effort static reading, not complete: it refuses (turns the self-test red on) only the forms its
 # docstring names, among them ROOT taken any way but as a path base or an argument to a tools/ module, a
 # ROOT default argument, an attribute other than joinpath and the plain reads of ROOT, of a ROOT path or
-# of a name bound alone to one, a ".." part, and a renderer's use, by name, of open, getattr, os, Path and
-# the other names on _WALK_REFUSED_NAMES, or of a name an import of one of them binds under any alias. It
-# does not see what a tools/ module a renderer calls reads or imports in turn, a path reaching a renderer
-# as a parameter, return value, container, attribute or unpacking target, code reached through an
-# object's attribute rather than by name, a module-level name bound inside a function, or a file API not on
-# that list or reached as a module's attribute (its docstring's blind spots). A renderer change of those
-# kinds needs this tuple checked by hand.
+# of a name bound alone to one, a ".." part, a walrus of a ROOT path taken as the base of another
+# attribute or of "/", a renderer's match capture of a ROOT path, and a renderer's use, by name, of open,
+# getattr, os, Path and the other names on _WALK_REFUSED_NAMES, or of a name an import of one of them binds
+# under any alias. It does not see what a tools/ module a renderer calls reads or imports in turn, a path
+# reaching a renderer as a parameter, return value, container, attribute or unpacking target, a path a
+# module-level match capture binds inside a larger case pattern, code reached through an object's
+# attribute rather than by name, a module-level name bound inside a function, or a file API not on that
+# list or reached as a module's attribute (its docstring's blind spots). A renderer change of those kinds
+# needs this tuple checked by hand.
 _MAPPINGS_RENDERER = "_c_mappings"
 _MAPPINGS_SOURCES = (".aiqt/standards/", ".aiqt/core/rules/", "tools/gen_mappings.py", "tools/gen_rules.py",
                      "tools/_standards.py", "tools/gen_agents.py")
@@ -2019,7 +2021,7 @@ def _data_carriers(sites=SITES, root=ROOT):
 
 class _FolderEntry:
     """A path part standing for any entry of the folder named by the parts before it (the value of a loop
-    variable over that folder's iterdir() or glob())."""
+    variable over that folder's iterdir())."""
 
     def __repr__(self):
         return "<entry>"
@@ -2056,6 +2058,14 @@ def _root_parts(node, used, bound=None):
     return parts + [part.value for part in extra]
 
 
+def _unwalrus(node):
+    """`node` read through any walrus expressions around it: the value of (a := (b := value))."""
+    import ast
+    while isinstance(node, ast.NamedExpr):
+        node = node.value
+    return node
+
+
 def _module_statements(body):
     """Every statement of a module body, the bodies of its module-level if, try, with, for, while and match
     statements included (a definition, assignment or import there binds a module-level name too), but not
@@ -2077,11 +2087,14 @@ def _module_statements(body):
 
 # Names whose use in a walked part makes _mappings_inputs refuse (cannot evaluate): each reaches a file or a
 # module some way the derivation does not follow (a path from __file__, a literal or relative path, a
-# computed import, a computed attribute, or this module's namespace by name).
+# computed import, a computed attribute, or this module's namespace by name). posix, nt and _io are the C
+# modules behind os and io; __loader__ and __spec__ reach this module's loader (get_data reads any path);
+# type of a ROOT path is Path, and operator.truediv extends a path as "/" does, neither seen as a path.
 _WALK_REFUSED_NAMES = frozenset({
     "__file__", "open", "__import__", "importlib", "getattr", "setattr", "globals", "vars", "locals",
     "exec", "eval", "compile", "builtins", "__builtins__", "sys", "os", "io", "glob", "shutil", "pathlib",
-    "Path", "tomllib", "tempfile", "subprocess"})
+    "Path", "tomllib", "tempfile", "subprocess", "posix", "nt", "_io", "__loader__", "__spec__",
+    "type", "operator"})
 # The attributes a walked part may take of a ROOT path (other than joinpath, which extends it): each reads
 # the path itself or the entries of the folder it names, never a path the derivation does not see.
 _ROOT_PATH_READS = frozenset({"iterdir", "read_text", "read_bytes", "open", "is_file", "is_dir", "exists"})
@@ -2107,10 +2120,12 @@ def _mappings_inputs(source, root=ROOT):
     is a folder. A path base is ROOT; a name whose bindings (local to the walked part, or else at module
     level) are all the same path and each assign it, alone, a path built on a path base or make it, alone,
     the variable of a loop over that folder's entries (p = ROOT / "<a>", p := ..., a
-    module-level _P = ROOT / "<a>", a bare match capture of such a path); or the variable, alone, of a for
-    loop or comprehension over X.iterdir(), X.glob(...) or X.rglob(...) of such a path X, bare or as the one
-    argument of sorted, list, tuple or reversed, which stands for an entry of that folder (a path under the
-    entry derives the folder).
+    module-level _P = ROOT / "<a>", a module-level bare match capture of such a path), a walrus around
+    that path being read through (p = (q := ROOT / "<a>")); or the variable, alone, of a for loop or
+    comprehension over X.iterdir() of such a path X, bare or as the one argument of sorted, list, tuple or
+    reversed (a walrus around any of these read through), which stands for an entry of that folder (a path
+    under the entry derives the folder). A walrus expression itself, (p := ROOT / "<a>"), is no path base:
+    the path in it is derived, and its target is a path base as above.
 
     ValueError, as cannot evaluate, when `source` defines no _MAPPINGS_RENDERER; when the module, or a walked
     part, has a relative import, a star import, or an import of tools or tools.<name>; when a walked part
@@ -2121,29 +2136,36 @@ def _mappings_inputs(source, root=ROOT):
     walked part builds a path from a part that is not a string constant, names a path that is missing under
     root or leaves it ("", "." or ".." as a part, on ROOT or on a named path base), takes an attribute of
     ROOT or of a path other than joinpath and _ROOT_PATH_READS (ROOT.iterdir(), ROOT.parent,
-    (ROOT / "<a>").glob(...), p.parent or p.glob(...) for a named path base p, an entry's .parent), uses a
-    name bound to a path that has another binding, not that same path, as well (p = ROOT / "<a>" then
-    p /= "..", or a loop variable reused over another folder), is a function whose
+    (ROOT / "<a>").glob(...), p.parent or p.glob(...) for a named path base p, so a loop over X.glob(...)
+    or X.rglob(...) too, an entry's .parent), takes an attribute other than _ROOT_PATH_READS (joinpath
+    included) of a walrus expression whose value is a ROOT path, or has one on either side of "/"
+    ((p := ROOT / "<a>").parent, (p := ROOT / "<a>") / ".."), has a match statement whose subject is a ROOT
+    path (a walrus around it read through) and whose case patterns capture a name at any depth (case p:,
+    case object(parent=p):), uses a name bound to a ROOT path that has another binding as well: one that
+    is no ROOT path (p = ROOT / "<a>" then p /= "..") or one to another ROOT path (a loop variable reused
+    over another folder), is a function whose
     default arguments use ROOT, uses ROOT any other way than as the base of such a path or as an argument
     of a call into a module of root's tools/ folder (an alias r = ROOT, str(ROOT), os.path.join(ROOT, ...),
-    a match capture of ROOT), or uses a name on _WALK_REFUSED_NAMES (open, getattr, __file__, os, Path and
-    the others there).
+    a match capture of ROOT), or uses a name on _WALK_REFUSED_NAMES (open, getattr, __file__, os, Path,
+    posix, nt, _io, __loader__, __spec__, type, operator and the others there).
 
     Blind spots, which no row here turns red: what a tools/ module reads, and the modules it imports in
     turn, when the walked part calls it (ROOT or a path handed to it included; the module is an input, its
     own reads are not derived); a path that reaches a walked part other than as a path base (a function
     parameter or default, a call's return value, an unpacking target, a conditional expression, a
-    container, an attribute or subscript, a with target, a loop over anything but the folder reads named
-    above, such as enumerate(p.iterdir()) or a name bound to p.iterdir()): its attributes and further
-    parts are neither derived nor refused; the path parts a match capture binds inside a larger pattern; a
+    container, an attribute or subscript, a with target, a loop over anything but the X.iterdir() forms
+    named above, such as enumerate(p.iterdir()) or a name bound to p.iterdir()): its attributes and further
+    parts are neither derived nor refused; the path a match capture binds inside a larger case pattern of a
+    module-level match (case object(parent=_P):), or from a match subject that is not itself a ROOT path (a
+    container holding one), at module level or in a walked part; a
     module-level name bound other than by a module-level statement (a global statement in a function,
     setattr on the module, an assignment through sys.modules) or a name a walked part reaches through an
     object's attribute rather than by name (a method of a class instance, a callable stored in a
     container): the code behind it is not walked; a module-level name bound twice is walked in every
     binding, so one a renderer never reaches can still be refused or derived; a local name that shadows a
     refused module-level import is refused all the same; and a read through a file API whose module and
-    name are not on _WALK_REFUSED_NAMES (codecs.open, linecache, zipfile and the like, imported under any
-    name) or that a walked part reaches as an attribute of a module it may use
+    name are not on _WALK_REFUSED_NAMES (codecs.open, linecache, zipfile, posixpath and the like, imported
+    under any name) or that a walked part reaches as an attribute of a module it may use
     (gen_rules.Path(".aiqt/core/hooks").iterdir(), gen_mappings.os.listdir(...)), whatever path it names."""
     import ast
     tree = ast.parse(source)
@@ -2245,24 +2267,28 @@ def _mappings_inputs(source, root=ROOT):
         return isinstance(func, ast.Name) and func.id in imported and bool(tools_modules(imported[func.id]))
 
     def entries(node, bound):
-        # The parts of the folder entries `node` iterates, plus _ROOT_ENTRY, when it is X.iterdir(),
-        # X.glob(...) or X.rglob(...) (bare or as the one argument of sorted, list, tuple or reversed) over a
-        # ROOT path X; None otherwise.
+        # The parts of the folder entries `node` iterates, plus _ROOT_ENTRY, when it is X.iterdir() (bare
+        # or as the one argument of sorted, list, tuple or reversed) over a ROOT path X; None otherwise.
+        # X.glob(...) and X.rglob(...) are no folder reads: the attribute check refuses them on a ROOT path.
+        # A walrus around the iterable, the call's argument or X is read through.
+        node = _unwalrus(node)
         while isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and len(node.args) == 1 \
                 and node.func.id in ("sorted", "list", "tuple", "reversed"):
-            node = node.args[0]
+            node = _unwalrus(node.args[0])
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                and node.func.attr in ("iterdir", "glob", "rglob"):
-            parts = _root_parts(node.func.value, set(), bound)
+                and node.func.attr == "iterdir":
+            parts = _root_parts(_unwalrus(node.func.value), set(), bound)
             return None if parts is None else parts + [_ROOT_ENTRY]
         return None
 
     def resolver(bindings, fallback):
         # bound(name) for _root_parts: the parts of a name in `bindings` ({name: [(kind, value)]}) whose
-        # bindings are each a ROOT path ("path") or a loop over a ROOT folder's entries ("loop"), all the
+        # bindings are each a ROOT path ("path", read through a walrus around it) or a loop over a ROOT
+        # folder's entries ("loop"), all the
         # same, so the name is a path base as ROOT is; ValueError when a name with such a binding has another
-        # binding that is not that same path; None for a name with no such binding; and fallback(name) for a
-        # name not in `bindings`.
+        # binding that is no ROOT path, or a binding to another ROOT path (a loop variable reused over a
+        # second folder); None for a name with no such binding; and fallback(name) for a name not in
+        # `bindings`.
         memo, active = {}, set()
 
         def bound(name):
@@ -2275,13 +2301,17 @@ def _mappings_inputs(source, root=ROOT):
             active.add(name)
             try:
                 found = [(parts, value) for kind, value in bindings[name] for parts in (
-                    _root_parts(value, set(), bound) if kind == "path" else
+                    _root_parts(_unwalrus(value), set(), bound) if kind == "path" else
                     entries(value, bound) if kind == "loop" else None,) if parts is not None]
             finally:
                 active.discard(name)
-            if found and (len(found) < len(bindings[name]) or any(parts != found[0][0] for parts, _ in found)):
-                raise ValueError("cannot evaluate {}, a ROOT path bound to another value too (line {})".format(
-                    name, found[0][1].lineno))
+            if found and len(found) < len(bindings[name]):
+                raise ValueError("cannot evaluate {}, a name bound to a ROOT path and to another value (line {})"
+                                 .format(name, found[0][1].lineno))
+            other = next((value for parts, value in found if parts != found[0][0]), None)
+            if other is not None:
+                raise ValueError("cannot evaluate {}, a name bound to more than one ROOT path (line {})".format(
+                    name, other.lineno))
             memo[name] = found[0][0] if found else None
             return memo[name]
         return bound
@@ -2349,6 +2379,24 @@ def _mappings_inputs(source, root=ROOT):
                 raise ValueError("cannot evaluate a function whose default arguments use ROOT (line {})"
                                  .format(node.lineno))
         for node in nodes:
+            # A walrus expression whose value is a ROOT path ((p := ROOT / "<a>").parent) is no path base, so
+            # an attribute of it other than _ROOT_PATH_READS (joinpath included), or "/" on either side of
+            # it, is refused; its target is a path base as any name bound alone is.
+            for operand in ([node.value] if isinstance(node, ast.Attribute) and node.attr not in _ROOT_PATH_READS
+                            else [node.left, node.right] if isinstance(node, ast.BinOp) else []):
+                inner = _unwalrus(operand)
+                if inner is not operand and id(inner) in chains:
+                    raise ValueError("cannot evaluate a walrus of a ROOT path as the base of {} (line {})".format(
+                        "." + node.attr if isinstance(node, ast.Attribute) else "/", node.lineno))
+            # A capture (as, star or mapping rest name, at any depth of a case pattern) in a match statement
+            # of a walked part whose subject is a ROOT path is refused: it is not bound as a path base.
+            if isinstance(node, ast.Match):
+                if id(_unwalrus(node.subject)) in chains and any(
+                        isinstance(pattern, (ast.MatchAs, ast.MatchStar)) and pattern.name
+                        or isinstance(pattern, ast.MatchMapping) and pattern.rest
+                        for case in node.cases for pattern in ast.walk(case.pattern)):
+                    raise ValueError("cannot evaluate a match capture of a ROOT path in a renderer (line {})"
+                                     .format(node.lineno))
             refuse_import(node)
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 for _name, origin, refused in import_bindings(node):
@@ -3798,10 +3846,15 @@ def _self_test():
     # ROOT path (local, module-level or a loop variable over a folder's entries) is a path base: its .parent,
     # a ".." part on it, or a second binding of it is refused. An import of a refused module or name under
     # an alias, in the renderer or at module level then used there, and a match capture of ROOT are refused.
-    # A module-level if or try body is walked as module level is. ROOT handed whole to a tools/ module call
-    # stays clean.
+    # A walrus of a ROOT path taken as the base of .parent, joinpath or "/" (nested, or around a bound path or
+    # a loop's folder, too), a renderer's match capture of a ROOT path (bare, in a larger pattern, or of a
+    # walrus subject), a module-level bare capture's .parent, a loop over a ROOT path's glob or rglob, a
+    # dotted refused import, a refused name from another module, and type, operator, posix, nt, _io,
+    # __loader__ and __spec__ are refused too. A module-level if or try body is walked as module level is.
+    # ROOT handed whole to a tools/ module call stays clean.
     rooted = '(root / ".aiqt" / "core" / "hooks").iterdir()'
-    bound = 'p = ROOT / ".aiqt" / "standards"; '
+    std_path = 'ROOT / ".aiqt" / "standards"'
+    bound = "p = " + std_path + "; "
     for name, text in (
             ("local-alias", reading('r = ROOT; (r / ".aiqt" / "core" / "hooks").iterdir()')),
             ("root-default", own.replace(anchor, "\ndef _mappings_data(root=ROOT):\n    " + rooted + "\n")
@@ -3831,7 +3884,38 @@ def _self_test():
             ("from-importlib", reading('from importlib import import_module; import_module("gen_hooks")')),
             ("module-import-os-alias", reading('_os.listdir(".aiqt/core/hooks")', "import os as _os\n\n\n")),
             ("match-capture-root", reading('(_R2 / ".aiqt" / "core" / "hooks").iterdir()',
-                                           "match ROOT:\n    case _R2:\n        pass\n\n\n"))):
+                                           "match ROOT:\n    case _R2:\n        pass\n\n\n")),
+            ("walrus-parent", reading("(p := " + std_path + ').parent.joinpath("core", "hooks").iterdir()')),
+            ("walrus-leaves-root", reading("((p := " + std_path + ') / ".." / "core" / "hooks").iterdir()')),
+            ("walrus-joinpath", reading("(p := " + std_path + ').joinpath("..", "core", "hooks").iterdir()')),
+            ("walrus-right-operand", reading('("x" / (p := ' + std_path + ")).iterdir()")),
+            ("walrus-nested-parent", reading("(q := (p := " + std_path + ")).parent.iterdir()")),
+            ("bound-walrus-parent", reading("p = (q := " + std_path + "); p.parent.iterdir()")),
+            ("entry-walrus-parent", reading('[e.parent.parent / "core" / "hooks" for e in (q := ' + std_path
+                                            + ").iterdir()]")),
+            ("local-match-capture", reading("match " + std_path + ":\n        case p:\n            "
+                                            '(p.parent / "core" / "hooks").iterdir()')),
+            ("local-match-capture-in-pattern", reading("match " + std_path + ":\n        case object(parent=p):\n"
+                                                       '            (p / "core" / "hooks").iterdir()')),
+            ("local-match-walrus-subject", reading("match (q := " + std_path + "):\n        case p:\n"
+                                                   "            p.parent.iterdir()")),
+            ("module-match-capture-parent", reading('(_S.parent / "core" / "hooks").iterdir()',
+                                                    "match " + std_path + ":\n    case _S:\n        pass\n\n\n")),
+            ("module-match-walrus-subject", reading("_S.parent.iterdir()", "match (_Q := " + std_path
+                                                    + "):\n    case _S:\n        pass\n\n\n")),
+            ("entry-glob", reading("[e for e in (" + std_path + ').glob("*")]')),
+            ("entry-rglob", reading("[e for e in sorted((" + std_path + ').rglob("*"))]')),
+            ("import-os-path-alias", reading('import os.path as osp; osp.exists(".aiqt/core/hooks")')),
+            ("from-importlib-machinery", reading("from importlib.machinery import SourceFileLoader; SourceFileLoader")),
+            ("from-module-path-alias", reading('from gen_rules import Path as GP; GP(".aiqt/core/hooks").iterdir()')),
+            ("type-of-path", reading("type(" + std_path + ')(".aiqt/core/hooks").iterdir()')),
+            ("operator-truediv", reading("operator.truediv(" + std_path + ', "..").iterdir()')),
+            ("import-posix", reading('import posix; posix.listdir(".aiqt/core/hooks")')),
+            ("import-nt", reading('import nt; nt.listdir(".aiqt/core/hooks")')),
+            ("from-io-c", reading('from _io import FileIO; FileIO(".aiqt/core/hooks/manifest.toml")')),
+            ("loader-get-data", reading('__loader__.get_data(".aiqt/core/hooks/manifest.toml")')),
+            ("spec-loader", reading('__spec__.loader.get_data(".aiqt/core/hooks/manifest.toml")')),
+            ("module-import-posix", reading('_px.listdir(".aiqt/core/hooks")', "import posix as _px\n\n\n"))):
         got = _mappings_sources_findings(text, derived)
         expect("gensrc/mappings-sources-refused-{}-red".format(name),
                own.count(anchor) == 1 and len(got) == 1
@@ -3853,7 +3937,9 @@ def _self_test():
              hooks),
             ("module-with-target", reading("_H", 'with contextlib.nullcontext(ROOT / ".aiqt" / "core" / "hooks") '
                                                  "as _H:\n    pass\n\n\n"), hooks),
-            ("module-dotted-import", reading("gen_hooks.main", "import gen_hooks.x\n\n\n"), "tools/gen_hooks.py")):
+            ("module-dotted-import", reading("gen_hooks.main", "import gen_hooks.x\n\n\n"), "tools/gen_hooks.py"),
+            ("module-match-guard-walrus", reading("_H.iterdir()", 'match 0:\n    case _ if (_H := ROOT / ".aiqt" / '
+                                                                  '"core" / "hooks"):\n        pass\n\n\n'), hooks)):
         got = _mappings_sources_findings(text, derived)
         expect("gensrc/mappings-sources-{}-red".format(name),
                got == ["_MAPPINGS_SOURCES lacks {}, which the mappings renderers read".format(want)], got)
@@ -3881,6 +3967,31 @@ def _self_test():
         reading('import json; json.loads("{}")'),
         reading("pass", "import os as _os\n\n\n"))]
     expect("gensrc/mappings-sources-bound-path-reads-clean", own.count(anchor) == 1 and got == [[]] * 7, got)
+    # A loop variable reused over 2 declared folders, and a path base given a second value that is no ROOT
+    # path, are each refused with a message naming that case.
+    for name, text, message in (
+            ("entry-two-folders", reading("for e in (" + std + ").iterdir():\n        e.read_text()\n"
+                                          "    for e in (ROOT / \".aiqt\" / \"core\" / \"rules\").iterdir():\n"
+                                          "        e.read_text()"), "e, a name bound to more than one ROOT path"),
+            ("bound-path-other-value", reading(bound + 'p /= "../core/hooks"; p.iterdir()'),
+             "p, a name bound to a ROOT path and to another value")):
+        got = _mappings_sources_findings(text, derived)
+        expect("gensrc/mappings-sources-refused-{}-message-red".format(name),
+               own.count(anchor) == 1 and len(got) == 1
+               and got[0].startswith("_MAPPINGS_SOURCES cannot be checked: cannot evaluate " + message), got)
+    # A walrus of a declared path read with the plain reads, its target used as a path base, a walrus around a
+    # bound path or a loop's folder, a match on a path with no capture, a capture of a value that is no path,
+    # and a loop variable reused over the same folder, are all clean.
+    got = [_mappings_sources_findings(text, derived) for text in (
+        reading("(p := " + std + ").iterdir()"),
+        reading("if (p := " + std + ").is_dir():\n        p.iterdir()"),
+        reading("p = (q := " + std + "); p.iterdir()"),
+        reading("[e.read_text() for e in (q := " + std + ").iterdir()]"),
+        reading("match " + std + ":\n        case _:\n            pass"),
+        reading("match 1:\n        case p:\n            p"),
+        reading("for e in (" + std + ").iterdir():\n        e.read_text()\n    for e in (" + std
+                + ").iterdir():\n        e.read_text()"))]
+    expect("gensrc/mappings-sources-walrus-and-match-clean", own.count(anchor) == 1 and got == [[]] * 7, got)
     got = [_mappings_sources_findings(reading(body), derived)
            for body in ("gen_rules.load_corpus(ROOT)", 'load_manifests(ROOT / ".aiqt" / "standards", root=ROOT)')]
     expect("gensrc/mappings-sources-root-into-tools-module-clean", own.count(anchor) == 1 and got == [[], []],
