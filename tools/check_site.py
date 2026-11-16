@@ -1434,9 +1434,12 @@ def _markup_declaration_self_test(quiet):
         check(name, page.tag_findings == [(2, message(text))], (page.tag_findings, page.links))
         page = read("<title>t</title>\n<p>&lt;![CDATA[ x &gt; {} ]]&gt;</p>".format(anchor))
         check(twin, page.tag_findings == [] and page.links == [(href, 2)], (page.tag_findings, page.links))
+    # A parser that reads a CDATA section runs it to the end of the text; one that ends "<![" at the first ">", as
+    # a browser does, then reads "</a>" with no open <a>. The finding comes from the lexical scan either way, so
+    # the row requires it (the page fails) and does not assert what the parser reads after it.
     text = '<p><![CDATA[ <a href="/elsewhere/">v</a></p>'
     page = read(text)
-    check("page/unterminated-cdata-fails", page.tag_findings == [(1, message(text))],
+    check("page/unterminated-cdata-fails", (1, message(text)) in page.tag_findings,
           (page.tag_findings, page.links))
     page = read('<p><!-- x > --> <a href="/elsewhere/">v</a></p>')
     check("page/comment-before-anchor-passes", page.tag_findings == [] and page.links == [("/elsewhere/", 1)],
@@ -1466,7 +1469,7 @@ def _markup_declaration_self_test(quiet):
     # and on a generated one; the twin (the attribute's "<!--" written as "&lt;!--", an ordinary comment) is
     # none, and the anchor after it is read.
     payload = '<script>alert(1)</script><a href="http://example.test/v">v</a>'
-    for name, body, hidden in (
+    for name, body, construct in (
             ("page/attribute-comment-opener-abrupt-comment-fails",
              '<p><span title="<!--"><!-->' + payload + "--></span></p>", "<!-->"),
             ("page/attribute-comment-opener-cdata-fails",
@@ -1474,7 +1477,7 @@ def _markup_declaration_self_test(quiet):
             ("page/attribute-comment-opener-cdata-after-element-fails",
              '<span title="<!--">x</span><![CDATA[ x > ' + payload + " ]]> -->", "<![CDATA[")):
         text = "<title>t</title>\n" + body
-        at = text.find(hidden)
+        at = text.find(construct)
         want = (2, _site_markup.construct_finding(at, text[at:at + 9]))
         live, generated = read(text), Page(template=True)
         generated.feed(text)
@@ -1500,7 +1503,10 @@ def _markup_declaration_self_test(quiet):
         (root / "index.html").write_text(head + "<p>&lt;![CDATA[ x &gt; {} ]]&gt;</p>".format(upper_https),
                                          encoding="utf-8")
         check("page/scan-passes-escaped-cdata-text", quiet(_scan_root, base, "site", frozenset()) == 0, None)
-        (root / "index.html").write_text(head + "<p>x</p><!-->" + hidden, encoding="utf-8")
+        # What follows the abrupt comment is the anchor the ordinary-comment twin below shows passing, so the scan
+        # fails on the abrupt comment alone, whether the parser keeps it open (hiding the anchor) or ends it at
+        # once (reading the anchor).
+        (root / "index.html").write_text(head + "<p>x</p><!-->" + upper_https + "-->", encoding="utf-8")
         check("page/scan-reports-abrupt-comment", quiet(_scan_root, base, "site", frozenset()) == 1, None)
         (root / "index.html").write_text(head + "<p>x</p><!-- x -->" + upper_https, encoding="utf-8")
         check("page/scan-passes-ordinary-comment", quiet(_scan_root, base, "site", frozenset()) == 0, None)

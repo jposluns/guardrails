@@ -4,9 +4,10 @@ tools/gen_draft_site.py (its inline markup, its link guard and its code-style re
 
 Why. Python's html.parser and a browser (the WHATWG tokenizer) read some constructs differently, and each
 difference can hide markup that is live in a browser from every check built on html.parser: html.parser reads
-"<![CDATA[" as a section up to "]]>" where a browser in HTML content ends it at the first ">"; it opens a comment
-at "<!-->" and "<!--->" and keeps it open to the next "-->" where a browser ends each at once as an empty
-comment; and it reads textarea, title, xmp, noembed, noframes and plaintext as raw text even inside svg or math,
+"<![CDATA[" as a section up to "]]>" where a browser in HTML content ends it at the first ">"; some patch
+releases open a comment at "<!-->" and "<!--->" and keep it open to the next "-->" where a browser ends each at
+once as an empty comment (others end it at once, as a browser does; the scan below reports it either way); and
+it reads textarea, title, xmp, noembed, noframes and plaintext as raw text even inside svg or math,
 where a browser reads them as foreign elements and keeps tokenizing markup. Closing them one construct at a
 time cannot be shown complete, so the pages are held to what both read alike instead:
 

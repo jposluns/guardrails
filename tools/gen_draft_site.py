@@ -1480,9 +1480,10 @@ NEWTAB_HINT = "(opens in a new tab)"
 _URL_BAD_CHAR_RE = re.compile(r"[\x00-\x20\x7f\\]")
 # The markup constructs html.parser and a browser can end at different places (_site_markup.split_constructs).
 # html.parser (3.14) reads "<![CDATA[" as a CDATA section that ends at "]]>" where a browser, in HTML content,
-# ends "<![" at the first ">"; it opens a comment at "<!-->" and "<!--->" and keeps it open to the next "-->"
-# where a browser ends each at once as an empty comment. Markup after such a construct is live in a browser and
-# hidden from html.parser. Rather than list the differences one at a time, a page may hold only the constructs
+# ends "<![" at the first ">"; some patch releases open a comment at "<!-->" and "<!--->" and keep it open to the
+# next "-->" where a browser ends each at once as an empty comment (others end it at once as a browser does).
+# Markup after such a construct can be live in a browser and hidden from html.parser. Each construct is found by
+# the lexical scan, not by the parser, so the finding does not depend on the release. Rather than list the differences one at a time, a page may hold only the constructs
 # both read alike: ordinary comments and "<!doctype html>". Inline markup holding any other is refused
 # (_inline_https), and the link guard and refusals_for report each one wherever it appears on a page (also
 # where both read it as text, such as inside an attribute value).
@@ -2834,9 +2835,12 @@ def _self_test():
         name = "refuse/inline-escaped-cdata-text-" + vector
         expect(name, "nor an https URL" in refused(name, inline_page, escaped.format(anchor)))
     declaration = _site_markup.construct_finding(3, "<![CDATA[")
+    # The guard lists every construct first (from the lexical scan), so the row requires that finding first,
+    # which also refuses the page. What the parser reads after "<![" depends on whether it reads a CDATA section
+    # or ends "<![" at the first ">" as a browser does, so the findings after it are not asserted.
     for vector, anchor in cdata_vectors:
         got = _link_findings(site, "<p><![CDATA[ x > " + anchor + " ]]></p>")
-        expect("links/guard-cdata-" + vector + "-refused", got == [declaration], got)
+        expect("links/guard-cdata-" + vector + "-refused", got[:1] == [declaration], got)
     got = _link_findings(site, '<p><![CDATA[ <a href="http://example.com/v">v</a></p>')
     expect("links/guard-unterminated-cdata-refused", got == [declaration], got)
     for name, html, want in (
@@ -2912,14 +2916,17 @@ def _self_test():
                     "<p><!-- a note --> " + upper_anchor + "</p>")
     expect("links/inline-ordinary-comment-accepted",
            '<!-- a note --> <a href="https://example.com/v"' + newtab_tail in twin, twin)
-    # An abrupt comment ("<!-->", "<!--->") on a whole page: a browser ends it at once, html.parser keeps it open
-    # to the next "-->", so the anchor and the script between are live in a browser and hidden from the guard
-    # and refusals_for. Both report the construct; with an ordinary comment instead, both read what follows.
+    # An abrupt comment ("<!-->", "<!--->") on a whole page: a browser ends it at once. Some html.parser patch
+    # releases keep it open to the next "-->", so the anchor and the script between are live in a browser and
+    # hidden from the guard and refusals_for; others end it at once and read them. Both report the construct
+    # first, from the lexical scan, whichever way the parser ends it, so each row requires that finding first
+    # (the page is refused) and does not assert what the parser reads after it. With an ordinary comment
+    # instead, both read what follows.
     for name, opener in (("links/guard-abrupt-comment-hidden-anchor-refused", "<!-->"),
                          ("links/guard-abrupt-dash-comment-hidden-anchor-refused", "<!--->")):
         html = '<p>x</p>' + opener + '<a href="http://example.com/v">v</a>-->'
         got = _link_findings(site, html)
-        expect(name, got == [_site_markup.construct_finding(8, html[8:17])], got)
+        expect(name, got[:1] == [_site_markup.construct_finding(8, html[8:17])], got)
     got = _link_findings(site, '<p>x</p><!-- x --><a href="http://example.com/v">v</a>')
     expect("links/guard-ordinary-comment-http-anchor-read",
            got == ["href 'http://example.com/v' on <a> is neither under /draft/ nor an https URL"], got)
@@ -2927,7 +2934,7 @@ def _self_test():
                          ("refuse/abrupt-dash-comment-hidden-script", "<!--->")):
         html = '<p>x</p>' + opener + '<script>alert(1)</script><img src="x" onerror="alert(1)">-->'
         got = refusals_for(html)
-        expect(name, got == [_site_markup.construct_finding(8, html[8:17])], got)
+        expect(name, got[:1] == [_site_markup.construct_finding(8, html[8:17])], got)
     got = refusals_for('<p>x</p><!-- x --><script>alert(1)</script><img src="x" onerror="alert(1)">')
     expect("refuse/ordinary-comment-script-read",
            "inline <script> element" in got and "onerror attribute on <img>" in got, got)
