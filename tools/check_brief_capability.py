@@ -358,7 +358,8 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        text, `BRIEF-REVISIONS: <hex> [<hex> ...]`, its values separated by whitespace, each a
                        commit id of 7 to 40 or 64 hex digits (hex_ref) that resolves to a commit in the
                        repository the lint is pointed at (--repo; main passes this repository when --repo is
-                       absent), read as the P3 pins are (resolve_revision: hermetic, replace objects disabled).
+                       absent), read as every P9 word is (revision_commit: git --no-lazy-fetch rev-parse under
+                       LC_ALL=C, hermetic, replace objects disabled, never fetching a missing object).
                        The DECLARED SET is the union of the BRIEF-PIN, REVIEWED HEAD and BRIEF-REVISIONS
                        values. With a declaration, P9 splits every line of the raw text (prose, code spans,
                        fences, web addresses, pin lines and the declaration itself alike) into words at every
@@ -373,17 +374,27 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        and the declared set, and one git answers cleanly names no commit (exit 1 and nothing
                        printed for an absent object, or exit 1 and git's one expected-commit-type line, read
                        under LC_ALL=C, for a blob or a tree; measured with git 2.53.0) is quiet; an ambiguous
-                       prefix is quiet only where git prints nothing for it (not measured for a 7-hex prefix;
-                       any text is CANNOT_EVALUATE). With no declaration the rule is quiet. Two
+                       prefix is quiet only where git prints nothing for it (measured with git 2.53.0 for a
+                       7-hex prefix two commits share: exit 1, nothing printed; any text is CANNOT_EVALUATE).
+                       With no declaration the rule is quiet. Two
                        declaration lines, a column-zero label without its colon or with a glued suffix, a
                        declaration with no value, a value that is not such a commit id (a branch name such as
                        main) or does not resolve to one commit (unknown, ambiguous), a declaration with no
                        repository to read, a repository git refuses for its ownership, a git that cannot be
                        launched or times out, a probe that fails in any other way (a corrupt or unreadable
                        object, text on stderr, another exit, output that is no commit id; a git older than
-                       2.44 refuses --no-lazy-fetch), a word that names no commit present in a partial clone
-                       (its config holds extensions.partialClone or a remote.<name>.promisor entry, so the
-                       promisor remote may hold it), and more than P9_MAX_WORDS distinct undeclared hex words
+                       2.44 refuses --no-lazy-fetch), a word that names no commit present in a repository that
+                       is not whole (object_store_gap): an object store git cannot read whole, since git skips a
+                       pack it cannot open and answers an object held only there as absent, printing nothing
+                       (measured with git 2.53.0 for a missing or unreadable .idx or .pack), read as
+                       git count-objects -v exiting 0 with a warning, a garbage count or fewer local packs than the
+                       pack-*.idx and pack-*.pack pairs present, an alternate it prints in quotes or not
+                       absolute, or a .idx with no .pack, a .pack with no .idx or a pack file this process
+                       cannot read, in the object directory or an alternate; a partial clone (its config holds
+                       extensions.partialClone or a remote.<name>.promisor entry, so the promisor remote may
+                       hold it); or a shallow clone (git rev-parse --is-shallow-repository answers true), which
+                       lacks every commit beyond its shallow boundary; a check of these git cannot answer
+                       cleanly, and more than P9_MAX_WORDS distinct undeclared hex words
                        are CANNOT_EVALUATE (exit 2), never a pass. The label anywhere else (indented,
                        mid-line) declares nothing and is not read.
 
@@ -467,15 +478,21 @@ is read as two lines; a tag force-moved after the lint runs is not seen; a dispa
 helps only where the sender refuses to send on exit 1 or 2. P9 is opt-in, so a brief with no BRIEF-REVISIONS line
 is not judged; the declaration is written by the same author or generator as the rest of the brief, so a stale
 value carried into BRIEF-REVISIONS (or into a pin line) passes, and so does every word that shares a prefix with a
-declared value; a stale commit absent from --repo (not fetched there) is quiet, and so is an ambiguous prefix where
+declared value; a stale commit absent from a whole, full clone named by --repo (never fetched there) is quiet, and so is an ambiguous prefix where
 git answers it like an absent one, printing nothing; a word of 6 hex digits or fewer, of 41 to 63, or of 65 or more is not judged; a
+commit id glued to other letters or digits in one word (<hex>s, v<hex>, x<hex>, or a percent escape such as %2F<hex>,
+whose 2F joins the hex digits, so git probes another word and answers it absent) is not read; a
 branch or tag named with hex digits alone resolves to its commit, so naming it undeclared refuses (the P5 residual's
 mirror image); a look-alike or fullwidth digit, a commit id split across a line break, and a commit named through a
 ref (main~1, HEAD^) are not read; nor are a commit id written 0x<hex>, one split by emphasis (**abcd**ef01234),
 one split by a format character inside code (decode_brief allows one there, and P9 reads the raw text), or a
-describe name with an upper-case G, which git does not read as one; in a partial clone every undeclared hex word
-that names no commit present there, a nonce or a digest included, exits 2 (lint from a full clone), and a
-remote.<name>.promisor entry set to false still counts; a probe that exits 1 with any text on stderr exits 2,
+describe name with an upper-case G, which git does not read as one; in a repository that is not whole (a damaged
+object store, a partial clone, a shallow clone) every undeclared hex word that names no commit present there, a
+nonce or a digest included, exits 2 (repair it, or lint from a whole full clone), a remote.<name>.promisor entry
+set to false still counts, and so do a pack written or removed while the lint runs (a concurrent fetch, repack or
+gc) and a stray file git counts as garbage; the pack files are read as the lint's own uid, so a lint run as root
+reads a mode-000 pack (git run the same way reads it too), and damage inside a readable pack is seen only where
+git prints it; a probe that exits 1 with any text on stderr exits 2,
 even where git only warned; the BRIEF-PIN and REVIEWED HEAD values are still resolved by P3 with git's default
 lazy fetch, so in a partial clone that read can fetch; round ids, item counts and other prose are outside it; and
 the lint reads one brief and never the previous round's.
@@ -646,8 +663,9 @@ Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one su
                            declared input that exists but cannot be confirmed readable (P6); a malformed
                            ACCEPTED-RESIDUAL declaration or pinned content that cannot be read (P7); two
                            BRIEF-REVISIONS lines, a malformed one, a value that is not a commit id or does not
-                           resolve, a declaration with no repository, a hex word git cannot read or a partial
-                           clone lacks, or too many hex words to probe (P9); the
+                           resolve, a declaration with no repository, a hex word git cannot read or a repository
+                           that is not whole (a damaged object store, a partial or a shallow clone) lacks, or too
+                           many hex words to probe (P9); the
                            family is not in the table; the
                            table is missing, unreadable, or malformed (format-version must be the
                            integer 1); or the arguments are wrong (a repeated --family or --table
@@ -3816,6 +3834,166 @@ def partial_clone(repo):
     raise _probe_failure("partial clone check", repo, probe)
 
 
+def _p9_read(repo, args):
+    """git `args` in `repo` under _no_replace_env() and LC_ALL=C, output captured."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo)] + args, capture_output=True,
+                          timeout=GIT_READ_TIMEOUT, env=dict(_no_replace_env(), LC_ALL="C"))
+
+
+def _shallow_probe(repo):
+    """git rev-parse --is-shallow-repository in `repo`."""
+    return _p9_read(repo, ["rev-parse", "--is-shallow-repository"])
+
+
+def _objects_probe(repo):
+    """git rev-parse of the absolute path of the object directory of `repo`."""
+    return _p9_read(repo, ["rev-parse", "--path-format=absolute", "--git-path", "objects"])
+
+
+def _count_objects_probe(repo):
+    """git count-objects -v in `repo`: its local loose and pack counts, its garbage count, a warning on stderr
+    for each garbage file, and one `alternate: <path>` line per alternate object directory."""
+    return _p9_read(repo, ["count-objects", "-v"])
+
+
+def _clean_answer(repo, what, probe):
+    """The stdout lines of a P9 git read that exited 0 with nothing on stderr, else CannotEvaluate."""
+    probe = _p9_git(repo, what, lambda: probe(repo))
+    if probe.returncode != 0 or probe.stderr.strip():
+        raise _probe_failure(what, repo, probe)
+    return probe.stdout.decode("utf-8", "replace").splitlines()
+
+
+def shallow_clone(repo):
+    """Whether `repo` is a shallow clone, which lacks every commit beyond its shallow boundary: git rev-parse
+    --is-shallow-repository answers exactly true or false; any other answer is CannotEvaluate."""
+    answer = _clean_answer(repo, "shallow clone check", _shallow_probe)
+    if answer not in (["true"], ["false"]):
+        raise CannotEvaluate("shallow clone check: git answered {!r} in {}, neither true nor false".format(
+            _excerpt(" ".join(answer)), repo))
+    return answer == ["true"]
+
+
+def _pack_stems(directory):
+    """{stem: set of suffixes} for the pack-*.idx and pack-*.pack entries of `directory` (a pack/ directory);
+    an absent directory holds none, and any other listing error raises OSError."""
+    stems = {}
+    try:
+        entries = [entry.name for entry in os.scandir(directory)]
+    except FileNotFoundError:
+        return stems
+    for name in entries:
+        for suffix in (".idx", ".pack"):
+            if name.startswith("pack-") and name.endswith(suffix):
+                stems.setdefault(name[:-len(suffix)], set()).add(suffix)
+    return stems
+
+
+def _pack_damage(objects):
+    """None when every pack of the object directory `objects` is whole and readable here, else why not: each
+    pack-*.idx has its pack-*.pack and each .pack its .idx, and each is a regular file whose first byte this
+    process reads. git skips a pack whose index or data it cannot open and then answers a lookup of an object
+    held only there as it answers an absent one, exit 1 and nothing printed (measured with git 2.53.0 for an
+    unreadable .idx, an unreadable .pack, a missing .pack and a missing .idx), so P9 reads the files itself."""
+    directory = os.path.join(objects, "pack")
+    try:
+        stems = _pack_stems(directory)
+    except OSError as exc:
+        return "cannot list {}: {}".format(directory, exc.strerror or exc)
+    for stem, suffixes in sorted(stems.items()):
+        for suffix in (".idx", ".pack"):
+            path = os.path.join(directory, stem + suffix)
+            if suffix not in suffixes:
+                return "{} is missing".format(path)
+            try:
+                if not stat.S_ISREG(os.stat(path).st_mode):
+                    return "{} is not a regular file".format(path)
+                with open(path, "rb") as handle:
+                    if not handle.read(1):
+                        return "{} is empty".format(path)
+            except OSError as exc:
+                return "cannot read {}: {}".format(path, exc.strerror or exc)
+    return None
+
+
+def _count_objects_fields(repo, lines):
+    """({key: value}, [alternate]) for git count-objects -v output lines, or CannotEvaluate when a line is not
+    `key: value` or the packs or garbage count is missing or not a number."""
+    fields, alternates = {}, []
+    for line in lines:
+        key, colon, value = line.partition(": ")
+        if not colon:
+            raise CannotEvaluate("object store check: git count-objects printed {!r} in {}".format(
+                _excerpt(line), repo))
+        if key == "alternate":
+            alternates.append(value)
+        else:
+            fields[key] = value
+    for key in ("packs", "garbage"):
+        if not fields.get(key, "").isdigit() or not fields[key].isascii():
+            raise CannotEvaluate("object store check: git count-objects printed no {} count in {}".format(
+                key, repo))
+    return fields, alternates
+
+
+def _count_objects_damage(fields, packs, stderr):
+    """None when git count-objects -v (exit 0) found its object store whole, else why not: a warning on `stderr`
+    (git warns of each garbage file there, an alternate's included: a .idx with no .pack, a .pack with no .idx,
+    a stray file; measured with git 2.53.0), a garbage count, or a local pack count other than the `packs`
+    pack-*.idx and pack-*.pack pairs present (git opens a pack only through its index: an unreadable .idx
+    counts no pack, measured with git 2.53.0)."""
+    if stderr.strip():
+        return "git count-objects warned: {}".format(_excerpt(stderr.decode("utf-8", "replace")))
+    if fields["garbage"] != "0":
+        return "git count-objects counts {} garbage file(s) in its object store".format(fields["garbage"])
+    if int(fields["packs"]) != packs:
+        return "git count-objects opens {} of the {} local pack(s)".format(fields["packs"], packs)
+    return None
+
+
+def _store_damage(repo):
+    """None when `repo`'s object store, its alternates included, is whole and readable here, else why not:
+    git count-objects -v's warnings and counts (_count_objects_damage), an alternate path it prints in quotes
+    or not absolute (not read here), and the pack files of the object directory and of every alternate
+    (_pack_damage). A git read that fails or prints what this check does not read is CannotEvaluate."""
+    probe = _p9_git(repo, "object store check", lambda: _count_objects_probe(repo))
+    if probe.returncode != 0:
+        raise _probe_failure("object store check", repo, probe)
+    fields, alternates = _count_objects_fields(repo, probe.stdout.decode("utf-8", "replace").splitlines())
+    objects = _clean_answer(repo, "object store check", _objects_probe)
+    if len(objects) != 1 or not objects[0].startswith("/"):
+        raise CannotEvaluate("object store check: git named no absolute object directory in {}".format(repo))
+    for alternate in alternates:
+        if not alternate.startswith("/"):
+            return "the alternate object directory {!r} is not a plain absolute path".format(_excerpt(alternate))
+    for directory in objects + alternates:
+        damage = _pack_damage(directory)
+        if damage:
+            return damage
+    try:
+        packs = len(_pack_stems(os.path.join(objects[0], "pack")))
+    except OSError as exc:
+        return "cannot list the packs of {}: {}".format(objects[0], exc.strerror or exc)
+    return _count_objects_damage(fields, packs, probe.stderr)
+
+
+def object_store_gap(repo):
+    """None when git's clean absent answer (_absent_answer) in `repo` means the object is absent, else why it
+    may not: an object store that is not whole or not readable here (_store_damage), a partial clone
+    (partial_clone), whose promisor remote may hold the object, or a shallow clone (shallow_clone), which lacks
+    every commit beyond its shallow boundary. A check git cannot answer cleanly is CannotEvaluate."""
+    damage = _store_damage(repo)
+    if damage:
+        return ("a repository whose object store git cannot read whole ({}); git answers an object held only in "
+                "a pack it cannot open as absent, so repair the repository or lint from a whole clone".format(damage))
+    if partial_clone(repo):
+        return "a partial clone: its promisor remote may hold one, and the lint never fetches; lint from a full clone"
+    if shallow_clone(repo):
+        return ("a shallow clone: it lacks every commit beyond its shallow boundary, and the lint never fetches; "
+                "lint from a full clone")
+    return None
+
+
 def revision_value_ok(value):
     """Whether a BRIEF-REVISIONS value is a commit id as a pin is written (hex_ref): a branch, a tag or any
     other name is not, since a name can move."""
@@ -3871,12 +4049,13 @@ def hex_words(raw):
     return found
 
 
-def revision_commit(repo, word, promisor=False):
+def revision_commit(repo, word, gap=None):
     """The full commit id a hex word names in `repo`, or None when git answers cleanly that it names none:
     git rev-parse (_rev_parse_local: hermetic, replace objects disabled, never fetching) answers exit 1 and
     nothing printed (_absent_answer) for an absent object, and exit 1 with its one not-a-commit line
-    (_not_a_commit) for a blob or a tree (measured with git 2.53.0). In a partial clone (`promisor`) the
-    absent answer is CannotEvaluate, since the promisor remote may hold the object. A repository git
+    (_not_a_commit) for a blob or a tree (measured with git 2.53.0). Where `repo` is not whole (`gap`, the
+    reason object_store_gap gives: a damaged or unreadable object store, a partial clone, a shallow clone) the
+    absent answer is CannotEvaluate, since the object may exist where git cannot read it. A repository git
     refuses for its ownership, a git that cannot be launched or times out, and every other failure (a
     corrupt or unreadable object, other text on stderr, another exit, output that is no full commit id) are
     CannotEvaluate, never a quiet pass."""
@@ -3885,9 +4064,8 @@ def revision_commit(repo, word, promisor=False):
     if _not_a_commit(probe, word):
         return None
     if _absent_answer(probe):
-        if promisor:
-            raise CannotEvaluate("{} names no commit present in {}, a partial clone: its promisor remote may hold "
-                                 "one, and the lint never fetches; lint from a full clone".format(what, repo))
+        if gap:
+            raise CannotEvaluate("{} names no commit present in {}, {}".format(what, repo, gap))
         return None
     commit = probe.stdout.decode("ascii", "replace").strip()
     if probe.returncode == 0 and _full_commit(commit):
@@ -3895,9 +4073,9 @@ def revision_commit(repo, word, promisor=False):
     raise _probe_failure(what, repo, probe)
 
 
-def declared_commit(repo, value, promisor):
+def declared_commit(repo, value, gap):
     """The commit a BRIEF-REVISIONS value names (revision_commit), or CannotEvaluate when it names none."""
-    commit = revision_commit(repo, value, promisor)
+    commit = revision_commit(repo, value, gap)
     if commit is None:
         raise CannotEvaluate("the {} value {} does not resolve to a commit in {}".format(REVISIONS_LABEL, value,
                                                                                          repo))
@@ -3913,8 +4091,9 @@ def rule_p9(names, row, repo):
     that names no commit there (absent, ambiguous, a blob or a tree) is quiet. With no declaration the rule is
     quiet. More than P9_MAX_DECLARATIONS declaration lines, a malformed declaration, a value that is not a
     commit id or does not resolve to a commit (declared_commit), a declaration with no repository to read, a
-    probe git fails, a word a partial clone (partial_clone) lacks, and more than P9_MAX_WORDS distinct
-    undeclared hex words are CannotEvaluate, never a pass. No P9 read fetches (P9_NO_FETCH_OPTIONS)."""
+    probe git fails, a word that names no commit present in a repository that is not whole (object_store_gap:
+    a damaged or unreadable object store, a partial clone, a shallow clone), and more than P9_MAX_WORDS
+    distinct undeclared hex words are CannotEvaluate, never a pass. No P9 read fetches (P9_NO_FETCH_OPTIONS)."""
     declarations = revision_declarations(names.raw)
     if not declarations:
         return []
@@ -3925,17 +4104,17 @@ def rule_p9(names, row, repo):
     if repo is None:
         raise CannotEvaluate("the brief declares its revisions on a {} line but no repository was given to "
                              "resolve them in".format(REVISIONS_LABEL))
-    promisor = partial_clone(repo)
+    gap = object_store_gap(repo)
     values = [value for _, line_values in declarations for value in line_values]
     for value in values:
-        declared_commit(repo, value, promisor)
+        declared_commit(repo, value, gap)
     declared = [pin for _, pin in names.pins] + values
     undeclared = [(line, word) for line, word in hex_words(names.raw) if not pin_matches(word, declared)]
     distinct = list(dict.fromkeys(word.lower() for _, word in undeclared))
     if len(distinct) > P9_MAX_WORDS:
         raise CannotEvaluate("the brief names {} distinct hex words outside its declared revisions, more than "
                              "the {} the lint probes; name fewer".format(len(distinct), P9_MAX_WORDS))
-    commits = dict((word, revision_commit(repo, word, promisor)) for word in distinct)
+    commits = dict((word, revision_commit(repo, word, gap)) for word in distinct)
     findings, seen = [], set()
     for line, word in undeclared:
         commit = commits[word.lower()]
@@ -9485,7 +9664,8 @@ def self_test(report_path=None):
               ["the brief declares its revisions on a BRIEF-REVISIONS line but no repository was given to "
                "resolve them in", (0, [])])
         # git answers an ambiguous prefix under --quiet as it answers an absent one (exit 1, nothing printed;
-        # measured with git 2.53.0 on a 4-digit blob prefix): a declared one is exit 2 and a word is quiet
+        # measured with git 2.53.0 on a 4-digit blob prefix and on a 7-hex prefix two commits share): a declared
+        # one is exit 2 and a word is quiet
         genuine_rev_parse = _rev_parse_local
 
         def ambiguous_rev_parse(repo, rev):
@@ -9670,6 +9850,90 @@ def self_test(report_path=None):
                                                                                   p9_c, p9_b)],
               ["CannotEvaluate", "CannotEvaluate", p9_hard, (0, [])])
         check("preflight/p9-partial-clone-never-fetches", [p9_held_before, p9_holds(p9_d)], [False, False])
+
+        def p9_packed(name, damage=None):
+            """(copy of the fixture, pack stem) with C moved alone into its own pack and its loose copy deleted
+            (A and B stay loose), then `damage` applied to the pack's stem path."""
+            target = p7_base / name
+            shutil.copytree(p7_repo, target, symlinks=True)
+            objects = target / ".git" / "objects"
+            packed = subprocess.run(p9_git + ["-C", str(target), "pack-objects", "-q", str(objects / "pack" / "pack")],
+                                    input=(p9_c + "\n").encode("ascii"), check=True, capture_output=True, timeout=60,
+                                    env=p9_env).stdout.decode("ascii").strip()
+            (objects / p9_c[:2] / p9_c[2:]).unlink()
+            stem = str(objects / "pack" / ("pack-" + packed))
+            if damage is not None:
+                damage(stem)
+            return target, stem
+
+        # a commit held only in a pack git cannot open: git skips the pack and answers the lookup as it answers an
+        # absent object, exit 1 and nothing printed (measured with git 2.53.0 for a missing .pack, a missing .idx,
+        # an unreadable .idx and an unreadable .pack), so a word git calls absent in an object store that is not
+        # whole is CannotEvaluate; C loose (the fixture) and C packed in a whole store are HARD, and B (declared)
+        # stays quiet in every copy
+        p9_whole = p9_packed("p9-packed")[0]
+        p9_no_pack = p9_packed("p9-no-pack", lambda stem: os.unlink(stem + ".pack"))[0]
+        p9_no_idx = p9_packed("p9-no-idx", lambda stem: os.unlink(stem + ".idx"))[0]
+        p9_idx_locked, p9_idx_stem = p9_packed("p9-idx-locked", lambda stem: os.chmod(stem + ".idx", 0))
+        p9_pack_locked, p9_pack_stem = p9_packed("p9-pack-locked", lambda stem: os.chmod(stem + ".pack", 0))
+        p9_base_c, p9_base_b = "The base is {}.\n".format(p9_c), "The base is {}.\n".format(p9_b)
+        check("preflight/p9-packed-commit-hard",
+              [p9(p9_base_c), p9(p9_base_c, repo=p9_whole), p9(p9_nonce, repo=p9_whole), p9(p9_base_b, repo=p9_whole)],
+              [p9_hard, p9_hard, (0, []), (0, [])])
+        check("preflight/p9-missing-pack-cannot-evaluate",
+              [p9(text, repo=repo) for repo in (p9_no_pack, p9_no_idx) for text in (p9_base_c, p9_nonce, p9_base_b)],
+              ["CannotEvaluate", "CannotEvaluate", (0, [])] * 2)
+        # a uid that reads a mode-000 file (root, or a capability) cannot show git skipping the pack: recorded
+        p9_locked = not os.access(p9_idx_stem + ".idx", os.R_OK) and not os.access(p9_pack_stem + ".pack", os.R_OK)
+        p9_locked_skipped = "skipped: this uid reads a mode-000 file, so git opens the pack here"
+        check("preflight/p9-unreadable-pack-cannot-evaluate",
+              [p9(text, repo=repo) for repo in (p9_idx_locked, p9_pack_locked) for text in (p9_base_c, p9_base_b)]
+              if p9_locked else p9_locked_skipped,
+              ["CannotEvaluate", (0, [])] * 2 if p9_locked else p9_locked_skipped)
+        if not p9_locked:
+            print("NOTE: preflight/p9-unreadable-pack-cannot-evaluate " + p9_locked_skipped)
+        # git count-objects -v read for the object store check: a garbage count, a pack count other than the pack
+        # pairs present, a warning, a failed exit, output it does not read and a quoted alternate are each
+        # CannotEvaluate for a word git calls absent (a nonce); the genuine answer stays quiet
+        p9_counts = _count_objects_probe(p7_repo).stdout.decode("ascii").splitlines()
+
+        def p9_counted(returncode, lines, stderr=b""):
+            answer = subprocess.CompletedProcess([], returncode, "".join(line + "\n" for line in lines).encode(
+                "utf-8"), stderr)
+            with _patched(_count_objects_probe=lambda repo: answer):
+                return p9(p9_nonce)
+
+        def p9_count_set(key, value):
+            return [key + ": " + value if line.startswith(key + ": ") else line for line in p9_counts]
+
+        p9_packs = [line.split(": ")[1] for line in p9_counts if line.startswith("packs: ")]
+        p9_count_cases = [lambda: p9_counted(0, p9_count_set("garbage", "1")),
+                          lambda: p9_counted(0, p9_count_set("packs", str(int(p9_packs[0]) + 1))),
+                          lambda: p9_counted(0, p9_counts, b"warning: garbage found: .git/objects/pack/x\n")]
+        check("preflight/p9-count-objects-cannot-evaluate",
+              [case() for case in p9_count_cases]
+              + [p9_counted(128, [], b"fatal: bad\n"), p9_counted(0, ["packs 0"]),
+                 p9_counted(0, [line for line in p9_counts if not line.startswith("garbage: ")]),
+                 p9_counted(0, p9_counts + ['alternate: "/w/a\\tb/objects"']), p9_counted(0, p9_counts)],
+              ["CannotEvaluate"] * 7 + [(0, [])])
+        # a shallow clone of the fixture (depth 2, from a file:// URL): a commit beyond its shallow boundary (A) is
+        # CannotEvaluate, the clone lacks it and the lint never fetches; the commit it holds below its head is
+        # HARD, and A in the full fixture is HARD
+        p9_shallow = p7_base / "p9-shallow"
+        subprocess.run(p9_git + ["clone", "-q", "--depth", "2", "file://" + str(p7_repo), str(p9_shallow)],
+                       check=True, capture_output=True, timeout=60, env=p9_env)
+        p9_tip, p9_below = [subprocess.run(p9_git + ["-C", str(p9_shallow), "rev-parse", rev], check=True,
+                                           capture_output=True, timeout=60, env=p9_env).stdout.decode("ascii").strip()
+                            for rev in ("HEAD", "HEAD~1")]
+
+        def p9_shallow_case(word, repo=p9_shallow):
+            return lambda: _outcome("BRIEF-PIN: {0}\nBRIEF-REVISIONS: {0}\nThe base is {1}.\n".format(p9_tip, word),
+                                    "alpha", True, repo)
+
+        check("preflight/p9-shallow-clone-cannot-evaluate",
+              [p9_a in (p9_tip, p9_below), p9_shallow_case(p9_a)(), p9_shallow_case(p9_nonce.split()[1][:-1])(),
+               p9_shallow_case(p9_below)(), p9_shallow_case(p9_a, p7_repo)()],
+              [False, "CannotEvaluate", "CannotEvaluate", p9_hard, p9_hard])
         # each guard patched out flips its fixture
         check("revert/p9-red", *flip([p9_case(p9_runs.format(p9_c[:7], p9_a[:7]))], [(0, [])], rule_p9=nothing))
         check("revert/p9-opt-in-red", *flip([p9_case(p9_runs.format(p9_c[:7], p9_a[:7]), "")], [p9_hard],
@@ -9686,10 +9950,10 @@ def self_test(report_path=None):
                                                revision_value_ok=lambda value: True))
         check("revert/p9-declared-resolve-red", *flip(
             [p9_case("", "BRIEF-REVISIONS: 0123456789abcdef0123456789abcdef01234567\n")], [(0, [])],
-            declared_commit=lambda repo, value, promisor: value))
+            declared_commit=lambda repo, value, gap: value))
         check("revert/p9-commit-split-red", *flip([p9_case(p9_nonce), p9_case(p9_blob), p9_case(p9_date)],
                                                   [p9_hard] * 3,
-                                                  revision_commit=lambda repo, word, promisor=False: "0" * 40))
+                                                  revision_commit=lambda repo, word, gap=None: "0" * 40))
         check("revert/p9-ownership-red", *flip([p9_ownership_named], [False], _ownership_refused=lambda probe: False))
         check("revert/p9-launch-red", *flip([p9_timeout, p9_no_git], ["TimeoutExpired", "FileNotFoundError"],
                                             GIT_RUN_ERRORS=()))
@@ -9704,6 +9968,19 @@ def self_test(report_path=None):
                                               _describe_hex=lambda line, word: False))
         check("revert/p9-partial-clone-red", *flip([p9_case(p9_nonce, repo=p9_partial)], [(0, [])],
                                                    partial_clone=lambda repo: False))
+        check("revert/p9-store-gap-red", *flip(
+            [p9_case(p9_base_c, repo=p9_no_pack), p9_shallow_case(p9_a), p9_case(p9_nonce, repo=p9_partial)],
+            [(0, [])] * 3, object_store_gap=lambda repo: None))
+        check("revert/p9-shallow-red", *flip([p9_shallow_case(p9_a)], [(0, [])], shallow_clone=lambda repo: False))
+        check("revert/p9-count-objects-red", *flip(p9_count_cases, [(0, [])] * 3,
+                                                   _count_objects_damage=lambda fields, packs, stderr: None))
+        # an unreadable .pack whose .idx git reads is seen by the pack walk alone (git counts that pack); a uid
+        # that reads a mode-000 file cannot show it, so the flip is recorded as skipped there
+        p9_pack_flip = (flip([p9_case(p9_base_c, repo=p9_pack_locked)], [(0, [])], _pack_damage=lambda objects: None)
+                        if p9_locked else (p9_locked_skipped, p9_locked_skipped))
+        if not p9_locked:
+            print("NOTE: revert/p9-pack-damage-red " + p9_locked_skipped)
+        check("revert/p9-pack-damage-red", *p9_pack_flip)
         # after every other read of the partial clone, since the patched read fetches D into it
         check("revert/p9-no-lazy-fetch-red", *flip([p9_case("The base is {}.\n".format(p9_d), repo=p9_partial)],
                                                    [p9_hard], P9_NO_FETCH_OPTIONS=()))
@@ -9715,7 +9992,8 @@ def self_test(report_path=None):
             HEX_WORD_RE=re.compile(r"\S++")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 260)
+    # 264, or 263 where the uid reads a mode-000 file and revert/p9-pack-damage-red is recorded as skipped
+    check("revert/every-flip-ran", len(flipped), 264 if p9_locked else 263)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
