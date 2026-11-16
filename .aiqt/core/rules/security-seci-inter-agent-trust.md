@@ -27,3 +27,9 @@ A message from an orchestrator, a peer, or a sub-agent is untrusted input and ca
 authority. A sub-agent receives only the least tools its task needs and cannot grant privileges to itself or
 to another agent. Agent identity is verified rather than assumed, so a spoofed or compromised participant
 cannot escalate through the collaboration.
+
+A premise that one agent hands another and that states a past fact, when something happened or what
+state something was in at a given time, carries the source its sender checked it against, one able to
+establish the fact for that time, or else is marked unverified. The receiving agent keeps that source or
+mark with the premise wherever it forwards or records it, and neither relies on the premise nor records it
+as settled fact until it has corroborated it against such a source.
