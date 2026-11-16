@@ -3810,6 +3810,239 @@ def _ie_dispatch_failures():
     return out
 
 
+@contextlib.contextmanager
+def _cp_environ(pattern, posture=None):
+    """While the block runs, the console prefix settings in os.environ are exactly pattern and posture (None
+    removes one); the values before are put back after."""
+    names = (aiqt_hooks._CONSOLE_PREFIX_PATTERN_ENV, aiqt_hooks._CONSOLE_PREFIX_POSTURE_ENV)
+    saved = {name: os.environ.get(name) for name in names}
+    try:
+        for name, value in zip(names, (pattern, posture)):
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+@contextlib.contextmanager
+def _cp_patched(name, value):
+    """While the block runs, aiqt_hooks.<name> is value (a mutant); the real one is put back after."""
+    real = getattr(aiqt_hooks, name)
+    setattr(aiqt_hooks, name, value)
+    try:
+        yield
+    finally:
+        setattr(aiqt_hooks, name, real)
+
+
+def _cp_line(kind, content, **extra):
+    """One synthetic transcript line: a user or assistant record carrying message.content."""
+    record = {"type": kind, "message": {"role": kind, "content": content}}
+    record.update(extra)
+    return json.dumps(record) + "\n"
+
+
+_CP_PATTERN = r"\[\d{4}-\d\d-\d\dT\d\d:\d\dZ\] "
+_CP_STAMPED = "[2026-11-16T10:00Z] working on it"
+_CP_UNSTAMPED = "working on it"
+
+
+def _test_console_prefix(failures, tmp):
+    """(cp-*) console_prefix_pretool, called directly over synthetic transcripts written under tmp; nothing
+    is executed and no live transcript is read. Each row pins the real handler's outcome, then the same row
+    under a mutant with the check that decides it removed (patched in through _cp_patched) must give a
+    different outcome, so the row is red without that check. The rows: stamped, unstamped (warn and deny),
+    no text, multiple blocks, malformed, oversized (the bounded read and a tail with no complete record),
+    missing file, the mode off, a bad pattern, a bad posture, and the wrong event."""
+    handler = aiqt_hooks.console_prefix_pretool
+    root = tmp / "console-prefix"
+    root.mkdir(parents=True, exist_ok=True)
+    tool_result = _cp_line("user", [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}])
+    tool_use = _cp_line("assistant", [{"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "ls"}}])
+
+    def transcript(name, text):
+        path = root / name
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def payload(path, event=aiqt_hooks.PRETOOL):
+        data = {"hook_event_name": event, "tool_name": "Bash", "tool_input": {"command": "ls"}}
+        if path is not None:
+            data["transcript_path"] = path
+        return data
+
+    def outcome(path, pattern=_CP_PATTERN, posture=None, event=aiqt_hooks.PRETOOL):
+        with _cp_environ(pattern, posture):
+            code, stdout_obj, _stderr = handler(payload(path, event))
+        reduced = "hard-block" if code == 2 else _reduce_result(code, stdout_obj)
+        note = ""
+        if isinstance(stdout_obj, dict):
+            note = str(stdout_obj.get("systemMessage", ""))
+            specific = stdout_obj.get("hookSpecificOutput")
+            if isinstance(specific, dict):
+                note = str(specific.get("permissionDecisionReason", ""))
+        return reduced, note
+
+    def always(value):
+        return lambda _pattern, _text: value
+
+    def swallow_missing(path, limit):
+        try:
+            return real_read(path, limit)
+        except OSError:
+            return b"", False
+
+    real_read = aiqt_hooks._console_prefix_read_tail
+    stamped = transcript("stamped.jsonl", _cp_line("assistant", [{"type": "text", "text": _CP_UNSTAMPED}])
+                         + tool_result + _cp_line("assistant", [{"type": "text", "text": _CP_STAMPED}]) + tool_use)
+    unstamped = transcript("unstamped.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}]) + tool_use)
+    no_text = transcript("no-text.jsonl", _cp_line("assistant", [{"type": "text", "text": _CP_UNSTAMPED}])
+                         + tool_result + tool_use)
+    multiple = transcript("multiple.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}]) + _cp_line(
+        "assistant", [{"type": "text", "text": "  " + _CP_STAMPED}, {"type": "thinking", "thinking": "x"}])
+        + tool_use)
+    malformed = transcript("malformed.jsonl", tool_result + "{not json\n" + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_STAMPED}]) + tool_use)
+    window = aiqt_hooks._CONSOLE_PREFIX_TAIL_BYTES
+    # Far more than the window of earlier, unstamped records, then a span the window does reach.
+    filler = _cp_line("assistant", [{"type": "text", "text": "x" * 4000}])
+    oversized = transcript("oversized.jsonl", filler * (2 * window // len(filler) + 2) + tool_result
+                           + _cp_line("assistant", [{"type": "text", "text": _CP_UNSTAMPED}]) + tool_use)
+    one_line = transcript("one-line.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_STAMPED + "y" * (window + 4096)}]))
+    missing = str(root / "absent.jsonl")
+    unprefixed_note = "1 of 1 assistant text block(s)"
+
+    rows = (
+        ("(cp-stamped) a stamped block after the last tool result allows silently", stamped, {}, "allow", "",
+         ("_console_prefix_matches", always(False)), "allow-note"),
+        ("(cp-unstamped) an unstamped block warns", unstamped, {}, "allow-note", unprefixed_note,
+         ("_console_prefix_matches", always(True)), "allow"),
+        ("(cp-unstamped-deny) an unstamped block denies under the deny posture", unstamped,
+         {"posture": "deny"}, "deny", unprefixed_note,
+         ("_console_prefix_config", lambda env: (re.compile(_CP_PATTERN), "warn", None)), "allow-note"),
+        ("(cp-no-text) a span with only a tool call allows silently, the earlier text past the boundary unread",
+         no_text, {}, "allow", "", ("_console_prefix_is_boundary", lambda record: False), "allow-note"),
+        ("(cp-multiple) every block of the span is checked, the first unstamped one too", multiple, {},
+         "allow-note", "1 of 2 assistant text block(s)", ("_console_prefix_checked", lambda texts: texts[-1:]),
+         "allow"),
+        ("(cp-malformed) a line that is not JSON notes and never blocks", malformed, {"posture": "deny"},
+         "allow-note", "a transcript line is not JSON",
+         ("_console_prefix_record", lambda line: {} if line.startswith(b"{not") else json.loads(line)),
+         "allow"),
+        ("(cp-oversized) the bounded tail of an oversized transcript still decides on its span", oversized,
+         {}, "allow-note", unprefixed_note,
+         ("_console_prefix_is_boundary", lambda record: False), "allow-note"),
+        ("(cp-oversized-line) a tail holding no complete record notes", one_line, {"posture": "deny"},
+         "allow-note", "hold no complete record",
+         ("_console_prefix_lines", lambda data, truncated: [line for line in data.split(b"\n") if line]),
+         "allow-note"),
+        ("(cp-missing) a missing transcript notes and never blocks", missing, {"posture": "deny"},
+         "allow-note", "did not run", ("_console_prefix_read_tail", swallow_missing), "allow"),
+        ("(cp-off) with no pattern set the mode is off, an unstamped transcript included", unstamped,
+         {"pattern": None}, "allow", "",
+         ("_console_prefix_config", lambda env: (re.compile(_CP_PATTERN), "warn", None)), "allow-note"),
+        ("(cp-no-path) a payload with no transcript_path notes", None, {}, "allow-note",
+         "transcript_path is missing", ("_console_prefix_config", lambda env: (None, "warn", None)), "allow"),
+    )
+    for label, path, settings, want, want_text, (mutant_name, mutant), flipped_want in rows:
+        got, note = outcome(path, **settings)
+        if got != want or want_text not in note:
+            failures.append("{}: expected {} with {!r} in its text, got {} with {!r}".format(
+                label, want, want_text, got, note))
+        with _cp_patched(mutant_name, mutant):
+            flipped, flipped_note = outcome(path, **settings)
+        if flipped == got and flipped_note == note:
+            failures.append("{}: the mutant of {} gave the same result ({}, {!r}), so the row does not show "
+                            "that check decides it".format(label, mutant_name, flipped, flipped_note))
+        elif flipped != flipped_want:
+            failures.append("{}: the mutant of {} must give {}, got {}".format(
+                label, mutant_name, flipped_want, flipped))
+
+    # (cp-oversized-bound) the read takes at most the window from the end of an oversized transcript, and is
+    # red with the bound removed.
+    reads = []
+
+    def spy(path, limit):
+        data, truncated = real_read(path, limit)
+        reads.append((len(data), truncated))
+        return data, truncated
+    with _cp_patched("_console_prefix_read_tail", spy):
+        outcome(oversized)
+        bounded = list(reads)
+        reads.clear()
+        with _cp_patched("_CONSOLE_PREFIX_TAIL_BYTES", 1 << 40):
+            outcome(oversized)
+        unbounded = list(reads)
+    size = os.path.getsize(oversized)
+    if bounded != [(window, True)] or size <= window:
+        failures.append("(cp-oversized-bound) expected one read of exactly {} bytes from the end of a {}-byte "
+                        "transcript, got {!r}".format(window, size, bounded))
+    if unbounded == bounded or not unbounded or unbounded[0][0] != size:
+        failures.append("(cp-oversized-unbounded) with the bound removed the read must take the whole {}-byte file, "
+                        "got {!r}".format(size, unbounded))
+    # (cp-oversized-cost) the handler's own CPU time on the oversized transcript stays far inside the budget.
+    _result, spent = _hook_cpu_timed(lambda: outcome(oversized), bound=1.0)
+    if spent >= 1.0:
+        failures.append("(cp-oversized-cost) console_prefix_pretool used {:.2f}s of CPU on a {}-byte transcript; "
+                        "the bound is 1 s".format(spent, size))
+    # (cp-settings) a pattern that does not compile, an overlong pattern and an unknown posture each note.
+    for label, settings, want_text in (
+            ("(cp-bad-pattern)", {"pattern": "(["}, "does not compile"),
+            ("(cp-long-pattern)", {"pattern": "a" * (aiqt_hooks._CONSOLE_PREFIX_PATTERN_MAX + 1)},
+             "over the 512-character limit"),
+            ("(cp-bad-posture)", {"posture": "block"}, "neither warn nor deny")):
+        got, note = outcome(unstamped, **settings)
+        if got != "allow-note" or want_text not in note:
+            failures.append("{} expected allow-note with {!r}, got {} with {!r}".format(label, want_text, got, note))
+    got, note = outcome(stamped, posture="block")
+    if got != "allow-note" or "check passed" not in note:
+        failures.append("(cp-bad-posture-pass) expected allow-note naming the passed check, got {} with {!r}"
+                        .format(got, note))
+    # (cp-pattern-boundary) at the pattern length limit the pattern is used, one past it is refused.
+    limit = aiqt_hooks._CONSOLE_PREFIX_PATTERN_MAX
+    for label, length, want in (("just inside", limit - 1, "allow"), ("exactly at", limit, "allow"),
+                                ("just past", limit + 1, "allow-note")):
+        # A pattern of exactly `length` characters that matches the unstamped text: a one- or two-character
+        # start that matches its "w", then optional "o?" pairs.
+        start = "w" if length % 2 else "\\w"
+        pattern = start + "o?" * ((length - len(start)) // 2)
+        got, _note = outcome(unstamped, pattern=pattern)
+        if got != want or len(pattern) != length:
+            failures.append("(cp-pattern-boundary) a pattern {} the {}-character limit ({} characters) expected "
+                            "{}, got {}".format(label, limit, len(pattern), want, got))
+    # (cp-wrong-event) wired to another event it hard-blocks, the sibling convention.
+    got, _note = outcome(stamped, event="PostToolUse")
+    if got != "hard-block":
+        failures.append("(cp-wrong-event) expected a hard block on a PostToolUse payload, got {}".format(got))
+    # (cp-partial) a long span whose boundary lies before the window is checked as far as the window reaches.
+    partial = transcript("partial.jsonl", tool_result + filler * (window // len(filler) + 2)
+                         + _cp_line("assistant", [{"type": "text", "text": _CP_STAMPED}]))
+    got, note = outcome(partial, pattern=r"[x\[]")
+    if got != "allow-note" or "start of the span" not in note:
+        failures.append("(cp-partial) expected allow-note saying the span start was not reached, got {} with "
+                        "{!r}".format(got, note))
+    # (cp-sidechain-and-string) a sidechain record is passed over; string content counts as one text block.
+    side = transcript("side.jsonl", tool_result + _cp_line("assistant", _CP_UNSTAMPED, isSidechain=True)
+                      + _cp_line("assistant", _CP_STAMPED))
+    got, note = outcome(side)
+    if got != "allow":
+        failures.append("(cp-sidechain-and-string) expected a silent allow, got {} with {!r}".format(got, note))
+    # (cp-not-regular) a directory as the transcript notes.
+    got, note = outcome(str(root))
+    if got != "allow-note" or "did not run" not in note:
+        failures.append("(cp-not-regular) expected allow-note for a directory, got {} with {!r}".format(got, note))
+
+
 def _test_inline_errexit(failures, tmp):
     """(ie-*) inline_errexit, called directly; no submitted Bash command is executed. Each fire row must
     allow with the note and no decision, and each silent row must allow silently; each row must then flip
@@ -7501,6 +7734,7 @@ _DEADLINE_CASES = {
     "branch_root": ("heredocs", "git_push_words_unbal", "nest_parens", "procsubst_run_after"),
     "commit_identity": ("nest_parens", "git_words_unbal_dq"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
+    "console_prefix_pretool": ("git_words", "write_content"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
     "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after",
                        "ansi_c_herestr", "ansi_c_noverify_after", "procsubst_run_after",
@@ -31568,6 +31802,7 @@ def _main_isolated(monitor):
         _test_malformed_bash_payload(failures)
         _test_nul_bash_command(failures)
         _test_inline_errexit(failures, tmp)
+        _test_console_prefix(failures, tmp)
         _test_pgrep_self_match(failures)
         _test_trkasy_no_amp(failures, tmp)
         _test_trkasy_heredoc_body_data(failures, tmp)

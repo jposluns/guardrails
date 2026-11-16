@@ -2085,6 +2085,15 @@
         {
           "class": "c",
           "default": "warn",
+          "event": "PreToolUse",
+          "id": "console-prefix-pretool",
+          "matcher": ".*",
+          "platform": "claude-code",
+          "residue": "OFF BY DEFAULT and adopter-armed: inert, a silent allow, unless the hook environment sets AIQT_CONSOLE_PREFIX_RE to a Python regular expression. When set, at each tool call it reads at most the last 1048576 bytes of the payload's transcript_path, walks back to the last user record (a tool result, or the prompt that began the turn), and checks that each non-blank assistant text block written since starts with the pattern, leading whitespace removed. NOTE-ONLY by default: an unprefixed block allows with a note; AIQT_CONSOLE_PREFIX_POSTURE=deny makes it deny the tool call instead, the one blocking result, and any other posture value warns with a note naming it.\n\nNEVER BLOCKS ON ITS OWN FAILURE: a missing, empty, relative or non-string transcript_path, a transcript that cannot be opened or is not a regular file, a tail with no complete record, a line that is not a JSON object, a record with no readable content, and a pattern that does not compile or is over 512 characters each allow with a note saying the check did not run. main() turns every dispatcher error path and the deadline into a warning on exit 0 (NOTE_ONLY_PRETOOL_MODES), whatever the posture.\n\nNOT SEEN: text with no following tool call, at the end of a turn, is left to a turn-end check. Whether the platform has written the current assistant text to the transcript when PreToolUse fires is the platform's behaviour and is not verified here; text not yet written is seen at a later tool call or not at all. Only text blocks of user and assistant records in the Claude Code transcript layout (JSON lines carrying message.content) are read; another layout notes as unreadable. Text inside a tool input, a thinking block and a sidechain record is not checked. A span longer than the read window is checked as far as the window reaches, with a note saying its start was not reached. The pattern runs on at most 4096 characters of each block, and a pattern slow enough to pass the deadline ends in a warning, never a block. Each tool call starts one more python3 process for this hook, even while it is off.\n"
+        },
+        {
+          "class": "c",
+          "default": "warn",
           "event": "UserPromptSubmit",
           "id": "orch-prompt-stamp",
           "platform": "claude-code",
