@@ -2420,7 +2420,7 @@ def scan_tree(root, allowlist=ALLOWLIST, disabled=()):
             raise CannotEvaluate("cannot read " + rel + ": " + str(exc))
         try:
             found = scan_source(source, rel, disabled, modules)
-        except (SyntaxError, ValueError, RecursionError) as exc:
+        except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
             if "fail-parse" in disabled:
                 continue
             raise CannotEvaluate("cannot parse " + rel + ": " + type(exc).__name__ + " " + str(exc))
@@ -3528,6 +3528,9 @@ TREE_VECTORS = (
     ("file unstatable after the walk", {"tools/a.py": _SITE}, (), _stat_refused("tools/a.py"),
      CE, "fail-nonregular", 0),
     ("parser ValueError", {"tools/a.py": _SITE}, (), _parse_raises(ValueError), CE,
+     "fail-parse", 0),
+    # A parser stack overflow raises MemoryError, which is cannot-evaluate as a parse failure.
+    ("parser MemoryError", {"tools/a.py": _SITE}, (), _parse_raises(MemoryError), CE,
      "fail-parse", 0),
     ("allowlist count drift", {"tools/a.py": _SITE}, (_ENTRY[:3] + (2, _REASON),), None,
      2, "allowlist-stale", 0),

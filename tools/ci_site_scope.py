@@ -517,6 +517,55 @@ def _fixture_literal_head(repo, body, env):
         handle.write(proc.stdout.decode("ascii").strip() + "\n")
 
 
+class _RecordedParentRead:
+    """Stands in for this module's subprocess global while a case runs the production parent
+    read (head_parents) in process. The fixture's git answer is read once, here, before the
+    stand-in is installed, with the fixture environment and a literal argv: the raw object read
+    head_parents spells, or, with honour_replace, the same read without --no-replace-objects (the
+    mutant that loses that flag). run then answers only head_parents's own argv, spelled again
+    below, with that recorded answer; any other argv (a production read that changed its flags)
+    gets a refusal exit, so no launch happens while the stand-in is installed and no caller
+    configuration is ever read."""
+    TimeoutExpired = subprocess.TimeoutExpired
+
+    def __init__(self, repo, env, honour_replace=False):
+        self.expected = ["git", "--no-replace-objects", "-C", str(repo), "cat-file", "commit",
+                         "HEAD"]
+        if honour_replace:
+            self.answer = subprocess.run(["git", "-C", str(repo), "cat-file", "commit", "HEAD"],
+                                         check=True, capture_output=True, timeout=GIT_TIMEOUT,
+                                         env=env)
+        else:
+            self.answer = subprocess.run(["git", "--no-replace-objects", "-C", str(repo),
+                                          "cat-file", "commit", "HEAD"], check=True,
+                                         capture_output=True, timeout=GIT_TIMEOUT, env=env)
+        self.refusal = subprocess.CompletedProcess(
+            self.expected, 128, b"", b"stand-in: only the recorded raw object read is answered\n")
+
+    def run(self, argv, capture_output=False, timeout=None):
+        return self.answer if list(argv) == self.expected else self.refusal
+
+
+def _mergetag_reading(original, raw):
+    """The mergetag mutant: original (head_parents), then every "parent <id>" a mergetag value's
+    continuation line in raw (the recorded commit object the parent read was answered with)
+    carries, when the rest of that line is a full object id, appended as one more parent (a
+    header reader that unfolds continuation lines). It launches nothing. Only a mergetag fixture
+    whose continuation line is exactly " parent <id>" catches it."""
+    def mutant(root):
+        parents, problem = original(root)
+        if problem is not None:
+            return parents, problem
+        within = False
+        for line in raw.partition(b"\n\n")[0].split(b"\n"):
+            if not line.startswith(b" "):
+                within = line.startswith(b"mergetag ")
+            elif within and line.startswith(b" parent ") and _object_id(line[8:]):
+                parents.append(line[8:].decode("ascii"))
+        return parents, None
+    return mutant
+
+
 def _cli(repo, merge_base):
     """Run the planted CLI copy as a child exactly as the workflow does; (exit code, stdout)."""
     proc = subprocess.run(
@@ -880,9 +929,11 @@ def self_test(report_path=None):
             # the decision reads HEAD's raw commit object and nothing that rewrites it: a valid
             # site-only two-parent merge, HEAD_SHA its second parent, still decides true when its
             # header also carries a gpgsig or a mergetag header (multi-line values whose
-            # continuation lines start with a space; each carries one that reads "parent <id>"
-            # after that space, which is header value text, never a parent line), when an
-            # info/grafts file gives HEAD other parents, and when a replace ref swaps the base
+            # continuation lines start with a space; each carries one that reads exactly
+            # "parent <id>" after that space, with no trailing text, so a reader that took a
+            # parent out of either value finds a well-formed id; that is header value text,
+            # never a parent line), when an info/grafts file gives HEAD other parents, and when
+            # a replace ref swaps the base and then HEAD itself
             repo, base = _fixture_repo(Path(scratch), env)
             _fixture_git(repo, "checkout", "-q", "-b", "merge-train-4", env=env)
             (repo / "site" / "index.html").write_text("b\n")
@@ -902,7 +953,7 @@ def self_test(report_path=None):
                       base.encode("ascii") + b"\n -----END PGP SIGNATURE-----\n\nmerge\n")
             tagged = (header + b"mergetag object " + train_tip.encode("ascii") +
                       b"\n type commit\n tag v1\n tagger " + signature + b" \n parent " +
-                      base.encode("ascii") + b" is the base this tag was cut against\n\nmerge\n")
+                      base.encode("ascii") + b"\n\nmerge\n")
             for check_id, body in (("cidecide/gpgsig-merge-true", signed),
                                    ("cidecide/mergetag-merge-true", tagged)):
                 _fixture_literal_head(repo, body, env)
@@ -912,6 +963,17 @@ def self_test(report_path=None):
                                           Path(scratch) / ("gh-output-" + check_id[9:]),
                                           head_sha=train_tip)),
                       (2, (0, "site_only=true\n")))
+            # the mergetag case in process, its twin first: HEAD's raw parents are exactly the
+            # two recorded ones, and the mergetag mutant (_mergetag_reading) reads the tag's
+            # " parent <id>" continuation line as one more parent, exactly the recorded base
+            _fixture_literal_head(repo, tagged, env)
+            recorded = _RecordedParentRead(repo, env)
+            with _patched(subprocess=recorded):
+                check("cidecide/mergetag-raw-parents-exact", merge_parents(repo),
+                      ((base, train_tip), None))
+                caught = _mergetag_reading(head_parents, recorded.answer.stdout)(repo)
+            check("revert/mergetag-continuation-parent-read-red", caught,
+                  ([base, train_tip, base], None))
             # info/grafts gives HEAD one parent, and git's own parent read follows it (the
             # fixture's count is 1); --no-replace-objects does not disable grafts, so only the
             # raw object read keeps the decision on the two recorded parents
@@ -944,6 +1006,31 @@ def self_test(report_path=None):
                    _ci_decide_outcome(repo, "pull_request", Path(scratch) / "gh-output-replace",
                                       head_sha=train_tip)),
                   (True, (0, "site_only=true\n")))
+            # a second replace ref swaps HEAD itself for a two-parent commit whose first parent
+            # is the replacement base, so a parent read that honoured it would diff against that
+            # base and see the tools/ change (git's own HEAD^1 does); the decision reads HEAD's
+            # raw object as recorded
+            swapped = subprocess.run(
+                ["git", "-C", str(repo), "commit-tree", merge + "^{tree}", "-p", replacement,
+                 "-p", train_tip, "-m", "swapped head"], check=True, capture_output=True,
+                text=True, timeout=GIT_TIMEOUT, env=env).stdout.strip()
+            _fixture_git(repo, "replace", merge, swapped, env=env)
+            check("cidecide/replaced-head-raw-object-true",
+                  (_fixture_rev(repo, "HEAD^1", env) == replacement,
+                   _ci_decide_outcome(repo, "pull_request",
+                                      Path(scratch) / "gh-output-replace-head",
+                                      head_sha=train_tip)),
+                  (True, (0, "site_only=true\n")))
+            # the parent read in process, its twin first: HEAD's raw parents are the recorded
+            # base and train head, and the mutant that drops --no-replace-objects from that read
+            # follows the replace ref on HEAD, so it reads the swapped commit's parents (a
+            # production read that dropped the flag itself is refused by the stand-in's argv)
+            with _patched(subprocess=_RecordedParentRead(repo, env)):
+                check("cidecide/replaced-head-raw-parents-exact", merge_parents(repo),
+                      ((base, train_tip), None))
+            with _patched(subprocess=_RecordedParentRead(repo, env, honour_replace=True)):
+                check("revert/parent-read-honours-replace-red", merge_parents(repo),
+                      ((replacement, train_tip), None))
         with tempfile.TemporaryDirectory() as scratch:
             repo, base = _fixture_repo(Path(scratch), env)
             _fixture_git(repo, "mv", "site/index.html", "tools/index.html", env=env)
@@ -1002,8 +1089,9 @@ def self_test(report_path=None):
           "with a note naming its cause, false on a valid two-parent merge that changes a tools/ "
           "file, and true on the matching site-only merge, also when the tool is extracted alone "
           "outside any repository, when the merge carries a gpgsig or a mergetag header, when an "
-          "info/grafts file rewrites HEAD's parents and when a replace ref swaps the base); "
-          "execution set "
+          "info/grafts file rewrites HEAD's parents and when replace refs swap the base and "
+          "HEAD, a mergetag continuation reader and a replace-honouring parent read each "
+          "caught); execution set "
           "reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 

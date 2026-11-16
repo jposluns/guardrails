@@ -2114,7 +2114,8 @@ def _test_stop_dispatch_note_sites(failures, tmp):
     permissionDecision "allow" mutant at the site fails here, in the hooks suite, not only in the
     orchestration suite: diff_wall_stop's wrong-event, unreadable-payload and diff-wall warnings;
     _orch_stop_family's unreadable-registry, unsaved-counter and failed-escape-spoof-record warnings
-    (Stop and TeammateIdle); orch_resume_audit's divergence warning; and main's unreadable-payload,
+    (Stop and TeammateIdle) and its loop-signal warnings under an unresolvable registry state_dir and a
+    toplevel that cannot be decoded as a path; orch_resume_audit's divergence warning; and main's unreadable-payload,
     handler-crash and window-error fail-open notes. The fixtures are selftest_orch_hooks.Fixture repos
     under tmp."""
     import selftest_orch_hooks as orch
@@ -2171,6 +2172,53 @@ def _test_stop_dispatch_note_sites(failures, tmp):
     finally:
         (aiqt_hooks._orch_registry, aiqt_hooks._orch_record_denial, aiqt_hooks._orch_escape_active,
          aiqt_hooks._orch_record_escape_spoof, aiqt_hooks._orch_resume_probes) = saved
+
+    # (ns-stop-state-dir-loop) _orch_stop_family's loop-signal note for a registry state_dir that cannot
+    # resolve (a NUL in the path), reached from a real fixture with no seam: without the loop signal the
+    # Stop HOLDS (exit 2) naming the state directory (the TWIN), and with stop_hook_active set the same
+    # Stop yields through _stop_warn, naming the loop signal and the state directory. A silent-allow or
+    # explicit-allow mutant at the site fails here; so does a mutant that drops the hold.
+    sd = orch.Fixture(base, "state-dir")
+    sd_regp = sd.root / ".aiqt" / "orchestration.local.json"
+    sd_reg = json.loads(sd_regp.read_text(encoding="utf-8"))
+    sd_reg["state_dir"] = str(sd.root / "st\u0000ate")
+    sd_regp.write_text(json.dumps(sd_reg), encoding="utf-8")
+    sd_hold = aiqt_hooks.orch_stop_guard(sd.payload("Stop"))
+    if not (sd_hold[0] == 2 and sd_hold[1] is None and "state directory" in str(sd_hold[2])
+            and "cannot-evaluate" in str(sd_hold[2])):
+        failures.append("(ns-stop-state-dir-hold) a Stop under an unresolvable registry state_dir expected an "
+                        "exit-2 hold naming the state directory, got {!r}".format(sd_hold))
+    sd_loop = aiqt_hooks.orch_stop_guard(sd.payload("Stop", extra={"stop_hook_active": True}))
+    note("(ns-stop-state-dir-loop) a Stop under an unresolvable registry state_dir with the loop signal set "
+         "yields with a note", sd_loop, "loop signal set")
+    if (_reduce_result(sd_loop[0], sd_loop[1]) == "allow-note"
+            and "state directory" not in sd_loop[1]["systemMessage"]):
+        failures.append("(ns-stop-state-dir-loop) the loop-signal note does not name the state directory: {!r}"
+                        .format(sd_loop[1]["systemMessage"]))
+
+    # (ns-stop-toplevel-loop) _orch_stop_family's loop-signal note for a repository toplevel that cannot be
+    # decoded as a path at all. _orch_stop_root answers (None, True) only where os.fsdecode raises, which no
+    # POSIX platform does (it escapes every byte), so a seam stands in for that answer here, as
+    # (ns-stop-registry) does for the registry read: without the loop signal the Stop HOLDS (exit 2) naming
+    # the toplevel (the TWIN), and with stop_hook_active set it yields through _stop_warn naming the loop
+    # signal and the toplevel. A silent-allow or explicit-allow mutant at the site fails here.
+    saved_root = aiqt_hooks._orch_stop_root
+    try:
+        aiqt_hooks._orch_stop_root = lambda _data: (None, True)
+        tl_hold = aiqt_hooks.orch_stop_guard(s.payload("Stop"))
+        tl_loop = aiqt_hooks.orch_stop_guard(s.payload("Stop", extra={"stop_hook_active": True}))
+    finally:
+        aiqt_hooks._orch_stop_root = saved_root
+    if not (tl_hold[0] == 2 and tl_hold[1] is None and "top-level path" in str(tl_hold[2])
+            and "cannot-evaluate" in str(tl_hold[2])):
+        failures.append("(ns-stop-toplevel-hold) a Stop whose toplevel cannot be decoded as a path expected an "
+                        "exit-2 hold naming the toplevel, got {!r}".format(tl_hold))
+    note("(ns-stop-toplevel-loop) a Stop whose toplevel cannot be decoded as a path, with the loop signal set, "
+         "yields with a note", tl_loop, "loop signal set")
+    if (_reduce_result(tl_loop[0], tl_loop[1]) == "allow-note"
+            and "top-level path" not in tl_loop[1]["systemMessage"]):
+        failures.append("(ns-stop-toplevel-loop) the loop-signal note does not name the toplevel: {!r}"
+                        .format(tl_loop[1]["systemMessage"]))
 
     def dispatch(stdin_text):
         buf, saved_stdin = io.StringIO(), sys.stdin

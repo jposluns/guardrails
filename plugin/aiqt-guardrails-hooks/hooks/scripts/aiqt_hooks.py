@@ -10574,7 +10574,7 @@ _RECOVERY_SIZE_CAP = 100 * 1024 * 1024  # 100 MiB
 _RECOVERY_LEDGER_PARTS = ("aiqt-guardrails", "recovery.jsonl")
 
 
-def _recovery_git(repo, args, env_extra=None, timeout=10):
+def _recovery_git(repo, args, env_extra=None, timeout=10, text=True):
     """Run a git subcommand against repo and return the CompletedProcess. INERT TO WORKING STATE: across all
     of its git calls it never touches the real index (a snapshot call uses a TEMP GIT_INDEX_FILE via
     env_extra), the worktree, HEAD, or a branch, and in a NORMAL repo writes only objects and one private ref
@@ -10592,12 +10592,14 @@ def _recovery_git(repo, args, env_extra=None, timeout=10):
     PATH-based git resolution, and partial-clone object availability, all read by git by design and none
     neutralized here.
     Raises subprocess.SubprocessError / OSError on a spawn or timeout failure, which the caller treats as a
-    snapshot failure. offline, bounded by `timeout`."""
+    snapshot failure. offline, bounded by `timeout`. text=False returns the output as bytes (the Stop
+    family's root read, _orch_stop_root, decodes the toplevel itself); every other caller keeps the
+    text-mode default."""
     cmd = ["git", "-C", repo] + list(args)
     env = _isolate_git_env(dict(os.environ))  # real-state calls must see the REAL repo, not an ambient decoy
     if env_extra:
         env.update(env_extra)  # a snapshot call sets its own GIT_INDEX_FILE here, applied AFTER the scrub
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+    return subprocess.run(cmd, capture_output=True, text=text, timeout=timeout, env=env)
 
 
 def _recovery_toplevel(repo):
@@ -21782,6 +21784,53 @@ def _orch_root(data):
     return _recovery_toplevel(cwd)
 
 
+def _orch_stop_root(data):
+    """The Stop family's repo root: (root, undecodable). The same scrubbed `git rev-parse
+    --show-toplevel` as _orch_root, read as BYTES, so a toplevel path that is not decodable text is
+    never read as out of scope. _recovery_toplevel (and so _orch_root and the snapshot caller) answers
+    None there, since its text-mode decode raises, and the Stop family would then ALLOW a stop in an
+    orchestrated tree. Here the toplevel is decoded the way the os module decodes a path
+    (os.fsdecode), so the registry, the lease and the state directory under it are still reached;
+    undecodable is True when those bytes are not strict text in the filesystem encoding, and the
+    caller then HOLDS (cannot-evaluate). (None, False) for a missing or non-string cwd, a git failure,
+    a non-zero exit or an empty or relative answer, exactly where _orch_root answers None; (None, True)
+    when the undecodable bytes cannot be decoded as a path at all (no POSIX platform: os.fsdecode
+    escapes every byte there)."""
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return (None, False)
+    try:
+        result = _recovery_git(cwd, ["rev-parse", "--show-toplevel"], timeout=5, text=False)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return (None, False)
+    raw = result.stdout
+    if result.returncode != 0 or not isinstance(raw, bytes):
+        return (None, False)
+    # strip git's ONE output terminator only, as _recovery_toplevel does
+    raw = raw[:-1] if raw.endswith(b"\n") else raw
+    if not raw:
+        return (None, False)
+    try:
+        raw.decode(sys.getfilesystemencoding(), "strict")
+        undecodable = False
+    except (UnicodeDecodeError, LookupError):
+        undecodable = True
+    try:
+        top = os.fsdecode(raw)
+    except (UnicodeDecodeError, ValueError):
+        return (None, True)
+    if not os.path.isabs(top):
+        return (None, False)
+    return (top, undecodable)
+
+
+# The cannot-evaluate entry a Stop-family decision carries when the repository toplevel is not
+# decodable text (_orch_stop_root): the stop HOLDS below the loop bound, never a silent out-of-scope allow.
+_ORCH_TOPLEVEL_UNDECODABLE_DETAIL = ("the repository top-level path is not decodable text, so this "
+                                     "guard cannot vouch for the paths and records it reads under it; "
+                                     "rename the repository directory to a UTF-8 name")
+
+
 # Orchestration-scope discovery: the truncation guard decides scope by the UNION of two legs.
 # Leg one walks the session cwd's PHYSICAL ancestor chain directly with no-follow, descriptor-anchored
 # lookups and needs no git at all, so a git discovery failure alone (no git binary on PATH, a
@@ -22198,6 +22247,27 @@ def _state_dir_from_registry(root, reg_data):
                                                             ".local", "state")
     key = __import__("hashlib").sha256(root.encode("utf-8", "replace")).hexdigest()[:16]
     return os.path.join(base, "aiqt-guardrails", "orch", key)
+
+
+_ORCH_STATE_DIR_UNUSABLE_DETAIL = ("the orchestration state directory {state_dir} cannot be resolved "
+                                   "({reason}), so the turn state, the dispatch ledger and the denial counter "
+                                   "cannot be read or saved; correct state_dir in the registry (the "
+                                   "confinement's trust root)")
+
+
+def _orch_state_dir_problem(root, reg_data):
+    """None when the state directory resolved from the ALREADY-READ registry (see _state_dir_from_registry)
+    can be resolved by os.path.realpath, else the formatted _ORCH_STATE_DIR_UNUSABLE_DETAIL naming it: a NUL
+    character, or a character the filesystem encoding cannot encode, makes every state reader and writer
+    fail (or raise), so no counter can bound a deny and no state can be trusted."""
+    sd = _state_dir_from_registry(root, reg_data)
+    try:
+        os.path.realpath(sd)
+    except (OSError, ValueError) as exc:
+        return _ORCH_STATE_DIR_UNUSABLE_DETAIL.format(
+            state_dir=_orch_clip(repr(sd), _ORCH_NAMED_REASON_MAX),
+            reason=_orch_clip("{}: {}".format(type(exc).__name__, exc), _ORCH_NAMED_REASON_MAX))
+    return None
 
 
 def _orch_state_dir_for_root(root):
@@ -22646,29 +22716,87 @@ _ORCH_SCOPE_CANNOT_DETAIL = ("the declared lease max_age_hours horizon is not us
                              "scope cannot be evaluated; correct it in the registry (the "
                              "confinement's trust root)")
 
+# The 'unreadable' scope answer's detail: a declared lease path that exists but cannot be read (any failure
+# other than genuine absence). Formatted with the declared path (repr, so a NUL or a lone surrogate shows
+# escaped) and the reason; _orch_scope_eval returns it formatted.
+_ORCH_SCOPE_UNREADABLE_DETAIL = ("the declared lease {lease} cannot be read ({reason}), so lease scope "
+                                 "cannot be evaluated; repair the lease file or correct its path in the "
+                                 "registry (the confinement's trust root)")
+
+# The cannot-evaluate row id each truthy non-True scope answer is held under.
+_ORCH_SCOPE_HOLD_IDS = {"cannot": "lease:max_age_hours", "unreadable": "lease:path"}
+
+
+def _orch_scope_unreadable(path, reason):
+    """The 'unreadable' scope answer for the declared lease path: ('unreadable', its formatted detail)."""
+    return ("unreadable", _ORCH_SCOPE_UNREADABLE_DETAIL.format(
+        lease=_orch_clip(repr(path), _ORCH_NAMED_REASON_MAX), reason=_orch_clip(reason, _ORCH_NAMED_REASON_MAX)))
+
 
 def _orch_scope_live(reg, root, session_id=None):
-    """The D11 scope check: True when a declared orchestrator lease file is live (present, non-empty,
-    within max_age_hours when declared) OR a declared mode record carries a mode line; False when scope
-    is provably not live; the string 'cannot' when a DECLARED max_age_hours horizon is not usable (a
-    boolean, zero, negative, NaN, infinite or non-number) on a lease that would otherwise read live
-    and no mode record reads live, so liveness cannot be evaluated. 'cannot' is TRUTHY on purpose: a
-    caller that only truth-tests this answer stays armed (the fail-closed direction), and every caller
-    handles it explicitly (the stop family and the yield guard route it into their existing
-    cannot-evaluate deny path; the dispatch ledger and the prompt stamp stay armed and surface it;
-    none turns a lease-scoped guard off over it). When the lease declares holder_is_session_id AND the
-    caller's session_id is known, a LIVE lease must additionally NAME that session_id, so a co-located
-    NON-holder session (a bounded worker) does not inherit the global backlog; a session the
-    lease does not name is a NON-holder (False) even under an unusable horizon. Where the lease
+    """The D11 scope answer alone (see _orch_scope_eval, which also returns the detail of a held answer)."""
+    return _orch_scope_eval(reg, root, session_id)[0]
+
+
+def _orch_scope_eval(reg, root, session_id=None):
+    """The D11 scope check, as (scope, detail). scope is True when a declared orchestrator lease file is
+    live (present, non-empty, within max_age_hours when declared) OR a declared mode record carries a mode
+    line; False when scope is provably not live; the string 'cannot' when a DECLARED max_age_hours horizon
+    is not usable (a boolean, zero, negative, NaN, infinite or non-number) on a lease that would otherwise
+    read live and no mode record reads live, so liveness cannot be evaluated; the string 'unreadable' when
+    the declared lease path cannot be read for any reason other than genuine absence (a FileNotFoundError):
+    a NUL character or a character the filesystem encoding cannot encode in the path, a permission error,
+    any other OSError, or a path that is not a regular file (a directory, a FIFO or a device), and no mode
+    record reads live. 'unreadable' follows the precedence 'cannot' uses (orchestrator decision of
+    2026-11-15T19:09Z): a live mode record is an independent scope source and outranks both, and it holds
+    only where 'cannot' would hold, so in holder mode a caller with no session id is a NON-holder (False)
+    whether or not the lease can be read. A genuinely absent lease is not live (False in holder mode, else
+    the mode record decides). detail is _ORCH_SCOPE_CANNOT_DETAIL for 'cannot', the formatted
+    _ORCH_SCOPE_UNREADABLE_DETAIL (naming the lease and the reason) for 'unreadable', else None. 'cannot' and 'unreadable' are TRUTHY on
+    purpose: a caller that only truth-tests this answer stays armed (the fail-closed direction), and every
+    caller handles both explicitly (the stop family, the yield guard and the ask guard route them into
+    their existing cannot-evaluate deny path under the _ORCH_SCOPE_HOLD_IDS row id; the dispatch ledger and
+    the prompt stamp stay armed and surface the detail; none turns a lease-scoped guard off over them).
+    When the lease declares holder_is_session_id AND the caller's session_id is known, a LIVE lease must
+    additionally NAME that session_id, so a co-located NON-holder session (a bounded worker) does not
+    inherit the global backlog; a session the lease does not name is a NON-holder (False) even under an
+    unusable horizon, while a lease that cannot be read names no one, so for a caller that carries a
+    session id it is 'unreadable' unless a mode record reads live. Where the lease
     records no comparable session identity, scope is repo-coarse (a co-located session may inherit the
     backlog): a disclosed residual, not a strict boundary."""
     lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
     cannot = False
+    unreadable = None  # the deferred 'unreadable' answer: a live mode record outranks it, as it does 'cannot'
     if lease:
         path = _orch_path(root, lease.get("path"))
         if path:
             try:
                 st = os.stat(path)
+            except FileNotFoundError:
+                st = None  # genuinely absent: not live (holder mode), else the mode record decides below
+            except OSError as exc:
+                # present but unreadable (a permission error, a non-directory component, a loop): a
+                # cannot-evaluate, never 'lease not live'
+                st = None
+                unreadable = _orch_scope_unreadable(path, "{}: {}".format(type(exc).__name__,
+                                                                          exc.strerror or exc))
+            except ValueError as exc:
+                # a NUL character, or a character the filesystem encoding cannot encode, in the path
+                st = None
+                unreadable = _orch_scope_unreadable(path, "{}: {}".format(type(exc).__name__, exc))
+            if st is not None and not stat.S_ISREG(st.st_mode):
+                st = None
+                unreadable = _orch_scope_unreadable(path, "not a regular file")
+            if unreadable is not None:
+                if lease.get("holder_is_session_id") and not (isinstance(session_id, str) and session_id):
+                    # holder mode, a caller with no session id: a NON-holder whatever the lease holds,
+                    # exactly as under 'cannot', so reading the lease could not change the answer
+                    return (False, None)
+                # otherwise the mode record decides below, as it does for 'cannot'
+            elif st is None:
+                if lease.get("holder_is_session_id"):
+                    return (False, None)  # holder mode: an absent lease -> caller cannot be confirmed holder
+            else:
                 fresh = True
                 max_age = lease.get("max_age_hours")
                 if max_age is not None:
@@ -22689,25 +22817,32 @@ def _orch_scope_live(reg, root, session_id=None):
                         # must be readable AND name that id as a whole token; anything else is a NON-holder
                         # (a co-located worker or an id-less session never inherits the global backlog).
                         if not (isinstance(session_id, str) and session_id):
-                            return False
+                            return (False, None)
+                        held = None
                         try:
                             with open(path, "r", encoding="utf-8", errors="replace") as fh:
                                 held = fh.read()
-                        except OSError:
-                            return False
-                        if not _orch_token_present(session_id, held):
-                            return False
-                        if not cannot:
-                            return True
+                        except FileNotFoundError:
+                            return (False, None)  # removed since the stat: genuinely absent, not live
+                        except (OSError, ValueError) as exc:
+                            # present but unopenable (a permission error): it names no one, so the
+                            # holder question cannot be evaluated; the mode record decides below
+                            unreadable = _orch_scope_unreadable(path, "{}: {}".format(
+                                type(exc).__name__, getattr(exc, "strerror", None) or exc))
+                        if held is not None:
+                            if not _orch_token_present(session_id, held):
+                                return (False, None)
+                            if not cannot:
+                                return (True, None)
                     elif not cannot:
-                        return True
-            except OSError:
-                if lease.get("holder_is_session_id"):
-                    return False  # holder mode: an unreadable lease -> caller cannot be confirmed holder
-                # otherwise an absent/unreadable lease is not live; fall through to the mode check
+                        return (True, None)
+                # otherwise an empty or stale lease is not live; fall through to the mode check
     if _orch_mode(reg, root) is not None:
-        return True  # a live mode record is an independent scope source; it outranks a lease 'cannot'
-    return "cannot" if cannot else False
+        # a live mode record is an independent scope source; it outranks 'cannot' and 'unreadable'
+        return (True, None)
+    if unreadable is not None:
+        return unreadable
+    return ("cannot", _ORCH_SCOPE_CANNOT_DETAIL) if cannot else (False, None)
 
 
 def _orch_escape_stat(path):
@@ -22725,6 +22860,8 @@ def _orch_escape_stat(path):
                      | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
     except OSError:
         return None
+    except ValueError:
+        return None  # a path holding a NUL character: unopenable, never an exception out of the guard
     try:
         return os.fstat(fd)
     finally:
@@ -22748,8 +22885,13 @@ def _orch_escape_active(reg, root):
     CATEGORICAL residual (closed only by an operator-owned, assistant-non-writable state dir at the OS
     layer); component resolution is a best-effort lstat walk under the anchor rather than a fully
     race-free openat-under-anchor (a narrow TOCTOU window between the walk and the O_NOFOLLOW open); and
-    uid inequality proves not-self, never operator identity."""
-    anchor = os.path.realpath(_orch_state_dir_for_root(root))
+    uid inequality proves not-self, never operator identity. A state dir realpath cannot resolve (a NUL
+    character, or a character the filesystem encoding cannot encode) is no trusted anchor, so no sentinel
+    is active: (False, None), never an exception out of the guard."""
+    try:
+        anchor = os.path.realpath(_orch_state_dir_for_root(root))
+    except (OSError, ValueError):
+        return (False, None)
     declared = (reg.get("escape") or {}).get("path") if isinstance(reg.get("escape"), dict) else None
     if declared is not None and (not isinstance(declared, str) or not declared):
         return (False, None)
@@ -22773,6 +22915,8 @@ def _orch_escape_active(reg, root):
                 return (False, "escape sentinel has a symlinked path component (rejected)")
         except OSError:
             return (False, None)  # a missing intermediate directory is simply no sentinel
+        except ValueError:
+            return (False, None)  # a component holding a NUL character names no sentinel
     # a symlink AT the final name is a spoof: classify via lstat so it surfaces a detail (the seam's
     # O_NOFOLLOW open would otherwise report it only as an unopenable None)
     try:
@@ -22780,6 +22924,8 @@ def _orch_escape_active(reg, root):
             return (False, "escape sentinel is a symlink (not followed; ignored)")
     except OSError:
         pass  # absent on disk here: the seam is authoritative (and may be injected under test)
+    except ValueError:
+        pass  # a name holding a NUL character: the seam reads it as unopenable (None)
     st = _orch_escape_stat(norm)
     if st is None:
         return (False, None)
@@ -22884,8 +23030,17 @@ def _orch_enumerate(reg, root):
     timeout = spec.get("timeout")
     timeout = timeout if isinstance(timeout, (int, float)) and 0 < timeout <= 600 else 60
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=root)
-    except (OSError, subprocess.SubprocessError) as exc:
+        # encoding="utf-8" (strict) so the enumerator's answer decodes the same under every locale:
+        # a valid UTF-8 title never denies under LC_ALL=C, and an undecodable byte always raises
+        # into the except below rather than only where the locale happens to be UTF-8.
+        result = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                                timeout=timeout, cwd=root)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # ValueError covers the UnicodeDecodeError that text-mode decoding raises on undecodable
+        # (non-UTF-8) enumerator output, on stdout or stderr: an enumerator whose answer cannot be
+        # read is an enumerator error (the same cannot-evaluate path an enumerator that cannot run
+        # takes, which the stop and schedule guards DENY on), never an uncaught crash that the
+        # dispatcher's Stop-family error posture would turn into a fail-open allow.
         return ("ENUMERATOR_ERROR", "enumerator failed to run: {}".format(
             _orch_clip(exc, _ORCH_NAMED_REASON_MAX)))
     if result.returncode != 0:
@@ -23616,10 +23771,19 @@ def _orch_record_forced_exit(root, event_name, ctx, reason):
 def _orch_stop_family(data, event_name, kind):
     """The shared Stop/TeammateIdle binding: scope, decide, map the verdict to the event's block
     mechanism (exit 2, doc-confirmed for both events 2026-08-29). Fail-OPEN on its own I/O errors;
-    a cannot-evaluate DENIES (FIX 1)."""
-    root = _orch_root(data)
+    a cannot-evaluate DENIES (FIX 1). The root is read by _orch_stop_root, so a toplevel path that is
+    not decodable text is a cannot-evaluate HOLD in an orchestrated tree, never an out-of-scope allow."""
+    root, undecodable = _orch_stop_root(data)
     if root is None:
-        return _allow()
+        if not undecodable:
+            return _allow()
+        # an undecodable toplevel with no usable path at all: no counter can be read, so the
+        # stop-hook loop signal is the bound
+        reason = "{} (cannot-evaluate)".format(_ORCH_TOPLEVEL_UNDECODABLE_DETAIL)
+        if data.get("stop_hook_active") is True:
+            return _stop_warn("AIQT guardrail ({}): loop signal set; yielding with a finding: {}"
+                              .format(event_name, reason))
+        return (2, None, reason)
     status, reg = _orch_registry(root)
     if status == "absent":
         return _allow()
@@ -23628,16 +23792,32 @@ def _orch_stop_family(data, event_name, kind):
                           "({}); the {} fails open on its own read error and, because the registry is "
                           "unreadable, writes NO guard-event (no record).".format(reg,
                                                                                   event_name))
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()
+    sd_problem = _orch_state_dir_problem(root, reg)
+    if sd_problem is not None:
+        # a state directory that cannot be resolved: no turn state, ledger or denial counter can be read
+        # or saved, so this HOLDS (cannot-evaluate) with the stop-hook loop signal as the bound, never an
+        # exception out of the handler (which the dispatcher turns into an allowed stop)
+        reason = "{} (cannot-evaluate)".format(sd_problem)
+        if data.get("stop_hook_active") is True:
+            return _stop_warn("AIQT guardrail ({}): loop signal set; yielding with a finding: {}"
+                              .format(event_name, reason))
+        return (2, None, reason)
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data)
-    if scope == "cannot":
-        # D11 scope CANNOT be evaluated (a declared but unusable max_age_hours): routed into this
-        # guard's existing cannot-evaluate deny path (FIX 1: ignorance refuses the wind-down; the
-        # loop bound and the operator escape still release), never a silent guards-off _allow().
+    if scope in _ORCH_SCOPE_HOLD_IDS:
+        # D11 scope CANNOT be evaluated (a declared but unusable max_age_hours, or a declared lease that
+        # cannot be read): routed into this guard's existing cannot-evaluate deny path (FIX 1: ignorance
+        # refuses the wind-down; the loop bound and the operator escape still release), never a silent
+        # guards-off _allow().
         ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
-            ("lease:max_age_hours", "cannot-evaluate", _ORCH_SCOPE_CANNOT_DETAIL)]
+            (_ORCH_SCOPE_HOLD_IDS[scope], "cannot-evaluate", scope_detail)]
+    if undecodable:
+        # an undecodable repository toplevel: routed into the same cannot-evaluate deny path (the loop
+        # bound and the operator escape still release), never the out-of-scope allow a None root reads as
+        ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
+            ("repo:toplevel", "cannot-evaluate", _ORCH_TOPLEVEL_UNDECODABLE_DETAIL)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     verdict, reason, disposition = decide_yield(ctx)
@@ -23735,7 +23915,7 @@ def orch_yield_tool(data):
             "work rather than parking or stopping the run.".format(reg),
             "AIQT guardrail: denied a scheduling call under an unreadable orchestration registry "
             "(ignorance refuses the wind-down); fix the registry or keep working.")
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()
     tool = data.get("tool_name")
@@ -23746,11 +23926,12 @@ def orch_yield_tool(data):
     kind = "stop" if tool_input.get("stop") is True else "schedule_idle"
     wake_text = " ".join(str(v) for v in tool_input.values() if isinstance(v, str))
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data, wake_text=wake_text)
-    if scope == "cannot":
-        # D11 scope cannot be evaluated: routed into this guard's existing cannot-evaluate deny
-        # path (the schedule cap and the operator escape still release), never a silent _allow().
+    if scope in _ORCH_SCOPE_HOLD_IDS:
+        # D11 scope cannot be evaluated ('cannot' or 'unreadable'): routed into this guard's existing
+        # cannot-evaluate deny path (the schedule cap and the operator escape still release), never a
+        # silent _allow().
         ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
-            ("lease:max_age_hours", "cannot-evaluate", _ORCH_SCOPE_CANNOT_DETAIL)]
+            (_ORCH_SCOPE_HOLD_IDS[scope], "cannot-evaluate", scope_detail)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     # Measured quiet beats a claimed quiet duration (estsep: the two grades never blend silently).
@@ -23918,12 +24099,14 @@ def _orch_ask_attended(data, reg, root):
     the live scope (a bounded co-located worker a holder-scoped lease does not name) does not
     inherit the global backlog, so the judgement allows there. Under a holder-scoped lease
     (holder_is_session_id) the judgement is off for EVERY session, the orchestrator included, where no
-    holder can be confirmed: a lease file that cannot be stat'ed, and, for a NON-EMPTY lease the
-    session-id and holder-token checks run on (one the age classifier reads as fresh or cannot-evaluate
-    under a declared max_age_hours, or, with no horizon declared, every non-empty lease whatever its
-    mtime), a lease that cannot be read, a call that carries no session id, or a lease that names no
-    session. Every other lease shape skips the holder check and falls through to the live-mode scope
-    source: an empty lease, a lease that declares no path (an absent, empty or non-string path), a
+    holder can be confirmed: a lease file that is genuinely absent, a lease that cannot be read by a
+    call that carries no session id, and, for a NON-EMPTY lease the session-id and holder-token checks
+    run on (one the age classifier reads as fresh or cannot-evaluate under a declared max_age_hours, or,
+    with no horizon declared, every non-empty lease whatever its mtime), a call that carries no session
+    id or a lease that names no session. A lease that cannot be read (stat'ed or opened) by a call that
+    carries a session id is 'unreadable', which the live mode record of this branch outranks, so the
+    judgement stays on there. Every other lease shape skips the holder check and falls through to the
+    live-mode scope source: an empty lease, a lease that declares no path (an absent, empty or non-string path), a
     lease stale past a declared max_age_hours, and a lease future-dated past the tolerated clock skew
     under a declared usable max_age_hours (an unusable one reads cannot-evaluate whatever the mtime,
     so the holder check runs); a live mode record then keeps every session in scope there, an id-less
@@ -23956,15 +24139,23 @@ def _orch_ask_attended(data, reg, root):
     not enumerable), so it denies as cannot-evaluate with a guard-events row exactly as in the yield
     guard, never a silent allow; the operator escape sentinel releases the deny exactly as in the yield
     guard; a deny whose counter cannot be saved stands and says so."""
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         # the same scope gate as the yield guard: a non-holder session never inherits the backlog.
-        # In this attended branch the mode record reads live, so _orch_scope_live is never 'cannot'
-        # here: it is False only through the holder-scoped lease check.
+        # In this attended branch the mode record reads live, so the scope is never 'cannot' or
+        # 'unreadable' here (a live mode record outranks both): it is False only through the
+        # holder-scoped lease check.
         return _allow()
     if "enumerator" not in reg:
         return _allow()  # no declared backlog enumerator: the attended backlog judgement is out of scope
     ctx, ts, basis = _orch_build_ctx(reg, root, "ask", data)
+    if scope in _ORCH_SCOPE_HOLD_IDS:
+        # defence in depth: the live mode record of this branch outranks 'cannot' and 'unreadable', so
+        # a held scope is not expected here; were one to arrive, it is routed into this guard's existing
+        # cannot-evaluate deny path (bounded by the ask cap; the operator escape still releases), never a
+        # silent _allow()
+        ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
+            (_ORCH_SCOPE_HOLD_IDS[scope], "cannot-evaluate", scope_detail)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     verdict, reason, _disposition = decide_yield(ctx)
@@ -27098,7 +27289,7 @@ def orch_dispatch_ledger(data):
     status, reg = _orch_registry(root)
     if status != "ok":
         return _allow()
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()  # only the holder session writes the shared dispatch ledger
     tool = data.get("tool_name")
@@ -27145,11 +27336,11 @@ def orch_dispatch_ledger(data):
     if not _orch_append_jsonl(path, row):
         return _allow_note("AIQT guardrail: the dispatch-ledger write failed; "
                            "the launched work may be invisible to the stop guard.")
-    if scope == "cannot":
+    if scope in _ORCH_SCOPE_HOLD_IDS:
         # armed and surfaced, never a silent skip: the row above was recorded anyway, so launched
-        # work stays visible to the stop guard while the operator corrects the horizon
+        # work stays visible to the stop guard while the operator corrects the horizon or the lease
         return _allow_note("AIQT guardrail: {}; this dispatch row was recorded anyway (the "
-                           "ledger stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
+                           "ledger stays armed).".format(scope_detail))
     return _allow()
 
 
@@ -32594,7 +32785,7 @@ def orch_prompt_stamp(data):
     status, reg = _orch_registry(root)
     if status != "ok":
         return _allow()
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()  # only the holder session stamps/resets the shared turn-state
     prompt = data.get("prompt")
@@ -32616,10 +32807,10 @@ def orch_prompt_stamp(data):
         ts.pop("ask_basis", None)
         unsaved = _orch_save_turn_state(root, ts)
         if unsaved is None:
-            if scope == "cannot":
+            if scope in _ORCH_SCOPE_HOLD_IDS:
                 # armed and surfaced, never a silent skip: the stamp above was written anyway
                 return _allow_note("AIQT guardrail: {}; this prompt was stamped anyway (the "
-                                   "stamp stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
+                                   "stamp stays armed).".format(scope_detail))
             return _allow()
         # the stamp is this recorder's record; the prompt proceeds and the unwritten stamp is noted
         return _allow_note("AIQT guardrail: this prompt was read as genuine human input, but turn-state.json "
@@ -32645,10 +32836,10 @@ def orch_prompt_stamp(data):
                 "or as genuine human input; record it manually (nocncl).".format(unsaved))
         return _context_note("UserPromptSubmit", context + " Additionally, " + warn,
                              "AIQT guardrail: this prompt was read as timer-originated, but " + warn)
-    if scope == "cannot":
+    if scope in _ORCH_SCOPE_HOLD_IDS:
         return _context_note("UserPromptSubmit", context,
                              "AIQT guardrail: {}; this wake was classified anyway (the stamp "
-                             "stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
+                             "stays armed).".format(scope_detail))
     return (0, {"hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
         "additionalContext": context}}, None)
@@ -32947,13 +33138,20 @@ def _orch_chained_rows(path, prefix):
     64*'0' for the first; seq is the line number; ids carry the family prefix) and return
     (rows, detail): rows is None when the file is unreadable or ANY line breaks the chain, shape,
     sequence, or id-prefix discipline, so a tampered or malformed register can never read as a
-    smaller clean one. A compact inline mirror of the authoritative gate
-    (tools/check_mistakes_register.py): the hooks script is standalone in adopter repos and cannot
-    import tools/, so the CI gate remains the authoritative checker and this feeds only the audit."""
+    smaller clean one. A register that is not strict UTF-8 text (a non-UTF-8 byte, an encoded
+    surrogate, a truncated sequence) is unreadable too, never an exception out of the reader. A
+    compact inline mirror of the authoritative gate (tools/check_mistakes_register.py): the hooks
+    script is standalone in adopter repos and cannot import tools/, so the CI gate remains the
+    authoritative checker and this feeds only the audit."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             lines = fh.read().splitlines()
     except OSError as exc:
+        return (None, "unreadable ({})".format(exc))
+    except UnicodeDecodeError as exc:
+        return (None, "not UTF-8 text ({})".format(exc))
+    except ValueError as exc:
+        # a declared path holding a NUL character (read as _orch_record_surface_read reads it)
         return (None, "unreadable ({})".format(exc))
     sha = __import__("hashlib").sha256
     rows, prev = [], None
@@ -32989,16 +33187,23 @@ def _orch_register_authority(root, path):
     of an authority the actor cannot trivially forge, its git merge-base state with origin/HEAD when
     the register is tracked, else its <path>.anchor file, with seq/digest identifying the current tip;
     otherwise ('hold', detail, None), a cannot-evaluate the caller routes to a fail-closed HOLD, never
-    a clean pass. RESIDUAL (disclosed): the register is itself actor-writable, and this authority only
-    checks that the on-disk register is an append-only EXTENSION of its committed (merge-base) or
-    anchored prefix. An actor with filesystem write ALONE can therefore APPEND rows past that prefix
-    (uncommitted; git status M) and have them counted as the tip, so the git/anchor authority defends
-    the register-SWAP and prefix-REWRITE classes but not an appended approved row (A2); the categorical
-    residual is closed only by an operator-owned, assistant-non-writable register at the OS layer."""
+    a clean pass. A register, or its merge-base state, that is not strict UTF-8 text is such a HOLD
+    too, never an exception out of the reader. RESIDUAL (disclosed): the register is itself
+    actor-writable, and this authority only checks that the on-disk register is an append-only
+    EXTENSION of its committed (merge-base) or anchored prefix. An actor with filesystem write ALONE
+    can therefore APPEND rows past that prefix (uncommitted; git status M) and have them counted as
+    the tip, so the git/anchor authority defends the register-SWAP and prefix-REWRITE classes but not
+    an appended approved row (A2); the categorical residual is closed only by an operator-owned,
+    assistant-non-writable register at the OS layer."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             lines = fh.read().splitlines()
     except OSError as exc:
+        return ("hold", "register unreadable ({})".format(exc), None)
+    except UnicodeDecodeError as exc:
+        return ("hold", "register is not UTF-8 text ({})".format(exc), None)
+    except ValueError as exc:
+        # a declared path holding a NUL character (read as _orch_record_surface_read reads it)
         return ("hold", "register unreadable ({})".format(exc), None)
     env = _isolate_git_env(dict(os.environ))
     rel = None
@@ -33021,18 +33226,32 @@ def _orch_register_authority(root, path):
                     "{})".format(probe.returncode), None)
         if probe.returncode == 0:
             try:
+                # read as bytes and decoded below as strict UTF-8, never by the locale, exactly as
+                # the git show read is
                 base = subprocess.run(["git", "-C", root, "merge-base", "HEAD", "origin/HEAD"],
-                                      capture_output=True, text=True, timeout=10, env=env)
-                if base.returncode != 0 or not base.stdout.strip():
+                                      capture_output=True, timeout=10, env=env)
+                if base.returncode != 0:
                     return ("hold", "no computable merge-base with origin/HEAD", None)
-                ref = base.stdout.strip()
+                try:
+                    ref = base.stdout.decode("utf-8").strip()
+                except UnicodeDecodeError as exc:
+                    return ("hold", "the merge-base with origin/HEAD is not UTF-8 text "
+                            "({})".format(exc), None)
+                if not ref:
+                    return ("hold", "no computable merge-base with origin/HEAD", None)
                 old = subprocess.run(["git", "-C", root, "show", "{}:{}".format(ref, rel)],
-                                     capture_output=True, text=True, timeout=10, env=env)
+                                     capture_output=True, timeout=10, env=env)
             except (OSError, subprocess.SubprocessError) as exc:
                 return ("hold", "cannot read the register authority ({})".format(exc), None)
             if old.returncode != 0:
                 return ("hold", "cannot read the register at its merge-base authority", None)
-            old_lines = old.stdout.splitlines()
+            # decoded as strict UTF-8, as the register on disk is, never by the locale: a merge-base
+            # state that is not UTF-8 text is a HOLD, never an exception out of the reader
+            try:
+                old_lines = old.stdout.decode("utf-8").splitlines()
+            except UnicodeDecodeError as exc:
+                return ("hold", "the register at its merge-base authority is not UTF-8 text "
+                        "({})".format(exc), None)
             if lines[:len(old_lines)] != old_lines:
                 return ("hold",
                         "register is not an append-only extension of its merge-base state", None)
@@ -33048,6 +33267,9 @@ def _orch_register_authority(root, path):
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             return ("hold", "the register anchor is a symlink, which is never followed", None)
+        return ("hold", "declared register has no readable anchor authority", None)
+    except ValueError:
+        # an anchor path holding a NUL character: unreadable, never an exception out of the reader
         return ("hold", "declared register has no readable anchor authority", None)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -33103,8 +33325,11 @@ def _orch_pointer_resolves(root, sd, pointer):
     if os.path.isabs(pointer):
         return False
     for base in (root, sd):
-        rb = os.path.realpath(base)
-        cand = os.path.realpath(os.path.join(base, pointer))
+        try:
+            rb = os.path.realpath(base)
+            cand = os.path.realpath(os.path.join(base, pointer))
+        except ValueError:
+            continue  # a pointer or base holding a NUL character resolves to nothing real here
         if (cand == rb or cand.startswith(rb.rstrip(os.sep) + os.sep)) and os.path.exists(cand):
             return True
     return False

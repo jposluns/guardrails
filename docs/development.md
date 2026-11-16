@@ -157,7 +157,7 @@ sidebar-active = "development"
       <h3>The governance core, and the chat assistant</h3>
       <p>The standard 1.2.0 will install already exists and is readable in full, the pack on GitHub: the ordering, the
         disciplines, and the universal skill. The
-        <a href="/">chat assistant (1.0.5)</a> runs this core today, so the standard
+        <a href="/">chat assistant</a> runs this core today, so the standard
         your project will adopt is the one you can hold a chat assistant to right now, and
         the pack is open to read in full.</p>
     </div>
