@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Changed-lines gate: refuse review and work labels that added lines write into tracked files.
 
-  check_review_labels.py [--protected REF] [--head REV]   exit 0 clean, 1 finding, 2 cannot evaluate
+  check_review_labels.py [--protected REF] [--head REV]   exit 0 clean (a NOTE line may precede the
+                                                         PASS), 1 finding, 2 cannot evaluate
   check_review_labels.py --self-test                     fixture repositories, each row with its flip
   check_review_labels.py [--self-test] --execution-report ABS_PATH
   any other argument list is refused with exit 2
@@ -48,15 +49,25 @@ remote that cannot be read is cannot-evaluate), so an origin/HEAD left on a feat
 candidate itself is never judged against; else, only when GITHUB_ACTIONS is "true",
 origin/GITHUB_REF_NAME (a push or manual run, where the candidate usually IS that branch, so nothing is
 added and the run passes: there the pull request run is the effective gate). No other fallback exists.
-A remote whose own HEAD names a feature branch (a clone of a linked worktree, say) makes that branch the
-default, which this derivation cannot tell from a real default; when the merge base with the branch
-origin/HEAD names is the candidate commit itself, none of its committed lines would be judged, so that
-is cannot-evaluate (pass --protected there). This also refuses a checkout whose HEAD sits at or behind
-the protected branch through origin/HEAD (a local main at origin/main), uncommitted edits included:
-pass --protected to judge such edits.
+
+A CANDIDATE AT OR BEHIND THE PROTECTED BRANCH (the merge base is the candidate commit itself, so every
+committed line of the candidate already sits on that branch). The rule turns on how the branch was
+named. When it is origin/main, named by its name (origin/HEAD on origin/main: a local main at
+origin/main, a clone of main, a branch behind main), the candidate has no committed line of its own, so
+nothing committed can hide there; the working tree is judged against the merge base as always (an
+uncommitted edit on main is judged against the tip), and a NOTE line says the candidate is at or behind
+the branch, and that there is nothing to judge when no line is added. This trusts origin/main no more
+than every other run does: a candidate ahead of origin/main is never judged on the lines origin/main
+already holds either. When origin/HEAD names another branch, accepted only because the remote's own HEAD
+names it, the derivation cannot tell a real default from a feature branch (a clone of a linked worktree
+checked out on one, whose remote HEAD is that branch, say): there the candidate's committed lines may
+never have been judged against main, so that case stays cannot-evaluate (pass --protected there). With
+--protected, GITHUB_BASE_REF or GITHUB_REF_NAME the caller named the branch, and a candidate at or behind
+it is judged the same way with the same NOTE.
 
 FAIL CLOSED (exit 2, never a pass): no protected branch can be derived, an origin/HEAD that is neither
-origin/main nor the remote's default branch, an origin/HEAD whose merge base is the candidate commit, a
+origin/main nor the remote's default branch, an origin/HEAD naming another branch than origin/main (the
+remote's default) whose merge base is the candidate commit, a
 remote HEAD naming no branch or several, a ref or revision that does not resolve to a commit, a
 shallow repository (its merge base can be wrong), no common ancestor, more than one merge base (a
 criss-cross history), git that cannot run or exits nonzero (an unreadable tracked file makes git diff
@@ -405,15 +416,32 @@ def merge_base(root, protected_sha, head_sha):
     return _one_base(bases, head_sha)
 
 
-def _require_candidate_ahead(source, base, head_sha):
-    """CannotEvaluate when the protected branch came from origin/HEAD and the merge base is the
-    candidate commit itself: origin/HEAD then names the candidate or a branch ahead of it (a clone of a
-    linked worktree whose remote HEAD is the feature branch, say), so none of the candidate's own
-    committed lines would be judged."""
-    if source == ORIGIN_HEAD_SOURCE and base == head_sha:
+def _require_candidate_ahead(source, ref, base, head_sha):
+    """CannotEvaluate when the protected branch came from origin/HEAD naming a branch other than
+    origin/main (accepted only as the remote's own default) and the merge base is the candidate commit
+    itself: that branch may be a feature branch holding the candidate (a clone of a linked worktree whose
+    remote HEAD is the feature branch, say), so none of the candidate's own committed lines would be
+    judged. origin/main named by its name is the protected branch itself, so a candidate at or behind it
+    has no committed line of its own and is judged on its working tree alone (see the docstring)."""
+    if source == ORIGIN_HEAD_SOURCE and ref != DEFAULT_TRACKING and base == head_sha:
         raise CannotEvaluate(
-            "the merge base with the branch origin/HEAD names is the candidate commit {} itself, so none "
-            "of its committed lines would be judged; pass --protected REF".format(head_sha[:12]))
+            "the merge base with the branch origin/HEAD names ({}, the remote's default branch) is the "
+            "candidate commit {} itself, so none of its committed lines would be judged; pass "
+            "--protected REF (for example {})".format(ref, head_sha[:12], DEFAULT_TRACKING[len(
+                "refs/remotes/"):]))
+
+
+def _position_note(ref, protected_sha, base, head_sha, head, added):
+    """The NOTE for a candidate at or behind the protected branch (the merge base is the candidate
+    commit), else None: what is judged there, and that nothing is when no line is added."""
+    if base != head_sha:
+        return None
+    where = "at the tip of" if protected_sha == head_sha else "behind"
+    judged = ("the commit --head names is judged on no line" if head is not None
+              else "only the working tree's uncommitted edits are judged, against {}".format(base[:12]))
+    return "the candidate {} is {} {}, so it has no committed line of its own and {}{}".format(
+        head_sha[:12], where, ref, judged,
+        "; no line is added, so there is nothing to judge" if head is None and not added else "")
 
 
 def _require_diff_ok(proc):
@@ -611,7 +639,7 @@ def evaluate(root, protected=None, head=None, environ=None):
     protected_sha = _resolve_commit(root, ref, "protected branch")
     head_sha = _resolve_commit(root, "HEAD" if head is None else head, "candidate")
     base = merge_base(root, protected_sha, head_sha)
-    _require_candidate_ahead(source, base, head_sha)
+    _require_candidate_ahead(source, ref, base, head_sha)
     diff = added_lines(read_diff(root, base, None if head is None else head_sha))
     judged = [line for line in diff.added if not _excluded(line.path, config.excluded)]
     skipped = len(diff.added) - len(judged)
@@ -623,7 +651,8 @@ def evaluate(root, protected=None, head=None, environ=None):
         "; {} line(s) in excluded file(s) not judged".format(skipped) if skipped else "",
         "; {} file(s) with a NUL byte read as raw lines".format(len(diff.nul_paths))
         if diff.nul_paths else "")
-    return judge(judged, config), summary, config.marker
+    note = _position_note(ref, protected_sha, base, head_sha, head, diff.added)
+    return judge(judged, config), summary, config.marker, note
 
 
 def _printable(text):
@@ -635,10 +664,12 @@ def _printable(text):
 
 def run(root, protected=None, head=None, environ=None):
     try:
-        findings, summary, marker = evaluate(root, protected, head, environ)
+        findings, summary, marker, note = evaluate(root, protected, head, environ)
     except CannotEvaluate as exc:
         print("CANNOT EVALUATE: review-label gate: {}".format(exc), file=sys.stderr)
         return 2
+    if note is not None:
+        print("NOTE: review-label gate: {}".format(note))
     if findings:
         print("FAIL: {} review or work label(s) on added lines ({}):".format(len(findings), summary))
         for item in findings:
@@ -831,7 +862,9 @@ def _self_test():
           "reordered line is not charged while an edited line and an extra copy are; a text file "
           "declared binary, a genuine binary and look-alike characters are read; textconv, an external "
           "diff, a submodule log, a GIT_DIR redirect and a replace ref are held off; git output off its "
-          "shape and an origin/HEAD at the candidate are refused; the configuration size bound "
+          "shape and an origin/HEAD naming the remote's default branch at the candidate are refused; a "
+          "clean main, a clone of main and a branch behind main pass with a NOTE, an uncommitted label "
+          "there is refused, and each is refused under the earlier rule; the configuration size bound "
           "holds under, at and over; bad arguments exit 2 without a scan)".format(len(EXECUTED)))
     return 0
 
@@ -948,6 +981,7 @@ def _rows(tmp):
 
     _fail_closed_rows(tmp, labels)
     _derivation_rows(tmp, labels)
+    _position_rows(tmp, labels)
     _exclusion_rows(tmp, labels)
     _move_rows(tmp, labels)
     _text_rows(tmp, labels)
@@ -1190,7 +1224,7 @@ def _derivation_rows(tmp, labels):
         code, out = _gate(repo, protected=None)
     check("fail-closed/origin-head-names-candidate", code == 2 and "is the candidate commit" in out, out)
     with _patched(remote_default_branch=lambda root: "feature",
-                  _require_candidate_ahead=lambda source, base, head_sha: None):
+                  _require_candidate_ahead=_widened_candidate_rule):
         code, out = _gate(repo, protected=None)
     check("flip/origin-head-feature-branch-accepted", code == 0 and "0 added line(s)" in out, out)
     code, out = _gate(repo, protected=_fx_git(repo, "rev-parse", "work"))
@@ -1204,6 +1238,108 @@ def _derivation_rows(tmp, labels):
     _fx_git(repo, "remote", "set-url", REMOTE, str(Path(tmp) / "derive-remote-absent"))
     code, out = _gate(repo, protected=None)
     check("fail-closed/origin-head-remote-unreadable", code == 2 and "cannot be read" in out, out)
+
+
+def _reverted_candidate_rule(source, ref, base, head_sha):
+    """A flip of the at-or-behind rule back to the earlier one: every origin/HEAD merge base that is the
+    candidate commit is refused, origin/main named by its name included."""
+    if source == ORIGIN_HEAD_SOURCE and base == head_sha:
+        raise CannotEvaluate("the merge base with the branch origin/HEAD names is the candidate commit {} "
+                             "itself (the earlier rule)".format(head_sha[:12]))
+
+
+def _widened_candidate_rule(source, ref, base, head_sha):
+    """A flip of the at-or-behind rule widened to every origin/HEAD target: nothing is refused."""
+    return None
+
+
+def _position_rows(tmp, labels):
+    """A candidate at or behind origin/main (named by origin/HEAD) has no committed line of its own: a
+    clean main, a clone of main and a branch behind main pass with a NOTE, and an uncommitted label is
+    judged against the merge base; each flip restores the earlier rule, which refused them all. A clone
+    of a checkout on a feature branch (origin/HEAD and the remote's HEAD on that branch, at the
+    candidate) still cannot be evaluated; its flip widens the rule to every origin/HEAD target, which
+    hides the branch's label line."""
+    repo = _base_repo(tmp, "position")
+    tip = _fx_git(repo, "rev-parse", "HEAD")
+    _fx_git(repo, "update-ref", ORIGIN_PREFIX + "main", tip)
+    _fx_git(repo, "symbolic-ref", ORIGIN_HEAD, ORIGIN_PREFIX + "main")
+    nothing = "there is nothing to judge"
+    reverted = {"_require_candidate_ahead": _reverted_candidate_rule}
+
+    # A clean main at origin/main: nothing to judge, a pass with a NOTE.
+    code, out = _gate(repo, protected=None)
+    check("pass/clean-main-at-tip", code == 0 and "NOTE: " in out and "at the tip of" in out
+          and nothing in out and "(from origin/HEAD)" in out, out)
+    with _patched(**reverted):
+        code, out = _gate(repo, protected=None)
+    check("flip/clean-main-refused-by-earlier-rule", code == 2 and "is the candidate commit" in out, out)
+
+    # An uncommitted label on main is judged against the tip.
+    _write(repo, "seed.py", "a = 1\nb = 2\n{}\n{}\n".format(labels["round-number"], labels["backlog-id"]))
+    code, out = _gate(repo, protected=None)
+    check("refuse/main-uncommitted-label-judged-against-tip", code == 1 and "  seed.py:4: backlog-id" in out
+          and out.count("  seed.py:") == 1 and "merge base {}".format(tip[:12]) in out
+          and "NOTE: " in out and nothing not in out, out)
+    with _patched(**reverted):
+        code, out = _gate(repo, protected=None)
+    check("flip/main-uncommitted-label-refused-by-earlier-rule", code == 2
+          and "is the candidate commit" in out, out)
+    _fx_git(repo, "checkout", "-q", "--", "seed.py")
+
+    # A branch behind main: origin/main moves on, the branch stays at the old tip.
+    _fx_git(repo, "branch", "behind")
+    _write(repo, "ahead.py", "value = 1\n")
+    new_tip = _commit_all(repo, "main moves ahead")
+    _fx_git(repo, "update-ref", ORIGIN_PREFIX + "main", new_tip)
+    _fx_git(repo, "checkout", "-q", "behind")
+    code, out = _gate(repo, protected=None)
+    check("pass/branch-behind-main", code == 0 and "is behind" in out and nothing in out, out)
+    with _patched(**reverted):
+        code, out = _gate(repo, protected=None)
+    check("flip/branch-behind-main-refused-by-earlier-rule", code == 2 and "is the candidate commit" in out,
+          out)
+    _write(repo, "seed.py", "a = 1\nb = 2\n{}\n{}\n".format(labels["round-number"], labels["backlog-id"]))
+    code, out = _gate(repo, protected=None)
+    check("refuse/branch-behind-main-uncommitted-label", code == 1 and "  seed.py:4: backlog-id" in out
+          and "merge base {}".format(tip[:12]) in out, out)
+    with _patched(**reverted):
+        code, out = _gate(repo, protected=None)
+    check("flip/branch-behind-main-uncommitted-label-refused-by-earlier-rule", code == 2, out)
+    _fx_git(repo, "checkout", "-q", "--", "seed.py")
+    _fx_git(repo, "checkout", "-q", "main")
+
+    # A clone of main: git clone sets origin/HEAD to origin/main, which is the candidate itself.
+    clone = Path(tmp) / "position-clone"
+    _fx_git(tmp, "clone", "-q", "--no-hardlinks", str(repo), str(clone))
+    named = _fx_git(clone, "symbolic-ref", ORIGIN_HEAD)
+    at = _fx_git(clone, "rev-parse", "HEAD")
+    code, out = _gate(clone, protected=None)
+    check("pass/clone-of-main-origin-head-is-candidate", code == 0 and named == ORIGIN_PREFIX + "main"
+          and at == new_tip and "at the tip of" in out and nothing in out, (named, at, out))
+    with _patched(**reverted):
+        code, out = _gate(clone, protected=None)
+    check("flip/clone-of-main-refused-by-earlier-rule", code == 2 and "is the candidate commit" in out, out)
+
+    # A clone of a checkout on a feature branch (a linked worktree, say) whose commit adds a label: the
+    # clone's origin/HEAD and the remote's own HEAD name that branch, at the candidate.
+    source = _base_repo(tmp, "position-feature-source")
+    _fx_git(source, "checkout", "-q", "-b", "feature")
+    _write(source, "labelled.py", labels["backlog-id"] + "\n")
+    _commit_all(source, "a label on the feature branch")
+    feature = Path(tmp) / "position-feature-clone"
+    _fx_git(tmp, "clone", "-q", "--no-hardlinks", str(source), str(feature))
+    named = _fx_git(feature, "symbolic-ref", ORIGIN_HEAD)
+    code, out = _gate(feature, protected=None)
+    check("fail-closed/clone-of-feature-checkout-origin-head-is-candidate", code == 2
+          and named == ORIGIN_PREFIX + "feature" and "is the candidate commit" in out, (named, out))
+    with _patched(_require_candidate_ahead=_widened_candidate_rule):
+        code, out = _gate(feature, protected=None)
+    check("flip/clone-of-feature-checkout-label-hidden-when-widened", code == 0 and "labelled.py" not in out,
+          out)
+    code, out = _gate(feature, protected="origin/main")
+    check("refuse/clone-of-feature-checkout-judged-with-protected", code == 1
+          and "  labelled.py:1: backlog-id" in out, out)
 
 
 EXCLUDE_BLOCK_RE = re.compile(r"(?ms)^exclude-paths = \[.*?^\]\n")
