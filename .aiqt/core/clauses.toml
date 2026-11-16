@@ -1355,7 +1355,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 12
 end-line = 13
 canonical-text = "A derived or generated artefact is never hand-edited; it changes only by changing its source and\nregenerating."
-source-digest = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
+source-digest = "0508c62659627d894b694cfb8d8d217222e5f935c4894716823154e1cd931492"
 layer = "core"
 
 [[clause]]
@@ -1365,7 +1365,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 12
 end-line = 13
 canonical-text = "A derived or generated artefact is never hand-edited; it changes only by changing its source and\nregenerating."
-source-digest = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
+source-digest = "0508c62659627d894b694cfb8d8d217222e5f935c4894716823154e1cd931492"
 layer = "core"
 
 [[clause]]
@@ -1375,7 +1375,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 12
 end-line = 13
 canonical-text = "A derived or generated artefact is never hand-edited; it changes only by changing its source and\nregenerating."
-source-digest = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
+source-digest = "0508c62659627d894b694cfb8d8d217222e5f935c4894716823154e1cd931492"
 layer = "core"
 
 [[clause]]
@@ -1385,7 +1385,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 13
 end-line = 13
 canonical-text = "Source and derivative land in the same change, so the two cannot drift apart."
-source-digest = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
+source-digest = "0508c62659627d894b694cfb8d8d217222e5f935c4894716823154e1cd931492"
 layer = "core"
 
 [[clause]]
@@ -1395,7 +1395,27 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 14
 end-line = 16
 canonical-text = "Deriving an artefact leaves its source originals byte-for-byte unchanged and writes separate outputs;\nin-place derivation uses copies in an area excluding the originals and refuses any path or alias\nwriting outside it or back to an original."
-source-digest = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
+source-digest = "0508c62659627d894b694cfb8d8d217222e5f935c4894716823154e1cd931492"
+layer = "core"
+
+[[clause]]
+clause-id = "gensrc.6"
+corpus-id = "gensrc"
+source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
+start-line = 18
+end-line = 19
+canonical-text = "When case-dependent behaviour is described in several places, keep its cases and qualifications in\none canonical source; other descriptions reference it or are generated from it."
+source-digest = "0508c62659627d894b694cfb8d8d217222e5f935c4894716823154e1cd931492"
+layer = "core"
+
+[[clause]]
+clause-id = "gensrc.7"
+corpus-id = "gensrc"
+source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
+start-line = 19
+end-line = 20
+canonical-text = "Where those cases\nare machine-checkable, use them as test inputs and expected outcomes against the implementation."
+source-digest = "0508c62659627d894b694cfb8d8d217222e5f935c4894716823154e1cd931492"
 layer = "core"
 
 [[clause]]

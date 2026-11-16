@@ -475,6 +475,10 @@ Deriving an artefact leaves its source originals byte-for-byte unchanged and wri
 in-place derivation uses copies in an area excluding the originals and refuses any path or alias
 writing outside it or back to an original.
 
+When case-dependent behaviour is described in several places, keep its cases and qualifications in
+one canonical source; other descriptions reference it or are generated from it. Where those cases
+are machine-checkable, use them as test inputs and expected outcomes against the implementation.
+
 ## Verify licence compatibility before introducing third-party material
 
 Before a dependency, vendored file, or copied code fragment is introduced, its licence is identified and
