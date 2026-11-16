@@ -1069,7 +1069,7 @@ def _build_tree(base, cid="tsthk1", residue="A self-test control catches nothing
     # (an absent one is exit 2 there), so every synthetic tree carries one below PACK_ALIGN_FIRST_VERSION, where
     # the plugin stays independent (the state of main before the 1.1.1 cut). A tree without the marker (an
     # adopter's) is not re-checked and never reads it. No installed .aiqt/manifest.toml is written: the rule never
-    # reads one. Case 36 overwrites or removes VERSION and plants a manifest where a leg needs one.
+    # reads one. Case 37 overwrites or removes VERSION and plants a manifest where a leg needs one.
     (base / PACK_VERSION_REL).write_bytes(b"1.0.5\n")
 
 
