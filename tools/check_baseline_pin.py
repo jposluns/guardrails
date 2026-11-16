@@ -13,8 +13,9 @@ opf/site/draft/assets/baseline while staging); a pin that names any other root, 
 a pin or a root, are cannot-evaluate, so 2 pins can never validate the same copy and leave the other one
 unchecked. For each registered pair the gate hashes every pinned file under the copy root and reports a
 file whose bytes differ, a
-pinned file that is missing, a file under a copy root that the pin does not list (a stray), and a
-symbolic link or other non-regular entry anywhere in a copy root, including the root itself (exit 1).
+pinned file that is missing, a file under a copy root that the pin does not list (a stray), a
+symbolic link or other non-regular entry anywhere in a copy root, including the root itself, and a parent
+folder of a copy root (such as site/draft) that is a symbolic link or not a directory (exit 1).
 
 The one exception to the copy-root rule is BUILD_TOOLS: the template's build tools that a site copies outside
 its served tree and pins in the same [files] table (only .baseline/check_palette.py, the palette gate). A
@@ -325,16 +326,29 @@ def _scan_pin(root, pin_rel, assigned, findings, errors, versions):
             return
     for copy_root, pinned in roots:
         base = Path(root) / copy_root
+        # Every folder on the way to the copy root, then the root itself, each checked with os.lstat from the
+        # top down: a linked or non-directory parent folder (site/draft as a link, say) would otherwise be
+        # followed to a copy outside the tree. The first such component is reported and the root skipped.
+        parts = copy_root.split("/")
+        linked = None
         try:
-            mode = os.lstat(base).st_mode
+            for depth in range(1, len(parts) + 1):
+                mode = os.lstat(Path(root).joinpath(*parts[:depth])).st_mode
+                if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+                    linked = "/".join(parts[:depth])
+                    break
         except FileNotFoundError:
             findings.extend("{}/{}: missing".format(copy_root, rel) for rel in sorted(pinned))
             continue
         except OSError as exc:
             errors.append("{}: cannot stat ({})".format(copy_root, exc))
             continue
-        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        if linked == copy_root:
             findings.append("{}: copy root is a symbolic link or not a directory".format(copy_root))
+            continue
+        if linked is not None:
+            findings.append("{}: parent folder {} is a symbolic link or not a directory".format(
+                copy_root, linked))
             continue
         present = _inventory(base, findings, errors, copy_root)
         for rel in sorted(set(present) - set(pinned)):
@@ -549,6 +563,52 @@ def _self_test():
 
     findings, errors = _scan_case(mutate=_link_root)
     check("refuse/symlink-root", errors == [] and len(findings) == 1 and "copy root is a symbolic link" in findings[0],
+          (findings, errors))
+
+    # A copy root reached through a linked parent folder: site/draft is a link to a real folder holding the
+    # exact copy, so only the parent folder check can refuse it (the root's own lstat sees a real directory).
+    parent_rel = FIXTURE_ROOT.rsplit("/", 2)[0]
+
+    def _link_parent(tmp):
+        real = tmp / "elsewhere-parent"
+        os.rename(tmp / parent_rel, real)
+        os.symlink(real, tmp / parent_rel)
+
+    findings, errors = _scan_case(mutate=_link_parent)
+    check("refuse/symlink-parent", errors == [] and findings == [
+        "{}: parent folder {} is a symbolic link or not a directory".format(FIXTURE_ROOT, parent_rel)],
+          (findings, errors))
+
+    # Its twin: the same link beside the parent folder, not on the path to the copy root, passes.
+    def _link_beside_parent(tmp):
+        os.symlink(tmp / parent_rel, tmp / (parent_rel + "-alias"))
+
+    findings, errors = _scan_case(mutate=_link_beside_parent)
+    check("pass/symlink-beside-parent", findings == [] and errors == [], (findings, errors))
+
+    # A parent folder that is a regular file is a finding, not cannot-evaluate: red if the parent check
+    # refuses only a link (the root's lstat then fails with ENOTDIR, an error).
+    def _file_parent(tmp):
+        os.rename(tmp / parent_rel, tmp / "elsewhere-parent")
+        (tmp / parent_rel).write_bytes(b"not a folder\n")
+
+    findings, errors = _scan_case(mutate=_file_parent)
+    check("refuse/nondir-parent", errors == [] and findings == [
+        "{}: parent folder {} is a symbolic link or not a directory".format(FIXTURE_ROOT, parent_rel)],
+          (findings, errors))
+
+    # The top-level folder (site) as a link to a real folder holding the exact copy: red if the parent check
+    # starts below the top level.
+    top_rel = FIXTURE_ROOT.split("/", 1)[0]
+
+    def _link_top(tmp):
+        real = tmp / "elsewhere-top"
+        os.rename(tmp / top_rel, real)
+        os.symlink(real, tmp / top_rel)
+
+    findings, errors = _scan_case(mutate=_link_top)
+    check("refuse/symlink-top-folder", errors == [] and findings == [
+        "{}: parent folder {} is a symbolic link or not a directory".format(FIXTURE_ROOT, top_rel)],
           (findings, errors))
 
     def _fifo(tmp):
@@ -868,8 +928,9 @@ def _self_test():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: check_baseline_pin {} checks (the exact fixture passes; a differing file, a "
-          "missing file, a stray file, a symbolic link at a file, a directory or the root, a FIFO and a "
-          "missing root each fail; a missing, unreadable, non-UTF-8, non-TOML or misshapen pin and an "
+          "missing file, a stray file, a symbolic link at a file, a directory, the root or a parent folder of "
+          "the root (the top-level folder included), a parent folder that is a regular file, a FIFO and a "
+          "missing root each fail, and a link beside a parent folder passes; a missing, unreadable, non-UTF-8, non-TOML or misshapen pin and an "
           "unreadable copied file are cannot-evaluate; the pin size bound holds one byte under, at and "
           "over; 2 registered pairs pass together, a second copy's defect is reported against its own root "
           "and pin, and a pin naming another root or a registry repeating a pin or a root is "
