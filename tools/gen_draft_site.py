@@ -43,8 +43,11 @@ title, n and small; every `html` key (region, value, clauses item, note, callout
 lead, prose, pullquote, record item, srcview item); clause title; section, family and subhead heading;
 family verified, intro, after and steps; entry heading, claim, limitation and evidence; table and register
 head cells and row cells; steps and list items; figure caption; srcview gen and heading; code and srcview
-note. Code text, code file labels, srcview labels and figure node text are escaped as before. Every
-rendered page then passes the link guard (_LinkGuard), which refuses raw markup that breaks the link rules.
+note. Code text, code file labels, srcview labels and figure node text are escaped as before. Inline markup
+may use only the elements of tools/_site_markup.py ELEMENTS (no svg or math, no raw-text element) and no
+markup declaration or processing instruction other than an ordinary comment; anything else is refused with
+the element and the page named. Every rendered page then passes the link guard (_LinkGuard), which refuses
+raw markup that breaks the link rules or an element outside the same allowlist.
 """
 import sys
 
@@ -75,6 +78,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _standards import load_manifests, ManifestError  # noqa: E402
+import _site_markup  # noqa: E402  (the element allowlist inline markup, the link guard and check_site share)
 import gen_mappings  # noqa: E402  (the one mappings rendering source: rows, registry and wording)
 import gen_rules  # noqa: E402  (the one frontmatter parser and corpus loader)
 from gen_agents import sort_key  # noqa: E402  (canonical AIQT priority order for the rules)
@@ -237,6 +241,10 @@ SITES = (
 
 class RefusedPage(Exception):
     """A built page or a page data file breaks a rule; nothing is written."""
+
+
+class InlineMarkupRefused(RefusedPage):
+    """Inline markup breaks the inline rules (_inline_https); render_page names the page it came from."""
 
 
 def _url(site, path=""):
@@ -1417,8 +1425,11 @@ def _body_html(site, page):
 # or one of its kept live paths, with no backslash, whitespace or control character, no protocol-relative
 # "//" start and no "." or ".." segment, raw or percent-encoded (%2e, either case); and every a or area whose href is https carries
 # target="_blank", rel with noopener and noreferrer, and the "(opens in a new tab)" hint in its text or
-# aria-label. A "<![" anywhere on the page is a finding (see _MARKUP_DECLARATION_SPLIT), and attribute names
-# are folded to lower case in ASCII only, as a browser folds them. Residual: the guard judges the markup as
+# aria-label. A "<![" anywhere on the page is a finding (see _MARKUP_DECLARATION_SPLIT), attribute names
+# are folded to lower case in ASCII only, as a browser folds them, and every element is held to the
+# template's element allowlist in its context (_site_markup: no math, no raw-text element outside the head,
+# and inside svg only the shell's own svg elements), the definition tools/check_site.py's Page also reads.
+# Residual: the guard judges the markup as
 # Python's html.parser tokenizes it, so a malformed construct a browser repairs differently is outside it;
 # it reads no stylesheet (inline styles are refused separately) and treats a URL-shaped value in any
 # attribute not listed here as text; and it does not check that an allowed target exists.
@@ -1503,8 +1514,19 @@ class _InlineLinkValues(HTMLParser):
         self._line_starts = [0] + [index + 1 for index, char in enumerate(source) if char == "\n"]
         self.values = []
         self.unplaced = []
+        # Each tag outside the inline element allowlist (_site_markup.ELEMENTS), as its finding.
+        self.rule = _site_markup.ElementRule(page=False)
+        self.outside = []
+
+    def handle_endtag(self, tag):
+        problem = self.rule.end(tag)
+        if problem is not None:
+            self.outside.append(problem)
 
     def handle_starttag(self, tag, attrs):
+        problem = self.rule.start(tag, self.get_starttag_text())
+        if problem is not None:
+            self.outside.append(problem)
         line, column = self.getpos()
         offset = self._line_starts[line - 1] + column
         try:
@@ -1528,22 +1550,26 @@ def _inline_https(value):
     attribute value or deeper in a URL is never mistaken for a value's start. A scheme written with a
     character reference is not a literal scheme and is left as written; the link guard refuses it (it
     accepts only a literal lower-case "https://"). An attribute is a link attribute by its name folded in
-    ASCII only, as a browser reads it (_ascii_lower). RefusedPage when a start tag's values cannot be placed
-    in the markup exactly, and when the markup holds "<![" (_MARKUP_DECLARATION_SPLIT), which html.parser and
-    a browser read differently. Each fragment is read alone: raw text or a comment opened by an earlier
-    fragment of the same page (a textarea, title, xmp, noembed or noframes element, or "<!--") is not known
-    here, so an https scheme written as a link attribute value inside such text in a later fragment is
-    written in lower case although the page reads it as text (or as a comment). That changes only the
-    letter case of those 8 characters; the link guard reads the whole page and reads those bytes as text
-    or a comment too, so no link escapes it this way."""
-    if _MARKUP_DECLARATION_SPLIT in value:
-        raise RefusedPage("inline markup holds {!r}, a markup declaration html.parser and a browser read "
-                          "differently".format(_MARKUP_DECLARATION_SPLIT))
+    ASCII only, as a browser reads it (_ascii_lower). InlineMarkupRefused (a RefusedPage; render_page names the
+    page) when the markup holds a markup declaration or processing instruction other than an ordinary comment
+    (_site_markup.comment_problem; "<![" among them), when it uses an element outside the inline element
+    allowlist (_site_markup.ELEMENTS: no svg or math, no raw-text element, so html.parser and a browser read
+    the same elements here), and when a start tag's values cannot be placed in the markup exactly. Each
+    fragment is read alone: a comment opened by an earlier fragment of the same page is not known here, so an
+    https scheme written as a link attribute value inside it in a later fragment is written in lower case
+    although the page reads it as a comment. That changes only the letter case of those 8 characters; the
+    link guard reads the whole page and reads those bytes as a comment too, so no link escapes it this way."""
+    declaration = _site_markup.comment_problem(value)
+    if declaration is not None:
+        raise InlineMarkupRefused("inline markup holds a markup declaration or processing instruction other "
+                                  "than an ordinary comment at offset {}".format(declaration))
     reader = _InlineLinkValues(value)
     reader.feed(value)
     reader.close()
+    if reader.outside:
+        raise InlineMarkupRefused("inline markup uses {}".format(reader.outside[0]))
     if reader.unplaced:
-        raise RefusedPage("inline markup start tag {!r} cannot be read exactly".format(reader.unplaced[0]))
+        raise InlineMarkupRefused("inline markup start tag {!r} cannot be read exactly".format(reader.unplaced[0]))
     parts, done = [], 0
     for start, end in sorted(reader.values):
         scheme = value[start:min(end, start + len(_HTTPS))]
@@ -1562,6 +1588,8 @@ class _LinkGuard(HTMLParser):
         self.scheme_src = scheme_src
         self.found = []
         self._anchor = None
+        # The page's elements are held to the template's element allowlist (_site_markup), in context.
+        self.rule = _site_markup.ElementRule(page=True)
 
     def _url_finding(self, name, tag, value, written):
         site, base = self.site, self.site["base"]
@@ -1589,6 +1617,9 @@ class _LinkGuard(HTMLParser):
         return "{} {!r} on <{}> is neither under {} nor an https URL".format(name, value, tag, base)
 
     def handle_starttag(self, tag, attrs):
+        problem = self.rule.start(tag, self.get_starttag_text())
+        if problem is not None:
+            self.found.append(problem)
         # Each value as written in the start tag's source text, for the literal-scheme rule of _url_finding,
         # and each attribute name folded in ASCII only, as a browser reads it (html.parser folds with
         # str.lower; a tag that cannot be re-read keeps those names, which can only add URL checks).
@@ -1635,6 +1666,9 @@ class _LinkGuard(HTMLParser):
             self._anchor[1].append(data)
 
     def handle_endtag(self, tag):
+        problem = self.rule.end(tag)
+        if problem is not None:
+            self.found.append(problem)
         if tag == "a" and self._anchor is not None:
             if NEWTAB_HINT not in "".join(self._anchor[1]):
                 self.found.append("external link {!r} without the new-tab hint".format(self._anchor[0]))
@@ -1686,8 +1720,13 @@ def render_page(site, pages, page):
         head.append('<meta name="robots" content="noindex, nofollow">')
     # The page's meta text, as plain text, is also its search and link-preview description. Specification
     # section 5 does not place these metas; they join the other metas before the title, where every
-    # reference page keeps its robots meta, so the elements section 5 lists keep their order.
-    description = _description(site, page)
+    # reference page keeps its robots meta, so the elements section 5 lists keep their order. A refusal of
+    # the page's inline markup (_inline_https) is given the page's name here.
+    try:
+        description = _description(site, page)
+        body = _body_html(site, page)
+    except InlineMarkupRefused as exc:
+        raise RefusedPage("{}/{} ({}): {}".format(site["root"], rel, page["where"], exc)) from exc
     if description:
         head.append('<meta name="description" content="{}">'.format(_attr(description)))
         head.append('<meta property="og:description" content="{}">'.format(_attr(description)))
@@ -1715,7 +1754,7 @@ def render_page(site, pages, page):
         '<header class="mast">{}{}{}</header>'.format(
             _brand(site), _nav(site, pages, _page_url(site, rel)), SCHEME_BUTTON),
         '<main id="main-content">',
-        _body_html(site, page),
+        body,
         "</main>",
         _footer(site),
         '<p class="vh" id="copy-status" role="status" aria-live="polite"></p>',
@@ -2028,10 +2067,18 @@ def _self_test():
 
     # The declared build is the promoted one (base "/", pages at each live root); most fixtures below are
     # the same pages built in their staged form (staged_sites), so the staging rules keep their cases.
-    live_outputs = build()
+    # A refusal in either build (a start tag the guard cannot re-read, say) fails a named row and ends the
+    # self-test there with its report, rather than a traceback before any row runs: every row below reads
+    # these outputs.
+    live_outputs = accepted("build/declared-pages-render", build)
     staged_ = staged_sites()
     site = staged_[0]
-    outputs = build(sites=staged_, registered=False)
+    outputs = accepted("build/staged-pages-render", build, None, staged_, False)
+    if not live_outputs or not outputs:
+        print("SELF-TEST FAIL: gen_draft_site {} failure(s)".format(len(failures)))
+        for failure in failures:
+            print("  - " + failure)
+        return 1
     page = outputs["site/draft/index.html"]
     expect("shell/html-class", '<html lang="en" class="site-aiqt">' in page)
     expect("shell/title", "<title>Home | AIQT.ai</title>" in page)
@@ -2647,6 +2694,106 @@ def _self_test():
              ["href '/elsewhere/' on <a> is neither under /draft/ nor an https URL"])):
         got = _link_findings(site, html)
         expect(name, got == want, got)
+    # The element allowlist (_site_markup). html.parser reads textarea, title and plaintext as raw text even
+    # inside svg or math, where a browser keeps reading markup, so an anchor after "</svg>" is live in a browser
+    # and hidden from the rewrite and the guard. Inline markup may use only _site_markup.ELEMENTS, so each vector
+    # and its HTML-namespace twin (the same raw-text element with no svg or math) is refused, with the element
+    # and the page named; the link guard reports the element on a page. The passing twins write the same text
+    # escaped: the anchor is then read, rewritten and checked.
+    def inline_refusal(html):
+        """(the refusal message render_page gives for a prose component holding `html`, the page prefix it
+        must start with)."""
+        page_model = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "{}"\n'.format(html.replace('"', '\\"')))
+        try:
+            render_page(site, [page_model], page_model)
+        except RefusedPage as exc:
+            return str(exc), "{}/{} ({}): ".format(site["root"], page_model["rel"], page_model["where"])
+        return "", None
+
+    outside = "{}, an element outside the template's element allowlist"
+    upper_anchor = '<a href="HTTPS://example.com/v"' + newtab_tail
+    for wrapper, raw in (("svg", "textarea"), ("svg", "title"), ("svg", "plaintext"), ("math", "textarea"),
+                         ("math", "title"), ("math", "plaintext"), ("", "textarea"), ("", "title"),
+                         ("", "plaintext")):
+        before = "{}<{}>{}".format("<{}>".format(wrapper) if wrapper else "", raw,
+                                   "</{}>".format(wrapper) if wrapper else "</svg>")
+        after = "<!--</{}>-->".format(raw)
+
+        def vector(anchor, escape=False):
+            text = (lambda part: _html.escape(part, quote=False)) if escape else (lambda part: part)
+            return "<p>{}{}{}</p>".format(text(before), anchor, text(after))
+
+        label = (wrapper + "-" if wrapper else "html-namespace-") + raw
+        first = wrapper or raw
+        name = "refuse/inline-{}-hidden-anchor".format(label)
+        message, prefix = inline_refusal(vector(upper_anchor))
+        expect(name, prefix is not None and message.startswith(prefix + "inline markup uses " + outside.format(
+            "<{}>".format(first))), message)
+        name = "links/inline-escaped-{}-text-anchor-lowercased".format(label)
+        twin = accepted(name, inline_page, vector(upper_anchor, escape=True))
+        expect(name, '<a href="https://example.com/v"' + newtab_tail in twin, twin)
+        http_anchor = '<a href="http://example.com/v">v</a>'
+        got = _link_findings(site, vector(http_anchor))
+        want = outside.format("<{}> inside <svg>".format(raw) if wrapper == "svg" else "<{}> on the page".format(first))
+        expect("links/guard-{}-hidden-anchor-refused".format(label), want in got, got)
+        got = _link_findings(site, vector(http_anchor, escape=True))
+        expect("links/guard-escaped-{}-text-http-anchor-read".format(label),
+               got == ["href 'http://example.com/v' on <a> is neither under /draft/ nor an https URL"], got)
+    # Inline markup refuses every markup declaration and processing instruction but an ordinary comment, with
+    # the page named; "<![" is refused by that inline rule itself (before the guard reads the page), so the
+    # refusal names the page and says "inline markup holds". The ordinary comment twin is accepted.
+    for name, html in (("refuse/inline-cdata-by-inline-rule-naming-page", "<p><![CDATA[ x > ]]></p>"),
+                       ("refuse/inline-bogus-declaration", "<p><!x y> t</p>"),
+                       ("refuse/inline-processing-instruction", "<p><?x y> t</p>"),
+                       ("refuse/inline-bogus-end-tag-comment", "<p></3 x> t</p>"),
+                       ("refuse/inline-abrupt-comment", "<p><!--> t</p>"),
+                       ("refuse/inline-comment-holding-double-dash", "<p><!-- a -- b --> t</p>")):
+        message, prefix = inline_refusal(html)
+        expect(name, prefix is not None and message.startswith(
+            prefix + "inline markup holds a markup declaration or processing instruction other than an "
+            "ordinary comment at offset 3: "), message)
+    twin = accepted("links/inline-ordinary-comment-accepted", inline_page,
+                    "<p><!-- a note --> " + upper_anchor + "</p>")
+    expect("links/inline-ordinary-comment-accepted",
+           '<!-- a note --> <a href="https://example.com/v"' + newtab_tail in twin, twin)
+    # The allowlist covers every element the data files' inline values and the generator's templates use: each
+    # inline value of the declared build (recorded at _inline_https) and each built page holds no element
+    # outside it, so generation still succeeds (the declared build above rendered every page).
+    inline_values = []
+
+    def recording(reader, data):
+        inline_values.append(data)
+        return HTMLParser.feed(reader, data)
+
+    _InlineLinkValues.feed = recording
+    try:
+        recorded = accepted("elements/data-file-inline-values-within-allowlist", build)
+    finally:
+        del _InlineLinkValues.feed
+
+    class _Names(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.names = set()
+
+        def handle_starttag(self, tag, attrs):
+            self.names.add(tag)
+
+    names = _Names()
+    for value in inline_values:
+        names.feed(value)
+        names.close()
+        names.reset()
+    expect("elements/data-file-inline-values-within-allowlist",
+           recorded == live_outputs and len(inline_values) > 0 and names.names <= _site_markup.ELEMENTS
+           and {"a", "p", "span", "strong", "code"} <= names.names, sorted(names.names - _site_markup.ELEMENTS))
+    built_problems = []
+    for built in list(live_outputs.values()) + list(outputs.values()):
+        rule_reader = _LinkGuard(site, ())
+        rule_reader.feed(built)
+        rule_reader.close()
+        built_problems.extend(f for f in rule_reader.found if "element allowlist" in f or "non-ASCII element" in f)
+    expect("elements/built-pages-within-allowlist", built_problems == [], built_problems)
     # A name a browser does not fold to a link attribute (KELVIN SIGN) is not checked as one; the ASCII twin is.
     got = _link_findings(site, '<span xlinK:href="HTTP://example.com/x">t</span>')
     expect("links/guard-non-ascii-attribute-name-not-a-link-attribute", got == [], got)
@@ -3143,13 +3290,14 @@ def _self_test():
             ("guard/aria-label-hint-passes", '<a href="https://example.com/" target="_blank" '
              'rel="noopener noreferrer" aria-label="Example (opens in a new tab)">x</a>'),
             ("guard/fragment-and-base-pass", '<a href="#top">x</a><img src="/draft/x.png" alt="">'),
-            ("guard/meta-name-passes", '<meta name="robots" content="noindex, nofollow">'),
+            # A meta and a script are head elements to the element allowlist, so these fixtures sit in a head.
+            ("guard/meta-name-passes", '<head><meta name="robots" content="noindex, nofollow"></head>'),
             ("guard/plain-path-passes", '<a href="/draft/install/">x</a>'),
             ("guard/encoded-non-dot-segment-passes", '<a href="/draft/a%2eb/">x</a>')):
         expect(name, _link_findings(site, text) == [], (text, _link_findings(site, text)))
     shell_src = _asset(site, "rail.js")
     expect("guard/shell-script-passes", _link_findings(
-        site, '<script src="{}" defer></script>'.format(shell_src), [shell_src]) == [])
+        site, '<head><script src="{}" defer></script></head>'.format(shell_src), [shell_src]) == [])
     expect("guard/shell-script-once", _link_findings(
         site, '<script src="{0}" defer></script><script src="{0}" defer></script>'.format(shell_src),
         [shell_src]) != [])
@@ -3159,7 +3307,8 @@ def _self_test():
     # once, with no other attribute; each near miss is refused.
     scheme_src = _asset(site, SCHEME_SCRIPT)
     expect("guard/scheme-script-passes", _link_findings(
-        site, '<script data-cfasync="false" src="{}"></script>'.format(scheme_src), (), scheme_src) == [])
+        site, '<head><script data-cfasync="false" src="{}"></script></head>'.format(scheme_src), (),
+        scheme_src) == [])
     for name, text in (
             ("guard/scheme-script-once", '<script data-cfasync="false" src="{0}"></script>'
              '<script data-cfasync="false" src="{0}"></script>'),

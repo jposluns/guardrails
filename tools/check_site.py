@@ -89,6 +89,7 @@ from urllib.parse import unquote, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 import _template_pages  # noqa: E402  which pages the site template generates (GENSRC_OUTPUTS, not a folder name)
+import _site_markup  # noqa: E402  the template's element allowlist, shared with tools/gen_draft_site.py
 
 EN, EM = "–", "—"
 # Site host from AIQT_SITE_HOST (default, and empty-value fallback, aiqt.ai; lowercased), so a
@@ -150,8 +151,17 @@ MARKUP_DECLARATION_SPLIT = "<!["
 
 
 class Page(HTMLParser):
-    def __init__(self):
+    """One parsed page. `template` true (a generated template page, _template_pages) also holds every element
+    to the template's element allowlist in its context (_site_markup, the definition tools/gen_draft_site.py
+    reads for its inline markup and its link guard): each element outside it is a structural finding with its
+    line. That covers the subtree of svg and math too, which the structure check suspends, so a raw-text element
+    html.parser reads inside foreign content (where a browser keeps reading markup) is reported, not hidden. A
+    live page (not generated) is not held to it."""
+
+    def __init__(self, template=False):
         super().__init__(convert_charrefs=True)
+        self._elements = _site_markup.ElementRule(page=True) if template else None
+        self._self_closing = False
         self._fed = []        # every text fed, for the MARKUP_DECLARATION_SPLIT scan in finalize
         self.links = []       # (value, line)
         self.ids = set()
@@ -166,7 +176,13 @@ class Page(HTMLParser):
         self.touch_icons = []     # (href, line) of each <link rel="apple-touch-icon">
         self.metas = {}           # the content of the first <meta> per property or name
 
+    def _element(self, problem):
+        if problem is not None:
+            self.tag_findings.append((self.getpos()[0], problem))
+
     def handle_starttag(self, tag, attrs):
+        if self._elements is not None and not self._self_closing:
+            self._element(self._elements.start(tag, self.get_starttag_text()))
         if self.suspend_tag is not None:
             if tag == self.suspend_tag:
                 self.suspend_count += 1
@@ -216,6 +232,15 @@ class Page(HTMLParser):
                 self.suspend_count = 1
 
     def handle_startendtag(self, tag, attrs):
+        if self._elements is not None:
+            self._element(self._elements.start(tag, self.get_starttag_text(), closed=True))
+        self._self_closing = True
+        try:
+            self._startendtag(tag, attrs)
+        finally:
+            self._self_closing = False
+
+    def _startendtag(self, tag, attrs):
         if self.suspend_tag is not None:
             return
         if tag in VOID_ELEMENTS:
@@ -232,6 +257,8 @@ class Page(HTMLParser):
         self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag):
+        if self._elements is not None:
+            self._element(self._elements.end(tag))
         if tag == "title":
             self._in_title = False
         if self.suspend_tag is not None:
@@ -1044,6 +1071,7 @@ def _self_test():
     _touch_icon_self_test(quiet)
     _card_self_test(quiet)
     _markup_declaration_self_test(quiet)
+    _element_allowlist_self_test()
     _not_found_links_self_test()
     _declaration_self_test()
     _entry_self_test()
@@ -1399,6 +1427,76 @@ def _markup_declaration_self_test(quiet):
         (root / "index.html").write_text(head + "<p>&lt;![CDATA[ x &gt; {} ]]&gt;</p>".format(upper_https),
                                          encoding="utf-8")
         check("page/scan-passes-escaped-cdata-text", quiet(_scan_root, base, "site", frozenset()) == 0, None)
+
+
+def _element_allowlist_self_test():
+    """The element allowlist of a generated template page (_site_markup): html.parser reads textarea, title and
+    plaintext as raw text even inside svg or math, where a browser keeps reading markup, so an anchor after
+    "</svg>" is live in a browser yet never reaches handle_starttag here. On a template page each such element,
+    and its HTML-namespace twin, is a finding with its line; the same text escaped is no finding and the anchor
+    after it is read. A live page is not held to the allowlist, and every generated page in the tree is within
+    it."""
+    import html as _html_module
+    outside = "{}, an element outside the template's element allowlist"
+    anchor = '<a href="HTTPS://example.test/v" target="_blank" rel="noopener noreferrer">v</a>'
+    shell = '<!doctype html><html lang="en"><head><title>t</title></head>\n<body>{}</body></html>'
+
+    def read(text, template=True):
+        page = Page(template=template)
+        page.feed(text)
+        page.finalize()
+        return page
+
+    for name, twin, wrapper, raw in (
+            ("page/svg-textarea-hidden-anchor-fails", "page/escaped-svg-textarea-text-anchor-passes",
+             "svg", "textarea"),
+            ("page/svg-title-hidden-anchor-fails", "page/escaped-svg-title-text-anchor-passes", "svg", "title"),
+            ("page/svg-plaintext-hidden-anchor-fails", "page/escaped-svg-plaintext-text-anchor-passes",
+             "svg", "plaintext"),
+            ("page/math-textarea-hidden-anchor-fails", "page/escaped-math-textarea-text-anchor-passes",
+             "math", "textarea"),
+            ("page/math-title-hidden-anchor-fails", "page/escaped-math-title-text-anchor-passes", "math", "title"),
+            ("page/math-plaintext-hidden-anchor-fails", "page/escaped-math-plaintext-text-anchor-passes",
+             "math", "plaintext"),
+            ("page/html-namespace-textarea-hidden-anchor-fails",
+             "page/escaped-html-namespace-textarea-text-anchor-passes", "", "textarea"),
+            ("page/html-namespace-title-hidden-anchor-fails",
+             "page/escaped-html-namespace-title-text-anchor-passes", "", "title"),
+            ("page/html-namespace-plaintext-hidden-anchor-fails",
+             "page/escaped-html-namespace-plaintext-text-anchor-passes", "", "plaintext")):
+        before = "{}<{}>{}".format("<{}>".format(wrapper) if wrapper else "", raw,
+                                   "</{}>".format(wrapper) if wrapper else "</svg>")
+        after = "<!--</{}>-->".format(raw)
+        want = outside.format("<{}> inside <svg>".format(raw) if wrapper == "svg"
+                              else "<{}> on the page".format(wrapper or raw))
+        page = read(shell.format("<p>{}{}{}</p>".format(before, anchor, after)))
+        check(name, (2, want) in page.tag_findings, page.tag_findings)
+        escaped = "<p>{}{}{}</p>".format(_html_module.escape(before, quote=False), anchor,
+                                         _html_module.escape(after, quote=False))
+        page = read(shell.format(escaped))
+        check(twin, page.tag_findings == [] and page.links == [("HTTPS://example.test/v", 2)],
+              (page.tag_findings, page.links))
+    page = read(shell.format("<p><svg><textarea></svg>{}<!--</textarea>--></p>".format(anchor)), template=False)
+    check("page/live-page-not-held-to-element-allowlist",
+          not any("element allowlist" in msg for _line, msg in page.tag_findings), page.tag_findings)
+    # The shell's own structure passes only where the shell writes it: a title or script inside head, the
+    # svg glyph elements inside svg; a head element in the body is a finding.
+    page = read(shell.format('<svg viewBox="0 0 2 2"><path d="M0 0"/><circle cx="1" cy="1" r="1"/></svg>'))
+    check("page/shell-svg-glyph-passes", page.tag_findings == [], page.tag_findings)
+    page = read(shell.format("<p>x</p><title>u</title>"))
+    check("page/title-in-body-fails", (2, outside.format("<title> on the page")) in page.tag_findings,
+          page.tag_findings)
+    # Every generated template page in the tree is within the allowlist.
+    root = Path(__file__).resolve().parents[1]
+    problems, pages = [], 0
+    for target in sorted(_template_pages.template_targets()):
+        path = root / target
+        if not path.is_file():
+            continue
+        pages += 1
+        page = read(path.read_text(encoding="utf-8"))
+        problems.extend((target, line, msg) for line, msg in page.tag_findings if "element" in msg)
+    check("page/generated-pages-within-element-allowlist", pages > 0 and problems == [], (pages, problems))
 
 
 def _touch_icon_self_test(quiet):
@@ -1934,7 +2032,7 @@ def _scan_root(root, subdir, targets=None):
         except OSError as exc:
             print("error: cannot read {} ({}); fail-closed".format(rel, exc), file=sys.stderr)
             return 2
-        page = Page()
+        page = Page(template=_template_pages.is_template_page(subdir, f.relative_to(site), targets))
         try:
             page.feed(text)
             page.finalize()
