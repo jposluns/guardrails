@@ -983,7 +983,8 @@ ALLOWLIST = (
         "side": "ci-only",
         "identity": "tools/check_instruction_budget.py --change-shape --protected <ref:origin/${GITHUB_REF_NAME}>",
         "reason": (
-            "A workflow_dispatch or schedule run has no pushed range, so the CI "
+            "A workflow_dispatch run (the Quality workflow has no schedule "
+            "trigger today) has no pushed range, so the CI "
             "job supplies only its runtime-derived origin ref and the change-shape "
             "mode compares the checked-out tip with its first parent. The bare "
             "leg runs locally."

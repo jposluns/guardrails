@@ -242,23 +242,37 @@ Usage:
   check_instruction_budget.py --change-shape [--protected REF] [--base OID]
                                                        compare the budget source with its base (below)
 
-CHANGE SHAPE. A routine ratchet update changes only the `ratchet = N` value and, on a raise, adds exactly
-one history entry directly above the `#   ceiling` comment line: each of its lines is `#`, 24 spaces and
-text with no trailing blank, the first reads `Raised OLD -> NEW on YYYY-MM-DD` with the base and candidate
-values and a real date, and no later line starts a second entry. Every other byte must match the base
+CHANGE SHAPE. A routine ratchet update changes only the `ratchet = N` value and, on each raise, appends
+one history entry directly above the `#   ceiling` comment line. A comparison spanning several raises (a
+push or a merge train carrying more than one) holds one appended entry per raise, compared entry by
+entry. Each appended line is `#`, exactly 24 spaces and printable ASCII text (U+0020 to U+007E, so a tab,
+a CR, NEL, a no-break or ideographic space, U+2028, U+2029 and every zero-width or bidi control is
+refused) with no trailing space, then LF. An entry opens with a line reading
+`Raised OLD -> NEW on YYYY-MM-DD` (numbers with no leading zero, NEW above OLD); every appended line
+whose text opens with the word "raised", in any letter case, must be such an opening line. The first
+OLD is the base value, each later OLD is the NEW of the entry before it, and the last NEW is the
+candidate value. Each date is real, no earlier than the latest date written above the base's ceiling
+line or an earlier appended entry's date, and no later than the day after the checking day (UTC); this
+upper bound makes the result depend on the clock. A raise and a lowering in the same comparison, or a
+history entry worded another way, is a finding that the declaration below does not waive: land such a
+change as a comparison of its own (its own pull request or push). Every other byte must match the base
 exactly; any other changed line is a finding (exit 1) naming the line. A lowering adds no entry and is
 accepted as a shape only: keeping the headroom the 2026-10-29 entry protects stays a review matter. The
 one exception is a reviewed declaration, .aiqt/core/instruction-budget-exception.toml in the candidate,
 holding exactly `base-sha256` and `head-sha256` (the SHA-256 of the exact base and candidate bytes of the
 budget source) and a non-blank `reason`; when both digests match, the other changed lines are reported as
 declared instead of failing, and a declaration bound to other bytes excuses nothing. A declaration never
-waives the entry a raise requires or the validation of either side, and it records intent, not
-authorization: the review of the change that adds it is the authorization. The base is the one
-tools/check_release_cut.py binds for the event, read with that gate's hardened git: in pull_request CI the
-merge commit's raw first parent, which must be origin/$GITHUB_BASE_REF; on a push (--protected and
---base) the event's before commit, so the whole pushed range is one comparison; in a workflow_dispatch or
-schedule run (--protected) the tip's raw first parent; locally the unique merge base with the origin/HEAD
-target. The candidate is the HEAD commit, the index, and the working tree, each compared separately. A
+waives the entry rules or the validation of either side, and it records intent, not authorization: the
+review of the change that adds it is the authorization. Nothing removes a declaration once its change has
+landed, so a later change recreating the same base and candidate bytes is excused again. The base is the
+one tools/check_release_cut.py binds for the event, read with that gate's hardened git: in pull_request
+CI the merge commit's raw first parent, which must be origin/$GITHUB_BASE_REF; on a push (--protected and
+--base) the event's before commit, so the whole pushed range is one comparison; in a workflow_dispatch run
+(--protected) the tip's raw first parent (that gate also accepts a schedule run, which the Quality
+workflow does not trigger today); locally the unique merge base with the target origin/HEAD names, or
+HEAD's raw first parent when HEAD is that target. The local target is whatever branch origin/HEAD
+names, which need not be main, so the first output line names it. The candidate is the HEAD commit, the
+index, and the working tree, each compared separately. A
 base that cannot be bound or read (a missing or ambiguous ref, a shallow clone, the file absent or not a
 regular mode 100644 file at the base, a root commit) and either side that is not a valid budget source
 are cannot-evaluate (exit 2). This guards against accidental edits; a candidate can also change this
@@ -1350,18 +1364,34 @@ def run(root):
 
 
 # --- change shape (--change-shape): the budget source compared with its base ------------------------
-# A routine ratchet update changes the ratchet value and, on a raise, adds one dated history entry
-# directly above the `#   ceiling` line; every other byte stays as it was. The comparison is byte-exact
-# with no whitespace normalisation. Older history entries are left opaque: only the new entry is held to
-# SHAPE_ENTRY_FIRST_RE. A shape this check accepts is not an approval: whether a raise is justified, or a
-# lowering keeps the headroom the 2026-10-29 entry protects, stays a review matter.
+# A routine ratchet update changes the ratchet value and, on each raise, appends one dated history entry
+# directly above the `#   ceiling` line; every other byte stays as it was. A comparison spanning several
+# raises (a push or a merge train carrying more than one) holds one appended entry per raise, compared
+# entry by entry: each opens `Raised OLD -> NEW on YYYY-MM-DD`, the first OLD is the base value, each
+# later OLD is the NEW of the entry before it, and the last NEW is the candidate value. The comparison is
+# byte-exact with no whitespace normalisation. Older history entries are left opaque: only the appended
+# entries are held to the entry grammar. A shape this check accepts is not an approval: whether a raise
+# is justified, or a lowering keeps the headroom the 2026-10-29 entry protects, stays a review matter.
 SHAPE_CEILING_ANCHOR = "#   ceiling "
 SHAPE_RATCHET_RE = re.compile(r"ratchet = ([0-9]+)\n", re.ASCII)
-# A history entry line: `#`, 24 spaces, then text that does not start with a space.
-SHAPE_ENTRY_INDENT = "#" + " " * 24
-SHAPE_ENTRY_FIRST_RE = re.compile(r"Raised ([0-9]+) -> ([0-9]+) on ([0-9]{4}-[0-9]{2}-[0-9]{2})(?: [^\n]*)?\n",
-                                  re.ASCII)
-SHAPE_ENTRY_START_RE = re.compile(r"Raised [0-9]", re.ASCII)
+# An appended entry line: `#`, exactly SHAPE_ENTRY_INDENT_WIDTH spaces, printable ASCII text (U+0020 to
+# U+007E) that neither starts nor ends with a space, then LF. Admitting printable ASCII alone refuses
+# every other blank or line-separator character (a tab, a CR, NEL, a no-break or ideographic space,
+# U+2028 and U+2029, a zero-width or bidi control) anywhere in the line.
+SHAPE_ENTRY_INDENT_WIDTH = 24
+SHAPE_ENTRY_LINE_RE = re.compile(r"#( +)([ -~]*)\n", re.ASCII)
+# An entry's first line. Its numbers are canonical: no leading zero, sign, or digit separator.
+SHAPE_NUMBER = r"[1-9][0-9]*"
+SHAPE_ENTRY_FIRST_RE = re.compile(
+    "Raised (" + SHAPE_NUMBER + ") -> (" + SHAPE_NUMBER + r") on ([0-9]{4}-[0-9]{2}-[0-9]{2})(?: [ -~]*)?",
+    re.ASCII)
+# An appended line whose text opens with the word "raised" in any letter case starts an entry and must be
+# a well-formed first line, so a second entry cannot pass as a continuation line of the one before it.
+SHAPE_ENTRY_START_RE = re.compile(r"Raised(?![A-Za-z0-9_])", re.ASCII | re.IGNORECASE)
+# A date written in the base above the `#   ceiling` line; the latest real one is the earliest date an
+# appended entry may carry. An entry dated later than the checking day (UTC) plus this slack is a finding.
+SHAPE_DATE_RE = re.compile(r"(?<![0-9])([0-9]{4}-[0-9]{2}-[0-9]{2})(?![0-9])", re.ASCII)
+SHAPE_DATE_SLACK_DAYS = 1
 # The bound exception: a reviewed declaration in the candidate that names the exact base and head bytes
 # of the budget source it excuses (a stale one, bound to other bytes, excuses nothing).
 SHAPE_EXCEPTION_REL = ".aiqt/core/instruction-budget-exception.toml"
@@ -1415,45 +1445,119 @@ def _shape_declaration(raw):
     return data["base-sha256"], data["head-sha256"]
 
 
-def _entry_findings(entry, first, old, new):
-    """Findings for the new history entry `entry` (its lines, the first at 1-based head line `first`) of a
-    raise `old` -> `new`: each line is SHAPE_ENTRY_INDENT, text, and an LF with no trailing blank; the
-    first reads `Raised OLD -> NEW on YYYY-MM-DD` with a real date; no later line starts a second entry."""
-    findings = []
-    if not entry:
+def _base_latest_date(lines):
+    """The latest real YYYY-MM-DD date written in `lines` (the base above its `#   ceiling` line), or None."""
+    latest = None
+    for line in lines:
+        for text in SHAPE_DATE_RE.findall(line):
+            try:
+                day = datetime.date.fromisoformat(text)
+            except ValueError:
+                continue
+            if latest is None or day > latest:
+                latest = day
+    return latest
+
+
+def _entry_findings(block, first, old, new, floor, today):
+    """Findings for the lines `block` appended directly above the `#   ceiling` line (the first at 1-based
+    head line `first`) while the ratchet moves `old` -> `new`. A raise needs at least one entry and every
+    other change none. Each appended line matches SHAPE_ENTRY_LINE_RE with exactly SHAPE_ENTRY_INDENT_WIDTH
+    spaces and no trailing space. The first line, and every later line whose text opens with "raised" in
+    any case, opens an entry and must read `Raised OLD -> NEW on YYYY-MM-DD` (SHAPE_ENTRY_FIRST_RE); entry
+    by entry, OLD is `old` for the first and the previous entry's NEW after it, NEW exceeds OLD, and the
+    last NEW is `new`. Each date is real, no earlier than `floor` (the base's latest date, None for no
+    bound) or an earlier entry's date, and no later than `today` plus SHAPE_DATE_SLACK_DAYS."""
+    if new <= old:
+        return ["line {}: a history entry was added, but the ratchet was not raised ({} -> {})".format(
+            first, old, new)] if block else []
+    if not block:
         return ["the raise {} -> {} has no history entry directly above the `{}` line".format(
             old, new, SHAPE_CEILING_ANCHOR.strip())]
-    for offset, line in enumerate(entry):
+    findings, reach, latest, opened, chained = [], old, floor, first, True
+    latest_day = today + datetime.timedelta(days=SHAPE_DATE_SLACK_DAYS)
+    for offset, line in enumerate(block):
         number = first + offset
-        body = line[len(SHAPE_ENTRY_INDENT):]
-        if (not line.startswith(SHAPE_ENTRY_INDENT) or not line.endswith("\n") or body[:1] in (" ", "\n")
-                or line[:-1] != line[:-1].rstrip(" \t")):
-            findings.append("line {}: a history entry line must be `#`, 24 spaces, text, and no trailing "
-                            "blank: {!r}".format(number, line))
-        elif offset == 0:
-            match = SHAPE_ENTRY_FIRST_RE.fullmatch(body)
-            if match is None or (int(match.group(1)), int(match.group(2))) != (old, new):
-                findings.append("line {}: the new entry must open `Raised {} -> {} on YYYY-MM-DD`: {!r}".format(
-                    number, old, new, line))
-            else:
-                try:
-                    datetime.date.fromisoformat(match.group(3))
-                except ValueError:
-                    findings.append("line {}: {} is not a real date".format(number, match.group(3)))
-        elif SHAPE_ENTRY_START_RE.match(body):
-            findings.append("line {}: a second history entry; a routine update adds exactly one: {!r}".format(
+        shape = SHAPE_ENTRY_LINE_RE.fullmatch(line)
+        if shape is None or len(shape.group(1)) != SHAPE_ENTRY_INDENT_WIDTH:
+            findings.append("line {}: an entry line must be `#`, {} spaces and printable ASCII text, then LF: "
+                            "{!r}".format(number, SHAPE_ENTRY_INDENT_WIDTH, line))
+            continue
+        body = shape.group(2)
+        if not body or body.endswith(" "):
+            findings.append("line {}: an entry line must have text and no trailing blank: {!r}".format(
                 number, line))
+            continue
+        if offset and not SHAPE_ENTRY_START_RE.match(body):
+            continue  # a continuation line of the entry above it
+        match = SHAPE_ENTRY_FIRST_RE.fullmatch(body)
+        if match is None:
+            findings.append("line {}: an entry must open `Raised OLD -> NEW on YYYY-MM-DD` (canonical "
+                            "numbers): {!r}".format(number, line))
+            chained = False
+            continue
+        low, high, opened = int(match.group(1)), int(match.group(2)), number
+        if chained and low != reach:
+            findings.append("line {}: this entry raises from {}, but the ratchet stood at {} before it".format(
+                number, low, reach))
+        if high <= low:
+            findings.append("line {}: an entry must raise the ratchet, not {} -> {}".format(number, low, high))
+        reach = high
+        try:
+            day = datetime.date.fromisoformat(match.group(3))
+        except ValueError:
+            findings.append("line {}: {} is not a real date".format(number, match.group(3)))
+            continue
+        if latest is not None and day < latest:
+            findings.append("line {}: {} is earlier than {}, the latest date in the base or an earlier "
+                            "entry".format(number, day, latest))
+        if day > latest_day:
+            findings.append("line {}: {} is later than the checking day {} (UTC)".format(number, day, today))
+        if latest is None or day > latest:
+            latest = day
+    if chained and reach != new:
+        findings.append("line {}: the entries raise the ratchet to {}, but the candidate's ratchet is {}".format(
+            opened, reach, new))
     return findings
 
 
-def compare_shape(base_raw, head_raw, declaration_raw=None):
+def _line_report(ops, base, head, base_from, head_from):
+    """A finding for each line of each non-equal difflib opcode in `ops`, which compare base lines from
+    index `base_from` with head lines from index `head_from`: a replacement of as many lines pairs them
+    one for one; otherwise each head line is reported added and each base line removed."""
+    report = []
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == "equal":
+            continue
+        if tag == "replace" and i2 - i1 == j2 - j1:
+            report += ["line {}: changed: base {!r} -> {!r}".format(head_from + j + 1, base[base_from + i],
+                                                                    head[head_from + j])
+                       for i, j in zip(range(i1, i2), range(j1, j2))]
+            continue
+        report += ["line {}: added: {!r}".format(head_from + j + 1, head[head_from + j]) for j in range(j1, j2)]
+        report += ["base line {}: removed: {!r}".format(base_from + i + 1, base[base_from + i])
+                   for i in range(i1, i2)]
+    return report
+
+
+def _opcodes(want, got):
+    return difflib.SequenceMatcher(None, want, got, autojunk=False).get_opcodes()
+
+
+def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
     """(findings, notes) for the budget source's change from the bytes `base_raw` to `head_raw`, with the
-    candidate's exception declaration `declaration_raw` (None when it has none). GateError (cannot
-    evaluate) when the base is absent or unreadable, either side is not a valid budget source, the base
-    lacks a unique `ratchet = N` line or `#   ceiling` line, or the declaration is malformed. Every
-    changed line outside the ratchet value and its new entry is a finding naming the line, unless a
-    declaration bound to these exact base and head bytes covers it; a declaration never waives the
-    entry a raise requires."""
+    candidate's exception declaration `declaration_raw` (None when it has none), on the checking day
+    `today` (None for the current UTC date). GateError (cannot evaluate) when the base is absent or
+    unreadable, either side is not a valid budget source, the base lacks a unique `ratchet = N` line or
+    `#   ceiling` line, or the declaration is malformed. The candidate is compared in two parts, the lines
+    above its one `#   ceiling` line and the rest, each with the matching part of the base (its ratchet
+    value replaced by the candidate's). Lines appended at the end of the upper part are the new entries
+    (_entry_findings); after a replacement there, the lines beyond the ones it pairs one for one. Every
+    other changed line is a finding naming the line (_line_report), unless a declaration bound to these
+    exact base and head bytes covers it; a declaration never waives the entry rules. A candidate without
+    exactly one `#   ceiling` line is compared whole and has no entry block."""
+    if today is None:
+        today = datetime.datetime.now(datetime.timezone.utc).date()
     base_text, base_data = _shape_text(base_raw, "the base " + BUDGET_REL)
     head_text, head_data = _shape_text(head_raw, "the candidate " + BUDGET_REL)
     old, new = base_data["ratchet"], head_data["ratchet"]
@@ -1465,39 +1569,27 @@ def compare_shape(base_raw, head_raw, declaration_raw=None):
     expected = list(base)
     expected[ratchet_at] = "ratchet = {}\n".format(new)
     anchors = [idx for idx, line in enumerate(head) if line.startswith(SHAPE_CEILING_ANCHOR)]
-    added = anchors[0] - ceiling_at if len(anchors) == 1 else -1
-    changed, entry = [], None
-    if added >= 0 and len(head) == len(base) + added:
-        # Aligned: the lines above the ceiling line, then `added` new lines, then the rest one for one.
-        entry = head[ceiling_at:ceiling_at + added]
-        for idx, want in enumerate(expected):
-            at = idx if idx < ceiling_at else idx + added
-            if head[at] != want:
-                changed.append("line {}: changed: base {!r} -> {!r}".format(at + 1, base[idx], head[at]))
+    findings, notes, block, start = [], [], None, None
+    if len(anchors) == 1:
+        at = anchors[0]
+        above = _opcodes(expected[:ceiling_at], head[:at])
+        block, start = [], at
+        tag, i1, i2, j1, j2 = above[-1] if above else ("equal", 0, 0, 0, 0)
+        if tag in ("insert", "replace") and (i2, j2) == (ceiling_at, at) and j2 - j1 > i2 - i1:
+            # Appended at the end of the upper part: past the lines a replacement pairs one for one.
+            start = j1 + (i2 - i1)
+            block = head[start:j2]
+            above[-1] = ("replace" if i2 > i1 else "equal", i1, i2, j1, start)
+        changed = (_line_report(above, base, head, 0, 0)
+                   + _line_report(_opcodes(expected[ceiling_at:], head[at:]), base, head, ceiling_at, at))
     else:
-        matcher = difflib.SequenceMatcher(None, expected, head, autojunk=False)
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-            if tag == "equal":
-                continue
-            for at in range(j1, j2):
-                changed.append("line {}: changed or added: {!r}".format(at + 1, head[at]))
-            for at in range(i1, i2):
-                changed.append("base line {}: changed or removed: {!r}".format(at + 1, base[at]))
-    findings, notes = [], []
-    if new > old:
-        if entry is not None:
-            findings += _entry_findings(entry, ceiling_at + 1, old, new)
-        else:
-            fresh = [at for at, line in enumerate(head) if line not in base and line.startswith(SHAPE_ENTRY_INDENT)
-                     and SHAPE_ENTRY_FIRST_RE.fullmatch(line[len(SHAPE_ENTRY_INDENT):]) is not None]
-            if len(fresh) != 1:
-                findings.append("the raise {} -> {} needs exactly one new `Raised {} -> {} on YYYY-MM-DD` "
-                                "entry; found {}".format(old, new, old, new, len(fresh)))
-            else:
-                findings += _entry_findings(head[fresh[0]:fresh[0] + 1], fresh[0] + 1, old, new)
-    elif entry:
-        findings.append("lines {}-{}: a history entry was added, but the ratchet was not raised ({} -> {})".format(
-            ceiling_at + 1, ceiling_at + len(entry), old, new))
+        changed = _line_report(_opcodes(expected, head), base, head, 0, 0)
+    if block is None:
+        if new > old:
+            findings.append("the raise {} -> {} has no entry block: the candidate has {} `{}` lines, not "
+                            "one".format(old, new, len(anchors), SHAPE_CEILING_ANCHOR.strip()))
+    else:
+        findings += _entry_findings(block, start + 1, old, new, _base_latest_date(base[:ceiling_at]), today)
     if new < old:
         notes.append("the ratchet was lowered {} -> {}; the shape is accepted, but whether the lowering keeps "
                      "the headroom the 2026-10-29 entry protects is for review".format(old, new))
@@ -1513,11 +1605,11 @@ def compare_shape(base_raw, head_raw, declaration_raw=None):
     return changed + findings, notes
 
 
-def shape_exit(name, base_raw, head_raw, declaration_raw=None):
-    """The exit status of one snapshot's comparison, its findings and notes printed: 0 accepted, 1 a
-    finding, 2 cannot evaluate."""
+def shape_exit(name, base_raw, head_raw, declaration_raw=None, today=None):
+    """The exit status of one snapshot's comparison (compare_shape), its findings and notes printed: 0
+    accepted, 1 a finding, 2 cannot evaluate."""
     try:
-        findings, notes = compare_shape(base_raw, head_raw, declaration_raw)
+        findings, notes = compare_shape(base_raw, head_raw, declaration_raw, today)
     except GateError as exc:
         print("error: change shape {}: {}; fail-closed".format(name, exc), file=sys.stderr)
         return 2
@@ -1568,15 +1660,18 @@ def _shape_index_entry(rc, root, path):
     return fields[0], rc.git(root, "cat-file", "blob", rc.oid(fields[1], path))
 
 
-def change_shape(root, protected=None, before=None):
+def change_shape(root, protected=None, before=None, today=None):
     """Compare the budget source with its base, the base check_release_cut.context binds for the event: a
     pull_request's merge commit against its raw first parent, which must be the target branch; a push
-    from the event's before commit to the pushed tip; a workflow_dispatch or schedule run's tip against
-    its raw first parent; locally, the unique merge base with the origin/HEAD target. The candidate is the
-    HEAD commit, the index and the working tree (so a clean working tree never certifies different staged
-    bytes), each read with its own exception declaration. In a commit or the index a mode other than the
-    base's 100644 is a finding. Exit 2 (cannot evaluate) when the base cannot be bound or read, never a
-    pass; a root commit with no base is cannot-evaluate too."""
+    from the event's before commit to the pushed tip; a workflow_dispatch run's tip against its raw first
+    parent (that gate also accepts a schedule run, which the Quality workflow does not trigger today);
+    locally, the unique merge base with the origin/HEAD target, or HEAD's raw first parent when HEAD is
+    that target. The local target is whatever branch origin/HEAD names, so the first output line names
+    the target ref. The candidate is the HEAD commit, the index and the working tree (so a clean working
+    tree never certifies different staged bytes), each read with its own exception declaration and
+    compared on the checking day `today` (None for the current UTC date). In a commit or the index a mode
+    other than the base's 100644 is a finding. Exit 2 (cannot evaluate) when the base cannot be bound or
+    read, never a pass; a root commit with no base is cannot-evaluate too."""
     import check_release_cut as rc  # loaded only by this mode, so the measurement keeps its imports
     try:
         repo, binding = rc.context(root, protected, before)
@@ -1600,16 +1695,29 @@ def change_shape(root, protected=None, before=None):
     except (GateError, rc.CannotEvaluate, OSError, ValueError) as exc:
         print("error: change shape: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
-    print("change shape: base {} ({} sha256 {}), head {}".format(
-        binding["base"], BUDGET_REL, hashlib.sha256(base_raw).hexdigest(), binding["head"]))
+    print("change shape: base {} ({} sha256 {}), head {}, target {}".format(
+        binding["base"], BUDGET_REL, hashlib.sha256(base_raw).hexdigest(), binding["head"],
+        binding["protected_ref"]))
     codes = []
     for name, mode, raw, declared in snapshots:
-        codes.append(shape_exit(name, base_raw, raw, declared))
+        codes.append(shape_exit(name, base_raw, raw, declared, today))
         if mode not in (None, base_mode) and raw is not None:
             print("FAIL: change shape {}: {} mode changed {} -> {}".format(
                 name, BUDGET_REL, base_mode.decode(), mode.decode()))
             codes.append(1)
     return max(codes)
+
+
+def shape_options(args):
+    """The {"--protected": REF, "--base": OID} options after --change-shape, or None when `args` is not
+    that grammar: each option at most once, in either order, with a non-empty value that does not start
+    with `-`, and nothing else."""
+    options, rest = {}, list(args)
+    while len(rest) >= 2 and rest[0] in ("--protected", "--base") and rest[0] not in options \
+            and rest[1] and not rest[1].startswith("-"):
+        options[rest[0]] = rest[1]
+        rest = rest[2:]
+    return None if rest else options
 
 
 # SELF-TEST: production code ends here; the red-on-revert mutations below target only the text above.
@@ -3025,37 +3133,47 @@ def self_test(report_path=None):
               ([_opened_fifo(run, r) for r in budget_fifos], [_opened_fifo(budget_first.run, r) for r in budget_fifos]),
               ([(2, False)] * 2, [(2, True)] * 2))
 
-        # Change shape (--change-shape): a base budget source and candidates derived from it. Each row
-        # asserts the exit and, for a finding, the line it names; the revert rows remove the check a row
-        # depends on in a mutant and require that row's outcome to change.
+        # Change shape (--change-shape): a base budget source and candidates derived from it, compared on
+        # a fixed checking day. Each row asserts the exit and the lines the findings name, in report order
+        # ("6" a candidate line, "base 6" a base line); each revert row removes the one check its row
+        # depends on in a mutant and requires that row's outcome to change.
+        shape_today = datetime.date(2026, 11, 16)
         indent = "#" + " " * 24
-        base_shape = ("# budget\n#\n#   ratchet              the PACK figure.\n"
-                      + indent + "Raised 90 -> 100 when the counting rule changed.\n"
-                      + "#   ceiling              a reported PACK figure.\n"
+        ceiling = "#   ceiling              a reported PACK figure.\n"
+        old_entry = indent + "Raised 90 -> 100 on 2026-10-01 when the counting rule changed.\n"
+        base_shape = ("# budget\n#\n#   ratchet              the PACK figure.\n" + old_entry + ceiling
                       + "#   claude-code-version  the build.\n" + _budget_text(100))
         entry = indent + "Raised 100 -> 150 on 2026-11-16 when a rule gained a paragraph.\n"
-        ceiling = "#   ceiling              a reported PACK figure.\n"
 
-        def raised(text, new_entry=entry):
-            return text.replace(ceiling, new_entry + ceiling).replace("ratchet = 100\n", "ratchet = 150\n")
+        def raised(text, new_entry=entry, ratchet=150):
+            return text.replace(ceiling, new_entry + ceiling).replace(
+                "ratchet = 100\n", "ratchet = {}\n".format(ratchet))
 
         def shape(base_text, head_text, declaration=None, module=None):
-            """(exit, the head line numbers the findings name) of one comparison."""
+            """(exit, the lines the findings name) of one comparison."""
             out = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
                 code = (module.shape_exit if module is not None else shape_exit)(
                     "fixture", base_text.encode("utf-8") if isinstance(base_text, str) else base_text,
-                    head_text.encode("utf-8"), None if declaration is None else declaration.encode("utf-8"))
-            return code, sorted(set(int(n) for n in re.findall(r"^  - line ([0-9]+):", out.getvalue(), re.M)))
+                    head_text.encode("utf-8"), None if declaration is None else declaration.encode("utf-8"),
+                    shape_today)
+            named = re.findall(r"^  - (base )?lines? ([0-9]+):", out.getvalue(), re.M)
+            return code, list(dict.fromkeys(prefix + number for prefix, number in named))
 
         def declare(base_text, head_text, reason="the loader version moved with this raise"):
             return 'base-sha256 = "{}"\nhead-sha256 = "{}"\nreason = "{}"\n'.format(
                 hashlib.sha256(base_text.encode("utf-8")).hexdigest(),
                 hashlib.sha256(head_text.encode("utf-8")).hexdigest(), reason)
 
+        def entry_line(text):
+            return indent + text + "\n"
+
+        def opened(date="2026-11-16", text="Raised 100 -> 150 on {} when a rule gained a paragraph"):
+            return entry_line(text.format(date))
+
         clean = raised(base_shape)
         stray = raised(base_shape).replace(ceiling, "#   ceiling             a reported PACK figure.\n")
-        second = raised(base_shape, entry + indent + "Raised 150 -> 160 on 2026-11-16 for another rule.\n")
+        past_ratchet = raised(base_shape, entry + entry_line("Raised 150 -> 160 on 2026-11-16 for another rule."))
         missing = base_shape.replace("ratchet = 100\n", "ratchet = 150\n")
         version_bump = clean.replace('"2.1.287"', '"2.1.288"')
         check("shape/clean-raise-0", shape(base_shape, clean), (0, []))
@@ -3063,33 +3181,288 @@ def self_test(report_path=None):
         check("shape/lower-only-0", shape(base_shape, base_shape.replace("ratchet = 100\n", "ratchet = 90\n")),
               (0, []))
         # The observed defect: a raise that also re-spaces the unrelated ceiling comment (line 6 after it).
-        check("shape/stray-whitespace-other-line-1", shape(base_shape, stray), (1, [6]))
-        check("shape/second-entry-1", shape(base_shape, second), (1, [6]))
+        check("shape/stray-whitespace-other-line-1", shape(base_shape, stray), (1, ["6"]))
+        check("shape/entry-chain-past-ratchet-1", shape(base_shape, past_ratchet), (1, ["6"]))
         check("shape/missing-entry-1", shape(base_shape, missing), (1, []))
         check("shape/unreadable-base-2", (shape(None, clean), shape(b"\xff" + base_shape.encode("utf-8"), clean)),
               ((2, []), (2, [])))
         check("shape/declared-exception-0", shape(base_shape, version_bump, declare(base_shape, version_bump)),
               (0, []))
-        check("shape/undeclared-other-line-1", shape(base_shape, version_bump), (1, [10]))
-        check("shape/stale-declaration-1", shape(base_shape, version_bump, declare(base_shape, clean)), (1, [10]))
+        check("shape/undeclared-other-line-1", shape(base_shape, version_bump), (1, ["10"]))
+        check("shape/stale-declaration-1", shape(base_shape, version_bump, declare(base_shape, clean)),
+              (1, ["10"]))
         no_entry_bump = missing.replace('"2.1.287"', '"2.1.288"')
         check("shape/declared-exception-keeps-entry-rule-1",
               shape(base_shape, no_entry_bump, declare(base_shape, no_entry_bump)), (1, []))
+        # Several raises in one comparison (a push or a merge train carrying two): one entry per raise,
+        # compared entry by entry, with continuation lines between them.
+        two_raises = raised(base_shape, opened("2026-11-15") + entry_line("(rows a.1 to a.3).")
+                            + entry_line("Raised 150 -> 200 on 2026-11-16 when another rule gained one."), 200)
+        check("shape/two-raises-entry-by-entry-0", shape(base_shape, two_raises), (0, []))
+        check("shape/entry-chain-gap-1",
+              shape(base_shape, raised(base_shape, entry + entry_line("Raised 160 -> 200 on 2026-11-16 for b."), 200)),
+              (1, ["6"]))
+        check("shape/entry-old-value-1", shape(base_shape, raised(base_shape, opened(text="Raised 99 -> 150 on {}"))),
+              (1, ["5"]))
+        check("shape/entry-new-value-1", shape(base_shape, raised(base_shape, opened(text="Raised 100 -> 151 on {}"))),
+              (1, ["5"]))
+        not_a_raise = raised(base_shape, entry + entry_line("Raised 150 -> 150 on 2026-11-16 for b."))
+        check("shape/entry-not-a-raise-1", shape(base_shape, not_a_raise), (1, ["6"]))
+        check("shape/entry-date-not-real-1", shape(base_shape, raised(base_shape, opened("2026-02-30"))), (1, ["5"]))
+        out_of_order = raised(base_shape, opened("2026-11-16")
+                              + entry_line("Raised 150 -> 200 on 2026-11-15 for b."), 200)
+        check("shape/entry-date-before-base-1",
+              (shape(base_shape, raised(base_shape, opened("2026-09-30"))),
+               shape(base_shape, raised(base_shape, opened("1970-01-01"))), shape(base_shape, out_of_order)),
+              ((1, ["5"]), (1, ["5"]), (1, ["6"])))
+        check("shape/entry-date-next-day-0", shape(base_shape, raised(base_shape, opened("2026-11-17"))), (0, []))
+        check("shape/entry-date-after-checking-day-1",
+              (shape(base_shape, raised(base_shape, opened("2026-11-18"))),
+               shape(base_shape, raised(base_shape, opened("2999-12-31")))),
+              ((1, ["5"]), (1, ["5"])))
+        unraised = base_shape.replace(ceiling, entry + ceiling)
+        lowered_entry = raised(base_shape, ratchet=90)
+        check("shape/entry-without-raise-1", (shape(base_shape, unraised), shape(base_shape, lowered_entry)),
+              ((1, ["5"]), (1, ["5"])))
+        trailing = raised(base_shape, entry.replace(".\n", ". \n"))
+        check("shape/entry-trailing-blank-1", shape(base_shape, trailing), (1, ["5"]))
+        short_indent = raised(base_shape, entry.replace(indent, "#" + " " * 23))
+        long_indent = raised(base_shape, entry.replace(indent, "#" + " " * 25))
+        check("shape/entry-indent-1", (shape(base_shape, short_indent), shape(base_shape, long_indent)),
+              ((1, ["5"]), (1, ["5"])))
+        # MEDIUM 3: every blank or separator outside printable ASCII, on a continuation line (line 6).
+        blanks = ["and its probe. ", "and its probe.　", "and its probe.\r", "\tand its probe.",
+                  " and its probe.", "and its ‮probe.", "and its probe.", "and its probe.",
+                  "and its\u0085probe.", "and its​probe.", "and its﻿probe.", "and its probe."]
+        blank_heads = [raised(base_shape, entry + indent + text + "\n") for text in blanks]
+        check("shape/entry-unicode-blank-1", [shape(base_shape, head) for head in blank_heads],
+              [(1, ["6"])] * len(blanks))
+        raised_word = [raised(base_shape, entry + entry_line(text)) for text in (
+            "raised 150 -> 160 on 2026-11-16 for b.", "Raised again 150 -> 160 on 2026-11-16 for b.",
+            "RAISED 150 -> 160 on 2026-11-16 for b.")]
+        check("shape/entry-raised-any-case-1", [shape(base_shape, head) for head in raised_word],
+              [(1, ["6"])] * 3)
+        padded = [raised(base_shape, opened(text=text)) for text in (
+            "Raised 0100 -> 150 on {}", "Raised 100 -> 0150 on {}", "Raised +100 -> 150 on {}")]
+        check("shape/entry-canonical-numbers-1", [shape(base_shape, head) for head in padded], [(1, ["5"])] * 3)
+        # Lines that do not line up with the base: a removed base line and an added line elsewhere.
+        removed = clean.replace("#   claude-code-version  the build.\n", "")
+        added = clean.replace("# budget\n", "# budget\n#   note\n")
+        check("shape/removed-line-reported-1", shape(base_shape, removed), (1, ["base 6"]))
+        check("shape/added-line-reported-1", shape(base_shape, added), (1, ["2"]))
+        # An entry placed away from the ceiling line is an added line, never read as the entry, also when a
+        # declaration covers it; an edit of the last old line before an appended entry can be declared.
+        misplaced = missing.replace("#\n#   ratchet", "#\n" + entry + "#   ratchet")
+        check("shape/declared-misplaced-entry-1",
+              (shape(base_shape, misplaced), shape(base_shape, misplaced, declare(base_shape, misplaced))),
+              ((1, ["3"]), (1, [])))
+        edited = raised(base_shape).replace(old_entry, old_entry.replace(" rule ", " rule  "))
+        check("shape/declared-edit-before-entry-0",
+              (shape(base_shape, edited), shape(base_shape, edited, declare(base_shape, edited))),
+              ((1, ["4"]), (0, [])))
+        check("shape/declaration-blank-reason-2",
+              (shape(base_shape, version_bump, declare(base_shape, version_bump, reason="   ")),
+               shape(base_shape, version_bump, declare(base_shape, version_bump) + 'extra = "x"\n')),
+              ((2, []), (2, [])))
+        check("shape/options-grammar",
+              [shape_options(args) for args in (
+                  [], ["--protected", "origin/main"], ["--base", "a1", "--protected", "origin/main"],
+                  ["--protected", "x", "--protected", "y"], ["--protected"], ["--protected", "-x"],
+                  ["--protected", ""], ["--bogus", "x"], ["--protected", "x", "extra"])],
+              [{}, {"--protected": "origin/main"}, {"--base": "a1", "--protected": "origin/main"}]
+              + [None] * 6)
+
         check("revert/shape-stray-whitespace-red",
-              shape(base_shape, stray, module=_mutant(tmp, "            if head[at] != want:\n",
-                                                       "            if head[at].split() != want.split():\n"))[0], 0)
-        check("revert/shape-second-entry-red",
-              shape(base_shape, second, module=_mutant(tmp, "        elif SHAPE_ENTRY_START_RE.match(body):\n",
-                                                        "        elif False:\n"))[0], 0)
+              shape(base_shape, stray, module=_mutant(
+                  tmp, '            report += ["line {}: changed: base {!r} -> {!r}"',
+                  '            report += [] and ["line {}: changed: base {!r} -> {!r}"'))[0], 0)
+        chain_end = _mutant(tmp, "    if chained and reach != new:\n", "    if False:\n")
+        check("revert/shape-entry-chain-end-red",
+              (shape(base_shape, past_ratchet, module=chain_end)[0],
+               shape(base_shape, raised(base_shape, opened(text="Raised 100 -> 151 on {}")), module=chain_end)[0]),
+              (0, 0))
         check("revert/shape-missing-entry-red",
-              shape(base_shape, missing, module=_mutant(tmp, "    if not entry:\n        return [",
-                                                         "    if False:\n        return ["))[0], 0)
+              shape(base_shape, missing, module=_mutant(
+                  tmp, '    if not block:\n        return ["the raise',
+                  '    if not block:\n        return [] and ["the raise'))[0], 0)
         check("revert/shape-unreadable-base-red",
               shape(None, clean, module=_mutant(tmp, '_shape_text(base_raw, "the base "',
                                                 '_shape_text(base_raw or head_raw, "the base "'))[0], 0)
         check("revert/shape-declaration-binding-red",
               shape(base_shape, version_bump, declare(base_shape, clean),
                     module=_mutant(tmp, "        if bound == digests:\n", "        if True:\n"))[0], 0)
+        check("revert/shape-entry-chain-step-red",
+              shape(base_shape, two_raises, module=_mutant(tmp, "        reach = high\n",
+                                                            "        reach = reach\n"))[0], 1)
+        check("revert/shape-entry-old-value-red",
+              shape(base_shape, raised(base_shape, opened(text="Raised 99 -> 150 on {}")), module=_mutant(
+                  tmp, "        if chained and low != reach:\n", "        if False:\n"))[0], 0)
+        check("revert/shape-entry-not-a-raise-red",
+              shape(base_shape, not_a_raise, module=_mutant(tmp, "        if high <= low:\n",
+                                                             "        if False:\n"))[0], 0)
+        check("revert/shape-entry-date-real-red",
+              shape(base_shape, raised(base_shape, opened("2026-02-30")), module=_mutant(
+                  tmp, '            findings.append("line {}: {} is not a real date".format(number, match.group(3)))\n',
+                  "            pass\n"))[0], 0)
+        check("revert/shape-entry-date-floor-red",
+              shape(base_shape, raised(base_shape, opened("2026-09-30")), module=_mutant(
+                  tmp, "        if latest is not None and day < latest:\n", "        if False:\n"))[0], 0)
+        check("revert/shape-entry-date-ceiling-red",
+              shape(base_shape, raised(base_shape, opened("2999-12-31")), module=_mutant(
+                  tmp, "        if day > latest_day:\n", "        if False:\n"))[0], 0)
+        check("revert/shape-entry-without-raise-red",
+              shape(base_shape, unraised, module=_mutant(tmp, "            first, old, new)] if block else []",
+                                                          "            first, old, new)] if False else []"))[0], 0)
+        check("revert/shape-entry-trailing-blank-red",
+              shape(base_shape, trailing, module=_mutant(tmp, '        if not body or body.endswith(" "):\n',
+                                                          "        if not body:\n"))[0], 0)
+        check("revert/shape-entry-indent-red",
+              [shape(base_shape, head, module=_mutant(
+                  tmp, "        if shape is None or len(shape.group(1)) != SHAPE_ENTRY_INDENT_WIDTH:\n",
+                  "        if shape is None:\n"))[0] for head in (short_indent, long_indent)], [0, 0])
+        check("revert/shape-entry-ascii-red",
+              shape(base_shape, blank_heads[0], module=_mutant(
+                  tmp, 'SHAPE_ENTRY_LINE_RE = re.compile(r"#( +)([ -~]*)\\n", re.ASCII)',
+                  'SHAPE_ENTRY_LINE_RE = re.compile(r"#( +)([^\\n]*)\\n", re.ASCII)'))[0], 0)
+        check("revert/shape-entry-raised-any-case-red",
+              shape(base_shape, raised_word[0], module=_mutant(tmp, "re.ASCII | re.IGNORECASE)", "re.ASCII)"))[0],
+              0)
+        check("revert/shape-entry-canonical-numbers-red",
+              shape(base_shape, padded[0], module=_mutant(tmp, 'SHAPE_NUMBER = r"[1-9][0-9]*"',
+                                                           'SHAPE_NUMBER = r"[0-9]+"'))[0], 0)
+        check("revert/shape-removed-line-red",
+              shape(base_shape, removed, module=_mutant(tmp, '        report += ["base line {}: removed: {!r}"',
+                                                         '        report += [] and ["base line {}: removed: {!r}"'))[0],
+              0)
+        check("revert/shape-added-line-red",
+              shape(base_shape, added, module=_mutant(tmp, '        report += ["line {}: added: {!r}"',
+                                                       '        report += [] and ["line {}: added: {!r}"'))[0], 0)
+        check("revert/shape-declared-edit-before-entry-red",
+              shape(base_shape, edited, declare(base_shape, edited), module=_mutant(
+                  tmp, '        if tag in ("insert", "replace") and', '        if tag in ("insert",) and'))[0], 1)
+        check("revert/shape-declaration-reason-red",
+              shape(base_shape, version_bump, declare(base_shape, version_bump, reason="   "), module=_mutant(
+                  tmp, '    if not isinstance(data["reason"], str) or not data["reason"].strip():',
+                  '    if not isinstance(data["reason"], str):'))[0], 0)
+        options_mutant = _mutant(tmp, 'rest[0] in ("--protected", "--base") and rest[0] not in options',
+                                 'rest[0] in ("--protected", "--base")')
+        check("revert/shape-options-duplicate-red", options_mutant.shape_options(["--protected", "x", "--protected", "y"]),
+              {"--protected": "y"})
+        check("revert/shape-options-dash-value-red", _mutant(
+            tmp, "and rest[1] and not rest[1].startswith(\"-\"):", "and rest[1]:").shape_options(["--protected", "-x"]),
+            {"--protected": "-x"})
+
+        # Change shape through git (change_shape): fixture repositories read through check_release_cut's
+        # hardened git, with every GitHub Actions variable removed (or set, for the pull_request leg).
+        import subprocess
+        import check_release_cut as release_cut
+        (tmp / "shape-git-home").mkdir()
+        git_env = release_cut.fixture_environment(tmp / "shape-git-home")
+
+        def git_fixture(repo, *args):
+            result = subprocess.run(
+                ["git", "-C", str(repo), "-c", "core.hooksPath=" + str(tmp / "shape-no-hooks"),
+                 "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", *args],
+                capture_output=True, env=git_env, timeout=60)
+            if result.returncode != 0:
+                print("SELF-TEST HARNESS ERROR: fixture git {} failed: {}".format(
+                    args[0], result.stderr.decode("utf-8", "replace").strip()), file=sys.stderr)
+                sys.exit(2)
+            return result.stdout.decode("ascii").strip()
+
+        def put(repo, text, stage=True):
+            (repo / BUDGET_REL).write_bytes(text.encode("utf-8"))
+            if stage:
+                git_fixture(repo, "add", "--", BUDGET_REL)
+
+        def shape_repo(name, executable=False):
+            """A repository whose main commit, origin/main and origin/HEAD hold base_shape (mode 100755 when
+            `executable`), on a new branch `feature`; returns (path, base commit)."""
+            repo = tmp / "shape-git" / name
+            (repo / BUDGET_REL).parent.mkdir(parents=True)
+            git_fixture(repo, "init", "-q", "-b", "main", "--template=")
+            put(repo, base_shape)
+            if executable:
+                git_fixture(repo, "update-index", "--chmod=+x", "--", BUDGET_REL)
+            git_fixture(repo, "commit", "-q", "-m", "base")
+            base_commit = git_fixture(repo, "rev-parse", "HEAD")
+            git_fixture(repo, "update-ref", "refs/remotes/origin/main", base_commit)
+            git_fixture(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+            git_fixture(repo, "switch", "-q", "-c", "feature")
+            return repo, base_commit
+
+        @contextlib.contextmanager
+        def actions_env(values):
+            names = ("CI", "GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "GITHUB_BASE_REF", "GITHUB_REF_NAME",
+                     "GITHUB_REF_TYPE", "PUSH_BEFORE")
+            saved = {name: os.environ.get(name) for name in names}
+            try:
+                for name in names:
+                    os.environ.pop(name, None)
+                os.environ.update(values)
+                yield
+            finally:
+                for name, value in saved.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+
+        def git_shape(repo, *args, module=None, env=None):
+            with actions_env(env or {}), contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                return (module.change_shape if module is not None else change_shape)(
+                    repo, *args, today=shape_today)
+
+        snapshot_mutant = "        for name in (\"HEAD\", \"index\", \"working tree\"):\n"
+        local, _ = shape_repo("local")
+        put(local, clean)
+        git_fixture(local, "commit", "-q", "-m", "raise")
+        clean_exit = git_shape(local)
+        put(local, stray, stage=False)
+        working = (git_shape(local), git_shape(local, module=_mutant(
+            tmp, snapshot_mutant, snapshot_mutant.replace(', "working tree"', ""))))
+        put(local, stray)
+        put(local, clean, stage=False)
+        index = (git_shape(local), git_shape(local, module=_mutant(
+            tmp, snapshot_mutant, snapshot_mutant.replace(', "index"', ""))))
+        put(local, clean)
+        restored_exit = git_shape(local)
+        mode_mutant = _mutant(tmp, "            codes.append(1)\n", "            codes.append(0)\n")
+        git_fixture(local, "update-index", "--chmod=+x", "--", BUDGET_REL)
+        index_mode = (git_shape(local), git_shape(local, module=mode_mutant))
+        git_fixture(local, "commit", "-q", "-m", "mode")
+        head_mode = (git_shape(local), git_shape(local, module=mode_mutant))
+        check("git/clean-raise-0", (clean_exit, restored_exit), (0, 0))
+        check("git/working-tree-snapshot-1", working[0], 1)
+        check("git/index-snapshot-1", index[0], 1)
+        check("git/mode-change-1", (index_mode[0], head_mode[0]), (1, 1))
+        check("revert/git-working-tree-snapshot-red", working[1], 0)
+        check("revert/git-index-snapshot-red", index[1], 0)
+        check("revert/git-mode-change-red", (index_mode[1], head_mode[1]), (0, 0))
+        # The base the event binds: a stray edit committed on a branch, read locally (the merge base with
+        # the origin/HEAD target), with --protected and --base, and as a pull_request merge.
+        merged, merged_base = shape_repo("merge")
+        put(merged, stray)
+        git_fixture(merged, "commit", "-q", "-m", "stray raise")
+        feature = git_fixture(merged, "rev-parse", "HEAD")
+        merge = git_fixture(merged, "commit-tree", git_fixture(merged, "rev-parse", feature + "^{tree}"),
+                            "-p", merged_base, "-p", feature, "-m", "PR merge")
+        git_fixture(merged, "update-ref", "HEAD", merge)
+        pull_request = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "pull_request", "GITHUB_BASE_REF": "main"}
+        check("git/base-binding-1",
+              (git_shape(merged), git_shape(merged, "origin/main", merged_base), git_shape(merged, env=pull_request)),
+              (1, 1, 1))
+        binding_mutant = _mutant(tmp, '_shape_tree_entry(rc, repo, binding["base_tree"], BUDGET_REL)',
+                                 '_shape_tree_entry(rc, repo, binding["head_tree"], BUDGET_REL)')
+        check("revert/git-base-binding-red",
+              (git_shape(merged, module=binding_mutant), git_shape(merged, env=pull_request, module=binding_mutant)),
+              (0, 0))
+        executable, _ = shape_repo("executable-base", executable=True)
+        git_fixture(executable, "commit", "-q", "--allow-empty", "-m", "next")
+        check("git/base-mode-2", git_shape(executable), 2)
+        check("revert/git-base-mode-red", git_shape(executable, module=_mutant(
+            tmp, '        if base_mode != b"100644":\n', "        if base_mode is None:\n")), 0)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -3128,9 +3501,14 @@ def self_test(report_path=None):
           "CLAUDE.md, .claude/CLAUDE.md and the budget source checked before they are opened, a non-regular rule "
           "file and a Windows 8.3 short name import exit 2 and no read blocking, an "
           "imported file's scope held to the grammar, the budget source "
-          "describing PACK, and the change shape: a clean raise, an unchanged or lowered source and a bound "
-          "exception pass, a stray edit on another line, a second entry, a missing entry and a stale "
-          "declaration exit 1 naming the line, and an absent or undecodable base exits 2); execution set "
+          "describing PACK, and the change shape: a clean raise, two raises compared entry by entry, an "
+          "unchanged or lowered source and a bound exception pass, a stray, added or removed line, an "
+          "entry chain that does not join the base and candidate values, an unreal, early or late date, "
+          "a padded number, a wrong indent, a trailing blank, a non-ASCII blank, a second entry in any "
+          "letter case, an entry without a raise, a missing or misplaced entry and a stale declaration "
+          "exit 1 naming the line, an absent or undecodable base and a blank declaration reason exit 2, "
+          "and through git the HEAD, index and working-tree snapshots, a mode change and the event's "
+          "base binding, a mode 100755 base exiting 2); execution set "
           "reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 
@@ -3142,15 +3520,10 @@ def main(argv):
         return self_test()
     if len(argv) == 2 and argv[0] == "--execution-report" and os.path.isabs(argv[1]):
         return self_test(argv[1])
-    if argv[0] == "--change-shape":
-        options, rest = {}, argv[1:]
-        while len(rest) >= 2 and rest[0] in ("--protected", "--base") and rest[0] not in options \
-                and rest[1] and not rest[1].startswith("-"):
-            options[rest[0]] = rest[1]
-            rest = rest[2:]
-        if not rest:
-            return change_shape(Path(__file__).resolve().parents[1], options.get("--protected"),
-                                options.get("--base"))
+    options = shape_options(argv[1:]) if argv[0] == "--change-shape" else None
+    if options is not None:
+        return change_shape(Path(__file__).resolve().parents[1], options.get("--protected"),
+                            options.get("--base"))
     print("usage: check_instruction_budget.py [--self-test | --execution-report ABS_PATH | "
           "--change-shape [--protected REF] [--base OID]]", file=sys.stderr)
     return 2

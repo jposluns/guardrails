@@ -1120,10 +1120,10 @@ jobs:
         run: python3 -I -B tools/check_instruction_budget.py
 
       # The budget source's change shape: a routine ratchet update changes only the ratchet value and,
-      # on a raise, adds one dated history entry above the ceiling line. The base is the one the
+      # on each raise, appends one dated history entry above the ceiling line. The base is the one the
       # release-cut gate binds: a pull_request compares its merge with the raw first parent, which must
       # be origin/$GITHUB_BASE_REF; a push compares the event's before commit with the pushed tip, the
-      # whole range at once; a workflow_dispatch or schedule run compares the tip with its first parent.
+      # whole range at once; a workflow_dispatch run compares the tip with its first parent.
       - name: Instruction budget change shape
         shell: bash
         env:
