@@ -11,8 +11,9 @@ and for every family, a path outside a declared workdir when the family's row sa
 (P2), or a pinned revision that a git command line of the listed subcommands (P5: clone, checkout, switch,
 reset, fetch, pull, worktree add, merge, rebase, restore --source, archive) reaches through a ref that can move with
 no later cure, or through a dispatch ref that resolves to another commit (P5), or an input the brief declares on an
-INPUT: line that does not exist on the host the lint runs on, or with --tree in the staged tree (P6), or a git
-command line whose subcommand is commit or push when the family's row says git-write = "no" (W1). The signal
+INPUT: line that does not exist on the host the lint runs on, or with --tree in the staged tree (P6), or, where
+the brief declares its revisions on a BRIEF-REVISIONS line, a hex word naming a commit it does not declare (P9), or
+a git command line whose subcommand is commit or push when the family's row says git-write = "no" (W1). The signal
 is structural, not certain: the lint fails closed, so some text a human would pass refuses (see RESIDUALS).
 Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY: its hits are printed so a
 human sees them, and it never refuses. For a family that can execute (`yes` or `read-only-sandbox`) no
@@ -353,6 +354,63 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        (exit 2), never a pass. Keyword-free residual prose is at most advisory: a line
                        holding the label outside a column-zero declaration prints one ADVISORY line, and
                        nothing is read at the pin for it.
+  P9 declared revisions HARD, for every family, opt-in. A declaration is one column-zero line of the raw brief
+                       text, `BRIEF-REVISIONS: <hex> [<hex> ...]`, its values separated by whitespace, each a
+                       commit id of 7 to 40 or 64 hex digits (hex_ref) that resolves to a commit in the
+                       repository the lint is pointed at (--repo; main passes this repository when --repo is
+                       absent), read as every P9 word is (revision_commit: git --no-lazy-fetch rev-parse under
+                       LC_ALL=C, hermetic, replace objects disabled, never fetching a missing object), once per
+                       distinct value (a value repeated in any case is one value).
+                       The DECLARED SET is the union of the BRIEF-PIN, REVIEWED HEAD and BRIEF-REVISIONS
+                       values. With a declaration, P9 splits every line of the raw text (prose, code spans,
+                       fences, web addresses, pin lines and the declaration itself alike) into words at every
+                       character that is not an ASCII letter or digit, so `a..b`, `^{commit}`, `~N` and a URL's
+                       path segments part words, and judges each word that is a commit id as a pin is written
+                       (hex_ref, any case), and the <hex> of a word g<hex> right after a hyphen, which git
+                       reads as that commit (git describe output: v1.2-3-g<hex>). A word in the declared set
+                       (pin_matches: it or a declared value is a prefix of the other, in any case) passes;
+                       any other is probed once per distinct word with git --no-lazy-fetch rev-parse of
+                       <word>^{commit} (hermetic, replace objects disabled, never fetching a missing object):
+                       one that names a commit there is HARD (exit 1), the message naming the word, the commit
+                       and the declared set, and one git answers cleanly names no commit (exit 1 and nothing
+                       printed for an absent object, or exit 1 and git's one expected-commit-type line, read
+                       under LC_ALL=C, for a blob or a tree; measured with git 2.53.0) is quiet; an ambiguous
+                       prefix is quiet only where git prints nothing for it (measured with git 2.53.0 for a
+                       7-hex prefix two commits share: exit 1, nothing printed; any text is CANNOT_EVALUATE).
+                       A brief with no BRIEF-REVISIONS line is not checked by P9 at all, whatever commits it
+                       names, and this is a residual of the opt-in design (see RESIDUALS). Two
+                       declaration lines, a column-zero label without its colon or with a glued suffix, a
+                       declaration with no value, more than P9_MAX_REVISIONS distinct declared values (counted
+                       before any value is resolved), a value that is not such a commit id (a branch name such
+                       as main) or does not resolve to one commit (unknown, ambiguous), a declaration with no
+                       repository to read, a repository git refuses for its ownership, a git that cannot be
+                       launched or times out, a probe that fails in any other way (a corrupt or unreadable
+                       object, text on stderr whatever the exit, a full commit id with exit 0 included, another
+                       exit, output that is no commit id; a git older than
+                       2.44 refuses --no-lazy-fetch), a word that names no commit present in a repository that
+                       is not whole (object_store_gap): an object store git cannot read whole, since git skips a
+                       pack it cannot open and answers an object held only there as absent, printing nothing
+                       (measured with git 2.53.0 for a missing or unreadable .idx or .pack), read through the
+                       common git directory and object directory git names (git rev-parse --git-common-dir and
+                       --git-path objects, never a .git path, so a linked worktree reads its main repository's
+                       store) as git count-objects -v run in that common git directory exiting 0 with a
+                       warning, a garbage count or fewer local packs than the .idx and .pack pairs present
+                       (whatever their names, as git opens them), an alternate it prints in quotes or not
+                       absolute, or a .idx with no .pack, a .pack with no .idx or a pack file this process
+                       cannot read, in the object directory or an alternate; a partial clone (its config holds
+                       extensions.partialClone or a remote.<name>.promisor entry, so the promisor remote may
+                       hold it); or a shallow clone (git rev-parse --is-shallow-repository answers true, or the
+                       shallow file of the common git directory exists), which lacks every commit beyond its
+                       shallow boundary; a shallow file this process cannot read (git answers one it cannot
+                       open as no shallow file, measured with git 2.53.0), a check of these git cannot answer
+                       cleanly, and more than P9_MAX_WORDS distinct undeclared hex words
+                       are CANNOT_EVALUATE (exit 2), never a pass. The label anywhere else (indented,
+                       mid-line) declares nothing and is not read.
+                       RESIDUAL: a brief names no repository the lint can read (a declared workdir is the
+                       worker's path and is never mapped to a checkout here), so the caller supplies --repo
+                       (main passes this repository when it is absent) and the git reads of P3, P5, P7 and P9
+                       resolve there unchecked against the brief, a mismatch made visible, not caught, by the
+                       `; repository: <path>` that ends every REFUSE and CANNOT_EVALUATE line of a brief run.
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
 sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
@@ -431,7 +489,29 @@ can be read as refs; a reach whose own arguments wrap onto the next line with no
 at a line's end, main on the next) is read without them, so it is not judged, and a code span across a line break
 is read as two lines; a tag force-moved after the lint runs is not seen; a dispatch ref written by hand that
 --repo cannot resolve is only ADVISORY, and the worker then fails closed at the fetch; and, like every rule, it
-helps only where the sender refuses to send on exit 1 or 2.
+helps only where the sender refuses to send on exit 1 or 2. P9 is opt-in, so a brief with no BRIEF-REVISIONS line
+is not judged; the declaration is written by the same author or generator as the rest of the brief, so a stale
+value carried into BRIEF-REVISIONS (or into a pin line) passes, and so does every word that shares a prefix with a
+declared value; a stale commit absent from a whole, full clone named by --repo (never fetched there) is quiet, and so is an ambiguous prefix where
+git answers it like an absent one, printing nothing; the lint knows a repository is not whole only from what git,
+the shallow file and the pack walk show, and runs no connectivity check, so a repository missing objects with no
+record of it (a shallow file or an object deleted by hand) reads as whole and a stale commit it lacks is quiet; a word of 6 hex digits or fewer, of 41 to 63, or of 65 or more is not judged; a
+commit id glued to other letters or digits in one word (<hex>s, v<hex>, x<hex>, or a percent escape such as %2F<hex>,
+whose 2F joins the hex digits, so git probes another word and answers it absent) is not read; a
+branch or tag named with hex digits alone resolves to its commit, so naming it undeclared refuses (the P5 residual's
+mirror image); a look-alike or fullwidth digit, a commit id split across a line break, and a commit named through a
+ref (main~1, HEAD^) are not read; nor are a commit id written 0x<hex>, one split by emphasis (**abcd**ef01234),
+one split by a format character inside code (decode_brief allows one there, and P9 reads the raw text), or a
+describe name with an upper-case G, which git does not read as one; in a repository that is not whole (a damaged
+object store, a partial clone, a shallow clone) every undeclared hex word that names no commit present there, a
+nonce or a digest included, exits 2 (repair it, or lint from a whole full clone), a remote.<name>.promisor entry
+set to false still counts, and so do a pack written or removed while the lint runs (a concurrent fetch, repack or
+gc) and a stray file git counts as garbage; the pack files are read as the lint's own uid, so a lint run as root
+reads a mode-000 pack (git run the same way reads it too), and damage inside a readable pack is seen only where
+git prints it; a probe that exits 0 or 1 with any text on stderr exits 2,
+even where git only warned; the BRIEF-PIN and REVIEWED HEAD values are still resolved by P3 with git's default
+lazy fetch, so in a partial clone that read can fetch; round ids, item counts and other prose are outside it; and
+the lint reads one brief and never the previous round's.
 
 GIT WRITE (beside the preflight, for every family, before the execution rules' early return for a family that can
 execute):
@@ -581,12 +661,17 @@ not one, so "do not run, build or install" stays negated.
 Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one summary line:
 
   exit 0  OK               no HARD hit (INFO and ADVISORY findings may be printed).
-  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5, P6 or W1). Rewrite the brief, or send the
-                           item to a family that can execute (S1 to S3), name paths it can read (P2) or, after the
-                           reach, add the cure line the hit gives (git -C <dir> checkout --detach <pin>^{commit}) or
-                           reach the pin by a dispatch ref (P5), or provide each missing declared input or correct
-                           its INPUT line (P6), or drop the git commit or push, state it in the PROHIBITED shape, or
-                           send it to a family that can write (W1).
+  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5, P6, P7, P9 or W1). Rewrite the brief, or
+                           send the item to a family that can execute (S1 to S3), name paths it can read (P2) or,
+                           after the reach, add the cure line the hit gives (git -C <dir> checkout --detach
+                           <pin>^{commit}) or reach the pin by a dispatch ref (P5), or provide each missing declared
+                           input or correct its INPUT line (P6), or correct each ACCEPTED-RESIDUAL line or re-pin
+                           (P7), or replace each undeclared hex word with a declared revision or add it to the
+                           BRIEF-REVISIONS line (P9), or drop the git commit or push, state it in the PROHIBITED
+                           shape, or send it to a family that can write (W1).
+                           Whichever summary the REFUSE line prints, it carries the P6, P7 and P9 hint for
+                           each of those rules among the hard hits; hits of more than one of P6, P7 and P9 with
+                           no other HARD rule print one mixed summary carrying each of their hints.
                            When a hit is a command line (S2 or S3), the REFUSE line
                            says how to rewrite: name the function, row or entry instead of embedding the
                            command (quote the def line of X, not the line that runs git push).
@@ -594,11 +679,19 @@ Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one su
                            blank; a scope range runs backwards; a pinned revision does not resolve or
                            cannot be read (P3); an INPUT line P6 cannot check, a look-alike input label, a
                            brief the shared reading's vendored parser cannot read, or a
-                           declared input that exists but cannot be confirmed readable (P6); the family is not
-                           in the table; the
+                           declared input that exists but cannot be confirmed readable (P6); a malformed
+                           ACCEPTED-RESIDUAL declaration or pinned content that cannot be read (P7); two
+                           BRIEF-REVISIONS lines, a malformed one, a value that is not a commit id or does not
+                           resolve, a declaration with no repository, a hex word git cannot read or a repository
+                           that is not whole (a damaged object store, a partial or a shallow clone) lacks, a
+                           shallow file the lint cannot read, or too many declared values or hex words to
+                           probe (P9); the
+                           family is not in the table; the
                            table is missing, unreadable, or malformed (format-version must be the
                            integer 1); or the arguments are wrong (a repeated --family or --table
                            included). A brief that cannot be evaluated is never OK.
+  Every REFUSE and CANNOT_EVALUATE line of a brief run ends with `; repository: <path>`, the repository the
+  git reads resolve in (--repo, else this repository; none when no repository was given).
 
 Run with no arguments, it lints no brief: it validates the shipped capability table only and exits 0
 when the table is valid, 2 when it is not.
@@ -3671,6 +3764,462 @@ def rule_p7(names, row, repo):
     return [finding for finding in findings if finding is not None] + advisory
 
 
+# ---------- P9: declared revisions ----------
+# a declaration is a column-zero line of the raw brief text: BRIEF-REVISIONS: <hex> [<hex> ...]
+REVISIONS_LABEL = "BRIEF-REVISIONS"
+# a brief declares its revisions on at most this many lines; a second line is CannotEvaluate
+P9_MAX_DECLARATIONS = 1
+# at most this many distinct undeclared hex words are probed in the repository; more is CannotEvaluate
+P9_MAX_WORDS = 256
+# at most this many distinct declared values (declared_values) are resolved in the repository; more is
+# CannotEvaluate, counted before any value is resolved
+P9_MAX_REVISIONS = 256
+# a word of the raw text: a run of ASCII letters and digits, so `a..b`, `^{commit}`, `~N`, a URL's path
+# segments, code-span backticks and every other character split words
+HEX_WORD_RE = re.compile(r"[0-9A-Za-z]++")
+# what a P9 git read raises when git cannot be launched or times out; each is CannotEvaluate
+GIT_RUN_ERRORS = (OSError, subprocess.SubprocessError)
+# the global options of P9's object probes: never fetch a missing object from a promisor remote (git 2.44 or
+# later; an older git refuses the option, which is CannotEvaluate)
+P9_NO_FETCH_OPTIONS = ("--no-lazy-fetch",)
+# the repository config keys (git's own regular expression, matched against the lower-cased key) that make a
+# repository a partial clone, one whose promisor remote may hold objects it lacks
+PROMISOR_CONFIG_KEYS = r"^(extensions\.partialclone|remote\..*\.promisor)$"
+
+
+def _rev_parse_local(repo, rev):
+    """_rev_parse with P9_NO_FETCH_OPTIONS: git rev-parse of `rev` as a commit in `repo` that never fetches a
+    missing object from a promisor remote, so a P9 probe reads only the objects `repo` holds and never writes
+    into its object store. LC_ALL=C keeps git's messages untranslated, so _not_a_commit can read them."""
+    return subprocess.run(["git", "--no-replace-objects"] + list(P9_NO_FETCH_OPTIONS)
+                          + ["-C", str(repo), "rev-parse", "--verify", "--quiet", rev + "^{commit}"],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=dict(_no_replace_env(), LC_ALL="C"))
+
+
+def _promisor_probe(repo):
+    """git config --get-regexp of PROMISOR_CONFIG_KEYS in `repo` under _no_replace_env(), output captured."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "config", "--null", "--get-regexp",
+                           PROMISOR_CONFIG_KEYS],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_no_replace_env())
+
+
+def _p9_git(repo, what, read):
+    """The completed git read `read()` for P9, or CannotEvaluate naming `what` when git cannot be launched or
+    times out (GIT_RUN_ERRORS), or refuses the repository for its ownership."""
+    try:
+        probe = read()
+    except GIT_RUN_ERRORS as exc:
+        raise CannotEvaluate("{}: cannot run git in {}: {}".format(what, repo, exc))
+    if _ownership_refused(probe):
+        raise CannotEvaluate("{}: cannot read {}: {}".format(what, repo, OWNERSHIP_REMEDY))
+    return probe
+
+
+def _absent_answer(probe):
+    """Whether a git read answered cleanly that there is nothing to report: exit 1 with nothing printed on
+    either stream, as git rev-parse --verify --quiet answers for an absent object, and git config
+    --get-regexp for no matching key (measured with git 2.53.0). Any other failure (a corrupt or unreadable
+    object, text on stderr, another exit) is not this answer."""
+    return probe.returncode == 1 and not probe.stdout.strip() and not probe.stderr.strip()
+
+
+# git rev-parse's one line, under LC_ALL=C, for <rev>^{commit} where <rev> names an object of another type
+NOT_A_COMMIT_ERROR = "error: {}^{{commit}}: expected commit type, but the object dereferences to {} type"
+
+
+def _not_a_commit(probe, rev):
+    """Whether git answered cleanly that `rev` names a blob or a tree, not a commit: exit 1, nothing on stdout,
+    and exactly NOT_A_COMMIT_ERROR on stderr (measured with git 2.53.0; even --quiet prints it)."""
+    stderr = probe.stderr.decode("utf-8", "replace").strip()
+    return (probe.returncode == 1 and not probe.stdout.strip()
+            and stderr in [NOT_A_COMMIT_ERROR.format(rev, kind) for kind in ("blob", "tree")])
+
+
+def _full_commit(text):
+    """Whether git printed a full commit id: 40 or 64 hex digits."""
+    return len(text) in (40, 64) and hex_ref(text)
+
+
+def _probe_failure(what, repo, probe):
+    """The CannotEvaluate for a P9 git read that failed in a way that is not the clean answer."""
+    stderr = probe.stderr.decode("utf-8", "replace").strip()
+    return CannotEvaluate("{}: git failed in {} (exit {}){}".format(
+        what, repo, probe.returncode, ": " + _excerpt(stderr) if stderr else ", printing no commit id"))
+
+
+def partial_clone(repo):
+    """Whether `repo` is a partial clone (its config holds a PROMISOR_CONFIG_KEYS key, whatever its value), whose
+    promisor remote may hold an object `repo` lacks. git's clean no-match answer (_absent_answer) is False; a
+    read that fails any other way is CannotEvaluate."""
+    probe = _p9_git(repo, "partial clone check", lambda: _promisor_probe(repo))
+    if _absent_answer(probe):
+        return False
+    if probe.returncode == 0 and probe.stdout.strip():
+        return True
+    raise _probe_failure("partial clone check", repo, probe)
+
+
+def _shallow_probe(repo):
+    """git rev-parse --is-shallow-repository in `repo` under _no_replace_env() and LC_ALL=C, output captured.
+    The argv is spelled out literally, as every git read of this file is, so the F-367 maintenance-pin scan
+    (tools/selftest_git_fixture_env.py) resolves its subcommand."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "rev-parse", "--is-shallow-repository"],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=dict(_no_replace_env(), LC_ALL="C"))
+
+
+def _store_dirs_probe(repo):
+    """git rev-parse of the absolute paths of the common git directory and the object directory of `repo`, one
+    per line, under _no_replace_env() and LC_ALL=C, output captured: in a linked worktree the common git
+    directory is the main repository's, which holds the objects and the shallow file (measured with git
+    2.53.0). The argv is literal, as in _shallow_probe."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "rev-parse", "--path-format=absolute",
+                           "--git-common-dir", "--git-path", "objects"],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=dict(_no_replace_env(), LC_ALL="C"))
+
+
+def _count_objects_probe(common):
+    """git count-objects -v with the common git directory `common` (store_dirs) as its git directory, under
+    _no_replace_env() and LC_ALL=C: its local loose and pack counts, its garbage count, a warning on stderr for
+    each garbage file, and one `alternate: <path>` line per alternate object directory. Run in a linked
+    worktree, git also counts the worktree's own refs directory as garbage (measured with git 2.53.0), which is
+    no part of the object store, so the count is read from the common git directory. The git directory is
+    passed as the separate value slot of --git-dir (git reads `--git-dir <path>` as `--git-dir=<path>`), so the
+    F-367 maintenance-pin scan resolves the subcommand past it."""
+    return subprocess.run(["git", "--no-replace-objects", "--git-dir", str(common), "count-objects", "-v"],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, cwd=common,
+                          env=dict(_no_replace_env(), LC_ALL="C"))
+
+
+def _clean_answer(repo, what, probe):
+    """The stdout lines of a P9 git read that exited 0 with nothing on stderr, else CannotEvaluate."""
+    probe = _p9_git(repo, what, lambda: probe(repo))
+    if probe.returncode != 0 or probe.stderr.strip():
+        raise _probe_failure(what, repo, probe)
+    return probe.stdout.decode("utf-8", "replace").splitlines()
+
+
+def store_dirs(repo):
+    """(common git directory, object directory) of `repo`, each an absolute path git names (_store_dirs_probe),
+    never one built from a .git path; CannotEvaluate when git does not answer cleanly with two absolute paths,
+    or names an object directory other than the common git directory's objects, which git count-objects run
+    there reads (_count_objects_probe)."""
+    answer = _clean_answer(repo, "object store check", _store_dirs_probe)
+    if len(answer) != 2 or not all(path.startswith("/") for path in answer):
+        raise CannotEvaluate("object store check: git named no absolute common git directory and object "
+                             "directory in {}".format(repo))
+    common, objects = answer
+    if os.path.normpath(objects) != os.path.join(os.path.normpath(common), "objects"):
+        raise CannotEvaluate("object store check: git names the object directory {} outside the common git "
+                             "directory {} in {}".format(_excerpt(objects), _excerpt(common), repo))
+    return common, objects
+
+
+def _shallow_file(common):
+    """Whether the shallow file of the common git directory `common` exists, read here directly: git keeps it
+    there for every worktree (measured with git 2.53.0), and git answers a shallow file it cannot open as no
+    shallow file, printing nothing (git rev-parse --is-shallow-repository answers false for a mode-000 one;
+    measured with git 2.53.0). An absent file is False; one that is not a regular file or that this process
+    cannot read is CannotEvaluate."""
+    path = os.path.join(common, "shallow")
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            raise CannotEvaluate("shallow clone check: {} is not a regular file".format(path))
+        with open(path, "rb") as handle:
+            handle.read(1)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise CannotEvaluate("shallow clone check: cannot read {}: {}; git answers a shallow file it cannot "
+                             "open as no shallow file".format(path, exc.strerror or exc))
+    return True
+
+
+def shallow_clone(repo, common):
+    """Whether `repo` is a shallow clone, which lacks every commit beyond its shallow boundary: git rev-parse
+    --is-shallow-repository answers true, or the shallow file of its common git directory `common` exists
+    (_shallow_file). git's answer must be exactly true or false, and an unreadable shallow file is
+    CannotEvaluate."""
+    answer = _clean_answer(repo, "shallow clone check", _shallow_probe)
+    if answer not in (["true"], ["false"]):
+        raise CannotEvaluate("shallow clone check: git answered {!r} in {}, neither true nor false".format(
+            _excerpt(" ".join(answer)), repo))
+    return _shallow_file(common) or answer == ["true"]
+
+
+def _pack_stems(directory):
+    """{stem: set of suffixes} for the *.idx and *.pack entries of `directory` (a pack/ directory), whatever
+    their names: git opens any .idx with its .pack, not only pack-* ones (measured with git 2.53.0: a pack
+    renamed stale.idx and stale.pack is counted and read). An absent directory holds none, and any other
+    listing error raises OSError."""
+    stems = {}
+    try:
+        entries = [entry.name for entry in os.scandir(directory)]
+    except FileNotFoundError:
+        return stems
+    for name in entries:
+        for suffix in (".idx", ".pack"):
+            if name.endswith(suffix):
+                stems.setdefault(name[:-len(suffix)], set()).add(suffix)
+    return stems
+
+
+def _pack_damage(objects):
+    """None when every pack of the object directory `objects` is whole and readable here, else why not: each
+    .idx (_pack_stems, whatever its name) has its .pack and each .pack its .idx, and each is a regular file
+    whose first byte this process reads. git skips a pack whose index or data it cannot open and then answers a
+    lookup of an object
+    held only there as it answers an absent one, exit 1 and nothing printed (measured with git 2.53.0 for an
+    unreadable .idx, an unreadable .pack, a missing .pack and a missing .idx), so P9 reads the files itself."""
+    directory = os.path.join(objects, "pack")
+    try:
+        stems = _pack_stems(directory)
+    except OSError as exc:
+        return "cannot list {}: {}".format(directory, exc.strerror or exc)
+    for stem, suffixes in sorted(stems.items()):
+        for suffix in (".idx", ".pack"):
+            path = os.path.join(directory, stem + suffix)
+            if suffix not in suffixes:
+                return "{} is missing".format(path)
+            try:
+                if not stat.S_ISREG(os.stat(path).st_mode):
+                    return "{} is not a regular file".format(path)
+                with open(path, "rb") as handle:
+                    if not handle.read(1):
+                        return "{} is empty".format(path)
+            except OSError as exc:
+                return "cannot read {}: {}".format(path, exc.strerror or exc)
+    return None
+
+
+def _count_objects_fields(repo, lines):
+    """({key: value}, [alternate]) for git count-objects -v output lines, or CannotEvaluate when a line is not
+    `key: value` or the packs or garbage count is missing or not a number."""
+    fields, alternates = {}, []
+    for line in lines:
+        key, colon, value = line.partition(": ")
+        if not colon:
+            raise CannotEvaluate("object store check: git count-objects printed {!r} in {}".format(
+                _excerpt(line), repo))
+        if key == "alternate":
+            alternates.append(value)
+        else:
+            fields[key] = value
+    for key in ("packs", "garbage"):
+        if not fields.get(key, "").isdigit() or not fields[key].isascii():
+            raise CannotEvaluate("object store check: git count-objects printed no {} count in {}".format(
+                key, repo))
+    return fields, alternates
+
+
+def _count_objects_damage(fields, packs, stderr):
+    """None when git count-objects -v (exit 0) found its object store whole, else why not: a warning on `stderr`
+    (git warns of each garbage file there, an alternate's included: a .idx with no .pack, a .pack with no .idx,
+    a stray file; measured with git 2.53.0), a garbage count, or a local pack count other than the `packs`
+    .idx and .pack pairs present (_pack_stems; git opens a pack only through its index: an unreadable .idx
+    counts no pack, measured with git 2.53.0)."""
+    if stderr.strip():
+        return "git count-objects warned: {}".format(_excerpt(stderr.decode("utf-8", "replace")))
+    if fields["garbage"] != "0":
+        return "git count-objects counts {} garbage file(s) in its object store".format(fields["garbage"])
+    if int(fields["packs"]) != packs:
+        return "git count-objects opens {} of the {} local pack(s)".format(fields["packs"], packs)
+    return None
+
+
+def _store_damage(repo, common, objects):
+    """None when `repo`'s object store (the object directory `objects` of its common git directory `common`,
+    store_dirs), its alternates included, is whole and readable here, else why not: git count-objects -v's
+    warnings and counts, read in the common git directory (_count_objects_probe, _count_objects_damage), an
+    alternate path it prints in quotes or not absolute (not read here), and the pack files of the object
+    directory and of every alternate (_pack_damage). A git read that fails or prints what this check does not
+    read is CannotEvaluate."""
+    probe = _p9_git(repo, "object store check", lambda: _count_objects_probe(common))
+    if probe.returncode != 0:
+        raise _probe_failure("object store check", repo, probe)
+    fields, alternates = _count_objects_fields(repo, probe.stdout.decode("utf-8", "replace").splitlines())
+    for alternate in alternates:
+        if not alternate.startswith("/"):
+            return "the alternate object directory {!r} is not a plain absolute path".format(_excerpt(alternate))
+    for directory in [objects] + alternates:
+        damage = _pack_damage(directory)
+        if damage:
+            return damage
+    try:
+        packs = len(_pack_stems(os.path.join(objects, "pack")))
+    except OSError as exc:
+        return "cannot list the packs of {}: {}".format(objects, exc.strerror or exc)
+    return _count_objects_damage(fields, packs, probe.stderr)
+
+
+def object_store_gap(repo):
+    """None when git's clean absent answer (_absent_answer) in `repo` means the object is absent, else why it
+    may not: an object store that is not whole or not readable here (_store_damage, read through the common
+    git directory and object directory git names, store_dirs, so a linked worktree reads its main repository's
+    store), a partial clone (partial_clone), whose promisor remote may hold the object, or a shallow clone
+    (shallow_clone), which lacks every commit beyond its shallow boundary. A check git cannot answer cleanly
+    and a shallow file this process cannot read are CannotEvaluate."""
+    common, objects = store_dirs(repo)
+    damage = _store_damage(repo, common, objects)
+    if damage:
+        return ("a repository whose object store git cannot read whole ({}); git answers an object held only in "
+                "a pack it cannot open as absent, so repair the repository or lint from a whole clone".format(damage))
+    if partial_clone(repo):
+        return "a partial clone: its promisor remote may hold one, and the lint never fetches; lint from a full clone"
+    if shallow_clone(repo, common):
+        return ("a shallow clone: it lacks every commit beyond its shallow boundary, and the lint never fetches; "
+                "lint from a full clone")
+    return None
+
+
+def revision_value_ok(value):
+    """Whether a BRIEF-REVISIONS value is a commit id as a pin is written (hex_ref): a branch, a tag or any
+    other name is not, since a name can move."""
+    return hex_ref(value)
+
+
+def revision_declarations(raw):
+    """[(line, [value])] for the BRIEF-REVISIONS declarations of the raw brief text: a column-zero line
+    `BRIEF-REVISIONS: <hex> [<hex> ...]`, its values separated by whitespace. A column-zero line that opens
+    with the label but not with `BRIEF-REVISIONS:` (another separator, a glued suffix), a declaration with no
+    value, and a value that is not a commit id (revision_value_ok) are CannotEvaluate, never ignored. The
+    label anywhere else (indented, mid-line) declares nothing."""
+    declarations = []
+    for number, line in enumerate(raw.split("\n"), 1):
+        if not line.startswith(REVISIONS_LABEL):
+            continue
+        rest = line[len(REVISIONS_LABEL):]
+        if not rest.startswith(":"):
+            raise CannotEvaluate("line {}: a column-zero {} line is not a declaration; write {}: <hex> "
+                                 "[<hex> ...]".format(number, REVISIONS_LABEL, REVISIONS_LABEL))
+        values = rest[1:].split()
+        if not values:
+            raise CannotEvaluate("line {}: a {} line with no value; write {}: <hex> [<hex> ...]".format(
+                number, REVISIONS_LABEL, REVISIONS_LABEL))
+        for value in values:
+            if not revision_value_ok(value):
+                raise CannotEvaluate("line {}: the {} value {!r} is not a commit id of 7 to 40 or 64 hex "
+                                     "digits".format(number, REVISIONS_LABEL, _excerpt(value)))
+        declarations.append((number, values))
+    return declarations
+
+
+def declared_values(declarations):
+    """The distinct values of the BRIEF-REVISIONS declarations (revision_declarations), in the order they first
+    appear, each in its first spelling: a value repeated in any case is one value, resolved once."""
+    distinct = {}
+    for _, values in declarations:
+        for value in values:
+            distinct.setdefault(value.lower(), value)
+    return list(distinct.values())
+
+
+def _describe_hex(line, word):
+    """Whether the word `word` (a HEX_WORD_RE match in `line`) is the g<hex> tail of a git describe name
+    (v1.2-3-g<hex>): a lower-case g right after a hyphen, then a commit id as a pin is written, which git
+    rev-parse reads as the commit <hex> names."""
+    text = word.group(0)
+    return text.startswith("g") and line[word.start() - 1:word.start()] == "-" and hex_ref(text[1:])
+
+
+def hex_words(raw):
+    """[(line, word)] for every word of the raw brief text (HEX_WORD_RE) that is a commit id as a pin is
+    written (hex_ref: 7 to 40 or 64 hex digits, any case), and the <hex> of every describe tail g<hex>
+    (_describe_hex), on every line: prose, code spans, fences, web addresses, pin lines and the declaration
+    itself alike."""
+    found = []
+    for number, line in enumerate(raw.split("\n"), 1):
+        for word in HEX_WORD_RE.finditer(line):
+            if hex_ref(word.group(0)):
+                found.append((number, word.group(0)))
+            elif _describe_hex(line, word):
+                found.append((number, word.group(0)[1:]))
+    return found
+
+
+def revision_commit(repo, word, gap=None):
+    """The full commit id a hex word names in `repo`, or None when git answers cleanly that it names none:
+    git rev-parse (_rev_parse_local: hermetic, replace objects disabled, never fetching) answers exit 1 and
+    nothing printed (_absent_answer) for an absent object, and exit 1 with its one not-a-commit line
+    (_not_a_commit) for a blob or a tree (measured with git 2.53.0). Where `repo` is not whole (`gap`, the
+    reason object_store_gap gives: a damaged or unreadable object store, a partial clone, a shallow clone) the
+    absent answer is CannotEvaluate, since the object may exist where git cannot read it. A repository git
+    refuses for its ownership, a git that cannot be launched or times out, and every other failure (a
+    corrupt or unreadable object, other text on stderr, even beside exit 0 and a full commit id, another exit,
+    output that is no full commit id) are CannotEvaluate, never a quiet pass."""
+    what = "hex word {}".format(word)
+    probe = _p9_git(repo, what, lambda: _rev_parse_local(repo, word))
+    if _not_a_commit(probe, word):
+        return None
+    if _absent_answer(probe):
+        if gap:
+            raise CannotEvaluate("{} names no commit present in {}, {}".format(what, repo, gap))
+        return None
+    commit = probe.stdout.decode("ascii", "replace").strip()
+    if probe.returncode == 0 and _full_commit(commit) and not probe.stderr.strip():
+        return commit
+    raise _probe_failure(what, repo, probe)
+
+
+def declared_commit(repo, value, gap):
+    """The commit a BRIEF-REVISIONS value names (revision_commit), or CannotEvaluate when it names none."""
+    commit = revision_commit(repo, value, gap)
+    if commit is None:
+        raise CannotEvaluate("the {} value {} does not resolve to a commit in {}".format(REVISIONS_LABEL, value,
+                                                                                         repo))
+    return commit
+
+
+def rule_p9(names, row, repo):
+    """P9 HARD, for every family, opt-in: where the brief declares its revisions (revision_declarations: one
+    column-zero BRIEF-REVISIONS: <hex> [<hex> ...] line), every hex word of the raw text (hex_words) that names
+    a commit in `repo` (revision_commit) and is not in the declared set refuses. The declared set is the union
+    of the BRIEF-PIN, REVIEWED HEAD and BRIEF-REVISIONS values, and a word is in it when it and a declared value
+    name the same commit by their spelling (pin_matches: either a prefix of the other, in any case). A hex word
+    that names no commit there (absent, ambiguous, a blob or a tree) is quiet. With no declaration the rule is
+    quiet. Each distinct declared value (declared_values: a value repeated in any case is one) is resolved
+    once. More than P9_MAX_DECLARATIONS declaration lines, a malformed declaration, more than P9_MAX_REVISIONS
+    distinct declared values (counted before any git read), a value that is not a
+    commit id or does not resolve to a commit (declared_commit), a declaration with no repository to read, a
+    probe git fails, a word that names no commit present in a repository that is not whole (object_store_gap:
+    a damaged or unreadable object store, a partial clone, a shallow clone), and more than P9_MAX_WORDS
+    distinct undeclared hex words are CannotEvaluate, never a pass. No P9 read fetches (P9_NO_FETCH_OPTIONS)."""
+    declarations = revision_declarations(names.raw)
+    if not declarations:
+        return []
+    if len(declarations) > P9_MAX_DECLARATIONS:
+        raise CannotEvaluate("lines {}: the brief has {} {} lines; declare every revision it names on one "
+                             "line".format(", ".join(str(line) for line, _ in declarations), len(declarations),
+                                           REVISIONS_LABEL))
+    values = declared_values(declarations)
+    if len(values) > P9_MAX_REVISIONS:
+        raise CannotEvaluate("line {}: the {} line declares {} distinct values, more than the {} the lint "
+                             "resolves; declare fewer".format(declarations[0][0], REVISIONS_LABEL, len(values),
+                                                              P9_MAX_REVISIONS))
+    if repo is None:
+        raise CannotEvaluate("the brief declares its revisions on a {} line but no repository was given to "
+                             "resolve them in".format(REVISIONS_LABEL))
+    gap = object_store_gap(repo)
+    for value in values:
+        declared_commit(repo, value, gap)
+    declared = [pin for _, pin in names.pins] + values
+    undeclared = [(line, word) for line, word in hex_words(names.raw) if not pin_matches(word, declared)]
+    distinct = list(dict.fromkeys(word.lower() for _, word in undeclared))
+    if len(distinct) > P9_MAX_WORDS:
+        raise CannotEvaluate("the brief names {} distinct hex words outside its declared revisions, more than "
+                             "the {} the lint probes; name fewer".format(len(distinct), P9_MAX_WORDS))
+    commits = dict((word, revision_commit(repo, word, gap)) for word in distinct)
+    findings, seen = [], set()
+    for line, word in undeclared:
+        commit = commits[word.lower()]
+        if commit is None or (line, word.lower()) in seen:
+            continue
+        seen.add((line, word.lower()))
+        findings.append(("P9", "HARD", line, "hex word {} names the commit {}, which is not a declared revision "
+                         "(BRIEF-PIN, REVIEWED HEAD and {} values: {})".format(
+                             word, commit, REVISIONS_LABEL, ", ".join(declared)), _excerpt(word)))
+    return findings
+
+
 # ---------- W1: a git command line that writes, for a family whose row says it cannot ----------
 
 # the subcommands the git-write row governs, matched where GIT_SUBCOMMAND_RE matches a git subcommand
@@ -3767,15 +4316,16 @@ def rule_w1(text, row, family, families, scoped=True):
 
 
 def preflight(text, row, repo, raw, tree=None):
-    """The preflight findings (P1 to P7) for a brief's text and its family's row; they apply to every family. `raw`
-    is the text before decode_brief removed format characters, which the P5 cure and the P7 declarations read.
+    """The preflight findings (P1 to P7 and P9) for a brief's text and its family's row; they apply to every family.
+    `raw` is the text before decode_brief removed format characters, which the P5 cure and the P7 and P9
+    declarations read.
     `tree` is the staged tree given with --tree, or None; it is checked (staged_tree) before any rule runs, and
     its real path is passed to P1, P3 and P6."""
     root = None if tree is None else staged_tree(tree)
     names = PreflightText(text, raw, relative=root is not None)
     return rule_p1(names, row, repo, root) + rule_p2(names, row, repo) + rule_p3(
         names, row, repo, root) + rule_p4(names, row, repo) + rule_p5(names, row, repo) + rule_p6(
-        names, row, repo, root) + rule_p7(names, row, repo)
+        names, row, repo, root) + rule_p7(names, row, repo) + rule_p9(names, row, repo)
 
 
 def can_execute(row):
@@ -3840,7 +4390,7 @@ COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or ent
                      "embedding the command (for example: quote the def line of X, not the line that runs git push)")
 
 
-PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6", "P7"))
+PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P9"))
 # the rules that apply to every family, whether or not it can execute
 EVERY_FAMILY_RULES = PREFLIGHT_RULES | frozenset(("W1",))
 # added to a REFUSE line when a P6 hit is among the hard hits
@@ -3848,49 +4398,69 @@ INPUT_HINT = "; provide each missing declared input, or correct its INPUT line, 
 # added to a REFUSE line when a W1 hit is among the hard hits
 GIT_WRITE_HINT = ("; the family's row says git-write = \"no\": drop the git commit or push, state it as a prohibition "
                   "(Do not run `git push`.), or send it to a family that can write")
+# added to a REFUSE line when a P9 hit is among the hard hits
+REVISIONS_HINT = ("; replace each P9 hex word with a declared revision, or add it to the BRIEF-REVISIONS line when "
+                  "the brief names it on purpose")
+# added to a REFUSE line when a P7 hit is among the hard hits
+ANCHOR_HINT = "; correct each ACCEPTED-RESIDUAL line ({}), or re-pin the brief".format(ANCHOR_SHAPE)
 
 
 def run(brief_path, family, table_path, scoped=True, repo=None, tree=None):
+    # every REFUSE and CANNOT_EVALUATE line names the repository the git reads resolve in: no brief names its
+    # repository, so a caller's --repo that does not match the brief is visible, not caught
+    repository = "; repository: {}".format("none" if repo is None else repo)
     try:
         table = load_table(table_path)
         code, findings = evaluate(_read_regular(brief_path, "brief"), family, table, scoped, repo, tree)
     except CannotEvaluate as exc:
-        print("CANNOT_EVALUATE: {}".format(exc))
+        print("CANNOT_EVALUATE: {}{}".format(exc, repository))
         return EXIT_CANNOT_EVALUATE
     for rule, severity, line, message, excerpt in findings:
         print("{}:{}: {} {}: {}: {}".format(brief_path, line, severity, rule, message, excerpt))
     hard = [rule for rule, severity, _, _, _ in findings if severity == "HARD"]
     missing_input = INPUT_HINT if "P6" in hard else ""
     git_write = GIT_WRITE_HINT if "W1" in hard else ""
+    revisions = REVISIONS_HINT if "P9" in hard else ""
+    anchors = ANCHOR_HINT if "P7" in hard else ""
     if code == EXIT_REFUSE and set(hard) - EVERY_FAMILY_RULES:
         print("REFUSE: family {} cannot execute and the brief carries a structural execution request ({} hard "
-              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}{}".format(
+              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}{}{}{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
-                  "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else "", missing_input, git_write))
+                  "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else "", missing_input, git_write,
+                  anchors, revisions) + repository)
     elif code == EXIT_REFUSE and "W1" in hard:
         print("REFUSE: family {}: the brief carries a git command line that commits or pushes ({} hard hit(s): {}){}"
-              "{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
-                          git_write, missing_input))
+              "{}{}{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r))
+                                                           for r in sorted(set(hard))), git_write, missing_input,
+                              anchors, revisions) + repository)
     elif code == EXIT_REFUSE and "P5" in hard:
         print("REFUSE: family {}: the brief reaches a pinned revision through a ref that can move ({} hard hit(s): "
-              "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}; "
+              "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}{}{}; "
               "{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
                   CURE_EXAMPLE.format("<pin>"), ", and name paths under the declared workdir" if "P2" in hard else "",
-                  missing_input, CURE_SHAPE))
+                  missing_input, anchors, revisions, CURE_SHAPE) + repository)
+    elif code == EXIT_REFUSE and set(hard) == {"P9"}:
+        print("REFUSE: family {}: the brief names a commit outside its declared revisions ({} hard hit(s): P9 x{})"
+              "{}".format(family, len(hard), len(hard), REVISIONS_HINT) + repository)
     elif code == EXIT_REFUSE and set(hard) == {"P6"}:
         print("REFUSE: family {}: the brief declares an input that does not exist {} ({} hard hit(s): "
               "P6 x{}){}".format(family, "on this host" if tree is None else "on this host or in the staged tree",
-                                 len(hard), len(hard), INPUT_HINT))
+                                 len(hard), len(hard), INPUT_HINT) + repository)
     elif code == EXIT_REFUSE and set(hard) == {"P7"}:
         print("REFUSE: family {}: the brief accepts a residual whose anchor does not hold at the pinned "
-              "revision ({} hard hit(s): P7 x{}); correct each ACCEPTED-RESIDUAL line ({}), or re-pin the "
-              "brief".format(family, len(hard), len(hard), ANCHOR_SHAPE))
-    elif code == EXIT_REFUSE:
+              "revision ({} hard hit(s): P7 x{}){}".format(family, len(hard), len(hard), ANCHOR_HINT) + repository)
+    elif code == EXIT_REFUSE and "P2" in hard:
         print("REFUSE: family {}: the brief names an input the family cannot read ({} hard hit(s): {}); name "
-              "paths under the declared workdir, or state a path the worker must not use as a prohibition{}".format(
-                  family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
-                  missing_input))
+              "paths under the declared workdir, or state a path the worker must not use as a prohibition{}{}"
+              "{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
+                          missing_input, anchors, revisions) + repository)
+    elif code == EXIT_REFUSE:
+        # hits of more than one of P6, P7 and P9 and no other HARD rule: one summary with each rule's hint
+        print("REFUSE: family {}: the brief carries hard hits of more than one preflight rule ({} hard hit(s): "
+              "{}){}{}{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r))
+                                                               for r in sorted(set(hard))),
+                                 missing_input, anchors, revisions) + repository)
     elif can_execute(table[family]):
         advisory = sum(1 for _, severity, _, _, _ in findings if severity == "ADVISORY")
         print("OK: family {} can execute ({}); the execution rules do not apply{}".format(
@@ -3908,6 +4478,9 @@ USAGE = ("usage: check_brief_capability.py --family NAME [--unscoped] [--table P
          "       check_brief_capability.py --self-test | --execution-report ABS_PATH\n"
          "The pin reads (P3) honour no system or global safe.directory entry: a --repo owned by another user exits 2\n"
          "(dubious ownership); run the check as the repository owner, or point --repo at a checkout you own.\n"
+         "A brief names no repository the lint can read, so the git reads (P3, P5, P7, P9) resolve in --repo\n"
+         "(default this repository) unchecked against the brief, a residual: every REFUSE and CANNOT_EVALUATE\n"
+         "line ends with '; repository: <path>' so a mismatch is visible.\n"
          "--tree judges relative INPUT paths, and those under the declared workdir, in the staged tree (P6, P3).")
 
 
@@ -8644,9 +9217,9 @@ def self_test(report_path=None):
             refuse_printed.append([text for text in printed.getvalue().splitlines() if text.startswith("REFUSE:")])
         check("preflight/p6-tree-refuse-line-wording", refuse_printed, [
             ["REFUSE: family alpha: the brief declares an input that does not exist on this host or in the "
-             "staged tree (1 hard hit(s): P6 x1)" + INPUT_HINT],
+             "staged tree (1 hard hit(s): P6 x1)" + INPUT_HINT + "; repository: {}".format(ROOT)],
             ["REFUSE: family alpha: the brief declares an input that does not exist on this host (1 hard hit(s): "
-             "P6 x1)" + INPUT_HINT]])
+             "P6 x1)" + INPUT_HINT + "; repository: {}".format(ROOT)]])
         # the stat in the tree follows the path as written: a regular file followed by a `.` component, or
         # a link whose target is one, is ENOTDIR (HARD), relative or mapped from the workdir, where a
         # normalised path would find the file and pass; the same forms over a directory pass
@@ -9125,9 +9698,691 @@ def self_test(report_path=None):
              p7_case("ACCEPTED-RESIDUAL: pkg/latin_body_utf8_cookie.py :: target :: needle target\n", p7_entries)],
             [(0, [])] * 2, python_source_text=p7_cookie_mutant(
                 lambda data: data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:2], "replace")))
+        # ---------- P9: declared revisions, in the P7 fixture repository ----------
+        # A is the pin, B is declared on the BRIEF-REVISIONS line, C is a commit of the repository neither names
+        p9_a, p9_b, p9_c = p7_commits[0], p7_commits[1], p7_commits[2]
+        p9_blobs = [_ls_tree_entry(p7_repo, commit, "pkg/mod.py").stdout.decode("ascii").split()[2]
+                    for commit in (p9_a, p9_b)]
+        p9_hard = (1, [("P9", "HARD")])
+        p9_declared = "BRIEF-REVISIONS: {}\n".format(p9_b)
+
+        def p9(lines, declaration=p9_declared, repo=p7_repo, family="alpha"):
+            return _outcome("BRIEF-PIN: {}\n".format(p9_a) + declaration + lines, family, True, repo)
+
+        def p9_case(lines, declaration=p9_declared, repo=p7_repo):
+            return lambda: p9(lines, declaration, repo)
+
+        def p9_refusal(text, repo=p7_repo):
+            """The CannotEvaluate text for a brief (alpha), or None when it evaluates."""
+            try:
+                evaluate(text.encode("utf-8"), "alpha", parse_table(TABLE_FIXTURE.encode("utf-8")), True, repo)
+            except CannotEvaluate as exc:
+                return str(exc)
+            return None
+
+        def p9_words(count):
+            return "Seen: {}.\n".format(" ".join("ee{:06x}".format(number) for number in range(count)))
+
+        p9_runs = "Runs: git diff {}..{}\n"
+        # each failing vector beside its passing twin: an undeclared commit on a runs line, in a code span, on a
+        # fence line, in upper case and in a web address's path is HARD; the declared commit or the pin is not
+        check("preflight/p9-stale-runs-line",
+              [p9(p9_runs.format(p9_c[:7], p9_a[:7])), p9(p9_runs.format(p9_b[:7], p9_a[:7]))], [p9_hard, (0, [])])
+        check("preflight/p9-stale-code-span",
+              [p9("Compare `git diff {}..{}` first.\n".format(commit, p9_a)) for commit in (p9_c, p9_b)],
+              [p9_hard, (0, [])])
+        check("preflight/p9-stale-fence-line",
+              [p9("```\n{} is the base\n```\n".format(commit)) for commit in (p9_c, p9_b)], [p9_hard, (0, [])])
+        check("preflight/p9-stale-upper-case",
+              [p9("The base is {}.\n".format(commit[:12].upper())) for commit in (p9_c, p9_a)], [p9_hard, (0, [])])
+        check("preflight/p9-stale-url",
+              [p9("See https://h.example/o/r/commit/{} now.\n".format(commit)) for commit in (p9_c, p9_a)],
+              [p9_hard, (0, [])])
+        # the finding names the line, the word and the commit it resolves to
+        p9_found = evaluate(("BRIEF-PIN: {}\n{}The base is {}.\n".format(p9_a, p9_declared, p9_c[:7])).encode(
+            "utf-8"), "alpha", parse_table(TABLE_FIXTURE.encode("utf-8")), True, p7_repo)[1]
+        check("preflight/p9-hard-names-word-and-commit",
+              [(line, message.startswith("hex word {} names the commit {},".format(p9_c[:7], p9_c)), excerpt)
+               for rule, _, line, message, excerpt in p9_found if rule == "P9"], [(3, True, p9_c[:7])])
+        # P9 applies to every family, one that cannot execute included
+        check("preflight/p9-every-family",
+              [p9("The base is {}.\n".format(p9_c), family=family) for family in ("beta", "gamma")], [p9_hard] * 2)
+        # a look-alike pin line with no BRIEF-PIN line is compared with nothing by P3, and P9 still reads it
+        check("preflight/p9-look-alike-pin-line-hard",
+              [_outcome("REVIEWED HEAD: {}\nBrief-Pin: {}\n{}".format(p9_a, commit, p9_declared), "alpha", True,
+                        p7_repo) for commit in (p9_c, p9_b)], [p9_hard, (0, [])])
+        check("preflight/p9-two-declarations-cannot-evaluate",
+              [p9("", p9_declared * 2), p9("The base is {}.\n".format(p9_c), "BRIEF-REVISIONS: {} {}\n".format(
+                  p9_b, p9_c))], ["CannotEvaluate", (0, [])])
+        check("preflight/p9-malformed-cannot-evaluate",
+              [p9("", declaration) for declaration in (
+                  "BRIEF-REVISIONS {}\n".format(p9_b), "BRIEF-REVISIONSX: {}\n".format(p9_b), "BRIEF-REVISIONS:\n",
+                  "BRIEF-REVISIONS:   \n")], ["CannotEvaluate"] * 4)
+        check("preflight/p9-declared-not-hex-cannot-evaluate",
+              [p9("", "BRIEF-REVISIONS: {}\n".format(value)) for value in (
+                  "main", "HEAD", p9_b + " main", p9_b[:6], p9_b)], ["CannotEvaluate"] * 4 + [(0, [])])
+        check("preflight/p9-declared-unresolved-cannot-evaluate",
+              [p9("", "BRIEF-REVISIONS: {}\n".format(value)) for value in (
+                  "0123456789abcdef0123456789abcdef01234567", p9_blobs[0], p9_b)],
+              ["CannotEvaluate"] * 2 + [(0, [])])
+        # with no pin line P3 reads nothing, so P9 alone answers that no repository was given
+        check("preflight/p9-no-repo-cannot-evaluate",
+              [p9_refusal(p9_declared, None), _outcome(p9_declared, "alpha", True, p7_repo)],
+              ["the brief declares its revisions on a BRIEF-REVISIONS line but no repository was given to "
+               "resolve them in", (0, [])])
+        # git answers an ambiguous prefix under --quiet as it answers an absent one (exit 1, nothing printed;
+        # measured with git 2.53.0 on a 4-digit blob prefix and on a 7-hex prefix two commits share): a declared
+        # one is exit 2 and a word is quiet
+        genuine_rev_parse = _rev_parse_local
+
+        def ambiguous_rev_parse(repo, rev):
+            if rev.lower().startswith(p9_c[:7]):
+                return subprocess.CompletedProcess([], 1, b"", b"")
+            return genuine_rev_parse(repo, rev)
+
+        with _patched(_rev_parse_local=ambiguous_rev_parse):
+            p9_ambiguous = [p9("", "BRIEF-REVISIONS: {}\n".format(p9_c[:7])), p9("The base is {}.\n".format(
+                p9_c[:7]))]
+        check("preflight/p9-ambiguous", p9_ambiguous, ["CannotEvaluate", (0, [])])
+        check("preflight/p9-no-declaration-quiet", p9(p9_runs.format(p9_c[:7], p9_a[:7]), ""), (0, []))
+        # the label anywhere but column zero declares nothing, so the rule stays quiet
+        check("preflight/p9-label-in-prose-quiet",
+              [p9("The base is {}.\n".format(p9_c), " " + p9_declared),
+               p9("The base is {}.\nNote the BRIEF-REVISIONS label.\n".format(p9_c), "")], [(0, [])] * 2)
+        p9_nonce = "Nonce {}.\n".format("0123456789abcdef" * 2)
+        p9_blob = "index {}..{} 100644\n".format(p9_blobs[0][:7], p9_blobs[1][:7])
+        p9_date = "Run 20261029 left the tree defaced.\n"
+        check("preflight/p9-unresolved-word-quiet",
+              [p9(p9_nonce), p9("Digest {}.\n".format("fedcba9876543210" * 4))], [(0, [])] * 2)
+        check("preflight/p9-blob-id-quiet", [p9(p9_blob), p9("Blob {}.\n".format(p9_blobs[0]))], [(0, [])] * 2)
+        check("preflight/p9-date-and-word-quiet", p9(p9_date), (0, []))
+        check("preflight/p9-prefix-agrees",
+              [p9("Head {}.\n".format(p9_a[:7])), p9("Base {}.\n".format(p9_b[:7])),
+               p9("Base {}.\n".format(p9_b), "BRIEF-REVISIONS: {}\n".format(p9_b[:9]))], [(0, [])] * 3)
+        # a pin conflict still exits 2 with P3's message: P3 answers before P9 reads anything
+        check("preflight/p9-pin-conflict-unchanged",
+              p9_refusal("BRIEF-PIN: {}\nBRIEF-PIN: {}\n{}".format(p9_a, p9_b, p9_declared)),
+              pin_conflict_message(brief_pin_conflict(PreflightText("BRIEF-PIN: {}\nBRIEF-PIN: {}\n".format(
+                  p9_a, p9_b)))))
+        check("preflight/p9-word-bound",
+              [p9(p9_words(P9_MAX_WORDS + 1)), p9(p9_words(P9_MAX_WORDS))], ["CannotEvaluate", (0, [])])
+        p9_counted_local = _rev_parse_local
+
+        def p9_probes(declaration, lines=""):
+            """(outcome, number of git rev-parse probes of B) for a brief with `declaration` beside `lines`."""
+            probed = []
+
+            def counting(repo, rev):
+                probed.append(rev.lower())
+                return p9_counted_local(repo, rev)
+
+            with _patched(_rev_parse_local=counting):
+                outcome = p9(lines, declaration)
+            return outcome, probed.count(p9_b.lower())
+
+        # a value repeated on the declaration, in any case, is one declared value, resolved by one probe
+        p9_repeated = "BRIEF-REVISIONS: {} {} {}\n".format(p9_b, p9_b, p9_b.upper())
+        check("preflight/p9-declared-once",
+              [p9_probes(p9_repeated), p9_probes(p9_declared), p9_probes(p9_repeated, "The base is {}.\n".format(
+                  p9_c))], [((0, []), 1), ((0, []), 1), (p9_hard, 1)])
+        p9_bound_text = "more than the {} the lint resolves".format(P9_MAX_REVISIONS)
+
+        def p9_declared_many(count):
+            """A declaration of `count` distinct values, none of which names a commit of the repository."""
+            return "BRIEF-REVISIONS: {}\n".format(" ".join("dd{:06x}".format(number) for number in range(count)))
+
+        def p9_bound_named(declaration):
+            """Whether the refusal of a brief with `declaration` names the declared-value bound."""
+            refusal = p9_refusal("BRIEF-PIN: {}\n{}".format(p9_a, declaration))
+            return refusal is not None and p9_bound_text in refusal
+
+        def p9_bound_probes(declaration):
+            """The number of git rev-parse probes a brief with `declaration` runs."""
+            probed = []
+
+            def counting(repo, rev):
+                probed.append(rev)
+                return p9_counted_local(repo, rev)
+
+            with _patched(_rev_parse_local=counting):
+                p9("", declaration)
+            return len(probed)
+
+        def p9_small_bound(declaration):
+            with _patched(P9_MAX_REVISIONS=2):
+                return p9("", declaration)
+
+        # more distinct declared values than the bound refuses before any is resolved, naming the bound; the
+        # same value repeated past the bound is one value, and at the bound the declaration resolves
+        check("preflight/p9-declared-bound",
+              [p9_bound_named(p9_declared_many(P9_MAX_REVISIONS + 1)),
+               p9_bound_probes(p9_declared_many(P9_MAX_REVISIONS + 1)),
+               p9("", "BRIEF-REVISIONS: {}\n".format(" ".join([p9_b] * (P9_MAX_REVISIONS + 1)))),
+               p9_small_bound("BRIEF-REVISIONS: {} {}\n".format(p9_b[:7], p9_b[:8])),
+               p9_small_bound("BRIEF-REVISIONS: {} {} {}\n".format(p9_b[:7], p9_b[:8], p9_b[:9]))],
+              [True, 0, (0, []), (0, []), "CannotEvaluate"])
+        p9_brief, p9_table = p7_base / "p9-brief.md", p7_base / "p9-table.toml"
+        with open(p9_brief, "w", encoding="utf-8") as handle:
+            handle.write("BRIEF-PIN: {}\n{}The base is {}.\n".format(p9_a, p9_declared, p9_c))
+        with open(p9_table, "w", encoding="utf-8") as handle:
+            handle.write(TABLE_FIXTURE)
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            refused = run(str(p9_brief), "alpha", p9_table, True, p7_repo)
+        check("preflight/p9-refuse-line", (refused, "names a commit outside its declared revisions (1 hard hit(s): "
+                                           "P9 x1)" + REVISIONS_HINT in printed.getvalue()), (1, True))
+        p9_named_brief = p7_base / "p9-repository-brief.md"
+
+        def p9_repository_named(text, repo_args):
+            """(exit, the repository each REFUSE or CANNOT_EVALUATE line names) for the brief `text`, run through
+            main with `repo_args`, or through run with no repository when `repo_args` is None."""
+            with open(p9_named_brief, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            shown = io.StringIO()
+            with contextlib.redirect_stdout(shown), contextlib.redirect_stderr(io.StringIO()):
+                if repo_args is None:
+                    code = run(str(p9_named_brief), "alpha", p9_table, True, None)
+                else:
+                    code = main(["--family", "alpha", "--table", str(p9_table)] + repo_args + [str(p9_named_brief)])
+            return code, [line.rpartition("; repository: ")[2] for line in shown.getvalue().splitlines()
+                          if line.startswith(("REFUSE:", "CANNOT_EVALUATE:"))]
+
+        # no brief names its repository, so every REFUSE and CANNOT_EVALUATE line names the one the git reads
+        # resolved in: --repo when given, else this repository, which lacks the fixture's commits (the brief
+        # checked against the wrong repository exits 2 naming it), and none when no repository was given
+        p9_refusing = "BRIEF-PIN: {}\n{}The base is {}.\n".format(p9_a, p9_declared, p9_c)
+        check("preflight/p9-repository-named",
+              [p9_repository_named(p9_refusing, ["--repo", str(p7_repo)]),
+               p9_repository_named("BRIEF-PIN: {}\nBRIEF-REVISIONS: {}\n".format(
+                   p9_a, "0123456789abcdef0123456789abcdef01234567"), ["--repo", str(p7_repo)]),
+               p9_repository_named(p9_refusing, []), p9_repository_named(p9_refusing, None)],
+              [(EXIT_REFUSE, [str(p7_repo)]), (EXIT_CANNOT_EVALUATE, [str(p7_repo)]),
+               (EXIT_CANNOT_EVALUATE, [str(ROOT)]), (EXIT_CANNOT_EVALUATE, ["none"])])
+        p9_hint_table = p7_base / "p9-hint-table.toml"
+
+        def p9_hint(family, lines, phrase, table_text=TABLE_FIXTURE):
+            """(exit code, whether the one REFUSE line is the branch `phrase` names, whether it carries
+            REVISIONS_HINT) for a brief that names C beside `lines`."""
+            with open(p9_brief, "w", encoding="utf-8") as handle:
+                handle.write("BRIEF-PIN: {}\n{}{}The base is {}.\n".format(p9_a, p9_declared, lines, p9_c))
+            with open(p9_hint_table, "w", encoding="utf-8") as handle:
+                handle.write(table_text)
+            shown = io.StringIO()
+            with contextlib.redirect_stdout(shown):
+                code = run(str(p9_brief), family, p9_hint_table, True, p7_repo)
+            refuse = [line for line in shown.getvalue().splitlines() if line.startswith("REFUSE:")]
+            return code, len(refuse) == 1 and phrase in refuse[0], len(refuse) == 1 and REVISIONS_HINT in refuse[0]
+
+        # every REFUSE branch that a P9 hit can join carries the hint: the S rules, W1, P5 and the default
+        check("preflight/p9-refuse-hint-every-branch",
+              [p9_hint("gamma", "1. Run `git log -1` in the clone.\n", "cannot execute and the brief carries"),
+               p9_hint("alpha", "Then run git commit -q -m done.\n", "commits or pushes",
+                       TABLE_FIXTURE.replace('git-write = "undeclared"', 'git-write = "no"', 1)),
+               p9_hint("alpha", "Clone with `git clone --branch main https://h.example/r.git w`.\n",
+                       "through a ref that can move"),
+               p9_hint("gamma", "Workdir: /w/repo\nRead /etc/passwd first.\n",
+                       "names an input the family cannot read")], [(1, True, True)] * 4)
+        p9_absent_anchor = "ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: not there\n"
+
+        def p7_p9_hint(family, lines, phrase, table_text=TABLE_FIXTURE):
+            """(exit code, the one REFUSE line is the branch `phrase` names, it carries ANCHOR_HINT, it carries
+            REVISIONS_HINT, it advises naming paths) for a brief with an absent residual anchor (P7) and C (P9)
+            beside `lines`."""
+            with open(p9_brief, "w", encoding="utf-8") as handle:
+                handle.write("BRIEF-PIN: {}\n{}{}{}The base is {}.\n".format(p9_a, p9_declared, p9_absent_anchor,
+                                                                         lines, p9_c))
+            with open(p9_hint_table, "w", encoding="utf-8") as handle:
+                handle.write(table_text)
+            shown = io.StringIO()
+            with contextlib.redirect_stdout(shown):
+                code = run(str(p9_brief), family, p9_hint_table, True, p7_repo)
+            refuse = [line for line in shown.getvalue().splitlines() if line.startswith("REFUSE:")]
+            one = refuse[0] if len(refuse) == 1 else ""
+            return (code, phrase in one, ANCHOR_HINT in one, REVISIONS_HINT in one,
+                    "name paths under the declared workdir" in one)
+
+        # P7 beside P9 alone prints the mixed summary with both hints and no advice to name paths, and every other
+        # REFUSE branch a P7 hit can join carries the P7 hint beside the P9 one
+        check("preflight/p7-p9-refuse-hint-every-branch",
+              [p7_p9_hint("alpha", "", "hard hits of more than one preflight rule"),
+               p7_p9_hint("gamma", "1. Run `git log -1` in the clone.\n", "cannot execute and the brief carries"),
+               p7_p9_hint("alpha", "Then run git commit -q -m done.\n", "commits or pushes",
+                          TABLE_FIXTURE.replace('git-write = "undeclared"', 'git-write = "no"', 1)),
+               p7_p9_hint("alpha", "Clone with `git clone --branch main https://h.example/r.git w`.\n",
+                          "through a ref that can move"),
+               p7_p9_hint("gamma", "Workdir: /w/repo\nRead /etc/passwd first.\n",
+                          "names an input the family cannot read")],
+              [(1, True, True, True, False)] * 4 + [(1, True, True, True, True)])
+        # one finding per line and word, whatever its case; the same word on another line is another finding
+        p9_twice = "The base is {0}, again {0} and {1}.\n".format(p9_c, p9_c.upper())
+
+        def p9_count(lines):
+            found = evaluate("BRIEF-PIN: {}\n{}{}".format(p9_a, p9_declared, lines).encode("utf-8"), "alpha",
+                             parse_table(TABLE_FIXTURE.encode("utf-8")), True, p7_repo)[1]
+            return len([rule for rule, _, _, _, _ in found if rule == "P9"])
+
+        check("preflight/p9-one-finding-per-line-word", [p9_count(p9_twice), p9_count(p9_twice * 2)], [1, 2])
+        # a git describe name's g<hex> tail is read as its commit; an upper-case G or no hyphen is not that form
+        p9_describe = "Built from v1.2-3-g{}.\n"
+        check("preflight/p9-describe-name",
+              [p9(p9_describe.format(p9_c[:7])), p9(p9_describe.format(p9_b[:7])),
+               p9("Built from v1.2-3-G{}.\n".format(p9_c[:7])), p9("Built from v1.2-3g{}.\n".format(p9_c[:7]))],
+              [p9_hard, (0, []), (0, []), (0, [])])
+        # a probe git fails is CannotEvaluate, never quiet: a corrupt loose object of C (exit 128, text on stderr),
+        # while B (declared) and a nonce, which git answers cleanly in the same repository, stay quiet
+        p9_corrupt = p7_base / "p9-corrupt"
+        shutil.copytree(p7_repo, p9_corrupt, symlinks=True)
+        p9_loose = p9_corrupt / ".git" / "objects" / p9_c[:2] / p9_c[2:]
+        p9_loose_found = p9_loose.is_file()
+        if p9_loose_found:
+            os.chmod(p9_loose, 0o644)
+            p9_loose.write_bytes(b"not a zlib stream")
+        check("preflight/p9-unreadable-commit-cannot-evaluate",
+              [p9_loose_found, p9("The base is {}.\n".format(p9_c), repo=p9_corrupt),
+               p9("The base is {}.\n".format(p9_b), repo=p9_corrupt), p9(p9_nonce, repo=p9_corrupt)],
+              [True, "CannotEvaluate", (0, []), (0, [])])
+        genuine_local = _rev_parse_local
+
+        def p9_stub(returncode, stdout, stderr):
+            """A _rev_parse_local answering (returncode, stdout, stderr) for C, genuine for every other rev."""
+            def stub(repo, rev):
+                if rev.lower().startswith(p9_c[:7]):
+                    return subprocess.CompletedProcess([], returncode, stdout, stderr)
+                return genuine_local(repo, rev)
+            return stub
+
+        def p9_stubbed(stub):
+            def outcome():
+                with _patched(_rev_parse_local=stub):
+                    return p9("The base is {}.\n".format(p9_c))
+            return outcome
+
+        # an unreadable fan-out directory (exit 1 with text on stderr; measured with git 2.53.0), another exit,
+        # and output that is no commit id are CannotEvaluate; the clean answer (exit 1, nothing printed) is quiet
+        p9_denied = p9_stub(1, b"", "error: unable to open loose object {}: Permission denied\n".format(
+            p9_c).encode("ascii"))
+        p9_garbled = p9_stub(0, b"not a commit id\n", b"")
+        check("preflight/p9-read-error-cannot-evaluate",
+              [p9_stubbed(p9_denied)(), p9_stubbed(p9_garbled)(), p9_stubbed(p9_stub(128, b"", b"fatal: bad\n"))(),
+               p9_stubbed(p9_stub(1, b"", b""))()], ["CannotEvaluate"] * 3 + [(0, [])])
+        # exit 0 and a full commit id beside text on stderr (a synthetic warning) is CannotEvaluate, for a word
+        # and for a declared value alike; the same answer with nothing on stderr names C
+        p9_warned = p9_stub(0, (p9_c + "\n").encode("ascii"), b"warning: synthetic\n")
+        p9_silent = p9_stub(0, (p9_c + "\n").encode("ascii"), b"")
+
+        def p9_declared_stubbed(stub):
+            def outcome():
+                with _patched(_rev_parse_local=stub):
+                    return p9("", "BRIEF-REVISIONS: {}\n".format(p9_c))
+            return outcome
+
+        check("preflight/p9-success-stderr-cannot-evaluate",
+              [p9_stubbed(p9_warned)(), p9_declared_stubbed(p9_warned)(), p9_stubbed(p9_silent)(),
+               p9_declared_stubbed(p9_silent)()], ["CannotEvaluate"] * 2 + [p9_hard, (0, [])])
+        p9_owned = p9_stub(128, b"", ("fatal: detected dubious ownership in repository at '{0}'\nTo add an "
+                                      "exception for this directory, call:\n\n\tgit config --global --add "
+                                      "safe.directory {0}\n".format(p7_repo)).encode("utf-8"))
+
+        def p9_ownership_named():
+            with _patched(_rev_parse_local=p9_owned):
+                refusal = p9_refusal("BRIEF-PIN: {}\n{}The base is {}.\n".format(p9_a, p9_declared, p9_c))
+            return refusal is not None and OWNERSHIP_REMEDY in refusal
+
+        check("preflight/p9-ownership-cannot-evaluate", p9_ownership_named(), True)
+
+        def p9_raising(error):
+            """The outcome of naming C when its probe raises `error`, or the name of what escaped."""
+            def stub(repo, rev):
+                if rev.lower().startswith(p9_c[:7]):
+                    raise error
+                return genuine_local(repo, rev)
+
+            def outcome():
+                try:
+                    with _patched(_rev_parse_local=stub):
+                        return p9("The base is {}.\n".format(p9_c))
+                except (OSError, subprocess.SubprocessError) as escaped:
+                    return type(escaped).__name__
+            return outcome
+
+        p9_timeout = p9_raising(subprocess.TimeoutExpired(["git"], GIT_READ_TIMEOUT))
+        p9_no_git = p9_raising(FileNotFoundError(errno.ENOENT, "No such file or directory", "git"))
+        check("preflight/p9-launch-cannot-evaluate", [p9_timeout(), p9_no_git()], ["CannotEvaluate"] * 2)
+
+        def p9_config_answer(returncode, stdout, stderr):
+            with _patched(_promisor_probe=lambda repo: subprocess.CompletedProcess([], returncode, stdout, stderr)):
+                return p9("The base is {}.\n".format(p9_b))
+
+        # the partial clone check fails closed too: another exit, or exit 0 that lists no key
+        check("preflight/p9-partial-clone-check-cannot-evaluate",
+              [p9_config_answer(3, b"", b"error: bad config\n"), p9_config_answer(0, b"", b""),
+               p9_config_answer(1, b"", b"")], ["CannotEvaluate"] * 2 + [(0, [])])
+        # a partial clone of the fixture (blob:none from a file:// upstream), then D committed upstream only
+        p9_env = _git_fixture_env.git_fixture_env(
+            GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+            GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
+        p9_git = ["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
+        p9_up, p9_partial = p7_base / "p9-upstream", p7_base / "p9-partial"
+        for args in (["clone", "-q", "--no-hardlinks", str(p7_repo), str(p9_up)],
+                     ["-C", str(p9_up), "config", "uploadpack.allowFilter", "true"],
+                     ["clone", "-q", "--filter=blob:none", "file://" + str(p9_up), str(p9_partial)],
+                     ["-C", str(p9_up), "commit", "-q", "--allow-empty", "-m", "upstream only"]):
+            subprocess.run(p9_git + args, check=True, capture_output=True, timeout=60, env=p9_env)
+        p9_d = subprocess.run(p9_git + ["-C", str(p9_up), "rev-parse", "HEAD"], check=True, capture_output=True,
+                              timeout=60, env=p9_env).stdout.decode("ascii").strip()
+
+        def p9_holds(commit):
+            """Whether the partial clone holds `commit`, read without fetching. The argv spells p9_git's pins
+            literally: the F-367 maintenance-pin scan does not read an enclosing function's list."""
+            return subprocess.run(["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                                   "maintenance.auto=false", "--no-lazy-fetch", "-C", str(p9_partial), "cat-file", "-e",
+                                   commit],
+                                  capture_output=True, timeout=60, env=p9_env).returncode == 0
+
+        # a word the partial clone lacks (D upstream, a nonce) is CannotEvaluate, its promisor remote may hold
+        # it; C, which it holds, is HARD and B (declared) is quiet; and the lint never fetched D
+        p9_held_before = p9_holds(p9_d)
+        check("preflight/p9-partial-clone-cannot-evaluate",
+              [p9("The base is {}.\n".format(word), repo=p9_partial) for word in (p9_d, "0123456789abcdef" * 2,
+                                                                                  p9_c, p9_b)],
+              ["CannotEvaluate", "CannotEvaluate", p9_hard, (0, [])])
+        check("preflight/p9-partial-clone-never-fetches", [p9_held_before, p9_holds(p9_d)], [False, False])
+
+        def p9_packed(name, damage=None):
+            """(copy of the fixture, pack stem) with C moved alone into its own pack and its loose copy deleted
+            (A and B stay loose), then `damage` applied to the pack's stem path. The argv spells p9_git's pins
+            literally, as in p9_holds."""
+            target = p7_base / name
+            shutil.copytree(p7_repo, target, symlinks=True)
+            objects = target / ".git" / "objects"
+            packed = subprocess.run(["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                                     "maintenance.auto=false", "-C", str(target), "pack-objects", "-q",
+                                     str(objects / "pack" / "pack")],
+                                    input=(p9_c + "\n").encode("ascii"), check=True, capture_output=True, timeout=60,
+                                    env=p9_env).stdout.decode("ascii").strip()
+            (objects / p9_c[:2] / p9_c[2:]).unlink()
+            stem = str(objects / "pack" / ("pack-" + packed))
+            if damage is not None:
+                damage(stem)
+            return target, stem
+
+        # a commit held only in a pack git cannot open: git skips the pack and answers the lookup as it answers an
+        # absent object, exit 1 and nothing printed (measured with git 2.53.0 for a missing .pack, a missing .idx,
+        # an unreadable .idx and an unreadable .pack), so a word git calls absent in an object store that is not
+        # whole is CannotEvaluate; C loose (the fixture) and C packed in a whole store are HARD, and B (declared)
+        # stays quiet in every copy
+        p9_whole = p9_packed("p9-packed")[0]
+        p9_no_pack = p9_packed("p9-no-pack", lambda stem: os.unlink(stem + ".pack"))[0]
+        p9_no_idx = p9_packed("p9-no-idx", lambda stem: os.unlink(stem + ".idx"))[0]
+        p9_idx_locked, p9_idx_stem = p9_packed("p9-idx-locked", lambda stem: os.chmod(stem + ".idx", 0))
+        p9_pack_locked, p9_pack_stem = p9_packed("p9-pack-locked", lambda stem: os.chmod(stem + ".pack", 0))
+        p9_base_c, p9_base_b = "The base is {}.\n".format(p9_c), "The base is {}.\n".format(p9_b)
+        check("preflight/p9-packed-commit-hard",
+              [p9(p9_base_c), p9(p9_base_c, repo=p9_whole), p9(p9_nonce, repo=p9_whole), p9(p9_base_b, repo=p9_whole)],
+              [p9_hard, p9_hard, (0, []), (0, [])])
+        check("preflight/p9-missing-pack-cannot-evaluate",
+              [p9(text, repo=repo) for repo in (p9_no_pack, p9_no_idx) for text in (p9_base_c, p9_nonce, p9_base_b)],
+              ["CannotEvaluate", "CannotEvaluate", (0, [])] * 2)
+        # a uid that reads a mode-000 file (root, or a capability) cannot show git skipping the pack: recorded
+        p9_locked = not os.access(p9_idx_stem + ".idx", os.R_OK) and not os.access(p9_pack_stem + ".pack", os.R_OK)
+        p9_locked_skipped = "skipped: this uid reads a mode-000 file, so git opens the pack here"
+        check("preflight/p9-unreadable-pack-cannot-evaluate",
+              [p9(text, repo=repo) for repo in (p9_idx_locked, p9_pack_locked) for text in (p9_base_c, p9_base_b)]
+              if p9_locked else p9_locked_skipped,
+              ["CannotEvaluate", (0, [])] * 2 if p9_locked else p9_locked_skipped)
+        if not p9_locked:
+            print("NOTE: preflight/p9-unreadable-pack-cannot-evaluate " + p9_locked_skipped)
+        # git count-objects -v read for the object store check: a garbage count, a pack count other than the pack
+        # pairs present, a warning, a failed exit, output it does not read and a quoted alternate are each
+        # CannotEvaluate for a word git calls absent (a nonce); the genuine answer stays quiet
+        p9_counts = _count_objects_probe(store_dirs(p7_repo)[0]).stdout.decode("ascii").splitlines()
+
+        def p9_counted(returncode, lines, stderr=b""):
+            answer = subprocess.CompletedProcess([], returncode, "".join(line + "\n" for line in lines).encode(
+                "utf-8"), stderr)
+            with _patched(_count_objects_probe=lambda repo: answer):
+                return p9(p9_nonce)
+
+        def p9_count_set(key, value):
+            return [key + ": " + value if line.startswith(key + ": ") else line for line in p9_counts]
+
+        p9_packs = [line.split(": ")[1] for line in p9_counts if line.startswith("packs: ")]
+        p9_count_cases = [lambda: p9_counted(0, p9_count_set("garbage", "1")),
+                          lambda: p9_counted(0, p9_count_set("packs", str(int(p9_packs[0]) + 1))),
+                          lambda: p9_counted(0, p9_counts, b"warning: garbage found: .git/objects/pack/x\n")]
+        check("preflight/p9-count-objects-cannot-evaluate",
+              [case() for case in p9_count_cases]
+              + [p9_counted(128, [], b"fatal: bad\n"), p9_counted(0, ["packs 0"]),
+                 p9_counted(0, [line for line in p9_counts if not line.startswith("garbage: ")]),
+                 p9_counted(0, p9_counts + ['alternate: "/w/a\\tb/objects"']), p9_counted(0, p9_counts)],
+              ["CannotEvaluate"] * 7 + [(0, [])])
+        # a shallow clone of the fixture (depth 2, from a file:// URL): a commit beyond its shallow boundary (A) is
+        # CannotEvaluate, the clone lacks it and the lint never fetches; the commit it holds below its head is
+        # HARD, and A in the full fixture is HARD
+        p9_shallow = p7_base / "p9-shallow"
+        subprocess.run(p9_git + ["clone", "-q", "--depth", "2", "file://" + str(p7_repo), str(p9_shallow)],
+                       check=True, capture_output=True, timeout=60, env=p9_env)
+        p9_tip, p9_below = [subprocess.run(p9_git + ["-C", str(p9_shallow), "rev-parse", rev], check=True,
+                                           capture_output=True, timeout=60, env=p9_env).stdout.decode("ascii").strip()
+                            for rev in ("HEAD", "HEAD~1")]
+
+        def p9_shallow_case(word, repo=p9_shallow):
+            return lambda: _outcome("BRIEF-PIN: {0}\nBRIEF-REVISIONS: {0}\nThe base is {1}.\n".format(p9_tip, word),
+                                    "alpha", True, repo)
+
+        check("preflight/p9-shallow-clone-cannot-evaluate",
+              [p9_a in (p9_tip, p9_below), p9_shallow_case(p9_a)(), p9_shallow_case(p9_nonce.split()[1][:-1])(),
+               p9_shallow_case(p9_below)(), p9_shallow_case(p9_a, p7_repo)()],
+              [False, "CannotEvaluate", "CannotEvaluate", p9_hard, p9_hard])
+        # the object store is read through the common git directory and object directory git names (store_dirs):
+        # git count-objects run in a linked worktree counts the worktree's own refs directory as garbage (measured
+        # with git 2.53.0), so it runs in the common git directory. In a plain clone, a linked worktree of it, an
+        # alternates repository (clone --shared) and a linked worktree of that, C is HARD and a nonce and B stay
+        # quiet; each worktree shares its main repository's common git directory, and the shared clone reads an
+        # alternate
+        p9_plain, p9_linked = p7_base / "p9-plain", p7_base / "p9-linked"
+        p9_shared, p9_shared_linked = p7_base / "p9-shared", p7_base / "p9-shared-linked"
+        for args in (["clone", "-q", "--no-hardlinks", str(p7_repo), str(p9_plain)],
+                     ["-C", str(p9_plain), "worktree", "add", "-q", "--detach", str(p9_linked), "HEAD"],
+                     ["clone", "-q", "--shared", str(p7_repo), str(p9_shared)],
+                     ["-C", str(p9_shared), "worktree", "add", "-q", "--detach", str(p9_shared_linked), "HEAD"]):
+            subprocess.run(p9_git + args, check=True, capture_output=True, timeout=60, env=p9_env)
+        p9_common = dict((repo, store_dirs(repo)[0]) for repo in (p9_plain, p9_linked, p9_shared, p9_shared_linked))
+        check("preflight/p9-linked-worktree-whole",
+              [p9_common[p9_linked] == p9_common[p9_plain] != str(p9_linked),
+               p9_common[p9_shared_linked] == p9_common[p9_shared] != str(p9_shared_linked),
+               b"\nalternate: /" in b"\n" + _count_objects_probe(p9_common[p9_shared]).stdout]
+              + [p9(text, repo=repo) for repo in (p9_plain, p9_linked, p9_shared, p9_shared_linked)
+                 for text in (p9_base_c, p9_nonce, p9_base_b)],
+              [True] * 3 + [p9_hard, (0, []), (0, [])] * 4)
+        # a damaged store stays damaged through a linked worktree: the missing .pack copy, with a linked worktree
+        # at B (loose), refuses C and a nonce, and B stays quiet
+        p9_no_pack_linked = p7_base / "p9-no-pack-linked"
+        subprocess.run(p9_git + ["-C", str(p9_no_pack), "worktree", "add", "-q", "--detach", str(p9_no_pack_linked),
+                                 p9_b], check=True, capture_output=True, timeout=60, env=p9_env)
+        check("preflight/p9-linked-worktree-damaged-cannot-evaluate",
+              [p9(text, repo=p9_no_pack_linked) for text in (p9_base_c, p9_nonce, p9_base_b)],
+              ["CannotEvaluate", "CannotEvaluate", (0, [])])
+        # git rev-parse's answer for the two directories fails closed: one line, a relative path, an object
+        # directory outside the common git directory, and a failed exit are CannotEvaluate; the genuine answer
+        # stays quiet
+        p9_dirs = _store_dirs_probe(p7_repo).stdout.decode("utf-8").splitlines()
+
+        def p9_dirs_answer(returncode, lines, stderr=b""):
+            answer = subprocess.CompletedProcess([], returncode, "".join(line + "\n" for line in lines).encode(
+                "utf-8"), stderr)
+            with _patched(_store_dirs_probe=lambda repo: answer):
+                return p9(p9_nonce)
+
+        check("preflight/p9-store-dirs-cannot-evaluate",
+              [p9_dirs_answer(0, p9_dirs[:1]), p9_dirs_answer(0, [".git", ".git/objects"]),
+               p9_dirs_answer(0, [p9_dirs[0], "/elsewhere/objects"]), p9_dirs_answer(128, [], b"fatal: bad\n"),
+               p9_dirs_answer(0, p9_dirs)], ["CannotEvaluate"] * 4 + [(0, [])])
+        # git answers a shallow file it cannot open as no shallow file (--is-shallow-repository prints false for a
+        # mode-000 one; measured with git 2.53.0), so the lint reads the shallow file of the common git directory
+        # itself: an unreadable one is CannotEvaluate in the clone and in a linked worktree of it, even for the
+        # commit it holds; restored, A beyond the boundary is CannotEvaluate and the commit held below the head
+        # is HARD in both
+        p9_shallow_locked, p9_shallow_linked = p7_base / "p9-shallow-locked", p7_base / "p9-shallow-linked"
+        for args in (["clone", "-q", "--depth", "2", "file://" + str(p7_repo), str(p9_shallow_locked)],
+                     ["-C", str(p9_shallow_locked), "worktree", "add", "-q", "--detach", str(p9_shallow_linked),
+                      "HEAD"]):
+            subprocess.run(p9_git + args, check=True, capture_output=True, timeout=60, env=p9_env)
+        p9_shallow_file = os.path.join(store_dirs(p9_shallow_linked)[0], "shallow")
+        p9_shallow_pair = (p9_shallow_locked, p9_shallow_linked)
+        os.chmod(p9_shallow_file, 0)
+        p9_shallow_unreadable = not os.access(p9_shallow_file, os.R_OK)
+        p9_shallow_denied = [p9_shallow_case(word, repo)() for repo in p9_shallow_pair for word in (p9_a, p9_below)]
+        os.chmod(p9_shallow_file, 0o644)
+        p9_shallow_restored = [p9_shallow_case(word, repo)() for repo in p9_shallow_pair for word in (p9_a, p9_below)]
+        check("preflight/p9-shallow-file-cannot-evaluate",
+              [p9_shallow_unreadable, p9_shallow_denied, p9_shallow_restored] if p9_locked else p9_locked_skipped,
+              [True, ["CannotEvaluate"] * 4, ["CannotEvaluate", p9_hard] * 2] if p9_locked else p9_locked_skipped)
+        if not p9_locked:
+            print("NOTE: preflight/p9-shallow-file-cannot-evaluate " + p9_locked_skipped)
+
+        def p9_git_says_not_shallow(word):
+            """The shallow clone's outcome for `word` when git answers false while the shallow file is readable."""
+            def outcome():
+                with _patched(_shallow_probe=lambda repo: subprocess.CompletedProcess([], 0, b"false\n", b"")):
+                    return p9_shallow_case(word)()
+            return outcome
+
+        # the shallow file read stands alone: with git answering false, A beyond the boundary still refuses and
+        # the commit held below the head is still HARD
+        check("preflight/p9-shallow-file-read",
+              [p9_git_says_not_shallow(word)() for word in (p9_a, p9_below)], ["CannotEvaluate", p9_hard])
+
+        def p9_stale(stem, locked=None):
+            """Rename the pack at `stem` (its .rev included) to stale.*, then make its `locked` file mode 000."""
+            directory = os.path.dirname(stem)
+            for suffix in (".idx", ".pack", ".rev"):
+                if os.path.exists(stem + suffix):
+                    os.rename(stem + suffix, os.path.join(directory, "stale" + suffix))
+            if locked:
+                os.chmod(os.path.join(directory, "stale" + locked), 0)
+
+        # git opens a pack whatever its name (measured with git 2.53.0: stale.idx and stale.pack are counted and
+        # read), so the pack walk reads every .idx and .pack: renamed whole, C is HARD and a nonce and B stay
+        # quiet; with its .idx mode 000, C is CannotEvaluate (recorded as skipped for a uid that reads it)
+        p9_stale_whole = p9_packed("p9-stale", p9_stale)[0]
+        p9_stale_locked = p9_packed("p9-stale-locked", lambda stem: p9_stale(stem, ".idx"))[0]
+        check("preflight/p9-pack-any-name",
+              [p9(text, repo=p9_stale_whole) for text in (p9_base_c, p9_nonce, p9_base_b)]
+              + ([p9(text, repo=p9_stale_locked) for text in (p9_base_c, p9_base_b)] if p9_locked
+                 else [p9_locked_skipped]),
+              [p9_hard, (0, []), (0, [])] + (["CannotEvaluate", (0, [])] if p9_locked else [p9_locked_skipped]))
+        # each guard patched out flips its fixture
+        check("revert/p9-red", *flip([p9_case(p9_runs.format(p9_c[:7], p9_a[:7]))], [(0, [])], rule_p9=nothing))
+        check("revert/p9-opt-in-red", *flip([p9_case(p9_runs.format(p9_c[:7], p9_a[:7]), "")], [p9_hard],
+                                            revision_declarations=lambda raw: [(0, [])]))
+        check("revert/p9-case-fold-red", *flip(
+            [p9_case("The base is {}.\n".format(p9_a[:12].upper()))], [p9_hard],
+            pin_matches=lambda ref, pins: any(ref.startswith(pin) or pin.startswith(ref) for pin in pins)))
+        check("revert/p9-prefix-red", *flip(
+            [p9_case("Head {}.\n".format(p9_a[:7]))], [p9_hard],
+            pin_matches=lambda ref, pins: ref.lower() in [pin.lower() for pin in pins]))
+        check("revert/p9-declaration-count-red", *flip([p9_case("", p9_declared * 2)], [(0, [])],
+                                                       P9_MAX_DECLARATIONS=2))
+        check("revert/p9-value-hex-red", *flip([p9_case("", "BRIEF-REVISIONS: HEAD\n")], [(0, [])],
+                                               revision_value_ok=lambda value: True))
+        check("revert/p9-declared-resolve-red", *flip(
+            [p9_case("", "BRIEF-REVISIONS: 0123456789abcdef0123456789abcdef01234567\n")], [(0, [])],
+            declared_commit=lambda repo, value, gap: value))
+        check("revert/p9-commit-split-red", *flip([p9_case(p9_nonce), p9_case(p9_blob), p9_case(p9_date)],
+                                                  [p9_hard] * 3,
+                                                  revision_commit=lambda repo, word, gap=None: "0" * 40))
+        check("revert/p9-ownership-red", *flip([p9_ownership_named], [False], _ownership_refused=lambda probe: False))
+        check("revert/p9-launch-red", *flip([p9_timeout, p9_no_git], ["TimeoutExpired", "FileNotFoundError"],
+                                            GIT_RUN_ERRORS=()))
+        check("revert/p9-absent-answer-red", *flip(
+            [p9_case("The base is {}.\n".format(p9_c), repo=p9_corrupt), p9_stubbed(p9_denied)], [(0, [])] * 2,
+            _absent_answer=lambda probe: probe.returncode != 0))
+        check("revert/p9-full-commit-red", *flip([p9_stubbed(p9_garbled)], [p9_hard], _full_commit=lambda text: True))
+        genuine_revision_commit = revision_commit
+
+        def p9_stderr_blind(repo, word, gap=None):
+            """revision_commit as the previous revision read it: exit 0 and a full commit id name the commit,
+            whatever git printed on stderr; every other answer is read as the genuine one reads it."""
+            probe = _p9_git(repo, "hex word {}".format(word), lambda: _rev_parse_local(repo, word))
+            commit = probe.stdout.decode("ascii", "replace").strip()
+            if probe.returncode == 0 and _full_commit(commit):
+                return commit
+            return genuine_revision_commit(repo, word, gap)
+
+        check("revert/p9-success-stderr-red", *flip(
+            [p9_stubbed(p9_warned), p9_declared_stubbed(p9_warned)], [p9_hard, (0, [])],
+            revision_commit=p9_stderr_blind))
+        # git prints its one expected-commit-type line for a blob, read as the clean not-a-commit answer
+        check("revert/p9-not-a-commit-red", *flip([p9_case(p9_blob), p9_case("Blob {}.\n".format(p9_blobs[0]))],
+                                                  ["CannotEvaluate"] * 2, _not_a_commit=lambda probe, rev: False))
+        check("revert/p9-describe-red", *flip([p9_case(p9_describe.format(p9_c[:7]))], [(0, [])],
+                                              _describe_hex=lambda line, word: False))
+        check("revert/p9-partial-clone-red", *flip([p9_case(p9_nonce, repo=p9_partial)], [(0, [])],
+                                                   partial_clone=lambda repo: False))
+        check("revert/p9-store-gap-red", *flip(
+            [p9_case(p9_base_c, repo=p9_no_pack), p9_shallow_case(p9_a), p9_case(p9_nonce, repo=p9_partial)],
+            [(0, [])] * 3, object_store_gap=lambda repo: None))
+        check("revert/p9-shallow-red", *flip([p9_shallow_case(p9_a)], [(0, [])],
+                                             shallow_clone=lambda repo, common: False))
+        # git count-objects run in the linked worktree itself (the previous revision) counts the worktree's refs
+        # directory as garbage, and a nonce there exits 2
+        p9_worktree_of = {p9_common[p9_plain]: p9_linked, p9_common[p9_shared]: p9_shared_linked}
+
+        def p9_worktree_counts(common):
+            """git count-objects -v run in the linked worktree whose common git directory is `common`."""
+            return subprocess.run(["git", "--no-replace-objects", "-C", str(p9_worktree_of[common]), "count-objects",
+                                   "-v"], capture_output=True, timeout=GIT_READ_TIMEOUT,
+                                  env=dict(_no_replace_env(), LC_ALL="C"))
+
+        check("revert/p9-common-dir-red", *flip(
+            [p9_case(p9_nonce, repo=p9_linked), p9_case(p9_nonce, repo=p9_shared_linked)], ["CannotEvaluate"] * 2,
+            _count_objects_probe=p9_worktree_counts))
+        # with the shallow file unread, git's false answer is trusted and A beyond the boundary passes
+        check("revert/p9-shallow-file-red", *flip([p9_git_says_not_shallow(p9_a)], [(0, [])],
+                                                  _shallow_file=lambda common: False))
+        # with the walk reading pack-* names alone, a whole pack named stale.* is counted by git and not by the
+        # walk, and a nonce there exits 2
+        genuine_stems = _pack_stems
+        check("revert/p9-pack-name-red", *flip(
+            [p9_case(p9_nonce, repo=p9_stale_whole)], ["CannotEvaluate"],
+            _pack_stems=lambda directory: dict((stem, suffixes) for stem, suffixes in genuine_stems(directory).items()
+                                               if stem.startswith("pack-"))))
+        check("revert/p9-count-objects-red", *flip(p9_count_cases, [(0, [])] * 3,
+                                                   _count_objects_damage=lambda fields, packs, stderr: None))
+        # an unreadable .pack whose .idx git reads is seen by the pack walk alone (git counts that pack); a uid
+        # that reads a mode-000 file cannot show it, so the flip is recorded as skipped there
+        p9_pack_flip = (flip([p9_case(p9_base_c, repo=p9_pack_locked)], [(0, [])], _pack_damage=lambda objects: None)
+                        if p9_locked else (p9_locked_skipped, p9_locked_skipped))
+        if not p9_locked:
+            print("NOTE: revert/p9-pack-damage-red " + p9_locked_skipped)
+        check("revert/p9-pack-damage-red", *p9_pack_flip)
+        # after every other read of the partial clone, since the patched read fetches D into it
+        check("revert/p9-no-lazy-fetch-red", *flip([p9_case("The base is {}.\n".format(p9_d), repo=p9_partial)],
+                                                   [p9_hard], P9_NO_FETCH_OPTIONS=()))
+        check("revert/p9-word-bound-red", *flip([p9_case(p9_words(P9_MAX_WORDS + 1))], [(0, [])],
+                                                P9_MAX_WORDS=P9_MAX_WORDS + 1))
+        # with every declared value kept, repeats included, B is probed once per spelling, and B repeated past
+        # the bound refuses
+        check("revert/p9-declared-once-red", *flip(
+            [lambda: p9_probes(p9_repeated),
+             p9_case("", "BRIEF-REVISIONS: {}\n".format(" ".join([p9_b] * (P9_MAX_REVISIONS + 1))))],
+            [((0, []), 3), "CannotEvaluate"],
+            declared_values=lambda declarations: [value for _, values in declarations for value in values]))
+        # with the bound raised past the declaration (built once, at the shipped bound), its first value is
+        # probed and refused as unresolved
+        p9_over_bound = p9_declared_many(P9_MAX_REVISIONS + 1)
+        check("revert/p9-declared-bound-red", *flip(
+            [lambda: p9_bound_named(p9_over_bound), lambda: p9_bound_probes(p9_over_bound)], [False, 1],
+            P9_MAX_REVISIONS=P9_MAX_REVISIONS + 1))
+        check("revert/p9-word-split-red", *flip(
+            [p9_case("Compare `git diff {}..{}` first.\n".format(p9_c, p9_a)),
+             p9_case("See https://h.example/o/r/commit/{} now.\n".format(p9_c))], [(0, [])] * 2,
+            HEX_WORD_RE=re.compile(r"\S++")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 242)
+    # 270, or 269 where the uid reads a mode-000 file and revert/p9-pack-damage-red is recorded as skipped
+    check("revert/every-flip-ran", len(flipped), 270 if p9_locked else 269)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -9194,7 +10449,13 @@ def self_test(report_path=None):
           "gate or hook id, Python symbol or byte-exact excerpt is absent at the brief's pinned revision, "
           "read from the git object store and never by a whole-file search, exits 2 on a malformed "
           "declaration, an unresolved or conflicting pin, or pinned content it cannot read or parse, and "
-          "prints the label in prose as ADVISORY (P7), and "
+          "prints the label in prose as ADVISORY (P7), where the brief declares one column-zero BRIEF-REVISIONS "
+          "line refuses a hex word in prose, a code span, a fence or a web address, in any case, that names a "
+          "commit outside the BRIEF-PIN, REVIEWED HEAD and BRIEF-REVISIONS values (prefix either way), stays quiet "
+          "on a word that names no commit (a nonce, a digest, a blob id, a date, an ambiguous prefix) and with no "
+          "declaration, and exits 2 on two declarations, a malformed one, a value that is not a commit id or does "
+          "not resolve, no repository, or more distinct declared values or hex words than it probes, resolving "
+          "a repeated declared value once (P9), and "
           "each preflight rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
