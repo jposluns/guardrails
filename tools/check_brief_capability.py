@@ -24,6 +24,9 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        and an input by a relative path: a token with a slash whose last component has a file
                        suffix (`tools/t.py`, `.aiqt/core/x.toml`), or that opens with `./` or `../`. A relative
                        path resolves against the worker's own scratch (its working directory), not the workdir.
+                       With --tree the advice instead says the path was judged from the staged tree's root and
+                       reaches the same file only when the worker starts there; it no longer asks for an
+                       absolute path, which the tree mode does not require.
   P2 outside workdir   HARD. The family's row says reads-outside-workdir = "no" and the brief declares a
                        workdir. P2 does not look for a path by pattern: it splits each line into words on
                        whitespace only (a span in " or ` quotes that closes on the line is one word together
@@ -104,8 +107,9 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        `git cat-file -e <commit>:<path>` from the object store, never the working tree. The
                        path may be a file the brief asks the worker to create, so P3 prints an ADVISORY line
                        and never refuses. With --tree (see P6), each such path that is not a declared input is
-                       also looked up in the staged tree, pin or no pin (os.lstat after its parent directory's
-                       real path is placed), and one missing there, resolving outside it or that cannot be
+                       also looked up in the staged tree, pin or no pin, as written and not folded, like P6
+                       (os.lstat of the path as written after its parent directory's real path is placed, so
+                       file/../x is ENOTDIR there), and one missing there, resolving outside it or that cannot be
                        looked up there (another stat error: EACCES, ELOOP, ENAMETOOLONG) is ADVISORY too, never
                        exit 2. A pin that does not resolve to one commit (unknown, ambiguous), a git
                        that cannot be launched or times out, or a pin with no repository to read is
@@ -351,7 +355,10 @@ checked here; the tree mode maps only the brief's one declared workdir, read lex
 another directory the worker sees as the tree (an unnamed mount, a second checkout) keeps the host check;
 os.access answers for the lint's own real uid and groups, not the worker's, so a lint run as root passes a
 mode-000 file; a directory is checked for read permission, not for search permission; a symbolic link is
-followed and its target judged (in the tree, only while it stays in the tree); a required input the
+followed and its target judged (in the tree, by where it would resolve for the worker, not at the tree's current
+place: only a relative link that stays inside the tree is followed, and an absolute link target or one that
+climbs above the tree's root is CANNOT_EVALUATE, exit 2, even when it lands in the tree today; a prose path's
+links are still judged at the tree's current place, P3 only); a required input the
 brief names only in prose, in code (not checked by design), or not at all, is not checked (with --tree a
 relative prose path missing from the tree is only ADVISORY, P3); and a verifier that skips a declared input
 without saying so is not caught here (check_verifier_delivery reads a clean verdict whose UNVERIFIABLE answer
@@ -2410,14 +2417,23 @@ def _first_seen(pairs):
     return out
 
 
-def rule_p1(names, row, repo):
+P1_ADVICE = ("relative path with a workdir named: it resolves against the worker's own scratch, not the workdir; "
+             "name it as an absolute path under the workdir")
+# with --tree a relative path is judged from the staged tree's root, so the advice names that tree as the place it
+# must resolve from instead of asking for an absolute path
+P1_ADVICE_TREE = ("relative path with a workdir named: the lint judged it from the staged tree's root, but the "
+                  "worker resolves it against its own working directory; it reaches the same file only when the "
+                  "worker starts at the root of the staged tree")
+
+
+def rule_p1(names, row, repo, tree=None):
     """P1 ADVISORY: the brief names a workdir and an input by a relative path, which resolves against the
-    worker's own scratch (its working directory), not the workdir."""
+    worker's own scratch (its working directory), not the workdir. With a staged tree (`tree`) the advice says
+    the path was judged from the tree's root and holds only when the worker starts there (P1_ADVICE_TREE)."""
     if not names.names_workdir:
         return []
-    return [("P1", "ADVISORY", line, "relative path with a workdir named: it resolves against the worker's "
-             "own scratch, not the workdir; name it as an absolute path under the workdir", _excerpt(path))
-            for line, path in _first_seen(names.relative)]
+    advice = P1_ADVICE if tree is None else P1_ADVICE_TREE
+    return [("P1", "ADVISORY", line, advice, _excerpt(path)) for line, path in _first_seen(names.relative)]
 
 
 def rule_p2(names, row, repo):
@@ -2503,8 +2519,9 @@ def rule_p3(names, row, repo, tree=None):
     """P3 ADVISORY: the brief pins a revision and a repository-relative path it names (repository_path) does
     not exist at that revision in `repo`; it may be a file the brief asks the worker to create, so it never
     refuses. With a staged tree (`tree`, the real path staged_tree returned), each such path that is not a
-    declared input (P6 judges those) is also looked up in the tree (tree_prose_state), pin or no pin, and one
-    missing there, resolving outside it or that cannot be looked up there is ADVISORY too, never
+    declared input (P6 judges those) is also looked up in the tree as written, not folded (tree_prose_state:
+    file/../x is ENOTDIR there, as the worker's read would be, while the pinned-revision lookup folds it), pin
+    or no pin, and one missing there, resolving outside it or that cannot be looked up there is ADVISORY too, never
     CannotEvaluate. A pin label with no valid pin (bad_pins), pin lines
     that disagree (brief_pin_conflict, reviewed_head_conflict, near_pin_conflict for a look-alike pin line: the
     message names both lines, pin_conflict_message), a pin that does not resolve, or no repository to read is
@@ -2519,9 +2536,11 @@ def rule_p3(names, row, repo, tree=None):
     paths = _first_seen([(line, path) for line, path in paths if path is not None])
     findings = []
     if tree is not None:
+        # the tree lookup reads each path as written, like P6, so its own spellings stay apart
+        written = _first_seen([(line, path) for line, path in names.relative if repository_path(path) is not None])
         declared = set(repository_path(path) for _, path in names.inputs if not path.startswith("/"))
-        for line, path in paths:
-            state = None if path in declared else tree_prose_state(tree, path)
+        for line, path in written:
+            state = None if repository_path(path) in declared else tree_prose_state(tree, path)
             if state is not None:
                 findings.append(("P3", "ADVISORY", line, "path {} the staged tree {}: if it is an input, the "
                                  "worker cannot read it there; if the brief asks the worker to create it, nothing "
@@ -3177,6 +3196,10 @@ def staged_tree(tree):
     return root
 
 
+# the most symbolic links tree_links follows for one declared input, as Linux's own path lookup (MAXSYMLINKS)
+TREE_LINK_LIMIT = 40
+
+
 def in_tree(path, root):
     """Whether a real path is the staged tree's root or lies under it."""
     return path == root or path.startswith(root.rstrip("/") + "/")
@@ -3227,27 +3250,68 @@ def tree_relative(path, names):
     return inside
 
 
+def tree_links(root, inside, line, path):
+    """Check every symbolic link the tree-relative `inside` reaches in the staged tree `root` by where it would
+    resolve for the worker, who reads the tree at another place: the walk keeps the components it has entered
+    below the root, each a real directory, and replaces a link by its own target. A link with an absolute
+    target (it names the tree's current place, or a place outside it), a `..` that climbs above the root (a
+    relative link that leaves the tree, even one that comes back in by the tree's own name), more than
+    TREE_LINK_LIMIT links, and a link that cannot be read are CannotEvaluate; a relative link that stays inside
+    the tree is followed. The walk stops at the first component that is missing, cannot be looked up or is not
+    a directory: the stat of the path as written (tree_probe) judges that. Empty and `.` components are
+    skipped here and left to the same stat."""
+    pending, entered, followed = [part for part in inside.split("/") if part not in ("", ".")], [], 0
+    while pending:
+        part = pending.pop(0)
+        if part == "..":
+            if not entered:
+                raise CannotEvaluate("line {}: the declared input {} climbs above the staged tree {} through a "
+                                     "symbolic link, so where it resolves for the worker depends on where the tree "
+                                     "is placed".format(line, path, root))
+            entered.pop()
+            continue
+        here = root.rstrip("/") + "/" + "/".join(entered + [part])
+        try:
+            info = os.lstat(here)
+        except (OSError, ValueError):
+            return
+        if stat.S_ISLNK(info.st_mode):
+            followed += 1
+            if followed > TREE_LINK_LIMIT:
+                raise CannotEvaluate("line {}: the declared input {} reaches more than {} symbolic links in the "
+                                     "staged tree {}".format(line, path, TREE_LINK_LIMIT, root))
+            try:
+                target = os.readlink(here)
+            except (OSError, ValueError) as exc:
+                raise CannotEvaluate("line {}: the declared input {} reaches a symbolic link in the staged tree {} "
+                                     "that cannot be read: {}".format(line, path, root, exc))
+            if target.startswith("/"):
+                raise CannotEvaluate("line {}: the declared input {} reaches a symbolic link in the staged tree {} "
+                                     "with an absolute target ({}), which resolves by where the tree is now, not "
+                                     "where the worker reads it; make the link relative".format(
+                                         line, path, root, target))
+            pending[:0] = [step for step in target.split("/") if step not in ("", ".")]
+            continue
+        if not stat.S_ISDIR(info.st_mode):
+            return
+        entered.append(part)
+
+
 def tree_probe(root, inside, line, path):
     """The path in the staged tree `root` that P6 stats for the tree-relative `inside`: the tree's real path
     joined with `inside` exactly as written, never normalised, so the stat itself resolves its `.` components,
     a trailing slash and every link as the worker's read would (file/., file/ and a link to file/. are
-    ENOTDIR). Containment is judged on the real path (os.path.realpath) of that same path: one that resolves
-    outside the tree (a symbolic link that escapes it) is CannotEvaluate."""
-    probe = root.rstrip("/") + "/" + inside
-    try:
-        resolved = os.path.realpath(probe)
-    except (OSError, ValueError) as exc:
-        raise CannotEvaluate("line {}: the declared input {} cannot be placed in the staged tree {}: {}".format(
-            line, path, root, exc))
-    if not in_tree(resolved, root):
-        raise CannotEvaluate("line {}: the declared input {} resolves outside the staged tree {} (to {})".format(
-            line, path, root, resolved))
-    return probe
+    ENOTDIR). Before that, every link it reaches is judged by where it would resolve for the worker, not by the
+    tree's current place (tree_links): an absolute link target, or one that climbs above the tree's root, is
+    CannotEvaluate even when it lands inside the tree today, and a relative link that stays inside is followed."""
+    tree_links(root, inside, line, path)
+    return root.rstrip("/") + "/" + inside
 
 
 def tree_prose_state(root, path):
-    """None when the repository-relative prose `path` is present in the staged tree `root` (os.lstat, the last
-    component not followed), else what P3 prints of it: missing (ENOENT, ENOTDIR), resolving outside the tree
+    """None when the relative prose `path`, as written (never normalised, like P6), is present in the staged
+    tree `root` (os.lstat, the last component not followed, so file/../x is ENOTDIR as the worker's read would
+    be), else what P3 prints of it: missing (ENOENT, ENOTDIR), resolving outside the tree
     (its parent directory's real path is not under `root`), or not looked up for another stat error (EACCES,
     ELOOP, ENAMETOOLONG and the like), which stays ADVISORY because a prose path is never a declared input."""
     joined = os.path.join(root, path)
@@ -3255,7 +3319,7 @@ def tree_prose_state(root, path):
         parent = os.path.realpath(os.path.dirname(joined))
         if not in_tree(parent, root):
             return "resolves outside"
-        os.lstat(os.path.join(parent, os.path.basename(joined)))
+        os.lstat(joined)
     except OSError as exc:
         if exc.errno in MISSING_ERRNOS:
             return "does not exist in"
@@ -3273,7 +3337,9 @@ def rule_p6(names, row, repo, tree=None):
     With a staged tree (`tree`, the real path staged_tree returned) a relative input, and an absolute one under
     the declared workdir (tree_relative), is judged in the tree instead (tree_probe, then input_state on the
     path as written under the tree, never normalised): one missing there is HARD and the message names the
-    tree, and one that resolves outside it is CannotEvaluate; an absolute input outside the workdir is still
+    tree, and one that reaches a symbolic link with an absolute target or one that climbs above the tree's root
+    (tree_links: judged by where it resolves for the worker, not at the tree's current place) is
+    CannotEvaluate; an absolute input outside the workdir is still
     judged on the host. Without a tree every message reads as it did before the staged-tree mode existed.
     A malformed declaration or a look-alike label (bad_inputs), any other stat error, another
     file type and a path input_readable refuses leave the input unconfirmed: CannotEvaluate, never a pass. Paths in
@@ -3662,11 +3728,12 @@ def preflight(text, row, repo, raw, tree=None):
     """The preflight findings (P1 to P7) for a brief's text and its family's row; they apply to every family. `raw`
     is the text before decode_brief removed format characters, which the P5 cure and the P7 declarations read.
     `tree` is the staged tree given with --tree, or None; it is checked (staged_tree) before any rule runs, and
-    its real path is passed to P3 and P6."""
+    its real path is passed to P1, P3 and P6."""
     root = None if tree is None else staged_tree(tree)
     names = PreflightText(text, raw, relative=root is not None)
-    return rule_p1(names, row, repo) + rule_p2(names, row, repo) + rule_p3(names, row, repo, root) + rule_p4(
-        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo, root) + rule_p7(names, row, repo)
+    return rule_p1(names, row, repo, root) + rule_p2(names, row, repo) + rule_p3(
+        names, row, repo, root) + rule_p4(names, row, repo) + rule_p5(names, row, repo) + rule_p6(
+        names, row, repo, root) + rule_p7(names, row, repo)
 
 
 def can_execute(row):
@@ -8403,12 +8470,18 @@ def self_test(report_path=None):
         os.symlink(outside / "in.md", linked / "f.md")
         os.mkfifo(full / "fifo")
         os.chmod(locked_tree, 0)
-        # links that stay in the full tree, relative and absolute; links whose target names a regular file
-        # with a `.` component after it (the stat of the link is ENOTDIR); and a link to the sibling tree
+        # links that stay in the full tree (relative ones, a chain of them, and in a subdirectory ones that
+        # climb with `..` to the root); links whose target names a regular file with a `.` component after it
+        # (the stat of the link is ENOTDIR); a link to the sibling tree; and links that land in the tree today
+        # but not where the worker reads it: an absolute target naming the tree's current place (directly or
+        # through a relative link), and `..` that leaves the tree and comes back in by the tree's own name
         for target, name in (("notes.md", "rlink"), (full / "notes.md", "alink"), ("inputs", "rdir"),
                              (full / "inputs", "adir"), ("notes.md/.", "dotlink"),
                              (str(full / "notes.md") + "/.", "absdotlink"), ("inputs/.", "dirdot"),
-                             (Path("..") / sibling.name, "sib")):
+                             (Path("..") / sibling.name, "sib"), (Path("..") / full.name / "notes.md", "climblink"),
+                             (Path("..") / full.name / "inputs", "climbdir"), ("plans/up", "chain"),
+                             ("alink", "toabs"), ("../notes.md", "plans/up"), ("..", "plans/root"),
+                             (Path("../..") / full.name / "notes.md", "plans/over"), (full, "plans/home")):
             os.symlink(target, full / name)
         os.symlink("loopb", lookup / "loopa")
         os.symlink("loopa", lookup / "loopb")
@@ -8490,8 +8563,8 @@ def self_test(report_path=None):
             "Read notes.md/../plans/plan.md and summarise it.\n", "Write your notes to plans/new.md.\n",
             "Read ./plans/plan.md first.\n")], [(0, [("P3", "ADVISORY")], True)] * 3)
         check("preflight/p3-tree-prose-present-quiet", [staged(text, full) for text in (
-            "Read notes.md/../plans/plan.md and summarise it.\n", "Read ./plans/plan.md first.\n")],
-              [tree_quiet] * 2)
+            "Read inputs/../plans/plan.md and summarise it.\n", "Read ./plans/plan.md first.\n",
+            "Read plans/./plan.md and plans/../notes.md first.\n")], [tree_quiet] * 3)
         # the shared reading's relative mode is explicit: the default still refuses a relative path, as
         # check_verifier_delivery's C1 relies on, and `..` is refused in both modes
         check("preflight/p6-tree-shape-default-absolute", (
@@ -8535,17 +8608,47 @@ def self_test(report_path=None):
         # normalised path would find the file and pass; the same forms over a directory pass
         check("preflight/p6-tree-dot-component-file-hard", [staged(text, full) for text in (
             "INPUT: notes.md/.\n", "INPUT: `notes.md/.`\n", "INPUT: notes.md/./\n", "INPUT: ./notes.md/.\n",
-            "INPUT: dotlink\n", "INPUT: absdotlink\n", "INPUT: dotlink/\n", "Workdir: {H}\nINPUT: {H}/notes.md/.\n",
+            "INPUT: dotlink\n", "INPUT: dotlink/\n", "Workdir: {H}\nINPUT: {H}/notes.md/.\n",
             "Workdir: {H}\nINPUT: {H}/./notes.md/.\n", "Workdir: {H}/\nINPUT: {H}//notes.md/./\n",
-            "Workdir: {H}\nINPUT: {H}/dotlink\n")], [tree_missing] * 11)
+            "Workdir: {H}\nINPUT: {H}/dotlink\n")], [tree_missing] * 10)
         check("preflight/p6-tree-dot-component-dir-quiet", [staged(text, full) for text in (
             "INPUT: inputs/.\n", "INPUT: ./inputs/./\n", "INPUT: dirdot\n", "INPUT: dirdot/\n",
             "INPUT: notes.md\n", "Workdir: {H}\nINPUT: {H}/inputs/.\n", "Workdir: {H}\nINPUT: {H}/./inputs/\n",
             "Workdir: {H}\nINPUT: {H}/.\n", "Workdir: {H}\nINPUT: {H}/dirdot\n")], [tree_quiet] * 9)
-        # links that stay in the tree, relative and absolute, are followed and their targets judged
+        # relative links that stay in the tree are followed and their targets judged: at the root, in a
+        # subdirectory climbing to the root (never above it), through a chain, relative or mapped
         check("preflight/p6-tree-in-tree-symlink-quiet", [staged(text, full) for text in (
-            "INPUT: rlink\n", "INPUT: alink\n", "INPUT: rdir/\n", "INPUT: adir/\n", "INPUT: adir\n",
-            "Workdir: {H}\nINPUT: {H}/alink\n", "Workdir: {H}\nINPUT: {H}/rdir/\n")], [tree_quiet] * 7)
+            "INPUT: rlink\n", "INPUT: rdir/\n", "INPUT: rdir\n", "INPUT: plans/up\n", "INPUT: chain\n",
+            "INPUT: plans/root/notes.md\n", "INPUT: plans/root/plans/up\n", "Workdir: {H}\nINPUT: {H}/rlink\n",
+            "Workdir: {H}\nINPUT: {H}/rdir/\n", "Workdir: {H}\nINPUT: {H}/plans/up\n")], [tree_quiet] * 10)
+        # a link judged by where it resolves for the worker, not at the tree's current place: an absolute
+        # target (even one naming the tree's current place, a file in it, its root, or reached through a
+        # relative link) and a relative one that climbs above the root (even one that comes back in by the
+        # tree's own name) are exit 2, relative or mapped; each lands in the tree today
+        check("preflight/p6-tree-link-worker-place-cannot-evaluate", [staged(text, full) for text in (
+            "INPUT: alink\n", "INPUT: adir\n", "INPUT: adir/\n", "INPUT: absdotlink\n", "INPUT: toabs\n",
+            "INPUT: climblink\n", "INPUT: climbdir/\n", "INPUT: plans/over\n", "INPUT: plans/home/notes.md\n",
+            "Workdir: {H}\nINPUT: {H}/alink\n", "Workdir: {H}\nINPUT: {H}/climblink\n")], ["CannotEvaluate"] * 11)
+        # the `.` and empty components inside the workdir's own part of a mapped input are skipped, however
+        # many (workdir_remainder), so the rest is judged in the tree: present is quiet, missing is HARD
+        dotted = str(host_workdir.parent) + "/./" + host_workdir.name
+        check("preflight/p6-tree-workdir-dot-component-mapped", [staged(text.format(dotted), full) for text in (
+            "Workdir: {{H}}\nINPUT: {}/notes.md\n", "Workdir: {{H}}\nINPUT: {}/./inputs/\n",
+            "Workdir: {{H}}\nINPUT: /.{}/plans/plan.md\n", "Workdir: {{H}}\nINPUT: {}/missing.md\n")] + [
+            staged("Workdir: {{H}}\nINPUT: {}//{}/notes.md\n".format(host_workdir.parent, host_workdir.name), full)],
+            [tree_quiet] * 3 + [tree_missing, tree_quiet])
+        # P1 with --tree says the path was judged from the staged tree's root, not that it must be absolute;
+        # without a tree its advice is unchanged
+        p1_texts = []
+        for p1_tree in (full, None):
+            p1_table = parse_table(TABLE_FIXTURE.encode("utf-8"))
+            _, p1_findings = evaluate("Workdir: /w/repo\nRead plans/plan.md first.\n".encode("utf-8"), "alpha",
+                                      p1_table, True, None, None if p1_tree is None else str(p1_tree))
+            p1_texts.append([message for rule, _, _, message, _ in p1_findings if rule == "P1"])
+        check("preflight/p1-tree-advice-names-tree", (
+            [["staged tree's root" in text and "absolute path" not in text for text in p1_texts[0]]], p1_texts[1]),
+            ([[True]], ["relative path with a workdir named: it resolves against the worker's own scratch, not the "
+                        "workdir; name it as an absolute path under the workdir"]))
         # a link to a sibling directory whose name starts with the tree's name is outside the tree
         check("preflight/p6-tree-sibling-prefix-cannot-evaluate", [staged(text, full) for text in (
             "INPUT: sib\n", "INPUT: sib/a.md\n", "Workdir: {H}\nINPUT: {H}/sib/a.md\n")], ["CannotEvaluate"] * 3)
@@ -8565,6 +8668,14 @@ def self_test(report_path=None):
             [message.startswith("path resolves outside the staged tree") for message in staged_messages(
                 text, tree)] for text, tree in (("Read x/a.md first.\n", linked), ("Read sib/a.md first.\n", full),
                                                 ("Read rdir/a.md first.\n", full))], [[True], [True], []])
+        # the tree lookup reads a prose path as written, like P6: `..` after a regular file is ENOTDIR for the
+        # worker's read, so it is ADVISORY where the folded path would be present (its twins are in
+        # p3-tree-prose-present-quiet: `..` after a directory)
+        check("preflight/p3-tree-prose-as-written-advisory", [
+            (staged(text, full), [message.startswith("path does not exist in the staged tree") for message in
+                                  staged_messages(text, full)]) for text in (
+                "Read notes.md/../plans/plan.md and summarise it.\n", "Read ./notes.md/../notes.md first.\n")],
+            [((0, [("P3", "ADVISORY")], True), [True])] * 2)
         # a prose path that cannot be looked up in the tree for a reason other than ENOENT or ENOTDIR (a
         # symbolic link loop, a name too long, and where this uid honours mode 000 a directory it cannot
         # search) stays ADVISORY, never exit 2: a prose path is never a declared input
