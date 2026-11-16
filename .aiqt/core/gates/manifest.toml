@@ -281,6 +281,15 @@ class = "c"
 residue = "A denylist scan for known private strings and host specifics in the commit-message and PR-metadata channels the file leak gate does not reach: the commit messages in a change's range, the PR title and body, and the head ref. On a public repository it is post-publication DETECTION, not prevention, and cannot un-expose already-pushed text. Its coverage depends on the CI event running at all: a commit carrying a CI-skip annotation, or a pull request in an unmergeable state, can suppress the run, and a description edited after the check is re-scanned only where the workflow subscribes to edit events. The post-merge run scans the landed commit messages, not the pull-request description, so a value present only in a description that never enters the final message is outside that path. The hash layer is evadable by deliberate obfuscation; file contents (the file leak gate and gitleaks own those), reviews and comments, and author identity are out of scope. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
+id = "commit-claims"
+script = "tools/check_commit_claims.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = "A lexical read of commit messages against the paths each commit changes: it refuses a message that says the release manifest or release root is not regenerated, not changed or not staged in a commit that changes .aiqt/manifest.toml or a file under .aiqt/release/, and a message that says they are regenerated in a commit that changes none of them. It reads the commits of a pull request's range or a push in CI and HEAD alone locally, so it judges committed history, not a message before the commit exists. The read is narrow by design: a claim phrased outside its shapes, spread over two sentences, quoted, hedged by a conditional, modal or reporting word, or under a residual heading is not read, and a merge or a merge train squash is checked only in the regenerated direction. A line carrying the allow marker with a reason lets a commit pass. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
 id = "portability"
 script = "tools/check_portability.py"
 rules = []

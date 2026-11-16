@@ -967,6 +967,16 @@ jobs:
             python3 -I -B tools/check_branch_root.py --protected "origin/${GITHUB_REF_NAME}" --max-lag 200
           fi
 
+      - name: Commit message release claims self-test
+        shell: bash
+        run: python3 -I -B tools/check_commit_claims.py --self-test
+
+      # The gate reads GITHUB_EVENT_NAME and GITHUB_EVENT_PATH itself: a pull request's base..head
+      # commits, a push's before..after commits, and HEAD alone on any other run.
+      - name: Commit message release claims
+        shell: bash
+        run: python3 -I -B tools/check_commit_claims.py
+
       - name: Release delta self-test
         shell: bash
         run: python3 -I -B tools/check_release_delta.py --self-test
