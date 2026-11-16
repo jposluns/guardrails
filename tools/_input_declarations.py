@@ -249,6 +249,10 @@ LOOK_ALIKE_REASON = ("the line opens with a look-alike of the INPUT: label (anot
                      "character, markup or HTML around the label, a quoted or task-list or heading or "
                      "table-cell label) and is never ignored; write INPUT: and one absolute path as its own "
                      "paragraph line, or quote the text in a code span or fence")
+# the same refusal for read(text, relative=True), where a relative path is accepted, so it never asks for an
+# absolute one
+RELATIVE_PATH_WORDING = "one path (relative to the staged tree, or absolute)"
+LOOK_ALIKE_REASON_RELATIVE = LOOK_ALIKE_REASON.replace("one absolute path", RELATIVE_PATH_WORDING)
 
 # opf/tools/_vendor, derived from THIS file's own absolute location (never the CWD), the same anchoring
 # opf/tools/_commonmark_headings.py uses
@@ -583,10 +587,11 @@ def input_shape(path, relative=False):
     """(path, None) when a declared input names one absolute path, else (None, reason): no path, a
     character of INPUT_SHAPE_CHARACTERS, a control character, a relative path, or a `..` component.
     With relative=True (the brief lint's staged-tree mode, which judges the path against a tree it was
-    given, and nothing else) a relative path is accepted under the same refusals; the default, which
-    check_verifier_delivery's C1 relies on, stays absolute only."""
+    given, and nothing else) a relative path is accepted under the same refusals, and no refusal asks for
+    an absolute path; the default, which check_verifier_delivery's C1 relies on, stays absolute only."""
     if not path:
-        return None, "an INPUT line with no path; write one absolute path after INPUT:"
+        return None, "an INPUT line with no path; write {} after INPUT:".format(
+            RELATIVE_PATH_WORDING if relative else "one absolute path")
     if any(character in INPUT_SHAPE_CHARACTERS for character in path):
         return None, ("the declared input {} holds a placeholder, variable, home, glob or brace character ({}), so "
                       "the path it names is not in the text; write the path itself".format(
@@ -615,7 +620,7 @@ def _declaration_tail(characters, relative=False):
         position += 1
     rest = characters[position:]
     if not rest:
-        return input_shape("")
+        return input_shape("", relative)
     if rest[0][1] == "code":
         end = 0
         while end < len(rest) and rest[end][1] == "code":
@@ -648,7 +653,8 @@ def _scan_segment(kind, characters, relative=False):
     """None, ("input", path) or ("bad", reason) for one rendered line of a unit. `characters` is
     [(character, kind)] with kind "text", "code" or "html"; html characters are invisible to a reader and
     take no part in the fold, but one in or before the label, or in the path, is bad. `relative` is
-    passed to input_shape."""
+    passed to input_shape and picks the look-alike refusal that does not ask for an absolute path."""
+    look_alike = LOOK_ALIKE_REASON_RELATIVE if relative else LOOK_ALIKE_REASON
     folded = []   # (folded character, index into `characters`, kind) for text and code characters
     html_positions = []
     for index, (character, piece_kind) in enumerate(characters):
@@ -672,10 +678,10 @@ def _scan_segment(kind, characters, relative=False):
     start = _lead_skip(folded_text)
     near = NEAR_INPUT_RE.match(folded_text, start)
     if near and any(entry[2] == "text" for entry in folded[start:near.end()]):
-        return "bad", LOOK_ALIKE_REASON
+        return "bad", look_alike
     if kind == "cell" and folded_text.strip() in CELL_TOKENS \
             and any(entry[2] == "text" for entry in folded):
-        return "bad", LOOK_ALIKE_REASON
+        return "bad", look_alike
     return None
 
 
@@ -1121,7 +1127,8 @@ def read(text, relative=False):
     [(line number, reason)] for every malformed declaration or look-alike. Inside code nothing is read.
     The caller refuses forbidden() first, so `text` ends its lines with LF alone here. DeclarationError
     when the vendored parser cannot read the text. relative=True accepts a relative declared path
-    (input_shape); only a caller that judges paths against a staged tree passes it."""
+    (input_shape), and its refusals never ask for an absolute path; only a caller that judges paths against
+    a staged tree passes it."""
     if text.isascii() and "nput" not in text.lower() and RENDERING_MARK_RE.search(text) is None:
         # nothing in it can spell the token INPUT, even folded, and no character reference, markup,
         # escape or inline HTML can make the rendered text differ from this source text
@@ -1136,7 +1143,8 @@ def read(text, relative=False):
                 raw.get("text", "") for raw in element.get("children") or [])
             for offset, raw_line in enumerate(body.split("\n")):
                 if _line_scan(raw_line, strip_tags=(kind == "html")):
-                    bad.append(((line or 1) + offset, LOOK_ALIKE_REASON))
+                    bad.append(((line or 1) + offset, LOOK_ALIKE_REASON_RELATIVE if relative else
+                                LOOK_ALIKE_REASON))
             continue
         for offset, characters in enumerate(_segments(element)):
             found = _scan_segment(kind, characters, relative)
