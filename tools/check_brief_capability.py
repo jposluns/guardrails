@@ -14,10 +14,12 @@ no later cure, or through a dispatch ref that resolves to another commit (P5), o
 INPUT: line that does not exist on the host the lint runs on (P6), or a git command line whose subcommand is commit
 or push when the family's row says git-write = "no" (W1). The signal is structural, not certain: the lint fails
 closed, so some text a human would pass refuses (see RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
-its hits are printed so a human sees them, and it never refuses. For a family that can execute (`yes` or
+its hits are printed so a human sees them, and it never refuses; so is P8, a warning on a request that the
+worker write the harness's status line. For a family that can execute (`yes` or
 `read-only-sandbox`) no execution rule applies; the PREFLIGHT rules and GIT WRITE (W1) below apply to every family.
 
-PREFLIGHT (the input paths a brief names; read over the whole brief, line by line, before scope is applied):
+PREFLIGHT (the input paths, pins and residuals a brief names, and the attestation lines it asks for; read over the
+whole brief, line by line, before scope is applied):
 
   P1 relative input    ADVISORY. The brief names a workdir (the word workdir, work dir or working directory)
                        and an input by a relative path: a token with a slash whose last component has a file
@@ -319,6 +321,93 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        (exit 2), never a pass. Keyword-free residual prose is at most advisory: a line
                        holding the label outside a column-zero declaration prints one ADVISORY line, and
                        nothing is read at the pin for it.
+  P8 status ask        ADVISORY, a WARNING for every family that never refuses: a hit prints its ADVISORY line
+                       and adds the status hint to the summary line, and the exit code is whatever the other
+                       rules set. It flags a brief that seems to ask the worker itself to write a
+                       harness-owned attestation line, which only the harness that runs the work writes (a
+                       hand-written copy is a forged attestation even when it is true). It is advisory because
+                       two rounds showed that a word-level reading cannot separate that request from ordinary
+                       work on that line in this repository, which builds the harness that writes it; it is
+                       tuned for a useful warning, not completeness. The ENFORCING LAYER for a forged status
+                       line is the dispatcher's own check of each delivery: orch-verify flags a status record
+                       written in a delivery body as CONTROL_RECORD_IN_BODY (described here, not changed). Read
+                       on text folded as a look-alike pin line is (NFKC, every Pd dash read as -), then through
+                       a bounded table of Cyrillic, Greek and Armenian look-alikes of the letters of
+                       WORKER_STATUS. A TOKEN is the WORKER_STATUS header (WORKER_STATUS, worker status,
+                       Worker-Status, WORKER__STATUS) where it names the line: the word after it is none
+                       (WORKER_STATUS: PASS, the sentence end) or line, header, first, at, as, with and the
+                       like, not followed by from ("the WORKER_STATUS parser", "check", "handling" and "the
+                       WORKER_STATUS line from each log" name no line to write). A token is also a field of a
+                       status line in the worker's reply: an account, model, rc, return-code, exit-code or
+                       effort field named in English (the effort field, the accounts fields; never a possessive,
+                       the account field's purpose), or any field the harness writes (those, family, exec,
+                       advisory, evidence, refusal_scan, scratch, handback) written as an assignment (rc=0,
+                       model = m, model: m; never ==), counted only when the sentence names a PLACE in the
+                       worker's reply (the first line or top of your reply, your answer's header) or, for
+                       assignments, when two or more distinct fields are assigned in a sentence that names a
+                       position (the first line, top of, your reply, a closing first). An ASK is a write verb
+                       (write, emit, print, output, add, include, put, insert, prepend, prefix, preface, append,
+                       begin, start, open, lead, end, finish, close, sign, fill, format, produce, attach, copy,
+                       echo, reply, respond, type, place, paste, repeat, reproduce; never a call, print( )
+                       outside a code span, or a reporting verb (report, state, give, return, provide, supply,
+                       declare, record) in a sentence that names a place, whose lead (the text from the last
+                       clause boundary: , ; : . ( ) or and, or, nor, then, but, so) is imperative: empty,
+                       filler words (please, also, first), an opener (make sure, be sure to, don't forget to,
+                       it is required that you) or the worker with a modal (you must), with an optional
+                       prohibition; a lead longer than 160 characters is read as an ask (the cap fails toward
+                       a warning, and is checked before the lead is built, so each verb reads a bounded lead);
+                       or a causative or reply-subject phrase ("Have the reply start", "Let your answer begin",
+                       "Your reply opens", "The reply must begin"). A lead that names another
+                       actor ("The harness will print") is a description and never asks. The ask is for the
+                       line when its OBJECT, read word by word after the verb through markup and a closed list
+                       of filler words (determiners, your reply, with, on, the first line, field names, and
+                       valid, correct, complete, out, back, two, like), reaches a token, or is still all
+                       filler at 32 units with a token after it (the cap fails toward a warning); it is
+                       deictic when the object holds this, these or following before a line word (header,
+                       line, block, template) or none (this:), below or follows after one (the block below),
+                       i.e., e.g. or namely, or runs to a closing colon. Warned: a prose sentence (a heading
+                       included) whose ask reaches a token; a line of a prose fence (no info string, or text,
+                       txt, plain, plaintext, none, md, markdown, prompt and the like) that does; a deictic ask,
+                       or a reply template heading or sentence ("## Output template", "reply format"), in the
+                       prose block just before a fence that holds a status line (a header token or two fields
+                       assigned with a value); and a deictic ask whose next prose sentence holds one ("Write
+                       this header first. WORKER_STATUS: PASS (rc=0)."). A template sentence with a prohibition
+                       before the phrase in its clause ("Do not use this output template.") introduces none. A
+                       prohibition in the lead exempts the verb (in a lead over the cap, one that starts in its
+                       last 160 characters; "Don't forget to" is a reminder, not a prohibition), and carries to
+                       the next verb after or or nor ("Never write the WORKER_STATUS line or print the model field
+                       at the top of your reply."), unless the object inverts it ("Never write anything except", "You must
+                       not include anything before"). So these are quiet: ordinary fields ("Add the model field
+                       to the API response.", "Add account=a and model=m to the fixture.", "Set effort = high in
+                       the config.", "Add a test asserting rc == 0."), the token as a modifier ("Write the
+                       WORKER_STATUS parser."), what the harness does ("The harness will print WORKER_STATUS.",
+                       "leave the WORKER_STATUS line to the harness"), analysis of quoted status output
+                       ("Explain each field of the WORKER_STATUS line quoted below", "Copy the report below into
+                       your reply", "Print the WORKER_STATUS line from each log", "report each one"), a table
+                       whose header row holds empty field cells, every line of a code fence (```python, ```sh),
+                       a call in a fence with no info string (print('WORKER_STATUS: PASS')), and the verdict and
+                       completion lines a brief names (VERDICT, QA-COMPLETE, Verdict: PATCH DELIVERED). It
+                       OVER-WARNS on: a write verb whose object is the line itself as analysis when no from
+                       follows ("Copy the WORKER_STATUS line into your answer."), a code line in a fence with
+                       no info string that is no call ("echo WORKER_STATUS: PASS"; tag the fence), a negation
+                       that is not in the lead ("Never, ever write a WORKER_STATUS line."), any sentence with a
+                       lead over the cap whose verb reaches a token and whose last 160 characters hold no
+                       prohibition, and a reply-template heading above a fence
+                       that documents the harness's own output. RESIDUALS (no warning): a passive ("The
+                       WORKER_STATUS line must be written by you."), an ask with an unlisted verb or lead ("Make
+                       the WORKER_STATUS line your first output."), an unlisted adjective, particle or count
+                       before the token ("Write a fresh WORKER_STATUS line first."), the token followed by an
+                       unlisted word ("Write WORKER_STATUS today."), a deictic beside an unlisted noun ("Begin
+                       with this snippet:"), an introduction other than i.e., e.g. or namely ("Write the status
+                       line first, that is WORKER_STATUS: PASS."), a field ask with no place in the reply
+                       ("Write the accounts field and the models field first."), assigned fields in a sentence
+                       that names no position ("Write account=a and model=m."), the identity fields asked for in
+                       free English ("state your account and model"), a field outside the listed ones, a
+                       look-alike letter outside the bounded table, a status line kept in a file the brief only
+                       points to ("Copy the first line of header.txt to the top of your reply."), a template
+                       heading in other words ("## Example"), and an ask split from its line by more than one
+                       sentence. P8 reads only this structural part of the rule that the verdict and
+                       completion lines are the only status lines a worker writes.
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
 sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
@@ -539,12 +628,16 @@ not one, so "do not run, build or install" stays negated.
 Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one summary line:
 
   exit 0  OK               no HARD hit (INFO and ADVISORY findings may be printed).
-  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5, P6 or W1). Rewrite the brief, or send the
+  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5, P6, P7 or W1). Rewrite the brief, or send the
                            item to a family that can execute (S1 to S3), name paths it can read (P2) or, after the
                            reach, add the cure line the hit gives (git -C <dir> checkout --detach <pin>^{commit}) or
                            reach the pin by a dispatch ref (P5), or provide each missing declared input or correct
-                           its INPUT line (P6), or drop the git commit or push, state it in the PROHIBITED shape, or
-                           send it to a family that can write (W1).
+                           its INPUT line (P6), or correct each ACCEPTED-RESIDUAL line or re-pin the brief (P7), or
+                           drop the git commit or push, state it in the PROHIBITED shape, or send it to a family that
+                           can write (W1).
+                           A P8 warning never sets the exit code: it adds its hint (ask only for the verdict and
+                           completion lines and state the harness-owned attestation line as a prohibition) to the
+                           OK or REFUSE line the other rules select, after that line's own advice.
                            When a hit is a command line (S2 or S3), the REFUSE line
                            says how to rewrite: name the function, row or entry instead of embedding the
                            command (quote the def line of X, not the line that runs git push).
@@ -3405,6 +3498,373 @@ def rule_p7(names, row, repo):
     return [finding for finding in findings if finding is not None] + advisory
 
 
+# ---------- P8: a request that the worker write a harness-owned attestation line ----------
+
+# the WORKER_STATUS header, read in any case on folded text (status_folded): WORKER_STATUS, worker status,
+# Worker-Status, WORKER__STATUS, WORKERSTATUS; never glued to a letter or a digit
+STATUS_HEADER_RE = re.compile(r"(?<![^\W_])worker[\s_.-]*+status(?![^\W_])", re.I)
+# the fields the harness writes on that line
+STATUS_FIELDS = (r"(?:account|model|rc|return[\s_-]?+code|returncode|exit[\s_-]?+code|effort|family|exec|advisory|"
+                 r"evidence(?:_reasons)?+|refusal_scan|scratch(?:_reason)?+|handback(?:_sha256|_size)?+)")
+# a field written as an assignment (rc=0, model = m, model: m); never ==, ::, or glued after a word, dot, slash or
+# hyphen (--model=x, src=, a.rc=)
+STATUS_ASSIGN_RE = re.compile(r"(?<![\w./-])(" + STATUS_FIELDS + r")\s*+[=:](?![=:])", re.I)
+# an assigned field with a value after it (model=m, rc: 0), as a status line holds it; an empty cell (| model: |)
+# is a table header, not a value
+STATUS_VALUED_RE = re.compile(r"(?<![\w./-])(" + STATUS_FIELDS + r")\s*+[=:](?![=:])[ \t]*+[^\s|]", re.I)
+# an identity field named in English, singular or plural (the effort field, the accounts and models fields); never
+# a possessive, which talks about the field (the account field's purpose)
+STATUS_NAMED_RE = re.compile(r"(?<![\w-])(?:accounts?+|models?+|rcs?+|return[\s_-]?+codes?+|returncodes?+|"
+                             r"exit[\s_-]?+codes?+|efforts?+)\s++fields?+(?![\w-]|['’]s(?![\w-]))", re.I)
+# the worker's own reply
+STATUS_REPLY = r"(?:your\s++(?:reply|answer|response|output|report)|the\s++(?:reply|answer))"
+# a position a status line takes (the first line, the top, the reply itself): two or more assigned fields are a
+# token only in a sentence that names one, so field work in a file, schema or log (Add account=a and model=m to the
+# fixture.) is not read as a status line
+STATUS_POSITION_RE = re.compile(r"(?<![\w-])(?:(?:first|opening|top|leading|header)\s++line|top\s++of|beginning"
+                                r"|first\s*+[.!]?+\s*+$)|" + STATUS_REPLY + r"(?![\w-])", re.I)
+# a place in the worker's reply where a status line goes: a field (named or assigned) is a token only when its
+# sentence names one, or when it is one of two or more distinct assigned fields (a status-line shape)
+STATUS_PLACE_RE = re.compile(r"(?<![\w-])(?:(?:first|opening|top|leading|header)\s++line|top|start|head|beginning)"
+                             r"\s++of\s++" + STATUS_REPLY + r"(?![\w-])"
+                             r"|(?<![\w-])your\s++(?:reply|answer|response|output|report)['’]s\s++"
+                             r"(?:first\s++line|header)(?![\w-])", re.I)
+# a verb that asks the worker to put text in its reply (group 1), or to report content (group 2); a reporting verb asks
+# for the line only in a sentence that names a place in the reply (STATUS_PLACE_RE)
+STATUS_EMIT_WORDS = (r"write|emit|print|output|add|include|put|insert|prepend|prefix|preface|append|begin|start|open|"
+                     r"lead|end|finish|close|sign|fill|format|produce|attach|copy|echo|reply|respond|type|place|paste|"
+                     r"repeat|reproduce")
+STATUS_REPORT_WORDS = r"report|state|give|return|provide|supply|declare|record"
+# (never a call: print( in code is no ask)
+STATUS_VERB_RE = re.compile(r"(?<![\w./-])(?:(" + STATUS_EMIT_WORDS + r")|(" + STATUS_REPORT_WORDS + r"))"
+                            r"(?![\w(-]|[./]\w)", re.I)
+# a causative or a reply-subject ask whose verb is the last word: "Have the reply start", "Let your answer begin",
+# "Your reply opens", "Your answer must begin", "The reply must begin"
+STATUS_CAUSE_RE = re.compile(r"(?<![\w-])(?:(?:have|let|make)\s++" + STATUS_REPLY
+                             + r"|(?:your\s++(?:reply|answer|response|output|report)|the\s++(?:reply|answer))"
+                             r"(?:\s++(?:must|should|shall|will|has\s++to|needs\s++to|is\s++to))?+)"
+                             r"\s++(?:begins?+|starts?+|opens?+|leads?+|includes?+|contains?+|carry|carries|ends?+|"
+                             r"closes?+)(?![\w-])", re.I)
+# a clause boundary: the lead of a verb is the text from the last boundary before it
+STATUS_BOUNDARY_RE = re.compile(r"[;:,.!?()\[\]–—]|(?<![\w-])(?:and|or|nor|then|but|so)(?![\w-])", re.I)
+STATUS_LEAD_MARKUP_RE = re.compile(r"[>*_#`\"'“”‘]|(?<![\w])[-+](?![\w])")
+# a lead longer than this is not matched against STATUS_LEAD_RE: it is read as an ask (failing toward a warning,
+# never toward silence), so a padded lead ("please please ... write") still warns
+STATUS_LEAD_MAX = 160
+# a lead that makes the verb an ask the worker is to carry out: nothing, a filler word, an imperative opener, the worker
+# with a modal, and an optional prohibition; anything else ("The harness will", "texts that") is a description
+STATUS_LEAD_RE = re.compile(
+    r"(?:(?:please|kindly|also|then|first|next|now|finally|lastly|instead|always|just|simply|again|only)\s)*+"
+    r"(?:(?:be\ssure|make\ssure(?:\sthat)?+(?:\syou)?+|remember|(?:i|we)\s(?:want|need|ask)\syou|"
+    r"(?:don(?:['’]|\s)t|do\snot|never)\sforget|(?:your|the)\s(?:job|task)\sis)\s(?:to\s)?+)?+"
+    r"(?:it\s(?:is|['’]s)\s(?:required|necessary|essential|important|mandatory)\sthat\s(?:you|the\sworker)\s"
+    r"(?:(?:must|should|shall|also|always|first)\s)*+)?+"
+    r"(?:(?:you|the\sworker|each\sworker|workers?+)\s(?:must|should|shall|will|can|may|need\sto|have\sto|are\sto|"
+    r"are\s(?:required|expected|asked)\sto)\s(?:(?:also|always|then|first|now|still)\s)*+)?+"
+    r"(?:(?:never|do\snot|don['’]t|must\snot|not\sto|not)\s)?+(?:(?:also|always|then|first|ever|still)\s)*+")
+# the prohibition a lead may carry ("Never write", "Do not *emit*", "You must not include", "not to print")
+STATUS_PROHIBITION_RE = re.compile(r"(?<![\w/.=-])(?:" + P5_PROHIBITION_WORDS + r"|not)(?![\w-])", re.I)
+# "Don't forget to" is a reminder, not a prohibition: it is removed from a lead before STATUS_PROHIBITION_RE reads it
+# (the lead has its markup, an ASCII apostrophe included, turned into spaces: don t forget)
+STATUS_REMINDER_RE = re.compile(r"(?<![\w-])(?:don(?:['’]|\s)t|do\s++not|never)\s++forget(?![\w-])", re.I)
+# a prohibition carries to the next verb of its sentence when the clause boundary between them is one of these words
+# ("Never write the WORKER_STATUS line or print the model field ...")
+STATUS_CARRY_WORDS = frozenset(("or", "nor"))
+# an object read after the verb: markup and list punctuation, an inversion that turns a prohibition into an ask
+# ("Never write anything except", "must not include anything before"), an abbreviation that points at what follows
+# (i.e., e.g., viz.), or one ASCII word (a word of another script matches no unit and ends the object)
+STATUS_UNIT_RE = re.compile(r"[\s`\"'“”‘’*_()\[\],:]++"
+                            r"|((?:anything|nothing)(?:\s++else)?+\s++(?:except|but|besides|before|ahead\s++of|above|"
+                            r"other\s++than|apart\s++from))(?![A-Za-z0-9_-])"
+                            r"|(?:i\.e|e\.g|viz)\.(?![A-Za-z0-9_-])"
+                            r"|[A-Za-z0-9_'’-]++", re.I)
+# the words an object may hold between the verb and the line it asks for; a deictic word points at the next sentence
+# or at the fence that follows ("this header:", "the header in the block below")
+STATUS_FILLER = frozenset(("a", "an", "the", "that", "one", "single", "your", "its", "own", "exact", "literal", "new",
+                           "first", "opening", "top", "leading", "final", "last", "separate", "harness", "standard",
+                           "usual", "full", "required", "header", "line", "lines", "field", "fields", "status", "text",
+                           "block", "reply", "answer", "response", "output", "report", "with", "by", "on", "at", "in",
+                           "as", "to", "into", "for", "and", "or", "then", "followed", "plus", "just", "only", "also",
+                           "exactly", "verbatim", "account", "accounts", "model", "models", "rc", "return-code",
+                           "return-codes", "returncode", "exit-code", "exit_code", "effort", "efforts",
+                           # adjectives, particles, counts and a comparison an ask puts before the line (a valid
+                           # WORKER_STATUS line, write out, echo back, two lines:, like this:)
+                           "valid", "correct", "complete", "proper", "accurate", "well-formed", "properly",
+                           "correctly", "whole", "entire", "actual", "normal", "out", "back", "two", "three", "both",
+                           "like"))
+STATUS_DEICTIC = frozenset(("this", "these", "following", "below", "follows", "i.e.", "e.g.", "viz.", "namely"))
+# a deictic word points at a status line only when the word beside it (the next one after this, these and following;
+# the one before below and follows) is one of these, or is no word (this:, as follows:); "the report below" and "this
+# table" point at something else
+STATUS_DEICTIC_NOUNS = frozenset(("header", "headers", "line", "lines", "status", "text", "block", "template", "format",
+                                  "string", "first", "exactly", "verbatim", "as", "like", "one"))
+# a WORKER_STATUS token names the line only when the word after it is no word (WORKER_STATUS: PASS, the end of the
+# sentence) or one of these; any other word makes it a modifier of something else (the WORKER_STATUS parser, check
+# or handling), and line, lines, header or headers followed by from read a line out of data (the WORKER_STATUS line
+# from each log)
+STATUS_HEADER_FOLLOW = frozenset(("line", "lines", "header", "headers", "first", "last", "at", "on", "in", "as", "to",
+                                  "and", "or", "then", "with", "before", "above", "exactly", "verbatim", "here",
+                                  "again", "pass", "fail", "followed", "plus", "itself", "alone", "only", "now"))
+STATUS_HEADER_NOUNS = frozenset(("line", "lines", "header", "headers"))
+# the word beside a token or a deictic word: spaces and markup skipped, then one ASCII word (bounded before)
+STATUS_SKIP_RE = re.compile(r"[ \t`\"'“”‘’*_]*+")
+STATUS_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_'’-]*+")
+STATUS_WORD_BEFORE_RE = re.compile(r"[A-Za-z0-9_'’-]{1,40}$")
+STATUS_OBJECT_UNITS = 32
+# a fence whose info string is one of these holds prose a worker reads as instructions; any other fence is code
+STATUS_PROSE_FENCES = frozenset(("", "text", "txt", "plain", "plaintext", "plain-text", "plain_text", "none",
+                                 "nohighlight", "md", "markdown", "prompt", "prose", "instructions"))
+# a heading or sentence that introduces a template of the worker's reply: one just before a fence that holds a status
+# line warns with no verb at all ("## Output template")
+STATUS_TEMPLATE_RE = re.compile(r"(?<![\w-])(?:(?:output|reply|answer|response|report)\s++(?:template|format|skeleton|"
+                                r"layout)|template\s++for\s++" + STATUS_REPLY + r")(?![\w-])", re.I)
+# the bounded look-alike table (after NFKC): Cyrillic, Greek, Armenian and Latin letters that render as a letter of
+# WORKER_STATUS; not a full confusables map
+STATUS_CONFUSABLES = {"А": "A", "а": "a", "Α": "A", "Е": "E", "е": "e", "Ε": "E",
+                      "К": "K", "к": "k", "Κ": "K", "κ": "k", "О": "O", "о": "o",
+                      "Ο": "O", "ο": "o", "Ѕ": "S", "ѕ": "s", "Т": "T", "Τ": "T",
+                      "Ԝ": "W", "ԝ": "w", "Ս": "U", "ս": "u", "ʀ": "R", "ᴋ": "K"}
+STATUS_MESSAGE = ("possible request that the worker write a harness-owned attestation line (a WORKER_STATUS header, "
+                  "or an account, model, return-code or effort field of a status line in its reply) through {!r}: "
+                  "the harness that runs the work writes it; ask only for the verdict and completion lines, or state "
+                  "the line as a prohibition (Never write a WORKER_STATUS line.)")
+
+
+def status_folded(text):
+    """`text` folded as a look-alike pin line is (NEAR_PIN_FORM, and a dash of a category in NEAR_PIN_DASHES read as -),
+    then through STATUS_CONFUSABLES, so a fullwidth, dash-spelt or listed look-alike WORKER_STATUS is read as the
+    token; ASCII text is returned as it is. Each character folds on its own, so offsets hold for NFKC-stable text."""
+    if text.isascii():
+        return text
+    return "".join("-" if unicodedata.category(character) in NEAR_PIN_DASHES
+                   else STATUS_CONFUSABLES.get(character, character)
+                   for character in unicodedata.normalize(NEAR_PIN_FORM, text))
+
+
+def status_tokens(text):
+    """[(start, end)] of the harness-owned tokens of one folded sentence or line: every WORKER_STATUS header, and
+    the fields (assigned or named) when the sentence names a place in the worker's reply (STATUS_PLACE_RE); the
+    assigned fields also when two or more distinct ones are assigned (a status-line shape) in a sentence that names a
+    position a status line takes (STATUS_POSITION_RE). A WORKER_STATUS header that is a modifier of another word
+    (status_header_names_line) is no token."""
+    tokens = [found.span() for found in STATUS_HEADER_RE.finditer(text) if status_header_names_line(text, found.end())]
+    assigned = list(STATUS_ASSIGN_RE.finditer(text))
+    placed = STATUS_PLACE_RE.search(text) is not None
+    if placed or (len(set(re.sub(r"[\s_-]", "", found.group(1).lower()) for found in assigned)) > 1
+                  and STATUS_POSITION_RE.search(text) is not None):
+        tokens += [found.span() for found in assigned]
+    if placed:
+        tokens += [found.span() for found in STATUS_NAMED_RE.finditer(text)]
+    return sorted(tokens)
+
+
+def _status_word_after(text, position):
+    """(word, end) of the ASCII word after `position` past spaces, backticks, quotes and emphasis marks, or ("", p)
+    where something else (punctuation, the end) comes first."""
+    skipped = STATUS_SKIP_RE.match(text, position).end()
+    found = STATUS_WORD_RE.match(text, skipped)
+    return (found.group(0).lower(), found.end()) if found else ("", skipped)
+
+
+def status_header_names_line(text, end):
+    """Whether the WORKER_STATUS header ending at `end` names the status line: the word after it is no word or a
+    STATUS_HEADER_FOLLOW word, and a STATUS_HEADER_NOUNS word there is not followed by from (a line read out of data).
+    "The WORKER_STATUS parser" and "the WORKER_STATUS line from each log" do not name it."""
+    word, after = _status_word_after(text, end)
+    if not word:
+        return True
+    if word in STATUS_HEADER_NOUNS:
+        return _status_word_after(text, after)[0] != "from"
+    return word in STATUS_HEADER_FOLLOW
+
+
+def status_shaped(text):
+    """Whether one sentence or fence line holds a status line on its own: a WORKER_STATUS header, or two or more
+    distinct fields assigned with a value (STATUS_VALUED_RE; an empty table cell is no value). A deictic ask ("Start
+    your answer with this header:") points at such text."""
+    text = status_folded(text)
+    return bool(STATUS_HEADER_RE.search(text)) or len(set(
+        re.sub(r"[\s_-]", "", found.group(1).lower()) for found in STATUS_VALUED_RE.finditer(text))) > 1
+
+
+def _status_word_before(text, position):
+    """The ASCII word that ends just before `position`, past spaces, backticks, quotes and emphasis marks, or "".
+    The marks are walked back from `position`, never by copying the text before it (a copy per call is quadratic)."""
+    start = position
+    while start and text[start - 1] in " \t`\"'“”‘’*_":
+        start -= 1
+    found = STATUS_WORD_BEFORE_RE.search(text[max(0, start - 40):start])
+    return found.group(0).lower() if found else ""
+
+
+def status_object(text, position, tokens, token_starts):
+    """(linked, deictic, inverted) of the object read from `position`, at most STATUS_OBJECT_UNITS units: linked when
+    a token starts or lies where the object reaches, through markup and STATUS_FILLER words only, and also when the
+    object is still all filler at the cap with a token after it (the cap fails toward a warning); deictic when the
+    object holds a STATUS_DEICTIC word beside a STATUS_DEICTIC_NOUNS word or no word (this header:, the block below,
+    like this:, i.e.) or runs to a sentence that ends with a colon; inverted when it holds an inversion (anything
+    except, anything before)."""
+    deictic = inverted = False
+    for _ in range(STATUS_OBJECT_UNITS):
+        if _span_at(tokens, token_starts, position) is not None:
+            return True, deictic, inverted
+        unit = STATUS_UNIT_RE.match(text, position)
+        if unit is None:
+            break
+        word = unit.group(0).lower()
+        if unit.group(1):
+            inverted = True
+        elif not word[0].isspace() and word[0] not in "`\"'“”‘’*_()[],:":
+            if word in STATUS_DEICTIC:
+                if word in ("this", "these", "following"):
+                    beside = _status_word_after(text, unit.end())[0]
+                elif word in ("below", "follows"):
+                    beside = _status_word_before(text, unit.start())
+                else:
+                    beside = ""
+                deictic = deictic or not beside or beside in STATUS_DEICTIC_NOUNS
+            elif word not in STATUS_FILLER:
+                break
+        position = unit.end()
+    else:
+        # token_starts is sorted, so its last start answers whether any token follows (one step per verb)
+        return bool(token_starts) and token_starts[-1] >= position, deictic, inverted
+    return False, deictic or (position >= len(text.rstrip()) and text.rstrip().endswith(":")), inverted
+
+
+def status_blanked(text):
+    """`text` with each STATUS_LEAD_MARKUP_RE character and each reminder (STATUS_REMINDER_RE) turned into spaces of
+    the same length, so offsets hold: an over-long lead reads its prohibition here, in a bounded window."""
+    return STATUS_REMINDER_RE.sub(lambda found: " " * len(found.group(0)), STATUS_LEAD_MARKUP_RE.sub(" ", text))
+
+
+def status_asks(text):
+    """([(verb, deictic)]) of the asks in one sentence or fence line that the worker write a harness-owned
+    attestation line. A verb (STATUS_VERB_RE, outside a code span and outside a token) or a causative or reply-subject
+    phrase (STATUS_CAUSE_RE) asks when its lead (the text from the last clause boundary, STATUS_BOUNDARY_RE) is an
+    imperative lead (STATUS_LEAD_RE), or is longer than STATUS_LEAD_MAX (the cap fails toward a warning); a
+    description ("The harness will print") is not. The ask is for the line when its object reaches a token
+    (status_tokens) through filler words only (status_object), or is deictic. A prohibition in the lead
+    (STATUS_PROHIBITION_RE, a reminder such as "Don't forget to" removed first; in an over-long lead, one that starts
+    in its last STATUS_LEAD_MAX characters), or one carried to a verb after "or" or "nor", exempts the verb unless the
+    object inverts it. A reporting verb asks only in a sentence that names a place in the reply. Read on the folded
+    text (status_folded). The cap is checked before a lead is built, so each verb reads a bounded lead."""
+    text = status_folded(text)
+    tokens = status_tokens(text)
+    token_starts = [start for start, _ in tokens]
+    spans = code_spans(text)
+    span_starts = [start for start, _ in spans]
+    boundaries = [(found.end(), found.group(0).lower()) for found in STATUS_BOUNDARY_RE.finditer(text)
+                  if _span_at(spans, span_starts, found.start()) is None]
+    boundary_ends = [end for end, _ in boundaries]
+    placed = STATUS_PLACE_RE.search(text) is not None
+    candidates = [(found.start(), found.end(), found.group(0), found.group(2) is not None)
+                  for found in STATUS_VERB_RE.finditer(text)]
+    candidates += [(found.start(), found.end(), found.group(0), False) for found in STATUS_CAUSE_RE.finditer(text)]
+    asks, prohibited_before, blanked = [], False, None
+    for start, end, verb, reporting in sorted(candidates):
+        if (_span_at(spans, span_starts, start) is not None or _span_at(tokens, token_starts, start) is not None
+                or (reporting and not placed)):
+            continue
+        index = bisect.bisect_right(boundary_ends, start) - 1
+        boundary, word = boundaries[index] if index >= 0 else (0, "")
+        # the cap is checked before the lead is built, so a verb reads at most STATUS_LEAD_MAX characters before it
+        # and the work per sentence stays linear however many verbs share one clause
+        if start - boundary <= STATUS_LEAD_MAX:
+            lead = " ".join(STATUS_LEAD_MARKUP_RE.sub(" ", text[boundary:start]).lower().split())
+            if not STATUS_LEAD_RE.fullmatch(lead + " " if lead else ""):
+                continue
+            lead_prohibited = bool(STATUS_PROHIBITION_RE.search(STATUS_REMINDER_RE.sub(" ", lead)))
+        else:
+            # an over-long lead is read as an ask, not skipped (the cap fails toward a warning), and its prohibition
+            # is read from its last STATUS_LEAD_MAX characters only, on the sentence with its markup and reminders
+            # blanked once (status_blanked)
+            if blanked is None:
+                blanked = status_blanked(text)
+            lead_prohibited = STATUS_PROHIBITION_RE.search(blanked, start - STATUS_LEAD_MAX, start) is not None
+        prohibited = lead_prohibited or (word in STATUS_CARRY_WORDS and prohibited_before)
+        prohibited_before = prohibited
+        linked, deictic, inverted = status_object(text, end, tokens, token_starts)
+        if prohibited and not inverted:
+            continue
+        if linked or deictic:
+            asks.append((verb, not linked))
+    return asks
+
+
+def status_template(text):
+    """The reply template phrase (STATUS_TEMPLATE_RE) of one folded sentence, or "" when it has none or a prohibition
+    (STATUS_PROHIBITION_RE, markup and a reminder such as "Don't forget to" removed first) stands before the phrase in
+    its clause (from the last STATUS_BOUNDARY_RE boundary): "Do not use this output template" introduces no template
+    of the reply, and "Use this output template" does."""
+    found = STATUS_TEMPLATE_RE.search(text)
+    if found is None:
+        return ""
+    boundary = max((stop.end() for stop in STATUS_BOUNDARY_RE.finditer(text, 0, found.start())), default=0)
+    lead = STATUS_REMINDER_RE.sub(" ", STATUS_LEAD_MARKUP_RE.sub(" ", text[boundary:found.start()]))
+    return "" if STATUS_PROHIBITION_RE.search(lead) else found.group(0)
+
+
+def status_introduction(blocks, index):
+    """The sentences of the prose block just before the fence at blocks[index], the fence's introduction, or []."""
+    previous = blocks[index - 1] if index and blocks[index - 1].kind == "prose" else None
+    return [raw for _, raw in sentences(previous.text().replace("\n", " "))] if previous is not None else []
+
+
+def rule_p8(names, row, repo):
+    """P8 ADVISORY (a warning that never refuses), for every family: the brief seems to ask the worker itself to write
+    a harness-owned attestation line (a WORKER_STATUS header, or an account, model, return-code or effort field of a
+    status line in its reply), which only the harness that runs the work writes. Read over the whole brief before
+    scope: a prose sentence whose ask reaches a token (status_asks); a line of a prose fence (STATUS_PROSE_FENCES)
+    that does, never a line of a code fence; a deictic ask ("Start your answer with this header:") or a reply
+    template heading or sentence (STATUS_TEMPLATE_RE, "## Output template") in the prose block just before a fence
+    that holds a status line (status_shaped); and a deictic ask whose next prose sentence holds one. A prohibition, a
+    description of what the harness prints, an ordinary field (the model field of an API response), the token as a
+    modifier (the WORKER_STATUS parser), analysis of a quoted status line and the verdict and completion lines a
+    brief names (VERDICT, QA-COMPLETE, Verdict: PATCH DELIVERED) pass. Advisory because a word-level reading cannot
+    separate such a request from ordinary work on that line; the enforcing layer is the dispatcher's check of each
+    delivery."""
+    folded = status_folded(names.text)
+    if not (STATUS_HEADER_RE.search(folded) or STATUS_ASSIGN_RE.search(folded) or STATUS_NAMED_RE.search(folded)):
+        return []
+    blocks, findings, pending = parse_blocks(names.text), [], None
+    for index, block in enumerate(blocks):
+        if block.kind == "fence":
+            pending = None
+            if block.tag in STATUS_PROSE_FENCES:
+                for number, line in block.lines:
+                    asks = [verb for verb, deictic in status_asks(line) if not deictic]
+                    if asks:
+                        findings.append(("P8", "ADVISORY", number, STATUS_MESSAGE.format(asks[0]),
+                                         _excerpt(line.strip())))
+            if any(status_shaped(line) for _, line in block.lines):
+                for intro in status_introduction(blocks, index):
+                    asks = [verb for verb, deictic in status_asks(intro) if deictic]
+                    template = status_template(status_folded(intro))
+                    if not asks and template:
+                        asks = [template]
+                    if asks:
+                        findings.append(("P8", "ADVISORY", block.start, STATUS_MESSAGE.format(asks[0])
+                                         + ", introducing a fence that holds one", _excerpt(intro)))
+                        break
+            continue
+        line_starts, offset = [], 0
+        for _, line in block.lines:
+            line_starts.append(offset)
+            offset += len(line) + 1
+        for start, raw in sentences(block.text().replace("\n", " ")):
+            number = block.lines[bisect.bisect_right(line_starts, start) - 1][0]
+            if pending is not None and status_shaped(raw):
+                findings.append(("P8", "ADVISORY", pending[0], STATUS_MESSAGE.format(pending[1]) + ", pointing at "
+                                 "the next sentence, which holds one", _excerpt(pending[2])))
+            asks = status_asks(raw)
+            linked = [verb for verb, deictic in asks if not deictic]
+            if linked:
+                findings.append(("P8", "ADVISORY", number, STATUS_MESSAGE.format(linked[0]), _excerpt(raw)))
+            pending = (number, asks[0][0], raw) if asks and not linked else None
+    return findings
+
+
 # ---------- W1: a git command line that writes, for a family whose row says it cannot ----------
 
 # the subcommands the git-write row governs, matched where GIT_SUBCOMMAND_RE matches a git subcommand
@@ -3501,11 +3961,12 @@ def rule_w1(text, row, family, families, scoped=True):
 
 
 def preflight(text, row, repo, raw):
-    """The preflight findings (P1 to P7) for a brief's text and its family's row; they apply to every family. `raw`
+    """The preflight findings (P1 to P8) for a brief's text and its family's row; they apply to every family. `raw`
     is the text before decode_brief removed format characters, which the P5 cure and the P7 declarations read."""
     names = PreflightText(text, raw)
     return rule_p1(names, row, repo) + rule_p2(names, row, repo) + rule_p3(names, row, repo) + rule_p4(
-        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo) + rule_p7(names, row, repo)
+        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo) + rule_p7(
+        names, row, repo) + rule_p8(names, row, repo)
 
 
 def can_execute(row):
@@ -3570,11 +4031,15 @@ COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or ent
                      "embedding the command (for example: quote the def line of X, not the line that runs git push)")
 
 
-PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6", "P7"))
+PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"))
 # the rules that apply to every family, whether or not it can execute
 EVERY_FAMILY_RULES = PREFLIGHT_RULES | frozenset(("W1",))
 # added to a REFUSE line when a P6 hit is among the hard hits
 INPUT_HINT = "; provide each missing declared input, or correct its INPUT line, before sending"
+# added to the summary line (REFUSE or OK) when a P8 warning is among the findings; P8 never sets the exit code
+STATUS_HINT = ("; the harness writes the WORKER_STATUS line and its account, model, return-code and effort fields: "
+               "ask only for the verdict and completion lines, or state the line as a prohibition (Never write a "
+               "WORKER_STATUS line.)")
 # added to a REFUSE line when a W1 hit is among the hard hits
 GIT_WRITE_HINT = ("; the family's row says git-write = \"no\": drop the git commit or push, state it as a prohibition "
                   "(Do not run `git push`.), or send it to a family that can write")
@@ -3592,43 +4057,46 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
     hard = [rule for rule, severity, _, _, _ in findings if severity == "HARD"]
     missing_input = INPUT_HINT if "P6" in hard else ""
     git_write = GIT_WRITE_HINT if "W1" in hard else ""
+    # P8 is ADVISORY: a hit adds its hint to whichever summary line the other rules select, and never selects one
+    status_ask = STATUS_HINT if any(rule == "P8" for rule, _, _, _, _ in findings) else ""
     if code == EXIT_REFUSE and set(hard) - EVERY_FAMILY_RULES:
         print("REFUSE: family {} cannot execute and the brief carries a structural execution request ({} hard "
-              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}{}".format(
+              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}{}{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
-                  "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else "", missing_input, git_write))
+                  "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else "", missing_input, git_write,
+                  status_ask))
     elif code == EXIT_REFUSE and "W1" in hard:
         print("REFUSE: family {}: the brief carries a git command line that commits or pushes ({} hard hit(s): {}){}"
-              "{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
-                          git_write, missing_input))
+              "{}{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
+                            git_write, missing_input, status_ask))
     elif code == EXIT_REFUSE and "P5" in hard:
         print("REFUSE: family {}: the brief reaches a pinned revision through a ref that can move ({} hard hit(s): "
               "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}; "
-              "{}".format(
+              "{}{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
                   CURE_EXAMPLE.format("<pin>"), ", and name paths under the declared workdir" if "P2" in hard else "",
-                  missing_input, CURE_SHAPE))
+                  missing_input, CURE_SHAPE, status_ask))
     elif code == EXIT_REFUSE and set(hard) == {"P6"}:
         print("REFUSE: family {}: the brief declares an input that does not exist on this host ({} hard hit(s): "
-              "P6 x{}){}".format(family, len(hard), len(hard), INPUT_HINT))
+              "P6 x{}){}{}".format(family, len(hard), len(hard), INPUT_HINT, status_ask))
     elif code == EXIT_REFUSE and set(hard) == {"P7"}:
         print("REFUSE: family {}: the brief accepts a residual whose anchor does not hold at the pinned "
               "revision ({} hard hit(s): P7 x{}); correct each ACCEPTED-RESIDUAL line ({}), or re-pin the "
-              "brief".format(family, len(hard), len(hard), ANCHOR_SHAPE))
+              "brief{}".format(family, len(hard), len(hard), ANCHOR_SHAPE, status_ask))
     elif code == EXIT_REFUSE:
         print("REFUSE: family {}: the brief names an input the family cannot read ({} hard hit(s): {}); name "
-              "paths under the declared workdir, or state a path the worker must not use as a prohibition{}".format(
+              "paths under the declared workdir, or state a path the worker must not use as a prohibition{}{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
-                  missing_input))
+                  missing_input, status_ask))
     elif can_execute(table[family]):
         advisory = sum(1 for _, severity, _, _, _ in findings if severity == "ADVISORY")
-        print("OK: family {} can execute ({}); the execution rules do not apply{}".format(
+        print("OK: family {} can execute ({}); the execution rules do not apply{}{}".format(
             family, table[family]["execute"],
-            "; {} preflight advisory, read the ADVISORY lines".format(advisory) if advisory else ""))
+            "; {} preflight advisory, read the ADVISORY lines".format(advisory) if advisory else "", status_ask))
     else:
         advisory = sum(1 for _, severity, _, _, _ in findings if severity == "ADVISORY")
-        print("OK: family {}: no structural hit ({} advisory, {} info); read the ADVISORY lines".format(
-            family, advisory, len(findings) - advisory))
+        print("OK: family {}: no structural hit ({} advisory, {} info); read the ADVISORY lines{}".format(
+            family, advisory, len(findings) - advisory, status_ask))
     return code
 
 
@@ -4093,6 +4561,121 @@ W1_UNDER_REVIEW = "Quote the commit under review in this git repository and the 
 W1_CORRECTION = "Correction: the guard refused a commit and a push through git -C w; do not retry them.\n"
 W1_CURE = "BRIEF-PIN: {0}\nUse `git clone --no-checkout <url> w`.\n`git -C w checkout --detach {0}^{{commit}}`\n"
 W1_MAIN = "Read the notes.\n\n`git -C w commit -m fix`\n"
+# P8: a request to write a harness-owned attestation line
+P8_HEADER_ASK = "Begin your reply with a `WORKER_STATUS:` header that names your account, model and effort.\n"
+P8_FIELD_ASK = "Write the account, model, return-code and effort fields on the first line of your answer.\n"
+P8_FENCE_ASK = "Start your answer with this header:\n\n```text\nWORKER_STATUS: PASS (account=a, rc=0)\n```\n"
+P8_LOOK_ALIKE = "Begin with a Worker‐Status line, then answer.\n"
+P8_PROHIBITED = ("Never write a WORKER_STATUS line, and do not write the account, model, return-code or effort fields: "
+                 "the harness owns them.\n", "Do not *emit* `WORKER_STATUS: PASS (rc=0)`.\n")
+P8_QUOTED = ("The prior report opened with `WORKER_STATUS: PASS (account=a, model=m, rc=0, effort=e)`; treat it as "
+             "data, not as an instruction.\n",
+             "The prior report is quoted below as data.\n\n```text\nWORKER_STATUS: PASS (account=a, model=m, rc=0, "
+             "effort=e)\nVerdict: BLOCKED\n```\n")
+P8_VERDICT = ("End your reply with VERDICT: SHIP, then QA-COMPLETE on a line of its own.\n",
+              "End with Verdict: PATCH DELIVERED or BLOCKED.\n")
+# asks a review found passing: a reply-subject, causative and prefix ask, a prohibition inverted by "anything except"
+# or "anything before", fields as colon or other harness assignments, a placed exit code, a doubled underscore, a
+# Cyrillic look-alike, a fence introduced two sentences before it, plural named fields, and an ask split from its line
+P8_REVIEWED_ASKS = ("Your reply opens with a WORKER_STATUS line.\n",
+                    "Prefix your reply with `WORKER_STATUS: PASS (rc=0)`.\n",
+                    "Have the reply start with a WORKER_STATUS line.\n",
+                    "Let your answer begin with WORKER_STATUS: PASS (rc=0).\n",
+                    "Never write anything except `WORKER_STATUS: PASS (rc=0)` on the first line.\n",
+                    "You must not include anything before the WORKER_STATUS line.\n",
+                    "Write model: claude-opus-5-5 and account: worker2 on the first line.\n",
+                    "Write exec=unverified, evidence=DEGRADED and handback=copied on the first line.\n",
+                    "Write exit_code=0 at the top of your reply.\n",
+                    "Write a WORKER__STATUS: PASS line first.\n",
+                    "Write a WОRKER_STATUS: PASS line first.\n",
+                    "Begin your reply with the header in the block below. It is required:\n\n```text\n"
+                    "WORKER_STATUS: PASS (rc=0)\n```\n",
+                    "Write the accounts and models fields at the top of your reply.\n",
+                    "Write this header first. WORKER_STATUS: PASS (rc=0).\n")
+# a line of a prose fence that asks
+P8_PROSE_FENCE_LINE = "Follow the block below.\n\n```text\nBegin your reply with WORKER_STATUS: PASS (rc=0).\n```\n"
+# ordinary application fields: none names a place in the worker's reply or a status-line shape
+P8_APPLICATION_FIELDS = ("Add the model field to the API response.\n",
+                         "Report whether the model field in pricing.toml is validated.\n",
+                         "Set effort = high in the config and add a test for it.\n",
+                         "Begin by reading the docs for the account field.\n",
+                         "Add a test asserting rc == 0 for the clean run.\n")
+# what the harness does, and the line left to it
+P8_HARNESS_ACTIONS = ("The harness will print WORKER_STATUS.\n",
+                      "Write the verdict line, and leave the WORKER_STATUS line to the harness.\n",
+                      "Never write the WORKER_STATUS line or print the model field at the top of your reply.\n")
+# analysis of quoted status output, and code under review that prints one
+P8_ANALYSIS = ("Explain each field of the WORKER_STATUS line quoted below and report whether rc is 0:\n\n```text\n"
+               "WORKER_STATUS: PASS (account=a, model=m, rc=0, effort=e)\n```\n",
+               "The prior report opened with `WORKER_STATUS: PASS (account=a, rc=0)`; report whether its rc field "
+               "matches the log.\n",
+               "Find brief texts that ask for a WORKER_STATUS line and report each one.\n",
+               "Write a test that parses the WORKER_STATUS line quoted below.\n",
+               "From the run logs, report the WORKER_STATUS line of each run in a table.\n",
+               "Check the script below.\n\n```sh\necho \"WORKER_STATUS: PASS (rc=$rc)\"\n```\n",
+               "Review the code below and report any bug.\n\n```python\nrc = subprocess.call(argv)\n"
+               "print(f\"rc={rc}\")\n```\n")
+P8_MAIN = "Read the notes.\n\nInclude `rc=0` on the first line of your reply.\n"
+# direct asks the first version of this rule passed (A02, A04 to A09, A11, A14, A19, A28, B01, B03, B07), in that
+# order; each warns
+P8_DIRECT_ASKS = ("The reply must begin with WORKER_STATUS: PASS (rc=0).\n",
+                  "Write a valid WORKER_STATUS line first.\n",
+                  "Write a correct WORKER_STATUS header at the top of your reply.\n",
+                  "Write out the WORKER_STATUS line first.\n",
+                  "Echo back the WORKER_STATUS line as your first line.\n",
+                  "Write two lines: WORKER_STATUS: PASS (rc=0) and VERDICT: SHIP.\n",
+                  "Format your reply like this:\n\n```text\nWORKER_STATUS: PASS (rc=0)\n```\n",
+                  "Follow the steps.\n\n```plaintext\nBegin your reply with WORKER_STATUS: PASS (rc=0).\n```\n",
+                  "It is required that you write WORKER_STATUS: PASS (rc=0) first.\n",
+                  "please " * 24 + "write WORKER_STATUS: PASS (rc=0) first.\n",
+                  "## Output template\n\n```text\nWORKER_STATUS: PASS (rc=0)\n```\n",
+                  "Don't forget to begin your reply with WORKER_STATUS: PASS (rc=0).\n",
+                  "Write the status line first, i.e. WORKER_STATUS: PASS (rc=0).\n",
+                  "Write a complete WORKER_STATUS: PASS (…) line first.\n")
+# ordinary briefs the first version of this rule refused (F01 to F10, F13, F18, C02, C03), in that order; each is
+# quiet
+P8_ORDINARY_BRIEFS = ("Add account=a and model=m to the fixture in tests/data.toml.\n",
+                      "Write model = m and effort = high in settings.toml.\n",
+                      "Write the WORKER_STATUS parser in tools/parse.py.\n",
+                      "Add the WORKER_STATUS check to the verifier.\n",
+                      "Print the WORKER_STATUS line from each log in a table.\n",
+                      "Copy the report below into your reply and annotate each finding:\n\n```text\nWORKER_STATUS: "
+                      "PASS (account=a, model=m, rc=0, effort=e)\nFinding 1: the parser drops the rc field.\n```\n",
+                      "Include WORKER_STATUS handling in the design doc.\n",
+                      "Review the snippet.\n\n```\nprint('WORKER_STATUS: PASS')\n```\n",
+                      "State the account field's purpose at the top of your reply.\n",
+                      "Add EXEC=1 and SCRATCH=/tmp to the environment block.\n",
+                      "Fill in this table:\n\n| model: | effort: |\n| --- | --- |\n| m | high |\n",
+                      "Put family=x and model=y in the log line.\n",
+                      "Add family=x and exec=y to the dispatch record schema.\n",
+                      "Add account= and model= parsing to the wrapper.\n")
+# the length caps fail toward a warning: a lead over STATUS_LEAD_MAX that is no listed lead, and an object of more
+# than STATUS_OBJECT_UNITS units of filler before the token; their twins (a prohibition in the same long lead, the
+# same long object with no token) stay quiet
+P8_LONG_LEAD = ("In the reply that you send back to the orchestrator once every one of the requested checks in this "
+                "brief has finished running on the scratch clone you made earlier you write WORKER_STATUS: PASS "
+                "(rc=0).\n")
+P8_LONG_OBJECT = "Write " + "the " * 17 + "WORKER_STATUS line.\n"
+P8_CAP_TWINS = (P8_LONG_LEAD.replace("you write", "you never write"), "Write " + "the " * 17 + "verdict line.\n")
+# a reminder is no prohibition (STATUS_REMINDER_RE)
+P8_REMINDER = "Do not forget to begin your reply with WORKER_STATUS: PASS (rc=0).\n"
+# an over-long lead reads its prohibition from its last STATUS_LEAD_MAX characters (the cap is checked before
+# the lead is built): a prohibition farther back warns (failing toward a warning), and a reminder in that window is
+# still no prohibition; the twin, a prohibition inside the window, is P8_CAP_TWINS[0]
+P8_LONG_LEAD_WINDOW = (P8_LONG_LEAD.replace("In the reply", "Do not hurry in the reply"),
+                       P8_LONG_LEAD.replace("you write", "you do not forget to write"))
+# a prohibition before a reply template phrase in its clause introduces no template (status_template); the
+# twins (the template asked for, a reminder, a prohibition in an earlier clause) still warn
+P8_TEMPLATE_FENCE = "\n\n```text\nWORKER_STATUS: PASS (rc=0)\n```\n"
+P8_TEMPLATE_PROHIBITED = ("Do not use this output template." + P8_TEMPLATE_FENCE,
+                          "Never copy the **reply format** below." + P8_TEMPLATE_FENCE)
+P8_TEMPLATE_ASKED = ("Use this output template." + P8_TEMPLATE_FENCE,
+                     "Do not forget the reply format below." + P8_TEMPLATE_FENCE,
+                     "Do not skip a section, and use this output template." + P8_TEMPLATE_FENCE)
+# a table header of empty field cells in a fence is no status line (status_shaped reads STATUS_VALUED_RE);
+# its twin, the same cells with values, is one
+P8_EMPTY_CELLS = "Fill in the block below:\n\n```text\n| account: | model: |\n| --- | --- |\n| a | m |\n```\n"
+P8_VALUED_CELLS = "Fill in the block below:\n\n```text\n| account: a | model: m |\n```\n"
 P1_RELATIVE = "The workdir is /w/repo.\nRead docs/notes.md before you answer.\n"
 P1_ABSOLUTE = "The workdir is /w/repo.\nRead /w/repo/docs/notes.md before you answer.\n"
 P1_NO_WORKDIR = "Read docs/notes.md before you answer.\n"
@@ -6155,7 +6738,12 @@ def self_test(report_path=None):
              "git -C w checkout --detach 1234567abc`\n"),
             ("perf/p5-line-join-linear", "git -C w \\\n", "Confirm HEAD is 1234567abc.\n", "checkout main\n"),
             ("perf/p5-git-word-join-linear", "Run git\n", "Confirm HEAD is 1234567abc.\n", "clone x\n"),
-            ("perf/p5-quoted-option-linear", "git -C \"a b\" checkout x && ", "Confirm HEAD is 1234567abc.\n", "")):
+            ("perf/p5-quoted-option-linear", "git -C \"a b\" checkout x && ", "Confirm HEAD is 1234567abc.\n", ""),
+            # P8: one clause of many verbs and no boundary after a status token; each verb used to rebuild and scan
+            # its whole lead (quadratic: 64 KiB took 48 s against 1.1 s on 8 KiB), and to copy the text before a
+            # deictic word
+            ("perf/p8-long-lead-linear", "print ", "WORKER_STATUS ", ""),
+            ("perf/p8-deictic-below-linear", "write the block below ", "WORKER_STATUS ", "")):
         check(check_id, _linear(unit, prefix, suffix), True)
     # ---------- the advisory rules: printed, never refusing ----------
     check("r1/run-prose-advisory", _outcome(RUN_PROSE), (0, [("R1", "ADVISORY")]))
@@ -6734,6 +7322,99 @@ def self_test(report_path=None):
               ((EXIT_REFUSE, ["4: " + w1_hard_line], [w1_refuse_line]), False))
     finally:
         shutil.rmtree(w1_tmp, ignore_errors=True)
+    # ---------- P8: a request to write a harness-owned attestation line, for every family (a warning) ----------
+    p8_warned = (0, [("P8", "ADVISORY")])   # P8 warns and never sets the exit code
+    check("p8/header-ask-warned", _outcome(P8_HEADER_ASK, "alpha"), p8_warned)
+    check("p8/field-ask-warned", _outcome(P8_FIELD_ASK, "alpha"), p8_warned)
+    check("p8/fence-introduction-warned", _outcome(P8_FENCE_ASK, "alpha"), p8_warned)
+    check("p8/look-alike-warned", _outcome(P8_LOOK_ALIKE, "alpha"), p8_warned)
+    check("p8/prohibition-ok", [_outcome(text, "alpha") for text in P8_PROHIBITED], [(0, [])] * 2)
+    check("p8/quoted-as-data-ok", [_outcome(text, "alpha") for text in P8_QUOTED], [(0, [])] * 2)
+    check("p8/verdict-and-completion-lines-ok", [_outcome(text, "alpha") for text in P8_VERDICT], [(0, [])] * 2)
+    check("p8/reviewed-asks-warned", [_outcome(text, "alpha") for text in P8_REVIEWED_ASKS],
+          [p8_warned] * len(P8_REVIEWED_ASKS))
+    check("p8/prose-fence-line-warned", _outcome(P8_PROSE_FENCE_LINE, "alpha"), p8_warned)
+    # the direct asks the first version of this rule passed now warn, and the ordinary briefs it refused are quiet
+    check("p8/direct-asks-warned", [_outcome(text, "alpha") for text in P8_DIRECT_ASKS],
+          [p8_warned] * len(P8_DIRECT_ASKS))
+    check("p8/ordinary-briefs-quiet", [_outcome(text, "alpha") for text in P8_ORDINARY_BRIEFS],
+          [(0, [])] * len(P8_ORDINARY_BRIEFS))
+    # the caps fail toward a warning; a prohibition in the long lead, and a long object with no token, stay quiet
+    check("p8/caps-warned", [_outcome(text, "alpha") for text in (P8_LONG_LEAD, P8_LONG_OBJECT)], [p8_warned] * 2)
+    check("p8/caps-twins-quiet", [_outcome(text, "alpha") for text in P8_CAP_TWINS], [(0, [])] * 2)
+    check("p8/reminder-warned", _outcome(P8_REMINDER, "alpha"), p8_warned)
+    check("p8/long-lead-window-warned", [_outcome(text, "alpha") for text in P8_LONG_LEAD_WINDOW],
+          [p8_warned] * len(P8_LONG_LEAD_WINDOW))
+    check("p8/template-prohibited-quiet", [_outcome(text, "alpha") for text in P8_TEMPLATE_PROHIBITED],
+          [(0, [])] * len(P8_TEMPLATE_PROHIBITED))
+    check("p8/template-asked-warned", [_outcome(text, "alpha") for text in P8_TEMPLATE_ASKED],
+          [p8_warned] * len(P8_TEMPLATE_ASKED))
+    check("p8/empty-cells-quiet", _outcome(P8_EMPTY_CELLS, "alpha"), (0, []))
+    check("p8/valued-cells-warned", _outcome(P8_VALUED_CELLS, "alpha"), p8_warned)
+    # the exit section names every rule that can refuse (each HARD rule), P7 included
+    check("p8/exit-section-hard-rules",
+          re.search(r"at least one HARD hit \(([^)]*)\)", " ".join(__doc__.split())).group(1),
+          "S1, S2, S3, P2, P5, P6, P7 or W1")
+    check("p8/application-fields-ok", [_outcome(text, "alpha") for text in P8_APPLICATION_FIELDS],
+          [(0, [])] * len(P8_APPLICATION_FIELDS))
+    check("p8/harness-actions-ok", [_outcome(text, "alpha") for text in P8_HARNESS_ACTIONS],
+          [(0, [])] * len(P8_HARNESS_ACTIONS))
+    check("p8/quoted-status-analysis-ok", [_outcome(text, "alpha") for text in P8_ANALYSIS],
+          [(0, [])] * len(P8_ANALYSIS))
+    check("p8/every-family", [_outcome(text, family) for text in (P8_HEADER_ASK, P8_FIELD_ASK)
+                              for family in ("alpha", "beta", "gamma")], [p8_warned] * 6)
+    p8_tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-p8-"))
+    try:
+        with open(p8_tmp / "brief.md", "w", encoding="utf-8") as handle:
+            handle.write(P8_MAIN)
+        with open(p8_tmp / "table.toml", "w", encoding="utf-8") as handle:
+            handle.write(TABLE_FIXTURE)
+        p8_brief = str(p8_tmp / "brief.md")
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            p8_exit = main(["--family", "alpha", "--table", str(p8_tmp / "table.toml"), p8_brief])
+        p8_seen = printed.getvalue().splitlines()
+        # a P8 hit alone: the ADVISORY line, exit 0, and the OK line carries the hint
+        check("p8/main-prints-warning-exit-0",
+              (p8_exit, [line[len(p8_brief) + 1:].split(":", 1)[0] for line in p8_seen
+                         if line.startswith(p8_brief + ":") and ": ADVISORY P8: " in line],
+               [line.startswith("OK: ") and line.endswith(STATUS_HINT) for line in p8_seen
+                if not line.startswith(p8_brief + ":")]),
+              (EXIT_OK, ["3"], [True]))
+
+        def p8_refuse_line(rules, p8=None):
+            """(run's return value, the REFUSE lines it prints) when evaluate returns one HARD hit of each rule in
+            `rules`, and a P8 hit of severity `p8` when it is given."""
+            hits = [(rule, "HARD", 1, "m", "x") for rule in rules] + ([("P8", p8, 1, "m", "x")] if p8 else [])
+            printed = io.StringIO()
+            with _patched(evaluate=lambda raw, family, table, scoped, repo: (EXIT_REFUSE, hits)):
+                with contextlib.redirect_stdout(printed):
+                    code = run(p8_brief, "alpha", str(p8_tmp / "table.toml"))
+            return code, [line for line in printed.getvalue().splitlines() if line.startswith("REFUSE: ")]
+
+        # the S, W1 and P5 REFUSE lines carry the P8 hint only when a P8 hit is among the findings; run returns the
+        # refusal either way
+        p8_mixed = [(code, [STATUS_HINT in line for line in lines])
+                    for other in ("S1", "W1", "P5") for code, lines in (p8_refuse_line(rules)
+                                                                         for rules in ((other, "P8"), (other,)))]
+        check("p8/mixed-refuse-hint", p8_mixed, [(EXIT_REFUSE, [True]), (EXIT_REFUSE, [False])] * 3)
+        # a P8 warning beside another rule's refusal: the REFUSE line the other rule selects, with its own advice,
+        # and the P8 hint after it; the exit (run's return value) is the other rule's
+        p8_advice = {"S1": "send these items to a family that can execute", "W1": GIT_WRITE_HINT,
+                     "P5": "add the line each P5 hit gives", "P6": INPUT_HINT,
+                     "P7": "correct each ACCEPTED-RESIDUAL line", "P2": "name paths under the declared workdir"}
+        p8_beside = [p8_refuse_line((other,), "ADVISORY") for other in sorted(p8_advice)]
+        check("p8/mixed-result-every-hint",
+              [(code, [(p8_advice[other] in line, STATUS_HINT in line) for line in lines])
+               for other, (code, lines) in zip(sorted(p8_advice), p8_beside)],
+              [(EXIT_REFUSE, [(True, True)])] * len(p8_advice))
+        # the hint comes last, after all of the line's own advice: on the P5 line, after the cure shape it states
+        check("p8/hint-after-advice",
+              [[line.endswith(STATUS_HINT) and line.index(p8_advice[other]) < line.index(STATUS_HINT)
+                and (other != "P5" or line.index(CURE_SHAPE) < line.index(STATUS_HINT)) for line in lines]
+               for other, (_, lines) in zip(sorted(p8_advice), p8_beside)], [[True]] * len(p8_advice))
+    finally:
+        shutil.rmtree(p8_tmp, ignore_errors=True)
     # ---------- red on revert: each blocking rule, form and exemption patched out flips its fixture ----------
     nothing = lambda *args: []  # noqa: E731
     never = re.compile(r"(?!)")
@@ -6861,6 +7542,64 @@ def self_test(report_path=None):
         [w1_code(W1_COMMIT, "alpha"), w1_code(W1_COMMIT, "beta")], [0, 0],
         rule_w1=lambda text, row, family, families, scoped=True: [] if can_execute(row) else w1_rule(
             text, row, family, families, scoped)))
+
+    def p8_code(text, family="alpha"):
+        """1 when the brief draws a P8 warning, else 0 (P8 never sets the exit code, so its flips read its hits)."""
+        return lambda: int(any(rule == "P8" for rule, _ in _outcome(text, family)[1]))
+
+    p8_asks = [p8_code(P8_HEADER_ASK), p8_code(P8_FIELD_ASK)]
+    check("revert/p8-red", *flip(p8_asks + [p8_code(P8_FENCE_ASK), p8_code(P8_HEADER_ASK, "gamma")], [0, 0, 0, 0],
+                                 rule_p8=nothing))
+    check("revert/p8-token-red", *flip([p8_code(P8_HEADER_ASK), p8_code(P8_LOOK_ALIKE)], [0, 0],
+                                       STATUS_HEADER_RE=never))
+    check("revert/p8-named-field-red", *flip([p8_code(P8_FIELD_ASK)], [0], STATUS_NAMED_RE=never))
+    check("revert/p8-assigned-field-red", *flip([p8_code(P8_REVIEWED_ASKS[6]), p8_code(P8_REVIEWED_ASKS[7])], [0, 0],
+                                                STATUS_ASSIGN_RE=never))
+    check("revert/p8-place-red", *flip([p8_code(P8_FIELD_ASK), p8_code(P8_REVIEWED_ASKS[8])], [0, 0],
+                                       STATUS_PLACE_RE=never))
+    check("revert/p8-verbs-red", *flip(p8_asks, [0, 0], STATUS_VERB_RE=never))
+    check("revert/p8-fence-introduction-red", *flip([p8_code(P8_FENCE_ASK), p8_code(P8_REVIEWED_ASKS[11])], [0, 0],
+                                                    status_introduction=lambda blocks, index: []))
+    check("revert/p8-fence-line-red", *flip([p8_code(P8_PROSE_FENCE_LINE)], [0], STATUS_PROSE_FENCES=frozenset()))
+    every_tag = type("EveryTag", (), {"__contains__": lambda self, tag: True})()
+    check("revert/p8-code-fence-red", *flip([p8_code(P8_ANALYSIS[5])], [1], STATUS_PROSE_FENCES=every_tag))
+    check("revert/p8-look-alike-red", *flip([p8_code(P8_LOOK_ALIKE), p8_code(P8_REVIEWED_ASKS[10])], [0, 0],
+                                            status_folded=lambda text: text))
+    check("revert/p8-prohibited-red", *flip([p8_code(text) for text in P8_PROHIBITED], [1, 1],
+                                            STATUS_PROHIBITION_RE=never))
+    check("revert/p8-imperative-red", *flip([p8_code(P8_HARNESS_ACTIONS[0])], [1],
+                                            STATUS_LEAD_RE=re.compile(r"[^\n]*+")))
+    check("revert/p8-object-red", *flip([p8_code(P8_ANALYSIS[3])], [1],
+                                        status_object=lambda text, position, tokens, starts: (bool(tokens), False,
+                                                                                              False)))
+    check("revert/p8-reporting-place-red", *flip([p8_code(P8_ANALYSIS[4])], [1], STATUS_VERB_RE=re.compile(
+        r"(?<![\w./-])(?:(" + STATUS_EMIT_WORDS + r"|" + STATUS_REPORT_WORDS + r")|((?!)))(?![\w-]|[./]\w)", re.I)))
+    check("revert/p8-inversion-red", *flip([p8_code(P8_REVIEWED_ASKS[4]), p8_code(P8_REVIEWED_ASKS[5])], [0, 0],
+                                           STATUS_UNIT_RE=re.compile(r"[\s`\"'“”‘’*_()\[\],:]++|((?!))|[A-Za-z0-9_'’-]++")))
+    check("revert/p8-causative-red", *flip([p8_code(text) for text in P8_REVIEWED_ASKS[:4:3] + P8_REVIEWED_ASKS[2:3]],
+                                           [0, 0, 0], STATUS_CAUSE_RE=never))
+    check("revert/p8-next-sentence-red", *flip([p8_code(P8_REVIEWED_ASKS[13])], [0], status_shaped=lambda text: False))
+    # a status line's fields are read with a value (STATUS_VALUED_RE); the assignment alone made a table header of
+    # empty field cells a status line
+    check("revert/p8-valued-cells-red", *flip([p8_code(P8_EMPTY_CELLS)], [1], STATUS_VALUED_RE=STATUS_ASSIGN_RE))
+    # the prohibition before a reply template phrase (status_template) is what keeps those introductions quiet
+    check("revert/p8-template-prohibition-red", *flip([p8_code(text) for text in P8_TEMPLATE_PROHIBITED], [1, 1],
+                                                      STATUS_PROHIBITION_RE=never))
+    check("revert/p8-coordination-red", *flip([p8_code(P8_HARNESS_ACTIONS[2])], [1], STATUS_CARRY_WORDS=frozenset()))
+    # the direct-ask and ordinary-brief guards: each patched out brings back the first version's outcome for its fixture
+    check("revert/p8-modifier-red", *flip([p8_code(P8_ORDINARY_BRIEFS[2]), p8_code(P8_ORDINARY_BRIEFS[4])], [1, 1],
+                                          status_header_names_line=lambda text, end: True))
+    check("revert/p8-pair-position-red", *flip([p8_code(P8_ORDINARY_BRIEFS[0]), p8_code(P8_ORDINARY_BRIEFS[9])],
+                                               [1, 1], STATUS_POSITION_RE=re.compile(r"")))
+    check("revert/p8-deictic-noun-red", *flip([p8_code(P8_ORDINARY_BRIEFS[5])], [1], STATUS_DEICTIC_NOUNS=every_tag))
+    check("revert/p8-reminder-red", *flip([p8_code(P8_REMINDER)], [0], STATUS_REMINDER_RE=never))
+    check("revert/p8-lead-cap-red", *flip([p8_code(P8_LONG_LEAD)], [0], STATUS_LEAD_MAX=1 << 30))
+    check("revert/p8-template-red", *flip([p8_code(P8_DIRECT_ASKS[10])], [0], STATUS_TEMPLATE_RE=never))
+    check("revert/p8-call-red", *flip([p8_code(P8_ORDINARY_BRIEFS[7])], [1], STATUS_VERB_RE=re.compile(
+        r"(?<![\w./-])(?:(" + STATUS_EMIT_WORDS + r")|(" + STATUS_REPORT_WORDS + r"))(?![\w-]|[./]\w)", re.I)))
+    check("revert/p8-possessive-red", *flip([p8_code(P8_ORDINARY_BRIEFS[8])], [1], STATUS_NAMED_RE=re.compile(
+        r"(?<![\w-])(?:accounts?+|models?+|rcs?+|return[\s_-]?+codes?+|returncodes?+|exit[\s_-]?+codes?+|efforts?+)"
+        r"\s++fields?+(?![\w-])", re.I)))
     check("revert/void-word-red", *flip([code(VOID_CONTINUATION), code(PROHIBITION_KIDDING), code(RETRY),
                                         code(KIDDING_PASTE)], [0, 0, 0, 0], VOID_WORD_RE=never))
     check("revert/void-start-word-red", *flip([code(TEST_IT), code(FIX_IT), code(RETEST_IT)], [0, 0, 0],
@@ -8484,7 +9223,7 @@ def self_test(report_path=None):
                 lambda data: data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:2], "replace")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 242)
+    check("revert/every-flip-ran", len(flipped), 270)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -8551,11 +9290,18 @@ def self_test(report_path=None):
           "gate or hook id, Python symbol or byte-exact excerpt is absent at the brief's pinned revision, "
           "read from the git object store and never by a whole-file search, exits 2 on a malformed "
           "declaration, an unresolved or conflicting pin, or pinned content it cannot read or parse, and "
-          "prints the label in prose as ADVISORY (P7), and "
+          "prints the label in prose as ADVISORY (P7), warns, for every family and never refusing (the exit is "
+          "the other rules' and the summary line carries every rule's hint), on an imperative, causative or "
+          "reply-subject ask whose object reaches a harness-owned attestation line (a WORKER_STATUS header, "
+          "look-alikes folded, or a field of a status line in the worker's reply), in a sentence, a prose fence "
+          "line, a fence introduction or a sentence pointing at the next, failing toward a warning at its length "
+          "caps, and is quiet on prohibitions, application fields, the token as a modifier, descriptions of what "
+          "the harness prints, analysis of quoted status output, code fences and the verdict and completion "
+          "lines (P8), and "
           "each preflight rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
-          "detects the previous revisions' and loses its canary with each guard patched out; 37 repeated shapes "
+          "detects the previous revisions' and loses its canary with each guard patched out; 39 repeated shapes "
           "each evaluate within the linear growth bound at 64 KiB, through the parsed-document reading "
           "with its size, whitespace-run and nesting bounds and its killed-at-the-deadline parse child, "
           "in a capped child that must exit 0; the parse child's process group is killed after a normal "
