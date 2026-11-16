@@ -375,10 +375,15 @@ PIN_KEY = "python-version"
 # The host-patch CI jobs: inside a HOST_JOBS job of HOST_WORKFLOW_REL, and nowhere else, a pin that is a patch
 # release of the floor passes only when it equals the python-host-patch this repository-local source names
 # (_host_patch_pin). These names are those of tools/check_python_host_pin.py, whose self-test holds them
-# equal (HOST_JOBS, WORKFLOW_REL, SOURCE_REL, PATCH_RE there).
+# equal (HOST_JOBS, WORKFLOW_REL, SOURCE_REL, PATCH_RE there). The jobs are the OPF job, the git-fixture-env
+# core job, then each shard job of the three git-fixture-env config lanes in workflow order: HOST_SHARDS maps
+# each lane's suite id to its shard count N, and shard K of N runs as job <suite id>-shard-K-host-patch.
 HOST_WORKFLOW_REL = WORKFLOWS_REL + "/quality.yml"
-HOST_JOBS = ("opf-host-patch", "git-fixture-env-core-host-patch", "git-fixture-env-config-combined-host-patch",
-             "git-fixture-env-config-malformed-host-patch", "git-fixture-env-config-system-host-patch")
+HOST_SHARDS = {"git-fixture-env-config-combined": 12, "git-fixture-env-config-malformed": 12,
+               "git-fixture-env-config-system": 19}
+HOST_JOBS = ("opf-host-patch", "git-fixture-env-core-host-patch",
+             *("{}-shard-{}-host-patch".format(lane, shard) for lane, count in HOST_SHARDS.items()
+               for shard in range(1, count + 1)))
 HOST_SOURCE_REL = ".aiqt/python-host.toml"
 HOST_SOURCE_KEYS = {"format-version", "python-host-patch"}
 HOST_PATCH_RE = re.compile(r"([1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})")
@@ -489,7 +494,9 @@ OLDER_CLAIM_RE = re.compile(
 # empty, . or .. segment and a leading /. load_source also refuses a . or .. segment by splitting on /,
 # a second layer.
 SURFACE_RE = re.compile(r"\.?[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/\.?[A-Za-z0-9_][A-Za-z0-9_.-]*)*\.py")
-FLOOR_RE = re.compile(r"([1-9][0-9]*)\.(0|[1-9][0-9]*)")
+# At most four digits in each component, as HOST_PATCH_RE: a longer component past CPython's int-string
+# limit would make int() raise ValueError, a traceback in place of cannot-evaluate.
+FLOOR_RE = re.compile(r"([1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})")
 FLAG_SETS = ((), ("-O",), ("-OO",))
 CHILD_TIMEOUT = 60
 CONTINUED = "CONTINUED"
@@ -529,9 +536,9 @@ if tuple(sys.version_info[:2]) < ({major}, {minor}):
 '''
 # The hook form, for HOOK_SURFACES only: the hook's events differ in the direction an error must fail, so
 # a mode named in the FLOOR_FAIL_OPEN_MODES literal (a Stop-type, SessionStart, TeammateIdle,
-# UserPromptSubmit or PostToolUse handler, or a note-only PreToolUse handler) warns on exit 0, never
-# blocking, and every other argv (any other PreToolUse handler, an unknown mode, no mode) fails closed with
-# the canonical refusal and exit 2. That
+# UserPromptSubmit, PostToolUse or PostToolUseFailure handler, or a note-only PreToolUse handler) warns on
+# exit 0, never blocking, and every other argv (any other PreToolUse handler, an unknown mode, no mode)
+# fails closed with the canonical refusal and exit 2. That
 # exit is fixed, never {code}: Claude Code reads exit 1 as a non-blocking error and lets a PreToolUse call
 # proceed, so load_source refuses a HOOK_SURFACES entry listed in nonblocking-surfaces. Both the
 # stderr refusal and the stdout warning are best-effort writes, each flushed inside its own
@@ -665,8 +672,8 @@ def load_source(root):
     floor_text = data["python-floor"]
     match = FLOOR_RE.fullmatch(floor_text) if isinstance(floor_text, str) else None
     if match is None:
-        raise CannotEvaluate("{}: python-floor must be a \"MAJOR.MINOR\" string, got {!r}".format(
-            SOURCE_REL, floor_text))
+        raise CannotEvaluate("{}: python-floor must be a \"MAJOR.MINOR\" string with at most four digits in "
+                             "each component, got {!r:.60}".format(SOURCE_REL, floor_text))
     for key in ("completeness-check", "documentation-check"):
         if type(data[key]) is not bool:
             raise CannotEvaluate("{}: {} must be a boolean".format(SOURCE_REL, key))
@@ -2338,6 +2345,14 @@ def _source_text(floor="3.14", surfaces=(), completeness=False, documentation=Tr
                 "true" if completeness else "false", "true" if documentation else "false", extra))
 
 
+def _floor_read(base, floor):
+    """The (major, minor) load_source reads from a source naming floor, or "cannot-evaluate"."""
+    try:
+        return load_source(_fixture(base, source=_source_text(floor=floor)))["floor"]
+    except CannotEvaluate:
+        return "cannot-evaluate"
+
+
 def _write(root, rel, text):
     path = root / rel
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2961,6 +2976,11 @@ def _self_test_cases(base):
         base, source=_source_text().replace("format-version = 1", "format-version = true")))[0], 2)
     check("source/malformed-floor-cannot-evaluate",
           evaluate(_fixture(base, source=_source_text(floor="3.14.0")))[0], 2)
+    # The floor's component bound, at each end: four digits are read, five are cannot-evaluate, and so
+    # is a 5001-digit component, past CPython's int-string limit, where int() would raise ValueError.
+    check("source/floor-component-digit-bound", [_floor_read(base, floor) for floor in (
+        "9999.9999", "10000.14", "3.10000", "1" * 5001 + ".14")],
+        [(9999, 9999), "cannot-evaluate", "cannot-evaluate", "cannot-evaluate"])
     check("source/non-bool-switch-cannot-evaluate", evaluate(_fixture(
         base, source=_source_text().replace("completeness-check = false", "completeness-check = 0")))[0],
           2)

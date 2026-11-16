@@ -32,7 +32,8 @@ an unknown or missing key, a wrong type, a duplicate output path, and a data dir
 (exit 2, nothing written). The page's scripts are derived from its content: copy.js where a copy block
 renders, select.js where the install selector renders, and rail.js where the rail lists in-page sections
 (section 7.6); no rail link carries a static aria-current. In an inline HTML value the token `$BASE/`
-renders as the base path, so content survives promotion unchanged. The document control strip reads its
+renders as the base path, so content survives promotion unchanged, and the token `$HOOK_COUNT` renders as
+the number of Claude Code hooks in .aiqt/core/hooks/manifest.toml, so no page types that count. The document control strip reads its
 Version from the repository's VERSION file and its Status from changelog.toml.
 
 Escaping: every data value is text, escaped for its context (element text, or a double-quoted attribute
@@ -105,21 +106,21 @@ SCHEME_BUTTON = (
 
 # The registry declaration (read statically by tools/gen_gensrc.py). Each page's sources are the inputs its
 # bytes derive from: the generator and the page's data file, plus VERSION and changelog.toml for a page whose
-# data renders the document control strip (_c_control), and STATUS_SOURCE for a page whose data carries the
-# $OPF_STATUS token. The kind "block" entries are the STATUS_LINES files, of which this generator owns only
-# the status line; page_targets() keeps them out of the page set. Two STATUS_LINES files have no entry
-# (_STATUS_LINES_UNREGISTERED). The self-test rows under "gensrc/" hold these sources to the built pages and
-# to STATUS_LINES. The mappings page also declares the modules whose functions render its bodies
-# (_mappings_data and the _mappings_by_* renderers): tools/gen_mappings.py (rows, registry and wording),
-# tools/gen_rules.py (the rule corpus loader), tools/_standards.py (the manifest loader) and
-# tools/gen_agents.py (the rule order). Not declared, a disclosed residual: every page's navigation (_nav)
-# shows a nav item only when a sibling page is built at that item's path, so a page's bytes can change when a
-# sibling data file under the same draft-src/ folder is added, removed, or its path field changes. Directory
-# sources here name content inputs (as .aiqt/standards/ does), and naming each sibling folder would make
-# every page depend on every other page's data.
+# data renders the document control strip (_c_control), STATUS_SOURCE for a page whose data carries the
+# $OPF_STATUS token, and HOOKS_SOURCE for a page whose data carries the $HOOK_COUNT token. The kind "block"
+# entries are the STATUS_LINES files, of which this generator owns only the status line; page_targets() keeps
+# them out of the page set. Two STATUS_LINES files have no entry (_STATUS_LINES_UNREGISTERED). The self-test
+# rows under "gensrc/" hold these sources to the built pages and to STATUS_LINES. The mappings page also
+# declares the modules whose functions render its bodies (_mappings_data and the _mappings_by_* renderers):
+# tools/gen_mappings.py (rows, registry and wording), tools/gen_rules.py (the rule corpus loader),
+# tools/_standards.py (the manifest loader) and tools/gen_agents.py (the rule order). Not declared, a disclosed
+# residual: every page's navigation (_nav) shows a nav item only when a sibling page is built at that item's
+# path, so a page's bytes can change when a sibling data file under the same draft-src/ folder is added,
+# removed, or its path field changes. Directory sources here name content inputs (as .aiqt/standards/ does),
+# and naming each sibling folder would make every page depend on every other page's data.
 GENSRC_OUTPUTS = (
     {"target": "site/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "site/draft-src/home.toml"),
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/home.toml", ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/404.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/404.toml"),
@@ -137,8 +138,8 @@ GENSRC_OUTPUTS = (
      "sources": ("tools/gen_draft_site.py", "site/draft-src/install.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/install/details/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "site/draft-src/install-details.toml", "VERSION",
-                 "changelog.toml"),
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/install-details.toml",
+                 ".aiqt/core/hooks/manifest.toml", "VERSION", "changelog.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/license/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/license.toml"),
@@ -153,6 +154,9 @@ GENSRC_OUTPUTS = (
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/standard/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/standard.toml", "VERSION", "changelog.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "site/teams/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/teams.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/home.toml", "opf/tools/opf.py"),
@@ -467,11 +471,78 @@ def _any_link(site, href, text, where):
 
 
 def _inline(site, value):
-    """An inline HTML value with the $BASE/ token rendered as the site's base path and the $OPF_STATUS
-    token rendered as the reference CLI status note (status_note)."""
+    """An inline HTML value with the $BASE/ token rendered as the site's base path, the $OPF_STATUS
+    token rendered as the reference CLI status note (status_note) and the $HOOK_COUNT token rendered as
+    the Claude Code hook count (hook_count) of the site's "tree" (the tree build() is given; ROOT when the site
+    names none)."""
     if "$OPF_STATUS" in value:
         value = value.replace("$OPF_STATUS", status_note())
+    if "$HOOK_COUNT" in value:
+        value = value.replace("$HOOK_COUNT", str(hook_count(site.get("tree", ROOT))))
     return value.replace("$BASE/", site["base"])
+
+
+# The Claude Code hook count the pages state: the [[hook]] entries of the hooks manifest whose platform is
+# "claude-code" (the predicate tools/check_reference_facts.py counts for the README), rendered wherever the
+# $HOOK_COUNT token appears, so a hook added to or removed from the manifest drifts the pages that state it.
+HOOKS_SOURCE = ".aiqt/core/hooks/manifest.toml"
+
+
+def hook_count(root=ROOT):
+    """The number of [[hook]] entries in the hooks manifest under root whose platform is "claude-code".
+    RefusedPage when the manifest cannot be read, when it is larger than MAX_PAGE_BYTES (the read stops
+    one byte past that bound), when it is not UTF-8 or not valid TOML, when its hook key is not an array
+    of tables each with a string platform, or when it holds no Claude Code hook. Before the open, each
+    directory on the manifest's path below root is checked with lstat, from root down, and refused unless
+    it is a directory (a symbolic link to a directory is refused), and the manifest path itself is checked
+    with lstat and refused unless it is a regular file. The open does not follow a symbolic link at the
+    manifest path and does not wait on a FIFO, and the opened descriptor is refused unless fstat reports a
+    regular file. The descriptor is closed once, whether the read succeeds or is refused. RESIDUAL: the
+    lstat checks run before the open, and O_NOFOLLOW applies to the manifest path's last component only,
+    so a directory on that path replaced by a symbolic link after its check is followed by the open, not
+    refused."""
+    path = Path(root) / HOOKS_SOURCE
+    try:
+        # These lstat checks run before the open: a directory replaced by a symbolic link after its check
+        # is not caught here (O_NOFOLLOW below applies to the manifest path's last component only).
+        rel = Path()
+        for part in Path(HOOKS_SOURCE).parent.parts:
+            rel = rel / part
+            if not stat.S_ISDIR(os.lstat(Path(root) / rel).st_mode):
+                raise RefusedPage("{}: {} is not a directory (a symbolic link or other entry)".format(
+                    HOOKS_SOURCE, rel.as_posix()))
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            raise RefusedPage("{}: not a regular file (a symbolic link or other entry)".format(HOOKS_SOURCE))
+        # O_NOFOLLOW and O_NONBLOCK keep an entry swapped in after the lstat from being followed or from
+        # blocking the open (a FIFO); the opened descriptor is checked again before anything is read.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                # After an O_NOFOLLOW open, a symbolic link has already failed the open (ELOOP); what
+                # fstat can see here is an opened entry of another kind, such as a FIFO or a device.
+                raise RefusedPage("{}: the opened entry is not a regular file".format(HOOKS_SOURCE))
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                data = handle.read(MAX_PAGE_BYTES + 1)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise RefusedPage("{}: unreadable ({})".format(HOOKS_SOURCE, exc)) from exc
+    if len(data) > MAX_PAGE_BYTES:
+        raise RefusedPage("{}: larger than {} bytes".format(HOOKS_SOURCE, MAX_PAGE_BYTES))
+    try:
+        doc = tomllib.loads(data.decode("utf-8"))
+    except (RecursionError, MemoryError, ValueError, UnicodeError) as exc:
+        # tomllib raises the ValueError family on malformed TOML and RecursionError or MemoryError on
+        # hostile nesting; each is disposed of here, at the parse site, as a refusal.
+        raise RefusedPage("{}: cannot parse ({}: {})".format(HOOKS_SOURCE, type(exc).__name__, exc)) from exc
+    hooks = doc.get("hook")
+    if not isinstance(hooks, list) or not all(
+            isinstance(hook, dict) and isinstance(hook.get("platform"), str) for hook in hooks):
+        raise RefusedPage("{}: hook is not an array of tables each with a string platform".format(HOOKS_SOURCE))
+    count = sum(1 for hook in hooks if hook["platform"] == "claude-code")
+    if not count:
+        raise RefusedPage("{}: no hook has platform \"claude-code\"".format(HOOKS_SOURCE))
+    return count
 
 
 # The reference CLI status note: generated from VERB_STATUS in opf/tools/opf.py, read as a literal from the
@@ -1597,14 +1668,15 @@ def staged_sites(sites=SITES):
     return tuple(dict(site, base=DRAFT_BASE, root=site["live"] + "/draft") for site in sites)
 
 
-def build(pages=None, sites=SITES, registered=True):
+def build(pages=None, sites=SITES, registered=True, tree=ROOT):
     """{target path: text} for every registered output. Each site is loaded from its own data directory
     and rendered with its own context; with the default page sets, the built set must match the
     GENSRC_OUTPUTS declaration, so a page cannot land or vanish without its registry entry. A given
     `pages` list (a fixture) is rendered for every site in `sites`. Every kept live path of a site must
     exist under its live root before anything renders, and no 2 sites may build the same output path.
     `registered` false skips the declaration match, for a fixture build of the declared pages at another
-    base (promoted_sites)."""
+    base (promoted_sites). `tree` is the repository tree whose hooks manifest gives the $HOOK_COUNT value
+    (run() passes the root it is given)."""
     declared = pages is None
     outputs = {}
     for site in sites:
@@ -1617,7 +1689,7 @@ def build(pages=None, sites=SITES, registered=True):
             target = "{}/{}".format(site["root"], page["rel"])
             if target in outputs:
                 raise RefusedPage("{}: built by more than 1 site".format(target))
-            outputs[target] = render_page(site, site_pages, page)
+            outputs[target] = render_page(dict(site, tree=tree), site_pages, page)
     if declared and registered:
         targets = page_targets()
         if set(outputs) != targets:
@@ -1745,10 +1817,10 @@ def _existing(path):
 
 def run(root, check, outputs=None):
     """Write (or with `check`, compare) the built pages under root. `outputs` (a self-test's prebuilt pages)
-    defaults to build()."""
+    defaults to build(tree=root)."""
     try:
         if outputs is None:
-            outputs = build()
+            outputs = build(tree=root)
     except RefusedPage as exc:
         print("error: refused: {}".format(exc), file=sys.stderr)
         return 2
@@ -1803,6 +1875,8 @@ _NOTE_ROW = "gensrc/status-note-pages-declare-status-source"
 _LINES_ROW = "gensrc/status-lines-registered"
 _BUILT_ROW = "gensrc/page-entries-built"
 _FOOTER_SOURCES = ("VERSION", "changelog.toml")
+# This generator's stem in the registry's discovery (tools/gen_gensrc.py discover_declarations).
+_OWN_STEM = "gen_draft_site"
 # The STATUS_LINES files with no register entry; the status line of each stays covered by this generator's
 # --check alone. .aiqt/core/ownership.toml excludes opf/README.md from the release (repository
 # documentation, not shipped), and tools/gen_manifest.py refuses an exclusion over any register target.
@@ -1850,7 +1924,35 @@ def _footer_markup(version, status):
         _t(version), _t(status))
 
 
-def _register_findings(entries, outputs, footer, note):
+def _naming_entries(entries, rel):
+    """The entries of a declaration that name the file `rel`: an entry whose target is `rel` itself, or a
+    kind "tree" entry whose target is an ancestor folder of `rel`. A tree target is compared as a folder
+    (a trailing "/" is added when the literal lacks one), so the match stops at a path component: a
+    sibling whose name only begins the same way (opf/README.mdx, a tree opf/spe/ or opf/spec/OPF-SPEC/)
+    does not name `rel`. An entry that is not a dict with a string target names nothing here (the
+    registry's own validation refuses it)."""
+    found = []
+    for entry in entries:
+        target = entry.get("target") if isinstance(entry, dict) else None
+        if not isinstance(target, str):
+            continue
+        folder = target if target.endswith("/") else target + "/"
+        if target == rel or (entry.get("kind") == "tree" and rel.startswith(folder)):
+            found.append(entry)
+    return found
+
+
+def _other_declarations(root=ROOT):
+    """[(stem, declaration)] for every generator the registry reads apart from this one: each tools/gen_*.py
+    declaration as tools/gen_gensrc.py discover_declarations reads it (statically, never importing the
+    generator), then gen_gensrc's own output. Raises ValueError or OSError as discover_declarations does."""
+    import gen_gensrc
+    others = [(stem, decl) for stem, decl in gen_gensrc.discover_declarations(Path(root) / "tools")
+              if stem != _OWN_STEM]
+    return others + [(gen_gensrc.SELF, gen_gensrc.OWN_OUTPUTS)]
+
+
+def _register_findings(entries, outputs, footer, note, others):
     """{row id: findings} for a declaration `entries` against the built pages `outputs` ({target: text}).
     `footer` is the control strip's Version and Status markup and `note` the status note, each as rendered.
     A page entry whose page carries `footer` must declare VERSION and changelog.toml, and one whose page
@@ -1858,7 +1960,10 @@ def _register_findings(entries, outputs, footer, note):
     carry the text is a finding too. A page entry whose target is not among `outputs` is a finding of its
     own row. Each STATUS_LINES file must have exactly 1 entry, of kind "block", naming this generator and
     STATUS_SOURCE among its sources, apart from a file on _STATUS_LINES_UNREGISTERED, which must have
-    none."""
+    none. `others` is [(stem, declaration)] for every other generator of the registry (_other_declarations);
+    a STATUS_LINES file named by an entry there, by its exact target or by an ancestor tree target, is a
+    finding, and so is one under an ancestor tree target of `entries`, because each such entry would claim
+    the whole file where this generator owns only its status line, or claim a file kept off the register."""
     rows = {_FOOTER_ROW: [], _NOTE_ROW: [], _LINES_ROW: [], _BUILT_ROW: []}
     for entry in entries:
         if entry["kind"] != "file":
@@ -1886,6 +1991,16 @@ def _register_findings(entries, outputs, footer, note):
                 "tools/gen_draft_site.py", STATUS_SOURCE} <= set(matches[0]["sources"]):
             rows[_LINES_ROW].append("{}: needs exactly 1 block entry naming tools/gen_draft_site.py and {} "
                                     "({} found)".format(rel, STATUS_SOURCE, matches))
+        for entry in _naming_entries(entries, rel):
+            if entry["target"] != rel:
+                rows[_LINES_ROW].append("{}: under the tree entry {!r} of this generator".format(
+                    rel, entry["target"]))
+        for stem, decl in others:
+            if stem == _OWN_STEM:
+                continue
+            for entry in _naming_entries(decl, rel):
+                rows[_LINES_ROW].append("{}: named by the {} entry {!r} of {}.py".format(
+                    rel, entry.get("kind"), entry["target"], stem))
     return rows
 
 
@@ -2054,7 +2169,7 @@ def _self_test():
              '<a href="https://posluns.ca/security/" target="_blank" rel="noopener noreferrer">Security'
              '<span class="vh"> (opens in a new tab)</span></a></p></div></div>')
     expect("about/landing-exact-markup", page.count(about) == 1)
-    expect("about/after-paragraph", 0 < page.find("arrive with 1.1.0.</p>") < page.find(about))
+    expect("about/after-paragraph", 0 < page.find("arrive with 1.2.0.</p>") < page.find(about))
     expect("about/inner-pages-none", all('class="about"' not in outputs["site/draft/" + rel]
                                          for rel in ("disclosure/index.html", "license/index.html")))
     expect("placeholder/index.html", page.count("<h1") == 1
@@ -2916,7 +3031,7 @@ def _self_test():
                 ("links/promoted-asset-at-root-flagged", '<img src="/assets/baseline/baseline.css">', 1),
                 ("links/promoted-asset-at-asset-base-passes", '<img src="/draft/assets/baseline/baseline.css">', 0),
                 ("links/promoted-placeholder-passes", '<a href="/draft/">x</a>', 0),
-                ("links/promoted-deleted-page-flagged", '<a href="/teams">x</a>', 1),
+                ("links/promoted-deleted-page-flagged", '<a href="/roadmap">x</a>', 1),
                 ("links/promoted-page-passes", '<a href="/install/">x</a>', 0),
                 ("links/promoted-redirect-source-passes", '<a href="/rule1">x</a>', 0),
                 ("links/promoted-kept-live-passes", '<a href="/development">x</a>', 0)):
@@ -2950,6 +3065,9 @@ def _self_test():
     expect("stray/tree-clean", stray_outputs(ROOT) == [], stray_outputs(ROOT))
 
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-selftest-") as tmp:
+        # run() counts the hooks of the tree it is given, so the tree carries the live hooks manifest.
+        os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+        shutil.copyfile(ROOT / HOOKS_SOURCE, Path(tmp) / HOOKS_SOURCE)
         first = run(tmp, check=True)
         second = run(tmp, check=False)
         third = run(tmp, check=True)
@@ -3037,15 +3155,21 @@ def _self_test():
 
     # The register rows over the live declaration and the declared build, then each flip of _REGISTER_FLIPS:
     # a copy of this file whose GENSRC_OUTPUTS literal carries that one change, loaded with importlib, must
-    # turn its row (and only that row) red, while the unmutated copy stays clean.
+    # turn its row (and only that row) red, while the unmutated copy stays clean. Every call reads the other
+    # generators' declarations as the registry discovers them.
     footer = _footer_markup(*_version_and_status())
-    for row, found in sorted(_register_findings(GENSRC_OUTPUTS, live_outputs, footer, live_note).items()):
+    others = _other_declarations()
+    expect("gensrc/registry-discovery-reads-other-generators",
+           others and "gen_gensrc" in {stem for stem, _decl in others}
+           and len({stem for stem, _decl in others}) > 1 and _OWN_STEM not in {stem for stem, _decl in others},
+           [stem for stem, _decl in others])
+    for row, found in sorted(_register_findings(GENSRC_OUTPUTS, live_outputs, footer, live_note, others).items()):
         expect(row, found == [], found)
     with open(__file__, encoding="utf-8") as handle:
         own = handle.read()
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-register-") as tmp:
         control = _load_register_mutant(own, tmp, "control")
-        got = control._register_findings(control.GENSRC_OUTPUTS, live_outputs, footer, live_note)
+        got = control._register_findings(control.GENSRC_OUTPUTS, live_outputs, footer, live_note, others)
         expect("gensrc/flip-control-clean", not any(got.values()), got)
         for position, (row, old, new) in enumerate(_REGISTER_FLIPS):
             name = "{}/flip{}-red".format(row, position)
@@ -3054,8 +3178,399 @@ def _self_test():
                 expect(name, False, "the flip's anchor is not in GENSRC_OUTPUTS exactly once")
                 continue
             mutant = _load_register_mutant(mutated, tmp, "flip{}".format(position))
-            got = mutant._register_findings(mutant.GENSRC_OUTPUTS, live_outputs, footer, live_note)
+            got = mutant._register_findings(mutant.GENSRC_OUTPUTS, live_outputs, footer, live_note, others)
             expect(name, sorted(key for key, found in got.items() if found) == [row], got)
+
+    def red_rows(entries, extra_others=()):
+        got = _register_findings(entries, live_outputs, footer, live_note, list(others) + list(extra_others))
+        return sorted(key for key, found in got.items() if found)
+
+    # The pages that carry the control strip and the status note, found from the data files on their own (a
+    # body component "control"; the $OPF_STATUS token in the file's text), must be the pages whose built text
+    # carries the rendered strip and note, and neither set is empty, so the rows below are never vacuous.
+    control_pages, note_pages = set(), set()
+    for data_site in SITES:
+        for page in _load_pages(ROOT / data_site["src"], data_site["src"]):
+            target = "{}/{}".format(data_site["root"], page["rel"])
+            if any(component["component"] == "control" for component in page["body"]):
+                control_pages.add(target)
+            with open(ROOT / page["where"], encoding="utf-8") as handle:
+                if "$OPF_STATUS" in handle.read():
+                    note_pages.add(target)
+    footer_carriers = {target for target, text in live_outputs.items() if footer in text}
+    note_carriers = {target for target, text in live_outputs.items() if live_note in text}
+    expect("gensrc/control-pages-found", control_pages and control_pages == footer_carriers,
+           (sorted(control_pages), sorted(footer_carriers)))
+    expect("gensrc/status-note-pages-found", note_pages and note_pages == note_carriers,
+           (sorted(note_pages), sorted(note_carriers)))
+    # Dropping one source from one page entry, for every entry whose page carries the rendered text and each
+    # source it must declare, turns that text's row (and only that row) red.
+    for name, row, source, carriers in (
+            ("gensrc/control-pages-drop-version-red", _FOOTER_ROW, "VERSION", footer_carriers),
+            ("gensrc/control-pages-drop-changelog-red", _FOOTER_ROW, "changelog.toml", footer_carriers),
+            ("gensrc/status-note-pages-drop-status-source-red", _NOTE_ROW, STATUS_SOURCE, note_carriers)):
+        missed = []
+        for target in sorted(carriers):
+            dropped = tuple(dict(entry, sources=tuple(s for s in entry["sources"] if s != source))
+                            if entry["target"] == target else entry for entry in GENSRC_OUTPUTS)
+            if red_rows(dropped) != [row]:
+                missed.append((target, red_rows(dropped)))
+        expect(name, carriers and not missed, missed)
+    # A block entry is never a page: page_targets() leaves it out, and the template pages the site gates read
+    # (tools/_template_pages.py) are exactly the page targets, so a block entry neither becomes a template page
+    # nor moves a site's template base.
+    import _template_pages
+    blocks = {entry["target"] for entry in GENSRC_OUTPUTS if entry["kind"] == "block"}
+    expect("gensrc/block-entries-not-pages", blocks and not blocks & page_targets()
+           and _template_pages.template_targets(ROOT) == page_targets(), sorted(blocks))
+
+    # A STATUS_LINES file named outside this generator's own exact entries: by an exact target or an ancestor
+    # tree target in another generator's declaration, or by an ancestor tree target in this one. Each red
+    # vector turns the status-lines row (alone) red, and each of the vectors read from another generator is
+    # clean when the other declarations are left out, so the registry discovery is what finds it. Each twin
+    # names a sibling whose path only begins like the file's (and would match a bare prefix test), and stays
+    # clean.
+    def other(*targets):
+        return [("gen_fixture", tuple({"target": target, "kind": kind, "sources": ("tools/gen_fixture.py",),
+                                       "regenerate": "python3 tools/gen_fixture.py"} for target, kind in targets))]
+
+    own_tree = GENSRC_OUTPUTS + ({"target": "opf/", "kind": "tree", "sources": ("tools/gen_draft_site.py",),
+                                  "regenerate": "python3 tools/gen_draft_site.py"},)
+    own_sibling_tree = GENSRC_OUTPUTS + ({"target": "opf/READ/", "kind": "tree",
+                                          "sources": ("tools/gen_draft_site.py",),
+                                          "regenerate": "python3 tools/gen_draft_site.py"},)
+    for name, entries, extra, want in (
+            ("gensrc/unregistered-exact-target-in-other-generator-red", GENSRC_OUTPUTS,
+             other(("opf/README.md", "file")), [_LINES_ROW]),
+            ("gensrc/unregistered-block-entry-in-other-generator-red", GENSRC_OUTPUTS,
+             other(("opf/spec/OPF-SPEC.md", "block")), [_LINES_ROW]),
+            ("gensrc/unregistered-ancestor-tree-in-other-generator-red", GENSRC_OUTPUTS,
+             other(("opf/spec/", "tree")), [_LINES_ROW]),
+            ("gensrc/registered-ancestor-tree-in-other-generator-red", GENSRC_OUTPUTS,
+             other(("opf/site/", "tree")), [_LINES_ROW]),
+            ("gensrc/unregistered-ancestor-tree-in-own-declaration-red", own_tree, (), [_LINES_ROW]),
+            ("gensrc/sibling-files-in-other-generator-allowed", GENSRC_OUTPUTS,
+             other(("opf/README.mdx", "file"), ("opf/README", "file"), ("opf/spec/OPF-SPEC.md.bak", "block")), []),
+            ("gensrc/sibling-trees-in-other-generator-allowed", GENSRC_OUTPUTS,
+             other(("opf/spe/", "tree"), ("opf/spec/OPF-SPEC/", "tree"), ("opf/site/llms/", "tree")), []),
+            ("gensrc/sibling-tree-in-own-declaration-allowed", own_sibling_tree, (), [])):
+        expect(name, red_rows(entries, extra) == want, (red_rows(entries, extra), want))
+        if extra and want:
+            expect(name, _register_findings(entries, live_outputs, footer, live_note, ())[_LINES_ROW] == [],
+                   "found without the other declarations")
+
+    # The hook count: read from the hooks manifest, rendered for the $HOOK_COUNT token, and the only form the
+    # pages state it in.
+    live_hooks = hook_count()
+    for rel, wording in (("site/index.html", "an opt-in plugin of {} hooks"),
+                         ("site/index.html", "Its {} Claude Code hooks"),
+                         ("site/install/details/index.html", "The {} Claude Code hooks")):
+        expect("hooks/live-count-on-pages", wording.format(live_hooks) in live_outputs[rel], (rel, wording))
+    expect("hooks/no-unrendered-token", not any("$HOOK_COUNT" in text for text in live_outputs.values()))
+    # A typed count: a number (digits or a number word) followed by "hooks" with at most 4 words between,
+    # in any case, matched after TOML \u and \U escapes and HTML character references (&nbsp; among them)
+    # are decoded, so neither a number word nor a no-break space hides a typed count. The pattern matches
+    # only a number or number word with at most 4 words before "hooks": a count with 5 or more words before
+    # "hooks", or not followed by "hooks" at all, is not matched.
+    number_words = ("zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|"
+                    "fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|"
+                    "eighty|ninety|hundred|dozen")
+    typed_count = re.compile(r"\b(?:\d+|" + number_words + r")\b(?:\W+\w+){0,4}?\W+hooks\b", re.IGNORECASE)
+
+    def typed_counts(text):
+        def code_point(match):
+            value = int(match.group(1) or match.group(2), 16)
+            return chr(value) if value <= 0x10FFFF else " "
+        text = re.sub(r"\\u([0-9A-Fa-f]{4})|\\U([0-9A-Fa-f]{8})", code_point, text)
+        return [found.group(0) for found in typed_count.finditer(_html.unescape(text))]
+
+    for name, text, want in (
+            ("hooks/typed-count-digits", "of 12 hooks", True),
+            ("hooks/typed-count-number-word", "of twelve hooks", True),
+            ("hooks/typed-count-number-word-capitalised", "Twelve Hooks ship", True),
+            ("hooks/typed-count-nbsp", "of 12&nbsp;hooks", True),
+            ("hooks/typed-count-nbsp-words-between", "The 12&nbsp;Claude&nbsp;Code hooks", True),
+            ("hooks/typed-count-toml-escape", "of 12\\u00a0hooks", True),
+            ("hooks/typed-count-char-reference-digits", "of &#49;&#50; hooks", True),
+            ("hooks/typed-count-hex-char-reference-digits", "of &#x31;&#x32; hooks", True),
+            ("hooks/typed-count-nbsp-not-a-word", "of 12&nbsp;Claude&nbsp;Code&nbsp;opt&nbsp;in hooks", True),
+            ("hooks/typed-count-four-words-between", "the 12 opt in Claude Code hooks", True),
+            ("hooks/typed-count-five-words-between-not-matched", "the 12 a b c d e hooks", False),
+            ("hooks/typed-count-token-not-matched", "The $HOOK_COUNT Claude Code hooks", False),
+            ("hooks/typed-count-no-number-not-matched", "the pack's tools and hooks", False)):
+        found = typed_counts(text)
+        expect(name, bool(found) == want, (text, found))
+    hook_data_files = []
+    for data_site in SITES:
+        with os.scandir(ROOT / data_site["src"]) as entries:
+            hook_data_files.extend("{}/{}".format(data_site["src"], entry.name) for entry in entries
+                                   if entry.name.endswith(".toml"))
+    expect("hooks/data-files-every-site", any(rel.startswith("opf/site/draft-src/") for rel in hook_data_files)
+           and "site/draft-src/home.toml" in hook_data_files, hook_data_files)
+    for rel in sorted(hook_data_files):
+        with open(ROOT / rel, encoding="utf-8") as handle:
+            data_text = handle.read()
+        typed = typed_counts(data_text)
+        carries = "$HOOK_COUNT" in data_text or rel not in ("site/draft-src/home.toml",
+                                                            "site/draft-src/install-details.toml")
+        expect("hooks/data-files-carry-the-token", carries and not typed, (rel, typed))
+    expect("hooks/token-rendered", _inline({"base": "/"}, "a $HOOK_COUNT b") == "a {} b".format(live_hooks))
+    for name, text, want in (
+            ("hooks/count-claude-code-only", '[[hook]]\nplatform = "claude-code"\n[[hook]]\nplatform = "claude-code"\n'
+             '[[hook]]\nplatform = "other"\n', 2),
+            ("hooks/count-one", '[[hook]]\nplatform = "claude-code"\n', 1)):
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+            with open(Path(tmp) / HOOKS_SOURCE, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            got = hook_count(tmp)
+        expect(name, got == want, got)
+    for name, text in (("hooks/malformed-refused", "[[hook]\n"),
+                       ("hooks/no-hooks-refused", 'format-version = 1\n'),
+                       ("hooks/no-claude-code-hook-refused", '[[hook]]\nplatform = "other"\n'),
+                       ("hooks/platform-missing-refused", '[[hook]]\nid = "x"\n'),
+                       ("hooks/hook-not-a-table-array-refused", 'hook = 3\n'),
+                       ("hooks/missing-manifest-refused", None)):
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            if text is not None:
+                os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+                with open(Path(tmp) / HOOKS_SOURCE, "w", encoding="utf-8") as handle:
+                    handle.write(text)
+            refused(name, hook_count, tmp)
+    # A symbolic link at the manifest path is refused, never followed, even to a valid manifest.
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+        os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+        with open(Path(tmp) / "real.toml", "w", encoding="utf-8") as handle:
+            handle.write('[[hook]]\nplatform = "claude-code"\n')
+        os.symlink(Path(tmp) / "real.toml", Path(tmp) / HOOKS_SOURCE)
+        refused("hooks/symlink-manifest-refused", hook_count, tmp)
+    # A FIFO at the manifest path is refused without a blocking open. A reader that did open it would wait
+    # for a writer; the writer below feeds such a reader a valid manifest (and gives up once the call returns
+    # or after about 10 seconds), so a reader that opens the FIFO counts a hook and the row fails, not hangs.
+    import threading
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+        fifo = Path(tmp) / HOOKS_SOURCE
+        os.makedirs(fifo.parent)
+        os.mkfifo(fifo)
+        done = threading.Event()
+
+        def feed():
+            for _attempt in range(1000):
+                if done.wait(0.01):
+                    return
+                try:
+                    fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                except OSError:
+                    continue
+                try:
+                    os.write(fd, b'[[hook]]\nplatform = "claude-code"\n')
+                finally:
+                    os.close(fd)
+                return
+
+        feeder = threading.Thread(target=feed, daemon=True)
+        feeder.start()
+        try:
+            refused("hooks/fifo-manifest-refused", hook_count, tmp)
+        finally:
+            done.set()
+            feeder.join(15)
+    # One row per layer of hook_count's read, each failing when only its layer is removed. The race each
+    # layer guards is driven in process: os.lstat, os.open or both os.open and os.close are replaced by
+    # stand-ins for the whole of one hook_count call (every call hook_count makes to them in that time goes
+    # to the stand-in). An os.lstat or os.open stand-in either substitutes its own result for the manifest
+    # path or records the call and passes it to the real function, and it calls the real function for every
+    # other path; the os.close stand-in records every descriptor it is given and closes each with the real
+    # os.close. Each stand-in is patched under its literal attribute name, and the patch restores the real
+    # function when its with statement ends. The symbolically linked parent row replaces no function: it
+    # puts the symbolic link on disk.
+    import contextlib
+    from unittest import mock
+    real_lstat, real_open, real_close = os.lstat, os.open, os.close
+    one_hook = '[[hook]]\nplatform = "claude-code"\n'
+
+    def hooks_tree(tmp):
+        """The manifest path under tmp (its parent directories made) and a valid manifest beside it."""
+        os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+        with open(Path(tmp) / "real.toml", "w", encoding="utf-8") as handle:
+            handle.write(one_hook)
+        return Path(tmp) / HOOKS_SOURCE, Path(tmp) / "real.toml"
+
+    def lstat_says_regular(target, regular):
+        """An os.lstat stand-in reporting the regular file `regular` for `target` (really a symbolic link or
+        a FIFO), as if the entry were swapped in between the lstat and the open."""
+        def stand_in(path, *args, **kwargs):
+            if os.fspath(path) == os.fspath(target):
+                return real_lstat(regular)
+            return real_lstat(path, *args, **kwargs)
+        return stand_in
+
+    def row_lstat_refuses_before_open():
+        # The lstat check refuses a symbolic link before any open of the manifest path.
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            target, real = hooks_tree(tmp)
+            os.symlink(real, target)
+            opened = []
+
+            def open_recorder(path, *args, **kwargs):
+                if os.fspath(path) == os.fspath(target):
+                    opened.append(os.fspath(path))
+                return real_open(path, *args, **kwargs)
+            with mock.patch.object(os, "open", open_recorder):
+                message = refused("hooks/lstat-refuses-before-open", hook_count, tmp)
+        expect("hooks/lstat-refuses-before-open", not opened and "not a regular file" in message,
+               (opened, message))
+
+    def row_nofollow_refuses_swapped_symlink():
+        # The lstat reports a regular file, but the path is a symbolic link to a valid manifest: O_NOFOLLOW
+        # fails the open, where a following open would read the manifest and count its hook.
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            target, real = hooks_tree(tmp)
+            os.symlink(real, target)
+            with mock.patch.object(os, "lstat", lstat_says_regular(target, real)):
+                refused("hooks/nofollow-refuses-swapped-symlink", hook_count, tmp)
+
+    def row_nonblock_opens_swapped_fifo():
+        # The lstat reports a regular file, but the path is a FIFO: with O_NONBLOCK the open returns at once
+        # and fstat refuses. An open without it waits for a writer; the writer below waits about 3 seconds
+        # for the call to return, then unblocks such an open (feeding it a valid manifest) and records that,
+        # so a blocking open fails the row instead of hanging.
+        import threading
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            target, real = hooks_tree(tmp)
+            os.mkfifo(target)
+            done = threading.Event()
+            fed = []
+
+            def unblock():
+                if done.wait(3):
+                    return
+                for _attempt in range(1000):
+                    if done.wait(0.01):
+                        return
+                    try:
+                        writer = real_open(target, os.O_WRONLY | os.O_NONBLOCK)
+                    except OSError:
+                        continue
+                    try:
+                        os.write(writer, one_hook.encode("utf-8"))
+                    finally:
+                        real_close(writer)
+                    fed.append(True)
+                    return
+
+            helper = threading.Thread(target=unblock, daemon=True)
+            helper.start()
+            try:
+                with mock.patch.object(os, "lstat", lstat_says_regular(target, real)):
+                    message = refused("hooks/nonblock-opens-swapped-fifo", hook_count, tmp)
+            finally:
+                done.set()
+                helper.join(15)
+        expect("hooks/nonblock-opens-swapped-fifo", not fed and "the opened entry" in message, (fed, message))
+
+    def row_fstat_refuses_opened_fifo(closed_once_id):
+        # The manifest path is a valid regular manifest, but the open returns a FIFO holding a valid manifest
+        # (an entry swapped in between the lstat and the open): only the fstat check refuses it, and the
+        # descriptor is closed exactly once on that refusal.
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            target, real = hooks_tree(tmp)
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(one_hook)
+            fifo = Path(tmp) / "swapped.fifo"
+            os.mkfifo(fifo)
+            opened = []
+            closes = []
+
+            def open_fifo_instead(path, *args, **kwargs):
+                if os.fspath(path) != os.fspath(target):
+                    return real_open(path, *args, **kwargs)
+                fd = real_open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+                opened.append(fd)
+                writer = real_open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                try:
+                    os.write(writer, one_hook.encode("utf-8"))
+                finally:
+                    real_close(writer)
+                return fd
+
+            def close_recorder(fd):
+                closes.append(fd)
+                real_close(fd)
+            with mock.patch.object(os, "open", open_fifo_instead), mock.patch.object(os, "close", close_recorder):
+                message = refused("hooks/fstat-refuses-opened-fifo", hook_count, tmp)
+        expect("hooks/fstat-refuses-opened-fifo", len(opened) == 1 and "the opened entry" in message,
+               (opened, message))
+        expect(closed_once_id, len(opened) == 1 and [fd for fd in closes if fd in opened] == opened,
+               (opened, closes))
+
+    def row_closed_once_on_success():
+        # A valid manifest is counted and the descriptor opened for it is closed exactly once. A refusal of
+        # that manifest fails this row, naming the refusal, rather than ending the self-test.
+        got, refusal = None, ""
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            target, real = hooks_tree(tmp)
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(one_hook)
+            opened = []
+            closes = []
+
+            def open_recorder(path, *args, **kwargs):
+                fd = real_open(path, *args, **kwargs)
+                if os.fspath(path) == os.fspath(target):
+                    opened.append(fd)
+                return fd
+
+            def close_recorder(fd):
+                closes.append(fd)
+                real_close(fd)
+            with mock.patch.object(os, "open", open_recorder), mock.patch.object(os, "close", close_recorder):
+                try:
+                    got = hook_count(tmp)
+                except RefusedPage as exc:
+                    refusal = "refused: {}".format(exc)
+        expect("hooks/descriptor-closed-once-on-success",
+               not refusal and got == 1 and len(opened) == 1 and [fd for fd in closes if fd in opened] == opened,
+               (got, refusal, opened, closes))
+
+    def row_symlinked_parent_refused():
+        # A directory on the manifest's path that is a symbolic link to a directory holding a valid manifest
+        # is refused, at each level below the root.
+        parents = Path(HOOKS_SOURCE).parent.parts
+        for depth in range(1, len(parents) + 1):
+            with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+                linked = Path(tmp).joinpath(*parents[:depth])
+                elsewhere = Path(tmp) / "elsewhere"
+                os.makedirs(elsewhere.joinpath(*parents[depth:]))
+                os.makedirs(linked.parent, exist_ok=True)
+                with open(elsewhere.joinpath(*parents[depth:]) / Path(HOOKS_SOURCE).name, "w",
+                          encoding="utf-8") as handle:
+                    handle.write(one_hook)
+                os.symlink(elsewhere, linked)
+                message = refused("hooks/symlinked-parent-refused", hook_count, tmp)
+            expect("hooks/symlinked-parent-refused", "is not a directory" in message, (depth, message))
+
+    row_lstat_refuses_before_open()
+    row_nofollow_refuses_swapped_symlink()
+    row_nonblock_opens_swapped_fifo()
+    row_fstat_refuses_opened_fifo("hooks/descriptor-closed-once-on-refusal")
+    row_closed_once_on_success()
+    row_symlinked_parent_refused()
+    # run() counts the hooks manifest of the root it is given, not ROOT's: a tree whose manifest holds 1 more
+    # Claude Code hook than the live one gets pages stating that count.
+    import io
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-run-") as tmp:
+        os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+        with open(Path(tmp) / HOOKS_SOURCE, "w", encoding="utf-8") as handle:
+            handle.write('[[hook]]\nplatform = "claude-code"\n' * (live_hooks + 1))
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = run(tmp, check=False)
+        written = ""
+        if os.path.isfile(Path(tmp) / "site/index.html"):
+            with open(Path(tmp) / "site/index.html", encoding="utf-8") as handle:
+                written = handle.read()
+    expect("hooks/run-counts-its-root",
+           code == 0 and "an opt-in plugin of {} hooks".format(live_hooks + 1) in written, code)
 
     if failures:
         print("SELF-TEST FAIL: gen_draft_site {} failure(s)".format(len(failures)))
@@ -3067,8 +3582,14 @@ def _self_test():
           "cycle, base path, every "
           "component's reference markup, the data-file refusals, derived scripts with rail.js only where "
           "the rail lists sections, the link rules, kept live paths, the mappings bodies, promotion "
-          "switch, text-field escaping, the structural link guard, the checked title and meta keys, "
-          "--check exit codes and the register rows with their flips)")
+          "switch, text-field escaping, the structural link guard, the checked title and meta keys, the "
+          "hook count read from the hooks manifest of the root run() is given (a symbolic link, a FIFO or "
+          "a symbolically linked parent directory there refused, each layer of the read driven on its "
+          "own, and its descriptor closed once), no draft-src data file of either site typing a number (digits or a number word) "
+          "with at most 4 words before \"hooks\" once TOML escapes and HTML character references are "
+          "decoded, --check exit codes and the register rows with their flips, each source dropped from "
+          "every control-strip and status-note page entry, and status lines named by an exact or ancestor "
+          "tree target in any generator's declaration)")
     return 0
 
 

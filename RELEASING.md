@@ -26,9 +26,8 @@ pull request (CLAUDE.md, Gates and CI).
    release other than the one `.aiqt/python-host.toml` names (the python-host-pin gate), so run it on that
    release; when the host interpreter has changed, first land one change that updates `python-host-patch`
    there and the `python-version` pin of every host-patch job (`opf-host-patch`,
-   `git-fixture-env-core-host-patch`, `git-fixture-env-config-combined-host-patch`,
-   `git-fixture-env-config-malformed-host-patch` and `git-fixture-env-config-system-host-patch`) in
-   `.github/workflows/quality.yml` together. After the freeze the
+   `git-fixture-env-core-host-patch` and the 43 config shard jobs
+   `git-fixture-env-config-<lane>-shard-K-host-patch`) in `.github/workflows/quality.yml` together. After the freeze the
    release artifacts (the version-numbered `site/downloads/aiqt-skill-<skill version>.zip`, which the site
    links to, and `site/downloads/aiqt-instructions.txt`) and their generating inputs (the corpus and
    `tools/gen_skill.py`) do not change; `site/downloads/aiqt-skill.zip` is a stable "latest" alias kept
@@ -102,13 +101,23 @@ pull request (CLAUDE.md, Gates and CI).
 
    OPF declaration checklist (OPF-SPEC section 16.1). The reference tooling's declaration file is
    `opf/tools/opf-declaration.toml`, and the shipped-file digest is carried in
-   `opf/tools/_opf_declaration.py` as `SHIPPED_DECLARATION_SHA256`. Its `release` is the pack release
-   version, so each release cut sets, in one change: `release` in that file;
-   `RELEASE_IDENTITY`, `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in
-   `_opf_declaration.py`; and the restatement below and in `opf/spec/OPF-QUICKSTART.md`. A change of the supported `spec_version`, homes generation or worklog
-   storage generation (`_opf_store.py`) changes the same places. `python3 -I -B
+   `opf/tools/_opf_declaration.py` as `SHIPPED_DECLARATION_SHA256`. Its `release` is OPF's own release
+   version in `opf/VERSION`, which moves independently of the pack release version in `VERSION`, so each
+   change of OPF's version sets, in one change: `opf/VERSION`; `release` in that file;
+   `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in `_opf_declaration.py`; and the
+   restatement below and in `opf/spec/OPF-QUICKSTART.md`. A change of the supported `spec_version`, homes generation or worklog
+   storage generation changes its value in `_opf_store.py`, the matching field in
+   `opf/tools/opf-declaration.toml`, `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in
+   `_opf_declaration.py`, and the restatement below and in `opf/spec/OPF-QUICKSTART.md`; it does not by
+   itself touch `opf/VERSION` or `release`. `python3 -I -B
    tools/check_opf_declaration.py` must then exit 0. It refuses a restatement that differs from the file
-   and a release other than `VERSION`. This release declares:
+   and a release other than the version in `opf/VERSION`; a pack release that leaves OPF's version
+   unchanged changes none of these places. `RELEASE_IDENTITY` is read from `opf/VERSION` when the module
+   loads, and a missing or malformed `opf/VERSION` leaves the build without one, so every gated verb
+   refuses. Adoption is bound to OPF's own version: `python3 tools/gen_manifest.py` records `opf/VERSION`
+   as the release manifest's `opf-version`, and the `opf adopt` trust gate checks the plan's release
+   version against that `opf-version`, never the pack manifest's `release-version` (taken from the root
+   `VERSION`), refusing a manifest that records none. This release declares:
 
    ```toml opf-declaration
    release = "1.0.5"

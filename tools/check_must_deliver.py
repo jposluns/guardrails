@@ -307,20 +307,18 @@ def self_test_main():
             failures.append("T3: a listed straddling rule must be exit 1 naming it, got {}\n{}".format(
                 code, out))
 
-        # T4. Bytes, not characters: U+00E9 padding puts ruleaa's character end inside the cap and its
-        # byte end past it (the same construction as the generator's own multi-byte vector).
+        # T4. Bytes, not characters: 100 U+00E9 in a before-rules block (a rule body is ASCII) put ruleaa's
+        # character end inside the cap and its byte end past it (the generator's own multi-byte vector).
         t4 = tmp / "t4"
         two = "é"
-        mb = [("prjint1", True, 0), ("ruleaa", False, two), ("rulebb", False, 100)]
-        gfpd._write_tree(t4, mb)
-        raw = (t4 / "AGENTS.md").read_bytes()
-        lead = "Obligation text ruleaa".encode("utf-8")
-        pad_b = raw.find(lead) + len(lead)
-        pad_c = len(raw[:pad_b].decode("utf-8"))
-        a0 = (CAP - 1 - pad_b) % 2
-        m = CAP - 50 - pad_c - a0 - 1
-        sp = gfpd._write_tree(t4, [("prjint1", True, 0), ("ruleaa", False, "a" * a0 + two * m),
-                                   ("rulebb", False, 100)])
+        mb_block = ("OPF-SELFTEST", "AGENTS.md", "before-rules", 1, "opf/blocks/selftest.md", two * 100 + "\n")
+        mb_registry = gfpd.adapter_compose.registry_text([("AGENTS.md", "composed")], [mb_block])
+
+        def mb_specs(fill):
+            return [("prjint1", True, 0), ("ruleaa", False, fill), ("rulebb", False, 100)]
+
+        sp = gfpd._write_tree(t4, mb_specs(20000), mb_registry, [mb_block])
+        sp = gfpd._write_tree(t4, mb_specs(20000 + CAP + 50 - sp["ruleaa"][1]), mb_registry, [mb_block])
         raw = (t4 / "AGENTS.md").read_bytes()
         char_end = len(raw[:sp["ruleaa"][1]].decode("utf-8"))
         if not (char_end <= CAP < sp["ruleaa"][1]):

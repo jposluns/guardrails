@@ -182,6 +182,9 @@ def strict_releases(data, where):
 # is the stricter kind-specific form gen_manifest actually emits.
 MANIFEST_TOP_KEYS = frozenset({"format-version", "release-version", "genesis", "tree-sha256", "sources",
                                "artifacts"})
+# OPF's own release version (opf/VERSION), emitted by gen_manifest where the pack tracks that file; the same
+# optional key the shared pack grammar (opf/tools/_opf_pack_manifest.py) admits.
+MANIFEST_OPTIONAL_KEYS = frozenset({"opf-version"})
 MANIFEST_SOURCES_KEYS = frozenset({"path", "bytes", "sha256"})
 MANIFEST_ARTIFACT_BASE = frozenset({"artifact-id", "path", "kind", "sha256"})
 MANIFEST_ARTIFACT_KEYS = {"file": MANIFEST_ARTIFACT_BASE,
@@ -204,9 +207,12 @@ def strict_manifest(data, where):
     artifact-id. The full SOURCES-set-equality against the tracked tree stays check_manifest's."""
     if not isinstance(data, dict):
         raise SchemaError("{}: manifest is not a table".format(where))
-    if set(data) != MANIFEST_TOP_KEYS:
-        raise SchemaError("{}: top-level keys must be EXACTLY {} (found {})".format(
-            where, sorted(MANIFEST_TOP_KEYS), sorted(data)))
+    if not MANIFEST_TOP_KEYS <= set(data) <= MANIFEST_TOP_KEYS | MANIFEST_OPTIONAL_KEYS:
+        raise SchemaError("{}: top-level keys must be EXACTLY {}, optionally with {} (found {})".format(
+            where, sorted(MANIFEST_TOP_KEYS), sorted(MANIFEST_OPTIONAL_KEYS), sorted(data)))
+    if "opf-version" in data and (not isinstance(data["opf-version"], str)
+                                  or _parse(data["opf-version"]) is None):
+        raise SchemaError("{}: opf-version {!r} is not a bare SemVer".format(where, data["opf-version"]))
     if data["format-version"] != 1:
         raise SchemaError("{}: format-version must be exactly 1".format(where))
     if not isinstance(data["release-version"], str) or _parse(data["release-version"]) is None:
@@ -355,6 +361,10 @@ ORDER_FAMILY_VOCAB = frozenset({"apex", "aiqt", "security"})
 ORDER_TIE_BREAKERS = frozenset({"slug-bytewise"})
 CLAUSE_ROW_KEYS = frozenset({"clause-id", "corpus-id", "source-path", "start-line", "end-line",
                              "canonical-text", "source-digest"})
+# The clause layer field (the two-layer split): head inventories carry it on every row (check_clauses
+# requires it and derives its value); an inventory from before the field existed carries none, so a row
+# holds either the base keyset or the base keyset plus `layer`, and a present layer is core or detail.
+CLAUSE_LAYERS = frozenset({"core", "detail"})
 IDHISTORY_ROW_KEYS = {"born": {"id", "born-release"}, "tombstone": {"id", "retired-release"},
                       "successor": {"id", "retired-release", "successor-id"}}
 
@@ -433,13 +443,14 @@ def strict_order(data, where):
 
 def strict_clause_inventory(data, where):
     """EXHAUSTIVE 7.2 clause-inventory schema (round-4 finding 2): a [[clause]] array of tables, each with
-    EXACTLY the 7.2 keyset; a well-formed clause-id (UNIQUE) whose corpus part equals a well-formed
-    corpus-id field; a non-empty source-path; positive integer start-line/end-line with end >= start; a
-    non-empty canonical-text; and a 64-lowercase-hex source-digest. The full source-file span/text/digest
-    CONSISTENCY (reading the rule sources) stays check_clauses'; this validates the record's own structure
-    exhaustively on BOTH objects (the round-2/3 three-field guard accepted malformed ids and missing span/
-    digest fields). The EXACT top-level keyset is required first (round-6 finding 3: an unknown top-level
-    key like `bogus` was ignored). Returns the rows list."""
+    EXACTLY the 7.2 keyset, or that keyset plus a layer of core or detail; a well-formed clause-id
+    (UNIQUE) whose corpus part equals a well-formed corpus-id field; a non-empty source-path; positive
+    integer start-line/end-line with end >= start; a non-empty canonical-text; and a 64-lowercase-hex
+    source-digest. The full source-file span/text/digest CONSISTENCY (reading the rule sources) stays
+    check_clauses'; this validates the record's own structure exhaustively on BOTH objects (the round-2/3
+    three-field guard accepted malformed ids and missing span/digest fields). The EXACT top-level keyset
+    is required first (round-6 finding 3: an unknown top-level key like `bogus` was ignored). Returns the
+    rows list."""
     if not isinstance(data, dict) or set(data) != {"clause"}:
         raise SchemaError("{}: top-level keys must be EXACTLY {{'clause'}} (found {})".format(
             where, sorted(data) if isinstance(data, dict) else type(data).__name__))
@@ -452,9 +463,11 @@ def strict_clause_inventory(data, where):
         rw = "{} clause row #{}".format(where, i)
         if not isinstance(row, dict):
             raise SchemaError("{}: not a table".format(rw))
-        if set(row) != CLAUSE_ROW_KEYS:
-            raise SchemaError("{}: keys are not exactly the 7.2 clause schema {}".format(
-                rw, sorted(CLAUSE_ROW_KEYS)))
+        if set(row) not in (CLAUSE_ROW_KEYS, CLAUSE_ROW_KEYS | {"layer"}):
+            raise SchemaError("{}: keys are not exactly the 7.2 clause schema {} (plus an optional "
+                              "layer)".format(rw, sorted(CLAUSE_ROW_KEYS)))
+        if "layer" in row and (not isinstance(row["layer"], str) or row["layer"] not in CLAUSE_LAYERS):
+            raise SchemaError("{}: layer {!r} is not one of {}".format(rw, row["layer"], sorted(CLAUSE_LAYERS)))
         cid = row["clause-id"]
         parsed = split_clause_id(cid) if isinstance(cid, str) else None
         if parsed is None:

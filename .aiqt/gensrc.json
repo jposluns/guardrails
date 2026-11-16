@@ -517,7 +517,8 @@
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
         "tools/gen_draft_site.py",
-        "site/draft-src/home.toml"
+        "site/draft-src/home.toml",
+        ".aiqt/core/hooks/manifest.toml"
       ],
       "target": "site/index.html"
     },
@@ -527,6 +528,7 @@
       "sources": [
         "tools/gen_draft_site.py",
         "site/draft-src/install-details.toml",
+        ".aiqt/core/hooks/manifest.toml",
         "VERSION",
         "changelog.toml"
       ],
@@ -588,6 +590,15 @@
         "changelog.toml"
       ],
       "target": "site/standard/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "site/draft-src/teams.toml"
+      ],
+      "target": "site/teams/index.html"
     }
   ],
   "version": 1

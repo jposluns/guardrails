@@ -9,11 +9,14 @@
 # and no permission change fixes it. Only a GitHub App, or a classic token with the
 # `repo` scope, can read Checks.
 #
-# DO NOT substitute `commits/<sha>/status`. GitHub Actions publishes through Check
-# Runs, not the older Statuses API, so that endpoint returns `state: pending` with
-# `total_count: 0` FOREVER, even on a commit whose workflow succeeded. Verified on
-# 2026-08-08 against commit 7666cff, whose Quality run had concluded `success`.
-# Anything treating it as the green signal hangs; anything inverting it merges on a lie.
+# DO NOT read the combined `state` of `commits/<sha>/status` as a green signal. GitHub
+# Actions publishes through Check Runs, not the older Statuses API, so for Actions that
+# endpoint returns `state: pending` with `total_count: 0` FOREVER, even on a commit whose
+# workflow succeeded (verified on 2026-08-08 against commit 7666cff, whose Quality run had
+# concluded `success`), and the combined state mixes every context into one value. Anything
+# treating it as the green signal hangs; anything inverting it merges on a lie. Reading ONE
+# context's own entries is a different read and is allowed: --require-status (THE STATUS
+# REQUIREMENT below) reads only the named context's entries, never the combined state.
 #
 # This reads every paginated run from `actions/runs?head_sha=` AND the newest pages of the unfiltered
 # `actions/runs` listing back to a lower bound derived from the commit's committer date, keeping the
@@ -46,6 +49,13 @@
 #                                                   # THE BASE-BRANCH REQUIREMENT below)
 #   ... --require-base main --require-workflow PATH # the same, requiring the workflow whose file
 #                                                   # is PATH instead of the default quality.yml
+#   tools/ci-status.sh <sha> --pr N --require-status local-quality
+#                                                   # additionally require pull request N open at
+#                                                   # this head into the base, the newest
+#                                                   # local-quality status on this commit success
+#                                                   # and posted by the pinned creator, and this
+#                                                   # commit to contain the base's tip; prints
+#                                                   # MERGE-SHA (THE STATUS REQUIREMENT below)
 #   tools/ci-status.sh --match-tree [--head REV] [--require-job-success NAME]...
 #                                                   # succeed only on a completed successful run of
 #                                                   # .github/workflows/quality.yml whose head commit
@@ -61,8 +71,19 @@
 #                                                   # on a further commit is not compared, and no
 #                                                   # successful run listed after the first such run
 #                                                   # is accepted (THE TREE MATCH)
+#   tools/ci-status.sh --main-health                # main's own health: exit 0 only when the newest
+#                                                   # completed push run of .github/workflows/quality.yml
+#                                                   # on main concluded success, 1 when it did not, 2
+#                                                   # when none is listed in the window or a read fails
+#                                                   # (THE MAIN HEALTH)
+#   tools/ci-status.sh --main-health --merge-commit SHA
+#                                                   # after a merge: wait, bounded, for the push run(s)
+#                                                   # of that workflow file on main for the merge commit
+#                                                   # SHA (a full commit id) and exit 1 loudly when red
 #
-# Exit codes (--match-tree has its own, stated at THE TREE MATCH below): 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check, a run that
+# Exit codes (--match-tree and --main-health have their own, stated at THE TREE MATCH and THE MAIN
+# HEALTH below; --require-status adds those
+# stated at THE STATUS REQUIREMENT below): 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check, a run that
 # does not satisfy --require-base, or no completed successful run of the required workflow file
 # (a conforming one under --require-base; report-once refuses at once; --wait refuses after its
 # settle window), a --wait whose head, with no merge into the base shown in its associated pull
@@ -109,8 +130,12 @@ set -uo pipefail
 # repeated, and so is a --require-job-success naming a job already named. --head and
 # --require-job-success are accepted only with --match-tree, and --match-tree refuses a positional rev
 # (its rev is taken through --head only), --wait, --require-base and --require-workflow, so no option
-# is ever silently ignored.
+# is ever silently ignored. --pr and --require-status take a value the same way, are refused when
+# repeated, are accepted only together, and are refused with --match-tree; a --pr value must be a
+# decimal pull-request number with no leading zero.
 SHA_IN="HEAD"
+PR_NUMBER=""
+REQUIRE_STATUS=""
 SHA_IN_SET=0
 WAIT=""
 REQUIRE_BASE=""
@@ -118,6 +143,8 @@ REQUIRE_BASE_SET=0
 MATCH_TREE=0
 HEAD_SET=0
 REQUIRE_JOBS=()
+MAIN_HEALTH=0
+MERGE_COMMIT=""
 # The workflow FILE whose completed successful run every invocation demands (a conforming one
 # under --require-base), matched against each run's recorded workflow path (the runs API's .path),
 # never its display name: any workflow can carry name: Quality, so a name match would let a
@@ -135,6 +162,9 @@ for arg in "$@"; do
       --require-workflow) label="workflow path" ;;
       --head) label="rev" ;;
       --require-job-success) label="job name" ;;
+      --pr) label="pull-request number" ;;
+      --require-status) label="status context" ;;
+      --merge-commit) label="merge commit id" ;;
     esac
     case "$arg" in
       -*)
@@ -168,6 +198,32 @@ for arg in "$@"; do
       fi
       SHA_IN="$arg"
       HEAD_SET=1
+    elif [ "$option" = "--pr" ]; then
+      if [ -n "$PR_NUMBER" ]; then
+        printf 'ERROR: --pr is given more than once; a repeated option is refused rather than read last-wins.\n' >&2
+        exit 2
+      fi
+      if ! [[ "$arg" =~ ^[123456789][0123456789]{0,8}$ ]]; then
+        printf 'ERROR: --pr needs a pull-request number (decimal digits, no leading zero, at most 9 digits).\n' >&2
+        exit 2
+      fi
+      PR_NUMBER="$arg"
+    elif [ "$option" = "--require-status" ]; then
+      if [ -n "$REQUIRE_STATUS" ]; then
+        printf 'ERROR: --require-status is given more than once; a repeated option is refused rather than read last-wins.\n' >&2
+        exit 2
+      fi
+      REQUIRE_STATUS="$arg"
+    elif [ "$option" = "--merge-commit" ]; then
+      if [ -n "$MERGE_COMMIT" ]; then
+        printf 'ERROR: --merge-commit is given more than once; a repeated option is refused rather than read last-wins.\n' >&2
+        exit 2
+      fi
+      if ! [[ "$arg" =~ ^([0123456789abcdef]{40}|[0123456789abcdef]{64})$ ]]; then
+        printf 'ERROR: --merge-commit needs the full id of the merge commit (40 or 64 lowercase hex digits); a short id or a rev name is refused, because each run records its head commit by full id.\n' >&2
+        exit 2
+      fi
+      MERGE_COMMIT="$arg"
     else
       for job in "${REQUIRE_JOBS[@]}"; do
         if [ "$job" = "$arg" ]; then
@@ -192,7 +248,17 @@ for arg in "$@"; do
       ;;
     --head) EXPECT_VALUE="--head" ;;
     --require-job-success) EXPECT_VALUE="--require-job-success" ;;
-    -*) printf 'ERROR: unknown option %s (only --wait, --require-base BRANCH, --require-workflow PATH, --match-tree, --head REV and --require-job-success NAME are supported).\n' "$arg" >&2; exit 2 ;;
+    --pr) EXPECT_VALUE="--pr" ;;
+    --require-status) EXPECT_VALUE="--require-status" ;;
+    --main-health)
+      if [ "$MAIN_HEALTH" -eq 1 ]; then
+        printf 'ERROR: --main-health is given more than once; a repeated option is refused.\n' >&2
+        exit 2
+      fi
+      MAIN_HEALTH=1
+      ;;
+    --merge-commit) EXPECT_VALUE="--merge-commit" ;;
+    -*) printf 'ERROR: unknown option %s (only --wait, --require-base BRANCH, --require-workflow PATH, --match-tree, --head REV, --require-job-success NAME, --pr N, --require-status CONTEXT, --main-health and --merge-commit SHA are supported).\n' "$arg" >&2; exit 2 ;;
     *)
       if [ "$SHA_IN_SET" -eq 1 ]; then
         printf 'ERROR: more than one rev was given; a repeated rev is refused rather than read last-wins.\n' >&2
@@ -209,9 +275,47 @@ if [ -n "$EXPECT_VALUE" ]; then
     --require-workflow) label="workflow path" ;;
     --head) label="rev" ;;
     --require-job-success) label="job name" ;;
+    --pr) label="pull-request number" ;;
+    --require-status) label="status context" ;;
+    --merge-commit) label="merge commit id" ;;
   esac
   printf 'ERROR: %s needs a %s and none was given.\n' "$EXPECT_VALUE" "$label" >&2
   exit 2
+fi
+# THE MAIN HEALTH (see below) is a separate read of main: it takes no rev and no other option but
+# --merge-commit, which it alone accepts. Both refusals come before any git or API read.
+if [ -n "$MERGE_COMMIT" ] && [ "$MAIN_HEALTH" -ne 1 ]; then
+  printf 'ERROR: --merge-commit is accepted only with --main-health.\n' >&2
+  exit 2
+fi
+if [ "$MAIN_HEALTH" -eq 1 ]; then
+  if [ "$SHA_IN_SET" -eq 1 ] || [ -n "$WAIT" ] || [ "$MATCH_TREE" -eq 1 ] || [ "$HEAD_SET" -eq 1 ] ||
+      [ "${#REQUIRE_JOBS[@]}" -ne 0 ] || [ "$REQUIRE_BASE_SET" -eq 1 ] ||
+      [ "$REQUIRE_WORKFLOW_SET" -eq 1 ] || [ -n "$PR_NUMBER" ] || [ -n "$REQUIRE_STATUS" ]; then
+    printf 'ERROR: --main-health is a separate read of main; a positional rev, --wait, --match-tree, --head, --require-job-success, --require-base, --require-workflow, --pr and --require-status are refused with it (its post-merge wait is --merge-commit SHA).\n' >&2
+    exit 2
+  fi
+fi
+if { [ -n "$PR_NUMBER" ] || [ -n "$REQUIRE_STATUS" ]; } && { [ -z "$PR_NUMBER" ] || [ -z "$REQUIRE_STATUS" ]; }; then
+  printf 'ERROR: --pr and --require-status are accepted only together.\n' >&2
+  exit 2
+fi
+if [ -n "$REQUIRE_STATUS" ] && [ "$MATCH_TREE" -eq 1 ]; then
+  printf 'ERROR: --match-tree is a separate read; --pr and --require-status are refused with it.\n' >&2
+  exit 2
+fi
+# THE STATUS CREATOR (see THE STATUS REQUIREMENT): the account whose status alone counts is named by
+# the caller's environment, never by this repository. Unset, empty or holding white space is refused
+# before any read; its value is never echoed.
+STATUS_CREATOR=""
+if [ -n "$REQUIRE_STATUS" ]; then
+  STATUS_CREATOR="${CI_STATUS_STATUS_CREATOR:-}"
+  case "$STATUS_CREATOR" in
+    ""|*[[:space:]]*)
+      printf 'ERROR: cannot evaluate: --require-status needs CI_STATUS_STATUS_CREATOR set to the account that posts that status (nonempty, no white space); it is unset or unusable.\n' >&2
+      exit 2
+      ;;
+  esac
 fi
 if [ "$MATCH_TREE" -eq 1 ]; then
   if [ "$SHA_IN_SET" -eq 1 ]; then
@@ -262,7 +366,10 @@ fi
 # nothing here can tell: the cause can then be wrong (that no commit id starts with the digits, say, when
 # that pack holds one). The cause is worded only after git has refused the rev, so a wrong cause is always a
 # refusal, never an acceptance. Anything else does not resolve.
-if ! SHA="$(git rev-parse --verify --quiet "${SHA_IN}^{commit}")"; then
+# --main-health resolves no rev (it reads main's runs, not a commit's), prints no COMMIT line and reads
+# no committer date; SHA stays empty there.
+SHA=""
+if [ "$MAIN_HEALTH" -eq 0 ] && ! SHA="$(git rev-parse --verify --quiet "${SHA_IN}^{commit}")"; then
   REV_CAUSE="does not resolve to a commit in this repository."
   if [[ "$SHA_IN" =~ ^([0123456789abcdefABCDEF]{4,})([~^].*)?$ ]]; then
     REV_PREFIX="${BASH_REMATCH[1]}"
@@ -326,11 +433,13 @@ if ! SHA="$(git rev-parse --verify --quiet "${SHA_IN}^{commit}")"; then
   printf 'ERROR: cannot evaluate: %s %s\n' "${SHA_IN}" "$REV_CAUSE" >&2
   exit 2
 fi
-printf 'COMMIT: %s\n' "$SHA"
-if ! COMMIT_TIME="$(git log -1 --no-show-signature --format=%ct "$SHA" --)" ||
-    ! [[ "$COMMIT_TIME" =~ ^[0-9]+$ ]]; then
-  printf 'ERROR: cannot read the committer date of %s.\n' "$SHA" >&2
-  exit 2
+if [ "$MAIN_HEALTH" -eq 0 ]; then
+  printf 'COMMIT: %s\n' "$SHA"
+  if ! COMMIT_TIME="$(git log -1 --no-show-signature --format=%ct "$SHA" --)" ||
+      ! [[ "$COMMIT_TIME" =~ ^[0-9]+$ ]]; then
+    printf 'ERROR: cannot read the committer date of %s.\n' "$SHA" >&2
+    exit 2
+  fi
 fi
 
 # THE REPOSITORY IS THE CHECKOUT'S OWN. The runs read are those of the repository this checkout's origin
@@ -415,6 +524,336 @@ if [ -n "${CI_STATUS_REPO:-}" ] && [ "$CI_STATUS_REPO" != "$REPO" ]; then
 fi
 NOW="$(date +%s)"
 DEADLINE=$(( NOW + ${CI_STATUS_TIMEOUT:-900} ))
+
+# THE MAIN HEALTH (--main-health [--merge-commit SHA]). A separate read, for a merge lane that must not
+# merge onto a red main and must see main's own run after each merge. It reads no commit of this
+# checkout: only the repository's runs, from the unfiltered `actions/runs` listing (Actions: Read), newest
+# first, one page per request, every page of the window read in full before any decision, as THE TREE
+# MATCH reads it. A run counts only when its recorded .path is exactly REQUIRE_WORKFLOW
+# (.github/workflows/quality.yml; --require-workflow is refused here), its head_branch is exactly main and
+# its event is exactly push: a main push run. The filter is applied here, on each run's raw record, never
+# by a server-side query parameter.
+# THE ADVISORY RUNS apply here exactly as in every other mode: a run of that file on main whose event is
+# schedule or workflow_dispatch is listed and named on a NOTE line, and is never the deciding run and
+# never a red signal, whatever it concluded, so a window holding only advisory runs cannot evaluate
+# (exit 2). A pull_request run (its head_branch is the pull request's branch), a run on another branch and
+# a run of another workflow file are not main push runs and are passed over.
+# One-shot (--main-health): the deciding run is the first main push run in the listing whose status is
+# completed (the newest by creation, under the ordering ASSUMPTION stated at BOUNDED SCAN below). Exit 0
+# when it concluded success; exit 1 (main is red) on any other conclusion, cancelled, timed_out, skipped
+# and neutral included; exit 2 when no main push run in the window is completed. A main push run listed
+# before the deciding run that is not completed (in progress, queued, ...) is named on a NOTE line and
+# neither passes nor blocks: it does not mask a red deciding run, and it does not erase a green one.
+# Post-merge (--main-health --merge-commit SHA): the main push runs whose head_sha is exactly SHA decide,
+# re-read every MAIN_HEALTH_POLL_SECONDS until CI_STATUS_TIMEOUT (default 900 seconds) has passed since
+# the script started (DEADLINE). Any of them completed with a conclusion other than success: exit 1 at
+# once, on a line starting "RESULT: MAIN IS RED"; none still running and at least one completed success:
+# exit 0; none listed yet or one still running at the deadline: exit 2 (cannot evaluate, naming the
+# timeout). THE DEADLINE BINDS EVERY STEP: it is checked before each read and after each read, before any
+# result of that read is accepted, so a read that ends at or after it is exit 2 whatever it shows (a red
+# one included: the RESULT line is never printed from a late read); each sleep is cut to the seconds
+# left; and each page read runs under timeout(1) with the seconds left, so a read still running at the
+# deadline is stopped and is exit 2 naming the timeout. The one-shot form keeps no deadline: its reads
+# are not bounded by time (as the reads of every other mode, --wait included, are not).
+# AVAILABILITY COST (disclosed): the post-merge form needs timeout(1) on PATH (GNU coreutils); without
+# it every page read fails and the wait exits 2. Time is whole seconds of date +%s, so the bound holds to
+# within a second, plus the time jq takes on a page already read.
+# Exit 2 also, in both forms and at once (no re-read, also under --merge-commit): a failed read, a
+# response jq cannot parse, a malformed page, or a malformed record anywhere on a page read (id, head_sha,
+# path, status, conclusion; for a run of the required file also its event and head_branch; and for a push
+# run of the required file a head_branch that is not a string, or, on main, a status that is not one:
+# whether such a run is main's, or completed, cannot be evaluated, so it is refused, never skipped), and a
+# page whose total_count is below the runs listed through it, or, on a short page (the listing's end),
+# differs from them (100 for each earlier page, all full, plus this page's), since a short or truncated
+# page is then not the end of the listing.
+# WINDOW (disclosed, stated on every result line): the listing is read to its end or to
+# MAIN_HEALTH_MAX_PAGES pages (500 runs), each in full; a run past the bound is not seen, so a busy
+# repository whose newest main push run lies beyond 500 runs cannot evaluate (exit 2). Up to 5 requests per
+# read, so a post-merge wait of 900 seconds makes at most about 300.
+# NOT CHECKED (disclosed): the one-shot read says nothing about a commit whose push run is not yet listed
+# (the newest listed run decides, which can be an older commit's); the post-merge form covers that for
+# the commit it names. Whether a pull request is the fix for a red main is the caller's judgment, not this
+# read's: exit 1 is the refusal, and an exception for the fixing pull request is taken outside this
+# script. The listing shows each run's latest attempt only. A run that a page shift between page reads
+# skips is not seen (see BOUNDED SCAN; this read merges no repeat, and reconciles the count only against
+# total_count as above: a run created at the head between page reads repeats a row and raises the count
+# alike, so it still reconciles; a run deleted between page reads lowers the count, which is exit 2 when
+# that leaves it below the runs listed, and on a short last page always).
+MAIN_HEALTH_BRANCH="main"
+MAIN_HEALTH_MAX_PAGES=5
+MAIN_HEALTH_POLL_SECONDS=15
+# Reads ONE raw page of the listing and prints "stop" or "more", then one TSV row (kind, run id, head
+# SHA, status, conclusion, event) per run of the required file on main whose event is push (kind "push")
+# or advisory (kind "advisory"); status and conclusion are "-" for none.
+CI_STATUS_MAIN_JQ='
+def malformed_page:
+  (type != "object")
+  or ((.total_count | type) != "number")
+  or (.total_count < 0)
+  or ((.total_count | floor) != .total_count)
+  or ((.workflow_runs | type) != "array")
+  or ((.workflow_runs | length) > 100);
+def object_name:
+  (type == "string") and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
+def nullable_token($field):
+  ($field != null) and ((($field | type) != "string") or (($field | length) == 0));
+def malformed_run:
+  (type != "object")
+  or ((.id | type) != "number")
+  or (.id <= 0)
+  or ((.id | floor) != .id)
+  or ((.head_sha | object_name) | not)
+  or ((.path | type) != "string")
+  or ((.path | length) == 0)
+  or nullable_token(.status)
+  or nullable_token(.conclusion)
+  or ((.path == $require_workflow)
+      and (((.event | type) != "string") or ((.event | length) == 0)
+           or nullable_token(.head_branch)))
+  or ((.path == $require_workflow) and (.event == "push")
+      and (((.head_branch | type) != "string")
+           or ((.head_branch == $branch) and ((.status | type) != "string"))));
+def advisory_run:
+  (.event == "schedule") or (.event == "workflow_dispatch");
+def rows_through_page:
+  100 * ($page_no - 1) + (.workflow_runs | length);
+if (length != 1) or (.[0] | malformed_page) then
+  error("malformed workflow-runs response")
+elif any(.[0].workflow_runs[]; malformed_run) then
+  error("malformed workflow run record")
+elif (.[0].total_count < (.[0] | rows_through_page))
+  or (((.[0].workflow_runs | length) < 100) and (.[0].total_count != (.[0] | rows_through_page))) then
+  error("incomplete workflow-runs listing: total_count " + (.[0].total_count | tostring)
+        + " does not match the " + (.[0] | rows_through_page | tostring)
+        + " runs listed through page " + ($page_no | tostring))
+else
+  .[0]
+  | (if (.workflow_runs | length) < 100 then "stop" else "more" end),
+    (.workflow_runs[]
+     | select((.path == $require_workflow) and (.head_branch == $branch)
+              and ((.event == "push") or advisory_run))
+     | [(if advisory_run then "advisory" else "push" end), (.id | tostring), .head_sha,
+        (.status // "-"), (.conclusion // "-"), .event]
+     | @tsv)
+end'
+
+# $1 is the number of the page read.
+main_jq() {
+  jq -s -r --arg require_workflow "$REQUIRE_WORKFLOW" --arg branch "$MAIN_HEALTH_BRANCH" \
+    --argjson page_no "$1" "$CI_STATUS_MAIN_JQ"
+}
+
+main_health_error() {
+  echo "ERROR: cannot evaluate the health of ${MAIN_HEALTH_BRANCH} in ${REPO}: $1"
+  echo "  raw: $2"
+  exit 2
+}
+
+# Prints the whole seconds left before DEADLINE, read from the clock every deadline check reads; 0 once
+# it has passed, and 0 when the clock cannot be read (so a bounded read refuses rather than runs unbounded).
+main_health_remaining() {
+  local now
+  now="$(date +%s)"
+  if ! [[ "$now" =~ ^[0123456789]+$ ]] || [ "$now" -ge "$DEADLINE" ]; then
+    echo 0
+    return 0
+  fi
+  echo "$((DEADLINE - now))"
+}
+
+# The post-merge wait's deadline outcome ($1 says what was last read, or why nothing was): exit 2.
+main_health_timeout() {
+  echo "ERROR: cannot evaluate the health of ${MAIN_HEALTH_BRANCH} at merge commit ${MERGE_COMMIT} in ${REPO}: TIMEOUT after ${CI_STATUS_TIMEOUT:-900}s; $1."
+  exit 2
+}
+
+# One read of the window: fills the MH_ arrays (one entry per row, in listing order) and MH_WINDOW, or
+# exits 2 through main_health_error. With $1 "bounded" (the post-merge wait) each page read is run under
+# timeout(1) with the seconds left before DEADLINE, and a page that cannot be read before it, or whose
+# read is still running at it, ends the wait through main_health_timeout.
+main_health_read() {
+  local raw step row page_no=1 kind run_id head_sha status concl event left read_rc
+  local -a rows=()
+  MH_KINDS=()
+  MH_IDS=()
+  MH_SHAS=()
+  MH_STATUSES=()
+  MH_CONCLS=()
+  MH_EVENTS=()
+  while :; do
+    if [ "${1:-}" = "bounded" ]; then
+      left="$(main_health_remaining)"
+      if [ "$left" -le 0 ]; then
+        main_health_timeout "the deadline passed before page ${page_no} of the workflow-runs listing was read (window: page ${page_no} of at most ${MAIN_HEALTH_MAX_PAGES} unread)"
+      fi
+      raw="$(timeout "$left" gh api "repos/$REPO/actions/runs?per_page=100&page=$page_no" 2>&1)"
+      read_rc=$?
+      if [ "$read_rc" -eq 124 ]; then
+        main_health_timeout "the read of page ${page_no} of the workflow-runs listing did not finish within the ${left}s left before the deadline, and was stopped (window: page ${page_no} of at most ${MAIN_HEALTH_MAX_PAGES} unread)"
+      fi
+    else
+      raw="$(gh api "repos/$REPO/actions/runs?per_page=100&page=$page_no" 2>&1)"
+      read_rc=$?
+    fi
+    [ "$read_rc" -eq 0 ] ||
+      main_health_error "the workflow-runs listing (page ${page_no}) could not be read" "$raw"
+    step="$(printf '%s\n' "$raw" | main_jq "$page_no" 2>&1)" ||
+      main_health_error "the workflow-runs listing (page ${page_no}) was refused" "$step"
+    mapfile -t rows <<<"$step"
+    for row in "${rows[@]:1}"; do
+      IFS=$'\t' read -r kind run_id head_sha status concl event <<<"$row"
+      # jq printed these from validated fields; anything else is refused.
+      if ! [[ "$kind" =~ ^(push|advisory)$ ]] || ! [[ "$run_id" =~ ^[123456789][0123456789]*$ ]] ||
+          ! [[ "$head_sha" =~ ^([0123456789abcdef]{40}|[0123456789abcdef]{64})$ ]] ||
+          [ -z "$status" ] || [ -z "$concl" ] || [ -z "$event" ]; then
+        main_health_error "unexpected workflow-runs listing output" "$row"
+      fi
+      MH_KINDS+=("$kind")
+      MH_IDS+=("$run_id")
+      MH_SHAS+=("$head_sha")
+      MH_STATUSES+=("$status")
+      MH_CONCLS+=("$concl")
+      MH_EVENTS+=("$event")
+    done
+    case "${rows[0]}" in
+      stop)
+        MH_WINDOW="listing pages read, each in full: ${page_no} of at most ${MAIN_HEALTH_MAX_PAGES}, to the listing's end"
+        return 0
+        ;;
+      more) ;;
+      *) main_health_error "unexpected workflow-runs listing output" "${rows[0]}" ;;
+    esac
+    if [ "$page_no" -ge "$MAIN_HEALTH_MAX_PAGES" ]; then
+      MH_WINDOW="listing pages read, each in full: ${page_no} of at most ${MAIN_HEALTH_MAX_PAGES}, any later page unread"
+      return 0
+    fi
+    page_no=$((page_no + 1))
+  done
+}
+
+# Names the advisory rows read (all of them, or with $1 only those on that commit) on a NOTE line.
+main_health_advisory_note() {
+  local i row
+  local -a named=()
+  for ((i = 0; i < ${#MH_IDS[@]}; i++)); do
+    if [ "${MH_KINDS[i]}" = "advisory" ] && { [ -z "${1:-}" ] || [ "${MH_SHAS[i]}" = "$1" ]; }; then
+      named+=("run ${MH_IDS[i]} on ${MH_SHAS[i]} (${MH_EVENTS[i]}): ${MH_STATUSES[i]}/${MH_CONCLS[i]}")
+    fi
+  done
+  if [ "${#named[@]}" -ne 0 ]; then
+    echo "NOTE: advisory run(s) (a schedule or workflow_dispatch event) of ${REQUIRE_WORKFLOW} on ${MAIN_HEALTH_BRANCH} are neither health evidence nor a red signal:"
+    for row in "${named[@]}"; do
+      printf '  %s\n' "$row"
+    done
+  fi
+}
+
+# Every outcome of --main-health without --merge-commit exits here.
+main_health_once() {
+  local i row decided=""
+  local -a newer=()
+  main_health_read
+  main_health_advisory_note
+  for ((i = 0; i < ${#MH_IDS[@]}; i++)); do
+    [ "${MH_KINDS[i]}" = "push" ] || continue
+    if [ "${MH_STATUSES[i]}" = "completed" ]; then
+      decided="$i"
+      break
+    fi
+    newer+=("run ${MH_IDS[i]} on ${MH_SHAS[i]}: ${MH_STATUSES[i]}")
+  done
+  if [ "${#newer[@]}" -ne 0 ]; then
+    echo "NOTE: newer push run(s) of ${REQUIRE_WORKFLOW} on ${MAIN_HEALTH_BRANCH} are not completed, so they do not decide:"
+    for row in "${newer[@]}"; do
+      printf '  %s\n' "$row"
+    done
+  fi
+  if [ -z "$decided" ]; then
+    echo "ERROR: cannot evaluate the health of ${MAIN_HEALTH_BRANCH} in ${REPO}: no completed push run of the workflow file ${REQUIRE_WORKFLOW} on ${MAIN_HEALTH_BRANCH} is listed (window: ${MH_WINDOW})."
+    exit 2
+  fi
+  if [ "${MH_CONCLS[decided]}" = "success" ]; then
+    echo "RESULT: ${MAIN_HEALTH_BRANCH} is green: the newest completed push run ${MH_IDS[decided]} of the workflow file ${REQUIRE_WORKFLOW} on ${MAIN_HEALTH_BRANCH} (commit ${MH_SHAS[decided]}) concluded success (window: ${MH_WINDOW})."
+    exit 0
+  fi
+  echo "RESULT: MAIN IS RED: the newest completed push run ${MH_IDS[decided]} of the workflow file ${REQUIRE_WORKFLOW} on ${MAIN_HEALTH_BRANCH} (commit ${MH_SHAS[decided]}) concluded ${MH_CONCLS[decided]}; fix ${MAIN_HEALTH_BRANCH} first, and merge nothing else onto it (window: ${MH_WINDOW})."
+  exit 1
+}
+
+# Every outcome of --main-health --merge-commit SHA exits here. The deadline is checked before every
+# read, after every read and before any result of it is accepted, and every sleep is cut to the time
+# left, so no read starts, no result is accepted and no sleep runs at or past DEADLINE.
+main_health_wait() {
+  local i row summary="no read of the workflow-runs listing finished before the deadline (window: none read)" nap
+  local -a failed=() pending=() passed=()
+  while :; do
+    if [ "$(main_health_remaining)" -le 0 ]; then
+      main_health_timeout "$summary"
+    fi
+    failed=()
+    pending=()
+    passed=()
+    main_health_read bounded
+    main_health_advisory_note "$MERGE_COMMIT"
+    for ((i = 0; i < ${#MH_IDS[@]}; i++)); do
+      [ "${MH_KINDS[i]}" = "push" ] && [ "${MH_SHAS[i]}" = "$MERGE_COMMIT" ] || continue
+      if [ "${MH_STATUSES[i]}" != "completed" ]; then
+        pending+=("run ${MH_IDS[i]}: ${MH_STATUSES[i]}")
+      elif [ "${MH_CONCLS[i]}" = "success" ]; then
+        passed+=("${MH_IDS[i]}")
+      else
+        failed+=("run ${MH_IDS[i]}: ${MH_CONCLS[i]}")
+      fi
+    done
+    if [ "${#failed[@]}" -ne 0 ]; then
+      summary="push run(s) that did not conclude success:"
+      for row in "${failed[@]}"; do
+        summary+=" ${row};"
+      done
+      summary="${summary%;}"
+    elif [ "${#pending[@]}" -ne 0 ]; then
+      summary="push run(s) not completed:"
+      for row in "${pending[@]}"; do
+        summary+=" ${row};"
+      done
+      summary="${summary%;}"
+    elif [ "${#passed[@]}" -ne 0 ]; then
+      summary="push run(s) $(IFS=,; printf '%s' "${passed[*]}") concluded success"
+    else
+      summary="no push run of the workflow file ${REQUIRE_WORKFLOW} on ${MAIN_HEALTH_BRANCH} is listed for it yet"
+    fi
+    summary+=" (window: ${MH_WINDOW})"
+    # A read that ended at or after the deadline is not accepted, whatever it shows.
+    if [ "$(main_health_remaining)" -le 0 ]; then
+      main_health_timeout "the last read ended at or after the deadline, so it is not accepted: ${summary}"
+    fi
+    if [ "${#failed[@]}" -ne 0 ]; then
+      echo "RESULT: MAIN IS RED: the push run(s) of the workflow file ${REQUIRE_WORKFLOW} on ${MAIN_HEALTH_BRANCH} for merge commit ${MERGE_COMMIT} did not conclude success; fix ${MAIN_HEALTH_BRANCH} first, and merge nothing else onto it (window: ${MH_WINDOW}):"
+      for row in "${failed[@]}"; do
+        printf '  %s\n' "$row"
+      done
+      exit 1
+    fi
+    if [ "${#pending[@]}" -eq 0 ] && [ "${#passed[@]}" -ne 0 ]; then
+      echo "RESULT: ${MAIN_HEALTH_BRANCH} is green at merge commit ${MERGE_COMMIT}: push run(s) $(IFS=,; printf '%s' "${passed[*]}") of the workflow file ${REQUIRE_WORKFLOW} concluded success (window: ${MH_WINDOW})."
+      exit 0
+    fi
+    echo "NOTE: merge commit ${MERGE_COMMIT}: ${summary}; waiting."
+    # Never past the deadline: the sleep is cut to the seconds left (at least 1 here, as checked above).
+    nap="$(main_health_remaining)"
+    [ "$nap" -gt "$MAIN_HEALTH_POLL_SECONDS" ] && nap="$MAIN_HEALTH_POLL_SECONDS"
+    if [ "$nap" -gt 0 ]; then
+      sleep "$nap"
+    fi
+  done
+}
+
+if [ "$MAIN_HEALTH" -eq 1 ]; then
+  if [ -n "$MERGE_COMMIT" ]; then
+    main_health_wait
+  fi
+  main_health_once
+fi
 
 # BOUNDED SCAN. The unfiltered listing is read newest first, one page per request, and paging stops at
 # the first page that is short (the end of the listing) or holds only runs created before LOWER_BOUND.
@@ -1497,6 +1936,247 @@ if [ "$MATCH_TREE" -eq 1 ]; then
   match_tree
 fi
 
+# THE STATUS REQUIREMENT (--pr N --require-status CONTEXT). An option, off unless both are given; every
+# other rule above still holds, so the runs must first read green as they would without it. Then:
+#   1. Before the runs are read, pull request N is read (`pulls/N`): it must be open, its head SHA must
+#      be this commit and its base PR_BASE (the --require-base value, else main); otherwise exit 2.
+#   2. Where the runs read green, this commit's statuses are read twice over: the paginated listing
+#      (`commits/<sha>/statuses`) and the combined record (`commits/<sha>/status`, every page of which
+#      must name this commit). The combined .state is never read (see the header). From the listing the
+#      newest CONTEXT entry is taken (greatest created_at, then greatest id); the combined record holds
+#      at most one CONTEXT entry. Both reads must agree on that entry's id and state, or both show none;
+#      a disagreement is re-read once, after RETRY_SECONDS, and exits 2 if it persists.
+#   3. The entry's creator.login must equal CI_STATUS_STATUS_CREATOR (exit 2 otherwise), because anyone
+#      who can write statuses can post any context name.
+#   4. State: success passes on; missing or pending exits 1 (under --wait each is re-read every
+#      POLL_SECONDS until the deadline, then exits 1); failure or error exits 1 at once; any other
+#      state exits 2.
+#   5. This commit must contain the current tip of PR_BASE, read from `git/ref/heads/PR_BASE` and
+#      tested locally with git merge-base --is-ancestor: not contained exits 1; a tip this checkout
+#      does not hold exits 2 (fetch it first).
+#   6. Pull request N is read again, as in step 1; a head that moved, or any other change, exits 2.
+#   7. On success the last line is "MERGE-SHA: " and this commit's full id, for the merge command.
+# Exit 2 also covers a failed read, a read that succeeds but writes to stderr, a reply that is not
+# exactly one JSON document, and a malformed or unparsable response, at once in every mode.
+# NOT CLOSED (disclosed): a status posted after these reads, or a head pushed after the last pull read,
+# is not seen; the merge command's own head pin and branch protection requiring CONTEXT are the
+# backstop. GitHub's semantics for these endpoints are taken from its REST documentation, not verified
+# live here.
+CI_STATUS_LOCAL_JQ='
+def object_name:
+  (type == "string") and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
+def stamp:
+  (type == "string")
+  and test("\\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\\z")
+  and ((try (fromdate | todate) catch null) == .);
+def malformed_entry:
+  (type != "object") or ((.context | type) != "string")
+  or ((.context == $context)
+      and (((.id | type) != "number") or (.id <= 0) or ((.id | floor) != .id)
+           or ((.state | type) != "string") or ((.state | length) == 0)
+           or ((.created_at | stamp) | not)
+           or ((.creator | type) != "object")
+           or ((.creator.login | type) != "string") or ((.creator.login | length) == 0)));
+if $mode == "pull" then
+  if (length != 1) or ((.[0] | type) != "object") or (.[0].number != $number)
+    or ((.[0].state | type) != "string") or ((.[0].head | type) != "object")
+    or ((.[0].head.sha | type) != "string") or ((.[0].base | type) != "object")
+    or ((.[0].base.ref | type) != "string") then
+    error("malformed pull-request record")
+  elif (.[0].state == "open") and (.[0].head.sha == $requested_sha) and (.[0].base.ref == $base) then
+    ["ok", "-"] | @tsv
+  else
+    ["mismatch", "state " + .[0].state + ", head " + .[0].head.sha + ", base " + .[0].base.ref] | @tsv
+  end
+elif $mode == "ref" then
+  if (length != 1) or ((.[0] | type) != "object") or (.[0].ref != ("refs/heads/" + $base))
+    or ((.[0].object | type) != "object") or (.[0].object.type != "commit")
+    or ((.[0].object.sha | object_name) | not) then
+    error("malformed branch reference")
+  else
+    .[0].object.sha
+  end
+elif $mode == "statuses" then
+  if (length != 2) or ((.[0] | type) != "array") or ((.[1] | type) != "array")
+    or ((.[1] | length) == 0) or any(.[0][]; type != "array")
+    or any(.[0][][]; malformed_entry)
+    or any(.[1][]; (type != "object") or ((.statuses | type) != "array") or any(.statuses[]; malformed_entry)) then
+    error("malformed status response")
+  elif any(.[1][]; .sha != $requested_sha) then
+    error("malformed status response: the combined status names another commit")
+  else
+    ([.[0][][] | select(.context == $context)] | sort_by(.created_at, .id) | last) as $newest
+    | [.[1][] | .statuses[] | select(.context == $context)] as $combined
+    | if ($combined | length) > 1 then
+        error("malformed status response: the combined status lists the context more than once")
+      elif ($newest == null) and (($combined | length) == 0) then ["missing", "-", "-"]
+      elif ($newest == null) or (($combined | length) == 0)
+        or ($newest.id != $combined[0].id) or ($newest.state != $combined[0].state) then
+        ["disagree", "-", "-"]
+      elif $newest.creator.login != $creator then ["creator", $newest.state, ($newest.id | tostring)]
+      else ["entry", $newest.state, ($newest.id | tostring)]
+      end
+    | @tsv
+  end
+else
+  error("unknown mode")
+end'
+
+status_jq() {
+  jq -s -r --arg mode "$1" --argjson number "$PR_NUMBER" --arg requested_sha "$SHA" \
+    --arg base "$PR_BASE" --arg context "$REQUIRE_STATUS" --arg creator "$STATUS_CREATOR" \
+    "$CI_STATUS_LOCAL_JQ"
+}
+
+# One gh api read for the status requirement ($@ its arguments). Only gh's stdout is printed, so
+# nothing gh writes to stderr is ever parsed as part of a reply. A failed read prints its stderr to
+# stderr and returns gh's status. A read that succeeds but writes any byte to stderr is refused the
+# same way (it returns 1): a reply with text beside it that this script cannot account for is
+# cannot-evaluate, as a reply jq cannot parse is.
+status_gh() {
+  local diagnostic rc
+  { diagnostic="$(gh api "$@" 2>&1 1>&3 3>&-; rc=$?; printf '.'; exit "$rc")"; rc=$?; } 3>&1
+  diagnostic="${diagnostic%.}"
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$diagnostic" >&2
+    return "$rc"
+  fi
+  if [ -n "$diagnostic" ]; then
+    printf 'gh wrote to stderr on a read that succeeded: %s\n' "$diagnostic" >&2
+    return 1
+  fi
+}
+
+# Prints the one JSON document read on stdin, compacted onto one line, or fails naming the reply ($1)
+# when stdin holds no document or more than one. Each statuses reply is checked on its own before the
+# two are combined, so one reply holding both documents beside an empty one can never pass as two.
+status_one_document() {
+  jq -s -c --arg reply "$1" 'if length == 1 then .[0] else error($reply + " is not exactly one JSON document") end'
+}
+
+status_error() {
+  echo "ERROR: cannot evaluate the ${REQUIRE_STATUS} status of ${SHA} in ${REPO} (pull request #${PR_NUMBER}): $1"
+  echo "  raw: $2"
+  exit 2
+}
+
+# Step 1 and step 6: $1 names which read this is, for the message.
+status_pull_check() {
+  local raw verdict
+  raw="$(status_gh "repos/$REPO/pulls/$PR_NUMBER" 2>&1)" ||
+    status_error "the ${1} read of the pull request failed" "$raw"
+  verdict="$(printf '%s\n' "$raw" | status_jq pull 2>&1)" ||
+    status_error "the ${1} read of the pull request was refused" "$verdict"
+  case "${verdict%%$'\t'*}" in
+    ok) ;;
+    mismatch)
+      echo "ERROR: cannot evaluate: at the ${1} read, pull request #${PR_NUMBER} is not open at ${SHA} into ${PR_BASE} (${verdict#*$'\t'}); refusing."
+      exit 2
+      ;;
+    *) status_error "unexpected pull-request output" "$verdict" ;;
+  esac
+}
+
+# Step 2: prints one TSV row (kind, state, id) from CI_STATUS_LOCAL_JQ, or returns 1 with the diagnostic.
+status_read() {
+  local listing combined
+  {
+    listing="$(status_gh "repos/$REPO/commits/$SHA/statuses?per_page=100" --paginate --slurp)" || return 1
+    combined="$(status_gh "repos/$REPO/commits/$SHA/status?per_page=100" --paginate --slurp)" || return 1
+    listing="$(printf '%s\n' "$listing" | status_one_document "the status listing")" || return 1
+    combined="$(printf '%s\n' "$combined" | status_one_document "the combined status")" || return 1
+    printf '%s\n%s\n' "$listing" "$combined" | status_jq statuses
+  } 2>&1
+}
+
+# Steps 2 to 7; every outcome exits here.
+status_requirement() {
+  local row kind rest state status_id raw tip ancestor_rc disagreed=0
+  while :; do
+    row="$(status_read)" || status_error "the status read failed or was refused" "$row"
+    kind="${row%%$'\t'*}"
+    rest="${row#*$'\t'}"
+    state="${rest%%$'\t'*}"
+    status_id="${rest#*$'\t'}"
+    case "$kind" in
+      disagree)
+        if [ "$disagreed" -eq 0 ]; then
+          disagreed=1
+          echo "NOTE: the status listing and the combined status disagree about the newest ${REQUIRE_STATUS} entry; re-reading once."
+          sleep "$RETRY_SECONDS"
+          continue
+        fi
+        echo "ERROR: cannot evaluate: the status listing and the combined status still disagree about the newest ${REQUIRE_STATUS} entry of ${SHA} after one re-read; refusing."
+        exit 2
+        ;;
+      creator)
+        echo "ERROR: cannot evaluate: the newest ${REQUIRE_STATUS} status of ${SHA} (id ${status_id}) was not posted by the account CI_STATUS_STATUS_CREATOR names; refusing."
+        exit 2
+        ;;
+      missing|entry) disagreed=0 ;;
+      *) status_error "unexpected status output" "$row" ;;
+    esac
+    if [ "$kind" = "missing" ] || [ "$state" = "pending" ]; then
+      if [ "$kind" = "missing" ]; then
+        last_summary="no ${REQUIRE_STATUS} status on ${SHA}"
+      else
+        last_summary="the ${REQUIRE_STATUS} status of ${SHA} is pending (id ${status_id})"
+      fi
+      if [ "$WAIT" != "--wait" ]; then
+        echo "RESULT: ${last_summary}, so it is not green; use --wait to wait for it."
+        exit 1
+      fi
+      if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+        echo "RESULT: TIMEOUT after ${CI_STATUS_TIMEOUT:-900}s; ${last_summary}."
+        exit 1
+      fi
+      echo "RESULT: ${last_summary}; waiting."
+      sleep "$POLL_SECONDS"
+      continue
+    fi
+    case "$state" in
+      success) break ;;
+      failure|error)
+        echo "RESULT: the ${REQUIRE_STATUS} status of ${SHA} is ${state} (id ${status_id})."
+        exit 1
+        ;;
+      *)
+        echo "ERROR: cannot evaluate: the ${REQUIRE_STATUS} status of ${SHA} has the unrecognized state '${state}' (id ${status_id}); refusing."
+        exit 2
+        ;;
+    esac
+  done
+  raw="$(status_gh "repos/$REPO/git/ref/heads/$PR_BASE" 2>&1)" ||
+    status_error "the tip of ${PR_BASE} could not be read" "$raw"
+  tip="$(printf '%s\n' "$raw" | status_jq ref 2>&1)" ||
+    status_error "the reference of ${PR_BASE} was refused" "$tip"
+  git merge-base --is-ancestor "$tip" "$SHA" 2>/dev/null
+  ancestor_rc=$?
+  if [ "$ancestor_rc" -eq 1 ]; then
+    echo "RESULT: ${SHA} does not contain ${tip}, the current tip of ${PR_BASE}, so the tree it tested is not the tree a merge would make; update the branch."
+    exit 1
+  elif [ "$ancestor_rc" -ne 0 ]; then
+    echo "ERROR: cannot evaluate: whether ${SHA} contains ${tip}, the current tip of ${PR_BASE}, could not be read in this checkout (fetch ${PR_BASE} first)."
+    exit 2
+  fi
+  status_pull_check "second"
+  echo "RESULT: the ${REQUIRE_STATUS} status of ${SHA} is success (id ${status_id}), posted by the pinned creator; pull request #${PR_NUMBER} is still open at this head into ${PR_BASE}, which this head contains."
+  echo "MERGE-SHA: ${SHA}"
+  exit 0
+}
+
+# Every green verdict of the runs ends here.
+runs_green() {
+  if [ -n "$REQUIRE_STATUS" ]; then
+    status_requirement
+  fi
+  exit 0
+}
+
+if [ -n "$REQUIRE_STATUS" ]; then
+  status_pull_check "first"
+fi
+
 SETTLE_FINGERPRINT=""
 SETTLE_COUNT=0
 last_summary="no workflow run registered"
@@ -1712,7 +2392,7 @@ while :; do
         echo "$missing_message"
         exit 1
       fi
-      exit 0
+      runs_green
     fi
     fingerprint="$(IFS=,; printf '%s' "${run_ids[*]}")"
     if [ "$fingerprint" = "$SETTLE_FINGERPRINT" ]; then
@@ -1744,6 +2424,6 @@ while :; do
     echo "RESULT: TIMEOUT after ${CI_STATUS_TIMEOUT:-900}s; ${last_summary}."
     exit 1
   fi
-  [ "$settled" -eq 1 ] && exit 0
+  [ "$settled" -eq 1 ] && runs_green
   sleep "$POLL_SECONDS"
 done

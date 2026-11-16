@@ -120,3 +120,12 @@ own tooling instead, or adopt by hand.
 - [`prompt-pack/`](prompt-pack/): the prompts an assistant follows to adopt, import and work the flow.
 - [`enforcement/`](enforcement/): the enforcement material for the drift gate and checks.
 - [`site/`](site/): the opfiles.ai website.
+
+## Required tools
+
+To run the `opf` CLI and its checks you need these tools on the machine. They are not repository
+dependencies, and nothing is installed with pip.
+
+- Python 3.14 or newer, as `python3`. Every tool refuses to run on an older Python.
+- git, for the checks and fixtures that build or read a git repository.
+- bash, for the check runner `tools/run_all_checks.sh`.
