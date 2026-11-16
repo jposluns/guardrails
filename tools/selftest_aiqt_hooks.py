@@ -12486,13 +12486,69 @@ def _main_isolated(monitor):
         # A probe that fails denies (fail closed): -x with -X makes git itself refuse the dry run, and a
         # dry-run helper that reports failure (None, as on a timeout) denies too.
         expect("(cx-l) clean -fxX, whose dry run git refuses, denies", "git clean -fxX", "deny", cwd=cx)
-        _cx_saved_dry_run = aiqt_hooks._clean_dry_run
-        aiqt_hooks._clean_dry_run = lambda *_a, **_k: None
+        _cx_saved_listing = aiqt_hooks._clean_probe_listing
+        aiqt_hooks._clean_probe_listing = lambda *_a, **_k: None
         try:
             expect("(cx-m) clean -fdx whose dry run fails or times out denies", "git clean -fdx", "deny",
                    cwd=str(_init_repo(tmp / "cleanx-probefail")))
         finally:
-            aiqt_hooks._clean_dry_run = _cx_saved_dry_run
+            aiqt_hooks._clean_probe_listing = _cx_saved_listing
+        # The listing bound is a real deadline: with no time left the listing is never launched and the
+        # clean denies with the bounded-listing reason, not the hook deadline's.
+        _cx_saved_seconds = aiqt_hooks._CLEAN_PROBE_SECONDS
+        aiqt_hooks._CLEAN_PROBE_SECONDS = 0.0
+        try:
+            expect("(cx-m2) clean -fd whose listing deadline has passed denies", "git clean -fd", "deny", cwd=cx)
+        finally:
+            aiqt_hooks._CLEAN_PROBE_SECONDS = _cx_saved_seconds
+        if aiqt_hooks._CLEAN_PROBE_SECONDS >= aiqt_hooks.PRETOOL_BUDGET_SECONDS:
+            failures.append("(cx-m3) the clean listing bound must sit under the hook deadline")
+        # A negated -e/--exclude pattern un-ignores a file, so a clean WITHOUT -x removes it, and with -x
+        # it passed the old compare-with-and-without-x premise; every form denies on its listings.
+        expect("(cx-s) clean -f -x -e '!*.local' (negated exclude with -x) denies",
+               "git clean -f -x -e '!*.local'", "deny", cwd=cx)
+        expect("(cx-t) clean -f -d -x -e '!*.local' denies", "git clean -f -d -x -e '!*.local'", "deny", cwd=cx)
+        expect("(cx-u) clean -f -x -e '!secrets.local' denies", "git clean -f -x -e '!secrets.local'", "deny",
+               cwd=cx)
+        expect("(cx-v) clean -fx behind -C with a negated exclude denies",
+               "git -C {} clean -f -x -e '!*.local'".format(cx), "deny", cwd=cx)
+        expect("(cx-w) clean -f -e '!*.local' (no -x) denies", "git clean -f -e '!*.local'", "deny", cwd=cx)
+        expect("(cx-x) clean -f -d -e '!*.local' -e '!sub/' (no -x) denies",
+               "git clean -f -d -e '!*.local' -e '!sub/'", "deny", cwd=cx)
+        expect("(cx-y) compound clean -f -e '!*.local' && true denies", "git clean -f -e '!*.local' && true",
+               "deny", cwd=cx)
+        expect("(cx-z) clean --exclude '!*.local' -f (long spelling) denies",
+               "git clean --exclude '!*.local' -f", "deny", cwd=cx)
+        # A -c or --config-env option, or a leading HOME, XDG_CONFIG_HOME or GIT_* assignment, can remove an
+        # ignore source (a global excludes file here would be hidden), so a clean carrying one denies.
+        expect("(cx-c1) clean -f under -c core.excludesFile=/dev/null denies",
+               "git -c core.excludesFile=/dev/null clean -f", "deny", cwd=cx)
+        expect("(cx-c2) clean -f under a leading XDG_CONFIG_HOME assignment denies",
+               "XDG_CONFIG_HOME=/nonexistent git clean -f", "deny", cwd=cx)
+        expect("(cx-c3) clean -f under leading HOME and XDG_CONFIG_HOME assignments denies",
+               "HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent git clean -f", "deny", cwd=cx)
+        expect("(cx-c4) clean -f under --config-env denies", "git --config-env=core.excludesFile=NOPE clean -f",
+               "deny", cwd=cx)
+        # An earlier step that restores, checks out or cleans the ignore rules changes them before the clean.
+        expect("(cx-k2) checkout -- .gitignore && clean -f denies", "git checkout -- .gitignore && git clean -f",
+               "deny", cwd=cx)
+        expect("(cx-k3) restore .gitignore && clean -f denies", "git restore .gitignore && git clean -f", "deny",
+               cwd=cx)
+        expect("(cx-k1) clean -f .gitignore && clean -f denies", "git clean -f .gitignore && git clean -f", "deny",
+               cwd=cx)
+        expect("(cx-k4) clean -f .gitignore ; clean -f denies", "git clean -f .gitignore ; git clean -f", "deny",
+               cwd=cx)
+        expect("(cx-tw1) twin: dry run clean -n -e '!*.local' allows", "git clean -n -e '!*.local'", "allow",
+               cwd=cx)
+        if not (cx_repo / "secrets.local").is_file():
+            failures.append("(cx-k5) the ignored file must survive every listing above (each is read-only)")
+        # git C-quotes a name holding a control byte, a double quote or a backslash; a malformed quoting
+        # makes the listing untrusted.
+        for _cq_in, _cq_out in ((b"plain name", b"plain name"), (b'"a\\tb"', b"a\tb"),
+                                (b'"q\\"\\\\"', b'q"\\'), (b'"\\303\\251"', b"\xc3\xa9"),
+                                (b'"open', None), (b'"bad\\q"', None), (b'"x\\40"', None)):
+            if aiqt_hooks._clean_unquote(_cq_in) != _cq_out:
+                failures.append("(cx-q1) _clean_unquote({!r}) must be {!r}".format(_cq_in, _cq_out))
         # A dirty tree: -x would remove the ignored file the snapshot lacks, so it denies (it was allowed
         # with a note saying a snapshot was saved); the same clean without -x keeps its allow-note.
         (cx_repo / "file.txt").write_text("committed line\nuncommitted fix\n", encoding="utf-8")
@@ -12507,6 +12563,8 @@ def _main_isolated(monitor):
         (cx_plain / "untracked.txt").write_text("junk\n", encoding="utf-8")
         expect("(cx-q) clean -fdx with no ignored file allows with a note as before", "git clean -fdx",
                "allow-note", cwd=str(cx_plain))
+        expect("(cx-tw2) twin: clean -fd on a tree with only untracked non-ignored files allows with a note",
+               "git clean -fd", "allow-note", cwd=str(cx_plain))
         expect("(cx-r) clean -fdx on a provably clean tree with no ignored file allows as before",
                "git clean -fdx", "allow", cwd=str(_init_repo(tmp / "cleanx-clean")))
 

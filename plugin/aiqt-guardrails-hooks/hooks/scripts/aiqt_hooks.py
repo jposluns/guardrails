@@ -9564,10 +9564,11 @@ def _tree_is_clean(repo):
     carrying both keeps the intent legible. The probe never asks for ignored files, so an ignored file is
     invisible to it, and a '!!' line in its answer is malformed (above), never clean. Probing --ignored here
     would treat every repo carrying build artifacts as dirty, so this probe stays blind to ignored files and
-    the recovery snapshot (git add --all) never holds one either. A non-dry-run 'clean -x' or 'clean -X' is
-    therefore judged before this probe by its own read-only dry run (_clean_ignored_refusal) and DENIED
-    unless that dry run shows it removes no ignored file. A forced checkout that overwrites an ignored file
-    remains a DISCLOSED residual: this probe does not see that file and no snapshot holds it.
+    the recovery snapshot (git add --all) never holds one either. Every non-dry-run clean (with or without
+    -x or -X: a negated -e pattern un-ignores a file too) is therefore judged before this probe by its own
+    read-only listings (_clean_ignored_refusal) and DENIED unless they show it removes no file that the
+    standard ignore sources ignore. A forced checkout that overwrites an ignored file remains a DISCLOSED
+    residual: this probe does not see that file and no snapshot holds it.
     Deliberately coarse: ANY tracked change or untracked file anywhere makes the tree not-provably-clean.
     Offline, read-only, 5s timeout; the guard never mutates the repo. GIT_OPTIONAL_LOCKS=0 keeps this probe
     from refreshing/writing the real `.git/index`, and EVERY ambient GIT_*-prefixed var is scrubbed via
@@ -9956,24 +9957,35 @@ def _clean_is_dry_run(pre):
     return "--dry-run" in pre or _has_short(pre, "n")
 
 
-# IGNORED FILES AND git clean -x/-X. The recovery snapshot is built with `git add --all`, which skips ignored
+# IGNORED FILES AND git clean. The recovery snapshot is built with `git add --all`, which skips ignored
 # files, and the clean-tree probe never lists them, so a clean that removes an ignored file can neither be
-# proven harmless by that probe nor recovered from a snapshot. A non-dry-run clean carrying -x or -X is
-# therefore DENIED unless a read-only dry run shows it removes no ignored file: for -X (which removes only
-# ignored files) the dry run with the same options and pathspecs must list nothing it would remove; for -x
-# its listing must equal the listing of the same dry run without -x (a clean without -x never removes an
-# ignored file, so any extra entry is ignored content). A probe that fails, exits nonzero or times out
-# denies (fail closed), as does a clean whose options cannot be read with certainty or whose repository
-# view the probe cannot reproduce. The flag letters below are git clean's: -d, -f (counted), -i, -n, -q,
-# -x, -X, and -e, which takes the rest of its cluster or the next token as its value; its long options,
-# each also accepted as a unique abbreviation, are --force, --dry-run, --quiet, --interactive and --exclude
-# (value '=VAL' or the next token), with the --no- forms of the first four. -x and -X have no long form.
+# proven harmless by that probe nor recovered from a snapshot. -x and -X are not the only way a clean
+# reaches one: an -e/--exclude pattern sits in the highest-precedence exclude group, so a negated one
+# ('!*.local') un-ignores a file and a clean WITHOUT -x then removes it. Every non-dry-run clean is
+# therefore judged by two read-only listings, under the scrubbed git environment with fsmonitor and hooks
+# off: what the clean would remove (git clean --dry-run with the same options and pathspecs), and which
+# untracked files are ignored under the repository's standard ignore sources (.gitignore files,
+# info/exclude and core.excludesFile) read with no command-level override (git ls-files --others --ignored
+# --exclude-standard --directory with the same pathspecs). The clean is DENIED when any entry it would
+# remove is, holds or lies inside an ignored entry, when it would remove a nested repository (whose
+# ignored files neither listing shows), and when either listing cannot be taken or read (fail closed), as
+# is a clean whose options cannot be read with certainty or whose repository view or ignore sources the
+# probe cannot reproduce. The flag letters below are git clean's: -d, -f (counted), -i, -n, -q, -x, -X,
+# and -e, which takes the rest of its cluster or the next token as its value; its long options, each also
+# accepted as a unique abbreviation, are --force, --dry-run, --quiet, --interactive and --exclude (value
+# '=VAL' or the next token), with the --no- forms of the first four. -x and -X have no long form.
 _CLEAN_SHORT_FLAGS = frozenset("dfinqxX")
 _CLEAN_LONG_OPTS = ("force", "dry-run", "quiet", "interactive", "exclude",
                     "no-force", "no-dry-run", "no-quiet", "no-interactive")
 # Dry-run lines that name nothing removed: a nested repository skipped, and the current directory kept.
 _CLEAN_KEEP_LINES = (b"Would skip repository ", b"Would refuse to remove current working directory")
-_CLEAN_PROBE_SECONDS = 10
+# The one wall-clock bound shared by both listings of a clean. It sits well under PRETOOL_BUDGET_SECONDS
+# (8 seconds), so a slow listing ends here with its own reason before the hook deadline, leaving that
+# budget room for the clean-tree probe and the snapshot that follow.
+_CLEAN_PROBE_SECONDS = 3.0
+# The C escapes git uses in a quoted path (quote_c_style), besides a three-digit octal byte.
+_CLEAN_C_ESCAPES = {ord("a"): 7, ord("b"): 8, ord("f"): 12, ord("n"): 10, ord("r"): 13, ord("t"): 9,
+                    ord("v"): 11, ord('"'): 34, ord("\\"): 92}
 
 
 def _clean_parse_options(args):
@@ -10034,90 +10046,160 @@ def _clean_parse_options(args):
     return force, d, x, big_x, excludes, paths + post
 
 
-def _clean_dry_run(repo, opts, paths):
-    """The nonempty stdout lines (bytes) of a read-only 'git clean --dry-run <opts> -- <paths>' run in repo,
-    or None when it cannot be launched, exits nonzero or times out. It runs under the scrubbed git
-    environment of the clean-tree probe (_isolate_git_env, GIT_OPTIONAL_LOCKS=0) with the C locale, so its
-    'Would remove' lines are untranslated, and with no stdin; the dry run itself removes nothing."""
+def _clean_probe_listing(repo, argv, deadline):
+    """The stdout (bytes) of the read-only 'git <argv>' run in repo, or None when it cannot be launched,
+    exits nonzero, or does not finish by `deadline` (a time.monotonic value). It runs under the scrubbed git
+    environment of the clean-tree probe (_isolate_git_env, GIT_OPTIONAL_LOCKS=0) with the C locale, so a
+    dry run's 'Would remove' lines are untranslated, with no stdin, and with core.fsmonitor and hooks off
+    (core.hooksPath=/dev/null), so the probe runs no configured monitor or hook program; core.quotePath is
+    off so only a name holding a control byte, a double quote or a backslash is C-quoted. None of these
+    settings is an ignore source, so the listing reads the same ignore rules the command does."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return None
     try:
         env = _isolate_git_env(dict(os.environ))
         env["GIT_OPTIONAL_LOCKS"] = "0"
         env["LC_ALL"] = "C"
         env.pop("LANGUAGE", None)
         result = subprocess.run(
-            ["git", "-C", repo, "clean", "--dry-run"] + opts + ["--"] + paths,
-            capture_output=True, timeout=_CLEAN_PROBE_SECONDS, env=env, stdin=subprocess.DEVNULL)
+            ["git", "-C", repo, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+             "-c", "core.quotePath=false"] + argv,
+            capture_output=True, timeout=left, env=env, stdin=subprocess.DEVNULL)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return None
-    return [line for line in result.stdout.split(b"\n") if line]
+    return result.stdout
+
+
+def _clean_unquote(name):
+    """The raw bytes of one path as git clean prints it: unchanged when unquoted, else decoded from git's
+    C-style quoting; None when a quoted name is malformed (the listing cannot then be trusted)."""
+    if not name.startswith(b'"'):
+        return name
+    if len(name) < 2 or not name.endswith(b'"'):
+        return None
+    body = name[1:-1]
+    out = bytearray()
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == 0x22:
+            return None  # an unescaped quote inside a quoted name
+        if ch != 0x5C:
+            out.append(ch)
+            i += 1
+            continue
+        nxt = body[i + 1] if i + 1 < len(body) else None
+        if nxt in _CLEAN_C_ESCAPES:
+            out.append(_CLEAN_C_ESCAPES[nxt])
+            i += 2
+            continue
+        digits = body[i + 1:i + 4]
+        if len(digits) != 3 or any(not 0x30 <= b <= 0x37 for b in digits) or int(digits, 8) > 255:
+            return None
+        out.append(int(digits, 8))
+        i += 4
+    return bytes(out)
+
+
+def _clean_hits_ignored(entry, ignored, ignored_sorted):
+    """True when a path the clean would remove is an ignored entry, lies inside an ignored directory, or is
+    a directory holding one (ls-files --directory lists a wholly ignored directory once, with a slash)."""
+    if entry in ignored:
+        return True
+    parts = entry.rstrip(b"/").split(b"/")
+    for k in range(1, len(parts)):
+        if b"/".join(parts[:k]) + b"/" in ignored:
+            return True
+    if entry.endswith(b"/"):
+        at = bisect.bisect_left(ignored_sorted, entry)
+        if at < len(ignored_sorted) and ignored_sorted[at].startswith(entry):
+            return True
+    return False
 
 
 def _clean_ignored_refusal(args, repo, cannot=None):
-    """None when this non-dry-run git clean cannot remove an IGNORED file, else a clause saying why that
-    cannot be shown (see the block comment above _CLEAN_SHORT_FLAGS). A clean with no -x or -X letter in any
-    option token keeps ignored files and returns None without a probe. `repo` is the directory the dry run
-    reads; `cannot`, when set, says why no dry run can reproduce what the command would see."""
-    pre = _split_pre_post(args)[0]
-    if not any(t.startswith("-") and not t.startswith("--") and ("x" in t or "X" in t) for t in pre):
-        return None
+    """None when this non-dry-run git clean, with or without -x or -X, provably removes no IGNORED file,
+    else a clause saying why that cannot be shown (see the block comment above _CLEAN_SHORT_FLAGS). `repo`
+    is the directory both listings read; `cannot`, when set, says why no read-only listing can reproduce
+    what the command would see (a repository view or ignore source the command itself can change)."""
     parsed = _clean_parse_options(args)
     if parsed is None:
         return "its options cannot be read with certainty, so which files it would remove cannot be shown"
     force, d, x, big_x, excludes, paths = parsed
-    if not (x or big_x):
-        return None  # the letter was an exclude value (git clean -f -e -x), not the flag
     if cannot is not None or repo is None:
-        return "{}, so no read-only dry run can show which files it would remove".format(
+        return "{}, so no read-only listing can show which files it would remove".format(
             cannot or "the directory it runs in cannot be established")
-    opts = ["-f"] * force + (["-d"] if d else []) + ["--exclude=" + e for e in excludes]
-    listed = _clean_dry_run(repo, opts + (["-x"] if x else []) + (["-X"] if big_x else []), paths)
+    deadline = time.monotonic() + _CLEAN_PROBE_SECONDS
+    opts = (["-f"] * force + (["-d"] if d else []) + (["-x"] if x else []) + (["-X"] if big_x else [])
+            + ["--exclude=" + e for e in excludes])
+    listed = _clean_probe_listing(repo, ["clean", "--dry-run"] + opts + ["--"] + paths, deadline)
     if listed is None:
-        return "its read-only dry run (git clean -n with the same options) failed or timed out"
-    if big_x:
-        gone = [line for line in listed if not line.startswith(_CLEAN_KEEP_LINES)]
-    else:
-        plain = _clean_dry_run(repo, opts, paths)
-        if plain is None:
-            return "its read-only comparison dry run (the same options without -x) failed or timed out"
-        if listed == plain:
-            return None
-        gone = [line for line in listed if line not in plain] or listed
+        return ("its read-only dry run (git clean -n with the same options and pathspecs) failed, exited "
+                "nonzero or did not finish within {:g} seconds".format(_CLEAN_PROBE_SECONDS))
+    removed = []
+    for line in listed.split(b"\n"):
+        if not line or line.startswith(_CLEAN_KEEP_LINES):
+            continue
+        name = _clean_unquote(line[len(b"Would remove "):]) if line.startswith(b"Would remove ") else None
+        if not name:
+            return "its read-only dry run printed a line that cannot be read ({!r})".format(
+                line.decode("utf-8", "backslashreplace"))
+        removed.append(name)
+    if not removed:
+        return None
+    ignored_out = _clean_probe_listing(
+        repo, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--"] + paths,
+        deadline)
+    if ignored_out is None:
+        return ("the read-only listing of its ignored files (git ls-files --others --ignored "
+                "--exclude-standard with the same pathspecs) failed, exited nonzero or did not finish within "
+                "{:g} seconds".format(_CLEAN_PROBE_SECONDS))
+    ignored = frozenset(p for p in ignored_out.split(b"\0") if p)
+    ignored_sorted = sorted(ignored)
+    repo_b = os.fsencode(repo)
+    gone = [e for e in removed if _clean_hits_ignored(e, ignored, ignored_sorted)
+            or (force > 1 and e.endswith(b"/") and os.path.lexists(os.path.join(repo_b, e, b".git")))]
     if not gone:
         return None
-    shown = ", ".join(repr((line[len(b"Would remove "):] if line.startswith(b"Would remove ") else line)
-                           .decode("utf-8", "backslashreplace")) for line in gone[:3])
-    return ("a read-only dry run (git clean -n with the same options) shows it would remove ignored content "
-            "({} entr{}: {}{})".format(len(gone), "y" if len(gone) == 1 else "ies", shown,
-                                       ", and more" if len(gone) > 3 else ""))
+    shown = ", ".join(repr(e.decode("utf-8", "backslashreplace")) for e in gone[:3])
+    return ("its read-only listings show it would remove ignored content, or a nested repository whose "
+            "ignored files no listing shows ({} entr{}: {}{})".format(
+                len(gone), "y" if len(gone) == 1 else "ies", shown, ", and more" if len(gone) > 3 else ""))
 
 
 def _clean_ignored_deny(why, alts):
     """The prsunc deny for a git clean that can remove ignored files (_clean_ignored_refusal)."""
     return _deny(
-        "AIQT rule prsunc (preserve-uncommitted-work): this git clean carries -x or -X, which removes IGNORED "
-        "files, and the recovery snapshot never holds an ignored file (it is built with git add --all, which "
-        "skips them); {}, so the discard may be unrecoverable; denied rather than run. To proceed, list what "
-        "it would remove with 'git clean -n' and the same options and pathspecs, move or commit what must be "
-        "kept, or run it without -x or -X. {}".format(why, alts),
-        "AIQT guardrail: denied a git clean -x/-X that can remove ignored files no recovery snapshot holds "
-        "(rule prsunc); list them with git clean -n and the same options, keep what matters, or drop -x/-X.")
+        "AIQT rule prsunc (preserve-uncommitted-work): this git clean may remove IGNORED files (through -x, "
+        "-X, an -e/--exclude pattern that un-ignores them, or ignore rules the command itself changes), and "
+        "the recovery snapshot never holds an ignored file (it is built with git add --all, which skips "
+        "them); {}, so the discard may be unrecoverable; denied rather than run. To proceed, list what it "
+        "would remove with 'git clean -n' and the same options and pathspecs, move or commit what must be "
+        "kept, and run the clean alone, without -x, -X, a negated exclude or a config or environment "
+        "override. {}".format(why, alts),
+        "AIQT guardrail: denied a git clean that may remove ignored files no recovery snapshot holds (rule "
+        "prsunc); list them with git clean -n and the same options, keep what matters, then run it alone.")
 
 
 def _clean_probe_target(tokens, cwd):
-    """(directory, None) when a read-only dry run of this pristine git clean, run in that directory, reads the
-    repository, ignore rules and configuration the command itself would, else (None, why). Only a leading
-    removed-override assignment (it redirects nothing) and '-C <dir>' global options are followed: an ambient
-    non-cosmetic GIT_* variable, any other leading assignment (HOME or a GIT_CONFIG_* variable can change the
-    ignore rules) and any other global option (-c core.excludesFile=..., --git-dir, --work-tree) can make the
-    command see another tree or other ignore rules than the probe."""
+    """(directory, None) when the read-only listings of this pristine git clean, run in that directory, read
+    the repository, ignore rules and configuration the command itself would, else (None, why). Only a
+    leading removed-override assignment (it redirects nothing) and '-C <dir>' global options are followed:
+    an ambient non-cosmetic GIT_* variable, any other leading assignment (HOME, XDG_CONFIG_HOME or a GIT_*
+    variable can remove or replace an ignore source, and the probe does not model the others) and any other
+    global option (-c or --config-env core.excludesFile=..., --git-dir, --work-tree) can make the command
+    see another tree or other ignore rules than the probe."""
     if _ambient_repo_view_override():
         return None, "a non-cosmetic ambient GIT_* variable shapes the repository view it acts on"
     cw = _command_word_index(tokens)
     for tok in tokens[:cw]:
         if not _REMOVED_DISCARD_PREFIX_RE.fullmatch(tok):
-            return None, "a leading assignment can change the repository or the ignore rules it acts on"
+            return None, ("its leading assignment {!r} can change the repository or the ignore rules it acts "
+                          "on (HOME, XDG_CONFIG_HOME and any GIT_* variable can remove an ignore "
+                          "source)".format(tok.split("=", 1)[0]))
     i = cw + 1
     while i < len(tokens) and tokens[i].startswith("-"):
         if tokens[i] != "-C" or i + 1 >= len(tokens):
@@ -10735,8 +10817,8 @@ def _pristine_single_bare_git(command, segments):
 # a would-be ALLOW is DOWNGRADED to ASK, and an already-ASK/DENY decision is left as-is with the failure
 # surfaced in its reason. HONEST LIMITATION: the snapshot cannot capture what the probe cannot see (content
 # hidden by assume-unchanged/skip-worktree marks or submodule.<name>.ignore), nor ignored files (git add
-# --all excludes them), so a discard of that content is not recoverable here; a git clean -x/-X, which
-# removes ignored files, is therefore denied unless its own read-only dry run shows it removes none
+# --all excludes them), so a discard of that content is not recoverable here; every non-dry-run git clean
+# is therefore denied unless its own read-only listings show it removes no ignored file
 # (_clean_ignored_refusal).
 _SNAPSHOTTABLE_VERBS = frozenset(("checkout", "switch", "restore", "reset", "rm", "clean"))
 # The lossy git verbs the form-classifier can reason about (the recognized-verb set). A command the raw scan
@@ -12385,7 +12467,8 @@ def _discard_positive_grammar(command, cwd):
                         verb, which may already have moved HEAD before the reset runs
       clean_checks    - (directory, args, moved) of every accepted non-dry-run git clean, for the
                         ignored-file probe (_clean_ignored_refusal); moved says an earlier segment is a
-                        recognized lossy verb, which may change the tree before the clean runs"""
+                        recognized lossy verb, which may change the tree or its ignore rules before the
+                        clean runs"""
     out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set(), "reset_checks": [],
            "clean_checks": []}
     items, bad = _discard_grammar_lex(command)
@@ -12803,11 +12886,12 @@ def git_discard(data):
     still act on the unknown cwd. See the recovery block comment above
     _SNAPSHOTTABLE_VERBS. The snapshot cannot capture what the probe cannot see (assume-unchanged/skip-worktree
     marks, submodule.<name>.ignore) or ignored files (git add --all excludes them), so a discard of that
-    content is not recoverable here. A non-dry-run git clean carrying -x or -X, which removes ignored files,
-    is therefore DENIED, on the pristine and the compound path alike and before any snapshot, unless a
-    read-only dry run (git clean -n with the same options and pathspecs, scrubbed git environment, bounded
-    timeout) shows it removes no ignored file; a probe that fails or times out denies
-    (_clean_ignored_refusal)."""
+    content is not recoverable here. Every non-dry-run git clean, with or without -x or -X, is therefore
+    DENIED, on the pristine and the compound path alike and before any snapshot, unless its read-only
+    listings (git clean -n with the same options and pathspecs, and git ls-files --others --ignored
+    --exclude-standard with the same pathspecs, scrubbed git environment, fsmonitor and hooks off, one
+    bounded timeout) show it removes no ignored file; a listing that fails or times out denies, and so does
+    a clean whose ignore sources the command itself can change (_clean_ignored_refusal)."""
     if data.get("hook_event_name") != PRETOOL:
         # A mis-wired event is a broken install: loud (unreachable given the generator's event whitelist).
         return _hard_block("aiqt_hooks: git_discard wired to unexpected event {!r}; failing closed"
@@ -12972,21 +13056,25 @@ def git_discard(data):
             r_refusal = _reset_ancestry_refusal(r_args, r_dir, r_cannot)
             if r_refusal is not None:
                 return _reset_ancestry_deny(r_refusal, _DISCARD_ALTS)
-        # Every accepted clean that can remove ignored files (-x or -X) is denied unless a read-only dry run
-        # in the directory the grammar resolved for it shows it removes none, before any snapshot: the
-        # snapshot never holds an ignored file. An earlier lossy segment may change the tree before the
-        # clean runs, and an ambient GIT_* variable may change the view the command sees, so either one
-        # leaves the dry run unable to show what the clean would remove, and it denies.
+        # Every accepted non-dry-run clean, with or without -x or -X, is denied unless its read-only listings
+        # in the directory the grammar resolved for it show it removes no ignored file, before any
+        # snapshot: the snapshot never holds an ignored file. An earlier lossy segment may change the tree
+        # or its ignore rules before the clean runs (a checkout, restore, reset, stash, rm or clean of a
+        # .gitignore, an info/exclude file or the configured excludes file), and an ambient GIT_* variable
+        # may change the view the command sees, so either one leaves the listings unable to show what the
+        # clean would remove, and it denies. The grammar admits no assignment word and no git global
+        # option but -C, so no -c, --config-env, HOME, XDG_CONFIG_HOME or GIT_* override reaches here.
         for c_dir, c_args, c_moved in walk["clean_checks"]:
             c_cannot = None
             if c_moved:
-                c_cannot = "an earlier segment of this command may change the tree before the clean runs"
+                c_cannot = ("an earlier segment of this command may change the tree or its ignore rules (a "
+                            ".gitignore, info/exclude or the configured excludes file) before the clean runs")
             elif _ambient_repo_view_override():
                 c_cannot = "a non-cosmetic ambient GIT_* variable shapes the repository view it acts on"
             c_why = _clean_ignored_refusal(c_args, c_dir, c_cannot)
             if c_why is not None:
                 return _clean_ignored_deny(c_why, _DISCARD_ALTS)
-        np_verb =next(iter(sorted(walk["subs"])), "discard")
+        np_verb = next(iter(sorted(walk["subs"])), "discard")
         # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo
         # whose stash cannot be preserved), so a resolved stash removal never notes a recovery that omits
         # the cleared stash.
@@ -13067,11 +13155,13 @@ def git_discard(data):
             st_reason, st_banner = _DISCARD_GRAMMAR_DENY_TEXTS["stashro"]
             return _deny(st_reason.format(st_bad, alts), st_banner)
 
-    # A non-dry-run clean that can remove ignored files (-x or -X) is denied unless a read-only dry run
-    # shows it removes none (_clean_ignored_refusal), decided here before any snapshot and before both the
-    # redirect branch and the plain path: the clean-tree probe never lists an ignored file (so an
+    # Every non-dry-run clean, with or without -x or -X, is denied unless its read-only listings show it
+    # removes no ignored file (_clean_ignored_refusal), decided here before any snapshot and before both
+    # the redirect branch and the plain path: the clean-tree probe never lists an ignored file (so an
     # ignored-only tree reads as provably clean) and the recovery snapshot never holds one, so neither the
-    # provably-clean allow nor a snapshot-then-allow could recover what such a clean removes.
+    # provably-clean allow nor a snapshot-then-allow could recover what such a clean removes. A -c or
+    # --config-env option, or a leading HOME, XDG_CONFIG_HOME or GIT_* assignment, can change the ignore
+    # sources the command reads, so _clean_probe_target refuses each.
     if sub == "clean" and role != "allow":
         cx_cwd = data.get("cwd")
         cx_dir, cx_cannot = _clean_probe_target(pristine, cx_cwd if isinstance(cx_cwd, str) and cx_cwd
