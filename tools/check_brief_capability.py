@@ -3841,22 +3841,22 @@ def partial_clone(repo):
     raise _probe_failure("partial clone check", repo, probe)
 
 
-def _p9_read(repo, args):
-    """git `args` in `repo` under _no_replace_env() and LC_ALL=C, output captured."""
-    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo)] + args, capture_output=True,
-                          timeout=GIT_READ_TIMEOUT, env=dict(_no_replace_env(), LC_ALL="C"))
-
-
 def _shallow_probe(repo):
-    """git rev-parse --is-shallow-repository in `repo`."""
-    return _p9_read(repo, ["rev-parse", "--is-shallow-repository"])
+    """git rev-parse --is-shallow-repository in `repo` under _no_replace_env() and LC_ALL=C, output captured.
+    The argv is spelled out literally, as every git read of this file is, so the F-367 maintenance-pin scan
+    (tools/selftest_git_fixture_env.py) resolves its subcommand."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "rev-parse", "--is-shallow-repository"],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=dict(_no_replace_env(), LC_ALL="C"))
 
 
 def _store_dirs_probe(repo):
     """git rev-parse of the absolute paths of the common git directory and the object directory of `repo`, one
-    per line: in a linked worktree the common git directory is the main repository's, which holds the objects
-    and the shallow file (measured with git 2.53.0)."""
-    return _p9_read(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir", "--git-path", "objects"])
+    per line, under _no_replace_env() and LC_ALL=C, output captured: in a linked worktree the common git
+    directory is the main repository's, which holds the objects and the shallow file (measured with git
+    2.53.0). The argv is literal, as in _shallow_probe."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "rev-parse", "--path-format=absolute",
+                           "--git-common-dir", "--git-path", "objects"],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=dict(_no_replace_env(), LC_ALL="C"))
 
 
 def _count_objects_probe(common):
@@ -3864,8 +3864,10 @@ def _count_objects_probe(common):
     _no_replace_env() and LC_ALL=C: its local loose and pack counts, its garbage count, a warning on stderr for
     each garbage file, and one `alternate: <path>` line per alternate object directory. Run in a linked
     worktree, git also counts the worktree's own refs directory as garbage (measured with git 2.53.0), which is
-    no part of the object store, so the count is read from the common git directory."""
-    return subprocess.run(["git", "--no-replace-objects", "--git-dir=" + common, "count-objects", "-v"],
+    no part of the object store, so the count is read from the common git directory. The git directory is
+    passed as the separate value slot of --git-dir (git reads `--git-dir <path>` as `--git-dir=<path>`), so the
+    F-367 maintenance-pin scan resolves the subcommand past it."""
+    return subprocess.run(["git", "--no-replace-objects", "--git-dir", str(common), "count-objects", "-v"],
                           capture_output=True, timeout=GIT_READ_TIMEOUT, cwd=common,
                           env=dict(_no_replace_env(), LC_ALL="C"))
 
@@ -9895,8 +9897,11 @@ def self_test(report_path=None):
                               timeout=60, env=p9_env).stdout.decode("ascii").strip()
 
         def p9_holds(commit):
-            """Whether the partial clone holds `commit`, read without fetching."""
-            return subprocess.run(p9_git + ["--no-lazy-fetch", "-C", str(p9_partial), "cat-file", "-e", commit],
+            """Whether the partial clone holds `commit`, read without fetching. The argv spells p9_git's pins
+            literally: the F-367 maintenance-pin scan does not read an enclosing function's list."""
+            return subprocess.run(["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                                   "maintenance.auto=false", "--no-lazy-fetch", "-C", str(p9_partial), "cat-file", "-e",
+                                   commit],
                                   capture_output=True, timeout=60, env=p9_env).returncode == 0
 
         # a word the partial clone lacks (D upstream, a nonce) is CannotEvaluate, its promisor remote may hold
@@ -9910,11 +9915,14 @@ def self_test(report_path=None):
 
         def p9_packed(name, damage=None):
             """(copy of the fixture, pack stem) with C moved alone into its own pack and its loose copy deleted
-            (A and B stay loose), then `damage` applied to the pack's stem path."""
+            (A and B stay loose), then `damage` applied to the pack's stem path. The argv spells p9_git's pins
+            literally, as in p9_holds."""
             target = p7_base / name
             shutil.copytree(p7_repo, target, symlinks=True)
             objects = target / ".git" / "objects"
-            packed = subprocess.run(p9_git + ["-C", str(target), "pack-objects", "-q", str(objects / "pack" / "pack")],
+            packed = subprocess.run(["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                                     "maintenance.auto=false", "-C", str(target), "pack-objects", "-q",
+                                     str(objects / "pack" / "pack")],
                                     input=(p9_c + "\n").encode("ascii"), check=True, capture_output=True, timeout=60,
                                     env=p9_env).stdout.decode("ascii").strip()
             (objects / p9_c[:2] / p9_c[2:]).unlink()
@@ -10131,9 +10139,16 @@ def self_test(report_path=None):
         # git count-objects run in the linked worktree itself (the previous revision) counts the worktree's refs
         # directory as garbage, and a nonce there exits 2
         p9_worktree_of = {p9_common[p9_plain]: p9_linked, p9_common[p9_shared]: p9_shared_linked}
+
+        def p9_worktree_counts(common):
+            """git count-objects -v run in the linked worktree whose common git directory is `common`."""
+            return subprocess.run(["git", "--no-replace-objects", "-C", str(p9_worktree_of[common]), "count-objects",
+                                   "-v"], capture_output=True, timeout=GIT_READ_TIMEOUT,
+                                  env=dict(_no_replace_env(), LC_ALL="C"))
+
         check("revert/p9-common-dir-red", *flip(
             [p9_case(p9_nonce, repo=p9_linked), p9_case(p9_nonce, repo=p9_shared_linked)], ["CannotEvaluate"] * 2,
-            _count_objects_probe=lambda common: _p9_read(p9_worktree_of[common], ["count-objects", "-v"])))
+            _count_objects_probe=p9_worktree_counts))
         # with the shallow file unread, git's false answer is trusted and A beyond the boundary passes
         check("revert/p9-shallow-file-red", *flip([p9_git_says_not_shallow(p9_a)], [(0, [])],
                                                   _shallow_file=lambda common: False))

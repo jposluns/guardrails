@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "3befbdd6910c8a5b0e24065a9480c613ad15579813921ecfd8577e702979355d"
+tree-sha256 = "06e8c77b12cac3c3cd469bc98c920e22082ad1871b3a39edd0d8c6779d8a704c"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4172,8 +4172,8 @@ sha256 = "9ec3224a7e8f517b357ab6738f82a4ce41a9bca6fcba66c3194b3a9157ff9ce0"
 
 [[sources]]
 path = "tools/check_brief_capability.py"
-bytes = 704046
-sha256 = "dd006d79a711f1ba02849d7484594c736856c1f6fd09afc6bcfb1cd6051d8e55"
+bytes = 705488
+sha256 = "d123d899b9c162afba9ea82524ac87b4971abadf1c431b80e6908d7f926f096c"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
