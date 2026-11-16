@@ -381,8 +381,12 @@ inside the HOST_JOBS jobs of quality.yml and only when it equals this source, an
 python-version in any workflow to the floor exactly. GitHub's runtime is not modelled: when the runner image
 retires or the host patch has no build for it, setup-python fails the job, closed and never on another patch
 release. On 2026-10-12 the setup-python versions manifest (actions/python-versions) listed Linux x64 builds of
-3.14.4 for Ubuntu 22.04 and 24.04 only, so the move off ubuntu-24.04 is one reviewed change of RUNNER, every
-host-patch runs-on line and, if needed, the host patch. The interpreter leg judges only the interpreter that runs this
+3.14.4 for Ubuntu 22.04 and 24.04 only, so the move of the host jobs off ubuntu-24.04 is one reviewed change of
+RUNNER, every host-patch runs-on line and, if needed, the host patch. The generated and selftest-execution jobs
+also run on ubuntu-24.04, for its GNU coreutils rather than for the host patch, so that change does not move
+them: their move is a separate decision, recorded in the docstring of tools/check_coreutils_environment.py and
+in CLAUDE.md, and tools/check_ci_parity.py (COREUTILS IMAGE) holds them to one pinned image. The interpreter
+leg judges only the interpreter that runs this
 gate; in CI it runs only in the HOST_JOBS jobs. Equal patch releases are not equal builds: a distribution
 build's downstream patches and the system libraries an interpreter links (OpenSSL, SQLite, expat, zlib and
 others) can differ between the host and the runner, and this gate does not compare them. It does not check

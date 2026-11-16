@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .orch
 .aiqt/orchestration.local.json
+.aiqt/coreutils-scope.local

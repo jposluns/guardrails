@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.27** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.28** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -248,6 +248,21 @@ job's suite) and fails when the running interpreter is another release, so `tool
 on any patch release other than the one the file names. When the host interpreter changes, update
 `python-host-patch` in `.aiqt/python-host.toml` and the `python-version` pin of every host job in
 `quality.yml` together, in one change.
+
+Two more jobs run on `ubuntu-24.04` for another reason: `generated` (the Hooks preview self-test, whose
+removal differential asserts what real GNU `rm`, `cp`, `mv` and others do under `/usr/bin:/bin`) and
+`selftest-execution` (the coreutils-environment gate, which in CI mode fails on any inventoried program not
+identified as GNU). They pin the image for its GNU coreutils, not for the host patch: on the
+`ubuntu-latest` image, CI run 43825233435 reported most inventoried programs as uutils. `tools/check_ci_parity.py`
+(COREUTILS IMAGE) fails unless the jobs that run either suite are exactly these two and share one pinned
+`runs-on` value. When GitHub retires `ubuntu-24.04`, these two jobs cannot run and `Quality gates` cannot
+pass; a host patch for a newer image does not fix them. Moving one alone, or to `ubuntu-latest`, fails
+`check_ci_parity.py`; moving both to a newer pinned image passes it, and then the `Coreutils environment` step
+fails if that image's coreutils are not GNU. The change needed is a reviewed decision: make GNU coreutils and
+diffutils what both the step's PATH and `/usr/bin:/bin` select in both jobs, or show the preview self-tests
+pass under the other implementation and change the removal differential and the gate's CI requirement to accept
+it. Then change both `runs-on` lines, this note and the gate's docstring (`tools/check_coreutils_environment.py`,
+which records the same) together.
 
 ## Git and writing conventions
 
