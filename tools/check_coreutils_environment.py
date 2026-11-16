@@ -54,6 +54,10 @@ PATH (so POSIXLY_CORRECT and every other inherited variable is dropped), in a ne
 PROBE_TIMEOUT seconds and OUTPUT_LIMIT bytes of stdout; past either bound its whole process group is killed.
 The first stdout line must be exactly '<program> (GNU <family>) <version>' or '<program> (uutils <family>)
 <version>', naming the program probed and the family (coreutils or diffutils) the inventory declares for it.
+One more form is read as GNU, for the programs in BARE_PACKAGE_PROGRAMS only: '<program> (<family>) <version>',
+with no GNU, which GNU dd prints (the merge-train Quality run 43886683154 reported 'dd (coreutils) 9.4' on the
+pinned ubuntu-24.04 image). The list holds dd alone, the one program that run showed printing it; any other
+program whose first line takes that form is UNRECOGNIZED.
 
 Outcomes, one per program and environment: OK (a recognised banner), MISSING (no executable of that name on
 that PATH, or PATH unset), PROBE_FAILED (the file could not be started, exited other than 0, or printed more
@@ -161,8 +165,13 @@ PROGRAM_KEYS = frozenset(("name", "family", "role"))
 RUNNER_ENV_KEYS = frozenset(("id", "path-source", "description"))
 FIXED_ENV_KEYS = frozenset(("id", "path", "description"))
 NAME_RE = re.compile(r"[a-z][a-z0-9_-]*", re.ASCII)
-BANNER_RE = re.compile(r"([A-Za-z0-9_.+\[-]+) \((GNU|uutils) (coreutils|diffutils)\) ([0-9][0-9A-Za-z.+~-]*)",
+BANNER_RE = re.compile(r"([A-Za-z0-9_.+\[-]+) \((?:(GNU|uutils) )?(coreutils|diffutils)\) ([0-9][0-9A-Za-z.+~-]*)",
                        re.ASCII)
+# The (program, family) pairs whose GNU --version banner names the package with no GNU, '<program> (<family>)
+# <version>', read as GNU. The merge-train Quality run 43886683154 reported 'dd (coreutils) 9.4' for dd on the
+# pinned ubuntu-24.04 image and 'GNU coreutils 9.4' for every other inventoried program, so dd is the one entry;
+# no GNU source or documentation was checked for another program, and none is added without that evidence.
+BARE_PACKAGE_PROGRAMS = frozenset((("dd", "coreutils"),))
 # A report value printed bare; any other value is printed as a JSON string, so a control character or a space
 # in a path cannot forge or split a report line.
 BARE_RE = re.compile(r"[A-Za-z0-9_./+:@,=~-]+", re.ASCII)
@@ -334,11 +343,14 @@ def probe(executable, path_value, timeout, limit):
 
 def parse_banner(name, family, output):
     """(implementation, version) when the first line of output is the recognised banner of program name in
-    family, otherwise None."""
+    family, otherwise None. A banner with no implementation, '<program> (<family>) <version>', is GNU for a
+    (name, family) pair in BARE_PACKAGE_PROGRAMS and unrecognised for any other."""
     first = output.split(b"\n", 1)[0].decode("ascii", "replace")
     match = BANNER_RE.fullmatch(first)
     if match is None or match.group(1) != name or match.group(3) != family:
         return None
+    if match.group(2) is None:
+        return ("GNU", match.group(4)) if (name, family) in BARE_PACKAGE_PROGRAMS else None
     return match.group(2), match.group(4)
 
 
@@ -369,8 +381,11 @@ def identify(environment, program, path_value, timeout, limit):
     parsed = parse_banner(name, family, output)
     if parsed is None:
         first = output.split(b"\n", 1)[0][:120].decode("ascii", "replace")
+        forms = "'{} (GNU|uutils {}) <version>'".format(name, family)
+        if (name, family) in BARE_PACKAGE_PROGRAMS:
+            forms += " or '{} ({}) <version>'".format(name, family)
         return Row(environment, name, selected, target, "", "", UNRECOGNIZED,
-                   "its first line {} is not '{} (GNU|uutils {}) <version>'".format(json.dumps(first), name, family))
+                   "its first line {} is not {}".format(json.dumps(first), forms))
     return Row(environment, name, selected, target, parsed[0], parsed[1], OK, "")
 
 
@@ -596,6 +611,16 @@ MUTANTS = (
      "    if match is None or match.group(1) != name or match.group(3) != family:\n        return None\n",
      "    if match is None:\n        return \"GNU\", \"0\"\n",
      "malformed-output"),
+    ("bare-package-banner",
+     "BANNER_RE = re.compile(r\"([A-Za-z0-9_.+\\[-]+) \\((?:(GNU|uutils) )?(coreutils|diffutils)\\) "
+     "([0-9][0-9A-Za-z.+~-]*)\",\n",
+     "BANNER_RE = re.compile(r\"([A-Za-z0-9_.+\\[-]+) \\((GNU|uutils) (coreutils|diffutils)\\) "
+     "([0-9][0-9A-Za-z.+~-]*)\",\n",
+     "gnu-dd-bare-package"),
+    ("bare-package-scoped",
+     "        return (\"GNU\", match.group(4)) if (name, family) in BARE_PACKAGE_PROGRAMS else None\n",
+     "        return \"GNU\", match.group(4)\n",
+     "bare-package-lookalike"),
     ("probe-environment",
      "    env = {\"LC_ALL\": PROBE_LOCALE, \"LANG\": PROBE_LOCALE, \"PATH\": path_value}\n",
      "    env = dict(os.environ, PATH=path_value)\n",
@@ -673,6 +698,7 @@ def _fixtures(base):
     kinds = {
         "gnu": lambda name, family: "printf '{} (GNU {}) 9.4\\n'\n".format(name, family),
         "uutils": lambda name, family: "printf '{} (uutils {}) 0.2.2\\n'\n".format(name, family),
+        "bare-package": lambda name, family: "printf '{} ({}) 9.4\\n'\n".format(name, family),
         "nonzero": lambda name, family: "printf '{} (GNU {}) 9.4\\n'\nexit 3\n".format(name, family),
         "slow": lambda name, family: sleeper + "printf '{} (GNU {}) 9.4\\n'\n".format(name, family),
         "malformed": lambda name, family: "printf 'hello from {}\\n'\n".format(name),
@@ -702,7 +728,9 @@ def _fixtures(base):
         dirs[key] = str(directory)
 
     make("gnu", "gnu", ("cp", "mv", "cat"))
-    make("uutils", "uutils", ("cp", "mv"))
+    make("uutils", "uutils", ("cp", "mv", "dd"))
+    # The banner GNU dd prints, 'dd (coreutils) 9.4', and the same form from cp, which stays unrecognised.
+    make("bare-package", "bare-package", ("dd", "cp"))
     make("mixed-a", "gnu", ("cp",))
     make("mixed-b", "uutils", ("mv",))
     make("first", "gnu", ("cp",))
@@ -788,6 +816,7 @@ def _log_lines(log):
 CP = ("cp", "coreutils", "preview-dependency")
 MV = ("mv", "coreutils", "preview-dependency")
 CAT = ("cat", "coreutils", "preview-dependency")
+DD = ("dd", "coreutils", "preview-dependency")
 MULTICALL = (("install", "coreutils", "preview-dependency"), ("tee", "coreutils", "preview-dependency"),
              ("truncate", "coreutils", "preview-dependency"))
 
@@ -855,6 +884,24 @@ def _vectors(m, dirs, log):
          1, "unknown", "SCOPE: CI scope; " + SCOPE_LABELS["unknown"].format("GNU"),
          "FAIL: CI mode requires GNU for every program, and 1 program(s) are not identified as GNU: " + unknown)
         for key in ("malformed", "other-name", "other-family", "busybox")])
+    # GNU dd's own banner, 'dd (coreutils) 9.4' with no GNU, as the merge-train Quality run 43886683154 reported
+    # it on ubuntu-24.04: GNU, so it passes in local and in CI mode; uutils dd is still uutils, refused in CI.
+    bare_dd = [m.evaluate((DD,), (("runner", dirs["bare-package"]),), "GNU", in_ci) for in_ci in (False, True)]
+    uutils_dd = m.evaluate((DD,), (("runner", dirs["uutils"]),), "GNU", True)
+    out["gnu-dd-bare-package"] = (
+        ([(result[0], result[3], rows_of(result), result[1][-1]) for result in bare_dd],
+         uutils_dd[0], rows_of(uutils_dd)),
+        ([(0, "match", [("dd", "OK", "GNU", "9.4")], "PASS: every program in every environment reports GNU")] * 2,
+         1, [("dd", "OK", "uutils", "0.2.2")]))
+    # The same form from cp, a program outside BARE_PACKAGE_PROGRAMS, is an unknown implementation.
+    lookalike = [m.evaluate((CP,), (("runner", dirs["bare-package"]),), "GNU", in_ci) for in_ci in (False, True)]
+    out["bare-package-lookalike"] = (
+        [(result[0], result[3], rows_of(result), result[1][-1]) for result in lookalike],
+        [(0, "unknown", [("cp", "UNRECOGNIZED", "", "")],
+          "WARNING: 1 program(s) are not identified as GNU, the CI implementation, so this local run does not "
+          "predict CI: " + unknown),
+         (1, "unknown", [("cp", "UNRECOGNIZED", "", "")],
+          "FAIL: CI mode requires GNU for every program, and 1 program(s) are not identified as GNU: " + unknown)])
     # A probe that exits 0 and prints nothing establishes no implementation: cannot-evaluate in both modes.
     silent = [m.evaluate((CP,), (("runner", dirs["empty"]),), "GNU", in_ci) for in_ci in (False, True)]
     out["empty-output"] = (
