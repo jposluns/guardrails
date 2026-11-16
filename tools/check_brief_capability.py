@@ -418,13 +418,19 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        base and head commit ids as a pin is written (hex_ref; a branch name such as main is
                        CANNOT_EVALUATE), the mode one of branch, history or partial, a nonempty reason required
                        for history and partial and refused for branch. A line that opens, after markup
-                       (indent, list or quote marker, emphasis, backticks, pipes), with a look-alike of the label
-                       (another case, BRIEF DIFF, BRIEF_DIFF, a Unicode dash, a colon look-alike) and a colon,
-                       `=` or a hex word is CANNOT_EVALUATE naming the label, never a silent non-declaration. The
-                       head must be the value of every BRIEF-PIN and REVIEWED HEAD line (prefix either way, any
-                       case), and those lines must agree. The protected target is the --protected REF the
-                       caller passes (a ref or a commit id), resolved in --repo; origin/HEAD and the local
-                       tracking branches are not consulted. Every P10 git read is hermetic, disables replace
+                       (indent, list, bullet, arrow or quote marker, a task box, an HTML tag, a one-letter item
+                       marker, emphasis, backticks, pipes), with a look-alike of the label (another case, BRIEF
+                       DIFF, BRIEF_DIFF, a Unicode dash, a colon look-alike, a Cyrillic or Greek look-alike
+                       letter) and a colon, `=` or a hex word is CANNOT_EVALUATE naming the label, never a silent
+                       non-declaration. The head must be the value of every BRIEF-PIN, REVIEWED HEAD and
+                       look-alike pin line (Reviewed head, Brief-Pin; prefix either way, any case), and those lines
+                       must agree. The base and head are read in --repo only as commit id prefixes (git rev-parse
+                       --disambiguate, replace objects disabled), never as ref names, so a branch or tag spelled
+                       as the value is not read; a value that is the prefix of no commit or of several commits is
+                       CANNOT_EVALUATE, and the resolved head must begin with every pin value. The protected
+                       target is the --protected REF the caller passes (a ref or a commit id), resolved in --repo,
+                       with no implicit fallback to origin/HEAD or a tracking branch (a tracking ref the caller
+                       passes is read as it stands, stale or not). Every P10 git read is hermetic, disables replace
                        objects and the commit-graph (core.commitGraph=false) and never fetches. Before any
                        ancestry answer is trusted, the object store must be whole (object_store_gap, as P9), no
                        grafts file may exist (git rev-parse --git-path info/grafts) and git rev-list --parents
@@ -434,16 +440,23 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        when the base lies strictly between the one merge base and the head. A base equal to the
                        head, a head with no common history with the target, a head already on the protected
                        line in branch mode (empty branch contribution) and a base the mode refuses are HARD
-                       (exit 1). Two declarations, a malformed or look-alike one, pin lines that disagree, a
-                       head that is not the BRIEF-PIN or REVIEWED HEAD value, no repository, a repository git
+                       (exit 1); a branch-mode refusal says where the base lies (on the branch after the fork, on
+                       the protected line, or on neither). Two declarations, a malformed or look-alike one, pin
+                       lines that disagree, a head that is not the pin value, a base or head that is the prefix
+                       of no commit or of several, no repository, a repository git
                        refuses for its ownership, a store that is not whole, a grafts file, no --protected REF
                        or one that does not resolve, several merge bases
                        in branch or partial mode, and any git read that is not a clean answer are
                        CANNOT_EVALUATE (exit 2). A pass prints one INFO line naming the target, its ref and the
                        merge bases, for the dispatcher to record. Beside a declaration, a prose range (X..Y,
-                       X...Y) or git diff, log or range-diff line whose two revisions are not the declared base
-                       and head prints one ADVISORY line, never a refusal; with no declaration P10 prints
-                       nothing. P10 decides only where the sender runs the lint and never fetches: the caller
+                       X...Y) or a git diff, log or range-diff command whose first two revisions are not the
+                       declared base and head prints one ADVISORY line, never a refusal: the command is read in a
+                       code span (bounded by its backticks) or on a line that opens with it (after an optional
+                       `$ ` prompt), its operands ending at --, a shell operator or the span's end, options
+                       skipped (with the value of one such as -n), and in prose only when both revisions are
+                       commit ids; each line is read once, linear in its length. With no declaration P10 prints
+                       nothing. A pin named only in prose (Review commit <id>) binds no head. P10 decides only
+                       where the sender runs the lint and never fetches: the caller
                        must fetch the protected ref (or pass the commit id it fetched) before the lint, since a
                        stale local ref decides the merge base it is given; the author writes the declaration,
                        target movement after the lint is not seen, and the reviewer can still run another
@@ -4276,17 +4289,31 @@ P10_REASON_SEPARATOR = " -- "
 # the global options of every P10 git read besides P9's: the commit-graph cache is never read, since it is a
 # substitution surface for the parents git reports
 P10_GIT_OPTIONS = ("-c", "core.commitGraph=false")
-# a LOOK-ALIKE declaration label: a line that is not a column-zero BRIEF-DIFF line but opens, after markup (spaces,
-# a list or quote marker, emphasis, backticks, table pipes), with BRIEF and DIFF in any case joined by a dash, an
-# underscore, spaces or nothing, then a colon or `=` or a hex word. It is read after NFKC and the dash fold (as
-# near_pin) and P10_COLON_FORMS read as a colon, and is CannotEvaluate, never a silent non-declaration
-P10_LOOKALIKE_RE = re.compile(r"[`|*_>#+\s\d.)-]*+(BRIEF[-_\s]*+DIFF)[`|*_\s]*+(?:[:=]|[0-9a-f]{7})", re.I)
+# a LOOK-ALIKE declaration label: a line that is not a column-zero BRIEF-DIFF line but opens, after markup (any run
+# of characters that are not letters: spaces, digits, list, quote, bullet and arrow marks, emphasis, backticks, table
+# pipes; a task box [x] or [ ]; an HTML tag such as <b>; a one-letter item marker such as a)), with BRIEF and DIFF in
+# any case joined by a dash, an underscore, spaces or nothing, then a colon or `=` or a hex word. It is read after
+# NFKC, the dash fold (as near_pin), P10_COLON_FORMS read as a colon and P10_LABEL_CONFUSABLES read as their Latin
+# letters, and is CannotEvaluate, never a silent non-declaration
+P10_LOOKALIKE_RE = re.compile(r"(?:\[[x ]\]|</?[a-z][a-z0-9]*+>|[a-z]\)|[\W\d_])*+(BRIEF[-_\s]*+DIFF)[`|*_\s]*+"
+                              r"(?:[:=]|[0-9a-f]{7})", re.I)
 # the colon look-alikes NFKC leaves as they are (modifier letter triangular colon, ratio, modifier letter colon)
 P10_COLON_FORMS = frozenset("˸∶꞉")
-# a range form in prose (X..Y or X...Y), read for the advisory only; it never decides anything
-P10_RANGE_RE = re.compile(r"([0-9A-Za-z_/-]++)\.\.\.?+([0-9A-Za-z_/-]++)")
+# the Cyrillic and Greek letters NFKC leaves as they are that look like a letter of BRIEF DIFF, read as that letter
+P10_LABEL_CONFUSABLES = {"В": "B", "Β": "B", "І": "I", "Ι": "I", "Ӏ": "I", "і": "i", "Е": "E", "Ε": "E", "е": "e",
+                         "Ϝ": "F"}
+# a range form in prose (X..Y or X...Y), read for the advisory only; it never decides anything. A match opens only
+# where a run of its word characters opens (the lookbehind), so each run is read once and the scan is linear
+P10_RANGE_RE = re.compile(r"(?<![0-9A-Za-z_/-])([0-9A-Za-z_/-]++)\.\.\.?+([0-9A-Za-z_/-]++)")
 # the git subcommands whose two revision words the advisory reads
 P10_COMPARE_COMMANDS = ("diff", "log", "range-diff")
+# the words that end a git command's operands: the pathspec separator and the shell control operators
+P10_OPERAND_ENDS = ("--", "|", "||", "&&", ";", "&", ">", ">>", "<")
+# the options of git diff, log and range-diff whose value is the next word, which is never a revision
+P10_OPTION_OPERANDS = ("-n", "--max-count", "--skip", "--author", "--committer", "--grep", "--since", "--until",
+                       "--after", "--before", "-G", "-S", "-L", "-O", "--diff-filter")
+# a shell prompt a command line may open with
+P10_PROMPT = "$ "
 # the severity of a prose comparison that is not the declared one: it never refuses
 P10_PROSE_SEVERITY = "ADVISORY"
 # the trailing punctuation a prose revision word sheds before it is compared
@@ -4302,11 +4329,12 @@ def diff_value_ok(value):
 def diff_lookalike(line):
     """The look-alike BRIEF-DIFF label a line opens with (P10_LOOKALIKE_RE), as folded, else None. The line is read
     after NFKC (a fullwidth letter or colon as its ASCII form), every character of a category in NEAR_PIN_DASHES
-    as - and every P10_COLON_FORMS character as a colon. diff_declarations reads only lines that are not
-    column-zero BRIEF-DIFF lines."""
+    as -, every P10_COLON_FORMS character as a colon and every P10_LABEL_CONFUSABLES letter as its Latin letter.
+    diff_declarations reads only lines that are not column-zero BRIEF-DIFF lines."""
     if not line.isascii():   # NFKC and the folds leave ASCII as it is
         line = "".join(":" if character in P10_COLON_FORMS else "-" if unicodedata.category(character)
-                       in NEAR_PIN_DASHES else character for character in unicodedata.normalize(NEAR_PIN_FORM, line))
+                       in NEAR_PIN_DASHES else P10_LABEL_CONFUSABLES.get(character, character)
+                       for character in unicodedata.normalize(NEAR_PIN_FORM, line))
     found = P10_LOOKALIKE_RE.match(line)
     return found.group(1) if found else None
 
@@ -4317,8 +4345,9 @@ def diff_declarations(raw):
     with `BRIEF-DIFF:`, a declaration without exactly a base, a head and a mode (P10_MODES), a base or head that
     is not a commit id (diff_value_ok), a branch-mode declaration with a reason and a history or partial one
     without a nonempty reason are CannotEvaluate, never ignored. A line that opens with a look-alike of the label
-    (diff_lookalike: indented, in markup, another case, BRIEF DIFF, a colon look-alike) is CannotEvaluate naming
-    the label it holds. The label anywhere else (mid-line in prose) declares nothing."""
+    (diff_lookalike: indented, in markup, behind a bullet, arrow, task box, HTML tag or item marker, another case,
+    BRIEF DIFF, a colon look-alike, a Cyrillic or Greek look-alike letter) is CannotEvaluate naming the label it
+    holds. The label anywhere else (mid-line in prose) declares nothing."""
     shape = "write {}: <base> <head> <mode>[ -- <reason>], the mode one of {}, a reason required for history and " \
             "partial and refused for branch".format(DIFF_LABEL, ", ".join(P10_MODES))
     declarations = []
@@ -4414,6 +4443,34 @@ def _p10_resolve(repo, rev, what):
     return commits[0]
 
 
+def _p10_commit_id(repo, value, what):
+    """The one commit whose id begins with a declared BRIEF-DIFF base or head `value` (a commit id, diff_value_ok)
+    in `repo`, read only as an object id prefix, never as a ref name: git rev-parse --disambiguate lists every object
+    whose id begins with it (replace objects disabled, _p10_read), so a branch or tag spelled as the value does not
+    stand in for the commit it abbreviates. Each listed object is kept when git reads it back as itself with
+    ^{commit} (a commit; a tree or blob is skipped, a tag peels to another id and is not kept). No commit is
+    CannotEvaluate, and so is more than one: an ambiguous value that names no one commit."""
+    if not diff_value_ok(value):
+        raise CannotEvaluate("{}: {!r} is not a commit id".format(what, _excerpt(value)))
+    objects = _p10_commits(repo, what, ["rev-parse", "--disambiguate=" + value.lower()])
+    commits = []
+    for name in objects:
+        probe = _p9_git(repo, what, lambda name=name: _p10_read(
+            repo, ["rev-parse", "--verify", "--quiet", name + "^{commit}"]))
+        if _not_a_commit(probe, name):
+            continue
+        if probe.returncode != 0 or probe.stderr.strip():
+            raise _probe_failure(what, repo, probe)
+        if probe.stdout.decode("utf-8", "replace").strip() == name:
+            commits.append(name)
+    if not commits:
+        raise CannotEvaluate("{}: no commit id in {} begins with {}".format(what, repo, value))
+    if len(commits) > 1:
+        raise CannotEvaluate("{}: {} is ambiguous in {}, the prefix of {} commits ({}); write more of its hex "
+                             "digits".format(what, value, repo, len(commits), ", ".join(sorted(commits))))
+    return commits[0]
+
+
 def _p10_is_ancestor(repo, ancestor, descendant):
     """Whether `ancestor` is an ancestor of `descendant` (or the same commit): git merge-base --is-ancestor
     answers exit 0 or exit 1 with nothing printed; every other answer is CannotEvaluate."""
@@ -4437,10 +4494,10 @@ def _p10_grafts(repo):
 
 def protected_target(repo, protected=None):
     """(ref, commit) of the protected target: the --protected ref `protected` the caller passes, resolved in `repo`
-    to one commit. The repository's own origin/HEAD and tracking branches are never consulted, since a stale local
-    tracking branch would decide the merge base; the caller fetches the protected ref (or passes the commit id it
-    fetched) before the lint. No --protected ref, and one that does not resolve to one commit, are
-    CannotEvaluate."""
+    to one commit. There is no implicit fallback to the repository's origin/HEAD or a tracking branch, since a stale
+    local tracking branch would decide the merge base; a ref the caller passes, a tracking branch included, is read
+    as it stands, stale or not, so the caller fetches the protected ref (or passes the commit id it fetched) before
+    the lint. No --protected ref, and one that does not resolve to one commit, are CannotEvaluate."""
     if protected is None:
         raise CannotEvaluate("protected target: the brief declares its comparison on a {} line but no --protected "
                              "REF was given; pass the protected ref (or its commit id) after fetching it, since a "
@@ -4459,11 +4516,17 @@ def _p10_head_bound(head, pin):
     return pin_matches(head, [pin])
 
 
+def _p10_near_pins(names):
+    """[(line, label, value)] for the brief's look-alike pin lines (near_pins: Reviewed head, Brief-Pin, a dash or
+    fullwidth form, in backticks or a table), which bind the declared head as a pin line does."""
+    return [(line, "look-alike pin label", pin) for line, pin in names.near_pins]
+
+
 def _p10_pins(names):
-    """[(line, label, value)] for the brief's pin lines, BRIEF-PIN and REVIEWED HEAD, in line order: the declared
-    head must be each of them (_p10_head_bound)."""
+    """[(line, label, value)] for the brief's pin lines, BRIEF-PIN and REVIEWED HEAD, and its look-alike pin lines
+    (_p10_near_pins), in line order: the declared head must be each of them (_p10_head_bound)."""
     return sorted([(line, "BRIEF-PIN", pin) for line, pin in names.brief_pins]
-                  + [(line, "REVIEWED HEAD", pin) for line, pin in names.reviewed_heads])
+                  + [(line, "REVIEWED HEAD", pin) for line, pin in names.reviewed_heads] + _p10_near_pins(names))
 
 
 def _p10_merged(fork, head):
@@ -4476,6 +4539,18 @@ def _p10_history_ok(repo, base, head, bases):
     return base not in bases and all(_p10_is_ancestor(repo, base, fork) for fork in bases)
 
 
+def _p10_branch_base_reason(repo, base, fork, head, target):
+    """Why a branch-mode base other than the merge base `fork` is refused, by where it lies: on the branch (after
+    the fork, an ancestor of the head) a diff leaves out the branch's earlier changes; on the protected line (an
+    ancestor of the target) it reads the protected line's own changes as the branch's; elsewhere it is not the
+    branch's contribution."""
+    if _p10_is_ancestor(repo, fork, base) and _p10_is_ancestor(repo, base, head):
+        return "it lies on the branch after the fork, so a diff against it leaves out the branch's earlier changes"
+    if _p10_is_ancestor(repo, base, target):
+        return "a diff against it reads the protected line's own changes as the branch's"
+    return "it is on neither the branch nor the protected line, so a diff against it is not the branch's contribution"
+
+
 def _p10_word(word):
     """A prose revision word without its trailing punctuation (P10_WORD_TRAIL)."""
     return word.rstrip(P10_WORD_TRAIL)
@@ -4486,16 +4561,53 @@ def _p10_revision_like(word):
     return hex_ref(word) or any(char.isascii() and char.isalpha() for char in word)
 
 
+def _p10_operand(word, code):
+    """Whether a word after a git diff, log or range-diff subcommand is read as a revision: any word in a code span
+    or a command line (`code`), only a commit id (hex_ref) in prose, so the prose after a command is never read."""
+    return code or hex_ref(word)
+
+
+def _p10_command_revisions(words, start, code):
+    """The first two revision words of the git command whose operands open at words[start]: options are skipped
+    (with the next word for a P10_OPTION_OPERANDS option), a P10_OPERAND_ENDS word or a word that is not an
+    operand (_p10_operand) ends them. The walk stops at its second revision, so it reads each word once."""
+    revisions, skip = [], False
+    for index in range(start, len(words)):
+        word = words[index]
+        if word in P10_OPERAND_ENDS:
+            break
+        if skip:
+            skip = False
+            continue
+        if word.startswith("-"):
+            skip = word in P10_OPTION_OPERANDS
+            continue
+        word = _p10_word(word)
+        if not _p10_operand(word, code):
+            break
+        revisions.append(word)
+        if len(revisions) == 2:
+            break
+    return revisions
+
+
 def _p10_prose_pairs(line):
-    """[(left, right)] for the comparisons a prose line names: each range form (P10_RANGE_RE) and each git diff,
-    log or range-diff command line's first two revision words, kept when either side may name a revision."""
+    """[(left, right)] for the comparisons a line names, kept when either side may name a revision: each range form
+    (P10_RANGE_RE), and the first two revisions (_p10_command_revisions) of each git diff, log or range-diff command
+    in a code span (between backticks, which bound it) or on a command line (the line opens with the command, after
+    indentation and an optional P10_PROMPT), or in prose only when both are commit ids. Each word is read once."""
     pairs = [(match.group(1), match.group(2)) for match in P10_RANGE_RE.finditer(line)]
-    words = line.replace("`", " ").split()
-    for index, word in enumerate(words[:-1]):
-        if (word == "git" or word.endswith("/git")) and words[index + 1] in P10_COMPARE_COMMANDS:
-            revisions = [_p10_word(other) for other in words[index + 2:] if not other.startswith("-")]
-            if len(revisions) >= 2 and ".." not in revisions[0] and ".." not in revisions[1]:
-                pairs.append((revisions[0], revisions[1]))
+    opening = line.lstrip()
+    opening = opening[len(P10_PROMPT):] if opening.startswith(P10_PROMPT) else opening
+    command_line = opening.split(" ", 1)[0] == "git" or opening.split(" ", 1)[0].endswith("/git")
+    for part, segment in enumerate(line.split("`")):
+        code = part % 2 == 1 or (part == 0 and command_line)
+        words = segment.split()
+        for index, word in enumerate(words[:-1]):
+            if (word == "git" or word.endswith("/git")) and words[index + 1] in P10_COMPARE_COMMANDS:
+                revisions = _p10_command_revisions(words, index + 2, code)
+                if len(revisions) == 2 and ".." not in revisions[0] and ".." not in revisions[1]:
+                    pairs.append((revisions[0], revisions[1]))
     return [pair for pair in pairs if _p10_revision_like(pair[0]) or _p10_revision_like(pair[1])]
 
 
@@ -4561,8 +4673,13 @@ def rule_p10(names, row, repo, require_diff=False, protected=None):
         raise CannotEvaluate("line {}: {} has a grafts file, which rewrites the parents every ancestry read sees; "
                              "lint from a clone without one".format(number, repo))
     ref, target = protected_target(repo, protected)
-    base = _p10_resolve(repo, base_value, "the {} base".format(DIFF_LABEL))
-    head = _p10_resolve(repo, head_value, "the {} head".format(DIFF_LABEL))
+    base = _p10_commit_id(repo, base_value, "the {} base".format(DIFF_LABEL))
+    head = _p10_commit_id(repo, head_value, "the {} head".format(DIFF_LABEL))
+    for line, label, pin in _p10_pins(names):
+        if not _p10_head_bound(head, pin):
+            raise CannotEvaluate("line {}: the {} head {} is the commit {}, not the {} {} of line {}; the declared "
+                                 "head is the brief's pinned revision".format(number, DIFF_LABEL, head_value, head,
+                                                                              label, pin, line))
     _p10_lines(repo, "history walk", ["rev-list", "--parents", head, target])
     bases = _p10_commits(repo, "merge base", ["merge-base", "--all", head, target], absent=True) or []
     excerpt = _excerpt(names.raw.split("\n")[number - 1])
@@ -4586,8 +4703,8 @@ def rule_p10(names, row, repo, require_diff=False, protected=None):
             return hard("the head {} is already on {}: empty branch contribution; use history mode".format(
                 head, where))
         if base != fork:
-            return hard("branch mode: the base {} is not {}, the merge base of the head {} and {}; a diff against "
-                        "it reads the protected line's own changes as the branch's".format(base, fork, head, where))
+            return hard("branch mode: the base {} is not {}, the merge base of the head {} and {}; {}".format(
+                base, fork, head, where, _p10_branch_base_reason(repo, base, fork, head, target)))
     elif mode == "history":
         if not _p10_history_ok(repo, base, head, bases):
             return hard("history mode: the base {} is not a strict ancestor of every merge base ({}) of the head {} "
@@ -11089,6 +11206,83 @@ def self_test(report_path=None):
                (1, True, True, False, False, True), (1, True, True, False, True, True)])
         check("preflight/p10-every-family", [p10(p10_incident, family=family) for family in ("beta", "gamma")],
               [p10_hard] * 2)
+        # a branch named as the short head (X2's first 7 hex digits, at W1, cut at M2) or as the short base (M2's,
+        # at F) is never read: the values are commit id prefixes, so the base M2 stays HARD for the pinned X2, with
+        # or without a BRIEF-PIN line; a value two commits begin with (git's listing stubbed) is CannotEvaluate
+        p10_clash = p7_base / "p10-clash"
+        shutil.copytree(p10_stale, p10_clash, symlinks=True)
+        p10_git(p10_clash, "update-ref", "refs/heads/" + p10_x2[:7], p10_w1)
+        p10_git(p10_clash, "update-ref", "refs/heads/" + p10_m2[:7], p10_f)
+
+        def p10_two_commits(repo, args):
+            """A _p10_read listing X1 and X2 for git rev-parse --disambiguate, genuine otherwise."""
+            if args[0] == "rev-parse" and args[1].startswith("--disambiguate="):
+                return subprocess.CompletedProcess(args, 0, "{}\n{}\n".format(p10_x1, p10_x2).encode("ascii"), b"")
+            return genuine_p10_read(repo, args)
+
+        def p10_ambiguous():
+            with _patched(_p10_read=p10_two_commits):
+                return p10(p10_ok)
+
+        p10_clash_cases = [p10_case(p10_line(p10_m2, p10_x2[:7]), repo=p10_clash, protected=p10_m2),
+                           p10_case("BRIEF-PIN: {}\n".format(p10_x2) + p10_line(p10_m2, p10_x2[:7]), repo=p10_clash,
+                                    protected=p10_m2),
+                           p10_case(p10_line(p10_m2[:7], p10_x2), repo=p10_clash, protected=p10_m2), p10_ambiguous]
+        check("preflight/p10-commit-id-not-ref",
+              [case() for case in p10_clash_cases] + [p10(p10_ok, p10_clash, protected=p10_m2)],
+              [p10_hard] * 3 + ["CannotEvaluate", p10_pass])
+        # a look-alike pin line (Reviewed head, Brief-Pin) binds the head as a pin line does
+        check("preflight/p10-near-pin-bound",
+              [p10("Reviewed head: {}\n".format(p10_x1) + p10_ok), p10("Reviewed head: {}\n".format(p10_x2) + p10_ok),
+               p10("Brief-Pin: {}\n".format(p10_x1) + p10_ok)], ["CannotEvaluate", p10_pass, "CannotEvaluate"])
+        # a look-alike label behind a bullet, an arrow, an item marker, a task box or an HTML tag, or with a Cyrillic
+        # letter, is CannotEvaluate alone and beside a declaration
+        p10_lookalikes_marked = [form.format(p10_m2, p10_x2) for form in (
+            "• BRIEF-DIFF: {} {} branch\n", "→ BRIEF-DIFF: {} {} branch\n", "a) BRIEF-DIFF: {} {} branch\n",
+            "- [x] BRIEF-DIFF: {} {} branch\n", "<b>BRIEF-DIFF:</b> {} {} branch\n", "BRІEF-DIFF: {} {} branch\n")]
+        check("preflight/p10-lookalike-marked-cannot-evaluate",
+              [p10(text) for text in p10_lookalikes_marked] + [p10(p10_ok + text) for text in p10_lookalikes_marked],
+              ["CannotEvaluate"] * (2 * len(p10_lookalikes_marked)))
+        # a branch-mode refusal says where the base lies: on the branch after the fork (X1), on the protected line
+        # (R before the fork, M2 after it), or on neither (O)
+
+        def p10_reasons():
+            said = [" ".join(p10_message(p10_line(base, p10_x2))) for base in (p10_x1, p10_r, p10_m2, p10_o)]
+            return ["leaves out the branch's earlier changes" in said[0],
+                    "protected line's own changes" in said[1], "protected line's own changes" in said[2],
+                    "on neither the branch nor the protected line" in said[3]]
+
+        check("preflight/p10-branch-base-reason", p10_reasons(), [True] * 4)
+        # a stale tracking ref the caller passes as --protected is read as it stands (the documented residual): with
+        # origin/main left at F, F passes as the base of W1 and the fetched M2 is HARD
+        check("preflight/p10-stale-ref-passed-decides",
+              [p10(p10_line(p10_f, p10_w1), p10_stale), p10(p10_line(p10_m2, p10_w1), p10_stale)],
+              [p10_pass, p10_hard])
+        # prose after a git command is not read as its operands: a code span bounds the command, prose reads only
+        # commit ids, and an option's value (-n 5) is no revision; a code span or a command line naming two other
+        # revisions is still ADVISORY
+        p10_operand_lines = ["Use `git diff --stat` to inspect changes.\n", "Use git diff --stat to inspect changes.\n",
+                             "Run `git log -n 5 main` first.\n", "`git diff main feature` is not the comparison.\n",
+                             "$ git diff {} {} -- a.py\n".format(p10_m2[:7], p10_x2[:7])]
+        check("preflight/p10-prose-operands", [p10(p10_ok + line) for line in p10_operand_lines],
+              [p10_pass] * 3 + [p10_advised] * 2)
+
+        def p10_prose_linear(unit, prefix=""):
+            """True when p10_prose on 64 KiB (`prefix`, `unit` repeated) takes at most LINEAR_FACTOR times as long as
+            on 8 KiB plus LINEAR_SLACK seconds, both timed here; otherwise the two times."""
+            def timed(size):
+                text = prefix + (unit * (size // len(unit) + 1))[:size]
+                began = time.perf_counter()
+                p10_prose(text, p10_f, p10_x2)
+                return time.perf_counter() - began
+            small, large = timed(1 << 13), timed(1 << 16)
+            return large <= LINEAR_FACTOR * small + LINEAR_SLACK or "64 KiB took {:.3f} s, 8 KiB {:.3f} s".format(
+                large, small)
+
+        # one 64 KiB word with no range separator, and one code span of many git diff commands, are read in linear
+        # time
+        check("preflight/p10-prose-range-linear", p10_prose_linear("a"), True)
+        check("preflight/p10-prose-command-linear", p10_prose_linear("git diff -x ", "`"), True)
         # each guard patched out flips its fixture
         check("revert/p10-red", *flip([p10_case(p10_incident)], [(0, [])], rule_p10=nothing))
         check("revert/p10-mode-history-ancestor-red", *flip(
@@ -11101,8 +11295,12 @@ def self_test(report_path=None):
         check("revert/p10-merged-head-red", *flip([p10_names_empty], [False], _p10_merged=lambda fork, head: False))
         check("revert/p10-multi-base-red", *flip([p10_case(p10_line(p10_k, p10_q), repo=p10_criss)], [p10_hard],
                                                  P10_SINGLE_BASE_MODES=()))
+        # with the hex check patched out and the values resolved as revisions (_p10_commit_id refuses a name too),
+        # main resolves to M2 and is HARD
         check("revert/p10-value-hex-red", *flip([p10_case(p10_line("main", p10_x2))], [p10_hard],
-                                                diff_value_ok=lambda value: True))
+                                                diff_value_ok=lambda value: True,
+                                                _p10_commit_id=lambda repo, value, what: _p10_resolve(repo, value,
+                                                                                                      what)))
         # with the grafts check patched out and git's grafts advice silenced, the graft moves the fork point to M2
         check("revert/p10-grafts-red", *flip(
             [p10_case(p10_ok, repo=p10_grafted)], [p10_hard], _p10_grafts=lambda repo: False,
@@ -11131,10 +11329,33 @@ def self_test(report_path=None):
         check("revert/p10-prose-not-hard-red", *flip(
             [p10_case(p10_ok + line) for line in p10_prose_lines], [(1, [("P10", "HARD"), ("P10", "INFO")])] * 3,
             P10_PROSE_SEVERITY="HARD"))
+        # resolved as a revision (git rev-parse --verify), the short head and base read the branches spelled as
+        # them: the wrong base passes, a BRIEF-PIN line still refuses the resolved head, and the stubbed ambiguous
+        # value passes
+        check("revert/p10-commit-id-only-red", *flip(
+            p10_clash_cases, [p10_pass, "CannotEvaluate", p10_pass, p10_pass],
+            _p10_commit_id=lambda repo, value, what: _p10_resolve(repo, value, what)))
+        check("revert/p10-near-pin-red", *flip(
+            [p10_case(label + ": {}\n".format(p10_x1) + p10_ok) for label in ("Reviewed head", "Brief-Pin")],
+            [p10_pass] * 2, _p10_near_pins=lambda names: []))
+        check("revert/p10-lookalike-marked-red", *flip(
+            [p10_case(text) for text in p10_lookalikes_marked], [(0, [])] * len(p10_lookalikes_marked),
+            P10_LOOKALIKE_RE=re.compile(r"[`|*_>#+\s\d.)-]*+(BRIEF[-_\s]*+DIFF)[`|*_\s]*+(?:[:=]|[0-9a-f]{7})", re.I),
+            P10_LABEL_CONFUSABLES={}))
+        check("revert/p10-branch-base-reason-red", *flip(
+            [p10_reasons], [[False, True, True, False]],
+            _p10_branch_base_reason=lambda repo, base, fork, head, target:
+            "a diff against it reads the protected line's own changes as the branch's"))
+        check("revert/p10-prose-operands-red", *flip(
+            [p10_case(p10_ok + line) for line in p10_operand_lines[1:3]], [p10_advised] * 2,
+            _p10_operand=lambda word, code: True, P10_OPTION_OPERANDS=()))
+        check("revert/p10-prose-range-linear-red", *flip(
+            [lambda: p10_prose_linear("a") is True], [False],
+            P10_RANGE_RE=re.compile(r"([0-9A-Za-z_/-]++)\.\.\.?+([0-9A-Za-z_/-]++)")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    # 283, or 282 where the uid reads a mode-000 file and revert/p9-pack-damage-red is recorded as skipped
-    check("revert/every-flip-ran", len(flipped), 283 if p9_locked else 282)
+    # 289, or 288 where the uid reads a mode-000 file and revert/p9-pack-damage-red is recorded as skipped
+    check("revert/every-flip-ran", len(flipped), 289 if p9_locked else 288)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
