@@ -411,3 +411,8 @@ reason = "Cross-reference to the check-fails-closed-on-unreadable (chkfcl) rule,
 corpus-id = "cnsprd"
 text = "A per-call hook cannot see sibling calls, so this ordering rests\non the caller."
 reason = "Scope note on enforcement: states why a per-call hook cannot enforce cnsprd.1; no obligation of its own."
+
+[[exempt]]
+corpus-id = "hiasrv"
+text = "The evidence-grounded-completion rule (evgcmp) governs when such a change is complete."
+reason = "Cross-reference to the evidence-grounded-completion rule (evgcmp), which owns completion of a change another tool parses; no obligation of its own."

@@ -16,3 +16,9 @@ map-iso-42001-broad: [A.6.2.4]
 
 Every substantive change is verified before it integrates by an independent adversarial pass, briefed to
 refute rather than confirm.
+
+A substantive change to a document that a gate or tool relies on as input, by quoting or matching its text
+or parsing its structure (a mere mention of the document is not such reliance), is reviewed together with
+each such gate or tool: the review brief names each one, found by searching the tooling for the document's
+path and for the text the change alters, and states what that search could miss; a review of the document
+alone is incomplete. The evidence-grounded-completion rule (evgcmp) governs when such a change is complete.
