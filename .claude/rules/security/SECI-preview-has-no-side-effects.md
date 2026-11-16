@@ -4,7 +4,7 @@ origin: pack
 family: security
 facet: SECI
 slug: preview-has-no-side-effects
-map-owasp-asi-tight: [ASI09]
+map-owasp-asi-broad: [ASI09]
 ---
 
 # A preview makes no change

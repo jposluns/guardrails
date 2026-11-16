@@ -6,11 +6,10 @@ tier: 10
 facet: INTEG
 secondary: [ACCUR, TRUST]
 slug: no-concealed-failure
-map-nist-airmf-tight: [GOVERN 4.3, MANAGE 4.3]
+map-nist-airmf-broad: [GOVERN 4.3, MANAGE 4.3]
 map-nist-80053-broad: [SA-11]
 map-iso-42001-broad: [A.6.2.4]
-map-iso-23894-tight: [6.7]
-map-iso-23894-broad: [A.12]
+map-iso-23894-broad: [6.7, A.12]
 ---
 
 # No concealed failure

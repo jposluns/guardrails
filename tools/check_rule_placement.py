@@ -105,7 +105,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _selftest_exit_report  # noqa: E402  (the execution report, finalized at interpreter exit)
 import _standards  # noqa: E402  (the module itself, so the self-test can patch its probe primitive)
 import gen_rules  # noqa: E402  for MAP_KEYS/SEQ_KEYS rebind under --root
-from gen_rules import parse_source, parse_source_text, derive  # noqa: E402
+from gen_rules import decode_rule_source, parse_source, parse_source_text, derive  # noqa: E402
 from _standards import close_chain, dir_or_absent, dir_present, follow_link, map_keys, open_chain  # noqa: E402
 from _standards import LINK_DANGLING, LINK_NOT_A_DIRECTORY, LINK_OUTSIDE_ROOT  # noqa: E402
 
@@ -208,8 +208,12 @@ def check_drift(f, rules, data=None):
     """Return a (code, detail) frontmatter-drift finding for file f, or None. Raises OSError on read.
     data, when given, is f's content already read through a bound descriptor (the gate's walk), parsed
     in place of reading f by name; content that is not UTF-8 is drift either way."""
+    # ADOPTER MODE (gen_rules FRONTMATTER): an adopter's rule may use CRLF line endings and comment
+    # lines (spaces, then `#`) in its frontmatter; the pack's own corpus stays LF-only with no comment line.
+    # conformance --self-test pins this call (case 7b).
     try:
-        fm = parse_source(f) if data is None else parse_source_text(data.decode("utf-8"), f.name)
+        fm = parse_source(f, adopter=True) if data is None else parse_source_text(
+            decode_rule_source(data, f.name, adopter=True), f.name, adopter=True)
     except ValueError as exc:
         return ("frontmatter-drift", str(exc))
     try:
@@ -1472,7 +1476,7 @@ def self_test(report_path=None):
             # is judged before its name, so it never reads as only a placement violation); and a
             # rule read through its descriptor is still parsed, so its frontmatter drift is found.
             rule = ("---\ncorpus-id: abcdef1\norigin: adopter\nfamily: aiqt\nslug: sample\ntier: 10\n"
-                    "facet: ACCUR\n---\n")
+                    "facet: ACCUR\n---\n\n# Sample\n\nA sample rule.\n")
             for cid, entry, kind in (
                     ("gate/rule-file-symlink-exits-2", "aiqt/10-ACCUR-sample.md", "rule"),
                     ("gate/rule-file-fifo-exits-2", "aiqt/10-ACCUR-sample.md", "fifo"),

@@ -11,8 +11,9 @@ with exit 2). This gate holds where it runs:
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
-     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py and
-     tools/check_verifier_delivery.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
+     tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py,
+     tools/check_verifier_delivery.py, tools/render_og_cards.py, tools/check_links.py and
+     opf/tools/check_opf_selftest_execution.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
      (the constant and both functions) and in the hooks dispatcher and its generated plugin copy (the constant
      and the probe) are each bound exactly once at module scope, by one top-level definition (an undecorated one
      for a function), and AST-identical (ast.dump, docstrings included) to the canonical text, so a call by that
@@ -29,7 +30,7 @@ with exit 2). This gate holds where it runs:
      _main_exit(lambda: _child_status_refusal_exit("opf.py") or main()) (the guard runs first, and _main_exit
      ends the process by raising SystemExit itself, never through sys.exit), and for every other,
      sys.exit(_child_status_refusal_exit("<basename>") or main()), except that of each SELF_TEST_COPIES entry
-     (the three opf/tools self_test modules above), which is exactly opf.py's canonical --self-test statement
+     (the four opf/tools self_test modules above), which is exactly opf.py's canonical --self-test statement
      (SELF_TEST_ENTRY, held to opf.py's own _ENTRY_STATEMENT) then that second form, with self_test bound once
      at module scope (the same count), by one undecorated top-level def whose first statement after the
      docstring is the guard call _child_status_refusal_exit("<basename>"); opf.py's _main_exit, which receives
@@ -78,11 +79,17 @@ with exit 2). This gate holds where it runs:
      value, a trailing comment, a tab in the indentation) is a finding, never a pass. Inside it, every value
      that names Python sits in a step with a run: key, after its job's one setup-python step and the probe
      step right after that; the probe step is exactly PROBE_STEP (its name, shell: bash and run, and no
-     other key, so no if: and no continue-on-error). In the five host-patch jobs (HOST_PATCH_JOBS) of the
-     one workflow HOST_PATCH_WORKFLOW only, the Python host pin step, exactly HOST_PIN_STEP, may stand
+     other key, so no if: and no continue-on-error). In the host-patch jobs (HOST_PATCH_JOBS: the OPF job,
+     the git-fixture-env core job and each shard job of the three git-fixture-env config lanes) of the one
+     workflow HOST_PATCH_WORKFLOW only, the Python host pin step, exactly HOST_PIN_STEP, may stand
      between setup-python and the probe (tools/check_python_host_pin.py holds that step as the one right
      after setup-python there), and the probe step right after it is then exactly HOST_PROBE_STEP (the same
-     shape, its name saying it runs after that gate); no other step, and no other spelling of either step,
+     shape, its name saying it runs after that gate); in the scope job SCOPE_JOB_ID of that same workflow
+     only, the fast-lane decision step, matched as SCOPE_DECIDE_STEP (tools/check_ci_parity.py pins that
+     job's whole body line for line), may stand there instead, because the decision must run before any
+     step that runs the checkout's own code, and the probe step right after it is then exactly
+     SCOPE_PROBE_STEP (the same shape, its name saying it runs after the decision); no other step, and no
+     other spelling of any of these steps,
      is passed over. The job carries
      no continue-on-error, and the
      interpreter words are python3 or python only. A value before the probe, in a step with no run: key or
@@ -100,10 +107,10 @@ with exit 2). This gate holds where it runs:
      is read from the repository root (R12). A word that does not resolve, or resolves to
      a path that is not self-guarded (a same-named file elsewhere included), is a finding. A directory the
      launcher walk cannot list is cannot-evaluate, and a declared launcher that is absent is a finding.
-  5. completeness: every entry point, enumerated from (a) every .py with a module-level __main__ guard
-     (tools/check_python_floor.py's own walk and EXCLUDED_TREES), (b) both runners' rosters, (c) every workflow's
-     python3 launch targets, (d) every registry runner (tools/selftest_checks.toml, through the execution gate's
-     schema validator) and (e) the hook registrations, is classified SELF (it carries the pinned guard),
+  5. completeness: every entry point, enumerated from (a) every tracked .py with a module-level __main__ guard
+     (tools/check_python_floor.py's tracked-file listing, git ls-files, outside its EXCLUDED_TREES), (b) both
+     runners' rosters, (c) every workflow's python3 launch targets, (d) every registry runner
+     (tools/selftest_checks.toml, through the execution gate's schema validator) and (e) the hook registrations, is classified SELF (it carries the pinned guard),
      NOT-APPLICABLE (a static scan of it and its local import closure finds no spawn or wait API), LAUNCHER (it
      reads a child's status and every declared launch is through a guarded launcher) or RESIDUAL (it reads one
      and has no declared launcher). A LAUNCHER or RESIDUAL entry's direct launch is unguarded, so each must be
@@ -136,7 +143,11 @@ in a variable or computed is pinned only by the expression the call spells (R13)
                                                        (tools/_selftest_exit_report.py)
 Exit: 0 every leg holds; 1 findings, each named; 2 cannot evaluate (an input missing, not a regular file,
 unreadable, not UTF-8, outside the parity reader's grammar or unparsable; a directory that cannot be listed or
-walked; an unresolved dynamic load), the live refusal, or usage. There is no warning tier.
+walked; an unresolved dynamic load), the live refusal, or usage. There is no warning tier. A self-test launch
+row is no verdict either way only when every part of it that fails is a launch that reached the canonical
+probe's CHILD_TIMEOUT bound (host load); any other failing part, a finished launch included, keeps the row a
+failure. With no row failed, the self-test prints SELF-TEST CANNOT EVALUATE naming each no-verdict row and exits
+2, never 0; any failed row still makes it exit 1.
 
 Disclosed residuals, not closed by this gate: R1 an ignore or SA_NOCLDWAIT set below Python after interpreter
 start (a native extension, ctypes, an embedding host) is not seen by the disposition read, and the fork probe runs
@@ -206,13 +217,14 @@ import re
 import shutil
 import tempfile
 import tomllib
+import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _selftest_exit_report  # noqa: E402  (the execution report, finalized at interpreter exit)
 import check_ci_parity  # noqa: E402  (the validated roster reader and loader)
 import check_entry_guard  # noqa: E402  (the non-blocking regular-file reader and the registry runners)
-import check_python_floor  # noqa: E402  (the shipped-entrypoint walk)
+import check_python_floor  # noqa: E402  (the shipped-entrypoint listing)
 import check_selftest_execution  # noqa: E402  (the registry schema)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -226,7 +238,9 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("opf/tools/_opf_import_complete.py", "_opf_import_complete.py"),
               ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
               ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"),
-              ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"))
+              ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"),
+              ("tools/render_og_cards.py", "render_og_cards.py"), ("tools/check_links.py", "check_links.py"),
+              ("opf/tools/check_opf_selftest_execution.py", "check_opf_selftest_execution.py"))
 # The CLI copy whose __main__ body is the one call _entry() (it raises its own exit rather than calling sys.exit):
 # its guard is the first statement of its one top-level _entry(), exactly ENTRY_GUARD.
 ENTRY_COPIES = (("tools/check_opf_declaration.py", "check_opf_declaration.py"),)
@@ -266,13 +280,13 @@ MAIN_EXIT_CALL = "status = main()"
 # exactly that statement then the CLI entry line, and the guard call SELF_TEST_GUARD is the first statement of
 # self_test() after its docstring, so the --self-test path refuses too.
 SELF_TEST_COPIES = ("opf/tools/_opf_adopt_complete.py", "opf/tools/_opf_adopt_state.py",
-                    "opf/tools/_opf_import_complete.py")
+                    "opf/tools/_opf_import_complete.py", "opf/tools/check_opf_selftest_execution.py")
 SELF_TEST_ENTRY = 'if sys.argv[1:] == ["--self-test"]:\n    sys.exit(self_test())\n'
 SELF_TEST_GUARD = '_child_status_refusal_exit("{}")'
 # The file whose _ENTRY_STATEMENT SELF_TEST_ENTRY copies: it must bind that name once, at the top level, to a string
 # that parses to the statement SELF_TEST_ENTRY parses to (entry_statement_finding), so the two cannot drift apart.
 ENTRY_STATEMENT_REL = "opf/tools/opf.py"
-HOOK_ANCHOR = "is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS"
+HOOK_ANCHOR = "is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS or is_note_only"
 HOOK_BLOCK = """unobservable = _child_status_refusal()
 if unobservable is not None:
     if not is_fail_open:
@@ -297,19 +311,37 @@ WORKFLOWS_REL = ".github/workflows"
 # The probe step, exactly: these keys in this order with these values, and no other key.
 PROBE_STEP = (("name", "Child exit status observable (before any gate)"), ("shell", "bash"),
               ("run", "python3 -I -B " + CANONICAL_REL))
-# The five host-patch jobs, the one workflow they live in and the Python host pin step, exactly:
+# The host-patch jobs, the one workflow they live in and the Python host pin step, exactly:
 # tools/check_python_host_pin.py holds that step as the one right after each of these jobs' setup-python
 # step, so in these jobs of HOST_PATCH_WORKFLOW only, exactly that step may stand between setup-python and
 # the probe, and the probe step right after it is HOST_PROBE_STEP, the probe with the name that placement
 # makes true. The exception is keyed on the workflow path and the job id together, so a job with any of these
-# ids in any other workflow gets the plain reading; the exactness of both steps is the bound.
+# ids in any other workflow gets the plain reading; the exactness of both steps is the bound. The jobs are the
+# OPF job, the git-fixture-env core job, then each shard job of the three git-fixture-env config lanes:
+# HOST_PATCH_SHARDS maps each lane's suite id to its shard count N, and shard K of N runs as job
+# <suite id>-shard-K-host-patch.
 HOST_PATCH_WORKFLOW = WORKFLOWS_REL + "/quality.yml"
-HOST_PATCH_JOBS = ("opf-host-patch", "git-fixture-env-core-host-patch", "git-fixture-env-config-combined-host-patch",
-                   "git-fixture-env-config-malformed-host-patch", "git-fixture-env-config-system-host-patch")
+HOST_PATCH_SHARDS = {"git-fixture-env-config-combined": 12, "git-fixture-env-config-malformed": 12,
+                     "git-fixture-env-config-system": 19}
+HOST_PATCH_JOBS = ("opf-host-patch", "git-fixture-env-core-host-patch",
+                   *("{}-shard-{}-host-patch".format(lane, shard) for lane, count in HOST_PATCH_SHARDS.items()
+                     for shard in range(1, count + 1)))
 HOST_PIN_STEP = (("name", "Python host pin"), ("shell", "bash"),
                  ("run", "python3 -I -B tools/check_python_host_pin.py"))
 HOST_PROBE_STEP = (("name", "Child exit status observable (after the host pin gate)"), ("shell", "bash"),
                    ("run", "python3 -I -B " + CANONICAL_REL))
+# The scope job of that same workflow runs its fast-lane decision step between setup-python and the
+# probe: the decision must run before any step that runs the checkout's own code (the probe runs
+# opf/tools/_child_status.py from the checkout), and tools/check_ci_parity.py pins that job's whole
+# body (SCOPE_JOB) line for line, so the exact body is that pin's bound. Here the step is matched by
+# its key/value pairs (its env: block and run: block scalar read as nested values), in the scope job
+# of HOST_PATCH_WORKFLOW only, and the probe step right after it is then SCOPE_PROBE_STEP, the probe
+# with the name that placement makes true.
+SCOPE_JOB_ID = "scope"
+SCOPE_DECIDE_STEP = (("name", "Site fast-lane scope decision"), ("id", "decide"), ("shell", "bash"),
+                     ("env", None), ("run", "|"))
+SCOPE_PROBE_STEP = (("name", "Child exit status observable (after the scope decision)"), ("shell", "bash"),
+                    ("run", "python3 -I -B " + CANONICAL_REL))
 SETUP_PYTHON_USES = "actions/setup-python@"
 JOBS_INDENT = 2
 # The closed workflow grammar (read_workflow): a key line, and the one-line scalars a value may be (quoted and
@@ -455,17 +487,18 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_standards_currency.py",
     "tools/check_standards_urls_live.py",
     "tools/check_version_monotonicity.py",
+    "tools/ci_site_scope.py",
     "tools/conformance.py",
     "tools/doctor.py",
     "tools/gen_adapters.py",
     "tools/gen_agents.py",
     "tools/gen_claude.py",
     "tools/gen_cursor.py",
+    "tools/gen_draft_site.py",
     "tools/gen_enforceability.py",
     "tools/gen_enforcement_register.py",
     "tools/gen_first_pin_demo.py",
     "tools/gen_hooks.py",
-    "tools/gen_install.py",
     "tools/gen_manifest.py",
     "tools/gen_mappings.py",
     "tools/gen_reference_facts.py",
@@ -500,6 +533,10 @@ DYNAMIC_LOADS_REVIEWED = (
     ("opf/tools/check_opf_init_contract.py", (),
      ("opf/tools/_opf_init_contract.py",), "runpy.run_path of opf/tools/_opf_init_contract.py inside the child "
      "script it launches, a string the scan does not parse"),
+    ("tools/_selftest_exit_report.py", ("loader.exec_module(main)",), (),
+     "the registered runner named in its own argv, run as __main__ by _bootstrap_main, which only the execution "
+     "gate's launch shim calls; every registered runner is an entry point classified on its own, so the row "
+     "follows nothing"),
     ("tools/check_opf_enforce_platforms.py",
      ("importlib.util.spec_from_file_location('_opf_enforce_platforms_hook', str(path))",
       "spec.loader.exec_module(module)"),
@@ -509,6 +546,9 @@ DYNAMIC_LOADS_REVIEWED = (
      ("tools/check_python_floor.py", "tools/check_python_host_pin.py"),
      "its own source, whole or with one check changed, and the python-floor gate's source for the names it "
      "shares, loaded in its self-test"),
+    ("tools/_selftest_exit_report.py", ("loader.exec_module(main)",), (),
+     "the registered self-test runner, loaded as __main__ by _bootstrap_main only in the child the execution "
+     "gate launches, never in a process that imports this module to arm its report"),
     ("tools/gen_crosswalk.py",
      ("importlib.util.spec_from_file_location('_crosswalk_fdopen_flip_' + flip_path.stem, flip_path)",
       "spec.loader.exec_module(reverted)"),
@@ -1042,7 +1082,9 @@ def workflow_findings(rel, text):
     every value that names Python must sit in a step with a run: key after its job's one setup-python step and
     the probe step right after that, which is exactly PROBE_STEP; in a HOST_PATCH_JOBS job of the workflow
     HOST_PATCH_WORKFLOW only, the step right after setup-python may instead be exactly HOST_PIN_STEP, with
-    exactly HOST_PROBE_STEP right after it; the
+    exactly HOST_PROBE_STEP right after it; in the SCOPE_JOB_ID job of that workflow only, it may instead
+    be the fast-lane decision step, matched as SCOPE_DECIDE_STEP, with exactly SCOPE_PROBE_STEP right
+    after it; the
     job carries no continue-on-error, and every
     interpreter word is one of PLAIN_INTERPRETERS."""
     try:
@@ -1067,14 +1109,18 @@ def workflow_findings(rel, text):
             out.append("{}: job {} launches Python with {} setup-python steps, not one".format(rel, job, len(setups)))
             continue
         probe = setups[0] + 1
-        pin, want_probe = None, PROBE_STEP
+        pin, want_probe, before = None, PROBE_STEP, "setup-python"
         if (rel == HOST_PATCH_WORKFLOW and job in HOST_PATCH_JOBS and probe < len(steps)
                 and _step_pairs(steps[probe]) == HOST_PIN_STEP):
             pin, probe, want_probe = probe, probe + 1, HOST_PROBE_STEP
+            before = "the Python host pin step"
+        elif (rel == HOST_PATCH_WORKFLOW and job == SCOPE_JOB_ID and probe < len(steps)
+                and _step_pairs(steps[probe]) == SCOPE_DECIDE_STEP):
+            pin, probe, want_probe = probe, probe + 1, SCOPE_PROBE_STEP
+            before = "the scope decision step"
         if probe == len(steps) or _step_pairs(steps[probe]) != want_probe:
             out.append("{}: job {}: the step right after {} is not the child-status probe step exactly "
-                       "(its name, shell: bash and run, and no other key)".format(
-                           rel, job, "setup-python" if pin is None else "the Python host pin step"))
+                       "(its name, shell: bash and run, and no other key)".format(rel, job, before))
             continue
         if any(key == "continue-on-error" for _index, key, _value, _child in entries):
             out.append("{}: job {} launches Python and carries continue-on-error, which would mask a probe "
@@ -1972,6 +2018,19 @@ def _inputs():
     host_probe_lines = ["{}: {}".format(key, value) for key, value in HOST_PROBE_STEP]
     host_probe = ("      - " + host_probe_lines[0] + "\n"
                   + "".join("        " + line + "\n" for line in host_probe_lines[1:]))
+    # The scope job's decision step, as SCOPE_DECIDE_STEP matches it (its env: block and run:
+    # block scalar are nested values, so their contents are the parity pin's bound, not this
+    # gate's), and the probe named for the placement right after it.
+    scope_decide = ("      - name: Site fast-lane scope decision\n"
+                    "        id: decide\n"
+                    "        shell: bash\n"
+                    "        env:\n"
+                    "          EVENT_NAME: event\n"
+                    "        run: |\n"
+                    '          python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide\n')
+    scope_probe_lines = ["{}: {}".format(key, value) for key, value in SCOPE_PROBE_STEP]
+    scope_probe = ("      - " + scope_probe_lines[0] + "\n"
+                   + "".join("        " + line + "\n" for line in scope_probe_lines[1:]))
     # Each a workflow the closed grammar does not classify at one line: an anchor, a merge key, a tag, a folded
     # value, a flow mapping, a repeated key, a tab, a literal line less indented than its first, a document
     # marker, a quoted scalar continued, a step that is not a mapping, and a trailing comment.
@@ -2028,6 +2087,18 @@ def _inputs():
                            + "        timeout-minutes: 5\n" + host_probe + gate + launch,
         "host-pin-old-probe": "jobs:\n  opf-host-patch:\n" + head + setup + pin_step + step + gate + launch,
         "host-probe-ahead": "jobs:\n  opf-host-patch:\n" + head + setup + step + pin_step + gate + launch,
+        # The order the scope job of quality.yml runs: the fast-lane decision step right after
+        # setup-python, the probe named for that placement right after it; the same order under
+        # any other job id, or in any other workflow, is a finding. The departures: the decision
+        # followed by the probe named for the plain placement, and the probe ahead of the
+        # decision, which this gate accepts (the decision's own placement is the parity pin's to
+        # hold).
+        "scope-decide-before-probe": "jobs:\n  scope:\n" + head + setup + scope_decide + scope_probe
+                                     + gate + launch,
+        "scope-decide-other-job": "jobs:\n  lone:\n" + head + setup + scope_decide + scope_probe
+                                  + gate + launch,
+        "scope-decide-old-probe": "jobs:\n  scope:\n" + head + setup + scope_decide + step + gate + launch,
+        "scope-probe-ahead": "jobs:\n  scope:\n" + head + setup + step + scope_decide + gate + launch,
         "later-job-key": "jobs:\n  one:\n" + head + setup + step + "   two:\n" + head + gate + launch,
         "targets-hash": guarded + gate + "        run: echo a#b; python3 -I -B tools/child.py\n",
         "block-hash-line": "jobs:\n  lone:\n" + head + gate + "        run: |\n          echo x\\\n"
@@ -2044,7 +2115,7 @@ def _inputs():
                          + 'python3 -I -B "$here/../../../../opf/tools/opf.py"\npython3 -I -B "$OPF_DIR/opf.py"\n',
         "shell-same-name": "#!/bin/sh\n" + here_line + "python3 -I -B tools/opf.py\n"
                            'opf_tool=${OPF_TOOL:-$here/../tools/opf.py}\n',
-        "shell-here-unbound": _swap(real[SHELL_REAL[0]], here_line, "here=$(pwd)\n"),
+        "shell-here-unbound": _swap(real[SHELL_REAL[0]], 'here=$(CDPATH= cd -- "$dir" && pwd)', "here=$(pwd)"),
         "shell-dir-unbound": _swap(real[SHELL_REAL[1]], 'dir=$(dirname -- "$0")', "dir=$(pwd)"),
         "hooks": real[HOOKS_JSON_REL],
         "hooks-unregistered": _swap(real[HOOKS_JSON_REL], '"absolute_paths"\n', '"no_such_mode"\n'),
@@ -2185,10 +2256,16 @@ def _vectors(module, trees, texts, canonical_tree):
     def quality_workflow(key):
         return m.workflow_findings(m.HOST_PATCH_WORKFLOW, texts[key])
 
-    # The five host-patch job ids, written out so that an id added to or dropped from HOST_PATCH_JOBS turns a
-    # vector red; each id is held by the host-pin order under it, accepted in quality.yml only.
-    host_jobs = ("opf-host-patch", "git-fixture-env-core-host-patch", "git-fixture-env-config-combined-host-patch",
-                 "git-fixture-env-config-malformed-host-patch", "git-fixture-env-config-system-host-patch")
+    # The host-patch job ids, built here from their own literal lane table (suite id to shard count), never
+    # from HOST_PATCH_JOBS or HOST_PATCH_SHARDS, so that an id added to or dropped from HOST_PATCH_JOBS turns a
+    # vector red; each id is held by the host-pin order under it, accepted in quality.yml only. Each config
+    # lane's vector holds every shard job of that lane, so a shard dropped anywhere in a lane is red.
+    host_shards = {"git-fixture-env-config-combined": 12, "git-fixture-env-config-malformed": 12,
+                   "git-fixture-env-config-system": 19}
+    host_lanes = {lane: tuple("{}-shard-{}-host-patch".format(lane, shard) for shard in range(1, count + 1))
+                  for lane, count in host_shards.items()}
+    host_jobs = ("opf-host-patch", "git-fixture-env-core-host-patch",
+                 *(job for jobs in host_lanes.values() for job in jobs))
 
     def host_job_held(job):
         text = texts["host-pin-before-probe"].replace("opf-host-patch", job, 1)
@@ -2341,9 +2418,20 @@ def _vectors(module, trees, texts, canonical_tree):
         ("launchers/workflow-host-pin-jobs-exact", lambda: sorted(m.HOST_PATCH_JOBS) == sorted(host_jobs)),
         ("launchers/workflow-host-pin-job-opf", lambda: host_job_held(host_jobs[0])),
         ("launchers/workflow-host-pin-job-core", lambda: host_job_held(host_jobs[1])),
-        ("launchers/workflow-host-pin-job-config-combined", lambda: host_job_held(host_jobs[2])),
-        ("launchers/workflow-host-pin-job-config-malformed", lambda: host_job_held(host_jobs[3])),
-        ("launchers/workflow-host-pin-job-config-system", lambda: host_job_held(host_jobs[4])),
+        ("launchers/workflow-host-pin-job-config-combined",
+         lambda: all(host_job_held(job) for job in host_lanes["git-fixture-env-config-combined"])),
+        ("launchers/workflow-host-pin-job-config-malformed",
+         lambda: all(host_job_held(job) for job in host_lanes["git-fixture-env-config-malformed"])),
+        ("launchers/workflow-host-pin-job-config-system",
+         lambda: all(host_job_held(job) for job in host_lanes["git-fixture-env-config-system"])),
+        ("launchers/workflow-scope-decide-before-probe", lambda: not quality_workflow("scope-decide-before-probe")),
+        ("launchers/workflow-scope-decide-other-job", lambda: quality_workflow("scope-decide-other-job")
+         == [not_probe_in(m.HOST_PATCH_WORKFLOW, "lone")]),
+        ("launchers/workflow-scope-decide-other-workflow", lambda: workflow("scope-decide-before-probe")
+         == [not_probe_in("w", "scope")]),
+        ("launchers/workflow-scope-decide-old-probe-name", lambda: quality_workflow("scope-decide-old-probe")
+         == [not_probe_in(m.HOST_PATCH_WORKFLOW, "scope", "the scope decision step")]),
+        ("launchers/workflow-scope-probe-ahead-of-decide", lambda: not quality_workflow("scope-probe-ahead")),
         ("launchers/workflow-block-hash-line", lambda: workflow("block-hash-line")
          == ["w:9: job lone: names Python before the child-status probe step"]),
         ("launchers/workflow-defaults-after-steps", lambda: workflow("defaults-after-steps") == ["w:14: " + outside]),
@@ -2600,7 +2688,7 @@ MUTANTS = (
      "rel == HOST_PATCH_WORKFLOW and probe", "launchers/workflow-host-pin-other-job"),
     ("workflow-host-pin-workflow-scope", "rel == HOST_PATCH_WORKFLOW and job in HOST_PATCH_JOBS",
      "job in HOST_PATCH_JOBS", "launchers/workflow-host-pin-opf-job-other-workflow"),
-    ("workflow-host-pin-workflow-true", "if (rel == HOST_PATCH_WORKFLOW and", "if (True and",
+    ("workflow-host-pin-workflow-true", "        if (rel == HOST_PATCH_WORKFLOW and", "        if (True and",
      "launchers/workflow-host-pin-git-job-other-workflow"),
     ("workflow-host-pin-prefix", "_step_pairs(steps[probe]) == HOST_PIN_STEP",
      "_step_pairs(steps[probe])[:len(HOST_PIN_STEP)] == HOST_PIN_STEP",
@@ -2613,13 +2701,29 @@ MUTANTS = (
     ("host-patch-job-extra", '("opf-host-patch", ', '("opf-host-patch", "git-fixture-env-host-patch", ',
      "launchers/workflow-host-pin-jobs-exact"),
     ("host-patch-job-opf", '("opf-host-patch", ', "(", "launchers/workflow-host-pin-job-opf"),
-    ("host-patch-job-core", '"git-fixture-env-core-host-patch", ', "", "launchers/workflow-host-pin-job-core"),
-    ("host-patch-job-config-combined", '"git-fixture-env-config-combined-host-patch",', "",
+    ("host-patch-job-core", '"git-fixture-env-core-host-patch",', "", "launchers/workflow-host-pin-job-core"),
+    ("host-patch-job-config-combined", '{"git-fixture-env-config-combined": 12, ', "{",
      "launchers/workflow-host-pin-job-config-combined"),
-    ("host-patch-job-config-malformed", '"git-fixture-env-config-malformed-host-patch", ', "",
+    ("host-patch-job-config-malformed", '"git-fixture-env-config-malformed": 12,', "",
      "launchers/workflow-host-pin-job-config-malformed"),
-    ("host-patch-job-config-system", ', "git-fixture-env-config-system-host-patch")', ")",
+    ("host-patch-job-config-system", '"git-fixture-env-config-system": 19}', "}",
      "launchers/workflow-host-pin-job-config-system"),
+    # One shard job dropped from a lane: the last (the shard count reduced) and one in the middle.
+    ("host-patch-job-last-shard", '"git-fixture-env-config-system": 19}', '"git-fixture-env-config-system": 18}',
+     "launchers/workflow-host-pin-job-config-system"),
+    ("host-patch-job-middle-shard", "for shard in range(1, count + 1)))",
+     'for shard in range(1, count + 1) if (lane, shard) != ("git-fixture-env-config-malformed", 6)))',
+     "launchers/workflow-host-pin-job-config-malformed"),
+    ("workflow-scope-decide-accept",
+     "elif (rel == HOST_PATCH_WORKFLOW and job == SCOPE_JOB_ID and probe < len(steps)\n"
+     "                and _step_pairs(steps[probe]) == SCOPE_DECIDE_STEP):",
+     "elif False:", "launchers/workflow-scope-decide-before-probe"),
+    ("workflow-scope-decide-job", "rel == HOST_PATCH_WORKFLOW and job == SCOPE_JOB_ID and probe",
+     "rel == HOST_PATCH_WORKFLOW and probe", "launchers/workflow-scope-decide-other-job"),
+    ("workflow-scope-decide-workflow", "elif (rel == HOST_PATCH_WORKFLOW and job == SCOPE_JOB_ID",
+     "elif (job == SCOPE_JOB_ID", "launchers/workflow-scope-decide-other-workflow"),
+    ("workflow-scope-probe-name", "pin, probe, want_probe = probe, probe + 1, SCOPE_PROBE_STEP",
+     "pin, probe, want_probe = probe, probe + 1, PROBE_STEP", "launchers/workflow-scope-decide-old-probe-name"),
     ("workflow-setup", "        if len(setups) != 1:\n", "        if False:\n", "launchers/workflow-no-setup"),
     ("workflow-py-word", "return bool(PYTHON_WORD_RE.search(text) or PY_WORD_RE.search(text))",
      "return bool(PYTHON_WORD_RE.search(text))", "launchers/workflow-names-py-file"),
@@ -2712,7 +2816,7 @@ MUTANTS = (
 UNMUTATED = {"copies/real-copies-identical", "entries/real-entries-pass", "entries/entry-function-real-pass",
              "launchers/real-launchers-pass",
              "launchers/real-workflows-in-grammar", "launchers/workflow-host-probe-ahead-of-pin",
-             "completeness/scan-clean-module"}
+             "launchers/workflow-scope-probe-ahead-of-decide", "completeness/scan-clean-module"}
 
 
 def _load_mutant(source, directory, number):
@@ -2746,8 +2850,84 @@ def _copy(rel, base, text=None):
     return path
 
 
-def _behaviour(probe, base):
-    """[(check id, ok, detail)] for every behaviour, control and guard-removed vector."""
+# What the canonical probe's run_child and through_bash put in a launch result when subprocess.TimeoutExpired
+# ended the launch at their CHILD_TIMEOUT bound.
+LAUNCH_TIMED_OUT = "launch failed (TimeoutExpired)"
+
+
+def _timed_out(got):
+    """Whether got, one launch result, is exactly what the probe returns for a launch that reached its
+    CHILD_TIMEOUT bound: (LAUNCH_TIMED_OUT, "", "") from run_child or (None, LAUNCH_TIMED_OUT, "") from
+    through_bash. Any other launch failure (an OSError) is not."""
+    return isinstance(got, tuple) and got in ((LAUNCH_TIMED_OUT, "", ""), (None, LAUNCH_TIMED_OUT, ""))
+
+
+def _verdict(*parts):
+    """A launch row's verdict from its parts, each (whether it holds, the one launch result it reads), made at
+    the row's own test: True when every part holds; None (no verdict) when every part that fails read a launch
+    that reached its time bound, since under host load that launch said nothing about the guard its row tests;
+    otherwise False, so a failing finished launch keeps its row a failure whatever else in the row timed out."""
+    failing = [got for ok, got in parts if not ok]
+    if not failing:
+        return True
+    return None if all(_timed_out(got) for got in failing) else False
+
+
+def _any_timeout_verdict(*parts):
+    """A rule the gate must not use, the flip for verdict/finished-failure-beside-timeout-fails: a failed row
+    is no verdict when any launch in it timed out, which hides a finished launch that failed beside it."""
+    if all(ok for ok, _got in parts):
+        return True
+    return None if any(_timed_out(got) for _ok, got in parts) else False
+
+
+def _timeout_fails_verdict(*parts):
+    """A rule the gate must not use, the flip for verdict/all-timed-out-no-verdict: a launch that reached its
+    time bound is a failure, so host load reads as a regression."""
+    return all(ok for ok, _got in parts)
+
+
+def _finished_in_mixed(disposition, argv):
+    """The launches verdict/finished-failure-beside-timeout-fails lets finish and fail: the first route of
+    control/audit-sees-every-launch, and behaviour/fail-open-restores's run under an inherited ignore."""
+    return (argv[-1] == AUDIT_CONTROL_LAUNCHES[0][0] and argv[-4].endswith("/audit/driver.py")
+            or disposition == "ignore" and argv[-2:] == [str(ROOT / HOOK_COPIES[0]), "diff_wall_stop"])
+
+
+def _finished_none(disposition, argv):
+    """verdict/all-timed-out-no-verdict lets no launch finish: every one reaches its time bound."""
+    return False
+
+
+def _verdict_row(probe, base, finished, failures, flip):
+    """(ok, detail) for a verdict row: _behaviour on stand-in launches, none of them run, where each launch
+    finished(disposition, argv) picks returns a finished failure and every other launch the result the probe
+    gives at its CHILD_TIMEOUT bound, must give False to each row in failures and None to every other row; with
+    flip, a rule the gate must not use, in place of _verdict, it must give some row another verdict."""
+    def run_child(args, stdin=""):
+        return LAUNCH_TIMED_OUT, "", ""
+
+    def through_bash(disposition, argv, stdin="", cwd=None, pass_fds=()):
+        if finished(disposition, argv):
+            return 2, "", "a launch that finished and failed\n"
+        return None, LAUNCH_TIMED_OUT, ""
+
+    stand_in = types.SimpleNamespace(TRAMPOLINE=probe.TRAMPOLINE, refusal_text=probe.refusal_text,
+                                     run_child=run_child, through_bash=through_bash)
+    wrong, flip_wrong = [], []
+    for rule, found in ((None, wrong), (flip, flip_wrong)):
+        rows = _behaviour(stand_in, Path(base) / ("flipped" if rule else "kept"), rule)
+        found.extend((check_id, ok) for check_id, ok, _detail in rows
+                     if ok is not (False if check_id in failures else None))
+        found.extend((check_id, "no row") for check_id in failures if check_id not in [row[0] for row in rows])
+    return not wrong and bool(flip_wrong), dict(wrong=wrong, flip_caught=bool(flip_wrong))
+
+
+def _behaviour(probe, base, verdict=None):
+    """[(check id, ok, detail)] for every behaviour, control and guard-removed vector; ok is the row's
+    _verdict (verdict, when given, in its place), None when every failing part read a launch that reached its
+    time bound."""
+    verdict = _verdict if verdict is None else verdict
     out = []
     python = [sys.executable, "-I", "-B"]
     via = probe.through_bash
@@ -2778,7 +2958,7 @@ def _behaviour(probe, base):
                                  "_opf_declaration.py"),
                                 ("behaviour/declaration-gate-refuses", "tools/check_opf_declaration.py",
                                  "check_opf_declaration.py")):
-        out.append((check_id, refused(results[rel][0], name), results[rel][0]))
+        out.append((check_id, verdict((refused(results[rel][0], name), results[rel][0])), results[rel][0]))
     # The other CLI copies under an inherited ignore, each read by its refusal line, not its exit status alone: each
     # refuses at its entry line, and each opf/tools self_test module on its --self-test path too, there at the first
     # statement of self_test().
@@ -2793,7 +2973,7 @@ def _behaviour(probe, base):
             ("behaviour/must-deliver-refuses", "tools/check_must_deliver.py", ()),
             ("behaviour/verifier-delivery-refuses", "tools/check_verifier_delivery.py", ())):
         got = via("ignore", python + [str(ROOT / rel)] + list(args), cwd=str(ROOT))
-        out.append((check_id, refused(got, Path(rel).name), got))
+        out.append((check_id, verdict((refused(got, Path(rel).name), got)), got))
     for check_id, rel, marker in (("control/opf-cli-default-runs", "opf/tools/opf.py", "opf: the OPFiles"),
                                   ("control/launcher-cli-default-runs", "tools/check_selftest_execution.py",
                                    "usage: check_selftest_execution.py"),
@@ -2803,7 +2983,7 @@ def _behaviour(probe, base):
                                    "usage: _opf_declaration.py"),
                                   ("control/declaration-gate-default-runs", "tools/check_opf_declaration.py",
                                    "usage: check_opf_declaration.py")):
-        out.append((check_id, ran(results[rel][1], 2, marker), results[rel][1]))
+        out.append((check_id, verdict((ran(results[rel][1], 2, marker), results[rel][1])), results[rel][1]))
 
     pre = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Read",
                       "tool_input": {"file_path": str(ROOT / README_REL)}, "cwd": str(ROOT)})
@@ -2815,17 +2995,23 @@ def _behaviour(probe, base):
     for check_id, rel in (("behaviour/pretool-refuses", HOOK_COPIES[0]),
                           ("behaviour/plugin-pretool-refuses", HOOK_COPIES[1])):
         got = via("ignore", python + [str(ROOT / rel), "absolute_paths"], stdin=pre, cwd=str(ROOT))
-        out.append((check_id, got == (2, "", note), got))
+        out.append((check_id, verdict((got == (2, "", note), got)), got))
     got = via("default", python + [str(ROOT / HOOK_COPIES[0]), "absolute_paths"], stdin=pre, cwd=str(ROOT))
-    out.append(("control/pretool-default-runs", got[0] == 0 and got[2] == "", got))
+    out.append(("control/pretool-default-runs", verdict((got[0] == 0 and got[2] == "", got)), got))
     default = via("default", python + [str(ROOT / HOOK_COPIES[0]), "diff_wall_stop"], stdin=stop, cwd=str(ROOT))
     ignored = via("ignore", python + [str(ROOT / HOOK_COPIES[0]), "diff_wall_stop"], stdin=stop, cwd=str(ROOT))
-    out.append(("control/fail-open-default-runs", default[0] == 0 and default[1] != "" and default[2] == "", default))
-    out.append(("behaviour/fail-open-restores", ignored == (0, default[1], restore), (default, ignored)))
+    out.append(("control/fail-open-default-runs",
+                verdict((default[0] == 0 and default[1] != "" and default[2] == "", default)), default))
+    # The ignored run must print what the default run printed: a default run that reached its time bound is
+    # this row's own failing part, and the ignored run is then held to its exit status and stderr alone.
+    out.append(("behaviour/fail-open-restores", verdict(
+        (not _timed_out(default), default),
+        (ignored[0] == 0 and ignored[2] == restore and (_timed_out(default) or ignored[1] == default[1]), ignored)),
+        (default, ignored)))
     got = probe.run_child(["-c", probe.TRAMPOLINE, "ignore"] + python + [
         "-c", "import subprocess, sys; print(subprocess.run(sys.argv[1:], capture_output=True).returncode)"]
         + python + [str(ROOT / CANONICAL_REL)])
-    out.append(("behaviour/python-reader-loses-refusal", got[:2] == (0, "0\n"), got))
+    out.append(("behaviour/python-reader-loses-refusal", verdict((got[:2] == (0, "0\n"), got)), got))
 
     for check_id, rel, marker, tail_marker, rc_line in (
             ("behaviour/runner-first-gate-fails", LOCAL_RUNNER, "GATE FAILED: child-status (exit 2)",
@@ -2837,10 +3023,10 @@ def _behaviour(probe, base):
         runner = _copy(rel, tree, _truncated_runner((ROOT / rel).read_text(encoding="utf-8"), tail_marker))
         ignored = via("ignore", ["bash", str(runner)], cwd=str(tree))
         default = via("default", ["bash", str(runner)], cwd=str(tree))
-        out.append((check_id, ignored[0] == 1 and marker in ignored[1] and rc_line in ignored[1]
-                    and refusal("_child_status.py") in ignored[2], ignored))
+        out.append((check_id, verdict((ignored[0] == 1 and marker in ignored[1] and rc_line in ignored[1]
+                                       and refusal("_child_status.py") in ignored[2], ignored)), ignored))
         out.append((check_id.replace("behaviour/", "control/").replace("-first-gate-fails", "-default-passes"),
-                    default[0] == 0 and "GATE FAILED" not in default[1], default))
+                    verdict((default[0] == 0 and "GATE FAILED" not in default[1], default)), default))
 
     # Each guard removed, computed by running: the vector above would then be red.
     guardless = Path(base) / "guardless"
@@ -2848,30 +3034,33 @@ def _behaviour(probe, base):
         (ROOT / "tools/check_selftest_execution.py").read_text(encoding="utf-8"),
         CLI_ENTRY.format("check_selftest_execution.py"), "sys.exit(main())"))
     got = via("ignore", python + [str(selftest)], cwd=str(guardless))
-    out.append(("revert/launcher-guard-removed-red", not refused(got, "check_selftest_execution.py")
-                and "usage: check_selftest_execution.py" in got[2], got))
+    out.append(("revert/launcher-guard-removed-red", verdict((not refused(got, "check_selftest_execution.py")
+                                                              and "usage: check_selftest_execution.py" in got[2], got)),
+                got))
     opf_tree = Path(base) / "guardless-opf"
     shutil.copytree(ROOT / "opf" / "tools", opf_tree / "opf" / "tools",
                     ignore=shutil.ignore_patterns("__pycache__"))
     opf = _copy("opf/tools/opf.py", opf_tree, _swap((ROOT / "opf/tools/opf.py").read_text(encoding="utf-8"),
                                                     cli_entry("opf.py"), "_main_exit(lambda: main())"))
     got = via("ignore", python + [str(opf), "--help"], cwd=str(opf_tree))
-    out.append(("revert/opf-guard-removed-red", not refused(got, "opf.py") and "opf: the OPFiles" in got[2], got))
+    out.append(("revert/opf-guard-removed-red",
+                verdict((not refused(got, "opf.py") and "opf: the OPFiles" in got[2], got)), got))
     declaration_module = _copy("opf/tools/_opf_declaration.py", opf_tree, _swap(
         (ROOT / "opf/tools/_opf_declaration.py").read_text(encoding="utf-8"), CLI_ENTRY.format("_opf_declaration.py"),
         "sys.exit(main())"))
     got = via("ignore", python + [str(declaration_module), "--usage"], cwd=str(opf_tree))
-    out.append(("revert/opf-declaration-guard-removed-red", not refused(got, "_opf_declaration.py")
-                and "usage: _opf_declaration.py" in got[2], got))
+    out.append(("revert/opf-declaration-guard-removed-red", verdict((not refused(got, "_opf_declaration.py")
+                                                                     and "usage: _opf_declaration.py" in got[2], got)),
+                got))
     hook = _copy(HOOK_COPIES[0], guardless, _swap((ROOT / HOOK_COPIES[0]).read_text(encoding="utf-8"),
                                                   "    unobservable = _child_status_refusal()\n",
                                                   "    unobservable = None\n"))
     got = via("ignore", python + [str(hook), "absolute_paths"], stdin=pre, cwd=str(ROOT))
-    out.append(("revert/hook-guard-removed-red", got[0] == 0 and "failing closed" not in got[2], got))
+    out.append(("revert/hook-guard-removed-red", verdict((got[0] == 0 and "failing closed" not in got[2], got)), got))
     canonical = _copy(CANONICAL_REL, guardless, _swap((ROOT / CANONICAL_REL).read_text(encoding="utf-8"),
                                                       CLI_ENTRY.format("_child_status.py"), "sys.exit(main())"))
     got = via("ignore", python + [str(canonical)], cwd=str(guardless))
-    out.append(("revert/probe-guard-removed-red", got[0] == 0 and got[1].startswith("PASS"), got))
+    out.append(("revert/probe-guard-removed-red", verdict((got[0] == 0 and got[1].startswith("PASS"), got)), got))
     gate_tree = Path(base) / "guardless-gate"
     for rel in ("tools/_selftest_exit_report.py", "tools/check_ci_parity.py", "tools/check_entry_guard.py",
                 "tools/check_python_floor.py", "tools/check_selftest_execution.py", CANONICAL_REL):
@@ -2879,20 +3068,22 @@ def _behaviour(probe, base):
     gate = _copy(COVERAGE_REL, gate_tree, _swap(Path(__file__).read_text(encoding="utf-8"),
                                                 "    if _live_refusal():\n        return 2\n", ""))
     got = via("ignore", python + [str(gate), "--usage"], cwd=str(gate_tree))
-    out.append(("revert/coverage-guard-removed-red", not refused(got, NAME)
-                and "usage: check_child_status_coverage.py" in got[2], got))
+    out.append(("revert/coverage-guard-removed-red", verdict((not refused(got, NAME)
+                                                              and "usage: check_child_status_coverage.py" in got[2],
+                                                              got)), got))
     declaration_gate = _copy("tools/check_opf_declaration.py", gate_tree, _swap(
         (ROOT / "tools/check_opf_declaration.py").read_text(encoding="utf-8"),
         "    " + ENTRY_GUARD.format("check_opf_declaration.py") + "\n", ""))
     got = via("ignore", python + [str(declaration_gate), "--usage"], cwd=str(gate_tree))
-    out.append(("revert/declaration-gate-guard-removed-red", not refused(got, "check_opf_declaration.py")
-                and "usage: check_opf_declaration.py" in got[2], got))
+    out.append(("revert/declaration-gate-guard-removed-red", verdict((not refused(got, "check_opf_declaration.py")
+                                                                      and "usage: check_opf_declaration.py" in got[2],
+                                                                      got)), got))
     tree = Path(base) / "guardless-runner"
     _copy(CANONICAL_REL, tree)
     text = _truncated_runner((ROOT / LOCAL_RUNNER).read_text(encoding="utf-8"), 'if [ "$failed" -ne 0 ]; then')
     runner = _copy(LOCAL_RUNNER, tree, _swap(text, RUNNER_PROBES[0][1] + "\n", ""))
     got = via("ignore", ["bash", str(runner)], cwd=str(tree))
-    out.append(("revert/runner-probe-removed-red", got[0] == 0 and "RESULT: PASS" in got[1], got))
+    out.append(("revert/runner-probe-removed-red", verdict((got[0] == 0 and "RESULT: PASS" in got[1], got)), got))
 
     # The --self-test statement of opf/tools/_opf_declaration.py runs before its guard, so that launch is unguarded:
     # run it under the process-creation audit, which must record no launch, in its report or its record stream;
@@ -2943,58 +3134,68 @@ def _behaviour(probe, base):
 
     declaration = str(ROOT / "opf/tools/_opf_declaration.py")
     got, report, streamed = audited(declaration, "--self-test")
-    out.append(("behaviour/opf-declaration-self-test-launches-nothing", got[0] == 0 and report == nothing
-                and streamed == [] and "opf declaration self-test: PASS" in got[1], got))
+    out.append(("behaviour/opf-declaration-self-test-launches-nothing", verdict((
+        got[0] == 0 and report == nothing and streamed == [] and "opf declaration self-test: PASS" in got[1], got)),
+        got))
     target = str(_copy("audit/forkserver_first.py", base, AUDIT_MULTIPROCESSING_TARGET))
     got, report, streamed = audited(target, declaration, "--self-test")
-    out.append(("behaviour/audit-reports-multiprocessing-launch", got[0] == 0 and isinstance(report, dict)
-                and report.get("code") == 0 and "_posixsubprocess.fork_exec" in report.get("launches", ())
-                and "_posixsubprocess.fork_exec" in (streamed or ()) and "opf declaration self-test: PASS" in got[1],
-                got))
+    out.append(("behaviour/audit-reports-multiprocessing-launch", verdict((
+        got[0] == 0 and isinstance(report, dict) and report.get("code") == 0
+        and "_posixsubprocess.fork_exec" in report.get("launches", ())
+        and "_posixsubprocess.fork_exec" in (streamed or ()) and "opf declaration self-test: PASS" in got[1], got)),
+        got))
+    # A row of several launches holds one part per launch, each read by its own test, so a launch that finished
+    # and failed keeps the row a failure beside one that reached its time bound.
     got, report, streamed = audited(target, declaration, "--self-test", script=no_fork_exec)
     control = str(_copy("audit/launches.py", base, AUDIT_CONTROL))
     again, again_report, again_streamed = audited(control, "reimported_fork_exec", script=no_fork_exec)
-    out.append(("revert/audit-fork-exec-unrecorded-red", got[0] == 0 and report == nothing and streamed == []
-                and "opf declaration self-test: PASS" in got[1] and again[0] == 0
-                and again_report == nothing and again_streamed == [], (got, again)))
-    missed = []
+    out.append(("revert/audit-fork-exec-unrecorded-red", verdict(
+        (got[0] == 0 and report == nothing and streamed == [] and "opf declaration self-test: PASS" in got[1], got),
+        (again[0] == 0 and again_report == nothing and again_streamed == [], again)), (got, again)))
+    missed, parts = [], []
     for route, event in AUDIT_CONTROL_LAUNCHES:
         got, report, streamed = audited(control, route)
-        if not (got[0] == 0 and isinstance(report, dict) and report.get("code") == 0
-                and event in report.get("launches", ()) and event in (streamed or ())):
+        parts.append((got[0] == 0 and isinstance(report, dict) and report.get("code") == 0
+                      and event in report.get("launches", ()) and event in (streamed or ()), got))
+        if not parts[-1][0]:
             missed.append((route, event, got))
-    out.append(("control/audit-sees-every-launch", not missed, missed))
-    missed = []
+    out.append(("control/audit-sees-every-launch", verdict(*parts), missed))
+    missed, parts = [], []
     for route in AUDIT_TEARDOWN_ROUTES:
         got, report, streamed = audited(control, route)
-        if not (got[0] == 0 and report == nothing and streamed == ["os.system"]):
+        parts.append((got[0] == 0 and report == nothing and streamed == ["os.system"], got))
+        if not parts[-1][0]:
             missed.append((route, got, report, streamed))
-    out.append(("control/audit-streams-teardown-launch", not missed, missed))
-    ran = []
+    out.append(("control/audit-streams-teardown-launch", verdict(*parts), missed))
+    ran, parts = [], []
     for route in ("record_closed", "record_redirected"):
         got, report, streamed = audited(control, route)
-        if got[0] != AUDIT_UNRECORDED or "UNRECORDED-LAUNCH-RAN" in got[2] or report is not None or streamed != []:
+        parts.append((got[0] == AUDIT_UNRECORDED and "UNRECORDED-LAUNCH-RAN" not in got[2] and report is None
+                      and streamed == [], got))
+        if not parts[-1][0]:
             ran.append((route, got, report, streamed))
-    out.append(("control/audit-unwritable-record-ends-run", not ran, ran))
+    out.append(("control/audit-unwritable-record-ends-run", verdict(*parts), ran))
     got, report, streamed = audited(control, "finalizer", script=no_stream)
-    out.append(("revert/audit-stream-removed-red", got[0] == 0 and report == nothing and streamed == [], got))
+    out.append(("revert/audit-stream-removed-red",
+                verdict((got[0] == 0 and report == nothing and streamed == [], got)), got))
     # The stream on fd 1 holds the plain teardown launch as a LAUNCHED line, and misses the one made with fd 1
     # pointed at /dev/null: a clean report, no LAUNCHED line and an empty record.
     plain = audited(control, "finalizer", script=on_stdout)
     dup2 = audited(control, "teardown_dup2", script=on_stdout)
-    out.append(("revert/audit-stdout-stream-misses-dup2-red", "LAUNCHED os.system" in plain[0][1].splitlines()
-                and dup2[0][0] == 0 and dup2[1] == nothing and "LAUNCHED" not in dup2[0][1] and dup2[2] == [],
-                (plain, dup2)))
+    out.append(("revert/audit-stdout-stream-misses-dup2-red", verdict(
+        ("LAUNCHED os.system" in plain[0][1].splitlines(), plain[0]),
+        (dup2[0][0] == 0 and dup2[1] == nothing and "LAUNCHED" not in dup2[0][1] and dup2[2] == [], dup2[0])),
+        (plain, dup2)))
     # The report printed when the script returns misses the exit-handler and late-thread launches, which the
     # record still holds: so the report's place after them is pinned by control/audit-sees-every-launch, which
     # needs each launch in both.
     late = [audited(control, route, script=at_return) for route in ("atexit", "late_thread")]
-    out.append(("revert/audit-report-at-return-red", all(got[0] == 0 and report == nothing
-                                                         and streamed == ["os.system"]
-                                                         for got, report, streamed in late), late))
+    out.append(("revert/audit-report-at-return-red", verdict(*(
+        (got[0] == 0 and report == nothing and streamed == ["os.system"], got) for got, report, streamed in late)),
+        late))
     got, report, streamed = audited(control, "subinterpreter", script=no_interpreters)
-    out.append(("revert/audit-subinterpreter-unrecorded-red", got[0] == 0 and report == nothing
-                and streamed == [], got))
+    out.append(("revert/audit-subinterpreter-unrecorded-red",
+                verdict((got[0] == 0 and report == nothing and streamed == [], got)), got))
     return out
 
 
@@ -3004,20 +3205,24 @@ def self_test(lane, report_path=None):
     if report_path is not None:
         _selftest_exit_report.arm(report_path, suite, executed)
 
-    def check(check_id, ok, detail=""):
-        results.append((check_id, bool(ok), detail))
+    def check(check_id, ok, detail="", launch=False):
+        # Only a launch row (launch=True) keeps None, which _verdict alone produces, as no verdict; every other
+        # row is pass or fail, so a None from any other check stays a failure.
+        results.append((check_id, None if launch and ok is None else bool(ok), detail))
         executed.append(check_id)
 
     probe = _canonical_module()
     if lane == "probe":
-        got = dict((check_id, (ok, detail)) for check_id, ok, detail in
+        # Each probe row reads one launch, and its detail is that launch's result: that one part is its verdict.
+        got = dict((check_id, (_verdict((ok, detail)), detail)) for check_id, ok, detail in
                    probe.self_test_results(str(ROOT / CANONICAL_REL)))
         for check_id, _index in (("repro/ignored-reads-failed-child-as-zero", 0),
                                  ("repro/default-reads-failed-child", 1), ("live/default-passes", 2),
                                  ("live/ignored-refuses-by-name", 3), ("layer/handler-seen-by-disposition", 4),
                                  ("layer/lost-status-seen-by-probe", 5), ("layer/no-fork-nothing-probed", 6),
                                  ("layer/no-sigchld-nothing-probed", 7)):
-            check(check_id, got.get(check_id, (False, "not run"))[0], got.get(check_id, (False, "not run"))[1])
+            check(check_id, got.get(check_id, (False, "not run"))[0], got.get(check_id, (False, "not run"))[1],
+                  launch=True)
     else:
         this = sys.modules[__name__]
         trees, texts = _inputs()
@@ -3078,6 +3283,11 @@ def self_test(lane, report_path=None):
                                 ("launchers/workflow-host-pin-job-config-combined", 0),
                                 ("launchers/workflow-host-pin-job-config-malformed", 0),
                                 ("launchers/workflow-host-pin-job-config-system", 0),
+                                ("launchers/workflow-scope-decide-before-probe", 0),
+                                ("launchers/workflow-scope-decide-other-job", 0),
+                                ("launchers/workflow-scope-decide-other-workflow", 0),
+                                ("launchers/workflow-scope-decide-old-probe-name", 0),
+                                ("launchers/workflow-scope-probe-ahead-of-decide", 0),
                                 ("launchers/workflow-block-hash-line", 0),
                                 ("launchers/workflow-defaults-after-steps", 0),
                                 ("launchers/workflow-python-outside-run-step", 0),
@@ -3165,6 +3375,15 @@ def self_test(lane, report_path=None):
             never = sorted(set(vectors) - exposed - UNMUTATED)
             check("mutant/every-vector-discriminates", not never, never)
             behaviour = dict((check_id, (ok, detail)) for check_id, ok, detail in _behaviour(probe, base))
+            # The launch rows' verdicts on stand-in launches: a finished launch that failed beside ones that
+            # timed out keeps its row a failure, and a row whose launches all timed out has no verdict.
+            ok, detail = _verdict_row(probe, Path(base) / "verdict-mixed", _finished_in_mixed,
+                                      ("control/audit-sees-every-launch", "behaviour/fail-open-restores"),
+                                      _any_timeout_verdict)
+            check("verdict/finished-failure-beside-timeout-fails", ok, detail)
+            ok, detail = _verdict_row(probe, Path(base) / "verdict-timed-out", _finished_none, (),
+                                      _timeout_fails_verdict)
+            check("verdict/all-timed-out-no-verdict", ok, detail)
         for check_id, _kind in (("behaviour/opf-cli-refuses", 0), ("behaviour/launcher-cli-refuses", 0),
                                 ("behaviour/coverage-gate-refuses", 0), ("behaviour/adopt-complete-refuses", 0),
                                 ("behaviour/adopt-complete-self-test-refuses", 0),
@@ -3198,7 +3417,8 @@ def self_test(lane, report_path=None):
                                 ("revert/audit-stdout-stream-misses-dup2-red", 0),
                                 ("revert/audit-report-at-return-red", 0),
                                 ("revert/audit-subinterpreter-unrecorded-red", 0)):
-            check(check_id, behaviour.get(check_id, (False, "not run"))[0], behaviour.get(check_id, (False, None))[1])
+            check(check_id, behaviour.get(check_id, (False, "not run"))[0],
+                  behaviour.get(check_id, (False, None))[1], launch=True)
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = run(ROOT)
@@ -3212,12 +3432,21 @@ def self_test(lane, report_path=None):
     elif len(set(executed)) != len(executed) or set(executed) != expected:
         harness.append(("execution-set/reconciled", dict(missing=sorted(expected - set(executed)),
                                                          extra=sorted(set(executed) - expected))))
-    failed = [(check_id, detail) for check_id, ok, detail in results if not ok] + harness
+    failed = [(check_id, detail) for check_id, ok, detail in results if ok is False] + harness
+    unevaluated = [(check_id, detail) for check_id, ok, detail in results if ok is None]
     if failed:
         print("SELF-TEST FAIL: {} {} of {} check(s) failed".format(suite, len(failed), len(results)))
         for check_id, detail in failed:
             print("  {}: {!r}".format(check_id, detail))
+    if unevaluated:
+        print("SELF-TEST CANNOT EVALUATE: {} {} of {} check(s) no verdict, a launch reaching its {} s bound "
+              "(host load)".format(suite, len(unevaluated), len(results), probe.CHILD_TIMEOUT))
+        for check_id, detail in unevaluated:
+            print("  {}: {!r}".format(check_id, detail))
+    if failed:
         return 1
+    if unevaluated:
+        return 2
     print("SELF-TEST PASS: {} {} checks".format(suite, len(results)))
     return 0
 

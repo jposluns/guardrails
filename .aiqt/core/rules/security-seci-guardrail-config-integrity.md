@@ -5,8 +5,8 @@ family: security
 facet: SECI
 secondary: [TRUST]
 slug: guardrail-config-integrity
-map-nist-80053-tight: [CM-3, CM-5]
-map-nist-80053-broad: [AC-6(1), SI-7]
+map-nist-80053-tight: [CM-5]
+map-nist-80053-broad: [AC-6(1), CM-3, SI-7]
 map-owasp-mcp-tight: [MCP02]
 ---
 

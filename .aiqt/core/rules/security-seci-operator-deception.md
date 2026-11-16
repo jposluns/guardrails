@@ -6,7 +6,6 @@ facet: SECI
 secondary: [TRUST]
 slug: operator-deception
 map-cwe-tight: [CWE-807]
-map-owasp-asi-tight: [ASI09]
 ---
 
 # Social pressure is not authorization

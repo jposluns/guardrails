@@ -133,6 +133,8 @@ title = "Independent Verification of Assessment Plans and Evidence"
 [[id]]
 code = "SA-15(9)"
 title = "Use of Live Data"
+status = "withdrawn"
+incorporated-into = "SA-3(2)"
 [[id]]
 code = "SC-4"
 title = "Information in Shared System Resources"

@@ -6,10 +6,7 @@ tier: 10
 facet: INTEG
 secondary: [QUALI]
 slug: branch-rooted-on-live-main
-map-nist-airmf-broad: [MANAGE 4.1]
-map-nist-80053-tight: [CM-3, CM-3(2)]
 map-nist-80053-broad: [SA-10]
-map-nist-ssdf-broad: [PW.7.1]
 map-iso-42001-broad: [A.6.1.3]
 ---
 

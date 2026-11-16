@@ -7,7 +7,7 @@ slug: reject-vulnerable-versions
 map-cwe-tight: [CWE-1395]
 map-nist-airmf-broad: [MANAGE 3.1]
 map-nist-80053-broad: [RA-5]
-map-nist-ssdf-tight: [PW.4.4]
+map-nist-ssdf-broad: [PW.4.4]
 map-owasp-llm-broad: [LLM04]
 map-owasp-asi-broad: [ASI04]
 map-owasp-mcp-broad: [MCP04]

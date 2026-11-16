@@ -34,7 +34,11 @@ Legs, in order:
                  job-keys       the job carries no key but name, runs-on and steps, and carries the one if:
                                 line HEAVY_JOB_IF_LINE exactly as written (without it the job runs on every
                                 pull request; any other if:, a continue-on-error:, env:, defaults:,
-                                container: or strategy: can skip, mask, move or change what it runs);
+                                container: or strategy: can skip, mask, move or change what it runs) and
+                                the one needs: line HEAVY_JOB_NEEDS_LINE exactly as written (the pinned if:
+                                reads the scope job's site_only output, the site fast lane; without
+                                needs: scope that output reads empty and the fast lane silently dies, and
+                                another target reads another job's output);
                  runner         runs-on is RUNNER, ubuntu-24.04: the setup-python versions manifest lists a
                                 patch release's Linux builds by Ubuntu version, so the job names its image;
                  checkout       the first step is the checkout step as written (uses: CHECKOUT_USES and a
@@ -68,11 +72,13 @@ Legs, in order:
                                 (_suite_shaped), run exactly the job's HOST_SUITES tuple, in that
                                 order, none omitted, repeated or added, each an executable step after
                                 the setup-python step, so after the Python host pin step
-                                (opf-host-patch: the OPF tooling self-test; each of
-                                git-fixture-env-core-host-patch, git-fixture-env-config-combined-host-patch,
-                                git-fixture-env-config-malformed-host-patch and
-                                git-fixture-env-config-system-host-patch: one git-fixture-env suite each,
-                                so the four run as parallel jobs);
+                                (opf-host-patch: the OPF tooling self-test;
+                                git-fixture-env-core-host-patch: the git-fixture-env-core suite; and
+                                each config lane, combined, malformed and system, as N shard jobs
+                                (CONFIG_SHARDS: 12, 12 and 19), each
+                                git-fixture-env-config-<lane>-shard-K-host-patch job running
+                                that lane's suite with --shard K/N, so the core suite and every
+                                shard run as parallel jobs);
                  outside-judge  the judge step holds its place: exactly one step outside the HOST_JOBS
                                 jobs runs this gate with --jobs-only (JOBS_ONLY_RUN) as its own run:
                                 command, judged by command tokens, never by exact text. EVERY job
@@ -203,7 +209,8 @@ Legs, in order:
                                 path is exit 2 there, dynamic-target).
                So a top-level key outside TOP_KEYS, a missing concurrency: block or one other than
                CONCURRENCY_BLOCK, a missing job-level if: on a host-patch job or one other than
-               HEAVY_JOB_IF_LINE, any if: on the judge's job, another runner or checkout, an env: on a
+               HEAVY_JOB_IF_LINE, a missing job-level needs: on a host-patch job or one other than
+               HEAVY_JOB_NEEDS_LINE, any if: on the judge's job, another runner or checkout, an env: on a
                host-patch job or on any of its steps, removing or moving a
                host-patch job, its setup-python step, its Python host pin step or one of its suite steps,
                omitting, reordering, repeating or adding a suite step, changing a job id or the command a held
@@ -381,13 +388,16 @@ build's downstream patches and the system libraries an interpreter links (OpenSS
 others) can differ between the host and the runner, and this gate does not compare them. It does not check
 that the committed patch is what the host runs: when the host interpreter changes, the maintainer updates the
 source and every host-patch pin in one reviewed change, and until then every local run fails on the
-interpreter leg. CI cost: the five jobs carry the pinned heavy-job if:, so they run the OPF tooling self-test
+interpreter leg. CI cost: the HOST_JOBS jobs (opf-host-patch, git-fixture-env-core-host-patch and the 43
+config shard jobs) carry the pinned heavy-job if: and needs: lines, so they run the OPF tooling self-test
 and the four git-fixture-env suites in every run on a push or on a merge-train-* pull request of this
-repository and in no other pull request run, the only CI run of each but the git-fixture-env-core suite, whose
-'3.14' canary job runs it too, the four suites as four parallel jobs (so the host leg's wall time is its
-longest job, not the sum of the four), and an edit to a pull request's title or body starts
-no Quality run (the workflow does not run on edited). This gate compares the concurrency: block and the if: line
-as text; whether GitHub evaluates them as their text says is not observed here.
+repository whose scope-job site_only output is not true (a site-only train skips them under the
+maintainer's recorded fast-lane authorization) and in no other pull request run, the only CI run of each
+but the git-fixture-env-core suite, whose '3.14' canary job runs it too. The core suite runs as one job
+and each config lane as its shard jobs, all in parallel (so the host leg's wall time is its longest job,
+not the sum of them), and an edit to a pull request's title or body starts no Quality run (the workflow
+does not run on edited). This gate compares the concurrency: block and the if: line as text; whether
+GitHub evaluates them as their text says is not observed here.
 
 Run this gate isolated: python3 -I -B tools/check_python_host_pin.py
 """
@@ -419,21 +429,24 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_REL = ".aiqt/python-host.toml"
 SOURCE_KEYS = {"format-version", "python-host-patch"}
 WORKFLOW_REL = ".github/workflows/quality.yml"
+# The git-fixture-env config lanes, each lane's suite id with N, the number of shard jobs it runs as: the
+# shard job git-fixture-env-config-<lane>-shard-K-host-patch runs that suite with --shard K/N, for K = 1
+# to N.
+CONFIG_SHARDS = {"git-fixture-env-config-combined": 12, "git-fixture-env-config-malformed": 12,
+                 "git-fixture-env-config-system": 19}
 # The host-patch jobs of WORKFLOW_REL, each with the ordered tuple of suites it exists to run (the run: text
-# of one executable step each, in this order): each git-fixture-env-*-host-patch job runs one
-# git-fixture-env suite, so the four run as parallel jobs, listed here core first, then combined,
-# malformed and system. tools/check_python_floor.py accepts a host-patch pin only inside
-# these jobs; its HOST_JOBS names the same jobs, which the self-test holds.
+# of one executable step each, in this order): the core suite runs in one job, and each config lane runs as
+# its N shard jobs (CONFIG_SHARDS), each shard job running one shard of its lane's suite, so the core job
+# and every shard job run in parallel. They are listed here opf first, then core, then the shard jobs of
+# combined, malformed and system, each lane's in shard order. tools/check_python_floor.py accepts a
+# host-patch pin only inside these jobs; its HOST_JOBS names the same jobs, which the self-test holds.
 HOST_SUITES = {
     "opf-host-patch": ("python3 -I -B opf/tools/opf.py --self-test",),
     "git-fixture-env-core-host-patch": (
         "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core",),
-    "git-fixture-env-config-combined-host-patch": (
-        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined",),
-    "git-fixture-env-config-malformed-host-patch": (
-        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed",),
-    "git-fixture-env-config-system-host-patch": (
-        "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system",),
+    **{"{}-shard-{}-host-patch".format(lane, shard): (
+        "python3 -I -B tools/check_selftest_execution.py --suite {} --shard {}/{}".format(lane, shard, count),)
+       for lane, count in CONFIG_SHARDS.items() for shard in range(1, count + 1)},
 }
 HOST_JOBS = tuple(HOST_SUITES)
 # Every suite run HOST_SUITES names, and the file names of the suite runners they run: a host-patch step
@@ -471,13 +484,24 @@ CONCURRENCY_BLOCK = (
     "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
 )
 # The keys a host-patch job may carry, and the one job-level if: line it must also carry, exactly as written
-# (a trailing comment included): it runs the job on a push and on a pull request whose head is a
-# merge-train-* branch of this repository. tools/check_ci_parity.py pins the same line (HEAVY_JOB_IF_LINE
+# (a trailing comment included): it runs the job on a push, on a workflow_dispatch or schedule run of
+# refs/heads/main (never on another ref), and on a pull request whose head is a
+# merge-train-* branch of this repository, except when the scope job's site_only output is true (the
+# site fast lane: every changed path of the pull request is in the site allowlist, so the heavy suites
+# are skipped under the maintainer's recorded authorization; the Quality gates job passes a skipped
+# heavy job only then). The job must also carry the one needs: line HEAVY_JOB_NEEDS_LINE exactly as
+# written, which makes the scope job's output readable from the if: line (without needs: scope the
+# output reads empty and the job always runs, so the fast lane silently dies). tools/check_ci_parity.py
+# pins the same if: line (HEAVY_JOB_IF_LINE
 # there); the self-test holds the two copies equal. No job that carries the --jobs-only judge carries an
 # if: at all (outside-judge), so the jobs leg still runs outside these jobs on every event.
 JOB_KEYS = {"name", "runs-on", "steps"}
-HEAVY_JOB_IF_LINE = ("    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && "
-                     "github.event.pull_request.head.repo.full_name == github.repository)")
+HEAVY_JOB_IF_LINE = ("    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || "
+                     "((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && "
+                     "github.ref == 'refs/heads/main') || "
+                     "(startsWith(github.head_ref, 'merge-train-') && "
+                     "github.event.pull_request.head.repo.full_name == github.repository))")
+HEAVY_JOB_NEEDS_LINE = "    needs: scope"
 # The first step of each host-patch job, as written: another ref, repository or path can put another tree
 # under the gate and the suite, and a persist-credentials other than false leaves the job token in the
 # checkout's git config, where every later step can read it (tools/check_ci_parity.py holds that input on
@@ -542,8 +566,8 @@ JOBS_ONLY_STEM = "--jobs-o"
 # set refuses each of them by the character it must spell. An eval needs no refused character, so
 # the grammar does not refuse one spelled only in safe characters: its line is read by the deletion
 # read like any other. A ${{ }} expression is refused first, with its own wording
-# (_run_line_tokens runs before this scan). The committed host-patch jobs carry sixteen run: lines with
-# eight distinct texts, each ASCII letters, digits, spaces and the - _ . / punctuation, so each
+# (_run_line_tokens runs before this scan). The committed host-patch jobs carry 136 run: lines with
+# 48 distinct texts, each ASCII letters, digits, spaces and the - _ . / punctuation, so each
 # passes this grammar unchanged. A line the grammar admits is still cannot-evaluate (exit 2, the
 # assignment named) when its first word, once any leading HOST_RUN_PREFIX_WORDS are skipped, is a
 # shell assignment (HOST_RUN_ASSIGNMENT_RE, _leading_assignment): a PATH=tools:/usr/bin prefix is
@@ -1183,14 +1207,22 @@ def _host_job_findings(job, tree, want):
     if "job-keys" in JOB_RULES:
         if "if" not in tree:
             found.append("{} carries no if:; the pinned if: line HEAVY_JOB_IF_LINE is required, so the job runs "
-                         "only on a push and on a merge-train-* pull request of this repository".format(where))
+                         "only on a push and on a merge-train-* pull request of this repository whose "
+                         "scope-job site_only output is not true".format(where))
+        if "needs" not in tree:
+            found.append("{} carries no needs:; the pinned needs line HEAVY_JOB_NEEDS_LINE is required, so "
+                         "the pinned if: line reads the scope job's site_only output (without needs: scope "
+                         "that output reads empty and the job runs whatever the scope job decided)".format(
+                             where))
         for key in tree:
             if key == "if" and getattr(tree[key], "written", None) == HEAVY_JOB_IF_LINE:
                 continue
+            if key == "needs" and getattr(tree[key], "written", None) == HEAVY_JOB_NEEDS_LINE:
+                continue
             if key not in JOB_KEYS:
                 found.append("{} carries {}:, which can skip, mask, move or change what it runs (a host-patch "
-                             "job carries only name, runs-on, steps and the pinned if: line "
-                             "HEAVY_JOB_IF_LINE)".format(where, key))
+                             "job carries only name, runs-on, steps, the pinned if: line HEAVY_JOB_IF_LINE "
+                             "and the pinned needs line HEAVY_JOB_NEEDS_LINE)".format(where, key))
     if "runner" in JOB_RULES and tree.get("runs-on") != RUNNER:
         found.append("{} runs on {!r}, not {!r}: the setup-python versions manifest lists the host patch's "
                      "Linux builds by Ubuntu version, so the job names its image".format(
@@ -1696,11 +1728,18 @@ REVERT_CALLS = (("jobs", "job_findings(root, patch)"),
                 ("interpreter", "interpreter_findings(patch, version)"))
 HOST = (3, 14, 4, "final")
 SOURCE_TEXT = "format-version = 1\npython-host-patch = \"3.14.4\"\n"
-# The OPF host-patch job, then the four git-fixture-env host-patch jobs in HOST_SUITES order (GFE, the
-# core suite's job, stands for any one of them), and their four suite runs in that order.
+# The OPF host-patch job, then the git-fixture-env host-patch jobs in HOST_SUITES order (GFE, the core
+# suite's job, stands for any one of them; then the config lanes' shard jobs), and their suite runs in that
+# order. LANE_JOBS holds each config lane's shard jobs in shard order, so a vector names a lane's job by
+# lane, never by a position in GFE_JOBS. GFE_LANE_RUNS are the four git-fixture-env suites unsharded, one
+# run each, core first: the commands of the single serial job the split replaced and of the lane fixtures.
 OPF, GFE_JOBS = HOST_JOBS[0], HOST_JOBS[1:]
 GFE = GFE_JOBS[0]
 GFE_RUNS = tuple(run for job in GFE_JOBS for run in HOST_SUITES[job])
+LANE_JOBS = {lane: tuple(job for job in GFE_JOBS if job.startswith(lane + "-shard-"))
+             for lane in CONFIG_SHARDS}
+GFE_LANE_RUNS = HOST_SUITES[GFE] + tuple(HOST_SUITES[GFE][0].rsplit(" ", 1)[0] + " " + lane
+                                         for lane in CONFIG_SHARDS)
 PIN = "python-version: '3.14.4'"
 FLOOR_JOB = ("  floor:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n"
              "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.14'\n"
@@ -1929,11 +1968,12 @@ def _lane_reading(reader, refusal, text):
 
 
 def _host_job(job):
-    """A whole host-patch job, laid out as quality.yml lays it out, its pinned if: line included."""
-    return ("  {0}:\n    name: {0}\n{2}\n    runs-on: {1}\n    steps:\n      - uses: actions/checkout@v4\n"
+    """A whole host-patch job, laid out as quality.yml lays it out, its pinned if: and needs: lines
+    included."""
+    return ("  {0}:\n    name: {0}\n{2}\n{3}\n    runs-on: {1}\n    steps:\n      - uses: actions/checkout@v4\n"
             "        with:\n          fetch-depth: 0\n          fetch-tags: true\n"
             "          persist-credentials: false\n\n".format(
-                job, RUNNER, HEAVY_JOB_IF_LINE)
+                job, RUNNER, HEAVY_JOB_IF_LINE, HEAVY_JOB_NEEDS_LINE)
             + SETUP_STEP + GATE_STEP + _suite_step(job))
 
 
@@ -2100,19 +2140,39 @@ def _job_cases():
     jobs/second-pin-line-finding and jobs/job-env-pin-finding are each refused by two overlapping rules,
     jobs/jobs-only-moved-and-host-jobs-env-finding and jobs/jobs-only-step-env-and-host-jobs-env-finding
     are each refused by both the outside-judge and job-keys rules, jobs/workflow-without-lane-settings-finding
-    is refused by both the workflow-keys and job-keys rules, and pins/host-job-missing-finding and the
-    three pins/config-*-host-job-missing-finding cases are refused by the unconditional missing-job
-    check in job_findings, which no JOB_RULES rule controls; a None case runs no rule-removal copy, so
-    it is red through its exit code and finding marker alone)."""
-    # These cases name the four git-fixture-env host-patch jobs by position, each running one suite: any
-    # other HOST_SUITES shape is a harness error naming that shape, never a traceback.
-    if len(GFE_JOBS) != 4 or any(len(HOST_SUITES[job]) != 1 for job in GFE_JOBS):
-        raise CannotEvaluate("the jobs-leg cases expect four git-fixture-env host-patch jobs of one suite "
-                             "each after {}; HOST_SUITES holds {}".format(
-                                 OPF, {job: len(HOST_SUITES[job]) for job in GFE_JOBS}))
+    is refused by both the workflow-keys and job-keys rules, and pins/host-job-missing-finding, the
+    three pins/config-*-host-job-missing-finding cases, pins/config-last-shard-job-missing-finding and
+    jobs/config-shard-job-renamed-finding are refused by the unconditional missing-job check in
+    job_findings, which no JOB_RULES rule controls; a None case runs no rule-removal copy, so it is red
+    through its exit code and finding marker alone)."""
+    # These cases name the core git-fixture-env host-patch job, then the shard jobs of each of the three
+    # config lanes by lane and shard (LANE_JOBS), each job running one suite: GFE_JOBS must be the core job
+    # and then exactly the shard jobs CONFIG_SHARDS names (12, 12 and 19 in the committed table), at least
+    # three per lane. Any other HOST_SUITES shape is a harness error naming that shape, never a traceback.
+    if (len(CONFIG_SHARDS) != 3
+            or GFE_JOBS[1:] != tuple(job for lane in CONFIG_SHARDS for job in LANE_JOBS[lane])
+            or any(len(LANE_JOBS[lane]) != count or count < 3 for lane, count in CONFIG_SHARDS.items())
+            or any(len(HOST_SUITES[job]) != 1 for job in GFE_JOBS)):
+        raise CannotEvaluate("the jobs-leg cases expect, after {}, the core git-fixture-env host-patch job and "
+                             "then the shard jobs of three config lanes of at least three shards each "
+                             "(CONFIG_SHARDS {}), every job running one suite; HOST_SUITES holds {}".format(
+                                 OPF, CONFIG_SHARDS, {job: len(HOST_SUITES[job]) for job in GFE_JOBS}))
     suite = {job: _suite_step(job) for job in HOST_JOBS}
-    # The suite step of each git-fixture-env host-patch job, a whole step text, in GFE_JOBS order.
-    lanes = [suite[job] for job in GFE_JOBS]
+    # The shard jobs of each config lane, in shard order, and the last lane's suite id and shard count.
+    combined, malformed, system = (LANE_JOBS[lane] for lane in CONFIG_SHARDS)
+    last_lane, last_count = tuple(CONFIG_SHARDS.items())[-1]
+    # A shard job one past the last lane's last shard, laid out as a host-patch job (its own Python host
+    # pin step among its steps), and the third combined shard job's id respelled with a leading zero.
+    extra_shard = "{}-shard-{}-host-patch".format(last_lane, last_count + 1)
+    extra_job = _host_job(system[-1]).replace(system[-1], extra_shard).replace(
+        "--shard {0}/{0}".format(last_count), "--shard {}/{}".format(last_count + 1, last_count))
+    renamed_shard = combined[2].replace("-shard-3-", "-shard-03-")
+    # The third combined shard job's suite run, and that run with another shard, another shard count or
+    # no shard at all.
+    third = HOST_SUITES[combined[2]][0]
+    other_shard = HOST_SUITES[combined[1]][0]
+    other_count = third.replace("/{}".format(len(combined)), "/{}".format(len(combined) - 1))
+    unsharded = GFE_LANE_RUNS[1]
     floor_suite = "python3 -I -B tools/check_selftest_execution.py --suite python-floor-selftest"
     retired_suite = "python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest"
     gate_name = "      - name: Python host pin\n"
@@ -2123,6 +2183,7 @@ def _job_cases():
     persist = "          persist-credentials: false\n"
     runs = "    runs-on: "
     pinned_if = HEAVY_JOB_IF_LINE + "\n"
+    pinned_needs = HEAVY_JOB_NEEDS_LINE + "\n"
     block = "\n".join(CONCURRENCY_BLOCK) + "\n"
     second = "  second:\n    runs-on: ubuntu-latest\n    steps:\n"
     decoy = ("  decoy:\n    runs-on: ubuntu-latest\n    steps:\n"
@@ -2133,13 +2194,32 @@ def _job_cases():
     every_env = tuple((job, runs, "    env:\n      BASH_ENV: '$(: > \"$0\")'\n" + runs) for job in HOST_JOBS)
     return (
         ("pins/host-job-missing-finding", (), (GFE,), "carries no job " + GFE, None),
-        # Each git-fixture-env lane's host-patch job is required on its own: omitting any one is a finding.
-        ("pins/config-combined-host-job-missing-finding", (), (GFE_JOBS[1],), "carries no job " + GFE_JOBS[1],
+        # Each config lane's shard jobs are each required on their own: omitting one shard job of any lane
+        # (the first shard of each lane, and the last lane's last shard) is a finding.
+        ("pins/config-combined-host-job-missing-finding", (), (combined[0],), "carries no job " + combined[0],
          None),
-        ("pins/config-malformed-host-job-missing-finding", (), (GFE_JOBS[2],), "carries no job " + GFE_JOBS[2],
-         None),
-        ("pins/config-system-host-job-missing-finding", (), (GFE_JOBS[3],), "carries no job " + GFE_JOBS[3],
-         None),
+        ("pins/config-malformed-host-job-missing-finding", (), (malformed[0],),
+         "carries no job " + malformed[0], None),
+        ("pins/config-system-host-job-missing-finding", (), (system[0],), "carries no job " + system[0], None),
+        ("pins/config-last-shard-job-missing-finding", (), (system[-1],), "carries no job " + system[-1], None),
+        # A shard job the map does not name (one past the last shard), laid out as a host-patch job: it is a
+        # job outside HOST_JOBS, so the outside-judge rule reads it and refuses its Python host pin step as
+        # an unresolved judge-shaped command.
+        ("jobs/config-shard-job-extra-finding", (("registry", "  registry:\n", extra_job + "  registry:\n"),),
+         (), "an unresolved judge-shaped command in the job " + extra_shard, "outside-judge"),
+        # A shard job id respelled (-shard-3- as -shard-03-): the expected job is missing.
+        ("jobs/config-shard-job-renamed-finding",
+         ((combined[2], "  {}:\n".format(combined[2]), "  {}:\n".format(renamed_shard)),), (),
+         "carries no job " + combined[2], None),
+        # A shard job's suite step running another shard of its lane, its shard of another count, or the
+        # whole lane unsharded: each is another suite run than its job's, a suite-step finding.
+        ("jobs/config-shard-job-other-shard-finding", ((combined[2], "run: " + third, "run: " + other_shard),),
+         (), "it omits " + third + "; adds " + other_shard, "suite-step"),
+        ("jobs/config-shard-job-other-count-finding", ((combined[2], "run: " + third, "run: " + other_count),),
+         (), "it omits " + third + "; adds " + other_count, "suite-step"),
+        ("jobs/config-shard-job-unsharded-suite-finding",
+         ((combined[2], "run: " + third, "run: " + unsharded),), (),
+         "it omits " + third + "; adds " + unsharded, "suite-step"),
         ("pins/newer-patch-finding", ((OPF, PIN, "python-version: '3.14.8'"),), (),
          "python-version '3.14.8' in the host-patch job opf-host-patch differs", "pin"),
         ("pins/floor-pin-in-host-job-finding", ((GFE, PIN, "python-version: '3.14'"),), (),
@@ -2202,35 +2282,36 @@ def _job_cases():
         ("jobs/suite-step-continue-on-error-finding",
          ((OPF, suite_name, suite_name + "        continue-on-error: true\n"),), (),
          "opf-host-patch does not run its suite", "suite-step"),
-        # Each git-fixture-env host-patch job runs the one suite of its lane as its own step, so the four
-        # run as parallel jobs: omitting that suite, two lanes' suites swapped between their jobs, one job
-        # running all four suites as the single serial job before the split did, and repeating or adding
-        # a suite step (a renamed, retired or respelled suite of a suite runner, or another job's suite,
-        # among them) are each a finding.
-        ("jobs/git-fixture-env-suite-omitted-finding", ((GFE_JOBS[2], lanes[2], ""),), (),
-         "it omits " + HOST_SUITES[GFE_JOBS[2]][0], "suite-step"),
+        # Each git-fixture-env host-patch job runs its one suite run as its own step (the core job the core
+        # suite, each shard job one shard of its lane's suite), so they run as parallel jobs: omitting that
+        # suite (in a malformed shard job), the core job's suite and the first combined shard's swapped
+        # between their jobs, the core job running the four suites unsharded as the single serial job
+        # before the split did, and repeating or adding a suite step (a renamed, retired or respelled suite
+        # of a suite runner, or another job's suite, among them) are each a finding.
+        ("jobs/git-fixture-env-suite-omitted-finding", ((malformed[0], suite[malformed[0]], ""),), (),
+         "it omits " + HOST_SUITES[malformed[0]][0], "suite-step"),
         ("jobs/git-fixture-env-lane-suites-swapped-finding",
-         ((GFE_JOBS[0], HOST_SUITES[GFE_JOBS[0]][0], HOST_SUITES[GFE_JOBS[1]][0]),
-          (GFE_JOBS[1], HOST_SUITES[GFE_JOBS[1]][0], HOST_SUITES[GFE_JOBS[0]][0])), (),
-         "it omits " + HOST_SUITES[GFE_JOBS[0]][0] + "; adds " + HOST_SUITES[GFE_JOBS[1]][0], "suite-step"),
+         ((GFE, HOST_SUITES[GFE][0], HOST_SUITES[combined[0]][0]),
+          (combined[0], HOST_SUITES[combined[0]][0], HOST_SUITES[GFE][0])), (),
+         "it omits " + HOST_SUITES[GFE][0] + "; adds " + HOST_SUITES[combined[0]][0], "suite-step"),
         ("jobs/git-fixture-env-lane-job-serial-suites-finding",
-         ((GFE, lanes[0], "".join("      - name: Lane {}\n".format(number) + SHELL_LINE + "        run: " + run
-                                  + "\n" for number, run in enumerate(GFE_RUNS, 1))),), (),
-         "adds " + GFE_RUNS[1], "suite-step"),
+         ((GFE, suite[GFE], "".join("      - name: Lane {}\n".format(number) + SHELL_LINE + "        run: " + run
+                                    + "\n" for number, run in enumerate(GFE_LANE_RUNS, 1))),), (),
+         "adds " + GFE_LANE_RUNS[1], "suite-step"),
         ("jobs/git-fixture-env-suite-repeated-finding",
-         ((GFE, lanes[0], lanes[0] + lanes[0].replace("name: Suite\n", "name: Suite again\n")),), (),
+         ((GFE, suite[GFE], suite[GFE] + suite[GFE].replace("name: Suite\n", "name: Suite again\n")),), (),
          "repeats " + HOST_SUITES[GFE][0], "suite-step"),
         ("jobs/git-fixture-env-suite-added-finding",
-         ((GFE_JOBS[3], lanes[3], lanes[3] + "      - name: Floor suite\n" + SHELL_LINE + "        run: "
-           + floor_suite + "\n"),), (), "adds " + floor_suite, "suite-step"),
+         ((system[0], suite[system[0]], suite[system[0]] + "      - name: Floor suite\n" + SHELL_LINE
+           + "        run: " + floor_suite + "\n"),), (), "adds " + floor_suite, "suite-step"),
         ("jobs/git-fixture-env-retired-suite-added-finding",
-         ((GFE_JOBS[3], lanes[3], lanes[3] + "      - name: Retired suite\n" + SHELL_LINE + "        run: "
-           + retired_suite + "\n"),), (), "adds " + retired_suite, "suite-step"),
+         ((system[0], suite[system[0]], suite[system[0]] + "      - name: Retired suite\n" + SHELL_LINE
+           + "        run: " + retired_suite + "\n"),), (), "adds " + retired_suite, "suite-step"),
         ("jobs/git-fixture-env-suite-respelled-finding",
          ((GFE, "run: " + HOST_SUITES[GFE][0], "run: " + HOST_SUITES[GFE][0].replace("tools/", "./tools/")),),
          (), "adds " + HOST_SUITES[GFE][0].replace("tools/", "./tools/"), "suite-step"),
         ("jobs/opf-other-job-suite-added-finding",
-         ((OPF, suite[OPF], suite[OPF] + lanes[0].replace("name: Suite\n", "name: Extra suite\n")),), (),
+         ((OPF, suite[OPF], suite[OPF] + suite[GFE].replace("name: Suite\n", "name: Extra suite\n")),), (),
          "adds " + HOST_SUITES[GFE][0], "suite-step"),
         ("jobs/job-if-finding", ((OPF, pinned_if, "    if: false\n"),), (),
          "opf-host-patch carries if:", "job-keys"),
@@ -2246,6 +2327,39 @@ def _job_cases():
          "opf-host-patch carries no if:", "job-keys"),
         ("jobs/git-fixture-env-job-if-missing-finding", ((GFE, pinned_if, ""),), (),
          GFE + " carries no if:", "job-keys"),
+        # The fast-lane condition dropped from the pinned if: line (the previous pin, which never reads
+        # the scope job's decision, so the heavy suites run on every site-only train): refused by
+        # job-keys like any other departure from HEAVY_JOB_IF_LINE.
+        ("jobs/job-if-scope-condition-dropped-finding",
+         ((OPF, pinned_if, "    if: github.event_name == 'push' || (startsWith(github.head_ref, "
+           "'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)\n"),),
+         (), "opf-host-patch carries if:", "job-keys"),
+        # A manual or scheduled run runs a host-patch job only on main: the dispatch arm without its
+        # main ref condition (a dispatch of any other ref would run the job) and the arm on another
+        # ref are refused by job-keys; so is the line from before the arm was added.
+        ("jobs/job-if-dispatch-any-ref-finding",
+         ((OPF, pinned_if, pinned_if.replace(" && github.ref == 'refs/heads/main'", "", 1)),),
+         (), "opf-host-patch carries if:", "job-keys"),
+        ("jobs/job-if-dispatch-other-ref-finding",
+         ((GFE, pinned_if, pinned_if.replace("'refs/heads/main'", "'refs/heads/dev'", 1)),),
+         (), GFE + " carries if:", "job-keys"),
+        ("jobs/job-if-dispatch-arm-dropped-finding",
+         ((OPF, pinned_if, "    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' "
+           "|| (startsWith(github.head_ref, 'merge-train-') && "
+           "github.event.pull_request.head.repo.full_name == github.repository))\n"),),
+         (), "opf-host-patch carries if:", "job-keys"),
+        # HEAVY_JOB_NEEDS_LINE is the one needs: a host-patch job carries: without it the pinned if:
+        # line reads an empty site_only output, another target reads another job's output, and the
+        # pinned line respelled with a trailing comment is another line; each is refused by job-keys.
+        ("jobs/job-needs-missing-finding", ((OPF, pinned_needs, ""),), (),
+         "opf-host-patch carries no needs:", "job-keys"),
+        ("jobs/git-fixture-env-job-needs-missing-finding", ((GFE, pinned_needs, ""),), (),
+         GFE + " carries no needs:", "job-keys"),
+        ("jobs/job-needs-other-target-finding", ((OPF, pinned_needs, "    needs: floor\n"),), (),
+         "opf-host-patch carries needs:", "job-keys"),
+        ("jobs/job-needs-pinned-line-commented-finding",
+         ((GFE, pinned_needs, HEAVY_JOB_NEEDS_LINE + "  # the scope job\n"),), (),
+         GFE + " carries needs:", "job-keys"),
         ("jobs/job-continue-on-error-finding", ((GFE, runs, "    continue-on-error: true\n" + runs),), (),
          GFE + " carries continue-on-error:", "job-keys"),
         ("jobs/job-container-finding", ((OPF, runs, "    container: python:3.14.8\n" + runs),), (),
@@ -2617,6 +2731,9 @@ def _self_test_cases(base):
     check("jobs/host-jobs-pinned-if-passes", (
         all(HEAVY_JOB_IF_LINE + "\n" in _host_job(job) for job in HOST_JOBS), evaluate(_fixture(base), HOST)[0]),
         (True, 0))
+    check("jobs/host-jobs-pinned-needs-passes", (
+        all(HEAVY_JOB_NEEDS_LINE + "\n" in _host_job(job) for job in HOST_JOBS),
+        evaluate(_fixture(base), HOST)[0]), (True, 0))
     check("jobs/extra-step-after-gate-passes", evaluate(_fixture(base, workflow=_workflow(((
         OPF, GATE_STEP, GATE_STEP + "      - name: Python host pin self-test\n        run: " + GATE_RUN
         + " --self-test\n\n"),))), HOST)[0], 0)
@@ -3193,21 +3310,22 @@ def _self_test_cases(base):
     check("jobs/host-job-assignment-argument-passes", evaluate(root, HOST)[0], 0)
 
     # Acceptance controls read from the committed .github/workflows/quality.yml (ROOT), not from
-    # module constants: its five host-patch jobs carry sixteen run: lines with eight distinct texts (the
-    # child-status probe line and the gate line in each job, the gate self-test line, the OPF suite line
-    # and the four git-fixture-env suite lines, one in each git-fixture-env job), and each of them passes
-    # the closed grammar and the assignment refusal unchanged. Each check holds its texts: how many
-    # committed lines carry each, and what each refusal returns for it.
+    # module constants: its 45 host-patch jobs (opf, core and the 43 config shard jobs) carry 136 run:
+    # lines with 48 distinct texts (the child-status probe line and the gate line in each job, the gate
+    # self-test line, the OPF suite line and the 44 git-fixture-env suite lines, the core suite line in
+    # the core job and one shard line in each shard job), and each of them passes the closed grammar and
+    # the assignment refusal unchanged. Each check holds its texts: how many committed lines carry each,
+    # and what each refusal returns for it.
     committed = _committed_host_runs()
     for check_id, texts, count in (
-            ("jobs/host-job-committed-probe-line-grammar-passes", (PROBE_RUN,), 5),
-            ("jobs/host-job-committed-gate-line-grammar-passes", (GATE_RUN,), 5),
+            ("jobs/host-job-committed-probe-line-grammar-passes", (PROBE_RUN,), 45),
+            ("jobs/host-job-committed-gate-line-grammar-passes", (GATE_RUN,), 45),
             ("jobs/host-job-committed-selftest-line-grammar-passes", (GATE_RUN + " --self-test",), 1),
             ("jobs/host-job-committed-opf-suite-line-grammar-passes", HOST_SUITES[OPF], 1),
             ("jobs/host-job-committed-gfe-suite-line-grammar-passes", GFE_RUNS, 1)):
         check(check_id, [(committed.count(text), _refused_run_char(text), _leading_assignment(text))
                          for text in texts], [(count, None, None)] * len(texts))
-    check("jobs/host-job-committed-run-lines-counted", (len(committed), len(set(committed))), (16, 8))
+    check("jobs/host-job-committed-run-lines-counted", (len(committed), len(set(committed))), (136, 48))
 
     # The step shape (RUN_KEYS, STEP_SHELL_LINE): the Python host pin step, each suite step and the
     # --jobs-only judge step carry exactly name, run and shell, the shell: written as the exact line
@@ -3630,16 +3748,17 @@ def _self_test_cases(base):
         FAILURES.append("real/source: {}".format(exc))
     if real is not None:
         check("real/tree-passes-at-its-host-patch", evaluate(ROOT, real)[0], 0)
-    # The four git-fixture-env suites run as four host-patch jobs, one suite each. serial_mutant is a copy
-    # of this gate whose HOST_SUITES regroups them into the single serial job the four replaced
-    # (git-fixture-env-host-patch, running the four suites in order). A workflow of that serial shape is
-    # a finding here (each lane's job is missing, and the serial job, now outside the host-patch jobs,
-    # runs this gate as an unresolved judge-shaped command) and passes the copy; the split fixture and the
-    # committed workflow pass here and are each refused by the copy, so each vector is red on revert.
+    # The four git-fixture-env suites run as host-patch jobs: the core suite in one job and each config
+    # lane as its shard jobs. serial_mutant is a copy of this gate whose HOST_SUITES regroups them into the
+    # single serial job the split replaced (git-fixture-env-host-patch, running the four suites unsharded
+    # in order). A workflow of that serial shape is a finding here (the core job and every shard job are
+    # missing, and the serial job, now outside the host-patch jobs, runs this gate as an unresolved
+    # judge-shaped command) and passes the copy; the split fixture and the committed workflow pass here
+    # and are each refused by the copy, so each vector is red on revert.
     serial = "git-fixture-env-host-patch"
     serial_mutant = _mutant(base, "python_host_pin_serial_host_job_mutant", source, ((
         "HOST_JOBS = " + "tuple(HOST_SUITES)",
-        "HOST_SUITES = " + repr({OPF: HOST_SUITES[OPF], serial: GFE_RUNS})
+        "HOST_SUITES = " + repr({OPF: HOST_SUITES[OPF], serial: GFE_LANE_RUNS})
         + "\nHOST_JOBS = " + "tuple(HOST_SUITES)"),))
     root = _fixture(base, workflow=serial_mutant._workflow())
     code, lines = evaluate(root, HOST)
@@ -3655,12 +3774,15 @@ def _self_test_cases(base):
         check("real/tree-serial-host-job-mutant-red", (code, _has(lines, "carries no job " + serial)), (1, True))
     # The committed workflow runs one git-fixture-env suite on '3.14', the core suite, in its
     # git-fixture-env-core canary job; the combined, malformed and system suites run in CI only in their
-    # host-patch jobs (_workflow_lanes: each lane's command, its shlex tokens joined by single spaces, and
-    # the pin lines of the job that carries it). A '3.14' copy of another suite put back, or the canary
-    # removed, is red here; a run: line or value the reader cannot read is cannot-evaluate (exit 2). The
-    # lanes/ vectors below read their own four-lane fixture, not the committed workflow.
-    lanes = (GFE_RUNS, (("python-version: '3.14'",),) * len(GFE_RUNS))
-    check("real/git-fixture-env-host-suites-are-the-lanes", _workflow_lanes(_read_text(ROOT / WORKFLOW_REL)),
+    # shard host-patch jobs (_workflow_lanes: each lane's command, its shlex tokens joined by single
+    # spaces, and the pin lines of the job that carries it). A '3.14' copy of another suite put back, or
+    # the canary removed, is red here; a run: line or value the reader cannot read is cannot-evaluate
+    # (exit 2), and a committed workflow the reader refuses (a shard job left outside HOST_JOBS among
+    # them) fails this check rather than ending the self-test. The lanes/ vectors below read their own
+    # four-lane fixture (the four suites unsharded, GFE_LANE_RUNS), not the committed workflow.
+    lanes = (GFE_LANE_RUNS, (("python-version: '3.14'",),) * len(GFE_LANE_RUNS))
+    check("real/git-fixture-env-host-suites-are-the-lanes",
+          _lane_reading(_workflow_lanes, CannotEvaluate, _read_text(ROOT / WORKFLOW_REL)),
           (GFE_RUNS[:1], (("python-version: '3.14'",),)))
     # Each lanes/ vector adds one job beside the four literal lanes and pairs the intact reader with a copy
     # of this gate (_mutant) whose reader drops one rule: "refusal" leaves a candidate line that is not an
@@ -3689,10 +3811,10 @@ def _self_test_cases(base):
     lane_jobs = "".join(
         "  lane-{}:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/setup-python@v5\n"
         "        with:\n          python-version: '3.14'\n      - name: Suite\n"
-        "        run: {}\n".format(number, run) for number, run in enumerate(GFE_RUNS, 1))
+        "        run: {}\n".format(number, run) for number, run in enumerate(GFE_LANE_RUNS, 1))
     runner = "python3 -I -B tools/check_selftest_execution.py"
-    widened = (GFE_RUNS + (runner + " --suite git-fixture-env-extra",),
-               (("python-version: '3.14'",),) * (len(GFE_RUNS) + 1))
+    widened = (GFE_LANE_RUNS + (runner + " --suite git-fixture-env-extra",),
+               (("python-version: '3.14'",),) * (len(GFE_LANE_RUNS) + 1))
     refused = (2, True)
     for check_id, copy, matrix, env, run, want, want_copy in (
             # Lines naming the runner or --suite whose suite comes from a matrix value or an expansion.

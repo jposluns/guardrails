@@ -41,13 +41,19 @@ the authority, and the summary further down this page only points to it.
   followed by the session's elapsed time when a lease is configured. The freshest time value in context
   is then a real reading, not one the model composed. It informs; it blocks nothing. Events:
   `PostToolUse` (after a tool call that succeeded) and `PostToolUseFailure` (after one that started and
-  failed); register both to cover both outcomes.
+  failed); register both to cover both outcomes. The pack's plugin now adds its own host clock line on
+  both events (the `clock-inject-post` and `clock-inject-failure` controls), without the elapsed time;
+  installed beside the plugin, this hook adds a second clock line after each tool call.
 - **`stamp-truth-stop.py`** checks each finished turn. When the assistant's prose carries a timestamp with
   an explicit zone that lies ahead of the clock, or an elapsed-time footer that disagrees with the
   configured lease, it blocks the stop and says why, so the assistant corrects the value before handing
   back. Text in code spans, fenced code blocks, and `>` quote lines is not checked, and a time that a
   scheduling word (such as `until`, `due`, or `next run at`) directly precedes is treated as a scheduled
-  time, not a reading. Event: `Stop`.
+  time, not a reading. Other times may run up to 1 minute ahead, but the bracketed stamp that opens a
+  message, such as `[2026-09-23 13:45 EDT]`, claims the current time and may not be ahead at all: truncate
+  it to the minute and never round up. When that opening stamp uses a zone abbreviation other than the
+  hook's local zone, the hook cannot check it and says so in a note instead of passing silently. Event:
+  `Stop`.
 - **`future-stamp-write.py`** denies a write that would record a future-dated timestamp into a folder you
   have declared as holding working records. An observed-time entry (a heartbeat, a recorded-at value) has
   to come from the clock, so one dated in the future was composed. A scheduled value (a deadline, a next
@@ -71,7 +77,9 @@ the authority, and the summary further down this page only points to it.
   existing, non-empty working-record file under a configured store folder. It checks the filesystem
   before the command runs and names the file and its size. It covers `rm` (including recursive
   removal), truncating redirections, plain two-operand `cp` and `mv` onto a file, `truncate -s 0`,
-  and `tee` without options. It also checks helper-session calls.
+  and `tee` without options. It also checks helper-session calls. An opt-in append mode, off by
+  default, also denies a shell append (`>>`, `&>>`, `tee -a`, `tee --append`) onto an existing file in
+  the store and names the sanctioned route for store writes (see Configuration).
   Event: `PreToolUse`, matcher `Bash`.
 - **`char-policy-write.py`** denies a file write that would add a character your repository's character
   policy forbids, in a file that policy covers. The policy is the data file `.aiqt/char-policy.json` at the
@@ -200,16 +208,16 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `char-policy-write.py` | `84a08059513f27c76e944d54c08e8ddae520f9e040ebe19296d139d49646b0f8` | [char-policy-write.py](char-policy-write.py) |
-| `clock-inject.py` | `2842a40fa754f433c84e9a11fad7455a9c28e1aa896e3be6528f52791f946e68` | [clock-inject.py](clock-inject.py) |
-| `constraint-reread.py` | `725974c306e63a3f9a1b4a2be2992c9ee9792c231aaad66035a813525d10c48a` | [constraint-reread.py](constraint-reread.py) |
-| `future-stamp-write.py` | `1cf8608693f472df1c7bee03b5ab5bf5de3e79a19b00c782a7015e77d167c348` | [future-stamp-write.py](future-stamp-write.py) |
-| `pattern-self-match.py` | `b70287e2aab2b08b0cd240c6c9150feb65141f2e3612adad63e402221dfcbb2f` | [pattern-self-match.py](pattern-self-match.py) |
-| `record-remove-check.py` | `9ad3454daf7ea104a62ef022957f06e2584cdaff8d2d595dbcf2a0a8cfc9c366` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `ff3091dc3812ff67604bfa507d01956345cbdbd196280f5dcd2a6e3c55e82aa2` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `9d2a8f9c26693cc87d058284427d40554e5ff0c3f2eca3df46f4369669a43859` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394` | [ungated-record.py](ungated-record.py) |
+| `char-policy-write.py` | `6529312e9dadd856353294d8774f09f02525f1a65b71598d88843140617894dc` | [char-policy-write.py](char-policy-write.py) |
+| `clock-inject.py` | `8b1764f13377d4d80154ada6ef09179a5c2f489505bb9b521e71275c41c02967` | [clock-inject.py](clock-inject.py) |
+| `constraint-reread.py` | `5f8ffc633993ebb9b84b1c858b5d03fa94511c30cc1624f6c2813a0e3268a9fb` | [constraint-reread.py](constraint-reread.py) |
+| `future-stamp-write.py` | `be125990e7ba4505821be61d832bcac9e7280cca82488f1690c99cce6bda576d` | [future-stamp-write.py](future-stamp-write.py) |
+| `pattern-self-match.py` | `84bcb120cc1d30df845e4c2f77d7033a1bb9af473b9a0ffd336a622ae67fe6cd` | [pattern-self-match.py](pattern-self-match.py) |
+| `record-remove-check.py` | `6ea79f2809054e1458f679e4219db8e45188f5f1f63eeccf401aa95478fce1d6` | [record-remove-check.py](record-remove-check.py) |
+| `rerun-pass-check.py` | `319f4de2aff71cca9d1cf33ae990c264982141ca38ec44e939780a0961996f66` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `stamp-truth-stop.py` | `74d119261117b20ca97bfd521d412bcfe0a00e7ee230948dc2b2619f40c676a6` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `unbounded-wait.py` | `da1917e92cc4dc93585ee6eabac75040926ba3068e5241892dfb87fe83f40842` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `5eedf3c960cdc34f35504ab6ea0935da31a0b3d9bf14126c8e8ee5a4c112b4e0` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 
@@ -442,7 +450,8 @@ you type directly (in Claude Code, a line starting with `!`).
 ## Configuration
 
 The hooks read their settings from environment variables. Each feature has its own off state, and nothing
-beyond these variables is assumed. Each `AIQT_` variable except `AIQT_CHAR_POLICY_ROOT` also accepts an
+beyond these variables is assumed. Each `AIQT_` variable except `AIQT_CHAR_POLICY_ROOT` and
+`AIQT_STORE_WRITE_ROUTE` also accepts an
 older spelling with the prefix `ORCH_` (for example `ORCH_STORE_ROOT`), read only when the `AIQT_` one is
 unset, so "unset" below means both spellings are unset. The worker skip likewise also honours `ORCH_WORKER=1` and any value of
 `ORCH_VERIFY_OWNER`; if your environment sets either for another purpose, the hooks stay silent there.
@@ -466,6 +475,21 @@ unset, so "unset" below means both spellings are unset. The worker skip likewise
   calls. For an intended destruction, put `# record-rm-ok: <reason>` after the last command token on the
   same line, separated by a blank, with a non-empty reason and nothing but whitespace after the comment.
   The comment records an attestation; it does not prove that the file was read or can be restored.
+  Append mode (opt-in, off by default): it is on only when `AIQT_STORE_ROOT` itself is set (the older
+  spelling alone does not turn it on) and `AIQT_STORE_WRITE_ROUTE` holds a non-blank text naming the
+  sanctioned route for store writes, such as a designated applier. In that mode the hook also denies
+  `>>`, `&>>`, `tee -a` and `tee --append` onto an existing regular file in a store (empty files
+  included, files in the store's `.git` directory excepted), and the reason quotes the route text up to
+  200 characters (a longer text is cut there and ends with `...`). An
+  append to a new file or outside the store, and a read, are allowed. The append checks have their own
+  bound on target words and their own work budgets, the same sizes as the removal checks' and kept apart
+  from them, except that a `tee` word holding a variable, `~` or glob is first expanded on the removal
+  checks' budgets, with the mode on or off, to see whether it makes an option, so a `tee -a` target can
+  shorten what a removal later in the same command is checked with, as it does without the mode. With either variable unset, or
+  the route empty or blank, behaviour is exactly as without the mode. The `# record-rm-ok:` comment
+  does not opt out of an append denial. Helper-session calls are judged like any other. Interpreter,
+  editor, `Write` and `Edit` tool writes, `bash -c` strings, `eval`, and scripts stay uncovered, and
+  the mode trusts the environment it reads: whoever can set or clear either variable turns it on or off.
 - **`char-policy-write.py`** uses `AIQT_CHAR_POLICY_ROOT`, which has no older spelling and no default:
   unset or empty, the hook does nothing, and with no policy file under that root it allows every
   well-formed file write silently (a malformed call still gets a note).
@@ -487,6 +511,7 @@ content of the command. Their reasons are optional; text inside quotes does not 
 | Variable | What it does |
 |---|---|
 | `AIQT_STORE_ROOT` | The folder or folders holding your working records, as absolute paths joined with `:`. The future-date and record-removal checks only look at files under these folders. |
+| `AIQT_STORE_WRITE_ROUTE` | A short text naming the sanctioned route for writes to existing store files, for `record-remove-check.py`. Set together with `AIQT_STORE_ROOT`, it turns on that hook's append mode, and the hook quotes it (up to 200 characters) when it denies an append. It has no older spelling; unset, empty, or blank, the mode is off. |
 | `AIQT_LEASE_FILE` | The absolute path to a small text file that marks when the current working session started. When it is set and valid, the hooks report and check how long the session has been running. |
 | `AIQT_CHAR_POLICY_ROOT` | The absolute path to one repository root, for `char-policy-write.py`. The hook reads the policy file `.aiqt/char-policy.json` under it and checks only files inside it. |
 | `AIQT_CONSTRAINT_RECORD` | The absolute path to the project's durable record of standing constraints, for `constraint-reread.py`; unset, empty, or relative, that hook does nothing. It reads `Constraint: <text>` lines as the constraints to name, and `Constraints-reread: <UTC time>` lines (written by the assistant from `date -u +%Y-%m-%dT%H:%M:%SZ` after re-reading) as re-read entries. |
@@ -521,6 +546,12 @@ section of its opening docstring. Read that section before relying on a hook; in
   natural-language time is not checked. A fabricated time in a code span, a code block, a `>` quote line,
   or just after a scheduling word passes. A genuinely future time mentioned in plain prose without a
   scheduling word before it is blocked; the remedy is to add the word or put the time in a code span.
+  An opening stamp in another zone's abbreviation is not checked (only noted); stamp in UTC or a numeric
+  offset, or run the hook under the same `TZ`. An opening stamp read from a different clock that runs ahead
+  of this host's (a remote or container `date`) is refused while it is still later than the time the hook
+  compares it with (when the message was recorded, else when the hook runs); put it in a code span. A stamp
+  rounded up or composed ahead is likewise refused only while it is later than that time: one whose minute
+  that time has already reached, as after a long generation, passes.
   Its refusals are capped: within one continuous run of turn ends with no observed new turn it refuses at
   most three times, after which each violating stop is allowed with a cap warning; a stop that carries
   neither `stop_hook_active` nor a `transcript_path` is outside the cap (nothing can key a counter to
@@ -708,7 +739,10 @@ section of its opening docstring. Read that section before relying on a hook; in
   commands, and optioned `cp`, `mv`, or `tee`. Unknown paths or directory changes, unreadable targets,
   and files beyond its scan budgets are not fully checked. Moving a record out of the store is allowed.
   A file created or filled after the check can be lost without a warning. It can deny unreachable
-  commands and files that have a good backup; it does not check for a restore path.
+  commands and files that have a good backup; it does not check for a restore path. Its opt-in append
+  mode reads only `>>`, `&>>`, `tee -a` and `tee --append` in Bash calls: interpreter, editor, `Write`
+  and `Edit` tool writes, `bash -c` strings, `eval`, scripts, and `<>` stay uncovered, appends beyond
+  the mode's own scan budgets are not checked, and the mode trusts the environment it reads.
 - **`pattern-self-match.py`** denies only its closed set of shapes, and each deny rests on premises
   observed on one host: that the Bash tool runs each command inside a shell whose own command line holds
   the command's text (its docstring gives a one-line `pgrep -c` probe to re-check a host), and how procps

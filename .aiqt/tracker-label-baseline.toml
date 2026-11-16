@@ -19,7 +19,7 @@ fix-id = 3
 
 [[path]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-fix-id = 33
+fix-id = 32
 review-round = 1
 
 [[path]]
@@ -28,52 +28,8 @@ fix-id = 11
 
 [[path]]
 path = ".github/check_cited_standards_contract.py"
-review-round = 11
-reviewer-source = 11
-
-[[path]]
-path = ".preview/char-policy-write.py"
-review-round = 14
-
-[[path]]
-path = ".preview/clock-inject.py"
-review-round = 7
-
-[[path]]
-path = ".preview/constraint-reread.py"
-review-round = 24
-reviewer-source = 15
-
-[[path]]
-path = ".preview/future-stamp-write.py"
-review-round = 308
-reviewer-source = 41
-
-[[path]]
-path = ".preview/pattern-self-match.py"
-review-round = 45
-
-[[path]]
-path = ".preview/record-remove-check.py"
-review-round = 3
-
-[[path]]
-path = ".preview/rerun-pass-check.py"
-review-round = 65
-reviewer-source = 41
-
-[[path]]
-path = ".preview/stamp-truth-stop.py"
-review-round = 397
-reviewer-source = 27
-
-[[path]]
-path = ".preview/unbounded-wait.py"
-review-round = 9
-
-[[path]]
-path = ".preview/ungated-record.py"
-review-round = 5
+review-round = 10
+reviewer-source = 10
 
 [[path]]
 path = "ENFORCEMENT.md"
@@ -99,7 +55,7 @@ reviewer-source = 2
 [[path]]
 path = "opf/tools/_opf_adopt_apply.py"
 fix-id = 1
-review-round = 98
+review-round = 97
 reviewer-source = 44
 
 [[path]]
@@ -126,7 +82,7 @@ reviewer-source = 1
 
 [[path]]
 path = "opf/tools/_opf_check.py"
-review-round = 77
+review-round = 73
 reviewer-source = 21
 
 [[path]]
@@ -207,7 +163,7 @@ fix-id = 2
 
 [[path]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-fix-id = 33
+fix-id = 32
 review-round = 1
 
 [[path]]

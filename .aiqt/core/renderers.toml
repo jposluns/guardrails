@@ -12,7 +12,7 @@ entrypoint = "tools/gen_agents.py"
 semantics-revision = 1
 targets = ["AGENTS.md"]
 closure = ["tools/gen_agents.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_rules.py"]
-code-digest = "05ace93130b5d3a246716f474a7a3f229d0a229b4e9d0a510962a4e6cd85dadc"
+code-digest = "58a77bb0cd99d1dd3eaf9de938a3dbada91ea74ad8e816c5428fe28ffca5f21c"
 
 [[renderer]]
 renderer-id = "adapters"
@@ -20,7 +20,7 @@ entrypoint = "tools/gen_adapters.py"
 semantics-revision = 1
 targets = ["GEMINI.md", ".github/copilot-instructions.md"]
 closure = ["tools/gen_adapters.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_agents.py", "tools/gen_rules.py"]
-code-digest = "15b2563344ee643d2dc64b1ec03308c9fe57a2551f4a39b3175d7c12e97ad9a6"
+code-digest = "7c4b6798ad83d90647bf56a06f7ea099d2035ac81a499e605656755c7c8dd571"
 
 [[renderer]]
 renderer-id = "claude"
@@ -28,7 +28,7 @@ entrypoint = "tools/gen_claude.py"
 semantics-revision = 1
 targets = [".claude/RULES-INDEX.md", "CLAUDE.md"]
 closure = ["tools/gen_claude.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_agents.py", "tools/gen_rules.py"]
-code-digest = "73770e9c9c255f3f5f431db1be914adb981960ba32e2d5dec77d773fd7fee06d"
+code-digest = "a3eeb2abafb1dea73140ef0d456849457cbf722aa4e1fc2f5f293d8bb720d70b"
 
 [[renderer]]
 renderer-id = "cursor"
@@ -36,7 +36,7 @@ entrypoint = "tools/gen_cursor.py"
 semantics-revision = 1
 targets = [".cursor/rules/aiqt-guardrails/"]
 closure = ["tools/gen_cursor.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_rules.py"]
-code-digest = "840ff15778c8e3e9c5f72369a0cfefbdc7fcc5509597a9f2696e1b49c16ed44c"
+code-digest = "976189ff894a498a47eb4f3cfe8d6cf90b31fc236dca5925b1873e0f6224043b"
 
 [[renderer]]
 renderer-id = "rules"
@@ -44,7 +44,7 @@ entrypoint = "tools/gen_rules.py"
 semantics-revision = 1
 targets = [".claude/rules/aiqt/", ".claude/rules/security/"]
 closure = ["tools/gen_rules.py", "tools/_gen_common.py", "tools/_standards.py"]
-code-digest = "05eb9a583d64ec5e3c79e2e95d8877dc473a085b43e444518c76bd9a58a6ba5f"
+code-digest = "4908147520857390e7a58bd2a1982dc0b2285ce7de43e3b34cc5f8febc3faa1b"
 
 [[renderer]]
 renderer-id = "skill"
@@ -52,7 +52,7 @@ entrypoint = "tools/gen_skill.py"
 semantics-revision = 2
 targets = ["site/downloads/aiqt/", "site/downloads/aiqt-instructions.txt", "site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip"]
 closure = ["tools/gen_skill.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_standards.py", "tools/check_sized_instructions.py", "tools/gen_agents.py", "tools/gen_mappings.py", "tools/gen_rules.py"]
-code-digest = "c8bc0274fecf88e9a0c8b61b2c18cca6f0efcb15d41d5f4f3194801a92ec83cc"
+code-digest = "624a9d458515ada650b73112f6470d9a6f0a573c6a30860ebc5989b174aad7a4"
 
 [[renderer]]
 renderer-id = "worker-pack"
@@ -60,4 +60,4 @@ entrypoint = "tools/gen_worker_pack.py"
 semantics-revision = 1
 targets = [".claude/worker-pack.md"]
 closure = ["tools/gen_worker_pack.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_rules.py"]
-code-digest = "6766cb6f2d106480dee4da6030f6b2e15b2c82baac380057774c7f9c4988ea78"
+code-digest = "5d7cd7a0eed6363008e142bcdd56e199f9ebc2c6069f26c604e807fabc17d412"

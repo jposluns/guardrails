@@ -20,6 +20,7 @@ gen_manifest.py at build time).
     end-line        = <int>                      1-based last line of the clause span (>= start-line)
     canonical-text  = "..."                      the obligation's own text, LF-preserving byte-exact (3.2)
     source-digest   = "<64 hex>"                 SHA-256 of the WHOLE rule source file's raw bytes (3.2)
+    layer           = "core" | "detail"          which layer of the rule the clause sits in (see LAYER)
   Model C: the [start-line, end-line] block is a LOCATING WINDOW of whole lines (the source file's
   lines[start-line-1 : end-line] joined with LF, no trailing newline). canonical-text must occur EXACTLY
   ONCE as a contiguous byte-exact substring within that window, and that one occurrence must BEGIN on
@@ -149,6 +150,25 @@ gen_manifest.py at build time).
   reviewed register. Removing a row a unit needs still surfaces that unit as uncovered (exit 1), but a
   removed stale, repeated, redundant or reasonless row leaves no trace, since removing it is its remedy.
 
+  LAYER (the two-layer split; gen_rules.py owns the `## Detail` heading syntax): a rule source may hold
+  one heading line reading exactly `## Detail`. A clause whose whole span lies above that heading is in
+  the core layer; a clause whose whole span lies below it is in the detail layer; a source with no
+  heading is all core. The gate DERIVES each row's layer from its span and the heading, and the stored
+  `layer` field must agree, so moving text without updating the inventory fails, and so does updating the
+  inventory without moving the text. A span that includes the heading line crosses the layers and fails.
+  Every non-blank line below the heading must lie inside a registered clause span of that rule (line by
+  line, not paragraph overlap): unregistered text may not move into the detail layer. A span that starts
+  on a frontmatter line fails whatever its layer. Rule sources are read with gen_rules.read_rule_source
+  and decode_rule_source (raw bytes, UTF-8, no newline translation), and the heading is located with
+  gen_rules.detail_heading_line, so this gate refuses (exit 2) every layout gen_rules refuses: a CR byte,
+  a frontmatter line starting with `#`, a second `## Detail` line, one without a blank line above it, a
+  body with no title line, any body line outside the gen_rules BODY GRAMMAR (blank, the one `# ` title
+  line first, the `## Detail` split, or a plain prose line; so no fence, HTML, block quote, list,
+  indented code, setext underline, thematic break, link reference definition or other heading), and any
+  other body line whose visible text reads Detail. A missing, non-string, or unknown `layer` value is
+  also malformed input (exit 2); a disagreement, a crossing span, a frontmatter span, or an unregistered
+  detail line is a finding (exit 1).
+
 LEGS (all run at the default step-1 invocation; none needs a manifest):
   ID SCHEME (7.1):      every rule corpus-id under rules-dir appears in the inventory; every clause-id is
                         `<corpus-id>.<ordinal>` with an UNPADDED positive-decimal ordinal (no leading
@@ -160,7 +180,10 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         end-line (a tight window); the source digest is the SHA-256 of the whole source
                         file. Zero or more than one occurrence, an untight occurrence, an empty
                         canonical-text, an edge that is not a whole-sentence or whole-clause edge of
-                        the source file (a truncated text), or a digest disagreement is a FAIL.
+                        the source file (a truncated text), or a digest disagreement is a FAIL. The
+                        stored layer must equal the layer derived from the span (see LAYER).
+  DETAIL COVERAGE:      every non-blank line below a rule's `## Detail` heading lies in a registered
+                        clause span of that rule.
   CUMULATIVE-MAX (7.1): each ordinal newly assigned this release (a born row at the newest release in the
                         register) strictly EXCEEDS the cumulative maximum ordinal EVER used for that
                         corpus-id, taken from the register's born rows (which persist for dead ids too), so
@@ -199,9 +222,27 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         parser reads lines, cut at LF only (CommonMark reads a carriage return as a line
                         ending too); no other character ends a line there or in CommonMark, so a vertical
                         tab, U+0085, U+2028 and U+2029 stay inside their line; a checked line (the title is
-                        never checked) holding '<!' or '<?' anywhere (an inline HTML comment, processing
+                        never checked) holding '<!' or '<?' anywhere (possibly an inline HTML comment, processing
                         instruction, declaration or CDATA section, which the vendored renderer passes through
-                        as raw HTML that a browser does not show); a body with no frontmatter; a title
+                        as raw HTML that a browser does not show; it is not parsed, so it is refused even where
+                        it opens none); a checked line holding, anywhere, a
+                        character reference: a match of the renderer's own
+                        pattern (Renderer._charref in opf/tools/_vendor/marko/renderer.py, which
+                        Renderer.__enter__ swaps into html._charref while it renders; copied here as
+                        _RENDERER_CHARREF_RE) that html.unescape, which escape_html in
+                        opf/tools/_vendor/marko/html_renderer.py runs on the text, changes, which the vendored
+                        renderer decodes when it sees the reference whole in plain text (not split by inline markup, not inside a code span). That
+                        pattern matches only a reference ending in ';': a decimal one of 1 to 7 digits such as
+                        '&#32;' or '&#10;', a hexadecimal one of 1 to 6 digits such as '&#x20;', and a named
+                        one of 1 to 32 characters (no space, tab, LF, form feed, '<', '&', '#' or ';' among
+                        them) such as '&nbsp;', '&amp;' or '&region=eu;' (decoded by its prefix '&reg'). A
+                        reference with no ';' ('cut&copy', '?a=1&region=eu', 'PR&#507', '&#32Beta') matches
+                        nothing, so the renderer shows it as typed and it is not refused. The refusal holds
+                        since the boundary grammar reads the reference's own characters, not the character
+                        it renders as, so '&#32;' between two sentences joins them into one unit and the ';'
+                        of '&amp; ' reads as a clause separator; a checked line that ends with a backslash,
+                        which the vendored renderer reads as a hard line break ('<br />'), so a sentence end
+                        before it is no cut to the grammar; a body with no frontmatter; a title
                         heading with no blank line after it; a line the splitter cannot classify; a
                         paragraph that ends with an opener still open (an inch mark, a stray backtick); and
                         a unit with no letter (str.isalpha) or decimal digit (str.isdecimal), so an
@@ -211,8 +252,9 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         whitespace, read conservatively), so a wrapped line of prose that merely begins with
                         '#', '<' or a number is still prose. These, and only these, are refused; 'whitespace'
                         below is any character str.isspace admits, a no-break space and a vertical tab included.
-                        On ANY line: an ATX heading other than the title (one to six '#' then whitespace or
-                        the line end); a bullet item ('-', '*' or '+' then whitespace or the line end); an
+                        On ANY line: an ATX heading (one to six '#' then whitespace or the line end) other than the
+                        title and the one `## Detail` split line (see LAYER); a bullet item ('-', '*' or '+' then
+                        whitespace or the line end); an
                         ordered item numbered 1 (up to eight leading zeros, '1', then '.' or ')' and
                         whitespace or the line end), the only number that can interrupt a paragraph; a
                         blockquote ('>'); a line that opens with '|' (a table row, or a delimiter row with a
@@ -226,14 +268,20 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         _HTML_BLOCK_TAGS: CommonMark's kind 1 and kind 6 names, plus meta and source); a
                         thematic break or setext underline (three or more of '-' '*' '_' '=' with optional
                         whitespace, or a run of only '=' or only '-'); and a line that opens with whitespace
-                        (an indented line). On a PARAGRAPH'S FIRST LINE also: an ordered item of any number
+                        (an indented line). On a PARAGRAPH'S FIRST LINE (a line directly after the
+                        `## Detail` split line, with no blank line between, is one, since that ATX heading
+                        closes its block, as a line after a blank line already is) also: an ordered item of
+                        any number
                         (one to nine decimal digits, any the vendored parser's \\d admits, so an Arabic-Indic
                         '\u0661.' too); a line that opens with '<' and then a letter or '/', and ends with
                         '>' before any trailing whitespace, which holds every HTML block of kind 7 (one
                         complete open or closing tag and nothing else, a quoted attribute value holding '<'
-                        or '>' included); and a line that opens with '[' and so may be a link reference
+                        or '>' included); a line that opens with '[' and so may be a link reference
                         definition: one with ']:' later on it, or one with no unescaped ']' on it, whose
-                        label may close on a later line.
+                        label may close on a later line; and a line that opens with a GFM task marker ('[',
+                        one whitespace character, 'x' or 'X', then ']', and whitespace or the line end, such
+                        as '[x] ' or '[ ] '), which the vendored GFM paragraph renders as a checkbox, not as
+                        text.
                         The class is wider than CommonMark on purpose: an empty list item, a '|' line no
                         table follows, a delimiter-shaped line no table header precedes, and an indented
                         continuation line are refused although CommonMark and GFM read them as paragraph
@@ -242,13 +290,23 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         vertical tab, and a setext underline with a trailing no-break space); a line whose
                         every '|'-separated cell begins with '-' or ':-', such as '--force is the flag.', is
                         refused wherever it stands, though only a header line holding a '|' with as many
-                        cells above it makes it a delimiter row; '<!' or '<?' inside a code span is refused,
-                        though a renderer shows it; as a paragraph's first line, '<b>bold</b>' and '<path> or
+                        cells above it makes it a delimiter row; '<!' or '<?' is refused wherever it stands on a
+                        checked line, since the check does not parse it, though a renderer shows it as text inside
+                        a code span ('`<!--`'), after a backslash ('\\<!--'), and anywhere but at a line's start
+                        where it opens no HTML comment, processing instruction, declaration or CDATA section
+                        ('Press <!> twice.', 'Type a <? b to start.', a '<!--' that no '-->' closes in its
+                        paragraph); as a paragraph's first line, '<b>bold</b>' and '<path> or
                         <ref>' are refused though they hold more than one tag, '[See the note]: it holds.' is
                         refused though no destination follows, and '[the note' is refused when its bracket
                         closes on a later line with no ':' after it; and a line such as '> 5 minutes is a
                         fault.' or '+ 1 to the count.' is refused because CommonMark reads it as a blockquote
-                        or a list item.
+                        or a list item. A character reference ending in ';' inside a code span or after a
+                        backslash (shown as typed, since the renderer decodes neither), a reference whose run
+                        to ';' is broken by emphasis, strikethrough, a code span or a backslash ('&reg*x*;', '&reg`x`;',
+                        '&copy\\;'), which the renderer splits into pieces and decodes none of, so it shows the
+                        reference as typed, a backslash at the line end of a paragraph's last line or after another backslash, and
+                        a task marker with no text after it in its paragraph are refused, though the
+                        renderer shows each as text.
                         RESIDUAL, disclosed: coverage is positional, not semantic. A unit counts as covered
                         when any row's resolved text contains it, whatever obligation that row names, and an
                         exemption's reason is read by a reviewer, never judged by the gate. The title
@@ -258,7 +316,12 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         which must then be covered or exempted. Inline raw HTML other than '<!' and '<?' (a
                         tag mid-line, such as a span with a hidden attribute, or a script or style element
                         opened mid-line) is read as text its unit holds; whether a renderer shows it is not
-                        judged.
+                        judged. Likewise a link destination, a link title and an image's alt text (in
+                        '[text](destination "title")' and '![alt](source)') are read as text their unit holds,
+                        though the vendored renderer emits them only as the href, title and alt attributes, not
+                        as page text, so they can hold unit text a reader does not see on the page (a title shows
+                        at most as a tooltip, and alt text only where the image does not load or through a screen
+                        reader).
 
 DEFERRED manifest-SOURCES leg (7.2 + round-10 R10-2 / gemini R9-4): the leg that cross-checks each row's
 source-digest against the manifest's SOURCES entry is OFF by default and reads no manifest. It runs only
@@ -305,6 +368,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import hashlib
+import html
 import io
 import re
 from contextlib import redirect_stderr, redirect_stdout
@@ -327,10 +391,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 from check_versions import _parse as _semver  # noqa: E402  reuse the shipped bare-SemVer parser
-from gen_rules import parse_source, CID_RE  # noqa: E402  reuse the frontmatter parser and corpus-id regex
+from gen_rules import (parse_source, CID_RE, detail_heading_line, body_first_line,  # noqa: E402  reuse the
+                       decode_rule_source, read_rule_source, DETAIL_HEADING)  # frontmatter parser, the
+#                      corpus-id regex, the `## Detail` split line and its locator, and the one way to read a
+#                      rule source
 
 ORDINAL_RE = re.compile(r"^[1-9][0-9]*$")  # unpadded positive decimal: no leading zero, no sign, no zero
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")  # the source-digest syntax: 64 lowercase hex characters
+LAYERS = ("core", "detail")               # the stored `layer` vocabulary (see LAYER in the docstring)
 
 
 class GateError(Exception):
@@ -749,6 +817,70 @@ def _span_content(text, start, end):
     return "\n".join(lines[start - 1:end])
 
 
+def _layout_of(raw, source_path):
+    """(first body line, `## Detail` heading line or None) of a rule source's raw bytes, decoded the way
+    gen_rules decodes it. A source with a CR byte or whose heading cannot be located (a refused layout, a
+    malformed frontmatter) is malformed input: GateError."""
+    try:
+        decoded = decode_rule_source(raw, source_path)
+        return body_first_line(decoded, source_path), detail_heading_line(decoded, source_path)
+    except ValueError as exc:
+        raise GateError("cannot derive clause layers from {} ({})".format(source_path, exc))
+
+
+def _layout_or_none(raw, source_path):
+    """_layout_of for the per-row leg: (None, None) where the layout is refused, so the row's layer is not
+    judged there; check_detail_coverage reads every rule source's layout and raises that refusal after the
+    text-coverage leg has reported what it finds."""
+    try:
+        return _layout_of(raw, source_path)
+    except GateError:
+        return None, None
+
+
+def derived_layer(heading, start, end):
+    """The layer a [start, end] clause span sits in relative to the heading line: "core" above it (or when
+    there is no heading), "detail" below it, and None when the span includes the heading line (a span that
+    crosses the layers)."""
+    if heading is None or end < heading:
+        return "core"
+    if start > heading:
+        return "detail"
+    return None
+
+
+def check_detail_coverage(rows, rule_sources):
+    """DETAIL COVERAGE: for each rule source with a `## Detail` heading, every non-blank line below the
+    heading must lie inside the span of at least one inventory row of that rule's corpus-id. Returns one
+    finding per run of consecutive uncovered lines; an unreadable or malformed source is a GateError."""
+    findings = []
+    for corpus, src in sorted(rule_sources.items()):
+        try:
+            raw = src.read_bytes()
+        except OSError as exc:
+            raise GateError("cannot read rule source {} ({})".format(src, exc))
+        _first_body, heading = _layout_of(raw, str(src))
+        if heading is None:
+            continue
+        spans = [(row.get("start-line"), row.get("end-line")) for row in rows if row.get("corpus-id") == corpus]
+        spans = [(s, e) for s, e in spans if isinstance(s, int) and isinstance(e, int)]
+        lines = read_rule_source(src).split("\n")
+        uncovered = []
+        for number in range(heading + 1, len(lines) + 1):
+            if not lines[number - 1].strip():
+                continue
+            if not any(s <= number <= e for s, e in spans):
+                if uncovered and uncovered[-1][1] == number - 1:
+                    uncovered[-1][1] = number
+                else:
+                    uncovered.append([number, number])
+        for u_start, u_end in uncovered:
+            findings.append("{}: detail lines {} to {} lie inside no registered clause span; register them in "
+                            "the inventory before they move below the '## Detail' heading"
+                            .format(src, u_start, u_end))
+    return findings
+
+
 SENTENCE_ENDS = ".?!"  # a sentence end
 CLAUSE_SEPARATOR = ";"  # the one separator that closes a whole clause (a ':' never does)
 QUOTE_PAIRS = {"\u201c": "\u201d", '"': '"'}  # double quotes, curly and straight: opener -> closer
@@ -934,6 +1066,7 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir, row_spans=
         text_field = row.get("canonical-text")
         digest_field = row.get("source-digest")
         start, end = row.get("start-line"), row.get("end-line")
+        layer = row.get("layer")
         if not isinstance(source_path, str) or not source_path.strip():
             raise GateError("{}: missing or non-string source-path".format(where))
         if not isinstance(text_field, str):
@@ -946,6 +1079,8 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir, row_spans=
         for _name, _val in (("start-line", start), ("end-line", end)):
             if isinstance(_val, bool) or not isinstance(_val, int):
                 raise GateError("{}: {} must be an integer, not {!r}".format(where, _name, _val))
+        if layer not in LAYERS:
+            raise GateError("{}: layer must be one of {}, not {!r}".format(where, "/".join(LAYERS), layer))
         abs_path = root / source_path
         resolved = abs_path.resolve()
         if Path(source_path).is_absolute():
@@ -964,17 +1099,18 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir, row_spans=
             try:
                 raw = abs_path.read_bytes()
             except FileNotFoundError:
-                digest_cache[source_path] = ("missing", None, None)
+                digest_cache[source_path] = ("missing", None, None, None, None)
             except OSError as exc:  # a permission or I/O error is environmental: fail closed
                 raise GateError("{}: cannot read source file {} ({})".format(where, source_path, exc))
             else:
                 try:
                     decoded = raw.decode("utf-8")
                 except UnicodeDecodeError:
-                    digest_cache[source_path] = ("non-utf8", None, None)
+                    digest_cache[source_path] = ("non-utf8", None, None, None, None)
                 else:
-                    digest_cache[source_path] = ("ok", hashlib.sha256(raw).hexdigest(), decoded)
-        status, digest, decoded = digest_cache[source_path]
+                    digest_cache[source_path] = (("ok", hashlib.sha256(raw).hexdigest(), decoded)
+                                                 + _layout_or_none(raw, source_path))
+        status, digest, decoded, first_body, heading = digest_cache[source_path]
         if status == "missing":
             findings.append("{}: source file {} does not exist".format(where, source_path))
             continue
@@ -1026,6 +1162,17 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir, row_spans=
                                     "sentence or clause boundary outside any quotation or bracket, so "
                                     "this is a truncated row or a shape the edge grammar refuses (see "
                                     "WHOLE-CLAUSE EDGES)".format(where, " and ".join(problems), source_path))
+        if window is not None and first_body is not None:
+            if start < first_body:
+                findings.append("{}: span (lines {} to {}) touches the frontmatter (lines 1 to {}) of {}; a "
+                                "clause is body text".format(where, start, end, first_body - 1, source_path))
+            derived = derived_layer(heading, start, end)
+            if derived is None:
+                findings.append("{}: span (lines {} to {}) crosses the '## Detail' heading at line {} of {}"
+                                .format(where, start, end, heading, source_path))
+            elif derived != layer:
+                findings.append("{}: stored layer {!r} disagrees with the layer {!r} derived from the span's "
+                                "position in {}".format(where, layer, derived, source_path))
         if digest_field != digest:
             findings.append("{}: source-digest does not match the SHA-256 of {}".format(where, source_path))
         try:
@@ -1056,9 +1203,23 @@ _TITLE_RE = re.compile(r"# \S")  # the one heading a rule body opens with: its t
 # opf/tools/_vendor/marko/source.py rewrites CRLF, a bare CR and a form feed to LF, and the parser then cuts lines
 # at LF only, so no other character ends a line there; the LF-only splitter refuses each, wherever it stands
 _RENDERER_LINE_BREAKS = (("\r", "carriage return"), ("\f", "form feed"))
-# an inline HTML comment, processing instruction, declaration or CDATA section, which the vendored renderer
-# passes through as raw HTML that a browser does not show, so its text would sit in a unit unseen
+# possibly an inline HTML comment, processing instruction, declaration or CDATA section, which the vendored
+# renderer passes through as raw HTML that a browser does not show, so its text would sit in a unit unseen; it
+# is matched, not parsed, so it also refuses a '<!' or '<?' that opens none (disclosed in the passage on why the class is wider than CommonMark)
 _HIDDEN_INLINE_RE = re.compile(r"<[!?]")
+# a backslash at a line's end, which the vendored inline parser (LineBreak in opf/tools/_vendor/marko/inline.py)
+# reads as a hard line break: it renders '<br />' between the line and the next, so a sentence end before it is
+# hidden from the boundary grammar, since no whitespace follows the sentence end on that line (the backslash
+# does) and the LF after the backslash is a hard break, not the plain line ending the grammar cuts at
+_HARD_BREAK_MARK = "\\"
+# the character-reference pattern the vendored renderer decodes with, copied from Renderer._charref in
+# opf/tools/_vendor/marko/renderer.py (Renderer.__enter__ swaps it into html._charref while it renders, in place
+# of the wider standard one): it matches only a reference ending in ';' (a decimal one of 1 to 7 digits, a
+# hexadecimal one of 1 to 6, a named one of 1 to 32 characters), so '&copy' or '&#32' with no ';' stays text.
+# The self-test reads Renderer._charref from that source with ast (this file never imports the vendored module)
+# and checks that this copy's pattern equals it.
+_RENDERER_CHARREF_RE = re.compile(r"&(#[0-9]{1,7};" r"|#[xX][0-9a-fA-F]{1,6};" r"|[^\t\n\f <&#;]{1,32};)")
+_RENDERER_SOURCE_REL = ("opf", "tools", "_vendor", "marko", "renderer.py")  # under the repo root
 # the vendored GFM table's row splitter and delimiter-cell test (TableRow in
 # opf/tools/_vendor/marko/ext/gfm/elements.py), for _is_table_delimiter_row
 _TABLE_CELL_SPLIT_RE = re.compile(r"\s*(?<!\\)\|\s*")
@@ -1083,10 +1244,13 @@ _UNCLASSIFIABLE_LINE_RE = re.compile(
 # a line the splitter cannot classify as the first line of a paragraph, where it starts a block though it would
 # continue one: an ordered item of any number (any \d digits, as the vendored parser reads them); a line that opens
 # with '<' and a letter or '/' and ends with '>', which holds every one-tag line (HTML block kind 7), a quoted '<' or
-# '>' in it included, and more; and a line that opens with '[' and may be a link reference definition, which renders
-# as no text: one with ']:' later on it, or one with no unescaped ']' on it, whose label may close on a later line
+# '>' in it included, and more; a line that opens with '[' and may be a link reference definition, which renders
+# as no text: one with ']:' later on it, or one with no unescaped ']' on it, whose label may close on a later line;
+# and a line that opens with a GFM task marker ('[', one whitespace character, 'x' or 'X', then ']', and whitespace
+# or the line end), which the vendored GFM paragraph (Paragraph in opf/tools/_vendor/marko/ext/gfm/elements.py)
+# renders as a checkbox at a paragraph's start, not as text
 _UNCLASSIFIABLE_FIRST_LINE_RE = re.compile(
-    r"(?:\d{1,9}[.)](?:\s|$)|<[A-Za-z/].*>\s*$|\[.*\]:|\[(?:[^\\\]]|\\.)*\\?$)")
+    r"(?:\d{1,9}[.)](?:\s|$)|<[A-Za-z/].*>\s*$|\[.*\]:|\[(?:[^\\\]]|\\.)*\\?$|\[[\sxX]\](?:\s|$))")
 _CUT_CANDIDATE_RE = re.compile(r"\s+|;")  # a boundary has whitespace at it or sits right before a ';'
 
 
@@ -1102,6 +1266,17 @@ def _is_table_delimiter_row(line):
     if cells and not cells[-1]:
         cells.pop()
     return bool(cells) and all(_TABLE_DELIMITER_CELL_RE.match(cell) for cell in cells)
+
+
+def _decoded_reference(line):
+    """The first character reference in line that is a match of _RENDERER_CHARREF_RE (the renderer's own
+    pattern, so only a reference ending in ';') that html.unescape changes, or None; the vendored renderer
+    decodes such a reference when it sees the reference whole in plain text (not split by inline markup, not inside a code span). html.unescape on the match alone gives what the renderer's substitution gives,
+    since the standard pattern matches the same whole reference and both use the same replacement."""
+    for match in _RENDERER_CHARREF_RE.finditer(line):
+        if html.unescape(match.group()) != match.group():
+            return match.group()
+    return None
 
 
 def _has_letter_or_digit(text):
@@ -1146,9 +1321,19 @@ def rule_units(source, where):
     exit 2): anywhere in the source, a character the vendored renderer reads as a line ending
     (_RENDERER_LINE_BREAKS: a carriage return or a form feed), since the lines here are cut at LF only; no
     frontmatter; a title with no blank line after it; a line _UNCLASSIFIABLE_LINE_RE matches or
-    _is_table_delimiter_row accepts; a checked line holding '<!' or '<?' (_HIDDEN_INLINE_RE); a paragraph that
+    _is_table_delimiter_row accepts; a checked line holding '<!' or '<?' (_HIDDEN_INLINE_RE); a checked line that
+    ends with a backslash (_HARD_BREAK_MARK, a hard line break to the vendored renderer); a checked line holding a
+    character reference the vendored renderer decodes when it sees it whole in plain text (_decoded_reference: a match of the
+    renderer's own pattern,
+    _RENDERER_CHARREF_RE, so one ending in ';', that html.unescape changes; a reference with no ';' such as
+    'cut&copy' or '&#32Beta' is shown as typed and is not refused); a paragraph that
     ends with an opener still open; and a unit with no letter or digit (_has_letter_or_digit). A line
-    _UNCLASSIFIABLE_FIRST_LINE_RE matches is refused only as a paragraph's first line."""
+    _UNCLASSIFIABLE_FIRST_LINE_RE matches (a GFM task marker included) is refused only as a paragraph's first
+    line. The one `## Detail`
+    split line (DETAIL_HEADING, opening a paragraph; see LAYER) is a layer marker, not text: it is cut
+    off from the units on both sides and is never a unit itself; any other heading is still refused. Since
+    it is an ATX heading, which closes its block, a non-blank line directly after it is a paragraph's first
+    line, so _UNCLASSIFIABLE_FIRST_LINE_RE applies there as after a blank line."""
     breaks = [(source.index(char), name) for char, name in _RENDERER_LINE_BREAKS if char in source]
     if breaks:
         at, name = min(breaks)
@@ -1161,6 +1346,7 @@ def rule_units(source, where):
                         "evaluate".format(where))
     body = source.find(_FRONTMATTER_CLOSE, 4) + len(_FRONTMATTER_CLOSE)
     text_start, offset, first, after_title, para_start = body, body, True, False, True
+    split = None
     for number, line in enumerate(source[body:].split("\n"), source.count("\n", 0, body) + 1):
         if line.strip():
             if after_title:
@@ -1169,19 +1355,34 @@ def rule_units(source, where):
                                     where, number, line))
             if first and _TITLE_RE.match(line):
                 text_start, after_title = offset + len(line), True
+            elif line == DETAIL_HEADING and para_start and not first and split is None:
+                split = (offset, offset + len(line))
             elif (_UNCLASSIFIABLE_LINE_RE.match(line) or _is_table_delimiter_row(line)
                   or (para_start and _UNCLASSIFIABLE_FIRST_LINE_RE.match(line))):
                 raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (markup "
                                 "the sentence grammar does not model); cannot evaluate".format(where, number, line))
             elif _HIDDEN_INLINE_RE.search(line):
-                raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (an inline HTML "
-                                "comment, processing instruction or declaration, '<!' or '<?', whose text a "
-                                "renderer does not show); cannot evaluate".format(where, number, line))
-            first = para_start = False
+                raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (potential inline "
+                                "HTML: '<!' or '<?' may open an HTML comment, processing instruction, declaration "
+                                "or CDATA section, whose text a renderer does not show; the check does not parse "
+                                "it, so it is refused even when escaped or not HTML, such as inside a code span); "
+                                "cannot evaluate".format(where, number, line))
+            elif line.endswith(_HARD_BREAK_MARK):
+                raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (a backslash at the "
+                                "line end, which the vendored renderer reads as a hard line break); cannot "
+                                "evaluate".format(where, number, line))
+            elif _decoded_reference(line) is not None:
+                raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (a character "
+                                "reference ending in ';', {!r}: a match of the renderer's own pattern that "
+                                "html.unescape changes, which the vendored renderer decodes when it sees the "
+                                "reference whole in plain text, not split by inline markup or inside a code span); cannot evaluate".format(where, number, line, _decoded_reference(line)))
+            # the split line is an ATX heading, which closes its block, so the line directly after it starts a
+            # new block (as the vendored renderer reads it) and gets the first-line checks, blank line or not
+            first, para_start = False, split is not None and split[0] == offset
         else:
             after_title, para_start = False, True
         offset += len(line) + 1
-    cuts = {text_start, len(source)}
+    cuts = {text_start, len(source)} | set(split or ())
     for match in _CUT_CANDIDATE_RE.finditer(source, text_start):
         pos = match.start()
         if not _is_boundary(source, pos):
@@ -1197,7 +1398,7 @@ def rule_units(source, where):
     for begin, end in zip(ordered, ordered[1:]):
         piece = source[begin:end]
         text = piece.strip()
-        if not text or text == CLAUSE_SEPARATOR:
+        if not text or text == CLAUSE_SEPARATOR or (begin, end) == split:
             continue
         if not _has_letter_or_digit(text):
             raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (no letter "
@@ -1436,6 +1637,10 @@ def run(root, rules_dir, inventory_path, register_path, prev_inventory_path=None
         findings += completeness
         coverage, (n_units, n_covered, n_exempt) = check_text_coverage(rule_corpus_ids, row_spans, exemptions)
         findings += coverage
+        # After the text-coverage leg, so its own diagnostic for a line it cannot classify is the one
+        # reported; this leg then reads every rule source's layout and refuses (exit 2) any the gen_rules
+        # BODY GRAMMAR refuses, whether or not a row names it.
+        findings += check_detail_coverage(rows, rule_corpus_ids)
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -1451,8 +1656,8 @@ def run(root, rules_dir, inventory_path, register_path, prev_inventory_path=None
         for finding in sorted(set(findings)):
             print("  " + finding)
         return 1
-    print("PASS: clause-id scheme, per-row span/text/digest, cumulative-max ordinal, resurrection, "
-          "completeness, and text coverage all hold")
+    print("PASS: clause-id scheme, per-row span/text/digest/layer, detail coverage, cumulative-max ordinal, "
+          "resurrection, completeness, and text coverage all hold")
     return 0
 
 
@@ -1501,9 +1706,10 @@ def _toml_clause(row):
            "start-line = {}".format(row["start-line"]),
            "end-line = {}".format(row["end-line"]),
            'canonical-text = "{}"'.format(_toml_escape(row["canonical-text"])),
-           'source-digest = "{}"'.format(row["source-digest"]),
-           ""]
-    return "\n".join(out)
+           'source-digest = "{}"'.format(row["source-digest"])]
+    if row.get("layer", "core") is not None:  # a None layer omits the field (the missing-layer case)
+        out.append('layer = "{}"'.format(row.get("layer", "core")))
+    return "\n".join(out + [""])
 
 
 def _toml_register(born, tombstones, successors):
@@ -1560,9 +1766,184 @@ def _good_genesis():
     return rules, clause_rows, born
 
 
-def _run_quiet(**kwargs):
+def _run_quiet(runner=None, **kwargs):
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-        return run(**kwargs)
+        return (runner or run)(**kwargs)
+
+
+def _with_shared_readers(module, probe):
+    """probe() with this module's rule-source readers (decode_rule_source, parse_source, body_first_line
+    and detail_heading_line) taken from module, a reverted gen_rules; they are restored afterwards."""
+    global decode_rule_source, parse_source, body_first_line, detail_heading_line
+    saved = decode_rule_source, parse_source, body_first_line, detail_heading_line
+    decode_rule_source, parse_source = module.decode_rule_source, module.parse_source
+    body_first_line, detail_heading_line = module.body_first_line, module.detail_heading_line
+    try:
+        return probe()
+    finally:
+        decode_rule_source, parse_source, body_first_line, detail_heading_line = saved
+
+
+def _run_output(runner, **kwargs):
+    """What runner(**kwargs) prints to stdout and stderr, as one text."""
+    out = io.StringIO()
+    with redirect_stdout(out), redirect_stderr(out):
+        runner(**kwargs)
+    return out.getvalue()
+
+
+# The layer cases: (name, body lines after the H1, [(ordinal, first line index, last line index, layer)],
+# expected exit). Line indices are 0-based into the body lines; a clause's canonical-text is those lines.
+# A first and last index of "fm" places the clause on the frontmatter's corpus-id line instead, and the
+# cr-byte case ends the H1 line with a CR byte.
+_DETAIL_BODY = ["core obligation", "", "## Detail", "", "detail obligation"]
+_LAYER_CASES = (
+    ("layer-derived-pass", _DETAIL_BODY, [(1, 0, 0, "core"), (2, 4, 4, "detail")], 0),
+    ("layer-disagrees", _DETAIL_BODY, [(1, 0, 0, "core"), (2, 4, 4, "core")], 1),
+    ("layer-crosses-heading", _DETAIL_BODY, [(1, 0, 4, "core")], 1),
+    ("unregistered-detail-paragraph", _DETAIL_BODY + ["", "unregistered detail paragraph"],
+     [(1, 0, 0, "core"), (2, 4, 4, "detail")], 1),
+    ("layer-missing", _DETAIL_BODY, [(1, 0, 0, None), (2, 4, 4, "detail")], 2),
+    ("layer-unknown", _DETAIL_BODY, [(1, 0, 0, "middle"), (2, 4, 4, "detail")], 2),
+    ("two-detail-headings", _DETAIL_BODY + ["", "## Detail", "", "more detail"],
+     [(1, 0, 0, "core"), (2, 4, 4, "detail"), (3, 8, 8, "detail")], 2),
+    ("no-heading-detail-row", ["core obligation"], [(1, 0, 0, "detail")], 1),
+    ("partial-detail-paragraph", _DETAIL_BODY + ["unregistered second line"],
+     [(1, 0, 0, "core"), (2, 4, 4, "detail")], 1),
+    ("frontmatter-core-span", ["core obligation"], [(1, "fm", "fm", "core"), (2, 0, 0, "core")], 1),
+    ("fenced-heading", ["core obligation", "", "```", "## Detail", "```", "", "detail obligation"],
+     [(1, 0, 0, "core"), (2, 6, 6, "core")], 2),
+    ("comment-heading", ["core obligation", "", "<!--", "## Detail", "-->", "", "detail obligation"],
+     [(1, 0, 0, "core"), (2, 6, 6, "core")], 2),
+    ("setext-heading", ["core obligation", "", "Detail", "---", "", "detail obligation"],
+     [(1, 0, 0, "core"), (2, 5, 5, "core")], 2),
+    ("cr-byte", ["core obligation"], [(1, 0, 0, "core")], 2),
+    ("html-wrapped-heading", ["core obligation", "", "<pre>", "", "## Detail", "", "detail obligation"],
+     [(1, 0, 0, "core"), (2, 6, 6, "detail")], 2),
+    ("blockquote-setext-heading", ["core obligation", "", "> Detail", "> ---", "", "detail obligation"],
+     [(1, 0, 0, "core"), (2, 5, 5, "core")], 2),
+    ("list-fence-heading", ["core obligation", "", "- a", "", "  ```", "x", "```", "", "## Detail", "",
+                            "detail obligation"], [(1, 0, 0, "core"), (2, 10, 10, "detail")], 2),
+    ("link-heading", ["core obligation", "", "## [Detail](https://example.test)", "", "detail obligation"],
+     [(1, 0, 0, "core"), (2, 4, 4, "core")], 2),
+    ("heading-then-rule", ["core obligation", "", "Detail is discussed here.", "# Another heading", "---"],
+     [(1, 0, 0, "core")], 2),
+    ("split-after-text", ["core obligation", "## Detail", "", "detail obligation"],
+     [(1, 0, 0, "core"), (2, 3, 3, "detail")], 2),
+    ("r4-setext-dash-space", ["core obligation", "", "Detail", "- ", "", "later obligation"],
+     [(1, 0, 0, "core"), (2, 5, 5, "core")], 2),
+    ("r4-quoted-script", ["Core obligation.", "", "> <script>", "## Detail", "Detail obligation.", "> </script>"],
+     [(1, 0, 0, "core"), (2, 4, 4, "detail")], 2),
+    ("r4-comment-reopen", ["core text", "", "<!-- a --> <!--", "```", "-->", "## Detail", "", "detail text",
+                           "<!--", "```", "more -->"], [(1, 0, 0, "core"), (2, 7, 7, "detail")], 2),
+    ("r4-wide-ordered-setext", ["core obligation", "", "10. Detail", "    ---"], [(1, 0, 0, "core")], 2),
+    ("r4-zwsp-heading", ["core obligation", "", "## De\u200btail"], [(1, 0, 0, "core")], 2),
+    ("r5-multiline-html-heading", ["core obligation", "", "<h2>De<span", 'title="x">tail</span></h2>'],
+     [(1, 0, 0, "core")], 2),
+    # A fenced comment opener, an ordered item not starting at 1 above a setext underline, and a `## Detail`
+    # line in the frontmatter are all refused (the gen_rules BODY GRAMMAR and FRONTMATTER grammar).
+    ("r6-fenced-comment", ["core obligation", "", "```", "<!--", "```", "Deta<span", 'class="x">il</span>', "---",
+                           "Hidden.", "-->"], [(1, 0, 0, "core")], 2),
+    ("r6-ordered-setext", ["core obligation", "", "Detail[](x '", "2. # y')", "---", "Hidden."],
+     [(1, 0, 0, "core")], 2),
+    ("r6-frontmatter-heading", ["core obligation"], [(1, 0, 0, "core")], 2),
+)
+# Red on revert: each guard put back to its pre-fix form in a scratch copy of this module, loaded through
+# importlib (never exec), must turn its case from the expected exit to the reverted exit. Where the
+# text-coverage leg reports the case as well, the entry names instead the guard's own finding text, which
+# must appear with the guard and not without it.
+# (name, fixed text, reverted text, case, exit or finding text with the guard reverted)
+_UNREGISTERED = "lie inside no registered clause span"
+_LAYER_REVERTS = (
+    ("layer-disagreement", "elif derived != layer:", "elif False:", "layer-disagrees", 0),
+    ("layer-crossing", '        return "detail"\n    return None\n', '        return "detail"\n    return "core"\n',
+     "layer-crosses-heading", 0),
+    ("detail-coverage", "_first_body, heading = _layout_of(raw, str(src))\n        if heading is None:",
+     "_first_body, heading = _layout_of(raw, str(src))\n        if True:", "unregistered-detail-paragraph",
+     _UNREGISTERED),
+    ("detail-coverage-wiring", "findings += check_detail_coverage(rows, rule_corpus_ids)", "pass",
+     "unregistered-detail-paragraph", _UNREGISTERED),
+    ("layer-vocabulary", "if layer not in LAYERS:", "if False:", "layer-unknown", 1),
+    ("heading-located", "derived = derived_layer(heading, start, end)", "derived = derived_layer(None, start, end)",
+     "layer-derived-pass", 1),
+    ("line-level-coverage", "if not any(s <= number <= e for s, e in spans):", "if False:",
+     "partial-detail-paragraph", _UNREGISTERED),
+    ("frontmatter-span", "if start < first_body:", "if False:", "frontmatter-core-span", "touches the frontmatter"),
+)
+# The CR refusal, the near-miss refusal, the blank line above the split, the BODY GRAMMAR and the
+# frontmatter `#` refusal live in the shared gen_rules reader and heading locator; each revert loads
+# gen_rules with that guard removed and patches this module's rule source readers and heading locator to
+# the reverted ones for the one case. A guard given as a tuple is reverted together with the others in it:
+# a case the BODY GRAMMAR prose line check also refuses reverts that check (_BODY_REVERT) with the guard
+# it names. (name, fixed text in gen_rules.py, reverted text, case, exit with the guard reverted)
+_BODY_REVERT = ("problem = _prose_problem(line)", "problem = None")
+_TITLE_TEXT_REVERT = ("if not line[2:].strip() or not set(line[2:]) <= _HEADING_TEXT:", "if False:")
+_SHARED_REVERTS = (
+    ("cr-byte", ('if b"\\r" in raw:', _TITLE_TEXT_REVERT[0]), ("if False:", _TITLE_TEXT_REVERT[1]), "cr-byte", 0),
+    ("near-miss-setext", ("if _names_detail(line):", _BODY_REVERT[0]), ("if False:", _BODY_REVERT[1]),
+     "setext-heading", 0),
+    ("near-miss-container-setext", ("if _names_detail(line):", _BODY_REVERT[0]),
+     ("if False:", _BODY_REVERT[1]), "blockquote-setext-heading", 0),
+    ("near-miss-link", ("if _names_detail(line):", _BODY_REVERT[0]), ("if False:", _BODY_REVERT[1]),
+     "link-heading", 0),
+    ("near-miss-r4-setext", ("if _names_detail(line):", _BODY_REVERT[0]), ("if False:", _BODY_REVERT[1]),
+     "r4-setext-dash-space", 0),
+    ("blank-before", 'if found > first and lines[found - 2] != "":', "if False:", "split-after-text", 0),
+    ("grammar-html", _BODY_REVERT[0], _BODY_REVERT[1], "html-wrapped-heading", 0),
+    ("grammar-multiline-html", _BODY_REVERT[0], _BODY_REVERT[1], "r5-multiline-html-heading", 0),
+    ("grammar-fence", _BODY_REVERT[0], _BODY_REVERT[1], "list-fence-heading", 0),
+    ("grammar-second-heading", _BODY_REVERT[0], _BODY_REVERT[1], "heading-then-rule", 0),
+    ("r6-fenced-comment", _BODY_REVERT[0], _BODY_REVERT[1], "r6-fenced-comment", 0),
+    ("r6-ordered-setext", _BODY_REVERT[0], _BODY_REVERT[1], "r6-ordered-setext", 0),
+    ("r6-frontmatter-heading", "        if comment:\n            if adopter:",
+     "        if comment:\n            if True:", "r6-frontmatter-heading", 0),
+)
+
+
+def _layer_case(base, name):
+    """Write the named layer case as a one-rule genesis corpus under base. Returns its root."""
+    _name, body, clauses, _expected = next(c for c in _LAYER_CASES if c[0] == name)
+    lines, line_of = _rule_lines("cdetl1", body, paragraphs=False)
+    if name == "cr-byte":
+        lines[6] += "\r"
+    if name == "r6-frontmatter-heading":
+        lines[2] = "## Detail"  # in place of `origin: pack`, so every line number stays put
+    digest = _sha_of(lines)
+    rows, born = [], [("cdetl1", "1.1.0")]
+    for ordinal, first, last, layer in clauses:
+        clause_id = "cdetl1.{}".format(ordinal)
+        if first == "fm":
+            start, end, text = 2, 2, lines[1]
+        else:
+            start, end, text = line_of[first], line_of[last], "\n".join(body[first:last + 1])
+        rows.append(dict([("clause-id", clause_id), ("corpus-id", "cdetl1"),
+                          ("source-path", ".aiqt/core/rules/cdetl1.md"), ("start-line", start),
+                          ("end-line", end), ("canonical-text", text),
+                          ("source-digest", digest), ("layer", layer)]))
+        born.append((clause_id, "1.1.0"))
+    return _write_corpus(base / name, dict(cdetl1=lines), rows, born, [], [])
+
+
+def _load_reverted(base, label, old, new):
+    """This module with one production guard reverted, written under base and loaded through importlib
+    (never exec). The mutation is confined to the text above the self-test section, so the revert table
+    itself is never the match. sys.path is restored after the load."""
+    import importlib.util
+    source = Path(__file__).read_text(encoding="utf-8")
+    production, sep, tests = source.partition("\n# --- self-test ")
+    if not sep or production.count(old) != 1:
+        raise AssertionError("revert {}: the fixed text must occur exactly once in the production code"
+                             .format(label))
+    path = base / "check_clauses_reverted_{}.py".format(label.replace("-", "_"))
+    path.write_text(production.replace(old, new, 1) + sep + tests, encoding="utf-8")
+    saved = list(sys.path)
+    try:
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = saved
+    return module
 
 
 def _run_capture(**kwargs):
@@ -1631,6 +2012,34 @@ def _not_run_vector(failures):
     if rc == 0 or want not in out.getvalue():
         failures.append("(NOT RUN vector) an unavailable temp directory must exit nonzero AND record {!r}, "
                         "never a PASS (PARTIAL) exit 0 (got exit {})".format(want, rc))
+
+
+def _charref_copy_failures(vendored, source=None):
+    """Failure lines (none when they agree) comparing _RENDERER_CHARREF_RE with the re.compile argument of
+    Renderer._charref in the vendored renderer at vendored, read with ast; source, when given, stands in for
+    that file's text (a self-test mutant). An argument ast.literal_eval cannot read (ValueError) is recorded
+    as a failure line, never raised."""
+    import ast
+    charref = None
+    try:
+        tree = ast.parse(vendored.read_text(encoding="utf-8") if source is None else source, str(vendored))
+    except (OSError, UnicodeDecodeError, SyntaxError) as exc:
+        return ["_RENDERER_CHARREF_RE: cannot read the vendored renderer {} ({})".format(vendored, exc)]
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "Renderer":
+            for item in node.body:
+                if (isinstance(item, ast.Assign) and [getattr(t, "id", None) for t in item.targets] == ["_charref"]
+                        and isinstance(item.value, ast.Call) and len(item.value.args) == 1
+                        and not item.value.keywords and ast.unparse(item.value.func) == "re.compile"):
+                    try:
+                        charref = ast.literal_eval(item.value.args[0])
+                    except ValueError as exc:
+                        return ["_RENDERER_CHARREF_RE: the re.compile argument of Renderer._charref in {} is not a "
+                                "literal ast.literal_eval reads ({})".format(vendored, exc)]
+    if charref != _RENDERER_CHARREF_RE.pattern:
+        return ["_RENDERER_CHARREF_RE {!r} is not Renderer._charref in {} ({!r})".format(
+            _RENDERER_CHARREF_RE.pattern, vendored, charref)]
+    return []
 
 
 def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence of fixture cases
@@ -1768,6 +2177,25 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
         failures.append("rule_units: a body with no frontmatter must be a cannot-evaluate (GateError)")
     except GateError:
         pass
+    # A body with no title is cut whole; the one `## Detail` split line is a layer marker and no unit, and a
+    # second one is refused as markup.
+    split_probes = (("---\ncorpus-id: cprobe\n---\n\nAlpha holds.\n", ["Alpha holds."]),
+                    ("---\ncorpus-id: cprobe\n---\n\n# Title words\n\nAlpha holds.\n\n## Detail\n\nBeta waits.\n",
+                     ["Alpha holds.", "Beta waits."]))
+    for split_probe, want in split_probes:
+        try:
+            _at, probe_units = rule_units(split_probe, "probe")
+            got = [split_probe[b:e] for b, e in probe_units]
+            if got != want:
+                failures.append("rule_units: expected units {!r}, got {!r}".format(want, got))
+        except GateError as exc:
+            failures.append("rule_units: {!r} raised {}".format(split_probe, exc))
+    try:
+        rule_units(split_probes[1][0] + "\n## Detail\n\nGamma ends.\n", "probe")
+        failures.append("rule_units: a second '## Detail' line must be a cannot-evaluate (GateError)")
+    except GateError as exc:
+        if "markup" not in str(exc):
+            failures.append("rule_units: a second '## Detail' line expected the markup refusal, got {}".format(exc))
     # A line that may start a Markdown block where it stands is refused; a wrapped prose line that merely
     # begins with '#', a number or '<' continues its paragraph. An ordered item of any number, a line that
     # opens with a tag and ends with '>' (a quoted '<' or '>' in an attribute value included), and a line that
@@ -1777,7 +2205,8 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
     head = "---\ncorpus-id: cprobe\n---\n\n# Title words\n\n"
     for line in ("#507 and its review.", "<path> only after a backup.", "2) when unsure.", "3.",
                  "<b>bold</b> stays inline.", "1234567890. is no list.", '<span title="a>b">',
-                 "[foo\nbar]: /url", "<b>bold</b>", "\u0661. Beta holds.", "the <span hidden>draft</span> text."):
+                 "[foo\nbar]: /url", "<b>bold</b>", "\u0661. Beta holds.", "the <span hidden>draft</span> text.",
+                 "[x] marks it done.", "[ ] marks it open."):
         try:
             rule_units(head + "See the start of the PR\n" + line + "\n", "probe")
         except GateError as exc:
@@ -1801,7 +2230,9 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
     for line in ("2) when unsure.", "7. beta item", "<path>", "</span>", '<a href="x">', "[foo]: /url",
                  '<custom data=">">', '<span title="a>b">', "<a href='x>y'>", '<span title="a<b">', "<a>\xa0",
                  "<b>bold</b>", "[foo\nbar]: /url", "[foo\\]\nbar]: /url", "[foo\nbar\nbaz]: /url",
-                 "2.\xa0Beta holds.", "2)\x0bBeta holds.", "\u0661. Alpha holds.", "\u0967\u0968) Alpha holds."):
+                 "2.\xa0Beta holds.", "2)\x0bBeta holds.", "\u0661. Alpha holds.", "\u0967\u0968) Alpha holds.",
+                 "[x] Beta holds.", "[X] Beta holds.", "[ ] Beta holds.", "[\t] Beta holds.", "[\xa0] Beta holds.",
+                 "[x]"):
         for text in (line + "\n", line + "\nAlpha holds.\n"):
             try:
                 rule_units(head + text, "probe")
@@ -1810,6 +2241,33 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
                 if "markup" not in str(exc):
                     failures.append("rule_units: {!r} as a paragraph's first line was refused for another "
                                     "reason: {}".format(text, exc))
+    # The `## Detail` split line is an ATX heading, which closes its block, so a line directly after it (no blank
+    # line between) is a paragraph's first line: each first-line form is refused there as the classifier's
+    # ("markup"). The sibling, a blank line after the split line and the same text wrapped as a paragraph's
+    # second line, stays prose, and so does plain prose directly after the split line.
+    split_head = head + "Alpha holds.\n\n## Detail\n"
+    for line in ("2. Beta holds.", "[x] Beta holds.", "[ ] Beta holds.", "[foo]: /url", "<path>"):
+        try:
+            rule_units(split_head + line + "\n", "probe")
+            failures.append("rule_units: {!r} directly after the split line was not refused".format(line))
+        except GateError as exc:
+            if "markup" not in str(exc):
+                failures.append("rule_units: {!r} directly after the split line was refused for another "
+                                "reason: {}".format(line, exc))
+    for tail, want in (("\nSee the start of the PR\n2. Beta holds.\n", ["See the start of the PR\n2.", "Beta holds."]),
+                       ("\nSee the start of the PR\n[x] Beta holds.\n", ["See the start of the PR\n[x] Beta holds."]),
+                       ("\nSee the start of the PR\n[ ] Beta holds.\n", ["See the start of the PR\n[ ] Beta holds."]),
+                       ("\nSee the start of the PR\n[foo]: /url\n", ["See the start of the PR\n[foo]: /url"]),
+                       ("\nSee the start of the PR\n<path>\n", ["See the start of the PR\n<path>"]),
+                       ("Beta holds.\n", ["Beta holds."])):
+        try:
+            _at, probe_units = rule_units(split_head + tail, "probe")
+            got = [(split_head + tail)[b:e] for b, e in probe_units]
+            if got != ["Alpha holds."] + want:
+                failures.append("rule_units: {!r} after the split line expected units {!r}, got {!r}".format(
+                    tail, ["Alpha holds."] + want, got))
+        except GateError as exc:
+            failures.append("rule_units: {!r} after the split line was refused: {}".format(tail, exc))
     # A carriage return and a form feed are line endings to the vendored renderer (marko's _preprocess_text) that
     # the LF-only splitter does not see: a cannot-evaluate wherever one stands, inside a line, at a line's start,
     # at its end, in the title and in the frontmatter, so a heading, list item or comment cannot hide behind one.
@@ -1838,7 +2296,8 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
         except GateError as exc:
             failures.append("rule_units: {!r} inside a line was refused: {}".format(char, exc))
     # An inline HTML comment, processing instruction, declaration or CDATA section passes through as raw HTML a
-    # browser does not show, so '<!' or '<?' anywhere in a body line is refused, on a first or a wrapped line.
+    # browser does not show, and '<!' or '<?' is matched, not parsed, so it is refused anywhere in a body line,
+    # on a first or a wrapped line, even where it opens none (an unclosed '<!--', one inside a code span).
     for line in ("Alpha holds <!-- hidden words --> today.", "Alpha holds <!--", "Alpha holds <?php hidden ?> today.",
                  "Alpha holds <![CDATA[hidden]]> today.", "Alpha holds <!X hidden> today.", "Use `<!--` here."):
         for text in (line + "\n", "See the start of the PR\n" + line + "\nhidden words --> today.\n"):
@@ -1848,6 +2307,73 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
             except GateError as exc:
                 if "does not show" not in str(exc):
                     failures.append("rule_units: {!r} was refused for another reason: {}".format(text, exc))
+    # A backslash at a line's end is a hard line break to the vendored renderer ('<br />'), and a character reference
+    # ending in ';' is decoded by it (a numeric one to its character: whitespace, a line ending or another character,
+    # such as '&#507;'; a named one to its character,
+    # '&region=eu;' by its prefix '&reg'), but the boundary grammar reads neither: '&#32;' or a hard break after a
+    # sentence end joins two rendered sentences into one unit, and the ';' of '&amp; ' reads as a clause separator.
+    # Each is refused on a first or a wrapped line.
+    for line, needle in (("Alpha holds.\\", "hard line break"), ("Alpha holds\\", "hard line break"),
+                         ("Alpha holds.&#32;Beta waits.", "character reference"),
+                         ("Alpha holds.&#10;Beta waits.", "character reference"),
+                         ("Alpha holds.&#x20;Beta waits.", "character reference"),
+                         ("Alpha holds.&nbsp;Beta waits.", "character reference"),
+                         ("Tom &amp; Jerry hold the lease.", "character reference"),
+                         ("Use cut&copy; to move it.", "character reference"),
+                         ("Open https://x.example/f?a=1&region=eu; now.", "character reference"),
+                         ("See PR&#507; now.", "character reference")):
+        for text in (line + "\nGamma ends.\n", "See the start of the PR\n" + line + "\nGamma ends.\n"):
+            try:
+                rule_units(head + text, "probe")
+                failures.append("rule_units: the {} in {!r} was not refused".format(needle, text))
+            except GateError as exc:
+                if needle not in str(exc) or "cannot classify" not in str(exc):
+                    failures.append("rule_units: {!r} was refused for another reason: {}".format(text, exc))
+    # ... while the same sentences parted by plain whitespace, a backslash inside a line, an '&' that opens no
+    # reference, and a reference with no ';', which the renderer's pattern does not match and so shows as typed
+    # ('&#32Beta', 'cut&copy', '&region=eu', 'PR&#507'), read as prose, cut where the grammar cuts.
+    for text, want in (("Alpha holds.\nBeta waits.\n", ["Alpha holds.", "Beta waits."]),
+                       ("Alpha holds. Beta waits.\n", ["Alpha holds.", "Beta waits."]),
+                       ("Alpha holds \\ today. Beta waits.\n", ["Alpha holds \\ today.", "Beta waits."]),
+                       ("R&D holds; Q&A waits.\n", ["R&D holds", "Q&A waits."]),
+                       ("Tom and Jerry hold the lease.\n", ["Tom and Jerry hold the lease."]),
+                       ("Alpha holds.&#32Beta waits.\n", ["Alpha holds.&#32Beta waits."]),
+                       ("Use cut&copy to move it.\n", ["Use cut&copy to move it."]),
+                       ("Open https://x.example/f?a=1&region=eu now.\n",
+                        ["Open https://x.example/f?a=1&region=eu now."]),
+                       ("See PR&#507 now.\n", ["See PR&#507 now."]),
+                       ("See the PR\nSee PR&#507 now.\n", ["See the PR\nSee PR&#507 now."])):
+        try:
+            _at, probe_units = rule_units(head + text, "probe")
+            got = [(head + text)[b:e] for b, e in probe_units]
+            if got != want:
+                failures.append("rule_units: {!r} expected units {!r}, got {!r}".format(text, want, got))
+        except GateError as exc:
+            failures.append("rule_units: {!r} was refused: {}".format(text, exc))
+    # Over-refusal, disclosed in the help text: a reference whose run to ';' is broken by emphasis is split by the
+    # renderer into pieces it decodes none of ('&amp;reg<em>x</em>;'), but the gate reads the raw line and
+    # refuses it. This vector holds that refusal, so the disclosure stays true.
+    text = "Use &reg*x*; here.\n"
+    try:
+        rule_units(head + text, "probe")
+        failures.append("rule_units: the disclosed over-refusal of {!r} no longer holds (update the disclosure)"
+                        .format(text))
+    except GateError as exc:
+        if "character reference" not in str(exc) or "cannot classify" not in str(exc):
+            failures.append("rule_units: {!r} was refused for another reason: {}".format(text, exc))
+    # _RENDERER_CHARREF_RE is a copy of the vendored renderer's Renderer._charref: this file never imports the
+    # vendored module, so its source is read with ast and the re.compile argument of that class attribute compared.
+    vendored = Path(__file__).resolve().parent.parent.joinpath(*_RENDERER_SOURCE_REL)
+    failures += _charref_copy_failures(vendored)
+    # A mutant whose re.compile argument is a name, not a literal, makes ast.literal_eval raise ValueError; the
+    # comparison records one clean failure line for it, never an escaping traceback.
+    mutant = _charref_copy_failures(vendored, "import re\n_PAT = '&x;'\n\n\nclass Renderer:\n"
+                                              "    _charref = re.compile(_PAT)\n")
+    if len(mutant) != 1 or "is not a literal" not in mutant[0]:
+        failures.append("_RENDERER_CHARREF_RE: a Renderer._charref whose pattern is a name must record one clean "
+                        "failure line, got {!r}".format(mutant))
+    if _RENDERER_CHARREF_RE.flags != re.compile("").flags:
+        failures.append("_RENDERER_CHARREF_RE carries flags the vendored Renderer._charref does not")
     # The delimiter-row test is the vendored GFM table's own: every '|'-separated cell begins with '-' or ':-'.
     for line, want in (("--x|--y", True), (":-- | --:", True), ("|--|", True), ("-", True), ("--force is it.", True),
                        ("a | --", False), ("-- | a", False), ("--||--", False), (":|-", False), ("--\\|x", True),
@@ -1904,6 +2430,76 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
             base = _fresh(rules, copy.deepcopy(rows), born)
             if _run_quiet(**_paths(base, genesis=True)) != 0:
                 failures.append("genesis: a well-formed genesis corpus expected exit 0")
+
+            # The layer: derived from the span and the `## Detail` heading, reconciled with the stored
+            # field; a crossing span, an unregistered detail paragraph, and a bad layer value all fail.
+            layer_base = base_tmp / "layers"
+            for name, _body, _clauses, expected in _LAYER_CASES:
+                got = _run_quiet(**_paths(_layer_case(layer_base, name), genesis=True))
+                if got != expected:
+                    failures.append("layer case {}: expected exit {}, got {}".format(name, expected, got))
+            revert_base = base_tmp / "reverted"
+            revert_base.mkdir()
+            for label, old, new, case, reverted_exit in _LAYER_REVERTS:
+                try:
+                    mutant = _load_reverted(revert_base, label, old, new)
+                except AssertionError as exc:
+                    failures.append(str(exc))
+                    continue
+                if isinstance(reverted_exit, str):
+                    # The text-coverage leg reports this case too (exit 1 either way), so the guard is pinned
+                    # by its own finding: present with the guard, gone without it.
+                    fixed_out = _run_output(run, **_paths(_layer_case(revert_base / (label + "-fixed"), case),
+                                                          genesis=True))
+                    reverted_out = _run_output(mutant.run, **_paths(_layer_case(revert_base / label, case),
+                                                                    genesis=True))
+                    if reverted_exit not in fixed_out or reverted_exit in reverted_out:
+                        failures.append("revert {}: case {} expected the finding {!r} with the guard and not "
+                                        "without it".format(label, case, reverted_exit))
+                    continue
+                got = _run_quiet(runner=mutant.run, **_paths(_layer_case(revert_base / label, case), genesis=True))
+                if got != reverted_exit:
+                    failures.append("revert {}: with the guard removed, case {} expected exit {} (the guard "
+                                    "is what catches it), got {}".format(label, case, reverted_exit, got))
+            gr_source = (Path(__file__).resolve().parent / "gen_rules.py").read_text(encoding="utf-8")
+            gr_production, gr_sep, gr_tests = gr_source.partition("\n# --- self-test ")
+            for label, old, new, case, reverted_exit in _SHARED_REVERTS:
+                pairs = list(zip(old, new)) if isinstance(old, tuple) else [(old, new)]
+                if not gr_sep or any(gr_production.count(fixed) != 1 for fixed, _reverted in pairs):
+                    failures.append("revert {}: the fixed text must occur exactly once in gen_rules.py's "
+                                    "production code".format(label))
+                    continue
+                import importlib.util
+                gr_mutated = gr_production
+                for fixed, reverted in pairs:
+                    gr_mutated = gr_mutated.replace(fixed, reverted, 1)
+                gr_path = revert_base / "gen_rules_reverted_{}.py".format(label.replace("-", "_"))
+                gr_path.write_text(gr_mutated + gr_sep + gr_tests, encoding="utf-8")
+                spec = importlib.util.spec_from_file_location(gr_path.stem, gr_path)
+                gr_mutant = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(gr_mutant)
+                # The text-coverage leg refuses each of these cases on its own (exit 2 either way), so the shared
+                # guard is pinned at this gate's own reads of the source (parse_source, which the corpus
+                # loader uses, and _layout_of, which check_rows and check_detail_coverage use): they refuse
+                # the case with the guard and read it without.
+                case_src = _layer_case(revert_base / label, case) / ".aiqt" / "core" / "rules" / "cdetl1.md"
+                case_raw = case_src.read_bytes()
+
+                def _layout_refused():
+                    try:
+                        parse_source(case_src)
+                        _layout_of(case_raw, str(case_src))
+                    except (GateError, ValueError):
+                        return True
+                    return False
+
+                fixed_refused = _layout_refused()
+                reverted_refused = _with_shared_readers(gr_mutant, _layout_refused)
+                if not fixed_refused or reverted_refused != (reverted_exit != 0):
+                    failures.append("revert {}: the layout read of case {} expected a refusal with the shared "
+                                    "guard and {} without it, got {} and {}".format(
+                                        label, case, "a refusal" if reverted_exit else "a read",
+                                        fixed_refused, reverted_refused))
 
             # The same corpus with the DEFERRED manifest leg armed and a matching manifest is clean; a
             # mismatching manifest fails; the default invocation reads no manifest at all.
@@ -3022,8 +3618,11 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
                 ("a second heading", "ccovn5", [two[0]], [(0, two[0])],
                  {"lines": ["---", "corpus-id: ccovn5", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
                            "", "# Another title", "", two[0]]}, 2, "cannot classify"),
-                ("a body with no title is checked whole", "ccovn6", [two[0]], [(0, two[0])],
-                 {"lines": ["---", "corpus-id: ccovn6", "origin: pack", "slug: fixture", "---", "", two[0]]}, 0, ""),
+                # The splitter checks a body with no title whole (the pure splitter cases above); the gate
+                # then refuses it, as gen_rules does, since the BODY GRAMMAR requires the title line.
+                ("a body with no title is outside the body grammar", "ccovn6", [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn6", "origin: pack", "slug: fixture", "---", "", two[0]]}, 2,
+                 "outside the body grammar"),
                 ("an exemptions file that does not exist", "ccovn7", two, [(0, two[0]), (1, two[1])],
                  {"exemptions_path": Path("/nonexistent-aiqt-dir/clause-exemptions.toml")}, 2, "does not exist"),
                 ("an absent exemptions file is a cannot-evaluate even with a sentence uncovered", "ccovn8", two,
@@ -3040,13 +3639,16 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
                  [two[0], 'Use a 3" pipe.'], [(0, two[0])], {"final_newline": False}, 2, "still open"),
                 ("a file with no final newline and no open opener", "ccovn14", two, [(0, two[0]), (1, two[1])],
                  {"final_newline": False}, 0, ""),
-                ("wrapped prose lines that begin with '#', a number or '<' continue their paragraph", "ccovn15",
+                # The splitter reads these wrapped lines as their paragraph's text (the pure splitter cases
+                # above); the gate then refuses the source, as gen_rules does, since a BODY GRAMMAR prose line
+                # starts with none of them.
+                ("wrapped prose lines that begin with '#', a number or '<' are outside the body grammar", "ccovn15",
                  [two[0], "#507 and its review.", "2) when unsure.", "<path> only after a backup."],
                  [(0, two[0]), (1, "#507 and its review."), (2, "2) when unsure."),
                   (3, "<path> only after a backup.")],
                  {"lines": ["---", "corpus-id: ccovn15", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
                            "", two[0], "#507 and its review.", "2) when unsure.", "<path> only after a backup."]},
-                 0, ""),
+                 2, "outside the body grammar"),
                 ("a paragraph that opens with a tag whose quoted value holds '>' is refused, even exempted",
                  "ccovn16", [two[0]], [(0, two[0])],
                  {"lines": ["---", "corpus-id: ccovn16", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
@@ -3101,6 +3703,31 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
                             "", two[0], "", "Alpha a | b", "--x|--y"],
                   "exemptions": [{"corpus-id": "ccovn27", "text": "Alpha a | b\n--x|--y",
                                   "reason": "A rationale."}]}, 2, "cannot classify"),
+                # A character reference passes the gen_rules BODY GRAMMAR, so the splitter's own refusal is what
+                # stops it: '&#32;' joins two rendered sentences into one unit, and the ';' of '&amp; ' cuts one
+                # sentence in two. Each is refused, even exempted; the same text with plain words passes.
+                ("a numeric character reference between two sentences is refused, even exempted", "ccovn28",
+                 [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn28", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                            "", two[0], "", "Gamma holds.&#32;Delta waits."],
+                  "exemptions": [{"corpus-id": "ccovn28", "text": "Gamma holds.&#32;Delta waits.",
+                                  "reason": "A rationale."}]}, 2, "character reference"),
+                ("the same two sentences parted by a space, exempted, pass", "ccovn29", [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn29", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                            "", two[0], "", "Gamma holds. Delta waits."],
+                  "exemptions": [{"corpus-id": "ccovn29", "text": "Gamma holds. Delta waits.",
+                                  "reason": "A rationale."}]}, 0, ""),
+                ("a named character reference whose ';' reads as a clause separator is refused, even exempted",
+                 "ccovn30", [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn30", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                            "", two[0], "", "Tom &amp; Jerry hold the lease."],
+                  "exemptions": [{"corpus-id": "ccovn30", "text": "Tom &amp; Jerry hold the lease.",
+                                  "reason": "A rationale."}]}, 2, "character reference"),
+                ("the same sentence with a plain word, exempted, passes", "ccovn31", [two[0]], [(0, two[0])],
+                 {"lines": ["---", "corpus-id: ccovn31", "origin: pack", "slug: fixture", "---", "", "# Fixture rule",
+                            "", two[0], "", "Tom and Jerry hold the lease."],
+                  "exemptions": [{"corpus-id": "ccovn31", "text": "Tom and Jerry hold the lease.",
+                                  "reason": "A rationale."}]}, 0, ""),
             ]
             for label, corpus, obligations, covered, extra, want, needle in cover_vectors:
                 got, out = _cover(corpus, obligations, covered, **extra)
@@ -3207,9 +3834,27 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
           "stay prose; an inline '<!' or '<?' is refused; a line the vendored GFM table reads as a delimiter "
           "row ('--x|--y') is refused; an ordered item in non-ASCII decimal digits is refused as a paragraph's "
           "first line; and each whitespace-widened block start has a no-break-space or vertical-tab vector "
-          "the classifier itself refuses); an unavailable temp directory "
-          "is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL)"
-          .format(core))
+          "the classifier itself refuses; and the earlier reproductions hold: a backslash at a line end (a hard "
+          "line break to the vendored renderer) and a character reference ending in ';' that it decodes "
+          "('&#32;', '&#10;', '&nbsp;', '&amp;', '&copy;', '&region=eu;', '&#507;') are a cannot-evaluate on a "
+          "first or a wrapped line, '&#32;' and '&amp;' also when exempted, while plain whitespace, a mid-line backslash, an '&' that "
+          "opens no reference and a reference with no ';', which the renderer shows as typed ('&#32Beta', "
+          "'cut&copy', '&region=eu', 'PR&#507'), stay prose, and the copied renderer pattern equals the vendored "
+          "Renderer._charref read with ast; and a GFM task marker "
+          "('[x] ', '[ ] ') is refused as a paragraph's first line while a wrapped one stays prose; and a "
+          "line directly after the '## Detail' split line is a paragraph's first line, so an ordered item, a "
+          "task marker, a link reference definition and a one-tag line are refused there while the same text "
+          "wrapped after a blank line stays prose); an unavailable "
+          "temp directory "
+          "is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL); and the clause layer: {} layer "
+          "case(s) hold (derived pass, stored-layer disagreement, crossing span, unregistered detail "
+          "paragraph or line, missing or unknown layer, two headings, detail row with no heading, "
+          "frontmatter span, fenced, commented, HTML-wrapped, setext, blockquote setext, list-fenced or "
+          "linked heading, a second heading, split after text, the further setext, quoted-script, "
+          "comment-reopen, ordered-setext and zero-width reproductions, the multi-line HTML heading, the "
+          "fenced-comment and frontmatter-heading reproductions, CR byte) and {} guard revert(s) each go "
+          "red"
+          .format(core, len(_LAYER_CASES), len(_LAYER_REVERTS) + len(_SHARED_REVERTS)))
     return 0
 
 

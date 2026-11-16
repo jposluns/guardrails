@@ -5,7 +5,14 @@
 # self-contained subset the opf-standalone-closure gate exercises in physical isolation.
 # Never pipe this to a truncating sink: a masked exit code defeats the gate.
 set -uo pipefail
-here="$(cd "$(dirname "$0")" && pwd)" || exit 2
+# This script's directory, resolved in checked steps: a dirname that fails or prints nothing exits 2
+# here, before any gate. "$dir/." makes an empty name the filesystem root in every shell, never the
+# calling directory, so only the empty-name check stands between it and a gate run from /. CDPATH is
+# cleared for the cd, as in opf/enforcement/ci/opf-ci.sh: a relative start would otherwise resolve
+# through a CDPATH entry, and cd PRINTS a CDPATH match, adding a second line to here.
+dir=$(dirname -- "$0") || exit 2
+[ -n "$dir" ] || exit 2
+here="$(CDPATH= cd -- "$dir/." && pwd)" || exit 2
 
 # Each gate launches isolated: `python3 -I -B <opf/tools>/<gate>.py`. `-I` (isolated mode) drops the
 # script's own directory from sys.path so a tool-written sibling cannot shadow a stdlib import; `-B`
@@ -44,6 +51,10 @@ run_gate "opf-doctor-selftest"         python3 -I -B "$here/check_opf_doctor.py"
 run_gate "opf-init-selftest"           python3 -I -B "$here/check_opf_init.py" --self-test
 run_gate "opf-init-contract-selftest"  python3 -I -B "$here/_opf_init_contract.py" --self-test
 run_gate "opf-init-contract-check-selftest" python3 -I -B "$here/check_opf_init_contract.py" --self-test
+run_gate "opf-init-contract-check"     python3 -I -B "$here/check_opf_init_contract.py"
+run_gate "opf-selftest-execution-selftest" python3 -I -B "$here/check_opf_selftest_execution.py" --self-test
+run_gate "opf-selftest-registry"       python3 -I -B "$here/check_opf_selftest_execution.py" --registry
+run_gate "opf-init-contract-check-selftest-execution" python3 -I -B "$here/check_opf_selftest_execution.py" --suite opf-init-contract-check-selftest
 run_gate "opf-adopt-selftest"          python3 -I -B "$here/_opf_adopt.py" --self-test
 run_gate "opf-adopt-apply-selftest"    python3 -I -B "$here/_opf_adopt_apply.py" --self-test
 run_gate "opf-adopt-state-selftest"    python3 -I -B "$here/_opf_adopt_state.py" --self-test

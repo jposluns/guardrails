@@ -52,11 +52,7 @@ Fix errors and prevent their recurrence. Worked first.
 
 | ID | Status | Item | Tags |
 | --- | --- | --- | --- |
-| OPF-HOMES-ACTIVATION-CHECKLIST | Partly done | Work needed before OPF switches to its second layout for where store files live (OPF tools still write to the first layout): the remaining fixes, then a full end-to-end test (H, M) | `[public]` `[tooling]` |
 | MODE-CANONICAL-SOURCE | Partly done | Hooks that depend on the operating mode read both a configured canonical mode file and the session record, and treat the mode as unattended when either says so (reading one configured file already works) (H, S) | `[public]` `[tooling]` |
-| FIX-MAIN-UNCOND | In progress (#385) | OPF tool self-tests run only for the exact self-test argument (M, M) | `[public]` `[tooling]` |
-| REQ-OPF-IMPORT-DECISIONS | Not started | OPF adoption splits a mixed decisions register into pending and decided records, preserving history (H, M) | `[public]` `[tooling]` |
-| OPF-FLOW-SKILL | Partly done | The /flow skill ships in OPF: /flow N runs N workstreams, reads the store's backlog and pipeline to choose work, and keeps a live workstream table (M, M) | `[public]` `[adopter]` |
 | FIX-411-REBUILD-CHILD-CONTRACT | Planned | Gates run loaded code in a child under the shared fail-closed contract (M, M) | `[public]` `[tooling]` |
 
 ## Priority 2 - Fill significant gaps
@@ -65,14 +61,13 @@ Fill significant gaps: strengthen capabilities that exist but are too thin to re
 
 | ID | Status | Item | Tags |
 | --- | --- | --- | --- |
+| MAPPINGS-FIT-SWEEP | Not started | Published framework mappings: remove or downgrade weak and over-labelled fits, then judge the rest (M, M) | `[public]` `[corpus]` |
 | GD-152 | Not started | A portable way for an adopting project to track review findings to an outcome: queue them, bring overdue ones back at the start of a session, and escalate any left unhandled (M, L) | `[public]` |
 | PYTHON-FLOOR-U7 | Not started | Python 3.14 floor: the release note, written into the changelog in step 1 of the 1.1.1 cut (M, XS) | `[public]` `[adopter]` `[release]` `[1.1.1 cut]` |
 | AIQT-INSTRUCTION-BUDGET | In progress (#392) | Cut the pack's instructions that load in every session from 112,222 to at most 90,000 characters: decide where each rule's detail belongs, move that detail into the layer loaded only on demand, then make the size check enforce the 90,000 limit (H, L) | `[public]` |
-| AIQT-INSTRUCTION-BUDGET-DETAIL | In progress (#392) | Rule detail layer: a place in each rule's source for detail that is loaded only on demand (H, M) | `[public]` |
 | TOOL-MERGE-TRAIN | In progress (#390) | Merge-train tool: after each merge, bring every open pull request up to date with main, regenerate the generated release files, rerun its checks and push the result (M, S) | `[public]` `[tooling]` |
 | ENFORCEMENT-ATTR-SOURCE-DOC | Not started | Name --attr-source among the git value-taking options in the commit-identity hook description (L, S) | `[public]` `[docs]` |
 | PUBLIC-ROADMAP-REFRESH | In progress (#395) | Bring the public roadmap up to date: plain progress words and a row for every open pull request (M, S) | `[public]` `[docs]` |
-| OPF-PROD-GATE-CHILD | Not started | OPF gate commands run loaded code under the child contract (S, M) | `[public]` `[tooling]` |
 
 ## Priority 3 - Tooling
 
@@ -81,24 +76,6 @@ Tooling: the pack's operational-files framework, migration and adoption machiner
 | ID | Status | Item | Tags |
 | --- | --- | --- | --- |
 | PREVIEW-FLEET-PORT | Planned | Port ten more generally useful hooks to the .preview/ channel, separate from the hooks already published there (M, L) | `[public]` `[tooling]` |
-| OPF-INIT | Partly done | `opf init` base: the shared setup code that creates a project's OPF store and that adoption reuses (store creation that resumes after an interruption, the first build of the readable views, and a lock against concurrent changes) (H, L) | `[public]` `[tooling]` `[1.1.1]` |
-| OPF-INIT-LATER | Not started | `opf init` after the base: the later steps, such as staging the created files in git, publishing them, finishing the run, and the command-line commands (not yet assigned to a release) (H, L) | `[public]` `[tooling]` |
-| OPF-DOGFOOD | Planned | Move this project's own operational records into OPF (M, M) | `[public]` `[tooling]` |
-| OPF-ADOPT-ENTRY | Planned | Adoption entry point for the pack: a generated instructions file on the website that a coding assistant can read and follow to adopt the pack by itself (hand-written adoption guides for OPFiles (the operational-files format), opf/site/adopt.md and opf/site/llms.txt, already exist since #274) (M, M) | `[public]` `[tooling]` |
-| OPF-ADOPT-VALIDATE | Planned | Adoption testing: a standing check that adopting the pack still works, including trial adoptions by live coding assistants (M, M) | `[public]` `[tooling]` |
-| OPF-EARLYCUT | Planned | Early release of clean-start OPF adoption for first adopters (M, S) | `[public]` `[tooling]` |
-| OPF-ENFORCE-PACK | Partly done | OPF enforcement pack: CI and pre-commit checks, plus hooks for each supported coding assistant that block direct record edits, with the known gaps published (H, L) | `[public]` `[tooling]` `[1.1.1]` |
-| OPF-PROMPT-PACK | Partly done | OPF prompt pack: adoption instructions, then post-adoption import instructions with an example for every type (M, S) | `[public]` `[tooling]` |
-| OPF-IMPORTED-SERIES | Planned | OPF imported records: a looser but still validated format for records brought in from a project's history, with their own IDs and health checks, and a safeguard so an old imported record never counts as a current approval (H, L) | `[public]` `[tooling]` |
-| OPF-RECORD-IMPORT | Planned | OPF record import: a write mode for batches of historical records (H, M) | `[public]` `[tooling]` |
-| OPF-IMPORT-COMPLETION | Planned | OPF import completion: prompt, status and verify modes with a per-source completion check (M, M) | `[public]` `[tooling]` |
-| OPF-CONSUMER | Planned | Switch this project's own work-tracking tools to read the backlog and other project records from the OPF store (M, M) | `[public]` `[tooling]` |
-| OPF-ADOPT-ORCH | Partly done | OPF adoption component: investigate a project, propose a plan, take one approval, then apply it deterministically (H, XL) | `[public]` `[tooling]` `[1.1.1]` |
-| OPF-ADOPT-U3 | Not started | Adoption apply: create the project's OPF store with the same initialization code `opf init` uses (M, M) | `[public]` `[tooling]` `[1.1.1]` |
-| OPF-ADOPT-U4 | Not started | Adoption apply: list in the OPF manifest the files OPF leaves unmanaged, and update the files that refer to moved records so they point to the new locations (M, M) | `[public]` `[tooling]` `[1.1.1]` |
-| OPF-ADOPT-U10 | Partly done | Adoption command: add the approval and apply steps, so one recorded approval carries the plan through to applying it (planning and status already work) (M, L) | `[public]` `[tooling]` `[1.1.1]` |
-| OPF-ADOPT-U12 | Not started | Adoption completion: check that direct record edits are blocked and the approved write paths still work (M, M) | `[public]` `[tooling]` `[1.1.1]` |
-| OPF-ADOPT-U13 | Not started | Adoption: retire old files only after every completion check passes, and safely replace a file already at the destination (M, M) | `[public]` `[tooling]` `[1.1.1]` |
 | VER-1 | Partly done | Release and version process for adopting projects: the remaining steps for tagging releases so adopters can pin a version and verify it (the core version checks are merged) (H, XL) | `[public]` |
 | REL-1 | Planned | Cut release 1.1.1 (version tag, published digest and short changelog) in seven steps, the rows that follow, done in order (H, M) | `[public]` `[release]` `[1.1.1 cut]` `[BLOCKED: waits for every item tagged 1.1.1 (not 1.1.1 cut) to merge]` |
 | REL-111-DECLARE | Planned | Release 1.1.1 cut, step 1, before the freeze: declare the cut, add the changelog entry and set the version; retire 1.1.0, which is skipped, by checking each feature that public text promises for 1.1.0 against main, crediting to 1.1.1 what main ships and moving the rest to 1.2.0 (the development assistant's setup wizard, install doctor and per-agent files are decided for 1.2.0; still to check: the enforcement controls in README.md:18 and site/index.html:145, the review tiers in disclosure.toml:77, the deeper per-language security in disclosure.toml:47, the repository records in docs/teams.md (which generates site/teams.html), the option to send a new guardrail back to the project as a pull request in site/tech-details.html:167, and the rest of the 1.1.0 design in site/tech-details.html:66 and docs/development.md (which generates site/development.html)); set IN_DEVELOPMENT_VERSIONS in tools/check_site_versions.py to {"1.2.0"} and update its comment and self-test case; settle the 754 entries in .aiqt/core/id-history.toml that record 1.1.0 as the release in which an id first appeared (relabelling them in place fails the append-only history check, so the maintainer is choosing how they are kept); and update the matching text in README.md, ROADMAP.md, roadmap.toml, DISCLOSURE.md, disclosure.toml, the docs/ and site/ pages, tools/check_overclaim.py and .aiqt/core/gates/manifest.toml; also update the text that still names AIQT 1.0.5: disclosure.toml and roadmap.toml (which generate the matching text in site/disclosure.html, site/roadmap.html, DISCLOSURE.md and ROADMAP.md), docs/evidence.md and docs/teams.md (which generate site/evidence.html and site/teams.html), and the hand-written text in site/install.html; and every other public mention of 1.0.5 as the current release, such as "chat assistant (1.0.5)" in docs/development.md and site/development.html, and "the 1.0.5 release" in the docs/ pages (H, L) | `[public]` `[release]` `[1.1.1 cut]` |
@@ -113,7 +90,6 @@ Tooling: the pack's operational-files framework, migration and adoption machiner
 | EN-5 | Partly done | Hooks that enforce the pack's written rules automatically: publish the plugin that packages them for adopting projects, with instructions to install and turn it on (the hooks and a first version of the plugin are merged) (H, M) | `[public]` |
 | S4 | Planned | A hook that asks for confirmation before a command deletes or overwrites credentials (M, L) | `[public]` `[adopter]` `[BLOCKED: waits for a shared component that reads shell commands the way the shell does]` |
 | WAIT-UTIL-RULE | Not started | Hooks that enforce the rule on doing ready work while waiting for a result, a rule that already ships (starting over after the 1.1.1 release: an earlier attempt, closed pull request #206, was not merged) (H, L) | `[public]` `[corpus]` |
-| OPF-CUSTOM-FILES | Not started | OPF custom (adopter-defined) operational-file types (M, M) | `[public]` `[tooling]` |
 
 ## Priority 4 - Adopter experience
 
@@ -121,12 +97,10 @@ Adopter experience: capability and guidance for organizations adopting the pack.
 
 | ID | Status | Item | Tags |
 | --- | --- | --- | --- |
-| OPF-ESTATE-RETIRE | Partly done | Retire the old OPF import and ingest code, keeping the readers that existing import evidence needs (M, L) | `[public]` `[tooling]` |
 | PACK-HOOKS-PROMOTE | Not started | Promote the .preview/ hooks into the pack's hook set (M, L) | `[public]` `[adopter]` |
 | DEV-1 | Planned | Development assistant, planned for the 1.2.0 release: a skill that installs the pack into a project, with a setup wizard, a doctor command that checks the install, and the instruction file each coding assistant expects (H, L) | `[public]` `[adopter]` |
 | DEV-2 | Planned | A skill that adopting projects can use to review work for quality (M, M) | `[public]` `[adopter]` |
 | TOOL-1 | Planned | A `/aiqt` command to manage the pack in a project, and a catalog of outside tools that work with it, each reviewed before it is listed (M, M) | `[public]` `[adopter]` |
-| OPF-STANDARDIZE | Partly done | Standard project records for adopters: the versioned TOML records store, its schemas and the generators for the readable views (backlog, done list, changelog) are merged; what remains is converting an adopter's existing files into it (M, L) | `[public]` `[adopter]` |
 | ADOPT-TEMPLATE | Not started | A template for adopters to propose a new guardrail to the pack (L, S) | `[public]` `[adopter]` |
 | DOC-CNTDEF | Not started | Adopter guidance: copy the continue-by-default rule file into your project and point your configuration at it; do not paraphrase it (L, S) | `[public]` |
 | DOC-RECORDS-STORE | Not started | Adopter guidance: configuring the pack's hooks so an assistant may write to a separate private records repository beside the code repository (the operational-files specification already describes that repository layout) (M, S) | `[public]` |

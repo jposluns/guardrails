@@ -3,16 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Technical details of the AIQT development assistant (1.1.0, in development)</title>
-<meta name="description" content="The technical detail of the AIQT development assistant (1.1.0, in development): the project-practice files it sets up, the config file you own, how new-guardrail seed PRs work, CI integration, and per-language depth composed at install.">
+<title>Technical details of the AIQT development assistant (1.2.0, in development)</title>
+<meta name="description" content="The technical detail of the AIQT development assistant (1.2.0, in development): the project-practice files it sets up, the config file you own, how new-guardrail seed PRs work, CI integration, and per-language depth composed at install.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="/styles.css?v=20260918a">
 <script src="/theme.js"></script>
 <link rel="canonical" href="https://aiqt.ai/tech-details">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/assets/baseline/logos/aiqt-touch.png">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Technical details of the AIQT development assistant (1.1.0, in development)">
-<meta property="og:description" content="The technical detail of the AIQT development assistant (1.1.0, in development): the project-practice files it sets up, the config file you own, how new-guardrail seed PRs work, CI integration, and per-language depth composed at install.">
+<meta property="og:title" content="Technical details of the AIQT development assistant (1.2.0, in development)">
+<meta property="og:description" content="The technical detail of the AIQT development assistant (1.2.0, in development): the project-practice files it sets up, the config file you own, how new-guardrail seed PRs work, CI integration, and per-language depth composed at install.">
 <meta property="og:url" content="https://aiqt.ai/tech-details">
 <meta name="twitter:card" content="summary">
 </head>
@@ -30,29 +31,24 @@
   <h4>Start</h4>
   <a class="navlink" href="/">Home</a>
   <h4>Chat assistants</h4>
-  <a class="navlink" href="/install">All assistants</a>
-  <a class="navlink" href="/install#claude">Claude</a>
-  <a class="navlink" href="/install#chatgpt">ChatGPT</a>
-  <a class="navlink" href="/install#gemini">Gemini</a>
-  <a class="navlink" href="/install#copilot">Copilot</a>
-  <a class="navlink" href="/install#copilotstudio">Copilot Studio</a>
-  <a class="navlink" href="/install#other">Any other</a>
+  <a class="navlink" href="/install/">All assistants</a>
+  <a class="navlink" href="/install/details/#claude">Claude</a>
+  <a class="navlink" href="/install/details/#chatgpt">ChatGPT</a>
+  <a class="navlink" href="/install/details/#gemini">Gemini</a>
+  <a class="navlink" href="/install/details/#copilot">Copilot</a>
+  <a class="navlink" href="/install/details/#copilotstudio">Copilot Studio</a>
+  <a class="navlink" href="/install/details/#other">Any other</a>
   <h4>Developers &amp; teams</h4>
   <a class="navlink" href="/development">Developers &amp; Coding</a>
   <a class="navlink active" href="/tech-details" aria-current="page">Technical details</a>
-  <a class="navlink" href="/teams">Teams &amp; Enterprise</a>
   <h4>Learn more</h4>
-  <a class="navlink" href="/learn">Overview</a>
-  <a class="navlink" href="/standard">The Standard</a>
-  <a class="navlink" href="/mappings">Mappings</a>
-  <a class="navlink" href="/examples">Examples</a>
-  <a class="navlink" href="/roadmap">Roadmap</a>
+  <a class="navlink" href="/standard/">The Standard</a>
+  <a class="navlink" href="/mappings/">Mappings</a>
   <a class="navlink" href="/evidence">Evidence</a>
   <h4>The five rules</h4>
-  <a class="navlink" href="/rules">The five rules</a>
+  <a class="navlink" href="/rules/">The five rules</a>
   <h4>Project</h4>
-  <a class="navlink" href="/about">About</a>
-  <a class="navlink" href="/disclosure">Disclosure</a>
+  <a class="navlink" href="/disclosure/">Disclosure</a>
   <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
   <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
 </nav>
@@ -63,7 +59,7 @@
 <div class="wrap pagehead">
   <p class="eyebrow">Under the hood</p>
   <h1>Technical details of the development assistant.</h1>
-  <p class="lead">Everything on this page is the AIQT 1.1.0 design, in development: what you
+  <p class="lead">Everything on this page is the AIQT 1.2.0 design, in development: what you
     own, what you configure, what can travel back, how it fits your pipeline, and how it
     composes per-language depth. The <a href="/development">overview</a> is the place to start;
     this is the detail once you are interested.</p>
@@ -119,7 +115,7 @@
         <tr><td>Updater</td><td>Update</td><td><code>.aiqt/core/</code> only (guard-enforced)</td><td>Everything else, including your <code>config.md</code></td></tr>
         <tr><td>Your assistant</td><td>While you work</td><td>The <code>.aiqt/</code> practice and QA records; your project files as you direct it</td><td><code>.aiqt/core/</code></td></tr>
         <tr><td>Doctor</td><td>Verification</td><td>Nothing (read-only)</td><td>Everything</td></tr>
-        <tr><td>CI and local exec workers</td><td>Pipeline and desk checks</td><td class="pending">pending, documented before 1.1.0 ships</td><td class="pending">pending</td></tr>
+        <tr><td>CI and local exec workers</td><td>Pipeline and desk checks</td><td class="pending">pending, documented before 1.2.0 ships</td><td class="pending">pending</td></tr>
       </tbody>
     </table></div>
         <p style="margin-top:1.2rem">With your permission, AIQT sets these up, and every one is
@@ -139,7 +135,7 @@
     <p class="eyebrow">Your configuration</p>
     <h2>The config file you own</h2>
     <p class="lead">Your choices live in <code>.aiqt/config.md</code>, and that file
-      is yours: you own it, you edit it, you commit it. In the 1.1.0 design, updates never
+      is yours: you own it, you edit it, you commit it. In the 1.2.0 design, updates never
       rewrite it.</p>
     <div class="grid">
       <div class="card">
@@ -166,7 +162,7 @@
     <p class="eyebrow">Sharing back</p>
     <h2>New-guardrail seed PRs</h2>
     <p class="lead">When a guardrail gap lets an issue through, the fifth rule closes the gap
-      locally. The 1.1.0 design adds an optional last step: contributing the new guardrail
+      locally. The 1.2.0 design adds an optional last step: contributing the new guardrail
       back to the AIQT project as a seed PR, so a gap found once is closed for every
       developer who uses AIQT.</p>
     <div class="grid">
@@ -205,7 +201,7 @@
       project, which you create and can revoke at any time. Before any seed is sent it is
       scrubbed and shown to you in a preview, and the AIQT project reviews each pull request like
       any other contribution.</p>
-    <p class="evidence-label">Exact credential scope and preview format: pending, documented before 1.1.0 ships</p>
+    <p class="evidence-label">Exact credential scope and preview format: pending, documented before 1.2.0 ships</p>
   </div>
 </section>
 
@@ -244,7 +240,7 @@
       confirm it, and their verdicts are reconciled. Different families miss systematically
       different things, so cross-family review catches what any one alone would let through.
       AIQT itself is built and reviewed this way, across three families (Claude, GPT/Codex, and
-      Gemini); in the 1.1.0 design, the development assistant brings the same standard to your
+      Gemini); in the 1.2.0 design, the development assistant brings the same standard to your
       project.</p>
     <ol class="steps">
       <li><b>Routine changes</b> run the ordinary gates. Most work needs nothing heavier, and
@@ -269,7 +265,7 @@
     <p class="eyebrow">Where it runs</p>
     <h2>The same check, in your pipeline and on your machine</h2>
     <p class="lead">A QA standard only standardizes anything if it holds in both places work
-      happens: at the gate, and at the desk. In the 1.1.0 design it runs in both.</p>
+      happens: at the gate, and at the desk. In the 1.2.0 design it runs in both.</p>
     <div class="grid">
       <div class="card">
         <h3>In your GitHub CI</h3>
@@ -296,8 +292,8 @@
         <tr><td>Delicate</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
       </tbody>
     </table></div>
-    <p class="evidence-label">The 1.1.0 data flow, providers, credentials, retention, and cost: pending, documented before 1.1.0 ships</p>
-        <p style="margin-top:1.2rem">The 1.1.0 design gives local and CI reviewers the same QA
+    <p class="evidence-label">The 1.2.0 data flow, providers, credentials, retention, and cost: pending, documented before 1.2.0 ships</p>
+        <p style="margin-top:1.2rem">The 1.2.0 design gives local and CI reviewers the same QA
       brief. Its intent is to reduce variation caused by who runs the check or which tool they
       use; provider behaviour and results remain to be verified.</p>
   </div>
@@ -331,11 +327,10 @@
     <p class="eyebrow">Ready to try it</p>
     <h2>Set it up, or read the source</h2>
     <p class="lead">The <a href="/development#setup">setup and verification steps</a> are on the
-      overview page, and where 1.1.0 stands is <a href="/development#availability">stated plainly
+      overview page, and where 1.2.0 stands is <a href="/development#availability">stated plainly
       there too</a>.</p>
     <div class="cta" style="justify-content:flex-start; margin-top:1.2rem">
       <a class="btn primary" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">Read the pack on GitHub</a>
-      <a class="btn ghost" href="/roadmap">Where 1.1.0 stands: the roadmap</a>
     </div>
   </div>
 </section>

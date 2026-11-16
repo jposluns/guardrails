@@ -742,7 +742,7 @@ def self_test():
     try:
         _rules = _rules_root / ".aiqt" / "core" / "rules" / "security"
         _rules.mkdir(parents=True)
-        (_rules / "bad-tier.md").write_text("---\ncorpus-id: abc123\ntier: ١٠\n---\nbody\n", encoding="utf-8")
+        (_rules / "bad-tier.md").write_text("---\ncorpus-id: abc123\ntier: ١٠\n---\n# Bad tier\n\nBody.\n", encoding="utf-8")
         try:
             mapped_cwe_ids(_rules_root)
         except ImportError_ as exc:
@@ -778,8 +778,8 @@ def self_test():
         (_rules.parent / "aiqt").mkdir()
         (_rules.parent / "aiqt" / "a-valid.md").write_text(
             "---\ncorpus-id: selfc1\norigin: pack\nfamily: aiqt\ntier: 10\nfacet: QUALI\n"
-            "slug: import-cwe-selftest\n---\nbody\n", encoding="utf-8")
-        (_rules / "bad-bytes.md").write_bytes(b"---\ncorpus-id: abc123\nslug: \xff\n---\nbody\n")
+            "slug: import-cwe-selftest\n---\n# Import CWE self-test\n\nBody.\n", encoding="utf-8")
+        (_rules / "bad-bytes.md").write_bytes(b"---\ncorpus-id: abc123\nslug: \xff\n---\n# Bad bytes\n\nBody.\n")
         _refused("a rule source that is not UTF-8", _rules / "bad-bytes.md")
         (_rules / "bad-bytes.md").unlink()
         (_rules / "gone.md").symlink_to(_rules / "no-such-target.md")

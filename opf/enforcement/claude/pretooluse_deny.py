@@ -232,8 +232,11 @@ assignment-bearing command is never the allowance.
      what the writer may do. This
      allowance also holds under an R6 roster failure, so the in-session repair path stays open.
 
-RESIDUALS (spec 14.1 requires each disclosed; the pack's residual register (slice (d)) and the plan's
-per-platform residual coverage carry the same list):
+RESIDUALS (spec 14.1 requires each disclosed; the pack's residual register, opf/enforcement/residuals.toml,
+and the plan's per-platform residual coverage carry the spec 14.1 residual tokens; the register says where
+each member discloses each residual, with the exceptions it states (claude/settings.opf.json discloses
+nothing, and ci/github-actions.yml says nothing about server-side protection); this list is this hook's
+own fuller list):
   - A Bash write the matcher cannot see: a protected path reaching the filesystem through a shell
     variable, glob, alias, function, command or process substitution, an interpreter one-liner, or
     any other spelling in which no protected token appears textually in the command string. This
@@ -292,9 +295,9 @@ per-platform residual coverage carry the same list):
     R7's path pass judges every payload string as a resolvable target, so a relative or tilde
     spelling that RESOLVES to a protected path is caught, but a spelling the hook cannot resolve
     lexically (a server-side variable, an encoded path, a string longer than a platform path) is
-    not; so is a read-only-listed tool that is
-    in fact write-capable on some server. Edits made outside Claude Code entirely (any other editor, shell or
-    tool) bypass this hook as before; the pre-commit and CI floor members are the overlapping controls.
+    not; so is a read-only-listed tool that is in fact write-capable on some server.
+    Edits made outside Claude Code entirely (any other editor, shell or tool) bypass this hook;
+    the pre-commit and CI floor members are the overlapping controls.
   - Case-insensitive or normalizing filesystems (default APFS, NTFS): the `.working` component and the
     roster paths are compared byte-exactly, so a differently cased spelling (`.Working`) that aliases
     the same directory on such a filesystem is not caught (the spec 4.2 reserved-home aliasing
@@ -311,20 +314,24 @@ per-platform residual coverage carry the same list):
     made outside Claude Code; and a pre-existing hardlink alias of a protected file is a DIFFERENT
     path to the same inode, which the path comparison (normpath and realpath) cannot see, so a
     write through such an alias passes (same-user preparation).
-  - Per-clone installation and bypass: the settings.json registration is local configuration; a clone
-    that never registered the hook runs no hook, and the same user can deregister or edit it
-    (same-user tampering, canonical hand edits).
+  - Per-clone installation and bypass: a clone runs this hook only where a registration it reads exists.
+    Claude Code reads hook registrations from the project's .claude/settings.json (project settings,
+    which a repository may commit and share) and from .claude/settings.local.json and user settings
+    (not shared), so a clone whose repository carries no committed registration and whose user
+    registered none runs no hook; the same user can deregister or edit the registration (same-user
+    tampering, canonical hand edits).
   - The check is point-in-time: the hook resolves every path (realpath, roster discovery, the
     machine-store test) in its own process BEFORE the tool runs, so a same-user change made
     between the check and the tool's own open (a background job re-pointing a symlink, renaming a
     directory or rewriting a roster) is not seen (a check-to-use race; same-user preparation, as
     spec 14.1 accepts).
-  - A protected path an exotic (not provably plain) command reaches with neither the session cwd
-    nor any literal text inside the product root: a path spelled only through a shell variable, an
-    alias or function, a command or process substitution, an escape the coarse scan does not decode
-    (ANSI-C or locale quoting), or an interpreter own language, where no literal word, no spelling
-    inside a word and no inherited git path value resolves into the product and the .working token
-    is not spelled, is not seen. R5 is a lexical floor, not a sandbox.
+  - Shell or interpreter wrapping (R5 is a lexical floor, not a sandbox): an exotic (not provably
+    plain) command reaches a protected path unseen only when it trips none of the coarse rule's
+    triggers: the session cwd lies outside every product root, the .working token is spelled
+    nowhere, and no literal word, no spelling inside a word and no inherited git path value
+    resolves inside a product root or onto the pack own tree. The path is then spelled only
+    through a shell variable, an alias or function, a command or process substitution, an escape
+    the coarse scan does not decode (ANSI-C or locale quoting), or an interpreter own language.
   - An inherited environment the hook cannot see or does not model: the hook judges the git
     variables in ITS OWN environment (GIT_PATH_ENV values as spellings, GIT_CODE_ENV as code), so a
     variable the Bash tool sets that the hook process does not inherit, a non-git program's own

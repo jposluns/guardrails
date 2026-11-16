@@ -62,10 +62,10 @@ hook, step 4) describes those cases. The payload is read as BYTES and parsed by 
 does not depend on the process locale.
 Unparseable hook input still emits the clock line under PostToolUse (the clock does not
 depend on the payload). An error writing the output (a closed or full stdout) is swallowed and the hook
-still exits 0 (round 24); if the stream cannot even be pointed at /dev/null, the hook ends at once with
+still exits 0; if the stream cannot even be pointed at /dev/null, the hook ends at once with
 os._exit(0), so no exit-time flush can fail it. Kill-switch: a subordinate worker process, detected as env
 AIQT_HOOKS_WORKER=1 (legacy spellings are also accepted, see _is_worker), exits 0 with no stdout, so it never
-distorts worker output; it writes one warning line to stderr (round 24), which on exit 0 reaches only the
+distorts worker output; it writes one warning line to stderr, which on exit 0 reaches only the
 host's debug log.
 In-session subagents are deliberately NOT skipped (there is no agent_id check): they benefit from the true
 time too, and this hook only adds context, it never blocks.
@@ -550,7 +550,7 @@ def clock_line(now_utc, start=None):
 
 
 def _emit_line(text, *stream):
-    """Write one line to `stream` (default stdout) and flush it. An output error fails OPEN (round 24): it is
+    """Write one line to `stream` (default stdout) and flush it. An output error fails OPEN: it is
     swallowed, and the stream's descriptor is pointed at /dev/null so the interpreter's exit flush cannot fail
     either, so the hook still exits 0. If that rescue fails too, the process ends at once with os._exit(0)
     (no flush is retried), since any later write or exit flush could fail the hook."""
@@ -588,7 +588,7 @@ def main(argv):
         return _self_test()
     try:
         if _is_worker():
-            # round 24: the skip is no longer silent (stderr only, so worker output is never distorted)
+            # the skip is not silent: one line on stderr only, so worker output is never distorted
             _emit_line("clock-inject: skipped, worker marker present (AIQT_HOOKS_WORKER=1 or a legacy spelling)",
                        sys.stderr)
             return 0
@@ -679,7 +679,7 @@ def _self_test():
             self.assertEqual(lease_start(self.lease), datetime.datetime(2026, 9, 23, 14, 17, 10, tzinfo=utc))
 
         def test_inactive_lease_never_reads_history(self):
-            # finding: `none` followed by a history line used to resolve to the historical id
+            # guards that `none` followed by a history line never resolves to the historical id
             with open(self.lease, "w") as f:
                 f.write("Active-session: none\n## History\nActive-session: sess-20200101T000000Z\n")
             self.assertIsNone(lease_start(self.lease))
@@ -793,7 +793,7 @@ def _self_test():
                     f.write(f"Active-session: {bad}\nActive-session: sess-20200101T000000Z\n")
                 self.assertIsNone(lease_start(self.lease), bad)
 
-        # -- round 13 (peer report): lease start sources --
+        # -- lease start sources --
         def write_lease(self, text):
             with open(self.lease, "w") as f:
                 f.write(text)
@@ -807,7 +807,7 @@ def _self_test():
                     f.write(json.dumps({"type": "user", "timestamp": ts, "message": {"content": "x"}}) + "\n")
             return tp
 
-        def test_r13_lease_field_forms(self):
+        def test_lease_field_forms(self):
             want = datetime.datetime(2026, 9, 23, 14, 17, 10, tzinfo=utc)
             for line in ("Active-session: sess-20260923T141710Z", "**Active-session:** sess-20260923T141710Z",
                          "- Active-session: sess-20260923T141710Z", "* Active-session: sess-20260923T141710Z",
@@ -816,7 +816,7 @@ def _self_test():
             self.assertEqual(lease_start(self.write_lease("+ Active-session: sess-20200101T000000Z\n"
                                                           "Active-session: sess-20260923T141710Z\n")), want)
 
-        def test_r13_date_only_id_with_and_without_session_start(self):
+        def test_date_only_id_with_and_without_session_start(self):
             ids = "# Lease\n\n**Active-session:** sess-2026-09-23-opus55-r1\n\n**Status:** active\n"
             self.assertIsNone(lease_start(self.write_lease(ids)))
             want = datetime.datetime(2026, 9, 23, 14, 18, 0, tzinfo=utc)
@@ -824,7 +824,7 @@ def _self_test():
                 self.assertEqual(lease_start(self.write_lease(ids + field + "\n")), want, field)
             self.assertIsNone(lease_start(self.write_lease(ids + "## History\nSession-start-UTC: 20260920T010000Z\n")))
 
-        def test_r13_transcript_fallback_and_main(self):
+        def test_transcript_fallback_and_main(self):
             ids = "**Active-session:** sess-2026-09-23-opus55-r1\n"
             tp = self.transcript("2026-09-23T14:30:00.000Z", "2026-09-23T14:18:00.000Z", "garbage")
             self.assertEqual(lease_start(self.write_lease(ids), tp), datetime.datetime(2026, 9, 23, 14, 18, tzinfo=utc))
@@ -837,7 +837,7 @@ def _self_test():
             rc, out = run_main(json.dumps({"tool_name": "Bash", "transcript_path": 7}), {"AIQT_LEASE_FILE": self.lease})
             self.assertNotIn("elapsed", json.loads(out)["hookSpecificOutput"]["additionalContext"])
 
-        def test_r13_inactive_lease_stays_unknown(self):
+        def test_inactive_lease_stays_unknown(self):
             tp = self.transcript("2026-09-23T14:18:00Z")
             for head in ("Active-session: none", "**Active-session:** none", "- Active-session: None", "Active-session:"):
                 self.write_lease(f"{head}\nSession-start-UTC: 2026-09-23T14:18:00Z\n")
@@ -847,7 +847,7 @@ def _self_test():
                 self.assertNotIn("elapsed", json.loads(out)["hookSpecificOutput"]["additionalContext"], head)
             self.assertIsNone(lease_start(self.write_lease("# no lease field\n"), tp))
 
-        def test_r13_fifo_transcript_does_not_block(self):
+        def test_fifo_transcript_does_not_block(self):
             fifo = os.path.join(self.tmp, "tfifo")
             os.mkfifo(fifo)
             self.write_lease("**Active-session:** sess-2026-09-23-opus55-r1\n")
@@ -857,7 +857,7 @@ def _self_test():
                                timeout=HANG_TIMEOUT)
             self.assertEqual(r.stdout.strip(), "None")
 
-        def test_r13_shared_lease_code_identical_to_stop_hook(self):
+        def test_shared_lease_code_identical_to_stop_hook(self):
             import importlib.util
             import inspect
             sib = _sibling_or_skip("stamp-truth-stop.py")
@@ -879,8 +879,8 @@ def _self_test():
                              (LEASE_MAX_BYTES, TRANSCRIPT_PREFIX_BYTES))
 
 
-        # -- round 24 (field validation of round 12) --
-        def test_r24_worker_skip_warns_and_output_error_fails_open(self):
+        # -- field validation of the worker skip and the output error path --
+        def test_worker_skip_warns_and_output_error_fails_open(self):
             old_err, sys.stderr = sys.stderr, io.StringIO()
             try:
                 rc, out = run_main(json.dumps({"tool_name": "Bash"}), {"AIQT_HOOKS_WORKER": "1"})
@@ -994,7 +994,7 @@ def _self_test():
             self.assertEqual(_wall_clock_asserts(good), [])
 
         # -- sibling parity on a single-hook install --
-        PARITY_TESTS = ("test_r13_shared_lease_code_identical_to_stop_hook",)
+        PARITY_TESTS = ("test_shared_lease_code_identical_to_stop_hook",)
         PARITY_SIBLINGS = ("stamp-truth-stop.py",)
 
         def _parity_in_copy(self, siblings, value, dangling=False):

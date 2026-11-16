@@ -10,27 +10,28 @@
 # without it), by a deployer that renders a member with a per-project overlay into a
 # per-account command (the member doubles as the render template; its overlay slots and the drift check
 # are specified inside the member) and by an adoption plan's prompt_pack {version, digest} binding,
-# which `opf adopt plan` takes as caller input and checks for shape only; nothing verifies that binding
-# against this manifest yet.
+# which `opf adopt plan` takes as caller input and checks for shape only. `opf adopt apply` refuses a
+# plan whose binding differs from this manifest's version or digest, a check that follows apply's
+# unlanded-stage refusal, which every apply in this build still meets first.
 # import/SKILL.md is the post-adoption import procedure, and the import/examples/<type>.batch.toml members
 # are its inert examples, one per baseline record type: each is a canonical opf.record.import-batch/v1 batch
 # that the gate also parses and checks (validate_examples). No writer consumes them in this release;
 # `opf record import --batch` does not exist, and the procedure marks that step not yet executable.
 format = "opf.prompt-pack/v1"
-version = "0.7.0"
-digest = "sha256:b988a50b5a0be8ec231675064ea2af37a84c74b330d2f511ea287ed86cbc039e"
+version = "0.7.4"
+digest = "sha256:c52976d94db2ace08d6f5ce25e87383775de047a663a864f8f3e388bbe35af15"
 
 [[members]]
 path = "adopt/SKILL.md"
-sha256 = "29b030d481d602a2c4adfff514033004de0c6d9a376149fe15492ff2676a48d0"
+sha256 = "33eabbe5ae23345b184c92e804678783b5f33203ea72d6f76c483cde3abeeb95"
 
 [[members]]
 path = "adopt/clean-start.md"
-sha256 = "3a01c315a3445ca93dbf8e10a543dcd23f39a69f4e70d06e8ad16d5914f3f21a"
+sha256 = "25ac6a39c6c32a429af5f14baae41d877392f40e2fadcb5d26c33a96f34a7068"
 
 [[members]]
 path = "flow/SKILL.md"
-sha256 = "7c915b106b31e31bbd9b0ec8e712af73351e1bd61742e973ee3b469018f8ad8b"
+sha256 = "22faed6581670ad03070d3e48eb88666632fefe6322bd7de1b72da103f26060d"
 
 [[members]]
 path = "import/SKILL.md"

@@ -60,8 +60,16 @@ option-classifier and helper narration that still uses the historical term.
 Error posture at the PreToolUse layer: FAIL CLOSED. A control that cannot read the input it is meant to
 cover, or is invoked in a context it does not understand, DENIES rather than waving the action through (per
 integ-check-fails-closed-on-unreadable): a missing tool_name, an unreadable command string, or an
-unreadable required field deny (except where the check is a pure convention nudge - abspth, expbnd - whose
-unreadable-input case allows with a note, since there is no hazard to fail closed on). A confirmed violation
+unreadable required field deny. Every Bash hook reads its command through one shared reader (_bash_command),
+so a tool_input that is missing or not an object, or a command that is missing, not a string or holds a NUL
+(bash ends a command string at its first NUL, so the text after it never runs), reads the same way in each, and a hook that judges the command denies it with a reason naming the malformed field
+(_deny_unreadable_command), the convention-nudge Bash hooks (abspth, expbnd) included, since each also has
+a deny tier that may sit in what was not read. The hooks scoped by an orchestration registry, a review
+dispatch binding or a review hold read a missing or non-string command that way only inside their scope;
+a command string holding a NUL is not absent (the text before the NUL runs and can name any repository),
+so each of them fails closed on it whatever its scope (_bash_command_holds_nul). The note-only Bash hook
+(inline_errexit) reads its command through the same reader but never denies, so its fail-closed outcome
+on such a command is an allow with a note naming the field. A confirmed violation
 denies. A clean pass emits NO decision and exits 0 silently.
 
 gensrc_guard (gensrc): a CONFIRMED registry match (a hand-edit of a registered generated artefact) DENIES
@@ -84,7 +92,9 @@ re-issue (single quotes, escape the marker, or git commit -F <file>); the unpars
 
 git_explicit_binding (expbnd): an ambient git target or a relocated whole-tree breadth stage is a binding
 CONVENTION where the orchestrator normally binds its own target, not a hazard, so every former ask
-(including the unreadable-command case) ALLOWS with a note - EXCEPT the whole-tree stage-then-push pair: a
+ALLOWS with a note, while an unreadable command (a tool_input that is missing or not an object, or a command
+that is missing, not a string or holds a NUL) DENIES under the shared fail-closed contract above, since the
+deny tier may sit in what was not read - EXCEPT the whole-tree stage-then-push pair: a
 breadth stage ('git add -A/./:/', 'git commit -a/--all') followed by a 'git push' later in the same command
 publishes whatever the tree holds, so it is DENIED, on the parsed path and on every fallback alike (the
 fallback tests that pair before its directory-change note, so the note cannot mask the denial).
@@ -115,7 +125,7 @@ takes the recover-then-allow/deny resolution above (never a silent pass). WITHIN
 verb: checkout/switch/restore/reset/clean/stash/
 rm/branch) that resolution applies unless the command is a PRISTINE SINGLE BARE 'git <verb>' invocation AND
 the tree is provably clean (or the form is genuinely non-destructive), in
-which case it ALLOWS. A Bash payload whose tool_input.command is MISSING or NOT A STRING is not that
+which case it ALLOWS. A Bash payload whose tool_input.command is MISSING, NOT A STRING or HOLDS A NUL is not that
 boundary but a cannot-evaluate input (a discard could hide in what was not read), so it DENIES under the
 shared fail-closed contract (check-fails-closed-on-unreadable), like the fail-closed controls above. PRISTINE
 SINGLE BARE means, PURELY LEXICALLY (the bash grammar is never parsed): after optional leading KEY=value
@@ -180,6 +190,8 @@ DELIBERATE decision where the platform documents exit 2 as the block (the orches
 manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
+A note-only PreToolUse mode (NOTE_ONLY_PRETOOL_MODES), which never blocks a call, takes the Stop handlers'
+posture on every one of these error paths instead: a non-blocking systemMessage warning on exit 0.
 A handler result whose exit code is not 0 or 2, or whose stderr text is neither a str nor None, is a
 handler crash with that same posture, and an exception's text in a diagnostic is built so that its own
 str() raising cannot end main() early.
@@ -205,11 +217,12 @@ hooks.json timeout tools/gen_hooks.py renders, less 2), armed before the payload
 not decided by then is interrupted by _HookDeadline, a BaseException that no handler's except Exception
 branch catches, and the call fails CLOSED with exit 2 and a stderr line naming the handler, the budget and
 the input size and asking for smaller calls or long content moved into a file; the timer is cancelled
-before the decision is written to stdout. Any other exception out of the window (an error entering or
-leaving it, or an in-process caller's own alarm handler raising when its expiry is delivered) fails
-closed with exit 2 as well, and a fail-open mode warns on exit 0 instead, except for a stop (an exit
-or an interrupt) raised in a fail-open mode, which ends the hook as it would with no window, save that
-an exit whose status would be 2 ends it with status 1. The raw 'git ... <verb>'
+before the decision is written to stdout. A note-only mode (NOTE_ONLY_PRETOOL_MODES) runs inside the same
+window, and when its deadline passes it warns on exit 0 instead. Any other exception out of the window (an
+error entering or leaving it, or an in-process caller's own alarm handler raising when its expiry is
+delivered) fails closed with exit 2 as well, and a fail-open mode warns on exit 0 instead, except for a
+stop (an exit or an interrupt) raised in a fail-open mode, which ends the hook as it would with no window,
+save that an exit whose status would be 2 ends it with status 1. The raw 'git ... <verb>'
 fallback scans are _RawSequence probes of linear cost: the single regexes they replaced grew with the
 square or the cube of the command length, and five guards ran past the hook timeout on some shape at or
 below 64 KB. The push backstop's raw mirror-configuration scan is a _RawMirrorConfig probe of linear cost,
@@ -244,10 +257,10 @@ import sys
 
 # PYTHON-FLOOR guard (the hook form of tools/check_python_floor.py). It runs before HANDLER_EVENT exists, so
 # it carries its own literal of the fail-open modes, which selftest_aiqt_hooks.py holds equal to the
-# HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS (the warn-only PreToolUse class included). On an
-# older interpreter that can start this file such a mode WARNS on exit 0 and never blocks (a Stop block here
-# would re-fire with no cap); every other mode, PreToolUse and an unknown mode alike, fails closed with exit
-# 2, as main() does on its own error paths.
+# HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS (the warn-only PreToolUse class included) plus the
+# NOTE_ONLY_PRETOOL_MODES. On an older interpreter that can start this file such a mode WARNS on exit 0 and
+# never blocks (a Stop block here would re-fire with no cap); every other mode, any other PreToolUse mode
+# and an unknown mode alike, fails closed with exit 2, as main() does on its own error paths.
 # Both forms' exits hold under the output condition the module docstring states.
 # An older interpreter that cannot start this file never reaches the guard and fails with Python's own error
 # first, and that exit has the event's normal meaning: one that accepts -I but cannot compile this file
@@ -257,8 +270,8 @@ import sys
 # hooks.json registers. That denies each PreToolUse call a registered matcher selects; blocks every
 # UserPromptSubmit prompt, which FAIL_OPEN_EVENTS below says an error must never do; blocks every Stop, with
 # no cap as above, and every TeammateIdle, the two FAIL_OPEN_EVENTS this file names exit 2 as the block for;
-# on PostToolUse its tool has already run but the recorder records nothing; and SessionStart cannot block at
-# all.
+# on PostToolUse and PostToolUseFailure its tool has already run but no recorder records and no clock
+# reading is added; and SessionStart cannot block at all.
 # The guard's stderr refusal and its stdout warning are best-effort writes, each wrapped and flushed
 # so a stream failure cannot change the exit: with stderr unavailable (a closed descriptor 2 leaves
 # sys.stderr None) the deny path still exits 2 and a fail-open mode still exits 0, rather than
@@ -267,7 +280,8 @@ import sys
 # streams: with a sys.stderr whose write works but whose flush fails, `raise SystemExit` here ended
 # as the interpreter's own exit 120 instead of the refusal exit. Nothing runs before this guard, so
 # os._exit discards no other buffered output; the warning itself is flushed before the exit.
-FLOOR_FAIL_OPEN_MODES = ("clock_inject", "diff_wall_stop", "future_stamp_write", "orch_dispatch_ledger",
+FLOOR_FAIL_OPEN_MODES = ("clock_inject", "clock_inject_failure", "clock_inject_post", "diff_wall_stop",
+                         "future_stamp_write", "inline_errexit", "orch_dispatch_ledger",
                          "orch_lease_heartbeat_post", "orch_lease_heartbeat_stop", "orch_prompt_stamp",
                          "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle")
 
@@ -301,6 +315,7 @@ import collections
 import datetime
 import errno
 import fnmatch
+import itertools
 import json
 import math
 import os
@@ -324,6 +339,8 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 # return 2 where the platform documents exit 2 as the block: Stop and TeammateIdle). SessionStart
 # cannot block at all; an errored UserPromptSubmit stamp must never block a human prompt; a
 # PostToolUse recorder error must surface as a warning, not a tool failure. Doc-confirmed 2026-08-29.
+# PostToolUseFailure (its tool has already run and failed) follows PostToolUse by this pack's choice, so
+# an error in its context-only clock reading warns; that line is not doc-confirmed.
 # A PreToolUse handler that is WARN-ONLY by design (a bake-stage warn whose code has no deny path:
 # future_stamp_write) is classed in HANDLER_EVENT by this marker, not by PRETOOL, and the marker is one of
 # FAIL_OPEN_EVENTS: main() then gives it the fail-open ERROR posture from the argv mode alone (a non-blocking
@@ -331,7 +348,12 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 # posture class, never a hook event name: the manifest still registers such a handler on PreToolUse.
 PRETOOL_WARN_ONLY = "PreToolUse (warn-only)"
 FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSubmit", "PostToolUse",
-                                  PRETOOL_WARN_ONLY)
+                                  "PostToolUseFailure", PRETOOL_WARN_ONLY)
+# PreToolUse modes that never block a call: every result is an allow or an allow with a note, and only a
+# miswired event hard-blocks. main() gives each one the fail-open posture of a FAIL_OPEN_EVENTS mode on every
+# error path, and keeps its PreToolUse deadline, which then warns on exit 0 instead of failing closed.
+# tools/gen_hooks.py reads this tuple: such a mode's control must declare the manifest default "warn".
+NOTE_ONLY_PRETOOL_MODES = ("inline_errexit",)
 # The platform stops a hook command at the timeout tools/gen_hooks.py writes into hooks.json (its
 # TIMEOUT); HOOK_TIMEOUT_SECONDS mirrors that value, and gen_hooks refuses to render (exit 2) when the two
 # differ, so both numbers come from that one source. main() gives every PreToolUse mode that is not
@@ -373,15 +395,16 @@ PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - 2.0
 # json.dumps, print or sys.stdout, for example) is outside it.
 NOTE_CONSTRUCTORS = (
     "_allow_note", "_context_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
-    "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
-    "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
+    "_discard_recovery_result", "_errexit_unreadable", "_expbnd_breadth_ask", "_expbnd_fallback",
+    "_expbnd_target_ask", "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
     "_orch_ask_attended", "_orch_oos_unreadable_input_note", "_orch_stop_family")
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
-    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
+    "_deny_unreadable_command", "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
-    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny", "_wrtscp_deny")
+    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny",
+    "_reset_ancestry_deny", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -441,6 +464,54 @@ def _deny_missing_tool_name(rule):
     return _deny("AIQT rule {} (fail-closed): malformed payload: missing tool_name.".format(rule),
                  "AIQT guardrail: denied a PreToolUse call with no tool_name (rule {}, fail-closed)."
                  .format(rule))
+
+
+def _bash_command(data):
+    """The one reader of a Bash payload's command, shared by every Bash hook so that none reads it more
+    laxly than the others: (command, None) when tool_input is a JSON object whose command member is a
+    string holding no NUL character (an empty string included: it is readable and runs nothing), otherwise
+    (None, detail), where detail names the malformed field and what it held (a tool_input that is missing
+    or not an object, a command that is missing, null, or an array, number, object or boolean, or a
+    command string holding a NUL). bash receives its command as a C string, which ends at the first NUL, so
+    the text before a NUL runs and the text after it never does: no hook can read such a string as the
+    command that runs. A hook that judges the command cannot clear what it did not read, so it fails
+    closed on that detail (_deny_unreadable_command)."""
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        kind = "missing" if "tool_input" not in data else _orch_json_kind(tool_input)
+        return None, "its tool_input is {}, not a JSON object".format(kind)
+    command = tool_input.get("command")
+    if not isinstance(command, str):
+        kind = "missing" if "command" not in tool_input else _orch_json_kind(command)
+        return None, "its tool_input.command is {}, not a string".format(kind)
+    if "\x00" in command:
+        return None, ("its tool_input.command holds a NUL character at offset {}, and bash ends a command "
+                      "string at its first NUL, so what runs is not the text a check would read"
+                      .format(command.index("\x00")))
+    return command, None
+
+
+def _bash_command_holds_nul(data):
+    """True when the Bash payload's command IS a string but holds a NUL. Such a command is not absent:
+    bash still runs the text before the NUL, which can name any directory, so a hook whose scope (a
+    registry, a dispatch binding, a review hold) is read from the session or the command's own targets
+    cannot treat it as a command that runs nothing. Each scoped hook fails closed on it whatever its
+    scope, never weaker than reading the targets from the raw text would be."""
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return False
+    command = tool_input.get("command")
+    return isinstance(command, str) and "\x00" in command
+
+
+def _deny_unreadable_command(rule, check, detail):
+    """Fail closed on a Bash payload whose command _bash_command could not read: the reason names the
+    malformed field (detail) and the check that could not run over it."""
+    return _deny("AIQT rule {}: the Bash payload carried no readable command string ({}), so the {} could "
+                 "not run; failing closed. Re-issue the call with a tool_input object carrying a string "
+                 "command.".format(rule, detail, check),
+                 "AIQT guardrail: denied a Bash call with no readable command (rule {}, fail-closed)."
+                 .format(rule.split(" ", 1)[0]))
 
 
 # --- shared raw-command tokenizer (quote/redirect-aware) ---------------------------------------------
@@ -4296,7 +4367,7 @@ def _is_diff_producer(tokens):
         # show ARGS): a genuine suppression flag in a real option position, no patch-enabling option
         # (-p/-u/--patch*/-U/--unified/-c/--cc or a p/u short cluster), and no unknown option. A suppression
         # token after '--' (a pathspec) or consumed as a value-taking option's argument (git show -S -s) does
-        # NOT earn it, and any patch enabler re-enables the diff (git show -s -p). cleanlanguage adopter
+        # NOT earn it, and any patch enabler re-enables the diff (git show -s -p). Adopter
         # report 2026-09-12; position- and cluster-aware hardening 2026-09-12.
         if _show_no_patch_exempt(rest):
             return False
@@ -4839,12 +4910,9 @@ def diff_source_pretool(data):
         return _deny_missing_tool_name("cnsdif")
     if tool_name != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    command = (data.get("tool_input") or {}).get("command")
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule cnsdif (no-console-diff-dumps): the Bash payload carried no readable command "
-            "string, so the diff-source check could not run; failing closed.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule cnsdif, fail-closed).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("cnsdif (no-console-diff-dumps)", "diff-source check", unread)
     reads = _SubstHeredocs.reads
     try:
         # The command reading (_CommandReading) adds, after the lexer's own segments, a producer behind a
@@ -5697,12 +5765,9 @@ def commit_identity(data):
         return _deny_missing_tool_name("cmtidn")
     if tool_name != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    command = (data.get("tool_input") or {}).get("command")
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule cmtidn (commit-identity): the Bash payload carried no readable command string, "
-            "so the commit-identity check could not run; failing closed.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("cmtidn (commit-identity)", "commit-identity check", unread)
     reads = _SubstHeredocs.reads
     try:
         hit = find_ai_authorship(command)
@@ -6895,14 +6960,16 @@ def bash_absolute_paths(data):
         return _deny_missing_tool_name("abspth")
     if tool != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or not command:
-        # Cannot read the command to resolve either position: allow with a note (absolute-paths is a
-        # convention nudge, not a hazard; hooks never ask).
+    command, unread = _bash_command(data)
+    if unread is not None:
+        # A truncating redirect to a relative target, the deny tier, may sit in what was not read.
+        return _deny_unreadable_command("abspth (absolute-paths)", "relative-cwd check", unread)
+    if not command:
+        # An empty command runs nothing: allow with a note (absolute-paths is a convention nudge, not a
+        # hazard; hooks never ask).
         return _allow_note(
-            "AIQT guardrail (rule abspth, absolute-paths): the Bash payload carried no readable command "
-            "string, so the relative-cwd check could not run. Allowing; prefer absolute paths so a command "
+            "AIQT guardrail (rule abspth, absolute-paths): the Bash command is empty, so it runs nothing and "
+            "the relative-cwd check had nothing to judge. Allowing; prefer absolute paths so a command "
             "cannot resolve against a working directory that differs between calls.")
     # Partial lex so an unparseable construct (a heredoc, here-string, process substitution, {fd} redirect,
     # or an unbalanced quote or escape) no longer discards every segment before it: a resolvable relative
@@ -7541,8 +7608,16 @@ def _git_alias_spelled_segments(command):
             last_end = -1
         if words:
             segments.append(words)
+    # A word holding no '$', backquote or '{' is all literal, with no brace and no unquoted part: each of the three
+    # searches below finds nothing in it. Where the text holds none, every word is such a word, so each gets its
+    # record (the shared one the lexer gives it, _WORD_SPELLINGS) with no search.
+    marked = "$" in text or "`" in text or "{" in text
     spelled = []
     for seg in segments:
+        if not marked:
+            spelled.append(_SpelledWords(seg, [_WORD_SPELLINGS[4 * len(word)] if len(word) < 64
+                                               else _WordSpelling(len(word), False, False) for word in seg]))
+            continue
         spelling = []
         for word in seg:
             mark = _GIT_ALIAS_SPELLED_MARK_RE.search(word)
@@ -8574,13 +8649,16 @@ def git_explicit_binding(data):
         return _deny_missing_tool_name("expbnd")
     if tool != "Bash":
         return _allow()
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or not command:
+    command, unread = _bash_command(data)
+    if unread is not None:
+        # The breadth-then-publish pair, the deny tier, may sit in what was not read.
+        return _deny_unreadable_command("expbnd (explicit-binding-over-ambient-context)",
+                                        "explicit-binding check", unread)
+    if not command:
         return _allow_note(
-            "AIQT guardrail (rule expbnd, explicit-binding): the Bash command was absent or unreadable, so "
-            "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
-            "it is allowed; prefer an explicit '-C' target and enumerated scope.")
+            "AIQT guardrail (rule expbnd, explicit-binding): the Bash command is empty, so it runs nothing "
+            "and names no git target or scope to check. This is a binding convention, not a hazard, so it "
+            "is allowed; prefer an explicit '-C' target and enumerated scope.")
     reads = _SubstHeredocs.reads
     try:
         # Both scans below read only each segment's words, and a segment with no word names no command
@@ -8723,12 +8801,13 @@ def git_stash_ref(data):
     another stash verb, or an operand the lexer could not read: an over-note, never a refusal), and text
     naming no such pair allows. A command whose '#' the lexer cannot judge that way gets the note when its
     text (_hash_doubt_scan) names git and stash, or holds quoting that text does not decode
-    (_hash_doubt_opaque), since the lexer read nothing past that '#'. An absent/unreadable command gets the
-    sibling's convention note.
+    (_hash_doubt_opaque), since the lexer read nothing past that '#'. An empty command gets the sibling's
+    convention note; a tool_input that is missing or not an object, or a command that is missing, not a
+    string or holds a NUL, denies (_bash_command, _deny_unreadable_command), as it does in the sibling.
     This note can co-occur with git_discard's raw/pristine fallback note on a wrapped or compound
     pop/apply, and with git_explicit_binding's note on a relocated form (e.g. `cd /x && git stash
     pop`); such sibling notes are consistent, never conflicting.
-    Only missing tool_name produces a structured deny;
+    Only a missing tool_name and an unreadable command produce a structured deny;
     a miswired event hard-blocks and dispatcher errors retain the manifest's fail-closed posture."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: git_stash_ref wired to unexpected event {!r}; failing "
@@ -8738,13 +8817,15 @@ def git_stash_ref(data):
         return _deny_missing_tool_name("expbnd")
     if tool != "Bash":
         return _allow()
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or not command:
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("expbnd (explicit-binding-over-ambient-context)", "stash-ref check",
+                                        unread)
+    if not command:
         return _allow_note(
-            "AIQT guardrail (rule expbnd, explicit-binding): the Bash command was absent or unreadable, so "
-            "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
-            "it is allowed; prefer an explicit '-C' target and enumerated scope.")
+            "AIQT guardrail (rule expbnd, explicit-binding): the Bash command is empty, so it runs nothing "
+            "and names no git target or scope to check. This is a binding convention, not a hazard, so it "
+            "is allowed; prefer an explicit '-C' target and enumerated scope.")
     try:
         # The loop below passes over a segment with no word (it has no command word), so one with no word
         # and no redirect is not built at all. The command reading (_CommandReading) adds each segment read
@@ -8807,6 +8888,564 @@ def git_stash_ref(data):
                 "Run 'git stash list', then name the entry explicitly, for example "
                 "\"git stash apply 'stash@{2}'\".")
     return _allow()
+
+
+# --- inline-errexit (nocncl): errexit turned on inline before steps joined by ; or a newline ------------
+# How the errexit walker reads each separator the shared lexer reports. "and-or" (&&, ||) joins the
+# pipelines of one statement and "pipe" (|, |&) the commands of one pipeline; "list" (; and a newline, which
+# the lexer reports as "", as it does the end of the command) ends the statement, and the next statement runs
+# whatever its status; "background" (&) ends it without waiting on its status; "open" and "close" bound a
+# (...) subshell or a $(...) command substitution, or end a case pattern, which the walker tells apart.
+_ERREXIT_JOINS = {"&&": "and-or", "||": "and-or", "|": "pipe", "|&": "pipe", ";": "list", "": "list",
+                  "&": "background", "(": "open", ")": "close"}
+# Reserved words the walker reads at the start of a segment. bash ignores errexit in a condition (after if,
+# elif, while or until, up to the then or do that ends it) and in a pipeline negated by !, so no step there
+# stops the shell. then, do, else and { open a body whose first command follows them; else and elif open
+# another branch of an if, which the branch before it does not run on into. fi, done, esac and } only close
+# a construct and run nothing of their own. for and select open a header, up to its do, that runs no command
+# that can fail. case and function headers are read on their own (_errexit_hazard).
+_ERREXIT_CONDITION_WORDS = frozenset(("if", "elif", "while", "until"))
+_ERREXIT_CLOSER_WORDS = frozenset(("fi", "done", "esac", "}"))
+_ERREXIT_HEADER_WORDS = frozenset(("for", "select"))
+# Command words that give errexit nothing to stop at when one is the whole final pipeline of a statement:
+# true and : always succeed, exit ends the shell itself, and set and shopt only change options; a shopt
+# whose argument form queries instead of setting or unsetting is kept out of this exemption, since its
+# exit status reports an option's state (_errexit_shopt_queries).
+_ERREXIT_NEVER_FAILS = frozenset(("true", ":", "exit", "set", "shopt"))
+# An UNQUOTED heredoc operator and its plain delimiter word (<<EOF, <<-EOF, << END), never a <<< here-string.
+# The shared lexer refuses an unquoted heredoc, so on a command it cannot read in full the walker reads it
+# again with each such delimiter quoted, which makes the lexer skip the body as data: a best-effort reading.
+_ERREXIT_UNQUOTED_HEREDOC_RE = re.compile(r"(?<!<)<<(-?)([ \t]*)([A-Za-z0-9_][A-Za-z0-9_.-]*)")
+_ERREXIT_NOTE = (
+    "AIQT guardrail (rule nocncl): this command turns errexit on inline (set -e, set -o errexit or shopt -s "
+    "-o errexit) and then runs a later step after a ; or a newline, past a step whose failure errexit would "
+    "stop at. In this tool an inline set -e was seen not to stop a later step after an earlier one failed, on "
+    "one reported command shape; whether it stops this command was not observed, and this note does not say "
+    "that any step failed. Where a failure must stop the run, join the steps with && or end each such step "
+    "with || exit 1: neither relies on errexit.")
+_ERREXIT_PARTIAL_NOTE = " (The command could not be fully parsed; this is a best-effort reading.)"
+_ERREXIT_PIPEFAIL_NOTE = (
+    " (The step read as failing here is a pipeline whose last command does not fail on its own, and whether "
+    "pipefail is on at that point could not be read from the command text, so this hazard is possible, not "
+    "certain: without pipefail the pipeline takes its last command's status.)")
+# The note for a payload field inline_errexit cannot read (_errexit_unreadable): the field, then what it held.
+_ERREXIT_UNREADABLE_NOTE = (
+    "AIQT guardrail (rule nocncl): this call's {} was {}, so the inline errexit check did not run on it. This "
+    "guard never blocks a call, so it is allowed: the check was not run, not passed.")
+# What the rest of a command the lexer could not read in full (_errexit_unread) must mention for inline_errexit
+# to note that rest when the part it read shows no hazard and leaves errexit off where it stopped: set or shopt
+# as a word no letter, digit, _ or - touches, or the text errexit or pipefail, in the rest as written or with
+# its quoting removed (_errexit_unread_mentions). A rest without one allows silently, so a process substitution
+# or a here-string alone draws no note.
+_ERREXIT_UNREAD_RE = re.compile(r"(?<![\w-])(?:set|shopt)(?![\w-])|errexit|pipefail")
+# A line continuation (a backslash then a newline) and each backslash and quote character, removed from the
+# unread rest before it is searched again, so s\et, s''et and a set split by a line continuation are found: a
+# rough form of bash's quote removal, which can only add to what the search of the rest as written finds.
+_ERREXIT_UNREAD_QUOTING_RE = re.compile(r"\\\n|[\\'\"]")
+_ERREXIT_UNREAD_NOTE = (
+    "AIQT guardrail (rule nocncl): the inline errexit check stopped at a construct it cannot parse, so the rest "
+    "of this command was not read, and that rest mentions set, shopt, errexit or pipefail. This guard never "
+    "blocks a call, so it is allowed: the rest was not checked, not passed.")
+# The note for that rest when errexit is on where the lexer stopped (_errexit_hazard's second value), whatever
+# the rest mentions: a later step there, after one errexit would stop at, was not checked.
+_ERREXIT_UNREAD_ON_NOTE = (
+    "AIQT guardrail (rule nocncl): the inline errexit check stopped at a construct it cannot parse, so the rest "
+    "of this command was not read, and errexit was turned on inline before that point, so a later step in that "
+    "rest after one errexit would stop at was not checked. This guard never blocks a call, so it is allowed: "
+    "the rest was not checked, not passed.")
+
+
+def _errexit_set_effect(words):
+    """The (errexit, pipefail) effects of the simple command `words` (its command word first): for each
+    option, True when the command turns it on, False when it turns it off, and None when it leaves it alone.
+    set with e in an option cluster (-e, -eu, -Eeuo) or -o errexit turns errexit on, and +e or +o errexit
+    turns it off, the last such option winning; -o pipefail and +o pipefail do the same for pipefail;
+    options are read up to '--', a lone '-' or the first operand, since what follows them is positional
+    parameters (set -- -e). shopt -s -o errexit turns errexit on and shopt -u -o errexit turns it off, the
+    s, u and o letters in one cluster or several, and the same forms naming pipefail set pipefail."""
+    if words[0] == "shopt":
+        letters = ""
+        names = []
+        for arg in words[1:]:
+            if arg[:1] == "-" and len(arg) > 1 and not names:
+                letters += arg[1:]
+            else:
+                names.append(arg)
+        if "o" not in letters or ("errexit" not in names and "pipefail" not in names):
+            return None, None
+        if "s" in letters:
+            on = True
+        elif "u" in letters:
+            on = False  # shopt -u -o errexit turns errexit off
+        else:
+            return None, None
+        return on if "errexit" in names else None, on if "pipefail" in names else None
+    if words[0] != "set":
+        return None, None
+    effect = None
+    pipefail = None
+    args = words[1:]
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        i += 1
+        if arg in ("-", "--"):
+            break  # '--' or a lone '-' ends the options: what follows is positional parameters
+        if arg[:1] not in ("-", "+") or len(arg) < 2:
+            break  # so does the first operand
+        on = arg[0] == "-"
+        for letter in arg[1:]:
+            if letter == "e":
+                effect = on
+            elif letter == "o" and i < len(args):
+                if args[i] == "errexit":
+                    effect = on
+                elif args[i] == "pipefail":
+                    pipefail = on  # set -o pipefail turns pipefail on and set +o pipefail turns it off
+                i += 1  # -o and +o take their option name from the next word
+    return effect, pipefail
+
+
+def _errexit_shopt_queries(words):
+    """Whether the shopt command `words` takes a form whose own exit status can be non-zero: an option
+    letter shopt does not take (anything beyond q, s, u, o and p) is an error, giving -s and -u together is
+    an error, and option names given without -s or -u report in the exit status whether every name is set,
+    with or without -q, which only silences that report. Setting or unsetting (-s or -u, with -o for a
+    set -o option name) exits 0 even with -q beside it, and so do a bare listing and a bare -q or -p with
+    no names; whether each NAME is one shopt knows is not judged."""
+    letters = ""
+    names = []
+    for arg in words[1:]:
+        if arg[:1] == "-" and len(arg) > 1 and not names:
+            letters += arg[1:]
+        else:
+            names.append(arg)
+    if any(letter not in "qsuop" for letter in letters):
+        return True  # an option shopt refuses can fail
+    if "s" in letters and "u" in letters:
+        return True  # shopt refuses setting and unsetting at once
+    if "s" in letters or "u" in letters:
+        return False  # setting or unsetting exits 0: a -q beside them only silences output
+    return bool(names)  # names alone, queried or not, report their state in the exit status
+
+
+def _errexit_armed(current, new):
+    """The stronger of two armed readings: True (a step bash would certainly stop at) over "possible" (a
+    pipeline whose stopping depends on a pipefail state the walker could not read) over False."""
+    if current is True or new is True:
+        return True
+    return current or new
+
+
+def _errexit_unread(text, segments, complete, in_progress):
+    """The part of text, the command as _errexit_statements lexed it into segments, that the lex may not have
+    read: "" when it read the whole text (complete); else the rest of text from the start of the segment it
+    stopped inside (in_progress), whose unread words could change it, or else from the end of the last segment
+    whose raw text is not blank. That end is taken where its raw text first occurs in text, at or before where
+    the segment ends, so the part returned holds every character the lex did not reach, with any separator or
+    quoted heredoc body before them. Under several readings of an uncertain '#' each reading's segments follow
+    the one before's (_lex_command), so the segment found here is the last one some reading read, and that
+    reading read the text before it: a character one reading reached counts as read."""
+    if complete:
+        return ""  # the lex read it all
+    if in_progress:
+        return segments[-1].raw  # the segment the lex stopped inside, to the end of text
+    for seg, _run in itertools.groupby(reversed(segments)):  # a run of equal segments is judged once
+        if seg.raw.strip():
+            at = text.find(seg.raw)
+            # raw is a slice of text, so it is always found; a miss would read the whole text, never less
+            return text[at + len(seg.raw):] if at >= 0 else text
+    return text  # the lex stopped before any segment with text, so none of it counts as read
+
+
+def _errexit_unread_mentions(unread):
+    """Whether the unread rest of a command (_errexit_unread) mentions an option word (_ERREXIT_UNREAD_RE), as
+    written or with its quoting removed (_ERREXIT_UNREAD_QUOTING_RE). The rest as written is searched as well,
+    so a set that removing the quoting joins to a longer word ("$x"set) is still found."""
+    return bool(_ERREXIT_UNREAD_RE.search(unread) or
+                _ERREXIT_UNREAD_RE.search(_ERREXIT_UNREAD_QUOTING_RE.sub("", unread)))
+
+
+def _errexit_statements(command):
+    """(pairs, tail, exact, unread) for the errexit walker: pairs are the (argv, sep_after, redirected) of each
+    segment the shared lexer read in full, in order, redirected being whether the segment carries a
+    redirection (a statement of redirections only still runs them); tail is the argv of the segment it
+    stopped inside (_lex_command's in_progress segment: [] for one that holds only redirects so far, None
+    when there is none), whose unread words could change it; exact is False when the lexer could not read
+    the whole command; and unread is the rest of the command the lexer did not read (_errexit_unread), "" when
+    it read all of it. On such a command, one that holds an unquoted heredoc is read again with its
+    delimiters quoted (_ERREXIT_UNQUOTED_HEREDOC_RE), so the body is skipped as data and the statements
+    after it are read, and unread is taken from that reading.
+
+    Of each run of consecutive segments with no word and no redirect that end with ';' (a ';;;;' run, which
+    the lexer returns again for each reading of an uncertain '#'), only the first two are kept. _errexit_hazard
+    reads every later one after a ';' and after one of the run that it also read after a ';', which leaves it
+    nothing to change: a case pattern stays a pattern, an arm that ';;' ended has its next pattern pending, a
+    continued statement stays continued and an ended one stays ended. So each later one leaves the walker's
+    state as it found it, its decision is the same, and a long run costs one comparison per segment
+    (itertools.groupby over equal segments) instead of a walker step and a pair."""
+    segments, exact, in_progress = _lex_command(command, partial=True)
+    text, complete = command, exact
+    if not exact:
+        quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)
+        if quoted != command:
+            segments, complete, in_progress = _lex_command(quoted, partial=True)
+            text = quoted
+    pairs = []
+    for seg, run in itertools.groupby(segments):
+        pair = (seg.argv, seg.sep_after, bool(seg.redirects))
+        if pair == ([], ";", False):
+            run = itertools.islice(run, 2)  # the rest of the run changes nothing the walker reads
+        pairs.extend(pair for _seg in run)
+    tail = pairs.pop()[0] if in_progress else None
+    return pairs, tail, exact, _errexit_unread(text, segments, complete, in_progress)
+
+
+def _errexit_stops(word, after_or, piped, in_function, pipefail):
+    """Whether bash, with errexit on, would stop at a failure of the statement just ended, read from its
+    final pipeline (bash ignores errexit for every pipeline of an && or || list but the last): `word` is the
+    command word of that pipeline's last command (None for a (...) subshell), `after_or` whether || comes
+    before the pipeline, `piped` whether it has more than one command, `in_function` whether the statement
+    is inside a function body, and `pipefail` the pipefail state (True, False, or None for unknown). A
+    pipeline after || is read as the handling the author wrote for the failure before it, so it counts only
+    when it cannot succeed: a lone false, or a return outside a function body, where return fails. A
+    pipeline of several commands counts when its last command can fail (without pipefail the pipeline takes
+    that command's status) or when pipefail is on (any stage's failure then fails the pipeline); each of its
+    commands runs in its own subshell, so an exit or return there only supplies that stage's status and can
+    fail the pipeline like any command; when its last command gives errexit nothing to stop at and the
+    pipefail state is unknown, it counts as "possible", not certain. Otherwise a lone _ERREXIT_NEVER_FAILS
+    word or a return inside a function body
+    (which ends the function) gives errexit nothing to stop at, and every other pipeline counts, whatever it
+    runs: the hook does not judge whether a command can fail."""
+    if piped and after_or:
+        return False  # a pipeline of several commands after || handles the failure before it
+    if piped:
+        # each pipeline command runs in its own subshell, so an exit or return there only supplies
+        # that stage's status to the pipeline: neither leaves the surrounding context
+        last_stops = word in ("exit", "return") or word not in _ERREXIT_NEVER_FAILS
+        if last_stops or pipefail:
+            return True  # the last command can fail alone, or pipefail lets any stage fail the pipeline
+        return "possible" if pipefail is None else False  # off: the last command decides; unknown: possible
+    if after_or:
+        cannot_succeed = word == "false"  # a || branch that cannot succeed handles nothing
+        if word == "return":
+            cannot_succeed = not in_function  # return fails outside a function body
+        return cannot_succeed
+    if word == "return":
+        return not in_function  # a lone return fails outside a function body, and ends the function inside one
+    return word not in _ERREXIT_NEVER_FAILS
+
+
+def _errexit_hazard(pairs, tail):
+    """(hazard, on): hazard is truthy when errexit is on at a statement whose failure bash would stop at under
+    errexit (_errexit_stops) and a later statement of the same scope follows it after a ; or a newline
+    (_ERREXIT_JOINS): the shape whose later steps an inline set -e was seen not to stop in this tool. It is
+    True for a certain such step, or "possible" when the only such step is a pipeline whose stopping depends
+    on a pipefail state the walker could not read. on is whether errexit is on where the walk ended, counting,
+    once every pair is read, each (...) subshell, $(...) substitution or function body still open there, since
+    the rest of the command returns to the state saved as it opened when it closes it (a { } group restores
+    nothing); inline_errexit reads it when the lexer stopped early and hazard is false. pairs and tail are
+    _errexit_statements' reading; the tail (None when there is none) counts only as a later statement, never
+    as a set or as a step that can fail, and a fully read statement of redirections only also counts as a
+    later statement (bash still runs its redirections, truncating a > target), whatever separator ends it; a
+    closing fi, done, esac or } that carries a redirection closes its construct and is no later statement.
+
+    Option changes are tracked in order (_errexit_set_effect), and only one that runs whenever its statement
+    runs counts: the first command of its && or || list, outside a pipeline and not sent to the background;
+    a pipefail change that is conditional there, or sits inside an if, case or loop body that may not run,
+    leaves the pipefail state unknown. A setting made inside a (...) subshell
+    ends with it, a setting made inside a function body takes effect when the function is called, never at
+    its definition, and a $(...) command substitution runs with errexit off, as bash runs it without
+    inherit_errexit. A statement is no step that can fail when errexit is off as its final pipeline's last
+    command starts, when that pipeline is negated by !, when the statement is part of a condition or a for
+    or select header (up to its then or do) or inside a subshell or { } group opened in one, when it ends
+    with &, or when _errexit_stops finds nothing in its final pipeline for errexit to stop at (a shopt that
+    only sets or unsets options is such a nothing; one that queries can fail). A newline after &&, || or a
+    pipe continues the statement.
+
+    Compound commands are read through their reserved words: each branch of an if and each arm of a case is
+    another branch, so a step of one arm does not make the next arm a later step, but a step that can fail in
+    any branch still counts after fi or esac; a case pattern, up to its ), runs nothing; and a function body
+    (name () { ... } or function name { ... }) is read where it is defined, as its own scope, with the
+    definition itself running nothing."""
+    on = False  # errexit starts off: only a set or shopt in the command turns it on
+    pipefail = False  # bash starts with pipefail off; None when a conditional change leaves it unknown
+    armed = False  # a statement that can fail unhandled under errexit has ended with ; or a newline
+    scopes = []  # the state outside each open (...) subshell or $(...) substitution
+    braces = []  # (a function body, and armed, ignored, on and pipefail outside it) for each open { group
+    frames = []  # [if or case, an earlier branch armed, a case pattern comes next] for each open if and case
+    functions = 0  # the open function bodies
+    loops = 0  # the open do ... done bodies, whose steps run only as the loop runs
+    fn_pending = False  # a function header was read, and its body has not opened yet
+    last = None  # (errexit on as it started, its command word or None) for the open pipeline's last command
+    exempt = False  # the open statement is part of a condition or a for or select header, up to then or do
+    ignored = False  # errexit is ignored in the whole subshell or { } group (opened in a condition or after !)
+    negated = False  # the open pipeline is negated by !
+    joiner = None  # the && or || before the open pipeline
+    piped = False  # the open pipeline has more than one command
+    continued = False  # the open statement's last segment ended with &&, || or a pipe
+    previous = None  # the separator after the segment before this one
+    count = len(pairs)
+    i = 0
+    while i < count:
+        argv, sep, redirected = pairs[i]
+        i += 1
+        before, previous = previous, sep
+        kind = _ERREXIT_JOINS.get(sep, "list")
+        words = argv[_command_word_index(argv):]
+        arms = frames[-1] if frames and frames[-1][0] == "case" else None
+        if arms is not None and arms[2] and words[:1] != ["esac"]:
+            if kind == "close":
+                arms[2] = False  # the pattern ends at its ), and the arm's body follows
+                last, negated, joiner, piped, continued = None, False, None, False, False  # the arm's first step
+            continue  # a case pattern runs nothing
+        if arms is not None and not argv and sep in (";", "&") and before in (";", ""):
+            arms[1] = _errexit_armed(arms[1], armed)  # a step of this arm can still fail before esac
+            armed = False  # ;; ends the arm: the next arm is another branch, not a later step
+            arms[2] = True  # and a pattern comes next
+            last, negated, joiner, piped, continued = None, False, None, False, False  # past the arm
+            continue
+        k = 0
+        while k < len(words):
+            word = words[k]
+            if word in ("else", "elif") and frames and frames[-1][0] == "if":
+                frames[-1][1] = _errexit_armed(frames[-1][1], armed)  # the branch before can fail before fi
+                armed = False  # else and elif open another branch, which the branch before does not run on into
+            if word in _ERREXIT_CONDITION_WORDS:
+                if word == "if":
+                    frames.append(["if", False, False])
+                exempt = True  # bash ignores errexit in a condition, up to its then or do
+            elif word == "!":
+                negated = True  # and in a pipeline negated by !
+            elif word in ("then", "do"):
+                if word == "do":
+                    loops += 1  # a do opens a loop or select body
+                exempt = False  # the condition or header ends, and a body follows
+            elif word == "{":
+                braces.append((fn_pending, armed, ignored, on, pipefail))
+                ignored = ignored or exempt or negated  # a { } group in a condition or after ! ignores errexit
+                if fn_pending:
+                    fn_pending = False
+                    functions += 1
+                    armed = False  # a function body runs when it is called, not where it is defined
+                    last, negated, joiner, piped, continued = None, False, None, False, False  # the body's start
+            elif word == "function" and k + 1 < len(words):
+                fn_pending = True  # function name, then () or its body: the header runs nothing
+                k += 1  # the name
+            elif word != "else":
+                break
+            k += 1
+        words = words[k:]
+        closer = False
+        if words and all(word in _ERREXIT_CLOSER_WORDS for word in words):
+            for word in words:
+                if word == "}" and braces:
+                    function_body, outside, ignored, outside_on, outside_pipefail = braces.pop()
+                    if function_body:
+                        functions -= 1
+                        armed = outside  # the definition itself runs nothing
+                        on = outside_on  # an option change in a body takes effect only when it is called
+                        pipefail = outside_pipefail  # pipefail likewise: the definition changes no option
+                elif word == "done" and loops:
+                    loops -= 1  # done closes the loop or select body its do opened
+                elif word in ("fi", "esac") and frames and frames[-1][0] == ("if" if word == "fi" else "case"):
+                    armed = _errexit_armed(frames.pop()[1], armed)  # any branch can have failed before fi/esac
+            words = []
+            closer = True  # even carrying a redirection, the closer is no later statement
+        if kind == "open" and i < count and pairs[i][:2] == ([], ")") and (
+                (fn_pending and not words) or (len(words) == 1 and not words[0].endswith("$"))):
+            fn_pending = True  # name () or function name (): a function header, whose () opens no subshell
+            i += 1
+            previous = ")"
+            continue
+        if not words and redirected and armed and not closer:
+            return armed, on  # a statement of redirections only is a later statement: bash still runs them
+        if words:
+            if armed:
+                return armed, on  # a later statement runs after one that failed with nothing to stop it
+            fn_pending = False
+            if words[0] == "case":
+                frames.append(["case", False, kind != "close"])  # the first pattern ends at its ), here or later
+                last, negated, joiner, piped, continued = None, False, None, False, False  # the header runs nothing
+                continue
+            if words[0] in _ERREXIT_HEADER_WORDS:
+                exempt = True  # a for or select header runs no command that can fail, up to its do
+            word = words[0]
+            if word == "shopt" and _errexit_shopt_queries(words):
+                word = "shopt?"  # a shopt form that can fail, kept apart from the exempt setting form
+            last = (on, word)  # errexit as the pipeline's last command starts
+            effect, pipefail_effect = _errexit_set_effect(words)
+            unconditional = joiner is None and not piped and kind not in ("pipe", "background")
+            if effect is not None and unconditional:
+                on = effect  # an option change that runs whenever its statement runs
+            if pipefail_effect is not None:
+                in_branch = bool(frames) or loops > 0  # an if, case or loop body may not run
+                pipefail = pipefail_effect if unconditional and not in_branch else None  # else: state unknown
+            continued = False
+        if kind == "and-or":
+            joiner = sep
+            negated = False  # ! negates one pipeline only
+            piped = False
+            continued = True
+        elif kind == "pipe":
+            piped = True
+            continued = True
+        elif kind == "open":
+            if armed:
+                return armed, on  # the subshell is a later statement
+            fn_pending = False
+            substitution = bool(argv) and argv[-1].endswith("$")
+            scopes.append((on, pipefail, armed, last, exempt, ignored, negated, joiner, piped, functions,
+                           loops, substitution, len(frames), len(braces)))
+            if substitution:
+                on = False  # bash runs a $(...) command substitution with errexit off
+            ignored = ignored or exempt or negated  # so does a subshell in a condition or after !
+            armed = False
+            last, negated, joiner, piped, continued = None, False, None, False, False  # inside the subshell
+            if not argv and not redirected:
+                # Each further equal '(' in a run (a bare subshell, read through the same rules) pushes the scope
+                # this state gives and leaves the state as it is: armed, fn_pending and the open pipeline are
+                # reset, ignored already holds exempt, and no case pattern is pending or the first would not
+                # have reached here. So the rest of the run is pushed at once, one entry object for all of it,
+                # and a long run costs one comparison per pair instead of a walker step.
+                run = i
+                while run < count and pairs[run] == pairs[i - 1]:
+                    run += 1
+                if run > i:
+                    scopes.extend(itertools.repeat((on, pipefail, armed, last, exempt, ignored, negated, joiner,
+                                                    piped, functions, loops, substitution, len(frames),
+                                                    len(braces)), run - i))
+                    i = run
+        elif kind == "close":
+            if scopes:
+                scope = scopes.pop()
+                (outside_on, outside_pipefail, outside_armed, outside_last, exempt, ignored, negated, joiner,
+                 piped, functions, loops, substitution, frame_depth, brace_depth) = scope
+                del frames[frame_depth:]  # a construct left open inside the subshell ends with it
+                del braces[brace_depth:]
+                on = outside_on  # an errexit setting made inside (...) ends with the subshell
+                pipefail = outside_pipefail  # and a pipefail setting made inside (...) ends with it too
+                armed = outside_armed  # and so does a step inside it: what follows the subshell runs either way
+                if not substitution:
+                    last = (on, None)  # the subshell is the open pipeline's last command
+                elif outside_last is not None:
+                    last = outside_last  # the command that holds the substitution
+                else:
+                    last = (on, None)  # a command of assignments only takes the substitution's status
+                if not argv and not redirected and not (frames and frames[-1][0] == "case" and frames[-1][2]):
+                    # Each further equal ')' that would pop this same entry (a run of '(' pushed one object)
+                    # restores the same state, and with no case pattern pending none of them ends a pattern, so
+                    # those closes are popped at once.
+                    run = i
+                    while run < count and len(scopes) > run - i and scopes[i - run - 1] is scope and (
+                            pairs[run] == pairs[i - 1]):
+                        run += 1
+                    del scopes[len(scopes) - (run - i):]
+                    i = run
+            else:
+                last = (on, None)
+            continued = False
+        elif kind == "list" and not words and continued:
+            continue  # a newline after &&, || or a pipe continues the statement
+        else:
+            if kind == "list" and last is not None and last[0] and not exempt and not ignored and not negated:
+                stops = _errexit_stops(last[1], joiner == "||", piped, functions > 0, pipefail)
+                armed = _errexit_armed(armed, stops)  # a later statement of this scope would run after this
+            last, negated, joiner, piped, continued = None, False, None, False, False  # a new statement
+    # errexit where the walk ended, or where closing a subshell, a substitution or a function body returns to
+    on = on or any(scope[0] for scope in scopes) or any(entry[3] for entry in braces if entry[0])
+    if tail is None:
+        return False, on  # the last statement never notes: nothing runs after it
+    return armed, on  # the tail counts only as a later statement, preserving a "possible" reading
+
+
+def _errexit_unreadable(field, present, value, kind):
+    """inline_errexit's outcome on a payload field it cannot read: a missing field, an empty string, or a value
+    that is not `kind`. This note-only guard never denies, so its fail-closed outcome is an allow with a note
+    naming the field and what it held, never a silent allow that would read as a checked call."""
+    if not present:
+        held = "missing"
+    elif value == "":
+        held = "empty"
+    else:
+        held = "{}, not {}".format(_orch_json_kind(value), kind)
+    return _allow_note(_ERREXIT_UNREADABLE_NOTE.format(field, held))
+
+
+def inline_errexit(data):
+    """nocncl (integ/no-concealed-failure), PreToolUse/Bash. NOTE-ONLY: it allows every Bash command, and
+    blocks only when wired to an event other than PreToolUse, a payload with no hook_event_name included (the
+    sibling hard-block convention); main() turns each of its error paths, its deadline included, into a
+    warning on exit 0 (NOTE_ONLY_PRETOOL_MODES). A Bash command that turns errexit on inline (set -e, set -o
+    errexit, shopt -s -o errexit) and then runs a later step after a ; or a newline, past a step whose
+    failure errexit would stop at (_errexit_hazard), ALLOWS with one informational note: in this tool an
+    inline set -e was seen not to stop such a later step, on one reported command shape. Steps joined by &&,
+    a step whose failure a || branch handles, and a chain inside bash -c '...' or a quoted heredoc (quoted
+    text and a quoted heredoc body are data to the shared lexer) do not fire.
+
+    HONEST RESIDUAL: it reads the command text only and cannot see how the tool evaluates it, so where an
+    inline set -e does stop at a failure the note is a false alarm, and the note never says a step failed.
+    errexit or pipefail turned on another way (bash -e, a sourced file, SHELLOPTS, an alias, a function,
+    eval, an earlier call) is not seen, and neither is a set reached through a wrapper (builtin set -e); a
+    pipefail change that may not run (after && or ||, in a pipeline, backgrounded, or inside an if, case or
+    loop body) leaves the pipefail state unknown, so a pipeline it could govern notes as possible rather
+    than as certain or silent. Apart from the few builtins _errexit_stops reads, it does not judge whether a
+    step can fail or whether a later step depends on it, and it reads a || branch as handling the failure
+    before it whether or not that branch can fail itself; a shopt is judged by its argument form only, never
+    by whether its option names exist, and a redirect-only statement counts as a later statement but never
+    as a step that can fail. A function body is read where it is defined, as if the function were called
+    plainly: bash
+    ignores errexit inside a function called in an && or || list, a condition or a ! pipeline, which is not
+    modelled. Compound commands are read only through their reserved words (_errexit_hazard). An unquoted
+    heredoc is read again with its delimiter quoted, a best-effort reading the note says it is; where the lexer
+    stops at any other construct it refuses, the rest of the command past the last segment it read in full is
+    not read (_errexit_unread). Where the part read shows no hazard, that rest allows with a note saying it was
+    not read when errexit is on where the lexer stopped (_errexit_hazard's second value), or else when that
+    rest mentions set or shopt as a word, errexit or pipefail (_errexit_unread_mentions), each with its own
+    note, and silently otherwise, so a later step there after an errexit turned on before the stop only by a
+    change that may not run (true || set -e), or only inside a function body the rest may call, is unseen.
+    Another tool silently allows. A tool_name that is missing, empty or not a string, a tool_input that is not
+    an object, and a command that is missing, empty or not a string each allow with a note naming that field
+    (_errexit_unreadable), never silently and never with a deny. The command comes through the reader every
+    Bash hook shares (_bash_command), so a command string holding a NUL (bash runs only the text before it)
+    also allows with that note, carrying the reader's detail: this guard is note-only, so its fail-closed
+    outcome is a note, not a deny."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: inline_errexit wired to unexpected event {!r}; failing "
+                           "closed".format(data.get("hook_event_name")))
+    tool = data.get("tool_name")
+    if not isinstance(tool, str) or not tool:
+        return _errexit_unreadable("tool_name", "tool_name" in data, tool, "a string")
+    if tool != "Bash":
+        return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
+    # The command comes through the reader every Bash hook shares; where it cannot read the command, the raw
+    # field is read only to word the note naming what the field held.
+    command, unreadable = _bash_command(data)
+    if unreadable is not None:
+        tool_input = data.get("tool_input")
+        if not isinstance(tool_input, dict):
+            return _errexit_unreadable("tool_input", "tool_input" in data, tool_input, "an object")
+        command = tool_input.get("command")
+        if not isinstance(command, str):
+            return _errexit_unreadable("command", "command" in tool_input, command, "a string")
+        return _allow_note(_ERREXIT_UNREADABLE_NOTE.format(  # a command string holding a NUL
+            "command", "a string holding a NUL ({})".format(unreadable)))
+    if not command:
+        return _errexit_unreadable("command", True, command, "a string")
+    pairs, tail, exact, unread = _errexit_statements(command)
+    hazard, on = _errexit_hazard(pairs, tail)
+    if not hazard:
+        if unread and on:
+            return _allow_note(_ERREXIT_UNREAD_ON_NOTE)  # a later step past errexit turned on was not read
+        if _errexit_unread_mentions(unread):
+            return _allow_note(_ERREXIT_UNREAD_NOTE)  # its unread rest mentions set, shopt, errexit or pipefail
+        return _allow()
+    note = _ERREXIT_NOTE
+    if hazard == "possible":
+        note += _ERREXIT_PIPEFAIL_NOTE  # pipefail unknown: the pipeline may take its last command's status
+    if not exact:
+        note += _ERREXIT_PARTIAL_NOTE
+    return _allow_note(note)
 
 
 def _has_short(tokens, ch):
@@ -9154,6 +9793,152 @@ def _reset_role(args):
     if mode == "soft":
         return ("allow", None)  # HEAD-only: the index and worktree are untouched
     return ("scoped", "git reset (an index or worktree reset that can drop staged or unstaged changes)")
+
+
+# git reset modes, for the ancestry check below. A soft reset keeps the older tree in the index and a mixed
+# reset (also the default) keeps it in the worktree, where a later 'git add -A' stages it again, so the next
+# commit records that tree. --hard, --keep and --merge rewrite tracked content to the target's tree, so they
+# leave no older tree to commit and are not judged by the ancestry check.
+_RESET_MODES = ("soft", "mixed", "hard", "keep", "merge")
+_RESET_ANCESTRY_MODES = frozenset(("soft", "mixed"))
+
+
+def _reset_commit_operand(args):
+    """(mode, operand) when a git reset moves HEAD to ONE commit operand under --soft, --mixed or no mode
+    (mode is "soft" or "mixed"); None otherwise: no operand, more than one operand (a path reset), any path
+    after '--', a path-scoped form (-p/--patch, --pathspec-from-file), or an effective --hard, --keep or
+    --merge. The last mode given wins and a mode is matched by unambiguous prefix, as git does; the ambiguous
+    '--m' (mixed or merge) is read as mixed, so it is judged. Options may follow operands, as git accepts;
+    '--end-of-options' ends the option region and '--' starts the paths. A lone '-' is git's shorthand for the
+    previous branch and is read as '@{-1}'. Pure: it runs nothing."""
+    mode = "mixed"
+    operands = []
+    end_of_options = False
+    for idx, a in enumerate(args):
+        if a == "--":
+            if args[idx + 1:]:
+                return None  # 'git reset <tree-ish> -- <paths>' resets paths and leaves HEAD where it is
+            break
+        if end_of_options or not a.startswith("-"):
+            operands.append(a)
+            continue
+        if a == "--end-of-options":
+            end_of_options = True
+            continue
+        if a == "-":
+            operands.append("@{-1}")
+            continue
+        if not a.startswith("--"):
+            if "p" in a[1:]:
+                return None  # a clustered -p: interactive patch mode is path-scoped
+            continue
+        name = a[2:].split("=", 1)[0]
+        if not name:
+            continue
+        if "patch".startswith(name) or "pathspec-from-file".startswith(name):
+            return None  # a path-scoped reset
+        if "=" in a:
+            continue  # no mode takes a value
+        matches = [m for m in _RESET_MODES if m.startswith(name)]
+        if len(matches) == 1:
+            mode = matches[0]
+        elif matches and set(matches) <= {"mixed", "merge"}:
+            mode = "mixed"  # an ambiguous '--m': judged, the safe direction
+    if mode not in _RESET_ANCESTRY_MODES or len(operands) != 1:
+        return None
+    return (mode, operands[0])
+
+
+def _reset_ancestry(repo, operand):
+    """Ask git, read-only and offline, whether a reset target is an ancestor of HEAD in `repo`. Returns
+    ('ancestor'|'not-ancestor'|'not-a-commit'|'no-commit-object'|'unknown', detail), read only from unmasked
+    git exit statuses, with the scrubbed environment of _branch_root_git. The operand is resolved alone and
+    the object it names is then peeled to a commit: appending '^{commit}' to the operand itself would change
+    what some operands name (everything after ':/' is a commit-message pattern, so ':/<text>^{commit}'
+    searches for the suffix too). 'not-a-commit': the operand resolves to no object (git then reads a single
+    operand as a path). 'no-commit-object': the operand resolves to an object that peels to no commit (a tree
+    or a blob), which git does not read as a path. 'unknown': no repository directory is known, git cannot be
+    launched or does not finish, HEAD resolves to no commit (an unborn branch or an unreadable repository),
+    the ancestry walk exits with anything but 0 or 1, or a repository that is shallow (or whose shallowness
+    cannot be read) answers 'not an ancestor' over history it may not hold."""
+    if not isinstance(repo, str) or not repo:
+        return ("unknown", "no repository directory could be resolved for it")
+    found = _branch_root_git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", operand)
+    if found is None:
+        return ("unknown", "git rev-parse could not be launched or did not finish")
+    if found.returncode == 1 and not found.stdout.strip():
+        return ("not-a-commit", "{!r} resolves to no commit".format(operand))
+    if found.returncode != 0 or not found.stdout.strip():
+        return ("unknown", "git rev-parse exited {} resolving {!r}".format(found.returncode, operand))
+    found_sha = found.stdout.strip()
+    target = _branch_root_git(
+        repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "{}^{{commit}}".format(found_sha))
+    if target is None:
+        return ("unknown", "git rev-parse could not be launched or did not finish")
+    if target.returncode == 1 and not target.stdout.strip():
+        return ("no-commit-object", found_sha)
+    if target.returncode != 0 or not target.stdout.strip():
+        return ("unknown", "git rev-parse exited {} peeling {} to a commit".format(target.returncode, found_sha))
+    target_sha = target.stdout.strip()
+    head = _branch_root_git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}")
+    if head is None or head.returncode != 0 or not head.stdout.strip():
+        return ("unknown", "HEAD resolves to no commit (an unborn branch or an unreadable repository)")
+    walk = _branch_root_git(repo, "merge-base", "--is-ancestor", target_sha, head.stdout.strip())
+    if walk is None:
+        return ("unknown", "git merge-base could not be launched or did not finish")
+    if walk.returncode == 0:
+        return ("ancestor", target_sha)
+    if walk.returncode != 1:
+        return ("unknown", "git merge-base --is-ancestor exited {}".format(walk.returncode))
+    shallow = _branch_root_git(repo, "rev-parse", "--is-shallow-repository")
+    if shallow is None or shallow.returncode != 0 or shallow.stdout.strip() != "false":
+        return ("unknown", "the repository is shallow, or its shallowness cannot be read, so a missing "
+                           "ancestry may only be missing history")
+    return ("not-ancestor", target_sha)
+
+
+def _reset_ancestry_refusal(args, repo, cannot):
+    """(mode, operand, what) for a git reset that moves HEAD to one commit (_reset_commit_operand) which is
+    not an ancestor of HEAD, or None when the reset is outside this check or its target is an ancestor. Such a
+    reset keeps the older tree in the index or worktree, so the next commit records it on top of the newer
+    history and reverts every change made since (a fold onto a newer main reverts that main). A probe that
+    cannot evaluate denies: `cannot` is a reason the repository the reset acts on cannot be established from
+    the command (the probe is then not run), and an 'unknown' probe denies as well. A soft reset whose operand
+    resolves to no object denies; a mixed reset whose single operand resolves to no object is a path reset,
+    and the caller's decision stands. An operand that resolves to an object that peels to no commit denies in
+    every mode. A target that equals HEAD or lies behind it is an ancestor and passes. The undo-amend
+    form 'HEAD@{1}' names the pre-amend commit, which is not an ancestor of the amended one, so it denies.
+    The caller returns _reset_ancestry_deny of a refusal."""
+    found = _reset_commit_operand(args)
+    if found is None:
+        return None
+    mode, operand = found
+    verdict, detail = ("unknown", cannot) if cannot is not None else _reset_ancestry(repo, operand)
+    if verdict == "ancestor" or (verdict == "not-a-commit" and mode == "mixed"):
+        return None
+    if verdict == "not-ancestor":
+        what = "moves HEAD to {}, which is not an ancestor of HEAD".format(detail)
+    elif verdict == "not-a-commit":
+        what = "names {!r}, which resolves to no commit".format(operand)
+    elif verdict == "no-commit-object":
+        what = "names {!r}, which resolves to {}, an object that is no commit".format(operand, detail)
+    else:
+        what = "could not be checked against HEAD's ancestry ({})".format(detail)
+    return (mode, operand, what)
+
+
+def _reset_ancestry_deny(refusal, alts):
+    """The deny for a refusal from _reset_ancestry_refusal; it gives the portable fold recipe and names no
+    repository-local tool."""
+    mode, operand, what = refusal
+    return _deny(
+        "AIQT rule brnrot (branch-rooted-on-live-main): this {} reset to {!r} {}. A reset that moves HEAD to a "
+        "commit that is not an ancestor of HEAD keeps the older tree in the index or worktree, so the next "
+        "commit records that tree on top of the newer history and reverts every change made there since; "
+        "denied rather than run. To fold a branch's commits onto its base, run git merge-base HEAD <ref> "
+        "and then git reset --soft <printed sha>, which this guard allows. {}".format(mode, operand, what, alts),
+        "AIQT guardrail: denied a git reset to a commit that is not an ancestor of HEAD (rule brnrot); "
+        "reset to the merge base instead.")
 
 
 # git clean options that CONSUME the following token (so its value must not be read as a flag): '-e'/
@@ -9798,7 +10583,7 @@ _RECOVERY_SIZE_CAP = 100 * 1024 * 1024  # 100 MiB
 _RECOVERY_LEDGER_PARTS = ("aiqt-guardrails", "recovery.jsonl")
 
 
-def _recovery_git(repo, args, env_extra=None, timeout=10):
+def _recovery_git(repo, args, env_extra=None, timeout=10, text=True):
     """Run a git subcommand against repo and return the CompletedProcess. INERT TO WORKING STATE: across all
     of its git calls it never touches the real index (a snapshot call uses a TEMP GIT_INDEX_FILE via
     env_extra), the worktree, HEAD, or a branch, and in a NORMAL repo writes only objects and one private ref
@@ -9816,12 +10601,14 @@ def _recovery_git(repo, args, env_extra=None, timeout=10):
     PATH-based git resolution, and partial-clone object availability, all read by git by design and none
     neutralized here.
     Raises subprocess.SubprocessError / OSError on a spawn or timeout failure, which the caller treats as a
-    snapshot failure. offline, bounded by `timeout`."""
+    snapshot failure. offline, bounded by `timeout`. text=False returns the output as bytes (the Stop
+    family's root read, _orch_stop_root, decodes the toplevel itself); every other caller keeps the
+    text-mode default."""
     cmd = ["git", "-C", repo] + list(args)
     env = _isolate_git_env(dict(os.environ))  # real-state calls must see the REAL repo, not an ambient decoy
     if env_extra:
         env.update(env_extra)  # a snapshot call sets its own GIT_INDEX_FILE here, applied AFTER the scrub
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+    return subprocess.run(cmd, capture_output=True, text=text, timeout=timeout, env=env)
 
 
 def _recovery_toplevel(repo):
@@ -11282,6 +12069,20 @@ def _discard_cd_target(operands):
     return _discard_literal_abs_path(path)
 
 
+def _discard_grammar_git_target(words, eff):
+    """(directory, subcommand, args) of a git segment the grammar ACCEPTED (_discard_git_segment_grammar):
+    its only global options are '-C <absolute literal path>' pairs, the last of which names the directory;
+    otherwise the directory is `eff` (None when unprovable)."""
+    seg_dir = eff
+    i = 1
+    while i + 1 < len(words) and words[i][0] == "-C":
+        seg_dir = _discard_literal_abs_path(words[i + 1][0])
+        i += 2
+    if i >= len(words):
+        return (seg_dir, None, [])
+    return (seg_dir, words[i][0], [t for t, _q in words[i + 1:]])
+
+
 def _discard_git_segment_grammar(words, eff):
     """Validate ONE segment whose bare command word is 'git' against the positive grammar. `words` is
     the full (text, quoted) token list (words[0] is 'git'); `eff` is the tracked effective directory,
@@ -11408,8 +12209,11 @@ def _discard_positive_grammar(command, cwd):
       deny            - None, or (kind, what) naming the first grammar violation
       snapshot_bases  - the resolved repo dir of every accepted worktree-discard segment
       stash_ops       - (repo dir, op word) of every accepted stash drop/clear segment
-      subs            - the snapshottable subcommands seen (the recovery-ledger verb label)"""
-    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set()}
+      subs            - the snapshottable subcommands seen (the recovery-ledger verb label)
+      reset_checks    - (directory or None, args, moved) of every accepted git reset that moves HEAD to one
+                        commit (_reset_commit_operand); moved says an earlier segment is a recognized lossy
+                        verb, which may already have moved HEAD before the reset runs"""
+    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set(), "reset_checks": []}
     items, bad = _discard_grammar_lex(command)
     if bad is None:
         segments, bad = _discard_grammar_segments(items)
@@ -11449,6 +12253,9 @@ def _discard_positive_grammar(command, cwd):
                 out["deny"] = (res[1], res[2])
                 return out
             _act, _base, _label = res[1], res[2], res[3]
+            r_dir, r_sub, r_args = _discard_grammar_git_target(words, eff)
+            if r_sub == "reset" and _reset_commit_operand(r_args) is not None:
+                out["reset_checks"].append((r_dir, r_args, lossy_segs > 0))
             if _act is not None:
                 lossy_segs += 1  # every action but None marks a recognized-lossy-verb segment
             if _act == "snapshot":
@@ -11745,10 +12552,11 @@ def git_discard(data):
     non-pristine path and the unparseable fallback never read the name, so there the prefixed command gets
     exactly what FOO=<the same value> gets); the guarantee is bounded to
     working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
-    reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
+    reflog-recoverable; a reset that moves HEAD to one commit that is not an ancestor of HEAD, or whose
+    ancestry cannot be evaluated, DENIES under brnrot, see _reset_ancestry_refusal) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
     reserved for the TRUE boundary (a present non-Bash tool, a non-git command, or no recognized lossy
     verb); a payload with NO tool_name is malformed, not another tool, and DENIES under the shared
-    missing-tool_name contract, and a tool_input whose command is MISSING or NOT A STRING is a
+    missing-tool_name contract, and a tool_input whose command is MISSING, NOT A STRING or HOLDS A NUL is a
     cannot-evaluate input, not that boundary, and DENIES under the shared fail-closed contract
     (check-fails-closed-on-unreadable), since a discard could hide in what was not read. A wrapper is in
     scope while the raw scan, the continuation-joined text or
@@ -11831,17 +12639,12 @@ def git_discard(data):
         return _deny_missing_tool_name("prsunc")
     if tool_name != "Bash":
         return _allow()  # boundary: a present non-Bash tool is out of scope
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
+    command, unread = _bash_command(data)
+    if unread is not None:
         # A missing, non-object or non-string command container is a cannot-evaluate input, not the true
         # boundary: a discard could hide in what was not read, so it denies under the shared fail-closed
         # contract (check-fails-closed-on-unreadable) rather than passing clean.
-        return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): the Bash payload carried no readable command "
-            "string, so the discard check could not run; failing closed. Re-issue the call with a string "
-            "command.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule prsunc, fail-closed).")
+        return _deny_unreadable_command("prsunc (preserve-uncommitted-work)", "discard check", unread)
     try:
         # Segments with no word and no redirect are skipped unbuilt: the lossy scan below passes over a
         # segment with no command word, and _pristine_single_bare_git returns before reading the segments
@@ -11976,6 +12779,19 @@ def git_discard(data):
             g_kind, g_what = walk["deny"]
             g_reason, g_banner = _DISCARD_GRAMMAR_DENY_TEXTS[g_kind]
             return _deny(g_reason.format(g_what, _DISCARD_ALTS), g_banner)
+        # Every accepted reset that moves HEAD to one commit is judged against HEAD's ancestry in the
+        # directory the grammar resolved for it, before any preservation or snapshot. An earlier lossy
+        # segment may move HEAD before the reset runs, and an unprovable directory names no repository, so
+        # either cannot be evaluated here and denies.
+        for r_dir, r_args, r_moved in walk["reset_checks"]:
+            r_cannot = None
+            if r_moved:
+                r_cannot = "an earlier segment of this command may move HEAD before the reset runs"
+            elif r_dir is None:
+                r_cannot = "the directory it runs in cannot be established"
+            r_refusal = _reset_ancestry_refusal(r_args, r_dir, r_cannot)
+            if r_refusal is not None:
+                return _reset_ancestry_deny(r_refusal, _DISCARD_ALTS)
         np_verb = next(iter(sorted(walk["subs"])), "discard")
         # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo
         # whose stash cannot be preserved), so a resolved stash removal never notes a recovery that omits
@@ -12071,6 +12887,26 @@ def git_discard(data):
     # non-redirecting case), but may NOT capture a redirected tree. With NO session cwd and no resolved -C
     # target a DESTRUCTIVE form DENIES below (fail closed): no base can be probed or snapshotted.
     ambient_override = _ambient_repo_view_override()
+    # A reset that moves HEAD to one commit is judged against HEAD's ancestry before any snapshot or role
+    # decision (_reset_ancestry_refusal); a reset with no commit operand is untouched. The probe reads the
+    # repository the reset acts on: the session directory, or the -C target. Under an ambient GIT_* override,
+    # a --git-dir/--work-tree/--bare redirect, a leading GIT_DIR/GIT_WORK_TREE assignment or an unresolvable
+    # -C, that repository cannot be established from the command, so the reset denies.
+    if sub == "reset":
+        r_cwd = data.get("cwd")
+        r_cwd = r_cwd if isinstance(r_cwd, str) and r_cwd else None
+        r_cannot = None
+        if ambient_override:
+            r_cannot = "a non-cosmetic ambient GIT_* variable shapes the repository it acts on"
+        elif _segment_has_path_redirect(pristine):
+            r_cannot = ("a --git-dir, --work-tree or --bare redirect, or a leading GIT_DIR or GIT_WORK_TREE "
+                        "assignment, shapes the repository it acts on")
+        r_repo = None if r_cannot is not None else _segment_repo_dir(pristine, r_cwd)
+        if r_repo == "opaque":
+            r_cannot = "its -C target cannot be resolved"
+        r_refusal = _reset_ancestry_refusal(args, r_cwd if r_repo is None else r_repo, r_cannot)
+        if r_refusal is not None:
+            return _reset_ancestry_deny(r_refusal, alts)
     if ambient_override or not _segment_dir_simple(pristine):
         ao_cwd = data.get("cwd")
         cwd_base = ao_cwd if isinstance(ao_cwd, str) and ao_cwd else None
@@ -14025,12 +14861,9 @@ def protected_line(data):
         return _deny_missing_tool_name("prtbrn")
     if tool_name != "Bash":
         return _allow()
-    command = (data.get("tool_input") or {}).get("command")
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule prtbrn (protected-branch-integrity): the Bash payload carried no readable command "
-            "string, so the protected-line check could not run; failing closed.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule prtbrn, fail-closed).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("prtbrn (protected-branch-integrity)", "protected-line check", unread)
     # After the input validation above (the PreToolUse
     # event, the Bash tool, and a readable command string), the raw-text backstop runs
     # unconditionally on every call, ahead of the commit-grammar reading and the lexer, so no
@@ -14685,13 +15518,9 @@ def branch_root(data):
         return _deny_missing_tool_name("brnrot")
     if tool_name != "Bash":
         return _allow()
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule brnrot (branch-rooted-on-live-main): the Bash payload carried no readable "
-            "command string, so branch creation could not be checked; failing closed.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("brnrot (branch-rooted-on-live-main)", "branch-creation check", unread)
     named = _git_alias_named(command)
     built = False  # a git command that reads as under an alias only through a word built at run time (_BRNROT_BUILT)
     reads = _SubstHeredocs.reads
@@ -16330,7 +17159,12 @@ def _gate_grammar_messages(kind, what, how, unparsed):
         "grammar (rule gatdis, fail-closed).".format(what[:40]))
 
 
-def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
+# The kind a caller of _gate_weakening_fallback passes when it has not read _gate_weakening_fallback_kind of the
+# command (whose own results include None), so the fallback reads it itself.
+_GATE_KIND_UNREAD = object()
+
+
+def _gate_weakening_fallback(command, heredoc_message=False, runtime=False, kind=_GATE_KIND_UNREAD):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
     a short -n cluster DENIES fail-safe too (the raw string cannot bind the cluster to its subcommand,
@@ -16347,8 +17181,10 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
     text names (_gate_unread_bypass) or that only a de-quoted reading spells (_decoded_readings), before
     it calls this with runtime, which reads a git word built at run time (_gate_runtime_bypass) after the
     denies here and before the note, so a command these denies refuse keeps their message and one they would
-    only note or allow ($G commit -nv <<<x) denies."""
-    kind = _gate_weakening_fallback_kind(command)
+    only note or allow ($G commit -nv <<<x) denies. kind, when given, is _gate_weakening_fallback_kind(command)
+    as the caller has just read it, so the raw probes are not run over the command a second time."""
+    if kind is _GATE_KIND_UNREAD:
+        kind = _gate_weakening_fallback_kind(command)
     if kind == "no-verify":
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
@@ -16579,9 +17415,11 @@ def _gate_weakening_fallback_kind(command):
         return "no-verify"
     if _RAW_SHORT_NOVERIFY_VERB_RE.search(command) and _RAW_SHORT_N_RE.search(command):
         return "short-n"
-    if _RAW_CHECKER_RE.search(command) and (
-            _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
-            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command))):
+    # The swallow and sink probes are read first: each is a short literal scan, where the checker keyword
+    # alternation tries every word start, so a command with no such spelling skips that scan.
+    if ((_RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
+            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command)))
+            and _RAW_CHECKER_RE.search(command)):
         return "swallow"
     return None
 
@@ -16690,6 +17528,8 @@ _GATE_BASH_ESCAPE_RE = re.compile(
     r"\\(?:([0-7]{1,3})|x\{([0-9A-Fa-f]*)\}?|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})"
     r"|c(\\\\|.)|(.))", re.S)
 _GATE_ANSI_C_BODY_RE = re.compile(r"(?:[^'\\]|\\.)*", re.S)
+# A run of characters _gate_shell_level keeps as they stand: none is a backslash, a quote or a '$'.
+_GATE_SHELL_LEVEL_PLAIN_RE = re.compile(r"[^\\'\"$]+")
 
 # Where the bash-model readings split words: bash's blanks (space, tab and newline, not the other characters
 # Python's str.split() treats as whitespace) and every shell operator character and opener (; & | ( ) < > and
@@ -16765,8 +17605,15 @@ def _gate_shell_level(text):
                 i += 1
             i += 1
         else:
-            out.append(c)
-            i += 1
+            # A run of characters none of which opens anything at this level is kept as it stands, in one copy
+            # rather than one step per character; a '$' before no quote is kept on its own.
+            run = _GATE_SHELL_LEVEL_PLAIN_RE.match(text, i)
+            if run is None:
+                out.append(c)
+                i += 1
+            else:
+                out.append(run.group())
+                i = run.end()
     return "".join(out)
 
 
@@ -16775,8 +17622,18 @@ def _gate_reading_words(text):
     stands, a '$' before a quote and every quote character and backslash left in text removed, the rest split at
     _GATE_WORD_BREAK_RE, and a 'git' word added after an option word whose attached value names git, as in
     _gate_dequoted_words."""
+    return _gate_plain_words(_gate_reading_plain(text))
+
+
+def _gate_reading_plain(text):
+    """The text _gate_reading_words splits into words: env -S's \\_ read as a blank, then a '$' before a quote and
+    every quote character and backslash removed."""
     plain = re.sub(r"\$(?=['\"])", "", text.replace("\\_", " "))
-    plain = plain.replace("'", "").replace('"', "").replace(chr(92), "")
+    return plain.replace("'", "").replace('"', "").replace(chr(92), "")
+
+
+def _gate_plain_words(plain):
+    """The words of _gate_reading_words for its text made plain (_gate_reading_plain)."""
     words = []
     for w in _GATE_WORD_BREAK_RE.split(plain):
         if not w:
@@ -16794,12 +17651,20 @@ def _gate_bash_readings(text):
     """The word lists of the bash-model readings of text, its line continuations joined first: the text at its
     own quoting level as bash reads it (_gate_shell_level), that result read once more as the shell it is handed
     to reads it (sh -c, eval or env -S, one level in), and the text with every ANSI-C $'...' quote the raw match
-    finds decoded as bash decodes it, at any depth (_gate_ansi_c_text). Each is split by _gate_reading_words."""
+    finds decoded as bash decodes it, at any depth (_gate_ansi_c_text). Each is split by _gate_reading_words.
+    Readings that are the same text once made plain (_gate_reading_plain) have the same words, so those words are
+    split once and the one list stands for each such reading; no reader of the lists changes one."""
     joined = _join_continuations(text)[0]
     outer = _gate_shell_level(joined)
     decoded = _GATE_ANSI_C_RE.sub(lambda m: _gate_ansi_c_text(m.group(1)), joined)
-    return (_gate_reading_words(outer), _gate_reading_words(_gate_shell_level(outer)),
-            _gate_reading_words(decoded))
+    split = {}
+    readings = []
+    for reading in (outer, _gate_shell_level(outer), decoded):
+        plain = _gate_reading_plain(reading)
+        if plain not in split:
+            split[plain] = _gate_plain_words(plain)
+        readings.append(split[plain])
+    return tuple(readings)
 
 
 def _gate_any_word_bypass(words, first=None):
@@ -16822,7 +17687,8 @@ def _gate_any_word_bypass(words, first=None):
                 found = (w, "a --no-verify spelling")
             elif short_at is not None and w in _NOVERIFY_SHORT_N_VERBS:
                 found = (w, "the short -n (--no-verify) in {!r}".format(words[short_at][:40]))
-        if _has_long_prefix((w,), "no-verify"):
+        # _has_long_prefix reads only a word starting with '--', so the test before it skips the call for any other.
+        if w[:2] == "--" and _has_long_prefix((w,), "no-verify"):
             long_at = p
         elif w[:1] == "-" and w[1:2] != "-" and "n" in w:
             short_at = p
@@ -16867,7 +17733,13 @@ def _gate_text_bypass(text, skip_own=False):
     readings."""
     if not _gate_text_may_name_git(text):
         return None
+    walked = []
     for words in (_gate_dequoted_words(text),) + _gate_bash_readings(text):
+        # The walk below reads nothing but the words, so a reading whose words equal those of one already walked
+        # (which gave None, or this would have returned) gives None again and is not walked a second time.
+        if words in walked:
+            continue
+        walked.append(words)
         if skip_own:
             k = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
             words = words[k + 1:]
@@ -17680,12 +18552,9 @@ def gate_weakening(data):
         return _deny_missing_tool_name("gatdis")
     if tool_name != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    command = (data.get("tool_input") or {}).get("command")
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule gatdis (gate-discipline): the Bash payload carried no readable command string, "
-            "so the gate-weakening check could not run; failing closed.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule gatdis, fail-closed).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("gatdis (gate-discipline)", "gate-weakening check", unread)
     reads = _SubstHeredocs.reads
     try:
         # Each reading of an uncertain '#' (the shared lexer's comment rule) is kept apart for the deny tier
@@ -17782,7 +18651,8 @@ def gate_weakening(data):
             # each ANSI-C quote's escapes decoded). Quoting alone is no ground to deny: a quoted argument that
             # spells no bypass (wc -l <<<"hello") keeps the raw probes' decision, and on a roster-verb git
             # segment (git commit -m "fix bug" <<<x) that decision is the closed grammar's deny.
-            if (_gate_weakening_fallback_kind(command) not in _GATE_FALLBACK_DENIES
+            raw_kind = _gate_weakening_fallback_kind(command)
+            if (raw_kind not in _GATE_FALLBACK_DENIES
                     and any(_gate_weakening_fallback_kind(text) in _GATE_FALLBACK_DENIES
                             for text in _decoded_readings(command))):
                 return _deny(
@@ -17799,7 +18669,7 @@ def gate_weakening(data):
             # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
             # on the parsed path (_gate_runtime_bypass), inside the fallback after its own denies, so each deny
             # above and each of the fallback's keeps its message.
-            return _gate_weakening_fallback(command, runtime=True)
+            return _gate_weakening_fallback(command, runtime=True, kind=raw_kind)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
         if _hash_doubt_opaque(command):
@@ -17958,8 +18828,9 @@ def gate_weakening(data):
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
-        if _gate_weakening_fallback_kind(command) in _GATE_FALLBACK_DENIES:
-            return _gate_weakening_fallback(command, heredoc_message=True)
+        raw_kind = _gate_weakening_fallback_kind(command)
+        if raw_kind in _GATE_FALLBACK_DENIES:
+            return _gate_weakening_fallback(command, heredoc_message=True, kind=raw_kind)
     # A word bash builds at run time ($G, g$(true)it, $(echo git)) may be git, which no reading above sees: one
     # followed in the same command piece by a roster verb carrying a hook-skip spelling denies fail-closed
     # (_gate_runtime_bypass), read over the whole raw text, so a wrapper, an sh -c or eval script and a
@@ -18120,15 +18991,10 @@ def commit_msg_subst(data):
         return _deny_missing_tool_name("sectvl")
     if tool_name != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule sectvl (tool-argument-validation): the Bash payload carried no readable command "
-            "string, so the git-commit argument substitution check could not run; it is denied fail-safe "
-            "(the payload could not be parsed safely). Re-issue a well-formed Bash command.",
-            "AIQT guardrail: denied a Bash call with no readable command; re-issue a well-formed command "
-            "(rule sectvl, fail-safe).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("sectvl (tool-argument-validation)",
+                                        "git-commit argument substitution check", unread)
     reads = _SubstHeredocs.reads
     try:
         # _commit_msg_subst_hit reads only the segment's own words, and finds no git commit in a segment with
@@ -18534,8 +19400,10 @@ def pgrep_self_match(data):
     strings too), since the checking shell, its ancestors and the pipeline stages and subshells it forks
     carry the command text on their command lines. A pattern written as the bracket idiom ([j]ob7) is
     allowed. Hooks never ask. BEST EFFORT: a command word built at run time is not seen; the residue in the hook
-    manifest states the shapes read and the misses. A missing tool_name takes the shared deny and a
-    non-string command denies fail-safe, as the sibling deny hooks do."""
+    manifest states the shapes read and the misses. A missing tool_name takes the shared deny, and a
+    tool_input that is missing or not an object, or a command that is missing, not a string or holds a NUL,
+    denies through the reader every Bash hook shares (_bash_command, _deny_unreadable_command), as the
+    sibling deny hooks do."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: pgrep_self_match wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -18544,14 +19412,9 @@ def pgrep_self_match(data):
         return _deny_missing_tool_name("trkasy")
     if tool_name != "Bash":
         return _allow()                     # a present-but-different tool is out of scope
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule trkasy (track-launched-work): the Bash payload carried no readable command string, so "
-            "the process self-match check could not run; it is denied fail-safe. Re-issue a well-formed Bash "
-            "command.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule trkasy, fail-safe).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("trkasy (track-launched-work)", "process self-match check", unread)
     hit = _psm_hit(command)
     if hit is None:
         return _allow()
@@ -18772,13 +19635,18 @@ def secrets_shift_left(data):
     # A non-dict tool_input cannot answer the scan; fail CLOSED cleanly in-handler (mirrors git_discard's
     # isinstance-dict guard) rather than raising an AttributeError only the dispatcher would catch.
     tool_input = data.get("tool_input")
-    if not isinstance(tool_input, dict):
+    if tool_name == "Bash":
+        # The Bash command comes through the reader every Bash hook shares.
+        target, unread = _bash_command(data)
+        if unread is not None:
+            return _deny_unreadable_command("secsec (keep-secrets-out)", "secret scan", unread)
+    elif not isinstance(tool_input, dict):
         return _deny(
             "AIQT rule secsec (keep-secrets-out): the {} payload carried no readable tool_input, so the "
             "secret scan could not run over what would be written; failing closed.".format(tool_name),
             "AIQT guardrail: denied a {} call with no readable payload (rule secsec, fail-closed)."
             .format(tool_name))
-    if tool_name == "MultiEdit":
+    elif tool_name == "MultiEdit":
         target = _secsec_multiedit_text(tool_input)
         if target is None:
             return _deny(
@@ -20397,8 +21265,10 @@ def _gensrc_mentions(entries, command, root_c):
 
 def _gensrc_bash(data):
     """The Bash channel verdict of gensrc_guard: ("allow",), ("note", message) or ("deny", reason, banner);
-    gensrc_guard turns it into the decision. A payload with no object tool_input or no readable command
-    string DENIES fail-closed (the detector cannot read it). The command is lexed under every reading of its
+    gensrc_guard turns it into the decision. The command comes through the reader every Bash hook shares
+    (_bash_command): a tool_input that is missing or not an object, or a command that is missing, not a
+    string or holds a NUL, DENIES fail-closed with a reason naming the malformed field (the detector cannot
+    read it), and so does an empty or blank command. The command is lexed under every reading of its
     uncertain '#' characters (_gensrc_lex) and the write effects of each reading collected on its own
     (_bash_write_effects), only where a segment can add one (_gensrc_reach); a complete lex with no effect
     ALLOWS before any registry read or git call (reads are never judged). Where the lexer cannot judge those
@@ -20421,13 +21291,12 @@ def _gensrc_bash(data):
     (_gensrc_mentions, a deliberate disclosed over-denial), and NOTE otherwise (the command runs, with a
     note that its writes were not cleared). The first deny wins, then the joined notes. A fault inside the
     detector (OSError, ValueError, RecursionError, MemoryError) DENIES fail-closed."""
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or not command.strip():
+    command, unread = _bash_command(data)
+    if unread is not None or not command.strip():
         return ("deny",
                 "AIQT rule gensrc (generated-artefact-source-only, fail-closed): the Bash payload carried no "
-                "readable command string, so the generated-artefact write-sink detector cannot read it and "
-                "denies the call.",
+                "readable command string ({}), so the generated-artefact write-sink detector cannot read it "
+                "and denies the call.".format(unread or "its tool_input.command is empty or blank"),
                 "AIQT guardrail: denied a Bash call with no readable command (rule gensrc, fail-closed).")
     cwd = data.get("cwd")
     if not isinstance(cwd, str) or not os.path.isabs(cwd) or any(ord(ch) < 0x20 for ch in cwd):
@@ -20852,6 +21721,13 @@ _ORCH_STATES = frozenset(("open", "closed", "proposed"))
 _ORCH_LOOP_BOUND = 2          # stop-path denies per epoch before ALLOW_WITH_FINDINGS
 _ORCH_SCHEDULE_CAP = 3        # schedule-path denies on an unchanged basis before findings
 _ORCH_MAX_NAMED = 10          # actionable items named in a deny message
+# Enumerator-supplied text reaches a deny message only through _orch_clip, so each named field is one bounded
+# line: an id, a title, and a reason or detail field are each cut to these many characters (mark included).
+_ORCH_NAMED_ID_MAX = 80
+_ORCH_NAMED_TITLE_MAX = 120
+_ORCH_NAMED_REASON_MAX = 200
+_ORCH_CLIP_MARK = "[...]"
+_ORCH_CLIP_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f" "\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]")
 # The `Operating-mode:` declaration is parsed per PHYSICAL line (the reader splits on newlines first, so the
 # value can never cross a line boundary): optional leading horizontal whitespace, then the key, then the value
 # is the REST OF THAT LINE ONLY. A present declaration whose value does not classify (empty or unrecognized)
@@ -20863,6 +21739,11 @@ _ORCH_MODE_DECL_LINE_RE = re.compile(r"^[ \t]*Operating-mode:[ \t]*(.*)$")
 # `attended (ipad); continuous mode` begin with the mode word and classify. Order: unattended before attended.
 _ORCH_MODE_UNATTENDED_RE = re.compile(r"unattended(\b|$)")
 _ORCH_MODE_ATTENDED_RE = re.compile(r"attended(\b|$)")
+# The structured operating-mode record a JSON mode file may carry instead of the bare {"mode": ...} object:
+# its keys include `mode` and are otherwise drawn only from these, and its `set_at` is a UTC time written
+# YYYY-MM-DDTHH:MM:SSZ in ASCII digits (matched whole, so a trailing newline or offset does not pass).
+_ORCH_MODE_RECORD_KEYS = frozenset(("mode", "phase", "set_by", "set_at"))
+_ORCH_MODE_SET_AT_RE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z")
 # The guards-armed posture a present-but-unusable mode marker fails closed to: it carries the `unattended`
 # token, so the ask blocker arms on it and _orch_scope_live reads it as a live (non-None) mode. A recognized
 # mode value carries the `attended`/`unattended` family token (so both `unattended` and `attended` spellings,
@@ -20910,6 +21791,53 @@ def _orch_root(data):
     if not isinstance(cwd, str) or not cwd:
         return None
     return _recovery_toplevel(cwd)
+
+
+def _orch_stop_root(data):
+    """The Stop family's repo root: (root, undecodable). The same scrubbed `git rev-parse
+    --show-toplevel` as _orch_root, read as BYTES, so a toplevel path that is not decodable text is
+    never read as out of scope. _recovery_toplevel (and so _orch_root and the snapshot caller) answers
+    None there, since its text-mode decode raises, and the Stop family would then ALLOW a stop in an
+    orchestrated tree. Here the toplevel is decoded the way the os module decodes a path
+    (os.fsdecode), so the registry, the lease and the state directory under it are still reached;
+    undecodable is True when those bytes are not strict text in the filesystem encoding, and the
+    caller then HOLDS (cannot-evaluate). (None, False) for a missing or non-string cwd, a git failure,
+    a non-zero exit or an empty or relative answer, exactly where _orch_root answers None; (None, True)
+    when the undecodable bytes cannot be decoded as a path at all (no POSIX platform: os.fsdecode
+    escapes every byte there)."""
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return (None, False)
+    try:
+        result = _recovery_git(cwd, ["rev-parse", "--show-toplevel"], timeout=5, text=False)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return (None, False)
+    raw = result.stdout
+    if result.returncode != 0 or not isinstance(raw, bytes):
+        return (None, False)
+    # strip git's ONE output terminator only, as _recovery_toplevel does
+    raw = raw[:-1] if raw.endswith(b"\n") else raw
+    if not raw:
+        return (None, False)
+    try:
+        raw.decode(sys.getfilesystemencoding(), "strict")
+        undecodable = False
+    except (UnicodeDecodeError, LookupError):
+        undecodable = True
+    try:
+        top = os.fsdecode(raw)
+    except (UnicodeDecodeError, ValueError):
+        return (None, True)
+    if not os.path.isabs(top):
+        return (None, False)
+    return (top, undecodable)
+
+
+# The cannot-evaluate entry a Stop-family decision carries when the repository toplevel is not
+# decodable text (_orch_stop_root): the stop HOLDS below the loop bound, never a silent out-of-scope allow.
+_ORCH_TOPLEVEL_UNDECODABLE_DETAIL = ("the repository top-level path is not decodable text, so this "
+                                     "guard cannot vouch for the paths and records it reads under it; "
+                                     "rename the repository directory to a UTF-8 name")
 
 
 # Orchestration-scope discovery: the truncation guard decides scope by the UNION of two legs.
@@ -21330,6 +22258,27 @@ def _state_dir_from_registry(root, reg_data):
     return os.path.join(base, "aiqt-guardrails", "orch", key)
 
 
+_ORCH_STATE_DIR_UNUSABLE_DETAIL = ("the orchestration state directory {state_dir} cannot be resolved "
+                                   "({reason}), so the turn state, the dispatch ledger and the denial counter "
+                                   "cannot be read or saved; correct state_dir in the registry (the "
+                                   "confinement's trust root)")
+
+
+def _orch_state_dir_problem(root, reg_data):
+    """None when the state directory resolved from the ALREADY-READ registry (see _state_dir_from_registry)
+    can be resolved by os.path.realpath, else the formatted _ORCH_STATE_DIR_UNUSABLE_DETAIL naming it: a NUL
+    character, or a character the filesystem encoding cannot encode, makes every state reader and writer
+    fail (or raise), so no counter can bound a deny and no state can be trusted."""
+    sd = _state_dir_from_registry(root, reg_data)
+    try:
+        os.path.realpath(sd)
+    except (OSError, ValueError) as exc:
+        return _ORCH_STATE_DIR_UNUSABLE_DETAIL.format(
+            state_dir=_orch_clip(repr(sd), _ORCH_NAMED_REASON_MAX),
+            reason=_orch_clip("{}: {}".format(type(exc).__name__, exc), _ORCH_NAMED_REASON_MAX))
+    return None
+
+
 def _orch_state_dir_for_root(root):
     """The machine-written state directory for a repo root: the registry's state_dir when declared, else
     ${XDG_STATE_HOME:-$HOME/.local/state}/aiqt-guardrails/orch/<repo-key>/. Reads the registry ONCE and
@@ -21574,6 +22523,33 @@ def _orch_reject_duplicate_keys(pairs):
     return seen
 
 
+def _orch_mode_object_ok(obj):
+    """True when a parsed JSON object is a mode marker whose `mode` string the reader classifies: the bare
+    {"mode": str} object, or a structured operating-mode record whose keys include `mode` and are otherwise
+    drawn only from `phase`, `set_by` and `set_at` (_ORCH_MODE_RECORD_KEYS), with `mode` a string, `phase`
+    null or a string, `set_by` a string, and `set_at` a string of the form YYYY-MM-DDTHH:MM:SSZ that names a
+    real calendar time. False for anything else (another key, a wrong type, a malformed or impossible
+    `set_at`), which the caller fails closed to guards-armed. A duplicate key never reaches here: the parse
+    refuses it first (_orch_reject_duplicate_keys)."""
+    if not isinstance(obj, dict) or not isinstance(obj.get("mode"), str):
+        return False
+    if not set(obj) <= _ORCH_MODE_RECORD_KEYS:
+        return False
+    if "phase" in obj and obj["phase"] is not None and not isinstance(obj["phase"], str):
+        return False
+    if "set_by" in obj and not isinstance(obj["set_by"], str):
+        return False
+    if "set_at" in obj:
+        m = _ORCH_MODE_SET_AT_RE.fullmatch(obj["set_at"]) if isinstance(obj["set_at"], str) else None
+        if m is None:
+            return False
+        try:
+            datetime.datetime(*(int(part) for part in m.groups()))
+        except ValueError:
+            return False                  # the form matched but the time does not exist (month 13, 24:00:00)
+    return True
+
+
 def _orch_mode_read(path):
     """Read the mode file at path without waiting for a FIFO writer and without reading past the bound:
     ('absent', None) when the open reports not found, ('ok', text) for a regular file of at most
@@ -21656,9 +22632,11 @@ def _orch_mode_detail(reg, root):
         a present `Operating-mode:` declaration line whose value is empty or does not begin with attended or
         unattended; or, when no declaration line is present, a JSON-shaped marker (the content begins with
         `{`, `[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate
-        keys), or that parses to anything other than a dict with EXACTLY the single key `mode` whose value is a
-        string beginning with attended or unattended (a scalar, an array, an object with extra keys, or an
-        object whose `mode` is absent, non-string, or an unrecognized value all fail closed here);
+        keys), or that parses to anything other than an accepted mode object (_orch_mode_object_ok: the bare
+        {"mode": str} object, or a structured operating-mode record that adds only `phase`, `set_by` and
+        `set_at` of their stated types) whose `mode` string begins with attended or unattended (a scalar, an
+        array, an object with another key or a wrong-typed value or a malformed `set_at`, or an object whose
+        `mode` is absent, non-string, or an unrecognized value all fail closed here);
       - "attended" when a recognized attended marker is present: a non-None value that does NOT contain
         `unattended`, so _orch_scope_live reads scope as live AND orch_ask_guard judges the ask against
         the fresh backlog (_orch_ask_attended) rather than taking the unattended deny.
@@ -21671,8 +22649,9 @@ def _orch_mode_detail(reg, root):
       3. The value and the JSON `mode` string are classified by the word-anchored mode grammar
          (_orch_mode_classify), a prefix match at the start, never a substring, so `disattended` and
          `not-attended` do NOT match `attended`.
-      4. JSON is parsed strict-exact with a duplicate-key-rejecting hook and an exactly-{"mode": str} shape,
-         so duplicate keys, extra keys, and non-object or non-string-mode values all fail closed."""
+      4. JSON is parsed strict-exact with a duplicate-key-rejecting hook and a closed shape (the bare
+         {"mode": str} object or the structured record of _orch_mode_object_ok), so duplicate keys, other
+         keys, wrong-typed record fields, and non-object or non-string-mode values all fail closed."""
     path = _orch_path(root, (reg.get("mode") or {}).get("path") if isinstance(
         reg.get("mode"), dict) else None)
     if not path:
@@ -21708,11 +22687,11 @@ def _orch_mode_classify_text(text):
         # `{`, `[`, or `"`) fails CLOSED; anything else is ordinary prose with no declaration and no JSON, the
         # no-marker None (fail open, because the file is shared).
         return _ORCH_MODE_ARMED if stripped[:1] in ("{", "[", '"') else None
-    if isinstance(obj, dict) and set(obj) == {"mode"} and isinstance(obj["mode"], str):
+    if _orch_mode_object_ok(obj):
         classified = _orch_mode_classify(obj["mode"])
         return classified if classified is not None else _ORCH_MODE_ARMED
-    # Any other JSON (a scalar, an array, an object with extra keys, or a dict without a string `mode`) is a
-    # present-but-unrecognized marker and fails CLOSED to guards-armed.
+    # Any other JSON (a scalar, an array, an object with a key outside the record keys or a value of the wrong
+    # type, or a dict without a string `mode`) is a present-but-unrecognized marker and fails CLOSED.
     return _ORCH_MODE_ARMED
 
 
@@ -21746,29 +22725,87 @@ _ORCH_SCOPE_CANNOT_DETAIL = ("the declared lease max_age_hours horizon is not us
                              "scope cannot be evaluated; correct it in the registry (the "
                              "confinement's trust root)")
 
+# The 'unreadable' scope answer's detail: a declared lease path that exists but cannot be read (any failure
+# other than genuine absence). Formatted with the declared path (repr, so a NUL or a lone surrogate shows
+# escaped) and the reason; _orch_scope_eval returns it formatted.
+_ORCH_SCOPE_UNREADABLE_DETAIL = ("the declared lease {lease} cannot be read ({reason}), so lease scope "
+                                 "cannot be evaluated; repair the lease file or correct its path in the "
+                                 "registry (the confinement's trust root)")
+
+# The cannot-evaluate row id each truthy non-True scope answer is held under.
+_ORCH_SCOPE_HOLD_IDS = {"cannot": "lease:max_age_hours", "unreadable": "lease:path"}
+
+
+def _orch_scope_unreadable(path, reason):
+    """The 'unreadable' scope answer for the declared lease path: ('unreadable', its formatted detail)."""
+    return ("unreadable", _ORCH_SCOPE_UNREADABLE_DETAIL.format(
+        lease=_orch_clip(repr(path), _ORCH_NAMED_REASON_MAX), reason=_orch_clip(reason, _ORCH_NAMED_REASON_MAX)))
+
 
 def _orch_scope_live(reg, root, session_id=None):
-    """The D11 scope check: True when a declared orchestrator lease file is live (present, non-empty,
-    within max_age_hours when declared) OR a declared mode record carries a mode line; False when scope
-    is provably not live; the string 'cannot' when a DECLARED max_age_hours horizon is not usable (a
-    boolean, zero, negative, NaN, infinite or non-number) on a lease that would otherwise read live
-    and no mode record reads live, so liveness cannot be evaluated. 'cannot' is TRUTHY on purpose: a
-    caller that only truth-tests this answer stays armed (the fail-closed direction), and every caller
-    handles it explicitly (the stop family and the yield guard route it into their existing
-    cannot-evaluate deny path; the dispatch ledger and the prompt stamp stay armed and surface it;
-    none turns a lease-scoped guard off over it). When the lease declares holder_is_session_id AND the
-    caller's session_id is known, a LIVE lease must additionally NAME that session_id, so a co-located
-    NON-holder session (a bounded worker) does not inherit the global backlog; a session the
-    lease does not name is a NON-holder (False) even under an unusable horizon. Where the lease
+    """The D11 scope answer alone (see _orch_scope_eval, which also returns the detail of a held answer)."""
+    return _orch_scope_eval(reg, root, session_id)[0]
+
+
+def _orch_scope_eval(reg, root, session_id=None):
+    """The D11 scope check, as (scope, detail). scope is True when a declared orchestrator lease file is
+    live (present, non-empty, within max_age_hours when declared) OR a declared mode record carries a mode
+    line; False when scope is provably not live; the string 'cannot' when a DECLARED max_age_hours horizon
+    is not usable (a boolean, zero, negative, NaN, infinite or non-number) on a lease that would otherwise
+    read live and no mode record reads live, so liveness cannot be evaluated; the string 'unreadable' when
+    the declared lease path cannot be read for any reason other than genuine absence (a FileNotFoundError):
+    a NUL character or a character the filesystem encoding cannot encode in the path, a permission error,
+    any other OSError, or a path that is not a regular file (a directory, a FIFO or a device), and no mode
+    record reads live. 'unreadable' follows the precedence 'cannot' uses (orchestrator decision of
+    2026-11-15T19:09Z): a live mode record is an independent scope source and outranks both, and it holds
+    only where 'cannot' would hold, so in holder mode a caller with no session id is a NON-holder (False)
+    whether or not the lease can be read. A genuinely absent lease is not live (False in holder mode, else
+    the mode record decides). detail is _ORCH_SCOPE_CANNOT_DETAIL for 'cannot', the formatted
+    _ORCH_SCOPE_UNREADABLE_DETAIL (naming the lease and the reason) for 'unreadable', else None. 'cannot' and 'unreadable' are TRUTHY on
+    purpose: a caller that only truth-tests this answer stays armed (the fail-closed direction), and every
+    caller handles both explicitly (the stop family, the yield guard and the ask guard route them into
+    their existing cannot-evaluate deny path under the _ORCH_SCOPE_HOLD_IDS row id; the dispatch ledger and
+    the prompt stamp stay armed and surface the detail; none turns a lease-scoped guard off over them).
+    When the lease declares holder_is_session_id AND the caller's session_id is known, a LIVE lease must
+    additionally NAME that session_id, so a co-located NON-holder session (a bounded worker) does not
+    inherit the global backlog; a session the lease does not name is a NON-holder (False) even under an
+    unusable horizon, while a lease that cannot be read names no one, so for a caller that carries a
+    session id it is 'unreadable' unless a mode record reads live. Where the lease
     records no comparable session identity, scope is repo-coarse (a co-located session may inherit the
     backlog): a disclosed residual, not a strict boundary."""
     lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
     cannot = False
+    unreadable = None  # the deferred 'unreadable' answer: a live mode record outranks it, as it does 'cannot'
     if lease:
         path = _orch_path(root, lease.get("path"))
         if path:
             try:
                 st = os.stat(path)
+            except FileNotFoundError:
+                st = None  # genuinely absent: not live (holder mode), else the mode record decides below
+            except OSError as exc:
+                # present but unreadable (a permission error, a non-directory component, a loop): a
+                # cannot-evaluate, never 'lease not live'
+                st = None
+                unreadable = _orch_scope_unreadable(path, "{}: {}".format(type(exc).__name__,
+                                                                          exc.strerror or exc))
+            except ValueError as exc:
+                # a NUL character, or a character the filesystem encoding cannot encode, in the path
+                st = None
+                unreadable = _orch_scope_unreadable(path, "{}: {}".format(type(exc).__name__, exc))
+            if st is not None and not stat.S_ISREG(st.st_mode):
+                st = None
+                unreadable = _orch_scope_unreadable(path, "not a regular file")
+            if unreadable is not None:
+                if lease.get("holder_is_session_id") and not (isinstance(session_id, str) and session_id):
+                    # holder mode, a caller with no session id: a NON-holder whatever the lease holds,
+                    # exactly as under 'cannot', so reading the lease could not change the answer
+                    return (False, None)
+                # otherwise the mode record decides below, as it does for 'cannot'
+            elif st is None:
+                if lease.get("holder_is_session_id"):
+                    return (False, None)  # holder mode: an absent lease -> caller cannot be confirmed holder
+            else:
                 fresh = True
                 max_age = lease.get("max_age_hours")
                 if max_age is not None:
@@ -21789,25 +22826,32 @@ def _orch_scope_live(reg, root, session_id=None):
                         # must be readable AND name that id as a whole token; anything else is a NON-holder
                         # (a co-located worker or an id-less session never inherits the global backlog).
                         if not (isinstance(session_id, str) and session_id):
-                            return False
+                            return (False, None)
+                        held = None
                         try:
                             with open(path, "r", encoding="utf-8", errors="replace") as fh:
                                 held = fh.read()
-                        except OSError:
-                            return False
-                        if not _orch_token_present(session_id, held):
-                            return False
-                        if not cannot:
-                            return True
+                        except FileNotFoundError:
+                            return (False, None)  # removed since the stat: genuinely absent, not live
+                        except (OSError, ValueError) as exc:
+                            # present but unopenable (a permission error): it names no one, so the
+                            # holder question cannot be evaluated; the mode record decides below
+                            unreadable = _orch_scope_unreadable(path, "{}: {}".format(
+                                type(exc).__name__, getattr(exc, "strerror", None) or exc))
+                        if held is not None:
+                            if not _orch_token_present(session_id, held):
+                                return (False, None)
+                            if not cannot:
+                                return (True, None)
                     elif not cannot:
-                        return True
-            except OSError:
-                if lease.get("holder_is_session_id"):
-                    return False  # holder mode: an unreadable lease -> caller cannot be confirmed holder
-                # otherwise an absent/unreadable lease is not live; fall through to the mode check
+                        return (True, None)
+                # otherwise an empty or stale lease is not live; fall through to the mode check
     if _orch_mode(reg, root) is not None:
-        return True  # a live mode record is an independent scope source; it outranks a lease 'cannot'
-    return "cannot" if cannot else False
+        # a live mode record is an independent scope source; it outranks 'cannot' and 'unreadable'
+        return (True, None)
+    if unreadable is not None:
+        return unreadable
+    return ("cannot", _ORCH_SCOPE_CANNOT_DETAIL) if cannot else (False, None)
 
 
 def _orch_escape_stat(path):
@@ -21825,6 +22869,8 @@ def _orch_escape_stat(path):
                      | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
     except OSError:
         return None
+    except ValueError:
+        return None  # a path holding a NUL character: unopenable, never an exception out of the guard
     try:
         return os.fstat(fd)
     finally:
@@ -21848,8 +22894,13 @@ def _orch_escape_active(reg, root):
     CATEGORICAL residual (closed only by an operator-owned, assistant-non-writable state dir at the OS
     layer); component resolution is a best-effort lstat walk under the anchor rather than a fully
     race-free openat-under-anchor (a narrow TOCTOU window between the walk and the O_NOFOLLOW open); and
-    uid inequality proves not-self, never operator identity."""
-    anchor = os.path.realpath(_orch_state_dir_for_root(root))
+    uid inequality proves not-self, never operator identity. A state dir realpath cannot resolve (a NUL
+    character, or a character the filesystem encoding cannot encode) is no trusted anchor, so no sentinel
+    is active: (False, None), never an exception out of the guard."""
+    try:
+        anchor = os.path.realpath(_orch_state_dir_for_root(root))
+    except (OSError, ValueError):
+        return (False, None)
     declared = (reg.get("escape") or {}).get("path") if isinstance(reg.get("escape"), dict) else None
     if declared is not None and (not isinstance(declared, str) or not declared):
         return (False, None)
@@ -21873,6 +22924,8 @@ def _orch_escape_active(reg, root):
                 return (False, "escape sentinel has a symlinked path component (rejected)")
         except OSError:
             return (False, None)  # a missing intermediate directory is simply no sentinel
+        except ValueError:
+            return (False, None)  # a component holding a NUL character names no sentinel
     # a symlink AT the final name is a spoof: classify via lstat so it surfaces a detail (the seam's
     # O_NOFOLLOW open would otherwise report it only as an unopenable None)
     try:
@@ -21880,6 +22933,8 @@ def _orch_escape_active(reg, root):
             return (False, "escape sentinel is a symlink (not followed; ignored)")
     except OSError:
         pass  # absent on disk here: the seam is authoritative (and may be injected under test)
+    except ValueError:
+        pass  # a name holding a NUL character: the seam reads it as unopenable (None)
     st = _orch_escape_stat(norm)
     if st is None:
         return (False, None)
@@ -21894,6 +22949,17 @@ def _orch_escape_active(reg, root):
     return (True, None)
 
 
+def _orch_clip(value, limit):
+    """value as one bounded line for a deny message: every control character (LF and CR included) and
+    every Unicode line or paragraph separator becomes a space, and text longer than limit is cut to
+    exactly limit characters ending in _ORCH_CLIP_MARK, so enumerator-supplied text can neither split a
+    reason across lines nor grow it without bound."""
+    text = _ORCH_CLIP_CONTROL_RE.sub(" ", str(value))
+    if len(text) > limit:
+        text = text[:limit - len(_ORCH_CLIP_MARK)] + _ORCH_CLIP_MARK
+    return text
+
+
 def validate_enumeration(obj):
     """AEI v1 strict validation: (items, None) on a valid enumeration, (None, detail) otherwise. A
     duplicate id, a malformed item or field, an unknown version, a missing envelope, or a non-dict
@@ -21903,7 +22969,8 @@ def validate_enumeration(obj):
         return (None, "payload is not a JSON object")
     version = obj.get("version")
     if type(version) is not int or version != 1:
-        return (None, "unknown AEI version {!r} (an exact integer 1 is required)".format(version))
+        return (None, "unknown AEI version {} (an exact integer 1 is required)".format(
+            _orch_clip(repr(version), _ORCH_NAMED_REASON_MAX)))
     gen = obj.get("generated_at_utc")
     gen_ts = _orch_parse_utc(gen) if isinstance(gen, str) else None
     if gen_ts is None:
@@ -21924,29 +22991,31 @@ def validate_enumeration(obj):
         iid = raw.get("id")
         if not isinstance(iid, str) or not iid:
             return (None, "an item has no string id")
+        named_iid = _orch_clip(iid, _ORCH_NAMED_ID_MAX)
         if iid in seen:
-            return (None, "duplicate item id {!r}".format(iid))
+            return (None, "duplicate item id {}".format(_orch_clip(repr(iid), _ORCH_NAMED_ID_MAX)))
         seen.add(iid)
         title = raw.get("title")
         if title is not None and not isinstance(title, str):
-            return (None, "item {} has a non-string title".format(iid))
+            return (None, "item {} has a non-string title".format(named_iid))
         state = raw.get("state")
         if state not in _ORCH_STATES:
-            return (None, "item {} has invalid state {!r}".format(iid, state))
+            return (None, "item {} has invalid state {}".format(
+                named_iid, _orch_clip(repr(state), _ORCH_NAMED_REASON_MAX)))
         granted = raw.get("granted")
         if not isinstance(granted, bool):
-            return (None, "item {} has a non-boolean granted".format(iid))
+            return (None, "item {} has a non-boolean granted".format(named_iid))
         blocker = raw.get("blocker")
         if blocker is not None:
             if not isinstance(blocker, dict) or blocker.get("kind") not in _ORCH_BLOCKER_KINDS \
                     or not isinstance(blocker.get("ref"), str) or not blocker.get("ref").strip():
-                return (None, "item {} has a malformed blocker".format(iid))
+                return (None, "item {} has a malformed blocker".format(named_iid))
             ev = blocker.get("evidence")
             obs = blocker.get("observed_at_utc")
             if (ev is not None and not isinstance(ev, str)) \
                     or (obs is not None and not isinstance(obs, str)):
                 return (None, "item {} has a malformed blocker field (evidence/observed_at_utc)"
-                        .format(iid))
+                        .format(named_iid))
         out.append({"id": iid, "title": title if isinstance(title, str) and title else iid,
                     "state": state, "granted": granted, "blocker": blocker})
     return (out, None)
@@ -21970,12 +23039,23 @@ def _orch_enumerate(reg, root):
     timeout = spec.get("timeout")
     timeout = timeout if isinstance(timeout, (int, float)) and 0 < timeout <= 600 else 60
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=root)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return ("ENUMERATOR_ERROR", "enumerator failed to run: {}".format(exc))
+        # encoding="utf-8" (strict) so the enumerator's answer decodes the same under every locale:
+        # a valid UTF-8 title never denies under LC_ALL=C, and an undecodable byte always raises
+        # into the except below rather than only where the locale happens to be UTF-8.
+        result = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                                timeout=timeout, cwd=root)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # ValueError covers the UnicodeDecodeError that text-mode decoding raises on undecodable
+        # (non-UTF-8) enumerator output, on stdout or stderr: an enumerator whose answer cannot be
+        # read is an enumerator error (the same cannot-evaluate path an enumerator that cannot run
+        # takes, which the stop and schedule guards DENY on), never an uncaught crash that the
+        # dispatcher's Stop-family error posture would turn into a fail-open allow.
+        return ("ENUMERATOR_ERROR", "enumerator failed to run: {}".format(
+            _orch_clip(exc, _ORCH_NAMED_REASON_MAX)))
     if result.returncode != 0:
         return ("ENUMERATOR_ERROR",
-                "enumerator exit {}: {}".format(result.returncode, (result.stderr or "")[:200]))
+                "enumerator exit {}: {}".format(result.returncode,
+                                                _orch_clip(result.stderr or "", _ORCH_NAMED_REASON_MAX)))
     try:
         payload = json.loads(result.stdout)
     except ValueError as exc:
@@ -22032,16 +23112,18 @@ def _orch_pending_haystack(reg, root):
     forge a row via the id-colon match). Returns None when no surface is declared or it is
     unreadable, so an undeclared/unreadable surface HOLDS a human-decision item (cannot-evaluate) rather
     than demoting it to a definite actionable; FIX 1 DENIES the stop on that cannot-evaluate below the loop
-    bound (ignorance refuses the wind-down), the operator escape releasing a genuine block."""
+    bound (ignorance refuses the wind-down), the operator escape releasing a genuine block. The surface is
+    read by _orch_record_surface_read, so a FIFO, a device or a directory there is unreadable at once
+    rather than stalling the hook, and a file longer than _ORCH_BARRIER_MAX_BYTES is unreadable too,
+    since a truncated record could hide a decision row."""
     rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
     declared = _orch_path(root, rec.get("pending_decisions"))
     if not declared:
         return None
-    try:
-        with open(declared, "r", encoding="utf-8", errors="replace") as fh:
-            return fh.read()
-    except OSError:
+    data, detail = _orch_record_surface_read(declared)
+    if detail is not None or len(data) > _ORCH_BARRIER_MAX_BYTES:
         return None
+    return _orch_record_surface_text(data)
 
 
 def _orch_attestation_refs(reg, root, staleness):
@@ -22260,7 +23342,8 @@ def decide_yield(ctx):
         # the unevaluable items are NAMED here exactly as on the stop path below, so a
         # scope-level cannot-evaluate such as lease:max_age_hours tells the operator WHAT to
         # correct, not only that one exists
-        named_sched = ", ".join(i for i, _c, _p in sched_cannot[:_ORCH_MAX_NAMED])
+        named_sched = ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                for i, _c, _p in sched_cannot[:_ORCH_MAX_NAMED])
         if len(sched_cannot) > _ORCH_MAX_NAMED:
             named_sched += "; and {} more".format(len(sched_cannot) - _ORCH_MAX_NAMED)
         return ("DENY",
@@ -22284,12 +23367,14 @@ def decide_yield(ctx):
             return ("DENY",
                     "wake hygiene: a permitted idle must name the item or blocker it will recheck; "
                     "pending: {}".format(
-                        ", ".join(i for i, _c, _p in rechecked[:_ORCH_MAX_NAMED])), disposition)
+                        ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                  for i, _c, _p in rechecked[:_ORCH_MAX_NAMED])), disposition)
         if ctx.get("cannot_evaluate", []):
             cannot_items = ctx.get("cannot_evaluate", [])
             # the unevaluable items are NAMED (bounded), so a scope-level cannot-evaluate such as
             # lease:max_age_hours tells the operator WHAT to correct, not only that one exists
-            named_cannot = ", ".join(i for i, _c, _p in cannot_items[:_ORCH_MAX_NAMED])
+            named_cannot = ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                     for i, _c, _p in cannot_items[:_ORCH_MAX_NAMED])
             if len(cannot_items) > _ORCH_MAX_NAMED:
                 named_cannot += "; and {} more".format(len(cannot_items) - _ORCH_MAX_NAMED)
             return ("DENY",
@@ -22311,7 +23396,9 @@ def decide_yield(ctx):
                 .format(ctx["schedule_denials"]), disposition)
     named = ctx["actionable"][:_ORCH_MAX_NAMED]
     more = len(ctx["actionable"]) - len(named)
-    listing = "; ".join("{} ({}: {})".format(i, t, w) for i, t, w in named)
+    listing = "; ".join("{} ({}: {})".format(_orch_clip(i, _ORCH_NAMED_ID_MAX),
+                                             _orch_clip(t, _ORCH_NAMED_TITLE_MAX),
+                                             _orch_clip(w, _ORCH_NAMED_REASON_MAX)) for i, t, w in named)
     if more > 0:
         listing += "; and {} more".format(more)
     if kind == "ask":
@@ -22320,7 +23407,8 @@ def decide_yield(ctx):
         if held:
             # the mixed backlog names BOTH sets in one reason: the actionable items above carry the
             # two exits, and the held items are named so the operator knows what to repair
-            named_held = ", ".join(i for i, _c, _p in held[:_ORCH_MAX_NAMED])
+            named_held = ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                   for i, _c, _p in held[:_ORCH_MAX_NAMED])
             if len(held) > _ORCH_MAX_NAMED:
                 named_held += "; and {} more".format(len(held) - _ORCH_MAX_NAMED)
             held_note = (" Additionally, a proof source for {} open item(s) is unreadable "
@@ -22692,10 +23780,19 @@ def _orch_record_forced_exit(root, event_name, ctx, reason):
 def _orch_stop_family(data, event_name, kind):
     """The shared Stop/TeammateIdle binding: scope, decide, map the verdict to the event's block
     mechanism (exit 2, doc-confirmed for both events 2026-08-29). Fail-OPEN on its own I/O errors;
-    a cannot-evaluate DENIES (FIX 1)."""
-    root = _orch_root(data)
+    a cannot-evaluate DENIES (FIX 1). The root is read by _orch_stop_root, so a toplevel path that is
+    not decodable text is a cannot-evaluate HOLD in an orchestrated tree, never an out-of-scope allow."""
+    root, undecodable = _orch_stop_root(data)
     if root is None:
-        return _allow()
+        if not undecodable:
+            return _allow()
+        # an undecodable toplevel with no usable path at all: no counter can be read, so the
+        # stop-hook loop signal is the bound
+        reason = "{} (cannot-evaluate)".format(_ORCH_TOPLEVEL_UNDECODABLE_DETAIL)
+        if data.get("stop_hook_active") is True:
+            return _stop_warn("AIQT guardrail ({}): loop signal set; yielding with a finding: {}"
+                              .format(event_name, reason))
+        return (2, None, reason)
     status, reg = _orch_registry(root)
     if status == "absent":
         return _allow()
@@ -22704,16 +23801,32 @@ def _orch_stop_family(data, event_name, kind):
                           "({}); the {} fails open on its own read error and, because the registry is "
                           "unreadable, writes NO guard-event (no record).".format(reg,
                                                                                   event_name))
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()
+    sd_problem = _orch_state_dir_problem(root, reg)
+    if sd_problem is not None:
+        # a state directory that cannot be resolved: no turn state, ledger or denial counter can be read
+        # or saved, so this HOLDS (cannot-evaluate) with the stop-hook loop signal as the bound, never an
+        # exception out of the handler (which the dispatcher turns into an allowed stop)
+        reason = "{} (cannot-evaluate)".format(sd_problem)
+        if data.get("stop_hook_active") is True:
+            return _stop_warn("AIQT guardrail ({}): loop signal set; yielding with a finding: {}"
+                              .format(event_name, reason))
+        return (2, None, reason)
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data)
-    if scope == "cannot":
-        # D11 scope CANNOT be evaluated (a declared but unusable max_age_hours): routed into this
-        # guard's existing cannot-evaluate deny path (FIX 1: ignorance refuses the wind-down; the
-        # loop bound and the operator escape still release), never a silent guards-off _allow().
+    if scope in _ORCH_SCOPE_HOLD_IDS:
+        # D11 scope CANNOT be evaluated (a declared but unusable max_age_hours, or a declared lease that
+        # cannot be read): routed into this guard's existing cannot-evaluate deny path (FIX 1: ignorance
+        # refuses the wind-down; the loop bound and the operator escape still release), never a silent
+        # guards-off _allow().
         ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
-            ("lease:max_age_hours", "cannot-evaluate", _ORCH_SCOPE_CANNOT_DETAIL)]
+            (_ORCH_SCOPE_HOLD_IDS[scope], "cannot-evaluate", scope_detail)]
+    if undecodable:
+        # an undecodable repository toplevel: routed into the same cannot-evaluate deny path (the loop
+        # bound and the operator escape still release), never the out-of-scope allow a None root reads as
+        ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
+            ("repo:toplevel", "cannot-evaluate", _ORCH_TOPLEVEL_UNDECODABLE_DETAIL)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     verdict, reason, disposition = decide_yield(ctx)
@@ -22811,7 +23924,7 @@ def orch_yield_tool(data):
             "work rather than parking or stopping the run.".format(reg),
             "AIQT guardrail: denied a scheduling call under an unreadable orchestration registry "
             "(ignorance refuses the wind-down); fix the registry or keep working.")
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()
     tool = data.get("tool_name")
@@ -22822,11 +23935,12 @@ def orch_yield_tool(data):
     kind = "stop" if tool_input.get("stop") is True else "schedule_idle"
     wake_text = " ".join(str(v) for v in tool_input.values() if isinstance(v, str))
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data, wake_text=wake_text)
-    if scope == "cannot":
-        # D11 scope cannot be evaluated: routed into this guard's existing cannot-evaluate deny
-        # path (the schedule cap and the operator escape still release), never a silent _allow().
+    if scope in _ORCH_SCOPE_HOLD_IDS:
+        # D11 scope cannot be evaluated ('cannot' or 'unreadable'): routed into this guard's existing
+        # cannot-evaluate deny path (the schedule cap and the operator escape still release), never a
+        # silent _allow().
         ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
-            ("lease:max_age_hours", "cannot-evaluate", _ORCH_SCOPE_CANNOT_DETAIL)]
+            (_ORCH_SCOPE_HOLD_IDS[scope], "cannot-evaluate", scope_detail)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     # Measured quiet beats a claimed quiet duration (estsep: the two grades never blend silently).
@@ -22994,12 +24108,14 @@ def _orch_ask_attended(data, reg, root):
     the live scope (a bounded co-located worker a holder-scoped lease does not name) does not
     inherit the global backlog, so the judgement allows there. Under a holder-scoped lease
     (holder_is_session_id) the judgement is off for EVERY session, the orchestrator included, where no
-    holder can be confirmed: a lease file that cannot be stat'ed, and, for a NON-EMPTY lease the
-    session-id and holder-token checks run on (one the age classifier reads as fresh or cannot-evaluate
-    under a declared max_age_hours, or, with no horizon declared, every non-empty lease whatever its
-    mtime), a lease that cannot be read, a call that carries no session id, or a lease that names no
-    session. Every other lease shape skips the holder check and falls through to the live-mode scope
-    source: an empty lease, a lease that declares no path (an absent, empty or non-string path), a
+    holder can be confirmed: a lease file that is genuinely absent, a lease that cannot be read by a
+    call that carries no session id, and, for a NON-EMPTY lease the session-id and holder-token checks
+    run on (one the age classifier reads as fresh or cannot-evaluate under a declared max_age_hours, or,
+    with no horizon declared, every non-empty lease whatever its mtime), a call that carries no session
+    id or a lease that names no session. A lease that cannot be read (stat'ed or opened) by a call that
+    carries a session id is 'unreadable', which the live mode record of this branch outranks, so the
+    judgement stays on there. Every other lease shape skips the holder check and falls through to the
+    live-mode scope source: an empty lease, a lease that declares no path (an absent, empty or non-string path), a
     lease stale past a declared max_age_hours, and a lease future-dated past the tolerated clock skew
     under a declared usable max_age_hours (an unusable one reads cannot-evaluate whatever the mtime,
     so the holder check runs); a live mode record then keeps every session in scope there, an id-less
@@ -23032,15 +24148,23 @@ def _orch_ask_attended(data, reg, root):
     not enumerable), so it denies as cannot-evaluate with a guard-events row exactly as in the yield
     guard, never a silent allow; the operator escape sentinel releases the deny exactly as in the yield
     guard; a deny whose counter cannot be saved stands and says so."""
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         # the same scope gate as the yield guard: a non-holder session never inherits the backlog.
-        # In this attended branch the mode record reads live, so _orch_scope_live is never 'cannot'
-        # here: it is False only through the holder-scoped lease check.
+        # In this attended branch the mode record reads live, so the scope is never 'cannot' or
+        # 'unreadable' here (a live mode record outranks both): it is False only through the
+        # holder-scoped lease check.
         return _allow()
     if "enumerator" not in reg:
         return _allow()  # no declared backlog enumerator: the attended backlog judgement is out of scope
     ctx, ts, basis = _orch_build_ctx(reg, root, "ask", data)
+    if scope in _ORCH_SCOPE_HOLD_IDS:
+        # defence in depth: the live mode record of this branch outranks 'cannot' and 'unreadable', so
+        # a held scope is not expected here; were one to arrive, it is routed into this guard's existing
+        # cannot-evaluate deny path (bounded by the ask cap; the operator escape still releases), never a
+        # silent _allow()
+        ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
+            (_ORCH_SCOPE_HOLD_IDS[scope], "cannot-evaluate", scope_detail)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     verdict, reason, _disposition = decide_yield(ctx)
@@ -23174,9 +24298,10 @@ def _orch_heredoc_data_command(command):
     _orch_heredoc_data_line accepts, then its body, then a line that is exactly its delimiter, the writes
     separated only by newlines. No other command word may appear anywhere: a later '.', source, bash or
     ./path can run a written file, and an earlier hash, alias, function, enable, builtin, command, exec,
-    eval or PATH or other assignment can make `cat` run something else, so any such line makes every body
-    code. Only then does cat copy each body into its file with nothing in the command running it, and only
-    then are the bodies data. The word cat is trusted as written: a function, alias or builtin named cat
+    eval or PATH or other assignment can make `cat` run something else, so any such line keeps every body
+    from this skip (_orch_foreground_scan then reads each on its own or as code). Only then does cat copy
+    each body into its file with nothing in the command running it, and only then are the bodies skipped
+    unread as data. The word cat is trusted as written: a function, alias or builtin named cat
     the shell already holds, or an inherited PATH or other environment that resolves cat to a shell or
     another program, is not seen (disclosed in the manifest). An empty command is not such a command."""
     lines = command.split("\n")
@@ -23198,7 +24323,7 @@ def _orch_heredoc_data_command(command):
     return writes > 0
 
 
-def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True):
+def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True, body=False):
     """One quote- and escape-tracking pass over a foreground command: "detach" when it meets an executable,
     unquoted, unescaped bare `&` control operator, "unbalanced" when it ends still inside a single or double
     quote or meets a `#` whose comment reading depends on context, None otherwise. amps, when given, is a
@@ -23220,11 +24345,34 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
     a double-quoted delimiter), each with its body and delimiter line, separated only by newlines, with no
     other command word anywhere (_orch_heredoc_data_command); each body, whose delimiter this pass also
     parses (_orch_heredoc_spec) with nothing open on the nesting stack, then resumes the pass past its
-    delimiter line unread. In every other command, one where a write is followed or preceded by any other
-    command (a '.', source, bash or ./path that can run the written file, a hash, alias, function, PATH or
-    other assignment that can rename cat) included, every body is read as shell text, as it is when
-    skip_bodies is False."""
+    delimiter line unread. In every other command (one where a write is followed or preceded by any other
+    command, a '.', source, bash or ./path that can run the written file, a hash, alias, function, PATH or
+    other assignment that can rename cat included) a body can be a shell's input, so its bare `&` is still
+    read; but bash never reads a quote, comment or operator in a body as part of the command, quoted
+    delimiter or not, so a body opened at the top level with nothing open, under a delimiter this pass
+    parses and ended at its exact delimiter line, is read ON ITS OWN (_orch_heredoc_body_spans): a pass
+    over the body text alone (body set) reads its `&`, `#` and quotes as a shell reading that text would for
+    its bare `&` (it does NOT model an unquoted delimiter's expansions and backslash removal, nor a
+    here-document nested inside the body, so a detach reached only through those stays a disclosed miss),
+    and the command's pass resumes past the delimiter line in the state the line before the body left, so
+    a body quote no longer opens or closes the command's quote state. That body pass returns "unbalanced"
+    for an uncertain `#`, and for a quote still open at the body's end where the body text that quote hides
+    holds an `&` (body); a quote it closes nowhere hides nothing after the body, but a shell reading that
+    body with other text (a later body appended to one file, or the file run) can pair it, so once a body
+    leaves one open (body_open) every bare `&` this pass reads in the command is "unbalanced", never a
+    detach the lexer could lift as a quoted body's `&` nor no detach. A body read on its own, unless the
+    WHOLE command is proved a safe data-writing shape (_orch_heredoc_data_shape), is read as its consumer's
+    COMMANDS: a quote it leaves open returns
+    "unbalanced", as a quote left open in the command's own text does, and a bare `&` in it returns
+    "detach" even when amps is given, so no lift reads it as a quoted body's `&`. A body this pass
+    does not read on its own is read as shell text, as every body is when skip_bodies is False: one opened
+    after a '(', backquote or '$[' anywhere before it or with something open, under a delimiter this pass
+    does not parse, after a body read as text, one whose delimiter line never comes, and an unquoted
+    delimiter's body holding a command substitution, a '${' that holds more than a name, or a
+    backslash-newline (_orch_heredoc_body_runs), since bash runs that substitution in the command's own
+    shell and this pass has no reader that ends it wherever bash does."""
     in_single = in_double = escaped = False
+    quote_at = 0  # the index of the quote that opened the current single- or double-quoted span
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
     prev = "break"  # the comment rule's class of the previous character (_hash_comment_reading)
     after_dollar = False  # the previous char was an unquoted, unescaped `$` (a following `{` opens ${...})
@@ -23236,12 +24384,18 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
     # Set once a here-document body is read as code: a line in it may be a nested shell's input or data
     # bash ends elsewhere, so no later here-document is skipped.
     code_body = False
+    # Set once a body read on its own ends with a quote open over no '&' ("open"): every bare `&` read in
+    # the command then reads as "unbalanced", never as a detach the lexer could lift or as no detach.
+    body_open = False
     # The first '(', backquote or '$[' anywhere in the command: a here-document opened after one may sit in
     # a substitution or an arithmetic expansion, whose body bash can end elsewhere, so it is never skipped.
     grouped = min((at for at in (command.find("("), command.find("`"), command.find("$[")) if at != -1),
                   default=len(command))
     # Whether the whole command is nothing but plain cat writes, the one case whose bodies are data.
     data_command = skip_bodies and _orch_heredoc_data_command(command)
+    # Whether the WHOLE command is a safe data-writing shape, proved once over the outer text: when it is,
+    # every here-document body is data; when it is not, every body is read as its consumer's commands.
+    data_shape = skip_bodies and _orch_heredoc_data_shape(command)
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
@@ -23306,13 +24460,41 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
             # is nothing but plain cat writes to files (_orch_heredoc_data_command) does nothing in it run a
             # body, so only there is a quoted body literal data the scan resumes past, its quotes shifting
             # nothing. In any other command (a write followed by '. ./s.sh' or 'bash s.sh', or preceded by
-            # 'hash -p /usr/bin/bash cat', included) the body is read as shell text, as before.
+            # 'hash -p /usr/bin/bash cat', included) a body can be a shell's input, so its '&' is still read.
             specs, heredocs = heredocs, []
             literal = (data_command and not nest and not code_body
                        and all(spec and spec[1] for spec in specs))
             end, closed = (_orch_heredoc_bodies_end(command, i + 1, n, [(spec[0], spec[2]) for spec in specs])
                            if literal else (i, False))
             if closed:
+                prev_dup, prev, after_dollar = False, "break", False
+                i = end
+                continue
+            # Any other body opened at the top level with nothing open, under a delimiter this pass parses,
+            # is read on its own (_orch_heredoc_body_spans), its '&' read as a shell reading the body would:
+            # bash never reads a quote in a body as a quote of the command, so a body quote no longer opens
+            # or closes the command's quote state, and the text after the delimiter line is read from where
+            # the line before the body left it. Every other body is read as shell text, as before.
+            spans, end = ((None, i) if literal or nest or code_body or not all(specs)
+                          else _orch_heredoc_body_spans(command, i + 1, n, specs))
+            if spans is not None:
+                for start, stop in spans:
+                    # Unless the WHOLE command is a safe data-writing shape (_orch_heredoc_data_shape, proved
+                    # once as data_shape), every body is read as its consumer's COMMANDS: a quote it leaves
+                    # open is the "unbalanced" a quote left open in the command's own text gives, and a bare
+                    # '&' in it is a detach no lift reads as quoted body text, so the pass returns it even
+                    # when amps is given.
+                    runs = not data_shape
+                    found = [] if amps is not None else None
+                    kind = _orch_foreground_scan(command[start:stop], bash_word_starts, found, False, True)
+                    if kind == "open" and not runs:
+                        body_open = True
+                    elif kind is not None:
+                        return "unbalanced" if body_open or kind == "open" else kind
+                    if found and runs:
+                        return "unbalanced" if body_open else "detach"
+                    if found:
+                        amps.extend(start + at for at in found)
                 prev_dup, prev, after_dollar = False, "break", False
                 i = end
                 continue
@@ -23327,11 +24509,11 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
             i += 1
             continue
         if ch == "'":
-            in_single, prev_dup, prev, after_dollar = True, False, "word", False
+            in_single, prev_dup, prev, after_dollar, quote_at = True, False, "word", False, i
             i += 1
             continue
         if ch == '"':
-            in_double, prev_dup, prev, after_dollar = True, False, "word", False
+            in_double, prev_dup, prev, after_dollar, quote_at = True, False, "word", False, i
             i += 1
             continue
         if ch == "&":
@@ -23351,7 +24533,9 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
                 i += 1
                 continue
             if amps is None:
-                return "detach"  # an executable bare `&` control operator: a foreground detach
+                # An executable bare `&` control operator: a foreground detach, unless a body read on its own
+                # left a quote open that a shell reading that body with later text can pair (body_open).
+                return "unbalanced" if body_open else "detach"
             amps.append(i)
             i += 1
             continue
@@ -23371,8 +24555,244 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
         after_dollar = ch == "$"
         i += 1
     # A scan that ended still inside an unbalanced quote could not prove a later `&` was quoted; it fails
-    # toward the DENY (with its own reason) rather than silently allowing a possibly-real detach.
-    return "unbalanced" if in_single or in_double else None
+    # toward the DENY (with its own reason) rather than silently allowing a possibly-real detach. A body
+    # read on its own (body) hides no text of the command after it, which the caller reads past the
+    # delimiter line: its open quote is "unbalanced" where the body text it hides holds an '&', and else
+    # "open", which the caller records (body_open).
+    if in_single or in_double:
+        return ("open" if body and "&" not in command[quote_at:] else "unbalanced")
+    # A body read on its own left a quote open: a shell reading that body with other text (a later body
+    # appended to the same file, or a file the command runs) can pair it with a later quote, so a bare `&`
+    # this pass read anywhere in the command (amps) is not shown to be a detach or quoted text either way.
+    return "unbalanced" if body_open and amps else None
+
+
+# One escape or expansion opener in an unquoted here-document body (_orch_heredoc_body_runs): a backslash
+# with the character it escapes there ('$', backquote, backslash or newline), a backquote, '$(' or '${'; and
+# a '${' that holds nothing but a name, which runs no command.
+_ORCH_BODY_EXPANSION_RE = re.compile(r"\\[$`\\\n]|`|\$[({]")
+_ORCH_BODY_PLAIN_BRACE_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def _orch_heredoc_body_runs(command, start, stop):
+    """True when the unquoted here-document body command[start:stop] holds what bash expands by running or
+    joining text: a command substitution ('$(' or a backquote, an arithmetic '$((' included), a '${' that
+    holds more than a name, or a backslash-newline, which bash removes before it reads the body. A backslash
+    before '$', a backquote or a backslash escapes it, so the escaped character opens nothing."""
+    for match in _ORCH_BODY_EXPANSION_RE.finditer(command, start, stop):
+        text = match.group()
+        if text == "\\\n":
+            return True
+        if text[0] == "\\":
+            continue
+        if text == "${" and _ORCH_BODY_PLAIN_BRACE_RE.match(command, match.start(), stop):
+            continue
+        return True
+    return False
+
+
+def _orch_heredoc_body_spans(command, i, n, specs):
+    """The bodies of the here-documents opened on one line, each spec a _orch_heredoc_spec (delimiter,
+    quoted, strip_tabs), read from index i (just past that line's newline) in the order their `<<` operators
+    appeared, as ([(start, stop), ...], end): each body runs from its first line to the line that is EXACTLY
+    its delimiter (leading tabs stripped for the <<- form, from that line only), and end is the index just
+    past the last delimiter line. (None, i) when any delimiter line never comes (bash reads the rest of the
+    command as that body), or an unquoted delimiter's body holds a command substitution, a '${' that holds
+    more than a name or a backslash-newline (_orch_heredoc_body_runs): bash runs such a substitution in the
+    command's own shell, and this pass has no reader that ends one wherever bash does, so the caller reads
+    those bodies as shell text, as it reads every body it does not read on its own. Every other body holds
+    text bash never reads for quotes, comments or operators, quoted delimiter or not, so the caller reads
+    each alone, apart from the command's quote state."""
+    spans = []
+    for delimiter, quoted, strip_tabs in specs:
+        start, stop = i, None
+        while i < n:
+            nl = command.find("\n", i)
+            line = command[i:(nl if nl != -1 else n)]
+            at, i = i, (n if nl == -1 else nl + 1)
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                stop = at
+                break
+        if stop is None or (not quoted and _orch_heredoc_body_runs(command, start, stop)):
+            return None, i
+        spans.append((start, stop))
+    return spans, i
+
+
+# A short allowlist of command words a safe data-writing command may hold besides the cat that writes a
+# here-document body (_orch_heredoc_data_shape): each reads, lists, hashes, makes a directory or tests, and
+# runs or renames no file it names. cat writes the bodies. An interpreter (python3 and the like), git, cp,
+# mv, ln, eval, exec, source, a lone '.', read and printf are NOT here: each can run or rename a file.
+_ORCH_DATA_SHAPE_ALLOWED = frozenset((
+    "cat", "echo", "mkdir", "sha256sum", "sha1sum", "sha224sum", "sha384sum", "sha512sum", "md5sum",
+    "b2sum", "cksum", "wc", "ls", "stat", "cmp", "diff", "test", "true"))
+# A plain word of a data-writing command: no quote, backslash, '$', backquote, parenthesis, brace, glob,
+# pipe, '&' or redirection character (a cat write target and a here-document delimiter use these bytes).
+_ORCH_DATA_SHAPE_WORD_RE = re.compile(r"[A-Za-z0-9_./+,:@%=-]+")
+# An assignment at a command word's start (NAME= or NAME+=), anchored to the word so the scan stays linear.
+_ORCH_DATA_SHAPE_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
+# One here-document delimiter word: plain characters and single-, double- or backslash-quoted runs of them
+# (EOF, 'EOF', "EOF", \EOF, EO'F'); the value is the delimiter with its quoting removed.
+_ORCH_DATA_SHAPE_DELIM_RE = re.compile(
+    r"[A-Za-z0-9_.+-]+|'[A-Za-z0-9_.+-]*'|\"[A-Za-z0-9_.+-]*\"|\\[A-Za-z0-9_.+-]")
+# Cost ceilings of the proof, each failing TOWARD reading the bodies as commands (the safe side): a command
+# longer than this many characters, or holding more here-documents than this, is not proved a data shape.
+# The proof is one left-to-right pass, so its work is linear in the command length within these ceilings.
+_ORCH_DATA_SHAPE_TEXT_LIMIT = 65536
+_ORCH_DATA_BODY_LIMIT = 64
+
+
+def _orch_data_shape_delim(command, i, n):
+    """Parse a here-document delimiter word at command[i:n] (just past '<<' or '<<-' and any blanks) as
+    (delimiter with quoting removed, index past it), or (None, i) when no delimiter word begins there."""
+    parts, start = [], i
+    while i < n:
+        match = _ORCH_DATA_SHAPE_DELIM_RE.match(command, i)
+        if match is None:
+            break
+        token = match.group()
+        if token[0] in "'\"":
+            parts.append(token[1:-1])
+        elif token[0] == "\\":
+            parts.append(token[1:])
+        else:
+            parts.append(token)
+        i = match.end()
+    if i == start:
+        return None, i
+    return "".join(parts), i
+
+
+def _orch_heredoc_data_shape(command):
+    """True when the WHOLE command is a safe data-writing shape in which every here-document body is DATA (the
+    scan then reads each body on its own for its bare `&` alone, apart from the command's quote state), proved
+    by ONE left-to-right pass over the command with each body skipped unread. The proof is positive and narrow
+    and fails toward reading the bodies as commands (the safe, over-refusing side) on anything it does not
+    recognise: every simple command outside the bodies is made only of plain words (no quote, backslash, '$',
+    backquote, parenthesis, brace, glob, pipe, bare '&' or redirection other than a cat write target), none is
+    an assignment, and the only separators are ';', '&&', '||' and newline, so none sits in a group, compound
+    command, pipeline or substitution; the command holding each body is a plain cat (its only words `cat`, its
+    only redirections '>'/'>>' to plain targets, writing to those files or, with none, to standard output),
+    and no write target is reached through a '..', is an ABSOLUTE path under /dev or /proc other than exactly
+    /dev/null or a path under /dev/shm/, or has a last path component that is an allowlisted word (or `cat`),
+    so a cat write cannot place a body where a later word runs it (a RELATIVE dev/ or proc/ target is an
+    ordinary project path); and
+    every other simple command's first word is in _ORCH_DATA_SHAPE_ALLOWED, a short list of readers and the
+    like that run or rename no file they name. A python3 -c or any interpreter, git, cp, mv, ln, eval, exec,
+    source, a dot, read or printf -v fails the proof, as does any first word (echo and printf among them, and
+    cat with a file redirect but no here-document body: `cat a > b`) that redirects to a file without holding
+    a body, so such a command's body is read as commands. The work is linear in the command length within two
+    cost ceilings, each failing toward commands: a command longer than _ORCH_DATA_SHAPE_TEXT_LIMIT characters,
+    or holding more than _ORCH_DATA_BODY_LIMIT here-documents."""
+    n = len(command)
+    if n > _ORCH_DATA_SHAPE_TEXT_LIMIT:
+        return False
+    i, bodies = 0, 0
+    first_word, is_cat, has_heredoc, has_redirect, extra_word = None, False, False, False, False
+    pending = []  # (delimiter, strip_tabs) for the here-documents opened on the current line
+
+    def segment_ok():
+        if first_word is None:
+            return not has_heredoc and not has_redirect
+        if has_heredoc:
+            return is_cat and not extra_word
+        if has_redirect:
+            return False
+        return first_word in _ORCH_DATA_SHAPE_ALLOWED
+
+    while i < n:
+        ch = command[i]
+        if ch in " \t":
+            i += 1
+            continue
+        if ch == "\n":
+            i += 1
+            if pending:
+                for delimiter, strip_tabs in pending:
+                    found = False
+                    while i < n:
+                        nl = command.find("\n", i)
+                        line = command[i:(n if nl == -1 else nl)]
+                        i = n if nl == -1 else nl + 1
+                        if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                            found = True
+                            break
+                    if not found:
+                        return False  # a body whose delimiter line never comes is not a clean data shape
+                pending = []
+            if not segment_ok():
+                return False
+            first_word, is_cat, has_heredoc, has_redirect, extra_word = None, False, False, False, False
+            continue
+        if ch in ";&|":
+            if ch == ";" and command.startswith(";;", i):
+                return False
+            if ch in "&|" and not command.startswith(ch * 2, i):
+                return False
+            i += 2 if ch in "&|" else 1
+            if not segment_ok():
+                return False
+            first_word, is_cat, has_heredoc, has_redirect, extra_word = None, False, False, False, False
+            continue
+        if ch == ">":
+            i += 2 if command.startswith(">>", i) else 1
+            has_redirect = True
+            while i < n and command[i] in " \t":
+                i += 1
+            match = _ORCH_DATA_SHAPE_WORD_RE.match(command, i)
+            if match is None:
+                return False
+            target = match.group()
+            parts = [part for part in target.split("/") if part not in ("", ".")]
+            # A write target the proof cannot read as an ordinary file is not a data shape, and each case
+            # below fails the proof toward reading the bodies as commands. First, a target reached through a
+            # '..' can traverse to a place the plain word does not name (/abs/../dev/stdout).
+            if not parts or ".." in parts:
+                return False
+            # Second, an ABSOLUTE target under /dev or /proc can be the shell's own stream, not a file
+            # (/dev/stdout, /dev/stderr, /dev/fd/N, /dev/tty, any /proc path), except exactly /dev/null and a
+            # path under /dev/shm/, a regular tmpfs file. A RELATIVE dev/ or proc/ target is an ordinary
+            # project path here, read as any other relative file.
+            if (target.startswith("/") and parts[0] in ("dev", "proc")
+                    and parts != ["dev", "null"] and not (len(parts) > 2 and parts[:2] == ["dev", "shm"])):
+                return False
+            # Third, a last path component that is an allowlisted word (or cat) names the very program a
+            # reader segment resolves, so the write could REPLACE a program the same command then runs.
+            if parts[-1] in _ORCH_DATA_SHAPE_ALLOWED:
+                return False
+            i = match.end()
+            continue
+        if ch == "<":
+            if command.startswith("<<<", i) or not command.startswith("<<", i):
+                return False
+            strip_tabs = command.startswith("<<-", i)
+            i += 3 if strip_tabs else 2
+            while i < n and command[i] in " \t":
+                i += 1
+            delimiter, i = _orch_data_shape_delim(command, i, n)
+            if delimiter is None:
+                return False
+            has_heredoc = True
+            bodies += 1
+            if bodies > _ORCH_DATA_BODY_LIMIT:
+                return False
+            pending.append((delimiter, strip_tabs))
+            continue
+        match = _ORCH_DATA_SHAPE_WORD_RE.match(command, i)
+        if match is None:
+            return False  # a forbidden character: a quote, '$', backquote, '(', '{', a glob and the like
+        word = match.group()
+        i = match.end()
+        if first_word is None:
+            if _ORCH_DATA_SHAPE_ASSIGN_RE.match(word):
+                return False
+            first_word, is_cat = word, word == "cat"
+        else:
+            extra_word = True
+        continue
+    if pending:
+        return False  # a here-document opened on the last line with no body and delimiter line after it
+    return segment_ok()
 
 
 def _orch_foreground_detach_kind(command, skip_bodies=True):
@@ -23446,6 +24866,65 @@ def _orch_lexed_amp_places(command, amps):
     return kinds
 
 
+# Runtime start forms: words and forms that can start a background job in a command with no '&' byte, so
+# an open quote or an uncertain '#' in such a command still denies (_orch_foreground_detach_lexed). coproc
+# runs its command asynchronously; eval reads a string, and an '&' built in it at run time, as code;
+# setsid can return before its command finishes (always under -f); disown leaves a job no one waits for;
+# source and a lone '.' (one at the start, or after whitespace (a blank, a newline or other whitespace),
+# ';', '|', '(', '{' or a backquote, with a blank after it) read a file as code, and a here-string (<<<)
+# fed to a shell is code too; a process substitution, <( ) or >( ), runs its command asynchronously. The
+# search reads two texts, each with every quote and backslash removed, so e'v'al, "eval" and \eval match
+# as well: the command as written, which reads a start form written whole, and the command with every
+# backslash-newline pair removed first, which reads a form split by a pair bash joins (ev\<newline>al is
+# eval, <\<newline>( a process substitution) whole. Not every pair is one bash joins (one whose backslash
+# is itself escaped, one ending a comment line, one inside single quotes), and removing such a pair can
+# glue a start word on the next line to the word before it, so a start form in EITHER text keeps the scan's
+# verdict: removing the pairs never lifts a deny the first text gives. '<<<', '<(' and '>(' have no
+# lookbehind, so the second text reads them wherever they sit, whatever is glued in front. The start words
+# and the '.' have one: the start words coproc, eval, setsid, disown and source refuse a match after a word
+# character, a '.' or a '-', and the '.' matches only after whitespace (a blank, a newline or other
+# whitespace), ';', '|', '(', '{' or a backquote, or at the start of the text. When a start word, or a '.'
+# and the blank after it, is split by a backslash-newline pair and any other backslash-newline pair comes
+# before it in the command, the search may miss it: the first text keeps it split, and the second also
+# removes the earlier pair, so the split word can be glued to whatever stood before that pair, and where
+# its lookbehind refuses what is glued in front it is read in neither text. Where the search misses such a
+# form that bash runs, the no-'&' allow can be taken (a disclosed residual). Known shapes, examples and not
+# the full set, each missed in both contexts the self-test pins while bash runs the form:
+# : x\\<newline>ev\<newline>al, : x.\\<newline>ev\<newline>al, # c\<newline>sou\<newline>rce,
+# #-\<newline>sou\<newline>rce, : x\<newline>\\<newline>ev\<newline>al and
+# : x\\<newline>\\<newline>ev\<newline>al (each earlier pair removed, eval glued to the x),
+# : x\\<newline>.\<newline> f, : x\<newline>\\<newline>.\<newline> f and #\<newline>.\<newline> f. Others
+# are read: a blank in : \\<newline>ev\<newline>al, a '/' in : /\\<newline>ev\<newline>al and the '#' of a
+# bare comment line in #\<newline>sou\<newline>rce are not refused, nor is the blank in
+# : \\<newline>.\<newline> f. A start word right after a pair inside single quotes, before the closing quote
+# or directly after it (echo 'x\<newline>'eval), is part of the quoted word, so bash runs no start word
+# there; a start word later in the command can run, as eval does in echo 'x\<newline>'; ev\<newline>al,
+# which the second text reads. A word that matches only after a removal, or one in a body or comment, reads
+# as a start form all the same, which only keeps the scan's verdict. A '.' right after a ')' is not read
+# (prose ends a sentence that way far more often than a case pattern runs '.'), nor is a start word built
+# at run time (from a variable or an ANSI-C escape).
+_ORCH_RUNTIME_START_RE = re.compile(
+    r"(?<![\w.-])(?:coproc|eval|setsid|disown|source)(?![\w.-])|(?<![^\s;|({`])\.(?=[ \t])|<<<|[<>]\(")
+_ORCH_RUNTIME_START_UNQUOTE = str.maketrans("", "", "'\"\\")
+
+
+def _orch_runtime_start_readings(command):
+    """The two texts the runtime start search (_ORCH_RUNTIME_START_RE) reads, a start form in either keeping
+    the scan's verdict: the command with every quote and backslash removed, which reads a start word written
+    whole (one after a pair bash does not join included), and the command with every backslash-newline pair
+    removed first, then every quote and backslash, which reads a form split by a pair bash joins. When a
+    start word, or a '.' and the blank after it, is split by a backslash-newline pair and any other
+    backslash-newline pair comes before it in the command, the search may miss it (a disclosed residual): the
+    first text keeps it split, and the second also removes the earlier pair, so the split word can be glued
+    to whatever stood before that pair, where a start word's lookbehind refuses a word character, a '.' or a
+    '-' and the '.' matches only after whitespace (a blank, a newline or other whitespace), ';', '|', '(',
+    '{' or a backquote, or at the start of the text. '<<<', '<(' and '>(' have no lookbehind and match in
+    the second text wherever they sit. A start word right after a pair inside single quotes, before the
+    closing quote or directly after it, is part of the quoted word, so bash runs no start word there."""
+    return (command.translate(_ORCH_RUNTIME_START_UNQUOTE),
+            command.replace("\\\n", "").translate(_ORCH_RUNTIME_START_UNQUOTE))
+
+
 def _orch_foreground_detach_lexed(command, lifts=None):
     """The foreground detach verdict orch_truncation_guard acts on: "detach", "unbalanced" or None, as the raw
     scan (_orch_foreground_detach_kind) returns them, read beside the shared lexer. The lexer decides first
@@ -23465,28 +24944,36 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     the delimiter and holds the closer anywhere after it, or at a backquote inside backquotes, running
     what this lex would read as body, so such a body records as "body" and is never
     lifted, fail closed), or the commit message form's body in "$(cat <<'EOF' ... EOF)", whose exact
-    close the lex itself resolves; (2)
+    close the lex itself resolves; a body in a command not proved a safe data-writing shape
+    (_orch_heredoc_data_shape) is never lifted, since the scan reads it as commands and gives its `&` as a
+    detach even when listing each bare `&` (_orch_foreground_scan); (2)
     a single- or double-quoted string; or (3) a '#' comment. Every other case where the lexer and the scan
     disagree still denies: an `&` the lexer places in a substitution or expansion that a double-quoted string
     holds (one in a quoted string or comment nested there included, since the lexer skips it whole), in an
     ANSI-C $'...' quote or behind an escape; a scan that ends inside a quote or meets an uncertain '#'
-    ("unbalanced", an apostrophe in a here-document body the scan reads as shell text included: an
-    unquoted delimiter's, or a quoted one's the scan does not skip); and a command the lexer reads
-    in more than one way. The lexer's quoting model is a best-effort reading of bash, not a guarantee, so
+    ("unbalanced", an apostrophe in a here-document body the scan reads as shell text included: one it
+    does not read on its own, _orch_foreground_scan, or a body quote left open over an '&'); and a command
+    the lexer reads in more than one way. The lexer's quoting model is a best-effort reading of bash, not a guarantee, so
     where it places an `&` inside one of the three shapes but bash reads that `&` as an operator, the detach
     is allowed (the disclosed lexer-path false-allow residual). lifts, when given, is a list the call
     appends True to where that narrowing reads the scan's "detach" as None, or where the scan reads None
     and the same scan reading every here-document body as text reads a "detach" the narrowing lifts, so a
     caller that must know whether it did reads the list instead of running the scan again.
 
-    COST: a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for the
-    scan, so neither the lex nor the narrowing can change what the scan returns, and the lex (which can
-    cost more than both scan rules together) is not run; a command that also holds no '#' and no quote
-    gives None from both scan rules (they return anything else only at one of those four characters, or
-    at the end inside a quote one of them opened), so the scan is not run either. The verdict is the same
-    either way."""
+    NO '&': a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for
+    the scan, so the lex (which can cost more than both scan rules together) is not run. Its "unbalanced"
+    (an open quote or an uncertain '#') says only that a LATER '&' might be hidden, and there is none, so
+    it is None without the scan (an apostrophe in a quoted here-document body the scan reads as code, ahead
+    of any later command, was denied as a possible detach although the command holds no '&' at all), UNLESS
+    the command holds a runtime start form (_ORCH_RUNTIME_START_RE) that can start a background job with no
+    '&' byte: there the scan decides as it does for any command, so an open quote or an uncertain '#' still
+    denies. A command that also holds no '#' and no quote gives None from both scan rules (they return
+    anything else only at one of those four characters, or at the end inside a quote one of them opened),
+    so the scan is not run either. The verdict is the same either way."""
     if "&" not in command:
         if "#" not in command and "'" not in command and '"' not in command:
+            return None
+        if not any(_ORCH_RUNTIME_START_RE.search(text) for text in _orch_runtime_start_readings(command)):
             return None
         return _orch_foreground_detach_kind(command)
     try:
@@ -23559,33 +25046,63 @@ def _orch_foreground_detach(command):
     is a disclosed residual; where such a construct still leaves an unquoted bare `&`, or leaves the scan
     inside an unbalanced quote at the end, it errs toward the DENY, but a detacher that carries no bare `&`
     (setsid worker, a nested `bash -c '... &'`) is NOT caught here and is a silent-allow residual disclosed
-    in the manifest. It judges only the `&` the top-level shell reads: a here-document body fed to a shell
-    is read as code, but the guard's lexer narrowing still lifts an `&` such a body holds under a quoted
-    delimiter where the scan reads the rest of the command to its end (`bash <<'EOF'` then `job &`), a
-    silent allow disclosed in the manifest.
+    in the manifest. A here-document body it reads on its own, in a command not proved a safe data-writing
+    shape (_orch_heredoc_data_shape: `bash <<'EOF'` then `job &`, `cat <<'EOF' | bash`, `cat > s.sh <<'EOF'`
+    then `bash s.sh`), is read as its consumer's commands, so the guard's lexer narrowing never lifts its
+    `&`. A cat write in a command the proof accepts whose file is run later without the command naming it
+    (a hook, a configuration a later program reads, or a later call, such as a body written into a shell
+    snapshot file a later shell sources) is read as data, a silent allow disclosed in the manifest's HONEST
+    RESIDUAL.
 
-    OVER-REFUSAL RESIDUAL (disclosed): this scan skips a here-document body as data only when the WHOLE
-    command is nothing but one or more plain cat writes (_orch_heredoc_data_command): each a line holding
-    only cat, one output redirect to a plain file and one quoted here-document operator (<<'EOF' or
-    <<"EOF") it parses, opened with no '(', backquote or '$[' anywhere before it and nothing open, then its
-    body and a line that is, whole, its delimiter, the writes separated only by newlines, with no other
-    command word anywhere. Only in such a command does a quote, `&` or substitution in a body (`cat > f
-    <<'EOF'` then `the user's file`) read as no detach. Every other body it reads as CODE: a quoted
-    delimiter's in a cat write followed or preceded by any other command (the same write followed by a
-    line `true` included), an unquoted delimiter's, one fed to a shell or any consumer it cannot show only
-    writes the body to a file (cat to standard output and tee included), the commit-message form's in
-    "$(cat <<'EOF' ... EOF)", one in a subshell or after any '(' or backquote, one after a body read as
-    code, and one with no delimiter line.
+    OVER-REFUSAL RESIDUAL (disclosed): this scan reads a here-document body as data (its bare `&` alone, the
+    body's quotes shifting nothing in the command) only when the WHOLE command is proved a safe data-writing
+    shape, by ONE positive proof over the outer text
+    (_orch_heredoc_data_shape): every simple command outside the bodies made only of plain words (no quote,
+    backslash, '$', backquote, parenthesis, brace, glob, pipe, bare '&' or redirection other than a cat
+    write target), none an assignment, none in a group, compound command, pipeline or substitution; the
+    command holding each body a plain cat writing to plain targets (none reached through a '..', none an
+    ABSOLUTE path under /dev or /proc other than exactly /dev/null or a path under /dev/shm/, and none whose
+    last path component is an allowlisted word or cat) or to standard output; and every
+    other simple command's first word in a short allowlist of readers that run or rename no file they name
+    (cat, mkdir, the checksum tools, wc, ls, stat, cmp, diff, test, true, echo). Only in such a command does a
+    quote, `&` or substitution in a body (`cat > f <<'EOF'` then `the user's file`, or a cat to standard
+    output alone, itself a data shape) read as no detach. Every command reads a body opened at the top level
+    with nothing open, under a delimiter the scan parses and ended at its delimiter line, ON ITS OWN, as a
+    shell reading that text would for its bare `&`, apart from the command's quote state (_orch_foreground_scan,
+    which does not model an unquoted delimiter's expansions or a nested here-document), so a body apostrophe no
+    longer leaves the command's quote open; the detach then stands only where the command is not a data shape.
+    A body opened at the top level (not in the commit-message form below) fed to a shell (bash, sh, dash,
+    zsh, source /dev/stdin, a cat piped onward), under a consumer the proof does not accept (a python3 -c or
+    any interpreter, git, echo or printf writing to a file, cp, mv, ln, eval, exec, source, a dot, read or
+    printf -v), or written to a file the same command then runs (bash FILE, sh FILE, source FILE, ./FILE,
+    python3 FILE) is read as those COMMANDS: a quote it leaves open denies beside an `&` or a runtime start
+    form, as one in the command's own text does, with or without an apostrophe elsewhere, and its bare `&` is
+    never lifted. The commit-message form "$(cat <<'EOF' ... EOF)" is not read that way under any consumer:
+    under eval, sh -c or python3 -c its body `&` sits inside the double-quoted substitution, so the scan
+    reads no bare `&` and the command allows on the scan alone although the consumer runs the body and can
+    start a background job, a disclosed false allow (the manifest's KNOWN FALSE-ALLOW RESIDUAL (1) and (2)
+    and the nested shell string of its HONEST RESIDUAL). That
+    over-refuses a body `&` under a consumer that does not run it (`git commit -F -`, the no-op `:`) and a
+    written file a reader not on the allowlist names without running it. Every other body it reads as CODE at
+    the outer quoting level: the commit-message form's in "$(cat <<'EOF' ... EOF)", one in a subshell or
+    after any '(' or backquote, one after a body read as code, one with no delimiter line, and an unquoted
+    delimiter's holding a command substitution, a '${' that holds more than a name or a backslash-newline
+    (_orch_heredoc_body_runs).
     The guard's lexer reading lifts that for an `&` only: a body `&` under a quoted delimiter (`say "a &
     b"` in the commit-message form) is allowed where the scan reads the rest of the command to its end. A
-    body the scan reads as code at the outer quoting level with an unbalanced apostrophe (`cat <<'EOF'`
-    to standard output, or one with no delimiter line), or one whose quote leaves the scan open at the end,
-    is still DENIED although nothing detaches, and so is a body `&` under an unquoted delimiter, which the
-    lexer refuses. The commit-message form's body is NOT denied for an unbalanced apostrophe: it sits
-    inside the outer double quotes, where the scan reads an apostrophe as a literal character. The remedy
-    is to quote the delimiter and write the content with `cat > file` in a call of its own that holds
-    nothing but such writes, then run any other command in a separate call, or to write the text to a file
-    and pass the file.
+    body the scan reads as code at the outer quoting level with an unbalanced apostrophe (one with no
+    delimiter line, or an unquoted delimiter's holding a command substitution), a body quote that leaves
+    the scan open at the end, a body read on its own whose quote stays open over an `&`, and any body
+    quote left open in a command holding a bare `&` (a body fed to a shell, `bash <<'EOF'` then `job &`
+    and `echo it's`, included), are still
+    DENIED although nothing detaches where the command holds an `&` or a runtime start form
+    (_ORCH_RUNTIME_START_RE), and so is a body `&` under an unquoted delimiter, which the lexer refuses; the
+    guard allows such a body in a command that holds neither (_orch_foreground_detach_lexed), where the
+    open quote has no `&` to hide. The commit-message form's body is NOT denied for an unbalanced
+    apostrophe: it sits inside the outer double quotes, where the scan reads an apostrophe as a literal
+    character. The remedy is to quote the delimiter and write the content with `cat > file` in a call of its
+    own that holds nothing but such writes, then run any other command in a separate call, or to write the
+    text to a file and pass the file.
 
     KNOWN FALSE-ALLOW RESIDUAL OF THIS SCAN (confirmed against real bash, disclosed in the manifest, which
     lists the same cases): the scan reads only the outer quoting level, and its quote and comment tracking
@@ -23601,14 +25118,18 @@ def _orch_foreground_detach(command):
     (e'v'al 'job &', {eval,} 'job &', \\eval 'job &'); (3) after an ANSI-C $'...' quote with an escaped
     quote that leaves the scan balanced but misaligned; (4) inside an arithmetic subscript that runs a
     substitution; (5) QUOTE SHIFT: after a quote character that bash reads as data but the scan reads as a
-    quote, above all an apostrophe or double quote in a here-document body the scan reads as code (an
-    unquoted delimiter's, a quoted one's it does not skip, the double-quoted commit-message form's), which
-    flips the scan's quote state so that a LATER real bare `&` (between two here-documents, or before a
-    second stray quote that rebalances the scan)
-    reads as quoted text and is allowed; and (6) COMMENT SHIFT: after a `#` that bash reads as quoted text
-    but the scan reads as a comment, where a double-quoted string nested inside a double-quoted "$(...)"
-    ends the scan's double quote early, so a `#` inside the nested string reads as a word-start comment
-    and a real bare `&` later on that line is skipped (echo "$(echo "a" "b # ")" & job # ")."""
+    quote, above all an apostrophe or double quote in a here-document body the scan reads as code at the
+    outer quoting level (one it does not read on its own, as listed above, the double-quoted commit-message
+    form's included), which flips the scan's quote state so that a LATER real bare `&` (between two
+    here-documents, or before a second stray quote that rebalances the scan) reads as quoted text and is
+    allowed; a body the scan reads on its own shifts nothing, and a quote opened in one such body and
+    closed in a later one is no longer read across them: where the command runs the file both bodies are
+    written to, each reads as commands and the first one's open quote denies, so an `&` that pairing
+    leaves bare is missed only where the consumer reading misses that run; and (6) COMMENT SHIFT: after a
+    `#` that bash reads as quoted text but the scan reads as a comment, where a double-quoted string nested
+    inside a double-quoted "$(...)" ends the scan's double quote early, so a `#` inside the nested string
+    reads as a word-start comment and a real bare `&` later on that line is skipped
+    (echo "$(echo "a" "b # ")" & job # ")."""
     return _orch_foreground_detach_kind(command) is not None
 
 
@@ -24894,8 +26415,9 @@ def _orch_registry_required():
 
 def _orch_oos_unreadable_input_note(detail):
     """The out-of-scope note for a Bash call whose tool input this guard cannot read (a tool_input that
-    is missing, null or not a JSON object, a command that is missing or not a string, or a
-    run_in_background that is present but not a real boolean): allowed WITH A NOTE naming the field it
+    is missing, null or not a JSON object, a command that is missing, not a string or holds a NUL, as
+    _bash_command reads it, or a run_in_background that is present but not a real boolean): allowed WITH
+    A NOTE naming the field it
     could not read, never the silent allow such a call once was here (a detach such an input carries is
     never scanned, so silence would read ignorance as clean) and never a deny (outside registry scope
     this guard denies nothing)."""
@@ -24926,8 +26448,16 @@ def orch_truncation_guard(data):
     that DETACHES a child with a bare `&` launches asynchronous work the foreground tool call does not track,
     and a bare-& detach is never the right way to launch tracked work, so a readable foreground command
     carrying such an operator DENIES-and-educates (use the tracked background dispatch, or keep it foreground
-    and wait). The detach is read by _orch_foreground_detach_lexed: the shared lexer's bare `&` separator
-    denies, the raw quote-tracking scan decides where the lexer refuses the command, and the scan's detach
+    and wait), except a backgrounded polling loop that the shared lexer itself reads as one
+    (_orch_detach_poll_loop): that deny gives orch_untracked_wait_loop's exits (_ORCH_POLL_LOOP_EXITS),
+    which forbid resubmitting the loop in either form, since a tracked or foreground copy still polls; and
+    except a command the lexer refuses whose text holds the poll shape's words (_orch_bg_poll_loop reads
+    'match' only through its text-scan fallback there, a real loop or an over-match on words in quoted or
+    comment text): orch_untracked_wait_loop denies that command with those same exits, so this deny gives a
+    hedged text that states the detach, says that if the command backgrounds a polling loop it must not be
+    resubmitted, and carries those exits, never the generic advice, which would offer the loop again in
+    both forms. The verdict is the same deny in every case. The detach is read by _orch_foreground_detach_lexed: the shared
+    lexer's bare `&` separator denies, the raw quote-tracking scan decides where the lexer refuses the command, and the scan's detach
     is lifted ONLY where every `&` it reads lies, as the lexer places it, in a quoted here-document body, a
     single- or double-quoted string, or a comment. Every other foreground call in registry scope remains
     out of scope (the harness returns its
@@ -24935,7 +26465,8 @@ def orch_truncation_guard(data):
 
     MALFORMED INPUT FAILS CLOSED (check-fails-closed-on-unreadable): a tool_input that is missing, null, or
     not a JSON object, a run_in_background that is present but not a real boolean (the string "true" is
-    malformed, never read as foreground), and a command that is not a string are each DENIED with a
+    malformed, never read as foreground), and a command that is not a string or holds a NUL (read, as in
+    every Bash hook, through _bash_command) are each DENIED with a
     reason naming the defect, never silently allowed. REGISTRY SCOPE (a disclosed residual, not a
     fail-closed case): the registry is this suite's scope declaration, located by the UNION of a walk of
     the cwd's physical ancestor chain with no-follow, descriptor-anchored lookups (_orch_registry_walk,
@@ -24972,7 +26503,8 @@ def orch_truncation_guard(data):
     or disown it names. A call there whose input cannot be read (a tool_input that is missing, null or not an
     object, a command that is missing or not a string, or a run_in_background that is present but not a
     real boolean) is allowed WITH A NOTE naming the field this guard could not read
-    (_orch_oos_unreadable_input_note), never silently and never a deny; a readable background dispatch
+    (_orch_oos_unreadable_input_note), never silently; a command string holding a NUL is not absent (the
+    text before the NUL runs) and DENIES there too (_bash_command_holds_nul); a readable background dispatch
     (run_in_background exactly true) and a readable foreground command neither reader flags are the
     silent allow. REGISTRY-REQUIRED MODE (opt-in, default
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
@@ -25069,10 +26601,11 @@ def orch_truncation_guard(data):
                 "registry found (rule trkasy, fail-closed).")
         # Not an orchestrated session: no registry on the chain or at a git toplevel. A call whose input this
         # guard cannot read (a tool_input that is missing, null or not an object, a command that is missing
-        # or not a string, or a run_in_background that is present but not a real boolean) is allowed with a
+        # or not a string, read through the shared _bash_command, or a run_in_background that is
+        # present but not a real boolean) is allowed with a
         # note naming the field it could not read, never silently (a detach such an input carries is never
-        # scanned, so silence would read ignorance as clean) and never a deny (no fail-closed case outside
-        # registry scope); a readable background dispatch (run_in_background exactly true) keeps the silent
+        # scanned, so silence would read ignorance as clean); a command string holding a NUL is not absent
+        # (the text before the NUL runs) and denies here too; a readable background dispatch (run_in_background exactly true) keeps the silent
         # allow. A readable foreground command gets ONE note when either reader finds work that may detach:
         # the detector the registry scope denies on (a bare-& detach, or quoting or comments it cannot read
         # to the end, where a later '&' can be a hidden detach) gives its own note, and otherwise the note
@@ -25083,17 +26616,15 @@ def orch_truncation_guard(data):
         # reading the vouched here-document shapes as data, so a setsid, nohup or disown command word
         # anywhere, a line continuation, an unclosed expansion, and every other cause outside those
         # shapes keeps its note (the single note is the true union of both readers).
-        out_input = data.get("tool_input")
-        if not isinstance(out_input, dict):
-            kind = "missing" if "tool_input" not in data else _orch_json_kind(out_input)
-            return _orch_oos_unreadable_input_note(
-                "its tool_input is {}, not a JSON object, so neither its command nor its "
-                "run_in_background flag can be read".format(kind))
-        out_command = out_input.get("command")
-        if not isinstance(out_command, str):
-            kind = "missing" if "command" not in out_input else _orch_json_kind(out_command)
-            return _orch_oos_unreadable_input_note(
-                "its command is {}, not a string, so it cannot be scanned".format(kind))
+        out_command, out_unread = _bash_command(data)
+        if out_unread is not None and _bash_command_holds_nul(data):
+            # a command string holding a NUL is not absent: the text before the NUL runs, so it
+            # denies outside registry scope too, as every Bash hook that judges the command does
+            return _deny_unreadable_command("trkasy (track-launched-work)", "foreground detach scan",
+                                            out_unread)
+        if out_unread is not None:
+            return _orch_oos_unreadable_input_note("{}; it cannot be scanned".format(out_unread))
+        out_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
         out_rib = out_input.get("run_in_background", False)
         if out_rib is True:
             # A readable background dispatch: not a foreground call, so the foreground detach note does
@@ -25206,17 +26737,20 @@ def orch_truncation_guard(data):
             "guard active).",
             "AIQT guardrail: denied a Bash call in registry-required mode whose git toplevel could not be "
             "opened for the orchestration registry (rule trkasy, fail-closed).")
+    # The command comes through the reader every Bash hook shares. A tool_input it cannot read as an object
+    # denies first (neither the command nor run_in_background can be read), a run_in_background that is not
+    # a boolean next, and a command it cannot read then denies in either mode.
+    command, unread = _bash_command(data)
     tool_input = data.get("tool_input")
-    if not isinstance(tool_input, dict):
-        kind = "missing" if "tool_input" not in data else _orch_json_kind(tool_input)
+    if unread is not None and not isinstance(tool_input, dict):
         return _deny(
-            "AIQT rule trkasy (track-launched-work): this Bash call's tool_input is {}, not a JSON object, "
-            "so this guard cannot read its command or its run_in_background flag. A check that cannot read "
+            "AIQT rule trkasy (track-launched-work): this Bash call's input cannot be read ({}), so this "
+            "guard cannot read its command or its run_in_background flag. A check that cannot read "
             "its input fails closed (check-fails-closed-on-unreadable): it is denied rather than allowed "
-            "unread. Re-issue the call with a tool_input object carrying a string command.".format(kind),
-            "AIQT guardrail: denied a Bash call whose tool_input is {}, not an object "
-            "(fail-closed).".format(kind))
-    command = tool_input.get("command")
+            "unread. Re-issue the call with a tool_input object carrying a string command.".format(unread),
+            "AIQT guardrail: denied a Bash call whose tool_input is not a JSON object (fail-closed).")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
     rib = tool_input.get("run_in_background", False)
     if not isinstance(rib, bool):
         return _deny(
@@ -25231,14 +26765,19 @@ def orch_truncation_guard(data):
         # scope, but a bare `&` detaches a child into untracked asynchronous work whose result and failure
         # are then lost. A bare-& detach is never the right way to launch tracked work (the tracked
         # background dispatch is), so it DENIES-and-educates: the caller self-corrects to run_in_background
-        # (or waits in the foreground), which is what lets the dispatch ledger record it. An unreadable
-        # (non-string) command fails closed; a non-detaching foreground command is out of scope (ALLOW).
-        if not isinstance(command, str):
+        # (or waits in the foreground), which is what lets the dispatch ledger record it. Two exceptions to
+        # that advice: a backgrounded polling loop the shared lexer reads as one (_orch_detach_poll_loop)
+        # takes the wait-loop exits instead, and a command the lexer refuses whose text holds the poll
+        # shape's words (_orch_bg_poll_loop's fallback 'match') takes a hedged text carrying those exits,
+        # since orch_untracked_wait_loop denies both and its exits forbid resubmitting the loop in either
+        # form. An unreadable command (not a string, or holding a NUL) fails closed; a non-detaching
+        # foreground command is out of scope (ALLOW).
+        if unread is not None:
             return _deny(
-                "AIQT rule trkasy (track-launched-work): this foreground Bash call's command is {}, not a "
-                "string, so this guard cannot scan it for a bare '&' detach; it is denied rather than "
+                "AIQT rule trkasy (track-launched-work): this foreground Bash call's command cannot be read "
+                "({}), so this guard cannot scan it for a bare '&' detach; it is denied rather than "
                 "allowed unread (check-fails-closed-on-unreadable). Re-issue with a string command."
-                .format("missing" if "command" not in tool_input else _orch_json_kind(command)),
+                .format(unread),
                 "AIQT guardrail: denied a foreground Bash call with no readable command string "
                 "(fail-closed).")
         detach_kind = _orch_foreground_detach_lexed(command)
@@ -25251,14 +26790,56 @@ def orch_truncation_guard(data):
                 "prove that a later '&' is quoted or commented text rather than a bare detach; it is denied "
                 "rather than allowed unread (check-fails-closed-on-unreadable). The open quote may be a "
                 "real unbalanced quote, or one the scan misreads: an apostrophe or double quote in a "
-                "here-document body this scan reads as code (an unquoted delimiter's, or a quoted one's it "
-                "cannot end at a whole delimiter line or whose command may run it: only a command of "
-                "nothing but plain cat > file writes is read as writing data, so write such text with "
-                "cat in a call of its own) or an ANSI-C $'...' "
-                "quote. Balance the quoting, put a blank before such a '#' outside any grouping or "
-                "substitution, or write the text to a file and pass the file.",
+                "here-document body this scan reads as code (one it cannot end at a whole delimiter line, "
+                "one opened after a '(' or backquote, an unquoted delimiter's holding a command "
+                "substitution, so quote the delimiter (<<'EOF') where the body needs no expansion, or one "
+                "whose quote stays open over an '&') or an ANSI-C $'...' "
+                "quote; a here-document body in any command this guard does not prove a safe data-writing shape "
+                "(one fed to a shell, held by a consumer other than a plain cat write to a plain file or to "
+                "standard output, written to a file the same command then runs, or beside any other command "
+                "such as a cd) is read as commands, so a "
+                "quote it leaves open counts as one. Balance the quoting, put a blank before such a '#' outside "
+                "any grouping or substitution, or write the text with cat in a call of its own and run any "
+                "other command in a separate call.",
                 "AIQT guardrail: denied a foreground command whose quoting or comments this guard could not "
                 "read to the end (rule trkasy, fail-closed).")
+        # COST: the classifier below lexes the command again, so it runs ONCE per detach deny, and
+        # _orch_detach_poll_loop (a further lex) only on its 'match', never on the plain detach path: the
+        # 1 MB deadline shapes whose readings the lexer can judge stay at one classifier lex, within the
+        # timed bounds the hooks self-test pins.
+        detach_poll_kind = _orch_bg_poll_loop(command) if detach_kind == "detach" else "none"
+        if detach_kind == "detach" and detach_poll_kind == "match" and _orch_detach_poll_loop(command):
+            # A backgrounded polling loop is the event orch_untracked_wait_loop denies with its specific
+            # advice (never resubmit the loop). The generic advice below (use the tracked background
+            # dispatch, or keep the command in the foreground) would resubmit that loop, so on this event
+            # the deny gives the same exits as that hook (_ORCH_POLL_LOOP_EXITS). The verdict is unchanged.
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground command backgrounds a polling loop "
+                "with a bare '&' (a for/while/until loop carrying sleep plus a status probe), launching "
+                "asynchronous work this tool call does not track, so its result and failure would be lost; "
+                "it is denied. " + _ORCH_POLL_LOOP_EXITS,
+                "AIQT guardrail: denied a foreground bare-& polling loop (untracked asynchronous work, rule "
+                "trkasy). " + _ORCH_POLL_LOOP_BANNER_EXITS)
+        if detach_kind == "detach" and detach_poll_kind == "match":
+            # The shared lexer refused the command (so _orch_detach_poll_loop found no lexed loop), but its
+            # text holds the poll shape's words (_orch_bg_poll_loop's text-scan fallback, which can
+            # over-match words in quoted or comment text), so orch_untracked_wait_loop denies the same
+            # command with the wait-loop exits. The generic advice below would offer the loop again in both
+            # forms, against those exits, so this deny states the bare-'&' detach, hedges on whether the
+            # detached work is a polling loop, and gives the same exits. The verdict is unchanged.
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "
+                "bare '&', launching asynchronous work this tool call does not track, so its result and "
+                "failure would be lost, and it carries a '#' whose comment reading this guard cannot judge "
+                "under both readings, so whether that work is a polling loop is read from the command's "
+                "text alone, which holds the words of one (a for/while/until loop carrying sleep plus a "
+                "status probe), written as code or in quoted or comment text; it is denied. If this "
+                "command backgrounds a polling loop, do not resubmit the loop. If it does not, put a blank "
+                "before such a '#' outside any grouping or substitution, or drop it, so this guard can "
+                "read where those words sit, and re-issue the call. " + _ORCH_POLL_LOOP_EXITS,
+                "AIQT guardrail: denied a foreground bare-'&' detach whose text holds a polling loop's "
+                "words (rule trkasy); if it backgrounds a polling loop, do not resubmit the loop. "
+                + _ORCH_POLL_LOOP_BANNER_EXITS)
         if detach_kind == "detach":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "
@@ -25267,16 +26848,19 @@ def orch_truncation_guard(data):
                 "(run_in_background) and collect its completion, or keep the command in the foreground and "
                 "wait for it. If the detached result and completion are genuinely not needed, drop the '&' "
                 "and run it foreground. If this '&' is not a detach at all (for example a bitwise AND in an "
-                "arithmetic expansion, an '&' in the body of a here-document whose delimiter is unquoted, "
+                "arithmetic expansion, an '&' in the body of a here-document whose delimiter is unquoted or "
+                "whose command this guard does not accept as a safe data-writing shape (git commit -F -), "
                 "or one inside a substitution in a double-quoted string), quote the here-document "
-                "delimiter (<<'EOF') where its body needs no expansion, or write the text to a file and "
-                "pass the file instead; the background-dispatch advice applies only to a real detach.",
+                "delimiter (<<'EOF') where its body needs no expansion, or write the text with cat in a call "
+                "of its own and run any other command separately; the background-dispatch advice applies "
+                "only to a real detach.",
                 "AIQT guardrail: denied a foreground bare-& detach (untracked asynchronous work, rule "
                 "trkasy); use the tracked background dispatch or run it in the foreground.")
         return _allow()  # foreground without a bare-& detach operator is out of scope by design
-    if not isinstance(command, str) or not command:
+    if unread is not None or not command:
         return _deny(
-            "AIQT rule trkasy: a background dispatch carried no readable command string; failing closed.",
+            "AIQT rule trkasy: a background dispatch carried no readable command string ({}); failing closed."
+            .format(unread or "its tool_input.command is an empty string"),
             "AIQT guardrail: denied an unreadable background dispatch (fail-closed).")
     if _ORCH_PLAIN_COMMAND_RE.fullmatch(command) and not (_ORCH_SHELL_KEYWORDS & set(command.split())):
         return _allow()  # no metacharacter and no reserved word: the full stdout reaches the harness capture
@@ -25549,8 +27133,10 @@ def _orch_bg_poll_loop(command):
     to another's can turn a 'match' into 'indeterminate', and the strictest answer is kept ('match', then
     'indeterminate', then 'none'). Where the lexer cannot judge it that way, the command's text
     (_hash_doubt_scan) is read for the canonical shape's words: a loop header, 'done', an '&', 'sleep' and
-    a probe all present give 'match' (an over-match on such a command, which the truncation guard denies
-    anyway), else 'indeterminate'. The classifier reads the loop words, the '&' and the sleep only where they
+    a probe all present give 'match' (an over-match on such a command is possible; the truncation guard
+    denies it anyway, with a hedged text carrying the wait-loop exits: _orch_detach_poll_loop does not take
+    this text scan, so that guard tests this classifier's 'match' for that text), else
+    'indeterminate'. The classifier reads the loop words, the '&' and the sleep only where they
     are written bare, so no quoting hides them from the text; the --watch and actions/runs probes it reads
     from decoded tokens, so text holding quoting that scan does not decode (_hash_doubt_opaque) counts as
     carrying a probe."""
@@ -25593,6 +27179,50 @@ def _orch_poll_reading(segments):
     return _orch_poll_loop_at(segments, amp_idx)
 
 
+# The exits every denial of a backgrounded polling loop gives. orch_untracked_wait_loop's deny carries them
+# on every 'match', the lexed reading and the text-scan fallback alike. orch_truncation_guard's bare-'&'
+# detach deny carries them too, in one of two texts: where the shared lexer itself reads the poll loop
+# (_orch_detach_poll_loop) its deny states the loop outright and gives these exits, and where the lexer
+# refuses the command but its text holds the poll shape's words (_orch_bg_poll_loop's fallback 'match', a
+# real loop or an over-match) its deny states the bare-'&' detach, hedges on whether the detached work is a
+# polling loop, and gives these exits; only a detach the classifier does not read as 'match' keeps the
+# generic detach advice, and there orch_untracked_wait_loop emits nothing. So no input draws one denial
+# that gives these exits and another that offers the loop again (a command whose detach scan cannot read
+# the command to its end takes the unreadable-quoting deny, which offers no resubmission either).
+# The loop is never resubmitted: a tracked or foreground copy
+# still waits by polling a status probe. Exit (1) needs a CI status reader with a wait mode, which an adopter
+# repository may not have, and many waits are not CI at all, so exit (2), the tracked wake, covers the rest.
+_ORCH_POLL_LOOP_EXITS = (
+    "Remove the trailing '&', do not resubmit the loop in any form (neither as a tracked background dispatch "
+    "nor in the foreground), and take ONE of these exits: (1) only for a CI wait in a repository that has a "
+    "CI status reader with a mode that waits until the run ends: start ONE tracked task as a background "
+    "dispatch (run_in_background: true) that runs that reader in its wait mode (such as tools/ci-status.sh "
+    "<sha> --wait in the AIQT Guardrails repository), collect its completion, and read the outcome from that "
+    "task's exit status as the reader documents its codes, never by matching success or failure words in its "
+    "output; (2) otherwise (a wait that is not CI, such as a health-check poll or waiting on a merge, or a "
+    "repository with no such reader), schedule a tracked wake that re-invokes this session to re-check.")
+_ORCH_POLL_LOOP_BANNER_EXITS = (
+    "Do not resubmit the loop: for a CI wait where the repository has a CI status reader with a wait mode, "
+    "run one tracked task with it and read its exit status; otherwise schedule a tracked wake.")
+
+
+def _orch_detach_poll_loop(command):
+    """True where the shared lexer itself reads command as the backgrounded polling loop
+    orch_untracked_wait_loop denies (a reading _orch_poll_reading classifies 'match', the answer
+    _orch_bg_poll_loop gives on a lexed command), so orch_truncation_guard's detach deny gives that hook's
+    exits instead of its generic advice. A command the lexer refuses is False here, including one whose '#'
+    it cannot judge under both readings: there _orch_bg_poll_loop falls back to a text scan that can read
+    'match' from words in quoted text or a comment, and on such a 'match' the truncation guard gives a
+    hedged text that carries the wait-loop exits and offers neither dispatch form, never the generic detach
+    advice (orch_untracked_wait_loop denies that command too, and the generic advice would offer the loop
+    its deny forbids). Only the reason chooses by this; the truncation guard's verdict does not."""
+    try:
+        readings = _lex_readings(command)
+    except ValueError:                      # _UncertainHashError included: no text-scan fallback here
+        return False
+    return any(_orch_poll_reading(segments) == "match" for segments in readings)
+
+
 def orch_untracked_wait_loop(data):
     """trkasy, PreToolUse Bash: DENY a command that backgrounds a status-polling loop with a bare `&`. A
     detached child is not a harness-tracked task, so its completion cannot notify this session and the result
@@ -25609,10 +27239,12 @@ def orch_untracked_wait_loop(data):
     allows, a bare-& detach denies) while this component stays inert. NOT lease-gated: a
     bounded worker building a fire-and-forget poll is equally wrong. A payload with NO tool_name is
     malformed, not another tool, and DENIES in every session (the shared missing-tool_name contract,
-    checked before the registry scope as orch_truncation_guard checks it). Fail-open (silent allow) on a
+    checked before the registry scope as orch_truncation_guard checks it). A command string holding a NUL
+    is not absent (the text before the NUL runs) and DENIES in every session, before the registry scope is
+    read (_bash_command_holds_nul). Fail-open (silent allow) on a
     present non-Bash tool, no git toplevel, an absent registry, or an empty command (it runs nothing); in
     registry scope a MISSING, NON-OBJECT or NON-STRING command is a cannot-evaluate input and DENIES
-    (check-fails-closed-on-unreadable), never a clean pass. A NUL, heredoc,
+    (check-fails-closed-on-unreadable), never a clean pass. A heredoc,
     unbalanced quote, or subshell-grouped detach classifies 'indeterminate' and emits nothing, deferring to
     the truncation guard's generic bare-`&` DENY-and-educate (or its open-quote deny) on the same event.
     Only a positive 'match' DENIES here. This is a specific companion to that generic deny, defence in
@@ -25626,23 +27258,23 @@ def orch_untracked_wait_loop(data):
         return _deny_missing_tool_name("trkasy")
     if tool_name != "Bash":
         return _allow()                     # a present non-Bash tool is out of scope
+    if _bash_command_holds_nul(data):
+        # the text before the NUL still runs, so it denies whatever the registry scope
+        return _deny_unreadable_command("trkasy (untracked wait loop)", "untracked background wait loop scan",
+                                        _bash_command(data)[1])
     root = _orch_root(data)
     if root is None:
         return _allow()
     status, _reg = _orch_registry(root)
     if status == "absent":
         return _allow()                     # no registry at the git toplevel: inert (the truncation guard's walk may still find one above)
-    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-    command = tool_input.get("command")
-    if not isinstance(command, str):
+    command, unread = _bash_command(data)
+    if unread is not None:
         # In registry scope a missing, non-object or non-string command is a cannot-evaluate input: the
         # loop scan cannot run over what was not read, so it denies (check-fails-closed-on-unreadable)
         # rather than passing clean.
-        return _deny(
-            "AIQT rule trkasy (untracked wait loop): the Bash payload carried no readable command string, "
-            "so this guard could not scan it for an untracked background wait loop; failing closed. "
-            "Re-issue the call with a string command.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule trkasy, fail-closed).")
+        return _deny_unreadable_command("trkasy (untracked wait loop)", "untracked background wait loop scan",
+                                        unread)
     if not command:
         return _allow()                     # an empty command runs nothing: no loop to scan, out of scope
     if _orch_bg_poll_loop(command) == "match":
@@ -25650,13 +27282,9 @@ def orch_untracked_wait_loop(data):
             "AIQT rule trkasy (untracked wait loop): this command backgrounds a polling loop with a bare "
             "'&' (a for/while/until loop carrying sleep plus a status probe). A detached child is not a "
             "harness-tracked task: its completion cannot notify this session, so the result is stranded and "
-            "the session goes dark waiting on it. Remove the trailing '&' and take ONE of these exits: (1) "
-            "submit the same loop as a tracked background dispatch (run_in_background: true) and collect its "
-            "completion; (2) run a bounded foreground watch and act on the observed result (for example: "
-            "timeout <seconds> gh pr checks <ref> --watch); (3) schedule a tracked wake that re-invokes this "
-            "session to re-check.",
+            "the session goes dark waiting on it. " + _ORCH_POLL_LOOP_EXITS,
             "AIQT guardrail: denied an untracked background wait loop; a bare-'&' poll cannot notify this "
-            "session. Use run_in_background, a bounded foreground watch, or a tracked wake.")
+            "session. " + _ORCH_POLL_LOOP_BANNER_EXITS)
     return _allow()                         # 'none' or 'indeterminate': emit nothing; truncation guard backstops
 
 
@@ -25670,7 +27298,7 @@ def orch_dispatch_ledger(data):
     status, reg = _orch_registry(root)
     if status != "ok":
         return _allow()
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()  # only the holder session writes the shared dispatch ledger
     tool = data.get("tool_name")
@@ -25717,11 +27345,11 @@ def orch_dispatch_ledger(data):
     if not _orch_append_jsonl(path, row):
         return _allow_note("AIQT guardrail: the dispatch-ledger write failed; "
                            "the launched work may be invisible to the stop guard.")
-    if scope == "cannot":
+    if scope in _ORCH_SCOPE_HOLD_IDS:
         # armed and surfaced, never a silent skip: the row above was recorded anyway, so launched
-        # work stays visible to the stop guard while the operator corrects the horizon
+        # work stays visible to the stop guard while the operator corrects the horizon or the lease
         return _allow_note("AIQT guardrail: {}; this dispatch row was recorded anyway (the "
-                           "ledger stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
+                           "ledger stays armed).".format(scope_detail))
     return _allow()
 
 
@@ -28515,9 +30143,9 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False, guard=(None,
     declared command elsewhere (_rdp_mentions) is UNVERIFIABLE, and one that names none is allowed. Names
     are compared without regard to case, since a case-insensitive filesystem runs ORCH-DISPATCH as
     orch-dispatch."""
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
-        return ("unverifiable", "the Bash tool_input carries no command string")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return ("unverifiable", "the Bash payload carries no command string ({})".format(unread))
     commands = cfg["commands"]
     words, why = _rdp_plain_words(command, commands)
     if words is None:
@@ -28667,7 +30295,8 @@ def review_dispatch_pin(data):
     paths carry no uncommitted state (a checked-out submodule is compared by its HEAD only), BEFORE the
     dispatch runs; where the binding declares the draft labels, a brief naming the worker draft the commit
     applies declares every path the draft's diff headers name less the paths it records as skipped, so a
-    drafted path neither committed nor skipped is refused. Inert without a review_dispatch binding; in a
+    drafted path neither committed nor skipped is refused. A command string holding a NUL is withheld in
+    every session, bound or not (the text before the NUL runs). Inert without a review_dispatch binding; in a
     session a binding scopes, a Bash call that is not one provably plain command (its command word on the
     allowlist, or a declared dispatch command) is withheld, a plain one naming the registry is refused
     unless it only reads, a plain git command that sets configuration (every git config write, every -c or
@@ -28689,7 +30318,12 @@ def review_dispatch_pin(data):
         return _deny_missing_tool_name("vfxcmt")
     if tool_name != "Bash":
         return _allow()
-    kind, message = _rdp_decide(data)
+    if _bash_command_holds_nul(data):
+        # the text before the NUL still runs, so it is withheld whatever binding scopes the session
+        kind, message = ("unverifiable", "the Bash payload carries no readable command string ({})"
+                         .format(_bash_command(data)[1]))
+    else:
+        kind, message = _rdp_decide(data)
     if kind in ("deny", "unverifiable"):
         prefix = "UNVERIFIABLE: " if kind == "unverifiable" else ""
         return _deny("{}AIQT rule vfxcmt: review dispatch withheld: {}.".format(prefix, message),
@@ -30590,8 +32224,10 @@ def _rwh_core_worktree(directory, cache):
 
 def _rwh_decide(data):
     """The review-workdir-hold decision for one Bash payload: ("allow"|"note"|"deny"|"unverifiable",
-    message). INERT where no review-hold marker directory exists and the payload carries an absolute
-    cwd: the only state read is the markers of the repositories the command names, so adopters who
+    message). A command string holding a NUL is UNVERIFIABLE whatever the markers say (an unreadable
+    session marker state still denies first): the text before the NUL runs and can name a held
+    worktree in any repository (_bash_command_holds_nul). INERT where no review-hold marker directory
+    exists and the payload carries an absolute cwd: the only state read is the markers of the repositories the command names, so adopters who
     write no markers see nothing. A cwd that is missing, relative, carries a NUL byte or names no
     directory that exists hides the
     session repository, so every git-word command outside the read-only grammar, and an absent
@@ -30701,8 +32337,7 @@ def _rwh_decide(data):
     ignored with a note; a live marker whose recorded head differs from its worktree's HEAD notes
     the drift without denying."""
     cwd = data.get("cwd")
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    command, unread = _bash_command(data)
     views, holds, cw_cache, notes = {}, {}, {}, []
     # the NUL test runs before isdir, which raises on an embedded NUL; a nonexistent absolute cwd
     # is the same fail-closed case (git cannot be asked anything there, so neither can its holds)
@@ -30712,12 +32347,20 @@ def _rwh_decide(data):
     s_state, s_payload = _rwh_holds(sview[1], holds, notes) if isinstance(sview, tuple) \
         else ("absent", [])
     s_live = s_payload if s_state == "ok" else []
-    if not isinstance(command, str) or not command:
+    if unread is not None or not command:
         if s_state == "bad":
             return ("deny", _rwh_bad_text(s_payload))
+        if _bash_command_holds_nul(data):
+            # the text before the NUL still runs and can name a held worktree of ANY repository,
+            # not only the session's, and its targets are not read from text that is not what
+            # runs: withheld whatever the session repository's own holds say
+            return ("unverifiable", "AIQT rule rvwpin: the Bash command is unreadable ({}); the text "
+                    "before its NUL still runs and can name a held worktree in any repository, so a "
+                    "mutation of a held worktree cannot be ruled out.".format(unread))
         if s_live:
-            return ("unverifiable", "AIQT rule rvwpin: the Bash command is absent or unreadable while "
-                    "a review hold is live, so a mutation of the held worktree cannot be ruled out.")
+            return ("unverifiable", "AIQT rule rvwpin: the Bash command is absent or unreadable{} while "
+                    "a review hold is live, so a mutation of the held worktree cannot be ruled out."
+                    .format(" ({})".format(unread) if unread is not None else ""))
         if not cwd_ok:
             return ("unverifiable", _rwh_cwd_text(cwd))
         if sview is _RWH_VIEW_ERROR:
@@ -30973,7 +32616,9 @@ def review_workdir_hold(data):
     modified until the review returns or is abandoned. The hold is an adopter-written marker file in
     GIT_COMMON_DIR/aiqt/review-holds/ naming the held worktree, its head at dispatch, a dispatch id
     and a required expiry; the dispatcher writes it before the reviewer starts and removes it when the
-    review ends. INERT (silent allow) where no marker directory exists and the payload carries an
+    review ends. A command string holding a NUL is withheld (UNVERIFIABLE) whatever the holds: the
+    text before the NUL runs and can name a held worktree in any repository, and its targets are
+    not read from text that is not what runs. INERT (silent allow) where no marker directory exists and the payload carries an
     absolute cwd; a cwd that is missing, relative, carries a NUL byte or names no directory that
     exists fails closed (UNVERIFIABLE)
     for every git-word command outside the read-only grammar and for an absent command, in the
@@ -31149,7 +32794,7 @@ def orch_prompt_stamp(data):
     status, reg = _orch_registry(root)
     if status != "ok":
         return _allow()
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()  # only the holder session stamps/resets the shared turn-state
     prompt = data.get("prompt")
@@ -31171,10 +32816,10 @@ def orch_prompt_stamp(data):
         ts.pop("ask_basis", None)
         unsaved = _orch_save_turn_state(root, ts)
         if unsaved is None:
-            if scope == "cannot":
+            if scope in _ORCH_SCOPE_HOLD_IDS:
                 # armed and surfaced, never a silent skip: the stamp above was written anyway
                 return _allow_note("AIQT guardrail: {}; this prompt was stamped anyway (the "
-                                   "stamp stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
+                                   "stamp stays armed).".format(scope_detail))
             return _allow()
         # the stamp is this recorder's record; the prompt proceeds and the unwritten stamp is noted
         return _allow_note("AIQT guardrail: this prompt was read as genuine human input, but turn-state.json "
@@ -31200,10 +32845,10 @@ def orch_prompt_stamp(data):
                 "or as genuine human input; record it manually (nocncl).".format(unsaved))
         return _context_note("UserPromptSubmit", context + " Additionally, " + warn,
                              "AIQT guardrail: this prompt was read as timer-originated, but " + warn)
-    if scope == "cannot":
+    if scope in _ORCH_SCOPE_HOLD_IDS:
         return _context_note("UserPromptSubmit", context,
                              "AIQT guardrail: {}; this wake was classified anyway (the stamp "
-                             "stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
+                             "stays armed).".format(scope_detail))
     return (0, {"hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
         "additionalContext": context}}, None)
@@ -31284,20 +32929,121 @@ def _orch_resume_audit_findings(status, reg, root):
     return findings
 
 
+def _orch_record_value_kind(value):
+    """The kind of a registry value in plain words, for a cannot-evaluate finding: an empty string, null,
+    a boolean (tested before a number, since a JSON boolean is a Python int), a number, a list or an
+    object; never a Python type name."""
+    if isinstance(value, str):
+        return "an empty string" if not value else "a string"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, list):
+        return "a list"
+    return "an object" if isinstance(value, dict) else "a value of another kind"
+
+
+def _orch_record_unusable(key, value):
+    """The finding for a record key that is present with a value _orch_path refuses. It names the key
+    and the value's kind, never the value itself, so a large value stays out of the text."""
+    return ("the registry declares record.{} with an unusable value ({}), not a non-empty path string: "
+            "cannot-evaluate".format(key, _orch_record_value_kind(value)))
+
+
+def _orch_record_block(reg):
+    """(record table, finding or None). An absent record block is ({}, None): nothing is declared. A
+    record block that is present and not a table (a list, a string, a number, a boolean or null) is
+    ({}, a cannot-evaluate finding naming the block and its kind), so it never reads as nothing to check."""
+    if "record" not in reg:
+        return ({}, None)
+    rec = reg["record"]
+    if isinstance(rec, dict):
+        return (rec, None)
+    return ({}, "the registry declares the record block as {}, not a table, so no record surface can be "
+                "probed: cannot-evaluate".format(_orch_record_value_kind(rec)))
+
+
+def _orch_record_surface_read(path):
+    """Read a declared record surface without waiting for a FIFO writer and without reading past the
+    bound: (data, None) with at most _ORCH_BARRIER_MAX_BYTES + 1 bytes, or (None, detail). The open is
+    os.open(O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at once instead
+    of waiting for one; the opened descriptor is fstat'ed and anything not a regular file (a FIFO, a
+    device, a directory) is (None, "not a regular file") without a read; a UNIX socket fails the open
+    (ENXIO). The read asks for at most _ORCH_BARRIER_MAX_BYTES + 1 bytes in all, so a caller tells a file
+    longer than the bound by len(data) > _ORCH_BARRIER_MAX_BYTES and decides what that means for its
+    surface. A failed open (a missing file, a NUL character in the path), read or close is (None, its
+    text). The descriptor is closed exactly once on every path. Not bounded here: the path lookup can
+    stall on a hung mount, and a regular file on a stalled filesystem can stall the read."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+                     | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError) as exc:  # ValueError: a path with a NUL character
+        return (None, str(exc))
+    chunks, total, detail = [], 0, None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            detail = "not a regular file"
+        else:
+            while total <= _ORCH_BARRIER_MAX_BYTES:
+                chunk = os.read(fd, _ORCH_BARRIER_MAX_BYTES + 1 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+    except OSError as exc:
+        detail = str(exc)
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError as exc:
+            detail = detail or str(exc)
+    if detail is not None:
+        return (None, detail)
+    return (b"".join(chunks), None)
+
+
+def _orch_record_surface_text(data):
+    """Decode the bytes _orch_record_surface_read gave for a record surface (handoff, findings or
+    pending_decisions) with the newline translation a text-mode open applies: a CRLF and then a lone CR
+    each become LF, so a Branch or Gate line, a findings row or a decision row after a CR still starts a
+    line. The bound is judged on the bytes, before this."""
+    return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _orch_resume_probes(reg, root):
     """The resume-audit probes (shared with tools/orch_doctor.py --resume-audit). Returns a list of
-    finding strings; empty means the recorded state matches observed reality."""
+    finding strings; empty means the recorded state matches observed reality. A record block that is
+    present and not a table is one cannot-evaluate finding (_orch_record_block). Each of handoff,
+    findings and pending_decisions that is present in the record with a value _orch_path refuses (an
+    empty string, null, a number, a boolean, a list or an object) is a cannot-evaluate finding naming the
+    key and the value's kind; an absent key is undeclared. Each declared surface is read by
+    _orch_record_surface_read: a FIFO, a device, a directory or anything else not a regular file is a
+    finding without a read, and no read takes more than _ORCH_BARRIER_MAX_BYTES + 1 bytes. A handoff
+    longer than the bound is a finding, since its Branch and Gate lines are parsed and a truncated handoff
+    cannot be judged; the findings register's content is parsed by _orch_merge_pending_findings, which
+    makes a longer register a finding there; pending_decisions is only required to be readable here, so a
+    longer regular file is no finding from this probe."""
     findings = []
-    rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
+    rec, block_finding = _orch_record_block(reg)
+    if block_finding is not None:
+        findings.append(block_finding)
+    for key in ("handoff", "findings", "pending_decisions"):
+        if key in rec and _orch_path(root, rec[key]) is None:
+            findings.append(_orch_record_unusable(key, rec[key]))
     handoff_path = _orch_path(root, rec.get("handoff"))
     if handoff_path:
-        try:
-            with open(handoff_path, "r", encoding="utf-8", errors="replace") as fh:
-                handoff = fh.read()
-        except OSError as exc:
+        data, detail = _orch_record_surface_read(handoff_path)
+        if detail is None and len(data) > _ORCH_BARRIER_MAX_BYTES:
+            detail = "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES)
+        if detail is not None:
             findings.append("declared handoff unreadable ({}): cannot-evaluate, the barrier holds"
-                            .format(exc))
+                            .format(detail))
             handoff = ""
+        else:
+            handoff = _orch_record_surface_text(data)
         m = re.search(r"^Branch:\s*(\S+)\s*$", handoff, re.MULTILINE)
         if m:
             actual = _head_branch(root)
@@ -31319,12 +33065,10 @@ def _orch_resume_probes(reg, root):
     for key in ("findings", "pending_decisions"):
         path = _orch_path(root, rec.get(key))
         if path:
-            try:
-                with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                    fh.read()
-            except OSError as exc:
+            _data, detail = _orch_record_surface_read(path)
+            if detail is not None:
                 findings.append("declared record surface {} unreadable ({}): cannot-evaluate"
-                                .format(key, exc))
+                                .format(key, detail))
     lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
     if lease:
         path = _orch_path(root, lease.get("path"))
@@ -31359,16 +33103,21 @@ def _orch_resume_probes(reg, root):
 def _orch_merge_pending_findings(reg, root):
     """The cheap in-hook layer of the record-drift check: an OPEN merge_pending row whose pr:N ref
     already has first-parent merge evidence is a divergence finding. tools/check_record_drift.py is
-    the authoritative gate; this probe only feeds the resume audit."""
-    rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
+    the authoritative gate; this probe only feeds the resume audit. A record block that is not a table
+    and an unusable findings value are reported once, by _orch_resume_probes; here they declare nothing.
+    The register is read by _orch_record_surface_read; one that is not a regular file, cannot be read,
+    or is longer than _ORCH_BARRIER_MAX_BYTES is a cannot-evaluate finding, since a truncated register
+    could hide a merge_pending row."""
+    rec = _orch_record_block(reg)[0]
     path = _orch_path(root, rec.get("findings"))
     if not path:
         return []
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
-    except OSError as exc:
-        return ["declared findings register unreadable ({}): cannot-evaluate".format(exc)]
+    data, detail = _orch_record_surface_read(path)
+    if detail is None and len(data) > _ORCH_BARRIER_MAX_BYTES:
+        detail = "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES)
+    if detail is not None:
+        return ["declared findings register unreadable ({}): cannot-evaluate".format(detail)]
+    text = _orch_record_surface_text(data)
     prs = set()
     for line in text.splitlines():
         if "merge_pending" in line:
@@ -31398,13 +33147,20 @@ def _orch_chained_rows(path, prefix):
     64*'0' for the first; seq is the line number; ids carry the family prefix) and return
     (rows, detail): rows is None when the file is unreadable or ANY line breaks the chain, shape,
     sequence, or id-prefix discipline, so a tampered or malformed register can never read as a
-    smaller clean one. A compact inline mirror of the authoritative gate
-    (tools/check_mistakes_register.py): the hooks script is standalone in adopter repos and cannot
-    import tools/, so the CI gate remains the authoritative checker and this feeds only the audit."""
+    smaller clean one. A register that is not strict UTF-8 text (a non-UTF-8 byte, an encoded
+    surrogate, a truncated sequence) is unreadable too, never an exception out of the reader. A
+    compact inline mirror of the authoritative gate (tools/check_mistakes_register.py): the hooks
+    script is standalone in adopter repos and cannot import tools/, so the CI gate remains the
+    authoritative checker and this feeds only the audit."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             lines = fh.read().splitlines()
     except OSError as exc:
+        return (None, "unreadable ({})".format(exc))
+    except UnicodeDecodeError as exc:
+        return (None, "not UTF-8 text ({})".format(exc))
+    except ValueError as exc:
+        # a declared path holding a NUL character (read as _orch_record_surface_read reads it)
         return (None, "unreadable ({})".format(exc))
     sha = __import__("hashlib").sha256
     rows, prev = [], None
@@ -31440,16 +33196,23 @@ def _orch_register_authority(root, path):
     of an authority the actor cannot trivially forge, its git merge-base state with origin/HEAD when
     the register is tracked, else its <path>.anchor file, with seq/digest identifying the current tip;
     otherwise ('hold', detail, None), a cannot-evaluate the caller routes to a fail-closed HOLD, never
-    a clean pass. RESIDUAL (disclosed): the register is itself actor-writable, and this authority only
-    checks that the on-disk register is an append-only EXTENSION of its committed (merge-base) or
-    anchored prefix. An actor with filesystem write ALONE can therefore APPEND rows past that prefix
-    (uncommitted; git status M) and have them counted as the tip, so the git/anchor authority defends
-    the register-SWAP and prefix-REWRITE classes but not an appended approved row (A2); the categorical
-    residual is closed only by an operator-owned, assistant-non-writable register at the OS layer."""
+    a clean pass. A register, or its merge-base state, that is not strict UTF-8 text is such a HOLD
+    too, never an exception out of the reader. RESIDUAL (disclosed): the register is itself
+    actor-writable, and this authority only checks that the on-disk register is an append-only
+    EXTENSION of its committed (merge-base) or anchored prefix. An actor with filesystem write ALONE
+    can therefore APPEND rows past that prefix (uncommitted; git status M) and have them counted as
+    the tip, so the git/anchor authority defends the register-SWAP and prefix-REWRITE classes but not
+    an appended approved row (A2); the categorical residual is closed only by an operator-owned,
+    assistant-non-writable register at the OS layer."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             lines = fh.read().splitlines()
     except OSError as exc:
+        return ("hold", "register unreadable ({})".format(exc), None)
+    except UnicodeDecodeError as exc:
+        return ("hold", "register is not UTF-8 text ({})".format(exc), None)
+    except ValueError as exc:
+        # a declared path holding a NUL character (read as _orch_record_surface_read reads it)
         return ("hold", "register unreadable ({})".format(exc), None)
     env = _isolate_git_env(dict(os.environ))
     rel = None
@@ -31472,18 +33235,32 @@ def _orch_register_authority(root, path):
                     "{})".format(probe.returncode), None)
         if probe.returncode == 0:
             try:
+                # read as bytes and decoded below as strict UTF-8, never by the locale, exactly as
+                # the git show read is
                 base = subprocess.run(["git", "-C", root, "merge-base", "HEAD", "origin/HEAD"],
-                                      capture_output=True, text=True, timeout=10, env=env)
-                if base.returncode != 0 or not base.stdout.strip():
+                                      capture_output=True, timeout=10, env=env)
+                if base.returncode != 0:
                     return ("hold", "no computable merge-base with origin/HEAD", None)
-                ref = base.stdout.strip()
+                try:
+                    ref = base.stdout.decode("utf-8").strip()
+                except UnicodeDecodeError as exc:
+                    return ("hold", "the merge-base with origin/HEAD is not UTF-8 text "
+                            "({})".format(exc), None)
+                if not ref:
+                    return ("hold", "no computable merge-base with origin/HEAD", None)
                 old = subprocess.run(["git", "-C", root, "show", "{}:{}".format(ref, rel)],
-                                     capture_output=True, text=True, timeout=10, env=env)
+                                     capture_output=True, timeout=10, env=env)
             except (OSError, subprocess.SubprocessError) as exc:
                 return ("hold", "cannot read the register authority ({})".format(exc), None)
             if old.returncode != 0:
                 return ("hold", "cannot read the register at its merge-base authority", None)
-            old_lines = old.stdout.splitlines()
+            # decoded as strict UTF-8, as the register on disk is, never by the locale: a merge-base
+            # state that is not UTF-8 text is a HOLD, never an exception out of the reader
+            try:
+                old_lines = old.stdout.decode("utf-8").splitlines()
+            except UnicodeDecodeError as exc:
+                return ("hold", "the register at its merge-base authority is not UTF-8 text "
+                        "({})".format(exc), None)
             if lines[:len(old_lines)] != old_lines:
                 return ("hold",
                         "register is not an append-only extension of its merge-base state", None)
@@ -31499,6 +33276,9 @@ def _orch_register_authority(root, path):
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             return ("hold", "the register anchor is a symlink, which is never followed", None)
+        return ("hold", "declared register has no readable anchor authority", None)
+    except ValueError:
+        # an anchor path holding a NUL character: unreadable, never an exception out of the reader
         return ("hold", "declared register has no readable anchor authority", None)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -31554,8 +33334,11 @@ def _orch_pointer_resolves(root, sd, pointer):
     if os.path.isabs(pointer):
         return False
     for base in (root, sd):
-        rb = os.path.realpath(base)
-        cand = os.path.realpath(os.path.join(base, pointer))
+        try:
+            rb = os.path.realpath(base)
+            cand = os.path.realpath(os.path.join(base, pointer))
+        except ValueError:
+            continue  # a pointer or base holding a NUL character resolves to nothing real here
         if (cand == rb or cand.startswith(rb.rstrip(os.sep) + os.sep)) and os.path.exists(cand):
             return True
     return False
@@ -35171,7 +36954,7 @@ _WRTSCP_MAX_BYTES = 64 * 1024                    # 64 KB: both artifacts are sma
 # SAME human-authorization discipline as any other scope widening (guardrail-config-integrity), so the actor
 # must not be able to self-declare a companion-store widening through a covered write; freezing the registry
 # against its own covered writes closes that self-widening residual (raised independently by our own QA and
-# the cleanlanguage adopter). BOTH registry files are frozen, not only the LOCAL one: _wrtscp_companion_stores
+# an adopter). BOTH registry files are frozen, not only the LOCAL one: _wrtscp_companion_stores
 # reads companion_stores from EITHER file (via _orch_registry, which falls back to the committed
 # .aiqt/orchestration.json when the LOCAL file is absent), so freezing only the LOCAL file left a covered
 # Write of companion_stores into .aiqt/orchestration.json to take effect IN-SESSION (its cross-repo allow
@@ -36078,6 +37861,34 @@ _FSW_SCHED_RE = re.compile(r"(?<![a-z0-9])(?:" + "|".join(
 _FSW_TOKEN_RE = re.compile(r"\S+")
 _FSW_WORDCH_RE = re.compile(r"[A-Za-z0-9]")
 _FSW_STAMP_RE = re.compile(_FSW_TIME_GRAMMAR + "(?:" + _FSW_ZONE_GRAMMAR + r")?(?![\d:])")
+# Two UTC time forms that cannot be a clock reading, flagged with no clock comparison. Both follow the stamp
+# grammar above: an optional date part (YYYY-MM-DD then T or a space), HH:MM, optional :SS and fraction, and
+# the Z alternative of the zone grammar, the one zone that names UTC by itself (a word zone such as AM is not
+# read, so a prose time stays out). (1) APPROX: such a token with about, around, approximately or circa (any
+# letter case, a whole word, then blanks) or a tilde right before it. (2) PLACEHOLDER: the same shape where a
+# digit slot holds x, X or ? (02:1xZ, 0x:xxZ, 2026-11-xxT00:33Z); a token with no such slot is an ordinary
+# stamp and is not read here. An exact-looking invented time is outside both forms.
+_FSW_NC_TIME = r"(?:[0-9]{4}-[0-9]{2}-[0-9]{2}[T ])?[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,9})?)?Z"
+_FSW_APPROX_RE = re.compile(r"(?:(?<![A-Za-z0-9])(?i:about|around|approximately|circa)[ \t]+|~[ \t]*)"
+                            + _FSW_NC_TIME + r"(?![A-Za-z0-9])")
+_FSW_NC_SLOT = "[0-9xX?]"
+_FSW_PLACEHOLDER_RE = re.compile(
+    r"(?<![0-9A-Za-z:?])(?:{d}{{4}}-{d}{{2}}-{d}{{2}}[T ])?{d}{{2}}:{d}{{2}}(?::{d}{{2}})?Z(?![A-Za-z0-9])".format(
+        d=_FSW_NC_SLOT))
+_FSW_PLACEHOLDER_CHARS = frozenset("xX?")
+
+
+class _FswNonClock(str):
+    """A flagged token that cannot be a clock reading (an APPROX or PLACEHOLDER form), as its exact text, so
+    the warning can name it apart from a future-dated literal."""
+
+
+def _fsw_nonclock_tokens(line):
+    """[(start, token)] for every APPROX or PLACEHOLDER token on one line, in line order. Linear."""
+    found = [(m.start(), m.group(0)) for m in _FSW_APPROX_RE.finditer(line)]
+    found += [(m.start(), m.group(0)) for m in _FSW_PLACEHOLDER_RE.finditer(line)
+              if not _FSW_PLACEHOLDER_CHARS.isdisjoint(m.group(0))]
+    return sorted(found)
 _FSW_TOKEN_BEFORE = r"(?<![A-Za-z0-9_.~/-])"
 _FSW_TOKEN_AFTER = r"(?![^/\s'\"`;|&<>()])"
 # Any non-ASCII character right after `date` makes another command word, so it is never read as date.
@@ -36267,7 +38078,9 @@ def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_e
     for a literal starting at absolute position base+pos that lies inside a date substitution; `cache` maps
     a literal to its converted value so a repeated literal is converted once; `extra_exempt(pos)`, when
     given, is an ADDITIONAL exemption for a literal starting at line position pos (the table-header rule);
-    `spans`, when given, are the line's inline code spans, and a literal starting inside one is exempt."""
+    `spans`, when given, are the line's inline code spans, and a literal starting inside one is exempt. An
+    APPROX or PLACEHOLDER token (_fsw_nonclock_tokens) on the line is returned too, as a _FswNonClock, with no
+    clock comparison and under the same exemptions."""
     found, seen, sched = [], set(), None
     cache = {} if cache is None else cache
     for m in _FSW_STAMP_RE.finditer(line):
@@ -36285,6 +38098,14 @@ def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_e
         if not sched(m.start()) and not (extra_exempt is not None and extra_exempt(m.start())):
             seen.add(lit)
             found.append(lit)
+    for pos, tok in (_fsw_nonclock_tokens(line) if ("Z" in line and ":" in line) else ()):
+        if tok in seen or (in_subst is not None and in_subst(base + pos)) or (spans and _fsw_in_spans(spans, pos)):
+            continue
+        if sched is None:
+            sched = _fsw_sched_exempter(line)
+        if not sched(pos) and not (extra_exempt is not None and extra_exempt(pos)):
+            seen.add(tok)
+            found.append(_FswNonClock(tok))
     return found
 
 
@@ -38619,8 +40440,8 @@ def _fsw_bash_future(cmd, now_us, cwd=None):
     """Future observed-time literals that are DATA of a Bash command's store write (else []; see _analyze).
     `cwd` is the payload's working directory, against which relative write targets resolve. The analysis
     runs under BASH_WORK_BUDGET; a command that spends it is allowed (fail open)."""
-    if _FSW_STAMP_RE.search(cmd) is None:
-        return []  # no literal at all: nothing to deny, and the tokenizer need not run
+    if _FSW_STAMP_RE.search(cmd) is None and not any(_fsw_nonclock_tokens(line) for line in cmd.split("\n")):
+        return []  # no literal and no non-clock token: nothing to warn on, and the tokenizer need not run
     start = frozenset((os.path.normpath(cwd) if isinstance(cwd, str) and os.path.isabs(cwd) else None,))
     try:
         an = _fsw_analyze(cmd, start, _fsw_store_ctx(), _FswBudget(_FSW_BASH_WORK_BUDGET))
@@ -38709,7 +40530,10 @@ def _fsw__evaluate(payload, now):
         for old, new, _every in edits:
             held = None  # old's literal-shaped substrings, indexed once per edit (not `lit in old` per literal)
             for lit in _fsw_future_in_changed_lines(new, old, now_us, tables=False, fences=False):
-                if unreadable:
+                if unreadable and isinstance(lit, _FswNonClock):
+                    if lit in old:
+                        continue
+                elif unreadable:
                     if held is None:
                         held = _fsw_literal_substrings(old)
                     if lit in held:
@@ -38731,12 +40555,20 @@ def _fsw_warn_line(bad, now):
     """The one-line warning for the future literals `bad`, at most WARN_MAX characters: the first literal, the
     count of the others, the UTC clock to the minute, and a pointer to `date -u`. When it is too long the pointer,
     then the clock reading, then the count are dropped, in that order; the first literal is never dropped, only
-    cut to fit with a trailing `...`."""
-    head = "future-stamp-write: future stamp "
+    cut to fit with a trailing `...`. When the first entry is a _FswNonClock (an approximate or placeholder
+    time), the line names it as no clock reading and points at stamping by command substitution at write
+    time; there the count is dropped before that pointer."""
     first = " ".join(str(bad[0]).split())
     more = f" (+{len(bad) - 1} more)" if len(bad) > 1 else ""
-    clock = "; now " + now.strftime("%Y-%m-%dT%H:%MZ")
-    for parts in ((more, clock, "; run date -u"), (more, clock, ""), (more, "", ""), ("", "", "")):
+    if isinstance(bad[0], _FswNonClock):
+        head = "future-stamp-write: not a clock reading: "
+        tries = ((more, "", "; stamp with $(date -u +%FT%RZ)"), ("", "", "; stamp with $(date -u +%FT%RZ)"),
+                 ("", "", ""))
+    else:
+        head = "future-stamp-write: future stamp "
+        clock = "; now " + now.strftime("%Y-%m-%dT%H:%MZ")
+        tries = ((more, clock, "; run date -u"), (more, clock, ""), (more, "", ""), ("", "", ""))
+    for parts in tries:
         line = head + first + "".join(parts)
         if len(line) <= _FSW_WARN_MAX:
             return line
@@ -39319,6 +41151,224 @@ def future_stamp_write(data):
     if bad:
         return _allow_note(_fsw_warn_line(bad, now))
     return _allow()
+# --- host clock reading (tstamp) ----------------------------------------------------------------------
+# Two context-only bindings, one per post-tool event: clock_inject_post on PostToolUse (after a tool call
+# that ran and succeeded) and clock_inject_failure on PostToolUseFailure (after one that started and
+# failed). Each adds one additionalContext line holding the host clock read at that hook event, so the
+# freshest time value in the assistant's context is a reading, not a figure it recalled. Neither refuses
+# anything: both events are in FAIL_OPEN_EVENTS, so an unreadable payload or a crash takes main()'s
+# warning on exit 0, and a payload that names another event gets a note and no reading. Residual: a
+# message written with no tool call gets no fresh reading, and neither does a call refused before it
+# runs (neither event fires for it); the value is the host clock at the hook event and goes stale as time
+# passes; it is context, not enforcement; and a host clock error carries through.
+# The shape of a POSIX TZ rule: a standard name (three or more letters, or three or more of letters,
+# digits, + and - in angle brackets) and offset, then optionally a daylight name, its offset and a
+# transition rule of two dates (Jn, n or Mm.w.d), each with an optional /time. The shape alone does not
+# make a rule: _clock_posix_rule also checks every number's range.
+_CLOCK_TZ_NAME = r"([A-Za-z]{3,}|<[A-Za-z0-9+-]{3,}>)"
+_CLOCK_TZ_OFFSET = r"([+-]?[0-9]{1,2}(?::[0-9]{1,2}){0,2})"
+_CLOCK_TZ_DATE = r"(J[0-9]{1,3}|[0-9]{1,3}|M[0-9]{1,2}\.[0-9]\.[0-9])(?:/([0-9]{1,2}(?::[0-9]{1,2}){0,2}))?"
+_CLOCK_POSIX_TZ_RE = re.compile(r"{0}{1}(?:{0}{1}?(?:,{2},{2})?)?\Z".format(
+    _CLOCK_TZ_NAME, _CLOCK_TZ_OFFSET, _CLOCK_TZ_DATE), re.ASCII)
+# Four legacy names that parse as a daylight rule with no transitions, each mapped to the zone that
+# current zone database releases make it a link to. A database without the name (some distributions
+# ship these names separately) is asked for the linked zone instead, and the conversion is checked
+# against that zone's offset and abbreviation like any other zone database name.
+_CLOCK_LEGACY_US_ZONES = {"EST5EDT": "America/New_York", "CST6CDT": "America/Chicago",
+                          "MST7MDT": "America/Denver", "PST8PDT": "America/Los_Angeles"}
+
+
+def _clock_hms(text, hours_max):
+    """Seconds for an '[+-]hh[:mm[:ss]]' text whose hours are at most hours_max and whose minutes and
+    seconds are at most 59, or None."""
+    sign = -1 if text.startswith("-") else 1
+    parts = [int(part) for part in text.lstrip("+-").split(":")] + [0, 0]
+    if parts[0] > hours_max or parts[1] > 59 or parts[2] > 59:
+        return None
+    return sign * (parts[0] * 3600 + parts[1] * 60 + parts[2])
+
+
+def _clock_posix_date_ok(text):
+    """True for a POSIX TZ rule date in range: Jn with n from 1 to 365, n from 0 to 365, or Mm.w.d with
+    m from 1 to 12, w from 1 to 5 and d from 0 to 6."""
+    if text.startswith("J"):
+        return 1 <= int(text[1:]) <= 365
+    if text.startswith("M"):
+        month, week, day = (int(part) for part in text[1:].split("."))
+        return 1 <= month <= 12 and 1 <= week <= 5 and 0 <= day <= 6
+    return 0 <= int(text) <= 365
+
+
+def _clock_posix_rule(tz):
+    """The (abbreviation, UTC offset) pairs a TZ value sets when it is a complete POSIX TZ rule, as a set
+    of (str, timedelta), or None when it is not one. Complete means every number is in range (each offset
+    and each transition time has hours at most 24 and minutes and seconds at most 59, so 24:59:59 is
+    accepted and 25:00 is not, and each transition date is valid) and a daylight name comes with its
+    transition rule: with no rule, which transitions apply is left to the implementation (glibc falls back
+    to a default or to a posixrules file), so such a value is not taken as a rule here. A rule time with a
+    sign or hours over 24 (an extension of the rule) is not accepted either."""
+    match = _CLOCK_POSIX_TZ_RE.match(tz)
+    if match is None:
+        return None
+    std, std_off, dst, dst_off, start, start_time, end, end_time = match.groups()
+    std_seconds = _clock_hms(std_off, 24)
+    if std_seconds is None or (dst is not None and start is None):
+        return None
+    pairs = {(std.strip("<>"), datetime.timedelta(seconds=-std_seconds))}
+    if dst is None:
+        return pairs
+    dst_seconds = std_seconds - 3600 if dst_off is None else _clock_hms(dst_off, 24)
+    if (dst_seconds is None or not (_clock_posix_date_ok(start) and _clock_posix_date_ok(end))
+            or any(text is not None and _clock_hms(text, 24) is None for text in (start_time, end_time))):
+        return None
+    return pairs | {(dst.strip("<>"), datetime.timedelta(seconds=-dst_seconds))}
+
+
+def _clock_regular_readable(path):
+    """True when path (followed through symlinks) is a regular file this process may read; False when it
+    is absent, is a directory, a FIFO or another non-regular file, is unreadable, or cannot be checked.
+    It reads no byte of the file."""
+    try:
+        return stat.S_ISREG(os.stat(path).st_mode) and os.access(path, os.R_OK)
+    except (OSError, ValueError):
+        return False
+
+
+def _clock_now():
+    """The host clock, read once, as an aware UTC datetime (tstamp). The self-test replaces it to fix
+    the reading."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _clock_local(now_utc, env=None, readable=None, convert=None):
+    """(local, None) with `local` the aware local time of now_utc, or (None, reason) when the checks below
+    do not establish the local zone, so the caller reports it as unknown instead of showing what the C
+    library fell back to. env defaults to os.environ, readable to _clock_regular_readable and convert to
+    datetime.astimezone() (the process zone, as the C library reads it); the self-test passes its own. The
+    zone is unknown when TZ is set but empty (an implementation-defined zone); when TZ is unset on a POSIX
+    host and /etc/localtime is not a readable regular file (absent, a directory, unreadable: what the C
+    library then shows is its fallback, not a configured zone); when TZ names an absolute file that is not
+    a regular file; when TZ is neither a complete POSIX TZ rule (_clock_posix_rule) nor a zone the zone
+    database holds (a legacy name such as EST5EDT that the database lacks is looked up under the zone it
+    is a link to, _CLOCK_LEGACY_US_ZONES), or zoneinfo cannot be imported to check the name; when the
+    conversion fails or gives no offset or no abbreviation (the C library gives an empty abbreviation for
+    a zone file it cannot read); when the abbreviation is -00, which the zone database uses for a zone
+    whose local time is unspecified (Factory); when TZ is a rule and the conversion's abbreviation and
+    offset are not one of the pairs the rule names; and when TZ is a zone database name and the zone
+    database's offset or abbreviation for it differs from the conversion's (glibc reads a name it cannot
+    load, such as Foo/Bar, as UTC under the abbreviation Foo). Residual: a regular file named by an
+    absolute TZ, or a readable /etc/localtime, that is not a valid zone file is checked only through the
+    empty abbreviation and -00; the zone database Python reads may differ from the C library's, and an
+    older or newer copy can give a different offset or abbreviation for a name, which reads unknown; and a
+    host that configures its zone somewhere other than TZ and /etc/localtime is read as libc reads it."""
+    env = os.environ if env is None else env
+    readable = _clock_regular_readable if readable is None else readable
+    tz = env.get("TZ")
+    zone = pairs = None
+    if tz is not None:
+        name = tz[1:] if tz.startswith(":") else tz
+        if not name:
+            return None, "TZ is set but empty, which leaves the zone to the implementation"
+        if name.startswith("/"):
+            if not os.path.isfile(name):
+                return None, "TZ names {!r}, which is not a regular file".format(name)
+        else:
+            pairs = _clock_posix_rule(tz)
+            if pairs is None:
+                try:
+                    import zoneinfo
+                except ImportError:
+                    return None, "TZ is {!r} and zoneinfo cannot be imported to check it".format(tz)
+                keys = (name, _CLOCK_LEGACY_US_ZONES[name]) if name in _CLOCK_LEGACY_US_ZONES else (name,)
+                for key in keys:
+                    try:
+                        zone = zoneinfo.ZoneInfo(key)
+                        break
+                    except Exception:
+                        pass
+                if zone is None:
+                    return None, ("TZ is {!r}, which is neither a complete POSIX TZ rule nor a zone the zone "
+                                  "database holds".format(tz))
+    elif os.name == "posix" and not readable("/etc/localtime"):
+        return None, ("TZ is unset and /etc/localtime is not a readable regular file, so UTC would be a "
+                      "default, not a setting")
+    try:
+        local = (now_utc.astimezone() if convert is None else convert(now_utc))
+        offset = local.utcoffset()
+        abbreviation = local.tzname()
+    except (OSError, OverflowError, ValueError) as exc:
+        return None, "the local conversion failed ({})".format(type(exc).__name__)
+    if offset is None or not abbreviation:
+        return None, "the C library gave no UTC offset or no zone abbreviation"
+    if abbreviation == "-00":
+        return None, "the zone abbreviation is -00, which marks local time as unspecified"
+    if pairs is not None and (abbreviation, offset) not in pairs:
+        return None, ("the C library's abbreviation and UTC offset are not the ones the POSIX TZ rule {!r} "
+                      "names".format(tz))
+    if zone is not None:
+        database = now_utc.astimezone(zone)
+        if (database.utcoffset(), database.tzname()) != (offset, abbreviation):
+            return None, ("the zone database's UTC offset or abbreviation for TZ {!r} differs from the C "
+                          "library's".format(tz))
+    return local, None
+
+
+def _clock_offset_text(offset):
+    """'UTC+HH:MM' for a UTC offset, with ':SS' added only when the offset has whole seconds; a part
+    below one second is dropped toward zero, and a zero offset is always written UTC+00:00."""
+    negative = offset < datetime.timedelta(0)
+    size = -offset if negative else offset
+    total = size.days * 86400 + size.seconds
+    hours, rest = divmod(total, 3600)
+    minutes, seconds = divmod(rest, 60)
+    text = "UTC{}{:02d}:{:02d}".format("-" if negative and total else "+", hours, minutes)
+    return text + (":{:02d}".format(seconds) if seconds else "")
+
+
+def _clock_context(event):
+    """The context line for `event`: the host clock read now, as UTC, beside the local time with its
+    numeric UTC offset and zone abbreviation, or with the local zone named unknown (and no local time)
+    when _clock_local cannot establish it."""
+    now = _clock_now().astimezone(datetime.timezone.utc)
+    local, reason = _clock_local(now)
+    if local is None:
+        where = "local time zone unknown ({}), so no local time is given; use the UTC value".format(reason)
+    else:
+        where = "local time {} {} ({})".format(local.strftime("%Y-%m-%d %H:%M:%S"),
+                                               _clock_offset_text(local.utcoffset()), local.tzname())
+    return ("[aiqt-clock] Host clock reading at this {} hook event: UTC {}; {}. It is the host clock at "
+            "that moment: it goes stale as time passes and carries any host clock error, and it is context "
+            "for a timestamp, not a check of one.".format(event, now.strftime("%Y-%m-%dT%H:%M:%SZ"), where))
+
+
+def _clock_wrong_event(handler_name, bound, event):
+    """The note for a clock binding whose payload names an event other than the one it is bound to."""
+    return ("AIQT guardrail: the {} clock reading is bound to {} but its payload names the event {!r}, so "
+            "no clock reading was added (a non-blocking note).".format(handler_name, bound, event))
+
+
+def clock_inject_post(data):
+    """tstamp, PostToolUse (context only, never blocks): after a tool call that ran and succeeded, add
+    the host clock at this hook event as additionalContext (_clock_context). A payload naming another
+    event gets a note and no reading."""
+    event = data.get("hook_event_name")
+    if event != "PostToolUse":
+        return _allow_note(_clock_wrong_event("clock_inject_post", "PostToolUse", event))
+    return (0, {"hookSpecificOutput": {
+        "hookEventName": "PostToolUse",
+        "additionalContext": _clock_context("PostToolUse")}}, None)
+
+
+def clock_inject_failure(data):
+    """tstamp, PostToolUseFailure (context only, never blocks): after a tool call that started and
+    failed, add the host clock at this hook event as additionalContext (_clock_context). A payload
+    naming another event gets a note and no reading."""
+    event = data.get("hook_event_name")
+    if event != "PostToolUseFailure":
+        return _allow_note(_clock_wrong_event("clock_inject_failure", "PostToolUseFailure", event))
+    return (0, {"hookSpecificOutput": {
+        "hookEventName": "PostToolUseFailure",
+        "additionalContext": _clock_context("PostToolUseFailure")}}, None)
 
 
 # --- dispatcher ---------------------------------------------------------------------------------------
@@ -39330,6 +41380,7 @@ HANDLERS = {
     "bash_absolute_paths": bash_absolute_paths,
     "git_explicit_binding": git_explicit_binding,
     "git_stash_ref": git_stash_ref,
+    "inline_errexit": inline_errexit,
     "git_discard": git_discard,
     "protected_line": protected_line,
     "branch_root": branch_root,
@@ -39355,6 +41406,8 @@ HANDLERS = {
     "orch_lease_heartbeat_stop": orch_lease_heartbeat_stop,
     "clock_inject": clock_inject,
     "future_stamp_write": future_stamp_write,
+    "clock_inject_post": clock_inject_post,
+    "clock_inject_failure": clock_inject_failure,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -39364,7 +41417,8 @@ HANDLERS = {
 # consults the stop_hook_active field of the payload), so on ANY error (unreadable stdin, JSON parse
 # failure, non-dict payload, or a handler crash) it emits a non-blocking systemMessage warning and exits 0.
 # A DELIBERATE backlog-deny is the intended exception (the documented Stop block mechanism, bounded by the
-# loop cap); only a PreToolUse handler fails closed via exit 2 on error.
+# loop cap); only a PreToolUse handler fails closed via exit 2 on error, and not one in
+# NOTE_ONLY_PRETOOL_MODES.
 HANDLER_EVENT = {
     "diff_wall_stop": "Stop",
     "diff_source_pretool": PRETOOL,
@@ -39373,6 +41427,7 @@ HANDLER_EVENT = {
     "bash_absolute_paths": PRETOOL,
     "git_explicit_binding": PRETOOL,
     "git_stash_ref": PRETOOL,
+    "inline_errexit": PRETOOL,
     "git_discard": PRETOOL,
     "protected_line": PRETOOL,
     "branch_root": PRETOOL,
@@ -39398,6 +41453,8 @@ HANDLER_EVENT = {
     "orch_lease_heartbeat_stop": "Stop",
     "clock_inject": "PostToolUse",
     "future_stamp_write": PRETOOL_WARN_ONLY,
+    "clock_inject_post": "PostToolUse",
+    "clock_inject_failure": "PostToolUseFailure",
 }
 
 
@@ -39726,9 +41783,10 @@ class _DeadlineWindow:
 
     def _take(self):
         """The take, run with every maskable signal blocked, in the order the class docstring gives. The
-        clock is read just before the take, so the window's use is never undercounted (a caller timer comes
-        back at most microseconds early, never late). Anything that raises once the timer is taken gives it
-        back, with the disposition, before the exception goes on."""
+        clock is read just before the take, so the take itself counts as time the window used. That does
+        not keep the restore from being late: _give_back says by how much a caller timer can come back late.
+        Anything that raises once the timer is taken gives it back, with the disposition, before the
+        exception goes on."""
         handler = signal.getsignal(signal.SIGALRM)
         began = time.monotonic()
         timer = self._as_taken(signal.setitimer(signal.ITIMER_REAL, 0))
@@ -39750,8 +41808,12 @@ class _DeadlineWindow:
 
     def _give_back(self):
         """The restore, run with every maskable signal blocked, in the order the class docstring gives: each
-        operation through _twice, the clock read once to decide whether the caller's timer came due, and a
-        due expiry queued last. `armed` is False when it returns or raises."""
+        operation through _twice, the clock read once to decide whether the caller's timer came due and what
+        it has left, and a due expiry queued last. setitimer counts the countdown from the moment the re-arm
+        runs, so a caller timer comes back late by the time between that clock read and the re-arm (normally
+        microseconds; a stall of the process in between adds its whole length) plus up to a microsecond from
+        setitimer rounding up; a relative re-arm computed before it runs cannot avoid this. `armed` is False
+        when it returns or raises."""
         self._live = False
         if not self.armed:
             return
@@ -39819,9 +41881,10 @@ def _pending_alarm_message(handler_name, seconds):
 
 def _dispatcher_fail_open_warn(handler_name, detail):
     """A fail-open dispatcher-level error for a Stop/SubagentStop/SessionStart/TeammateIdle/
-    UserPromptSubmit/PostToolUse handler, or a warn-only PreToolUse one (HANDLER_EVENT class
-    PRETOOL_WARN_ONLY): a non-blocking systemMessage on exit 0, so no error on these paths can wedge
-    a session, trap a teammate, block a human prompt, or block a tool call. It prints and flushes
+    UserPromptSubmit/PostToolUse/PostToolUseFailure handler, a warn-only PreToolUse one (HANDLER_EVENT class
+    PRETOOL_WARN_ONLY) or a NOTE_ONLY_PRETOOL_MODES handler: a non-blocking systemMessage on exit 0, so no
+    error on these paths can wedge a session, trap a teammate, block a human prompt, block a warn-only tool
+    call, or turn a note-only check into a block. It prints and flushes
     the note and returns the exit code 0, so main returns it directly (a note constructor's call is
     only ever the direct value of a return). The flush keeps the note out of the buffer os._exit at the
     entry line would discard. A print or flush failure RAISES out of this leaf (the note-shape scan
@@ -39912,19 +41975,22 @@ def main(argv):
     # a Stop/SubagentStop handler: a hard exit-2 Stop path could re-fire on the forced continuation and
     # wedge the session (an error path keeps no loop bound and never consults the stop_hook_active
     # field of the payload), so a bad-argv Stop invocation WARNS on exit 0 like every other Stop error
-    # path (FIX 2). A bad-argv PreToolUse handler still fails closed (exit 2), save a warn-only one
-    # (HANDLER_EVENT class PRETOOL_WARN_ONLY, one of FAIL_OPEN_EVENTS), which WARNS on exit 0 too.
+    # path. A bad-argv PreToolUse handler still fails closed (exit 2), save a warn-only one (HANDLER_EVENT
+    # class PRETOOL_WARN_ONLY, one of FAIL_OPEN_EVENTS) or a note-only one (NOTE_ONLY_PRETOOL_MODES), which
+    # never blocks a call and so takes the fail-open posture throughout.
     mode = argv[0] if argv else None
     if mode not in HANDLERS:
         _stderr_note("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))))
         return 2
     handler_name = mode
-    is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS
+    is_note_only = handler_name in NOTE_ONLY_PRETOOL_MODES
+    is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS or is_note_only
     # Child exit status: with SIGCHLD ignored, a handler's failed git or other child would read as a
-    # success. A fail-closed mode (a PreToolUse one not classed PRETOOL_WARN_ONLY) refuses (exit 2). A
-    # fail-open mode (a warn-only PreToolUse one included) must not exit 2 and must still run its
-    # handler (a stop guard's deliberate deny included), so it restores SIG_DFL for this one short-lived
-    # hook process, re-probes, and notes the restore; SIG_DFL is SIGCHLD's normal disposition,
+    # success. A PreToolUse mode refuses (exit 2, its fail-closed posture), except a warn-only one (classed
+    # PRETOOL_WARN_ONLY) or a note-only one, which never blocks and so takes the fail-open branch. A
+    # fail-open mode must not exit 2 and must still run its handler (a stop guard's deliberate deny
+    # included), so it restores SIG_DFL for this one short-lived hook process, re-probes, and notes the
+    # restore; SIG_DFL is SIGCHLD's normal disposition,
     # signal.signal also clears SA_NOCLDWAIT, and every spawn the fail-open handlers reach waits for its
     # child. If the re-probe still fails, it warns without running the handler.
     unobservable = _child_status_refusal()
@@ -39962,8 +42028,9 @@ def main(argv):
     # and any caller timer restored) before the stdout decision below is written; the stderr notes of
     # the unreadable-payload and handler-crash paths are written inside it, and both paths exit 2 even
     # when the deadline interrupts the note. A fail-open mode gets a window with no deadline, so its
-    # error posture is unchanged. Any other exception out of the window keeps the mode's posture too.
-    window = _DeadlineWindow(None if is_fail_open else PRETOOL_BUDGET_SECONDS)
+    # error posture is unchanged, except a note-only PreToolUse mode, whose deadline warns on exit 0. Any
+    # other exception out of the window keeps the mode's posture too.
+    window = _DeadlineWindow(None if is_fail_open and not is_note_only else PRETOOL_BUDGET_SECONDS)
     payload = None
     try:
         with window:
@@ -40020,6 +42087,13 @@ def main(argv):
     except _HookDeadline as exc:
         if exc.args[:1] != (window,):
             raise  # an enclosing window's deadline (an in-process caller's), not this call's
+        if is_fail_open:
+            # Only a note-only PreToolUse mode is fail-open with a deadline: its check never blocks a call,
+            # so neither does its deadline. The warn print raising loses the warning and keeps the 0.
+            try:
+                return _dispatcher_fail_open_warn(handler_name, "no decision within its deadline")
+            except BaseException:
+                return 0
         # Built inside a guard like the other diagnostics, so a message that cannot be built (a payload
         # whose encoding raises, a MemoryError) still leaves exit 2, with a fixed note in its place. A
         # window that ended at its entry on a SIGALRM already pending gets its own note: its budget did

@@ -55,8 +55,6 @@ re-reading the resulting source and confirming the intended change is present in
 own stdout, exit code, or narration of what it did. A successful process, a narrated or reported
 replacement, a zero-match conditional skip, or an exception raised before the write can each report success
 while leaving the file unchanged, so an applier's account of itself is not the evidence this rule requires.
-This is claims-rest-on-observation applied to an edit the author did not directly make: the changed source,
-not the applier's report, is the observation completion rests on.
 
 Where another tool parses the edited file, completion also rests on that tool's own parser, or the validator
 it names as authoritative, accepting the file as written, not on its self-test fixtures; else the edit is
