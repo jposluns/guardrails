@@ -5208,7 +5208,7 @@ expected-check-ids = [
 ]
 
 [[suite]]
-# The branch fold helper (tools/fold_onto_base.py): vectors H1 to H22 and Q10 in temporary
+# The branch fold helper (tools/fold_onto_base.py): vectors H1 to H27 and Q10 in temporary
 # repositories, then each listed mutant run against its own vector in a private sink. The helper
 # accepts --execution-report only after --self-test, so the row forwards it.
 id = "fold-onto-base-selftest"
@@ -5261,15 +5261,34 @@ expected-check-ids = [
   "fold/h20-recovery-collision-refused",
   "fold/h21-local-trunk-refused",
   "fold/h21-local-trunk-via-remote-head-refused",
+  "fold/h21-local-trunk-via-full-remote-head-refused",
   "fold/h21-twin-work-branch-folds",
   "fold/h22-tag-and-branch-ambiguous-refused",
   "fold/h22-local-origin-main-ambiguous-refused",
   "fold/h22-twin-full-ref-folds",
+  "fold/h23-protected-tilde-expression-cannot-evaluate",
+  "fold/h23-protected-caret-expression-cannot-evaluate",
+  "fold/h23-protected-peel-expression-cannot-evaluate",
+  "fold/h23-protected-commit-id-cannot-evaluate",
+  "fold/h23-twin-plain-name-work-branch-folds",
+  "fold/h24-ambiguous-tilde-expression-cannot-evaluate",
+  "fold/h24-ambiguous-peel-expression-cannot-evaluate",
+  "fold/h24-twin-full-ref-folds-onto-branch-base",
+  "fold/h25-undo-ambient-git-dir-restores-intended-repo",
+  "fold/h25-undo-ambient-common-dir-restores-intended-repo",
+  "fold/h25-twin-undo-clean-env-restores",
+  "fold/h26-twin-forged-graph-live",
+  "fold/h26-forged-commit-graph-ignored",
+  "fold/h27-twin-replace-graft-live",
+  "fold/h27-replace-graft-ignored",
   "cli/usage-and-unresolvable-exit-2",
   "cli/closed-git-subcommands",
   "cli/execution-report-alone-usage",
   "cli/execution-report-after-self-test-accepted",
+  "cli/execution-report-relative-path-usage",
   "cli/help-explains-options-exits-and-rewrite",
+  "cli/help-discloses-recovery-failure-residue",
+  "cli/help-discloses-expressions-undo-env-and-config",
   "mutant/parent-is-protected-tip",
   "mutant/tree-from-index",
   "mutant/swap-without-old-value",
@@ -5291,6 +5310,12 @@ expected-check-ids = [
   "mutant/recovery-ref-overwrites",
   "mutant/local-copy-allowed",
   "mutant/ambiguous-protected-allowed",
+  "mutant/expression-protected-accepted",
+  "mutant/expression-ambiguity-accepted",
+  "mutant/undo-obeys-ambient-git-dir",
+  "mutant/commit-graph-pin-dropped",
+  "mutant/replace-refs-honoured",
+  "mutant/execution-report-relative-accepted",
 ]
 
 [[suite]]
