@@ -188,7 +188,8 @@ DELIBERATE decision where the platform documents exit 2 as the block (the orches
 manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
-A note-only PreToolUse mode (NOTE_ONLY_PRETOOL_MODES), which never blocks a call, takes the Stop handlers'
+A note-only PreToolUse mode (NOTE_ONLY_PRETOOL_MODES), which never blocks a call on its own failure (its only
+blocking results are a miswired event and a deny the adopter explicitly opted into), takes the Stop handlers'
 posture on every one of these error paths instead: a non-blocking systemMessage warning on exit 0.
 A handler result whose exit code is not 0 or 2, or whose stderr text is neither a str nor None, is a
 handler crash with that same posture, and an exception's text in a diagnostic is built so that its own
@@ -37892,13 +37893,29 @@ def clock_inject_failure(data):
 # from its end to the last tool result (or the prompt that began the turn), and checks each assistant text
 # block in that span against the adopter's pattern. It is inert unless the adopter sets the pattern.
 #
+# OPT-IN REGISTRATION: the plugin's hooks.json does NOT register this mode (its manifest control carries
+# registration = "opt-in"), so an adopter who has not turned it on starts no process for it and pays nothing.
+# An adopter turns it on with two settings in a Claude Code settings file (.claude/settings.json, or
+# .claude/settings.local.json for one person): an env block setting AIQT_CONSOLE_PREFIX_RE, and a PreToolUse
+# hooks entry with matcher ".*" whose command is python3 -I, then the absolute path of this dispatcher in the
+# installed plugin (hooks/scripts/aiqt_hooks.py under the plugin directory), then console_prefix_pretool, with
+# timeout 10. Registered without the pattern it is off and allows silently, but each tool call still starts one
+# python3 process for it.
+#
 # Adopter settings, read from the hook process environment (for example the env block of the Claude Code
 # settings file): AIQT_CONSOLE_PREFIX_RE, a Python regular expression matched at the start of each text block
-# with leading whitespace removed (unset or empty: the mode is off and allows silently); and
-# AIQT_CONSOLE_PREFIX_POSTURE, "warn" (the default) or "deny". Any other posture value warns, and the note
-# names the value it did not accept.
+# with leading whitespace removed (unset or empty: the mode is off and allows silently; one that matches empty
+# text is refused, since it would pass every block); and AIQT_CONSOLE_PREFIX_POSTURE, "warn" (the default) or
+# "deny". Any other posture value warns, and the note names the value it did not accept. The transcript must lie
+# in the platform transcript directory, projects/ under CLAUDE_CONFIG_DIR when that is set, or under ~/.claude
+# otherwise; a transcript_path anywhere else is not read.
 _CONSOLE_PREFIX_PATTERN_ENV = "AIQT_CONSOLE_PREFIX_RE"
 _CONSOLE_PREFIX_POSTURE_ENV = "AIQT_CONSOLE_PREFIX_POSTURE"
+_CONSOLE_PREFIX_CONFIG_ENV = "CLAUDE_CONFIG_DIR"
+# How the transcript is opened: read only, never blocking on a FIFO or device, never following a symlink in
+# the final path component, and not inherited by a child.
+_CONSOLE_PREFIX_OPEN_FLAGS = (os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+                              | getattr(os, "O_CLOEXEC", 0))
 # The most bytes read from the end of the transcript. A span longer than this is checked as far as the read
 # reaches, and the note says the start of the span was not reached.
 _CONSOLE_PREFIX_TAIL_BYTES = 1048576
@@ -37914,13 +37931,18 @@ class _ConsolePrefixUnreadable(Exception):
     """The transcript tail could not be read as transcript records; its one argument says why."""
 
 
+def _console_prefix_is_off(raw):
+    """True when the adopter has not set a pattern: the mode is off and allows silently, reading nothing."""
+    return not raw
+
+
 def _console_prefix_config(environ):
     """(pattern or None, posture, problem) from the adopter's environment: pattern None means the mode is
     off; problem is None, or a sentence naming a setting that could not be used (a pattern that does not
-    compile or is too long, which turns the check off with a note, or a posture value other than warn or
-    deny, which warns)."""
+    compile, is too long or matches empty text, each of which means the check cannot be evaluated and is
+    reported with a note, whatever the posture; or a posture value other than warn or deny, which warns)."""
     raw = environ.get(_CONSOLE_PREFIX_PATTERN_ENV, "")
-    if not raw:
+    if _console_prefix_is_off(raw):
         return None, "warn", None
     posture_raw = environ.get(_CONSOLE_PREFIX_POSTURE_ENV, "")
     posture, problem = "warn", None
@@ -37936,7 +37958,15 @@ def _console_prefix_config(environ):
         pattern = re.compile(raw)
     except (re.error, RecursionError, OverflowError, ValueError) as exc:
         return None, posture, "{} does not compile ({})".format(_CONSOLE_PREFIX_PATTERN_ENV, _exception_text(exc))
+    if _console_prefix_matches_empty(pattern):
+        return None, posture, ("{} matches empty text, so it would pass every block; the check cannot be "
+                               "evaluated with it".format(_CONSOLE_PREFIX_PATTERN_ENV))
     return pattern, posture, problem
+
+
+def _console_prefix_matches_empty(pattern):
+    """True when the pattern matches at the start of empty text, so any block, stamped or not, would pass."""
+    return pattern.match("") is not None
 
 
 def _console_prefix_read_tail(path, limit):
@@ -37944,10 +37974,10 @@ def _console_prefix_read_tail(path, limit):
     read started after the first byte. Opened without following a final symlink and without blocking, so a
     FIFO or device cannot hold the hook; anything but a regular file raises _ConsolePrefixUnreadable, and an
     open or read failure raises OSError. The descriptor is closed exactly once on every path."""
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    fd = os.open(path, _CONSOLE_PREFIX_OPEN_FLAGS)
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
+        if not _console_prefix_is_regular(info.st_mode):
             raise _ConsolePrefixUnreadable("the transcript path is not a regular file")
         start = max(0, info.st_size - limit)
         os.lseek(fd, start, os.SEEK_SET)
@@ -37964,13 +37994,28 @@ def _console_prefix_read_tail(path, limit):
         os.close(fd)
 
 
+def _console_prefix_is_regular(mode):
+    """True for a regular file's st_mode: a FIFO, device or directory is never read as a transcript."""
+    return stat.S_ISREG(mode)
+
+
 def _console_prefix_lines(data, truncated):
-    """The complete lines of the tail read, oldest first: when the read started inside the file its first
-    line may be a fragment of a longer record, so it is dropped."""
+    """(lines, unfinished): the complete lines of the tail read, oldest first, and whether an unfinished last
+    line was set aside. When the read started inside the file its first line may be a fragment of a longer
+    record, so it is dropped. A last line with no newline after it that does not parse as JSON is a record
+    still being written: it is set aside, so the complete records before it are judged, and the caller's note
+    says it was not checked. A last line with no newline that does parse is a complete record and is kept."""
     lines = data.split(b"\n")
     if truncated:
         lines = lines[1:]
-    return [line for line in lines if line.strip()]
+    unfinished = False
+    if lines and lines[-1].strip() and not data.endswith(b"\n"):
+        try:
+            json.loads(lines[-1])
+        except (ValueError, RecursionError):
+            lines = lines[:-1]
+            unfinished = True
+    return [line for line in lines if line.strip()], unfinished
 
 
 def _console_prefix_record(line):
@@ -38021,12 +38066,50 @@ def _console_prefix_span(lines):
             block.get("text") for block in reversed(content)
             if isinstance(block, dict) and block.get("type") == "text"]
         for text in blocks:
-            if not isinstance(text, str):
-                raise _ConsolePrefixUnreadable("an assistant text block carries no text string")
+            _console_prefix_text_string(text)
             if text.strip():
                 texts.append(text)
     texts.reverse()
     return texts, False
+
+
+def _console_prefix_text_string(text):
+    """_ConsolePrefixUnreadable unless an assistant text block's text is a string."""
+    if not isinstance(text, str):
+        raise _ConsolePrefixUnreadable("an assistant text block carries no text string")
+
+
+def _console_prefix_is_absolute(path):
+    """True when the payload's transcript_path is absolute, so it never resolves against the hook's cwd."""
+    return os.path.isabs(path)
+
+
+def _console_prefix_transcript_root(environ):
+    """The platform transcript directory, resolved: projects/ under CLAUDE_CONFIG_DIR when that is a non-empty
+    absolute path, else under ~/.claude. _ConsolePrefixUnreadable when neither can be established."""
+    base = environ.get(_CONSOLE_PREFIX_CONFIG_ENV, "")
+    if not (base and os.path.isabs(base) and "\x00" not in base):
+        home = os.path.expanduser("~")
+        if not os.path.isabs(home) or "\x00" in home:
+            raise _ConsolePrefixUnreadable("the platform transcript directory cannot be established (no "
+                                           "absolute {} or home directory)".format(_CONSOLE_PREFIX_CONFIG_ENV))
+        base = os.path.join(home, ".claude")
+    return os.path.realpath(os.path.join(base, "projects"))
+
+
+def _console_prefix_confined(path, environ):
+    """The transcript path to open: its directory resolved (every symlink and '..' in it), joined to its final
+    component, which must lie inside the platform transcript directory; _ConsolePrefixUnreadable otherwise. The
+    final component is left unresolved, so the O_NOFOLLOW open still refuses a symlink there."""
+    root = _console_prefix_transcript_root(environ)
+    head, name = os.path.split(path)
+    if name in ("", ".", ".."):
+        raise _ConsolePrefixUnreadable("the payload's transcript_path does not name a file")
+    candidate = os.path.join(os.path.realpath(head), name)
+    if os.path.commonpath([root, candidate]) != root or candidate == root:
+        raise _ConsolePrefixUnreadable("the payload's transcript_path lies outside the platform transcript "
+                                       "directory, so it was not read")
+    return candidate
 
 
 def _console_prefix_matches(pattern, text):
@@ -38044,42 +38127,53 @@ def console_prefix_pretool(data):
     AIQT_CONSOLE_PREFIX_RE: at each tool call it reads at most _CONSOLE_PREFIX_TAIL_BYTES from the end of the
     payload's transcript_path, walks back to the last user record (a tool result, or the prompt that began
     the turn), and checks that each non-blank assistant text block written since starts with the pattern.
-    An unprefixed block allows with a note naming how many blocks missed it and how the first one begins,
-    or, where the adopter set AIQT_CONSOLE_PREFIX_POSTURE=deny, denies the tool call with the same reason.
+    An unprefixed block allows with a note naming how many blocks missed it and where the first one sits in
+    the span (never its text), or, where the adopter set AIQT_CONSOLE_PREFIX_POSTURE=deny, denies the tool call
+    with the same reason. OPT-IN REGISTRATION: the plugin's hooks.json does not register this mode; the adopter
+    registers it (see the comment above _CONSOLE_PREFIX_PATTERN_ENV), so it costs nothing until then.
 
-    It never blocks on its own failure: a transcript_path that is missing, empty, not a string or relative,
-    a transcript that cannot be opened or is not a regular file, a tail holding no complete record, a line
-    that is not a JSON object, a record with no readable content, and a pattern that does not compile or is
-    too long each allow with a note saying the check did not run; main() turns every error path and the
-    deadline into a warning on exit 0 (NOTE_ONLY_PRETOOL_MODES). The adopter's deny is the one blocking
-    result, a deliberate decision on a span it read in full or in part.
+    The off switch is read first: with no pattern set it allows silently, whatever the payload, and reads
+    nothing. It never blocks on its own failure: a transcript_path that is missing, empty, not a string,
+    relative or outside the platform transcript directory, a transcript that cannot be opened, is a symlink
+    or is not a regular file, a tail holding no complete record, a line that is not a JSON object (except an
+    unfinished last line, which is set aside with a note so the complete records before it are judged), a
+    record with no readable content, and a pattern that does not compile, is too long or matches empty text
+    each allow with a note saying the check did not run or could not be evaluated, under either posture;
+    main() turns every error path and the deadline into a warning on exit 0 (NOTE_ONLY_PRETOOL_MODES). With
+    the pattern set, a payload naming another event hard-blocks, the sibling convention for a miswired hook.
+    The adopter's deny is the one other blocking result, a deliberate decision on a span it read in full or
+    in part.
 
     HONEST RESIDUAL: text with no following tool call (the end of a turn) is never seen here and is left to
     a turn-end check. Whether the platform has already written the current assistant message's text to the
-    transcript when PreToolUse fires is the platform's behaviour, not checked here: text it has not yet
-    written is seen at the next tool call or not at all. The transcript format (JSON lines whose user and
-    assistant records carry message.content) is read as Claude Code writes it; another layout reads as
-    unreadable and notes. Only text blocks count: text inside a tool input, a thinking block, and a sidechain
-    record are not checked. A span longer than the read window is checked as far as the window reaches, and
-    the note says so. The pattern runs on at most _CONSOLE_PREFIX_MATCH_CHARS characters of each block; a
-    pattern slow enough to pass the deadline ends in main()'s warning, never a block."""
+    transcript when PreToolUse fires is the platform's behaviour, not checked here. Text it has not yet
+    written is seen only if a later tool call of the same assistant message runs this check before any tool
+    result is written; once a tool result follows that text, the text lies before the boundary and is never
+    checked. The transcript format (JSON lines whose user and assistant records carry message.content) is
+    read as Claude Code writes it; another layout reads as unreadable and notes. Only text blocks count: text
+    inside a tool input, a thinking block, and a sidechain record are not checked. A span longer than the
+    read window is checked as far as the window reaches, and the note says so. The pattern runs on at most
+    _CONSOLE_PREFIX_MATCH_CHARS characters of each block; a pattern slow enough to pass the deadline ends in
+    main()'s warning, never a block."""
+    pattern, posture, problem = _console_prefix_config(os.environ)
+    if pattern is None and problem is None:
+        return _allow()  # the adopter has not turned the check on: nothing is read and nothing blocks
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: console_prefix_pretool wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
-    pattern, posture, problem = _console_prefix_config(os.environ)
     if pattern is None:
-        if problem is None:
-            return _allow()  # the adopter has not turned the check on
-        return _allow_note("AIQT rule tstamp: the console prefix check did not run: {}.".format(problem))
+        return _allow_note("AIQT rule tstamp: the console prefix check did not run (cannot evaluate): {}."
+                           .format(problem))
     path = data.get("transcript_path")
     try:
-        if not isinstance(path, str) or not path or "\x00" in path or not os.path.isabs(path):
+        if not isinstance(path, str) or not path or "\x00" in path or not _console_prefix_is_absolute(path):
             raise _ConsolePrefixUnreadable("the payload's transcript_path is {}".format(
                 "missing" if "transcript_path" not in data else
                 "not an absolute path" if isinstance(path, str) and path and "\x00" not in path else
                 "empty" if path == "" else "not a usable string ({})".format(_orch_json_kind(path))))
+        path = _console_prefix_confined(path, os.environ)
         tail, truncated = _console_prefix_read_tail(path, _CONSOLE_PREFIX_TAIL_BYTES)
-        lines = _console_prefix_lines(tail, truncated)
+        lines, unfinished = _console_prefix_lines(tail, truncated)
         if not lines and truncated:
             raise _ConsolePrefixUnreadable("the last {} bytes of the transcript hold no complete record".format(
                 _CONSOLE_PREFIX_TAIL_BYTES))
@@ -38089,10 +38183,12 @@ def console_prefix_pretool(data):
         return _allow_note("AIQT rule tstamp: the console prefix check did not run ({}); allowing the call. "
                            "{}".format(detail, _CONSOLE_PREFIX_RESIDUAL))
     checked = _console_prefix_checked(texts)
-    missed = [text for text in checked if not _console_prefix_matches(pattern, text)]
+    missed = [index for index, text in enumerate(checked, 1) if not _console_prefix_matches(pattern, text)]
     partial = "" if reached or not truncated else (
         " The start of the span lies before the last {} bytes of the transcript, so earlier text in it was "
         "not checked.".format(_CONSOLE_PREFIX_TAIL_BYTES))
+    if unfinished:
+        partial += " The last transcript line was still being written and was not checked."
     setting = "" if problem is None else " ({})".format(problem)
     if not missed:
         if partial:
@@ -38101,9 +38197,9 @@ def console_prefix_pretool(data):
             return _allow_note("AIQT rule tstamp: console prefix check passed{}.".format(setting))
         return _allow()
     reason = ("AIQT rule tstamp: {} of {} assistant text block(s) written since the last tool result do not "
-              "start with the required console prefix (the {} pattern); the first begins {!r}. Start every "
-              "console message with the prefix.{} {}".format(
-                  len(missed), len(checked), _CONSOLE_PREFIX_PATTERN_ENV, missed[0].lstrip()[:60], partial,
+              "start with the required console prefix (the {} pattern); the first is block {} of the span. "
+              "Start every console message with the prefix.{} {}".format(
+                  len(missed), len(checked), _CONSOLE_PREFIX_PATTERN_ENV, missed[0], partial,
                   _CONSOLE_PREFIX_RESIDUAL))
     if posture == "deny":
         return _deny(reason, "AIQT guardrail: denied a tool call that followed console text without its "
@@ -38713,7 +38809,8 @@ def main(argv):
     # wedge the session (an error path keeps no loop bound and never consults the stop_hook_active
     # field of the payload), so a bad-argv Stop invocation WARNS on exit 0 like every other Stop error
     # path. A bad-argv PreToolUse handler still fails closed (exit 2), except a note-only one
-    # (NOTE_ONLY_PRETOOL_MODES), which never blocks a call and so takes the fail-open posture throughout.
+    # (NOTE_ONLY_PRETOOL_MODES), which never blocks a call on its own failure and so takes the fail-open
+    # posture throughout.
     mode = argv[0] if argv else None
     if mode not in HANDLERS:
         _stderr_note("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))))
@@ -38820,8 +38917,8 @@ def main(argv):
         if exc.args[:1] != (window,):
             raise  # an enclosing window's deadline (an in-process caller's), not this call's
         if is_fail_open:
-            # Only a note-only PreToolUse mode is fail-open with a deadline: its check never blocks a call,
-            # so neither does its deadline. The warn print raising loses the warning and keeps the 0.
+            # Only a note-only PreToolUse mode is fail-open with a deadline: its check never blocks a call on
+            # its own failure, so neither does its deadline. The warn print raising loses the warning and keeps the 0.
             try:
                 return _dispatcher_fail_open_warn(handler_name, "no decision within its deadline")
             except BaseException:

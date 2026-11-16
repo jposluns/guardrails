@@ -3811,13 +3811,14 @@ def _ie_dispatch_failures():
 
 
 @contextlib.contextmanager
-def _cp_environ(pattern, posture=None):
-    """While the block runs, the console prefix settings in os.environ are exactly pattern and posture (None
-    removes one); the values before are put back after."""
-    names = (aiqt_hooks._CONSOLE_PREFIX_PATTERN_ENV, aiqt_hooks._CONSOLE_PREFIX_POSTURE_ENV)
+def _cp_environ(pattern, posture=None, config=None):
+    """While the block runs, the console prefix settings in os.environ are exactly pattern and posture, and
+    CLAUDE_CONFIG_DIR is config (None removes one); the values before are put back after."""
+    names = (aiqt_hooks._CONSOLE_PREFIX_PATTERN_ENV, aiqt_hooks._CONSOLE_PREFIX_POSTURE_ENV,
+             aiqt_hooks._CONSOLE_PREFIX_CONFIG_ENV)
     saved = {name: os.environ.get(name) for name in names}
     try:
-        for name, value in zip(names, (pattern, posture)):
+        for name, value in zip(names, (pattern, posture, config)):
             if value is None:
                 os.environ.pop(name, None)
             else:
@@ -3860,27 +3861,39 @@ def _test_console_prefix(failures, tmp):
     under a mutant with the check that decides it removed (patched in through _cp_patched) must give a
     different outcome, so the row is red without that check. The rows: stamped, unstamped (warn and deny),
     no text, multiple blocks, malformed, oversized (the bounded read and a tail with no complete record),
-    missing file, the mode off, a bad pattern, a bad posture, and the wrong event."""
+    missing file, the mode off (reading nothing, a missing or wrong event included), a pattern that matches
+    empty text, a final symlink, a FIFO, a relative path, a path outside the transcript directory, the
+    4096-character match cap, a non-string text, an unfinished last line, a bad pattern, a bad posture, and
+    the wrong event. The transcripts lie in projects/ under a synthetic CLAUDE_CONFIG_DIR, the platform
+    transcript directory the handler confines its read to."""
     handler = aiqt_hooks.console_prefix_pretool
-    root = tmp / "console-prefix"
+    config = tmp / "console-prefix"
+    root = config / "projects" / "session"
     root.mkdir(parents=True, exist_ok=True)
+    outside = tmp / "console-prefix-outside"
+    outside.mkdir(parents=True, exist_ok=True)
     tool_result = _cp_line("user", [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}])
     tool_use = _cp_line("assistant", [{"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "ls"}}])
 
-    def transcript(name, text):
-        path = root / name
+    def transcript(name, text, where=root):
+        path = where / name
         path.write_text(text, encoding="utf-8")
         return str(path)
 
     def payload(path, event=aiqt_hooks.PRETOOL):
-        data = {"hook_event_name": event, "tool_name": "Bash", "tool_input": {"command": "ls"}}
+        data = {"tool_name": "Bash", "tool_input": {"command": "ls"}}
+        if event is not None:
+            data["hook_event_name"] = event
         if path is not None:
             data["transcript_path"] = path
         return data
 
     def outcome(path, pattern=_CP_PATTERN, posture=None, event=aiqt_hooks.PRETOOL):
-        with _cp_environ(pattern, posture):
-            code, stdout_obj, _stderr = handler(payload(path, event))
+        try:
+            with _cp_environ(pattern, posture, str(config)):
+                code, stdout_obj, _stderr = handler(payload(path, event))
+        except Exception as exc:  # a mutant may crash; the real handler never may, and "error" fails its row
+            return "error", "{}: {}".format(type(exc).__name__, exc)
         reduced = "hard-block" if code == 2 else _reduce_result(code, stdout_obj)
         note = ""
         if isinstance(stdout_obj, dict):
@@ -3921,6 +3934,50 @@ def _test_console_prefix(failures, tmp):
         "assistant", [{"type": "text", "text": _CP_STAMPED + "y" * (window + 4096)}]))
     missing = str(root / "absent.jsonl")
     unprefixed_note = "1 of 1 assistant text block(s)"
+    # A final symlink to the unstamped transcript, read only with O_NOFOLLOW removed.
+    final_link = root / "final-link.jsonl"
+    if not os.path.lexists(final_link):
+        os.symlink(unstamped, final_link)
+    # A FIFO: opened without blocking, it reads as empty, so only the regular-file check refuses it.
+    fifo = root / "fifo.jsonl"
+    if hasattr(os, "mkfifo") and not os.path.lexists(fifo):
+        os.mkfifo(fifo)
+    # The unstamped transcript named relative to the cwd: it resolves only with the absolute-path check removed.
+    relative = os.path.relpath(unstamped)
+    # A transcript outside the transcript directory, reached directly, through '..' and through a symlinked
+    # directory inside it.
+    elsewhere = transcript("elsewhere.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}]) + tool_use, where=outside)
+    dotdot = os.path.join(str(root), "..", "..", "..", outside.name, "elsewhere.jsonl")
+    link_dir = root / "link-dir"
+    if not os.path.lexists(link_dir):
+        os.symlink(outside, link_dir)
+    via_link = str(link_dir / "elsewhere.jsonl")
+    # The prefix appears only past the 4096-character match cap (a literal size, so a raised cap fails the row).
+    far = transcript("far.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": "x" * 5000 + "STAMP"}]) + tool_use)
+    near = transcript("near.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": "x" * 100 + "STAMP"}]) + tool_use)
+    capped = r"[\s\S]*STAMP"
+    non_string = transcript("non-string.jsonl", tool_result + _cp_line("assistant", [{"type": "text", "text": 5}])
+                            + tool_use)
+    # Complete records, then a last line still being written (no newline, not yet JSON).
+    unfinished_tail = '{"type": "assistant", "message": {"con'
+    unfinished = transcript("unfinished.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}]) + unfinished_tail)
+    unfinished_ok = transcript("unfinished-ok.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_STAMPED}]) + unfinished_tail)
+    no_newline = transcript("no-newline.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}]).rstrip("\n"))
+
+    def pinned_lines(data, truncated):
+        """The pinned reader: only the first fragment dropped, an unfinished last line kept."""
+        lines = data.split(b"\n")
+        return [line for line in (lines[1:] if truncated else lines) if line.strip()], False
+
+    def unconfined(path, _environ):
+        return path
+    deny = {"posture": "deny"}
 
     rows = (
         ("(cp-stamped) a stamped block after the last tool result allows silently", stamped, {}, "allow", "",
@@ -3944,16 +4001,64 @@ def _test_console_prefix(failures, tmp):
          ("_console_prefix_is_boundary", lambda record: False), "allow-note"),
         ("(cp-oversized-line) a tail holding no complete record notes", one_line, {"posture": "deny"},
          "allow-note", "hold no complete record",
-         ("_console_prefix_lines", lambda data, truncated: [line for line in data.split(b"\n") if line]),
+         ("_console_prefix_lines", lambda data, truncated: ([line for line in data.split(b"\n") if line], False)),
          "allow-note"),
         ("(cp-missing) a missing transcript notes and never blocks", missing, {"posture": "deny"},
          "allow-note", "did not run", ("_console_prefix_read_tail", swallow_missing), "allow"),
+        # The off switch itself is removed (not the whole settings reader): the unset pattern then reads as an
+        # empty one, which matches empty text, so the mutant notes instead of allowing silently.
         ("(cp-off) with no pattern set the mode is off, an unstamped transcript included", unstamped,
-         {"pattern": None}, "allow", "",
-         ("_console_prefix_config", lambda env: (re.compile(_CP_PATTERN), "warn", None)), "allow-note"),
+         {"pattern": None}, "allow", "", ("_console_prefix_is_off", lambda raw: False), "allow-note"),
+        ("(cp-off-unread) with no pattern set a missing transcript is never opened and nothing notes", missing,
+         {"pattern": None, "posture": "deny"}, "allow", "", ("_console_prefix_is_off", lambda raw: False),
+         "allow-note"),
+        ("(cp-off-no-event) with no pattern set a payload naming no event allows silently", stamped,
+         {"pattern": None, "event": None}, "allow", "", ("_console_prefix_is_off", lambda raw: False),
+         "hard-block"),
+        ("(cp-off-wrong-event) with no pattern set a PostToolUse payload allows silently", stamped,
+         {"pattern": None, "event": "PostToolUse"}, "allow", "", ("_console_prefix_is_off", lambda raw: False),
+         "hard-block"),
         ("(cp-no-path) a payload with no transcript_path notes", None, {}, "allow-note",
          "transcript_path is missing", ("_console_prefix_config", lambda env: (None, "warn", None)), "allow"),
+        ("(cp-empty-star) a pattern matching empty text cannot be evaluated, noted under deny", unstamped,
+         {"pattern": "x*", "posture": "deny"}, "allow-note", "matches empty text",
+         ("_console_prefix_matches_empty", lambda pattern: False), "allow"),
+        ("(cp-empty-alt) an alternation with an empty branch cannot be evaluated", unstamped,
+         {"pattern": r"\[S\]|", "posture": "deny"}, "allow-note", "cannot evaluate",
+         ("_console_prefix_matches_empty", lambda pattern: False), "allow"),
+        ("(cp-empty-look) an empty lookahead cannot be evaluated", unstamped,
+         {"pattern": "(?=)", "posture": "deny"}, "allow-note", "matches empty text",
+         ("_console_prefix_matches_empty", lambda pattern: False), "allow"),
+        ("(cp-symlink) a symlink as the final component is not followed, noted under deny", str(final_link), deny,
+         "allow-note", "did not run",
+         ("_CONSOLE_PREFIX_OPEN_FLAGS", aiqt_hooks._CONSOLE_PREFIX_OPEN_FLAGS & ~getattr(os, "O_NOFOLLOW", 0)),
+         "deny"),
+        ("(cp-relative) a relative transcript_path is never resolved against the cwd", relative, deny,
+         "allow-note", "not an absolute path", ("_console_prefix_is_absolute", lambda path: True), "deny"),
+        ("(cp-outside) a transcript outside the transcript directory is not read", elsewhere, deny,
+         "allow-note", "outside the platform transcript directory", ("_console_prefix_confined", unconfined),
+         "deny"),
+        ("(cp-outside-dotdot) '..' out of the transcript directory is not followed", dotdot, deny,
+         "allow-note", "outside the platform transcript directory", ("_console_prefix_confined", unconfined),
+         "deny"),
+        ("(cp-outside-link) a symlinked directory out of the transcript directory is not followed", via_link,
+         deny, "allow-note", "outside the platform transcript directory",
+         ("_console_prefix_confined", unconfined), "deny"),
+        ("(cp-match-cap) the pattern sees only the first 4096 characters of a block", far,
+         {"pattern": capped}, "allow-note", unprefixed_note, ("_CONSOLE_PREFIX_MATCH_CHARS", 1 << 40), "allow"),
+        ("(cp-non-string) a text block whose text is not a string notes, never crashes", non_string, deny,
+         "allow-note", "carries no text string", ("_console_prefix_text_string", lambda text: None), "error"),
+        ("(cp-unfinished) the complete records before an unfinished last line are judged", unfinished, deny,
+         "deny", "still being written", ("_console_prefix_lines", pinned_lines), "allow-note"),
+        ("(cp-unfinished-pass) a stamped span before an unfinished last line passes with a note", unfinished_ok,
+         deny, "allow-note", "still being written", ("_console_prefix_lines", pinned_lines), "allow-note"),
     )
+    if hasattr(os, "mkfifo"):
+        # Without the regular-file check a FIFO still allows, but only because its seek fails (a different
+        # note): inside the transcript directory no seekable non-regular file can be made without privilege.
+        rows += (("(cp-fifo) a FIFO as the transcript is refused as not a regular file, noted under deny", str(fifo),
+                  deny, "allow-note", "not a regular file", ("_console_prefix_is_regular", lambda mode: True),
+                  "allow-note"),)
     for label, path, settings, want, want_text, (mutant_name, mutant), flipped_want in rows:
         got, note = outcome(path, **settings)
         if got != want or want_text not in note:
@@ -3968,6 +4073,34 @@ def _test_console_prefix(failures, tmp):
             failures.append("{}: the mutant of {} must give {}, got {}".format(
                 label, mutant_name, flipped_want, flipped))
 
+    # (cp-no-quote) the note counts and places the missed block but never quotes the transcript's text.
+    got, note = outcome(unstamped)
+    if got != "allow-note" or _CP_UNSTAMPED in note or "block 1 of the span" not in note:
+        failures.append("(cp-no-quote) expected a note placing the block without its text, got {} with {!r}"
+                        .format(got, note))
+    # Passing twins: a prefix inside the match cap passes, a complete last line with no newline is judged,
+    # and a transcript inside the directory reached through no symlink is read.
+    for label, path, settings, want in (
+            ("(cp-match-cap-twin) a prefix inside the cap passes", near, {"pattern": capped}, "allow"),
+            ("(cp-no-newline-twin) a complete last line with no newline is judged", no_newline, deny, "deny"),
+            ("(cp-inside-twin) a transcript inside the directory is read and denied", unstamped, deny, "deny")):
+        got, note = outcome(path, **settings)
+        if got != want:
+            failures.append("{}: expected {}, got {} with {!r}".format(label, want, got, note))
+    # (cp-off-reads-nothing) while off the transcript is never opened; the same payload with the pattern set
+    # opens it once.
+    opened = []
+
+    def counting(path, limit):
+        opened.append(path)
+        return real_read(path, limit)
+    with _cp_patched("_console_prefix_read_tail", counting):
+        outcome(unstamped, pattern=None)
+        off_reads = len(opened)
+        outcome(unstamped)
+    if off_reads != 0 or len(opened) != 1:
+        failures.append("(cp-off-reads-nothing) expected no read while off and one read when on, got {} and {}"
+                        .format(off_reads, len(opened) - off_reads))
     # (cp-oversized-bound) the read takes at most the window from the end of an oversized transcript, and is
     # red with the bound removed.
     reads = []
