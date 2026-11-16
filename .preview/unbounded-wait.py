@@ -1774,8 +1774,9 @@ def _self_test():
             self.assertEqual((rc, err), (0, b""))
             out.decode("ascii")
 
-        # round 1 QA regressions, one per finding
-        def test_r1_01_leading_redirection(self):
+        # regression tests for loop detection: redirections, timeout wrappers, counters, date calls, argv, the
+        # public name, scan cost, split words, oversized input, case in a substitution and read-loop sense
+        def test_leading_redirection(self):
             for c in ("until test -f ready; do >/dev/null sleep .01; done", "until test -f r; do >log sleep 1; done",
                       "until test -f r; do 2>/dev/null >x </dev/null sleep 1; done"):
                 self.assertDeny(c)
@@ -1783,7 +1784,7 @@ def _self_test():
             # a redirection before `while` makes it an ordinary command name (bash rejects the rest): no loop
             self.assertAllow("2>/dev/null until test -f ready; do sleep 1; done")
 
-        def test_r1_02_timeout_wrapped_sleep(self):
+        def test_timeout_wrapped_sleep(self):
             for c in ("until test -f ready; do timeout 1 sleep .01; done",
                       "until test -f r; do timeout -s KILL -k 2 1 sleep 1; done",
                       "until test -f r; do timeout --preserve-status --kill-after=2 1 sleep 1; done",
@@ -1798,7 +1799,7 @@ def _self_test():
             finally:
                 shutil.rmtree(root)
 
-        def test_r1_03_counter_updates(self):
+        def test_counter_updates(self):
             for c in ("n=1; while [ \"$n\" != 3 ]; do let n+=1; sleep .01; done; printf '%s' \"$n\"",
                       "n=0; while [[ $n < 10 ]]; do sleep 1; n=$(expr $n + 1); done",
                       "n=0; until [ $n = 9 ]; do sleep 1; n=`expr $n + 1`; done",
@@ -1806,14 +1807,14 @@ def _self_test():
                 self.assertAllow(c)
             self.assertDeny("while [ \"$n\" != 3 ]; do sleep 1; done")
 
-        def test_r1_04_date_options(self):
+        def test_date_options(self):
             for c in ("deadline=$(date -d \"+1 second\" +%s); while [[ $(date -u +%s) < $deadline ]]; do sleep .01; "
                       "done", "until grep -q X f || [ \"$(date --utc '+%s')\" -gt 9 ]; do sleep 5; done",
                       "until grep -q X f || [ \"$(date -u +%s%N)\" = 9 ]; do sleep 5; done"):
                 self.assertAllow(c)
             self.assertDeny("until [ \"$(date -u +%H)\" = 09 ]; do sleep 60; done")  # not an epoch call
 
-        def test_r1_05_unsupported_argv(self):
+        def test_unsupported_argv(self):
             for extra in (["--bad"], ["--self-test", "extra"], ["-x"], [""]):
                 p = subprocess.run([sys.executable, "-I", "-S", "-B", here] + extra, input=payload_bytes(loop1),
                                    capture_output=True, env={"LC_ALL": "C"}, timeout=30)
@@ -1833,7 +1834,7 @@ def _self_test():
             finally:
                 g["_read_payload"], g["_is_worker"], sys.stdout = old_read, old_worker, old_out
 
-        def test_r1_06_public_name(self):
+        def test_public_name(self):
             src = open(here).read()
             self.assertNotIn("G" + str(26), src)
             self.assertTrue(self.assertDeny(loop1).startswith("Blocked (unbounded-wait): "))
@@ -1842,7 +1843,7 @@ def _self_test():
             for name in ("ORCH_" + "WORKER", "ORCH_" + "VERIFY_OWNER", "AIQT_" + "HOOKS_WORKER"):
                 self.assertNotIn(name, doc)
 
-        def test_r1_07_nested_conditions_examined_once(self):
+        def test_nested_conditions_examined_once(self):
             g, calls = globals(), [0]
             real = g["_args"]
 
@@ -1853,7 +1854,7 @@ def _self_test():
             try:
                 for k in (10, 650):
                     calls[0] = 0
-                    # the finding's shape (650 deep stays under 4000 tokens): no literal probe path, so no stat
+                    # the deeply nested shape (650 deep stays under 4000 tokens): no literal probe path, so no stat
                     # call ends the scan early. The outermost condition holds 2k - 1 command words (the sleep, and
                     # each inner body's `:` and `done`); each nested condition repeats a suffix of them, so a
                     # rescan examines about k * k words, examining each once exactly 2k - 1.
@@ -1863,29 +1864,30 @@ def _self_test():
             finally:
                 g["_args"] = real
 
-        def test_r1_08_split_word_sleep(self):
+        def test_split_word_sleep(self):
             for c in ('until test -f r; do sl""eep 1; done', "until test -f r; do sl''eep 1; done",
                       "until test -f r; do sl\\\neep 1; done", "until test -f r; do s\\leep 1; done"):
                 self.assertDeny(c)
 
-        def test_r1_09_oversized_fails_open_whole(self):
+        def test_oversized_fails_open_whole(self):
             self.assertAllow("until test -f ready; do sleep 1; done; " + " " * 65536 + "# wait-ok: deliberate watcher")
             self.assertAllow(loop1 + "; echo " + chr(233) * 33000)  # under 64 Ki characters, over 64 KiB of UTF-8
             self.assertDeny(loop1 + "; echo " + chr(233) * 100)
 
-        def test_r1_10_case_in_substitution_followed(self):
+        def test_case_in_substitution_followed(self):
             self.assertDeny('until grep -q X "$(case a in (a) echo f;; esac)"; do sleep 5; done')
             self.assertAllow("case a in a) " + loop1 + ";; esac")
 
-        def test_r1_11_read_loop_sense(self):
+        def test_read_loop_sense(self):
             for c in ("while ! read l; do sleep 1; done < f", "until read l; do sleep 1; done < f",
                       "while ! IFS= read -r l; do sleep 1; done < f"):
                 self.assertDeny(c)
             for c in ("while read l; do sleep 1; done < f", "until ! read l; do sleep 1; done < f"):
                 self.assertAllow(c)
 
-        # round 2 QA regressions, one per finding
-        def test_r2_01_argument_spans_read_once(self):
+        # regression tests for linear argument scanning, redirections among wrapper words, wrappers, whole read
+        # conditions and epoch clocks
+        def test_argument_spans_read_once(self):
             g, read = globals(), [0]
             real = g["_args"]
 
@@ -1904,7 +1906,7 @@ def _self_test():
             finally:
                 g["_args"] = real
 
-        def test_r2_02_redirections_among_wrapper_words(self):
+        def test_redirections_among_wrapper_words(self):
             self.assertDeny("until test -f ready; do timeout >/dev/null 1 sleep .01; done")
             for name, (values, operands) in sorted(_WRAPPERS.items()):
                 parts = [name, ">/dev/null"]
@@ -1913,7 +1915,7 @@ def _self_test():
                 parts += ["</dev/null", "1"] * operands + ["2>&1", "sleep", "1"]
                 self.assertDeny("until test -f r; do " + " ".join(parts) + "; done")
 
-        def test_r2_03_wrappers(self):
+        def test_wrappers(self):
             for name, (_, operands) in sorted(_WRAPPERS.items()):
                 self.assertDeny("until test -f r; do " + " ".join([name] + ["1"] * operands) + " sleep 1; done")
             for w in ("nice", "nice -n 5", "nice -5", "nice --adjustment=5", "ionice -c2 -n 7", "stdbuf -o L",
@@ -1923,8 +1925,8 @@ def _self_test():
                 self.assertDeny("until test -f r; do " + w + " sleep 1; done")
             self.assertAllow("until test -f r; do nicely sleep 1; done")  # not a wrapper: its own command
 
-        def test_r2_04_read_whole_condition(self):
-            # a condition that runs a read of the loop's own input is exempt whatever else it runs (the round 4
+        def test_read_whole_condition(self):
+            # a condition that runs a read of the loop's own input is exempt whatever else it runs (the read-loop
             # rule: read loops are not this hook's target, so it fails toward allow for them)
             for c in ("while read -r line || ! test -f ready; do sleep .01; done < /dev/null",
                       "while read l; true; do sleep 1; done < f", "while read l | cat; do sleep 1; done < f",
@@ -1934,7 +1936,7 @@ def _self_test():
             for c in ("while read l < f; do sleep 1; done", "while ! test -f r; do sleep 1; done"):
                 self.assertDeny(c)
 
-        def test_r2_05_epoch_clocks(self):
+        def test_epoch_clocks(self):
             for c in ("deadline=$(date -d \"+0.15 second\" +%s.%N); while [[ $EPOCHREALTIME < $deadline ]]; do "
                       "sleep .01; done; echo finished",
                       "d=9; while [ \"$(printf '%(%s)T' -1)\" -lt \"$d\" ]; do sleep 1; done",
@@ -1945,8 +1947,9 @@ def _self_test():
                 self.assertAllow(c)
             self.assertDeny("until test -f r; do printf '%s' x; sleep 1; done")  # not a time format
 
-        # rounds 3 and 4: read loops are exempt, except three shapes that spin, confirmed in real bash
-        def test_r3_01_read_loop_differential(self):
+        # regression tests for the read-loop rule: read loops are exempt, except three shapes that spin, confirmed
+        # in real bash; then env -, printf time formats and source stripping
+        def test_read_loop_differential(self):
             # D is the loop body: `sleep .01` for the hook; in bash an iteration counter that exits 99 on the 25th
             # pass, so a spin is decided by the count (exit 99), an end by exit 0, and time only guards a hang
             hook_body, bash_body = "do sleep .01; done", 'do n=$((n+1)); [ "$n" -ge 25 ] && exit 99; sleep .001; done'
@@ -2028,7 +2031,7 @@ def _self_test():
             for n, c in enumerate(spins, len(finite)):
                 self.assertIn(99, (codes[0][n], codes[1][n]), ("bash did not spin", c))
 
-        def test_r3_02_read_loop_structure(self):
+        def test_read_loop_structure(self):
             for c in ("while read -r line ||\n  [ -n \"$line\" ]; do sleep 1; done < f",
                       "while { read -r l; }; do sleep 1; done < f", "while (read -r l); do sleep 1; done < f",
                       "while if read l; then true; fi; do sleep 1; done < f",
@@ -2041,11 +2044,11 @@ def _self_test():
                       "while ! read -r l 2>/dev/null; do sleep 1; done < f", "until read; do sleep 1; done < f"):
                 self.assertDeny(c)
 
-        def test_r3_03_env_dash(self):
+        def test_env_dash(self):
             self.assertDeny("until test -f ready; do env - sleep .01; done")
             self.assertDeny("until test -f ready; do env - X=1 sleep .01; done")
 
-        def test_r3_04_printf_format_any_length(self):
+        def test_printf_format_any_length(self):
             for n in (1, 65, 300):
                 self.assertAllow("d=$(printf '%(" + "x" * n + "%s)T' -1); until [ \"$(printf '%(" + "x" * n
                                  + "%s)T' -1)\" != \"$d\" ]; do sleep .01; done")
@@ -2053,7 +2056,7 @@ def _self_test():
             self.assertEqual(_bound_marks("%(" * 30000 + ")T"), [0])  # one pass: every opener pends on the first
             self.assertEqual(_bound_marks("%(a) %(b)T"), [5])
 
-        def test_r3_05_strip_source(self):
+        def test_strip_source(self):
             src = ("X = 1  # trailing\n# only a comment\nS = 'a#b' + \"c # d\"  # cut\n"
                    "def f():\n    \"\"\"Doc # kept out.\n    more\"\"\"\n    return '#'\n\n"
                    "T = (1,  # inside\n     2)\nU = f'{X}#'\n")
@@ -2068,7 +2071,7 @@ def _self_test():
             with self.assertRaises(tokenize.TokenError):
                 _strip_source("X = " + q + "unterminated\n")
 
-        def test_r3_06_no_internal_names(self):
+        def test_no_internal_names(self):
             src = open(here).read()
             pattern = re.compile(r"\bG" + r"\d+\b|" + "|".join(
                 ("cla" + "ude", "gem" + "ini", "cod" + "ex", "fab" + "le", "g" + "pt", "orches" + "trator",
@@ -2076,8 +2079,8 @@ def _self_test():
             found = {m.group() for m in pattern.finditer(src)}
             self.assertEqual(found - {"OR" + "CH_WORKER", "OR" + "CH_VERIFY_OWNER"}, set())
 
-        # round 4 regressions
-        def test_r4_01_read_rule_work_is_linear(self):
+        # regression tests for read-rule cost and for source stripping that keeps the code's meaning
+        def test_read_rule_work_is_linear(self):
             g, read = globals(), [0]
             real = g["_args"]
 
@@ -2094,7 +2097,7 @@ def _self_test():
             finally:
                 g["_args"] = real
 
-        def test_r4_02_strip_keeps_meaning(self):
+        def test_strip_keeps_meaning(self):
             import ast
 
             def code(src):  # the executable AST: every def's and class's docstring removed
@@ -2127,8 +2130,8 @@ def _self_test():
                 self.assertEqual(env["X"], 1, repr(sample))
             self.assertEqual(_strip_source("X = 1  # c\r\nY = 2\r\n"), "X = 1\r\nY = 2\r\n")  # CRLF kept
 
-        # round 5 regressions
-        def test_r5_01_read_rule_edges(self):
+        # regression tests for read-rule edges: negation, grouping, pipes and a read word as an argument
+        def test_read_rule_edges(self):
             for c in ("until : | read l; do sleep 1; done", "while x |\n  read l; do sleep 1; done < f",
                       "while { ! read -r l; }; do sleep 1; done < f", "until (read -r l); do sleep 1; done < f",
                       "while ! { read -r l; }; do sleep 1; done < f", "until { IFS= read -r l\n}; do sleep 1; done < f",
@@ -2138,8 +2141,8 @@ def _self_test():
                       "while { { ! read l; }; }; do sleep 1; done < f", "while read l | cat; do sleep 1; done < f"):
                 self.assertAllow(c)
 
-        # round 6 regressions
-        def test_r6_01_pipe_descriptor_and_test_data(self):
+        # regression tests for a read behind a pipe or a descriptor, and the word read as test-expression data
+        def test_pipe_descriptor_and_test_data(self):
             for c in ("until curl -s u | { read x; [ \"$x\" = ok ]; }; do sleep 5; done",
                       "until : | ( read l ); do sleep 1; done", "until : |\n  { ! { read l; }; }; do sleep 1; done",
                       "while ! { read l; } 2>/dev/null; do sleep 1; done < f",
@@ -2153,8 +2156,8 @@ def _self_test():
                       "while [[ -f a ]] && read l; do sleep 1; done < f"):
                 self.assertAllow(c)
 
-        # round 7 regressions
-        def test_r7_01_pipe_relative_to_loop(self):
+        # regression tests for a pipe relative to the loop, and time-prefixed or piped reads in the condition
+        def test_pipe_relative_to_loop(self):
             for c in ("producer | while read l; do echo \"$l\"; sleep 1; done",
                       "producer | { while read -r l; do sleep 1; done; }",
                       "producer | ( while read l; do sleep 1; done )",
@@ -2170,8 +2173,8 @@ def _self_test():
                       "producer | { until : | { read l; }; do sleep 1; done; }"):
                 self.assertDeny(c)
 
-        # round 8 regressions
-        def test_r8_01_descriptors_and_time_options(self):
+        # regression tests for descriptor duplication and closing forms, and time options before a read
+        def test_descriptors_and_time_options(self):
             for c in ("until time -- { read l; }; do sleep 1; done", "until time -p -- ( read l ); do sleep 1; done",
                       "until : | { read l <&00; }; do sleep 1; done", "until : | { read l 00<&000; }; do sleep 1; done",
                       "until : | { read l <&0-; }; do sleep 1; done", "until : | { read l <&-; }; do sleep 1; done",

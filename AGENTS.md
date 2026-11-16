@@ -299,7 +299,7 @@ Validate an inferred premise before taking an action that depends on it.
 
 ## Verify a fix is in its commit
 
-Applying a fix on disk is not the same as landing it. Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state.
+Applying a fix on disk is not the same as landing it. Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show REF --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state.
 
 The same discipline applies before independent verification is dispatched over a committed state: the artefact under review is committed first, the verification declares the revision it reviews and the set of paths under review, and the dispatcher reconciles that declaration against the repository before any verifier runs. The declared revision is not trusted as the declarer names it: it is derived from, or validated against, the authoritative task revision the review is for (the change-request head, the dispatched commit, or the task revision under gate), exactly as the guard-input-soundness rule requires a target or context parameter to be derived from or validated against its authoritative source at the point of use. A declarer-named revision that reconciles to no authoritative task revision is a cannot-evaluate, not a pass, so a review pointed at an unrelated or superseded commit whose own diff happens to be empty or clean cannot stand in for the revision actually under gate. The declared revision resolves to a single commit, and the base its changed set is computed against is derived from that commit's own raw structure rather than named by the declarer: the diff is taken against the sole parent for an ordinary commit, against the first parent for a merge commit, and against the empty tree for a root commit. The parent list that base derivation rests on is read from the commit's raw object bytes with replacement-ref and graft resolution disabled, never from a graph view that a replacement ref, a grafts entry, or a commit-graph cache could rewrite, and a parent the object names but whose object is absent is itself a cannot-evaluate rather than a root, so a shallow or truncated history cannot present as a root whose empty-tree diff reviews nothing. This defence against substituted bytes is not confined to the parent read: every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution applied, or the dispatch is withheld as a cannot-evaluate, so no dependent read the reconciliation or the verifier relies on resolves to bytes other than the authoritative commit's, and where that cannot be guaranteed the dispatch is withheld unverifiable; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance, so a replacement ref, a grafts entry, or the commit-graph cache cannot empty a real changed set into a clean declaration or feed the verifier substituted content. The declared changed set is reconciled for equality against the paths that revision changed relative to that derived base, so a declared path the commit did not change, and a path the commit changed that the declaration omits, are each surfaced rather than silently absorbed; this equality catches a declared path absent from the commit and a committed change absent from the declaration, but it cannot catch a path the change semantically needs that is omitted from both the commit and the declaration together, which remains the disclosed under-scoped-declaration residual below. The working-tree cleanliness the dispatch requires over each declared path covers the whole of that path's uncommitted state, a difference between the declared revision and the index, a difference between the index and the tracked working tree, and an untracked entry at the path including one that recreates a path the commit deleted, so a staged-but-uncommitted or untracked change cannot slip through a worktree-only comparison; each path is matched as a literal byte path rather than a pathspec pattern, and a cleanliness probe whose result is unreadable or malformed is a cannot-evaluate, not a clean pass. The verifier reads the reviewed content from the declared revision, never from the ambient working tree, with the verdict recording the revision it read. A declaration that is missing, malformed, or irreconcilable is a cannot-evaluate, per the guard-input-soundness rule: the dispatch is withheld with a distinct unverifiable outcome, never treated as a pass and never widened into a whole-tree cleanliness demand the declaration did not make. Uncommitted work outside the declared review set does not block the dispatch.
 
@@ -462,6 +462,11 @@ reported failure is a missing result, never a pass. A pushed revision, an acknow
 elapsed wait is not evidence the trigger fired; a run is confirmed to exist for the revision under gate
 before anything is read from its outcome.
 
+A refused command or edit is never re-routed to evade the guard (script, stdin, subprocess, split calls):
+hold its step and report the refusal; re-issue only in a form the refusal names that the guard reads whole,
+or on explicit, recorded maintainer authorization. Where a guard reads commands, interpreters never run
+programs from stdin or process substitution.
+
 ## A generated artefact is changed only through its source
 
 A derived or generated artefact is never hand-edited; it changes only by changing its source and
@@ -484,7 +489,7 @@ finished, and no error is hidden, swallowed, or downgraded to make a result look
 
 ## Preserve uncommitted work
 
-A command that reverts a file drops uncommitted changes in it. git checkout -- <path> and git restore <path> overwrite the working tree from the index or a commit, discarding your unstaged edits; git reset --hard drops both staged and unstaged changes. Any of them can throw away a real fix you have applied but not yet committed. When undoing a temporary or experimental change, revert only those specific lines, or commit the genuine change first; never blind-revert a whole file whose uncommitted work you still need. A discard is safe only once the work you intend to keep is committed, or otherwise saved somewhere the discard will not reach.
+A command that reverts a file drops uncommitted changes in it. git checkout -- FILE and git restore FILE overwrite the working tree from the index or a commit, discarding your unstaged edits; git reset --hard drops both staged and unstaged changes. Any of them can throw away a real fix you have applied but not yet committed. When undoing a temporary or experimental change, revert only those specific lines, or commit the genuine change first; never blind-revert a whole file whose uncommitted work you still need. A discard is safe only once the work you intend to keep is committed, or otherwise saved somewhere the discard will not reach.
 
 ## Protected-branch integrity
 
@@ -547,8 +552,16 @@ An artefact is never installed, published, or promoted to a live or otherwise co
 destination before the verification it must pass has passed. It is placed first in a staging area that is
 not that destination, verified there, and only then is that same verified artefact promoted to the live
 destination, on a recorded pass. Promotion that races ahead of verification, or that ships a different
-artefact than the one verified, is the failure this prevents. This governs an artefact reaching a runtime
-or distribution target, and is distinct from integrating a change into the protected line of development.
+artefact than the one verified, is the failure this prevents. This governs an artefact or a change
+reaching a runtime, distribution, or live target, not integrating a change into the protected line of
+development; when a merge into that line itself deploys, this rule governs the deployment it triggers,
+not the merge. In a change to a live system, one step or many, each tool's side effects are recorded
+from observing it first, either on a copy that shares no state with and cannot reach the live system, or
+as one canary step that other steps of the change follow, run only after the state it changes meets the
+bar the verified-restore-path rule (secrst) sets for a destructive operation, as if the step destroyed
+that state; a change of a single step is observed first on that copy; any unrecorded effect, harmless or
+not, halts the change; it resumes only once every tool's effects are re-observed in one of the same two
+ways and recorded; no check the change must pass is relaxed.
 
 ## A launched task stays observable
 

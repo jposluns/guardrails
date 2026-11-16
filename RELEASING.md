@@ -26,9 +26,8 @@ pull request (CLAUDE.md, Gates and CI).
    release other than the one `.aiqt/python-host.toml` names (the python-host-pin gate), so run it on that
    release; when the host interpreter has changed, first land one change that updates `python-host-patch`
    there and the `python-version` pin of every host-patch job (`opf-host-patch`,
-   `git-fixture-env-core-host-patch`, `git-fixture-env-config-combined-host-patch`,
-   `git-fixture-env-config-malformed-host-patch` and `git-fixture-env-config-system-host-patch`) in
-   `.github/workflows/quality.yml` together. After the freeze the
+   `git-fixture-env-core-host-patch` and the 43 config shard jobs
+   `git-fixture-env-config-<lane>-shard-K-host-patch`) in `.github/workflows/quality.yml` together. After the freeze the
    release artifacts (the version-numbered `site/downloads/aiqt-skill-<skill version>.zip`, which the site
    links to, and `site/downloads/aiqt-instructions.txt`) and their generating inputs (the corpus and
    `tools/gen_skill.py`) do not change; `site/downloads/aiqt-skill.zip` is a stable "latest" alias kept
@@ -41,12 +40,22 @@ pull request (CLAUDE.md, Gates and CI).
    in the candidate tree, so the file must be committed before the freeze. Its content is not defined
    here; it remains open under the first-release-evidence item.
 
-   Skill version bump checklist. The skill is independently versioned today (skill 1.0.6 under pack
-   release 1.0.5); from the 1.1.1 pack release on, the skill version equals the pack version, and the
-   check that mirrors the two lands with the 1.1.1 cut. Only the latest skill version is served: exactly
+   Skill version bump checklist. The skill is independently versioned before the 1.1.1 pack release
+   (skill 1.0.6 under pack release 1.0.5); from the 1.1.1 pack release on, the skill version equals the
+   pack version. `gen_skill.build_outputs` enforces this: once `VERSION` is at or above
+   `gen_skill.PACK_ALIGN_FIRST_VERSION` (1.1.1), a skill meta version that differs from `VERSION` fails
+   closed (exit 2). The hooks plugin follows the same rule from the same release: `gen_hooks.py` fails
+   closed (exit 2) when the `[plugin]` `version` in `.aiqt/core/hooks/manifest.toml` differs from `VERSION`,
+   so the release cut also sets that value to the pack version and regenerates
+   `plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json` with `python3 tools/gen_hooks.py`. The root
+   `VERSION` is the pack version only in this repository (the tree carrying `.aiqt/authoring.toml`), so the
+   rule is a release-time rule of this repository and is enforced only here; in an adopter's tree, where
+   `VERSION` is the adopter's own, neither generator nor `conformance.py` re-checks it (a release ships only
+   after this check passed). A deleted `.aiqt/authoring.toml` that the git index still tracks is refused
+   (exit 2), not read as an adopter tree. Only the latest skill version is served: exactly
    one version-numbered zip sits under `site/downloads/`, and `gen_skill.py --check` reports a stale or
    missing one as latest-only drift. The concrete version-numbered
-   filename `aiqt-skill-<version>.zip` is spelled as a literal in four places, kept consistent by a
+   filename `aiqt-skill-<skill version>.zip` is spelled as a literal in four places, kept consistent by a
    fail-closed version-match assertion in `gen_skill.build_outputs` plus `gen_skill.py`'s latest-only
    refusal and `--check` (each names a stale version-numbered zip; the generator never deletes it), not by
    true single-sourcing (`versioned_zip_basename` is only the shared
@@ -63,7 +72,7 @@ pull request (CLAUDE.md, Gates and CI).
        to catch a forgotten bump: `gen_skill.py --check` reports a stale or missing plain sentence, or a
        missing page, as drift. The page must mention "served from the" exactly once (any case, comments and
        markup included, counted with plain whitespace between the three words), in the one plain canonical
-       sentence "served from the install page is <version>" on one line, lower-case, not inside an HTML
+       sentence "served from the install page is <skill version>" on one line, lower-case, not inside an HTML
        comment, with no markup, link or entity between the phrase and the version, and the version followed
        only by a space, a tab, the line end or a `.` (that `.` followed only by a space, a tab, the line end
        or `<`; so `1.0.6.9` and `1.0.6<b>-rc1</b>` are refused). A second plain-whitespace mention (stale,
@@ -76,7 +85,7 @@ pull request (CLAUDE.md, Gates and CI).
        `gen_site.py --check` reports `drift: site/evidence.html`).
    Run the bump in a normal git clone or worktree: `gen_skill.py` refuses (exit 2) any input or output
    with more than one hard link, so a hard-link-copied checkout (`cp -al`) is refused. For an input
-   (`LICENSE`, `skill-source.md`, the hooks manifest, `docs/evidence.md`) break the link by copying the
+   (`LICENSE`, `skill-source.md`, the hooks manifest, `docs/evidence.md`, `VERSION`) break the link by copying the
    file and moving the copy over it; never `git rm` an input.
    Then run `python3 tools/gen_skill.py`. The generator never deletes a file: this first run refuses
    (exit 2) and names the stale prior-version `aiqt-skill-<old>.zip`. Remove it yourself with
@@ -102,13 +111,23 @@ pull request (CLAUDE.md, Gates and CI).
 
    OPF declaration checklist (OPF-SPEC section 16.1). The reference tooling's declaration file is
    `opf/tools/opf-declaration.toml`, and the shipped-file digest is carried in
-   `opf/tools/_opf_declaration.py` as `SHIPPED_DECLARATION_SHA256`. Its `release` is the pack release
-   version, so each release cut sets, in one change: `release` in that file;
-   `RELEASE_IDENTITY`, `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in
-   `_opf_declaration.py`; and the restatement below and in `opf/spec/OPF-QUICKSTART.md`. A change of the supported `spec_version`, homes generation or worklog
-   storage generation (`_opf_store.py`) changes the same places. `python3 -I -B
+   `opf/tools/_opf_declaration.py` as `SHIPPED_DECLARATION_SHA256`. Its `release` is OPF's own release
+   version in `opf/VERSION`, which moves independently of the pack release version in `VERSION`, so each
+   change of OPF's version sets, in one change: `opf/VERSION`; `release` in that file;
+   `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in `_opf_declaration.py`; and the
+   restatement below and in `opf/spec/OPF-QUICKSTART.md`. A change of the supported `spec_version`, homes generation or worklog
+   storage generation changes its value in `_opf_store.py`, the matching field in
+   `opf/tools/opf-declaration.toml`, `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in
+   `_opf_declaration.py`, and the restatement below and in `opf/spec/OPF-QUICKSTART.md`; it does not by
+   itself touch `opf/VERSION` or `release`. `python3 -I -B
    tools/check_opf_declaration.py` must then exit 0. It refuses a restatement that differs from the file
-   and a release other than `VERSION`. This release declares:
+   and a release other than the version in `opf/VERSION`; a pack release that leaves OPF's version
+   unchanged changes none of these places. `RELEASE_IDENTITY` is read from `opf/VERSION` when the module
+   loads, and a missing or malformed `opf/VERSION` leaves the build without one, so every gated verb
+   refuses. Adoption is bound to OPF's own version: `python3 tools/gen_manifest.py` records `opf/VERSION`
+   as the release manifest's `opf-version`, and the `opf adopt` trust gate checks the plan's release
+   version against that `opf-version`, never the pack manifest's `release-version` (taken from the root
+   `VERSION`), refusing a manifest that records none. This release declares:
 
    ```toml opf-declaration
    release = "1.0.5"

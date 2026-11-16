@@ -18,6 +18,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   commit_msg_subst    PreToolUse  sectvl  deny shell substitution in a git commit argument
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
+  future_stamp_write  PreToolUse  tstamp  WARN (never deny) on a future-dated time written into a declared store
 
 Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
 as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
@@ -58,8 +59,16 @@ option-classifier and helper narration that still uses the historical term.
 Error posture at the PreToolUse layer: FAIL CLOSED. A control that cannot read the input it is meant to
 cover, or is invoked in a context it does not understand, DENIES rather than waving the action through (per
 integ-check-fails-closed-on-unreadable): a missing tool_name, an unreadable command string, or an
-unreadable required field deny (except where the check is a pure convention nudge - abspth, expbnd - whose
-unreadable-input case allows with a note, since there is no hazard to fail closed on). A confirmed violation
+unreadable required field deny. Every Bash hook reads its command through one shared reader (_bash_command),
+so a tool_input that is missing or not an object, or a command that is missing, not a string or holds a NUL
+(bash ends a command string at its first NUL, so the text after it never runs), reads the same way in each, and a hook that judges the command denies it with a reason naming the malformed field
+(_deny_unreadable_command), the convention-nudge Bash hooks (abspth, expbnd) included, since each also has
+a deny tier that may sit in what was not read. The hooks scoped by an orchestration registry, a review
+dispatch binding or a review hold read a missing or non-string command that way only inside their scope;
+a command string holding a NUL is not absent (the text before the NUL runs and can name any repository),
+so each of them fails closed on it whatever its scope (_bash_command_holds_nul). The note-only Bash hook
+(inline_errexit) reads its command through the same reader but never denies, so its fail-closed outcome
+on such a command is an allow with a note naming the field. A confirmed violation
 denies. A clean pass emits NO decision and exits 0 silently.
 
 gensrc_guard (gensrc): a CONFIRMED registry match (a hand-edit of a registered generated artefact) DENIES
@@ -82,7 +91,9 @@ re-issue (single quotes, escape the marker, or git commit -F <file>); the unpars
 
 git_explicit_binding (expbnd): an ambient git target or a relocated whole-tree breadth stage is a binding
 CONVENTION where the orchestrator normally binds its own target, not a hazard, so every former ask
-(including the unreadable-command case) ALLOWS with a note - EXCEPT the whole-tree stage-then-push pair: a
+ALLOWS with a note, while an unreadable command (a tool_input that is missing or not an object, or a command
+that is missing, not a string or holds a NUL) DENIES under the shared fail-closed contract above, since the
+deny tier may sit in what was not read - EXCEPT the whole-tree stage-then-push pair: a
 breadth stage ('git add -A/./:/', 'git commit -a/--all') followed by a 'git push' later in the same command
 publishes whatever the tree holds, so it is DENIED, on the parsed path and on every fallback alike (the
 fallback tests that pair before its directory-change note, so the note cannot mask the denial).
@@ -113,7 +124,7 @@ takes the recover-then-allow/deny resolution above (never a silent pass). WITHIN
 verb: checkout/switch/restore/reset/clean/stash/
 rm/branch) that resolution applies unless the command is a PRISTINE SINGLE BARE 'git <verb>' invocation AND
 the tree is provably clean (or the form is genuinely non-destructive), in
-which case it ALLOWS. A Bash payload whose tool_input.command is MISSING or NOT A STRING is not that
+which case it ALLOWS. A Bash payload whose tool_input.command is MISSING, NOT A STRING or HOLDS A NUL is not that
 boundary but a cannot-evaluate input (a discard could hide in what was not read), so it DENIES under the
 shared fail-closed contract (check-fails-closed-on-unreadable), like the fail-closed controls above. PRISTINE
 SINGLE BARE means, PURELY LEXICALLY (the bash grammar is never parsed): after optional leading KEY=value
@@ -245,10 +256,10 @@ import sys
 
 # PYTHON-FLOOR guard (the hook form of tools/check_python_floor.py). It runs before HANDLER_EVENT exists, so
 # it carries its own literal of the fail-open modes, which selftest_aiqt_hooks.py holds equal to the
-# HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS plus the NOTE_ONLY_PRETOOL_MODES. On an older
-# interpreter that can start this file such a mode WARNS on exit 0 and never blocks (a Stop block here would
-# re-fire with no cap); every other mode, any other PreToolUse mode and an unknown mode alike, fails closed
-# with exit 2, as main() does on its own error paths.
+# HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS (the warn-only PreToolUse class included) plus the
+# NOTE_ONLY_PRETOOL_MODES. On an older interpreter that can start this file such a mode WARNS on exit 0 and
+# never blocks (a Stop block here would re-fire with no cap); every other mode, any other PreToolUse mode
+# and an unknown mode alike, fails closed with exit 2, as main() does on its own error paths.
 # Both forms' exits hold under the output condition the module docstring states.
 # An older interpreter that cannot start this file never reaches the guard and fails with Python's own error
 # first, and that exit has the event's normal meaning: one that accepts -I but cannot compile this file
@@ -258,8 +269,8 @@ import sys
 # hooks.json registers. That denies each PreToolUse call a registered matcher selects; blocks every
 # UserPromptSubmit prompt, which FAIL_OPEN_EVENTS below says an error must never do; blocks every Stop, with
 # no cap as above, and every TeammateIdle, the two FAIL_OPEN_EVENTS this file names exit 2 as the block for;
-# on PostToolUse its tool has already run but the recorder records nothing; and SessionStart cannot block at
-# all.
+# on PostToolUse and PostToolUseFailure its tool has already run but no recorder records and no clock
+# reading is added; and SessionStart cannot block at all.
 # The guard's stderr refusal and its stdout warning are best-effort writes, each wrapped and flushed
 # so a stream failure cannot change the exit: with stderr unavailable (a closed descriptor 2 leaves
 # sys.stderr None) the deny path still exits 2 and a fail-open mode still exits 0, rather than
@@ -268,7 +279,8 @@ import sys
 # streams: with a sys.stderr whose write works but whose flush fails, `raise SystemExit` here ended
 # as the interpreter's own exit 120 instead of the refusal exit. Nothing runs before this guard, so
 # os._exit discards no other buffered output; the warning itself is flushed before the exit.
-FLOOR_FAIL_OPEN_MODES = ("diff_wall_stop", "inline_errexit", "orch_dispatch_ledger",
+FLOOR_FAIL_OPEN_MODES = ("clock_inject_failure", "clock_inject_post", "diff_wall_stop",
+                         "future_stamp_write", "inline_errexit", "orch_dispatch_ledger",
                          "orch_lease_heartbeat_post", "orch_lease_heartbeat_stop", "orch_prompt_stamp",
                          "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle")
 
@@ -326,7 +338,16 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 # return 2 where the platform documents exit 2 as the block: Stop and TeammateIdle). SessionStart
 # cannot block at all; an errored UserPromptSubmit stamp must never block a human prompt; a
 # PostToolUse recorder error must surface as a warning, not a tool failure. Doc-confirmed 2026-08-29.
-FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSubmit", "PostToolUse")
+# PostToolUseFailure (its tool has already run and failed) follows PostToolUse by this pack's choice, so
+# an error in its context-only clock reading warns; that line is not doc-confirmed.
+# A PreToolUse handler that is WARN-ONLY by design (a bake-stage warn whose code has no deny path:
+# future_stamp_write) is classed in HANDLER_EVENT by this marker, not by PRETOOL, and the marker is one of
+# FAIL_OPEN_EVENTS: main() then gives it the fail-open ERROR posture from the argv mode alone (a non-blocking
+# warning on exit 0, never exit 2, and no PreToolUse deadline), like the other fail-open events. It is a
+# posture class, never a hook event name: the manifest still registers such a handler on PreToolUse.
+PRETOOL_WARN_ONLY = "PreToolUse (warn-only)"
+FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSubmit", "PostToolUse",
+                                  "PostToolUseFailure", PRETOOL_WARN_ONLY)
 # PreToolUse modes that never block a call: every result is an allow or an allow with a note, and only a
 # miswired event hard-blocks. main() gives each one the fail-open posture of a FAIL_OPEN_EVENTS mode on every
 # error path, and keeps its PreToolUse deadline, which then warns on exit 0 instead of failing closed.
@@ -379,7 +400,7 @@ NOTE_CONSTRUCTORS = (
 DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
-    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
+    "_deny_unreadable_command", "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
     "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny",
     "_reset_ancestry_deny", "_wrtscp_deny")
@@ -442,6 +463,54 @@ def _deny_missing_tool_name(rule):
     return _deny("AIQT rule {} (fail-closed): malformed payload: missing tool_name.".format(rule),
                  "AIQT guardrail: denied a PreToolUse call with no tool_name (rule {}, fail-closed)."
                  .format(rule))
+
+
+def _bash_command(data):
+    """The one reader of a Bash payload's command, shared by every Bash hook so that none reads it more
+    laxly than the others: (command, None) when tool_input is a JSON object whose command member is a
+    string holding no NUL character (an empty string included: it is readable and runs nothing), otherwise
+    (None, detail), where detail names the malformed field and what it held (a tool_input that is missing
+    or not an object, a command that is missing, null, or an array, number, object or boolean, or a
+    command string holding a NUL). bash receives its command as a C string, which ends at the first NUL, so
+    the text before a NUL runs and the text after it never does: no hook can read such a string as the
+    command that runs. A hook that judges the command cannot clear what it did not read, so it fails
+    closed on that detail (_deny_unreadable_command)."""
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        kind = "missing" if "tool_input" not in data else _orch_json_kind(tool_input)
+        return None, "its tool_input is {}, not a JSON object".format(kind)
+    command = tool_input.get("command")
+    if not isinstance(command, str):
+        kind = "missing" if "command" not in tool_input else _orch_json_kind(command)
+        return None, "its tool_input.command is {}, not a string".format(kind)
+    if "\x00" in command:
+        return None, ("its tool_input.command holds a NUL character at offset {}, and bash ends a command "
+                      "string at its first NUL, so what runs is not the text a check would read"
+                      .format(command.index("\x00")))
+    return command, None
+
+
+def _bash_command_holds_nul(data):
+    """True when the Bash payload's command IS a string but holds a NUL. Such a command is not absent:
+    bash still runs the text before the NUL, which can name any directory, so a hook whose scope (a
+    registry, a dispatch binding, a review hold) is read from the session or the command's own targets
+    cannot treat it as a command that runs nothing. Each scoped hook fails closed on it whatever its
+    scope, never weaker than reading the targets from the raw text would be."""
+    tool_input = data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return False
+    command = tool_input.get("command")
+    return isinstance(command, str) and "\x00" in command
+
+
+def _deny_unreadable_command(rule, check, detail):
+    """Fail closed on a Bash payload whose command _bash_command could not read: the reason names the
+    malformed field (detail) and the check that could not run over it."""
+    return _deny("AIQT rule {}: the Bash payload carried no readable command string ({}), so the {} could "
+                 "not run; failing closed. Re-issue the call with a tool_input object carrying a string "
+                 "command.".format(rule, detail, check),
+                 "AIQT guardrail: denied a Bash call with no readable command (rule {}, fail-closed)."
+                 .format(rule.split(" ", 1)[0]))
 
 
 # --- shared raw-command tokenizer (quote/redirect-aware) ---------------------------------------------
@@ -4840,12 +4909,9 @@ def diff_source_pretool(data):
         return _deny_missing_tool_name("cnsdif")
     if tool_name != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    command = (data.get("tool_input") or {}).get("command")
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule cnsdif (no-console-diff-dumps): the Bash payload carried no readable command "
-            "string, so the diff-source check could not run; failing closed.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule cnsdif, fail-closed).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("cnsdif (no-console-diff-dumps)", "diff-source check", unread)
     reads = _SubstHeredocs.reads
     try:
         # The command reading (_CommandReading) adds, after the lexer's own segments, a producer behind a
@@ -5267,34 +5333,169 @@ _ALIAS_IDENTITY_RE = re.compile(r"(?i)(?:user|author|committer)\.(?:name|email)\
 # -a, reaches git, so the form is sought in the whole text rather than in the words the tokenizer keeps.
 _CMTIDN_IDENTITY_SET_RE = re.compile(r"(?<![A-Za-z0-9_])(?:EMAIL|(?i:GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)))"
                                      r"[+:]?=|(?i:(?:user|author|committer)\.(?:name|email))[+:]?=")
-# The characters dropped from the text before the second search for an identity name and an AI name: quotes,
-# backslashes and '$' (a backslash-newline is dropped first), so a name or value that quoting splits
-# (export 'EM''AIL=X', -c author.na"me"=X, Cl"au"de) is found joined. A newline is kept as a word boundary.
+# The characters dropped from a word before the second search for an identity name and an AI name: quotes,
+# backslashes and '$' (a backslash-newline is dropped from the text first), so a name or value that quoting
+# splits (export 'EM''AIL=X', -c author.na"me"=X, Cl"au"de) is found joined.
 _CMTIDN_SET_UNREAD_RE = re.compile(r"[\\\"'$]")
+# A GIT_CONFIG_KEY_<n> or GIT_CONFIG_VALUE_<n> name in an assignment or default-value form, sought as
+# _CMTIDN_IDENTITY_SET_RE is (git 2.53.0 reads GIT_CONFIG_COUNT pairs, so a KEY that names an identity key gives
+# its VALUE as that identity).
+_CMTIDN_CONFIG_KEY_SET_RE = re.compile(r"(?<![A-Za-z0-9_])GIT_CONFIG_KEY_[0-9]+[+:]?=")
+_CMTIDN_CONFIG_VALUE_SET_RE = re.compile(r"(?<![A-Za-z0-9_])GIT_CONFIG_VALUE_[0-9]+[+:]?=")
+# A part of an assigned value that the shell fills in when it runs the command, so the text does not spell the
+# value: a backquote, or a '$' that starts a parameter, a ${...} or $(...) body or an ANSI-C quote ($'\x43').
+# A locale quote ($"...") is read as the double-quoted text it is.
+_CMTIDN_EXPANSION_RE = re.compile(r"`|\$[A-Za-z_0-9{(@*#?!$'-]")
+# The characters that end a word of the raw-text rule where they stand outside every quote and body.
+_CMTIDN_WORD_STOPS = frozenset(" \t\n;&|<>()")
+
+
+def _cmtidn_raw_words(text):
+    """The words of the raw text for the raw-text rule (_cmtidn_identity_set_ai), heredoc bodies, redirect words
+    and here-strings included, read in one pass. A word ends at a space, a tab, a newline or a shell operator
+    character (_CMTIDN_WORD_STOPS) that stands outside every single or double quote, backslash escape and open
+    ${...}, $(...) or backquote body, so a value keeps the quoted spaces, nested expansions and quoted braces
+    that bash keeps in it (${EMAIL:="}"x@y}). The reading is lexical: a quote or body left open runs to the
+    end of the text, and a quote character in a heredoc body or a comment is read as a quote, which can join or
+    split the words after it. The word reader (find_ai_authorship) judges every command it can parse before
+    this rule; this rule is its backstop."""
+    words = []
+    stack = []  # the open contexts: "'", '"', "{" (a ${ body), "(" (a $( body or a ( inside one), "`"
+    start = None
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        top = stack[-1] if stack else None
+        if top == "'":
+            if c == "'":
+                stack.pop()
+            i += 1
+            continue
+        if top is None and c in _CMTIDN_WORD_STOPS:
+            if start is not None:
+                words.append(text[start:i])
+                start = None
+            i += 1
+            continue
+        if start is None:
+            start = i
+        if c == "\\":
+            i += 2  # the escaped character is part of the word and opens nothing
+            continue
+        if c == "'" and top != '"':
+            stack.append("'")
+        elif c == '"':
+            if top == '"':
+                stack.pop()
+            else:
+                stack.append('"')
+        elif c == "`":
+            if top == "`":
+                stack.pop()
+            else:
+                stack.append("`")
+        elif c == "$" and i + 1 < n and text[i + 1] in "{(":
+            stack.append("{" if text[i + 1] == "{" else "(")
+            i += 2
+            continue
+        elif c == "}" and top == "{":
+            stack.pop()
+        elif c == "(" and top == "(":
+            stack.append("(")
+        elif c == ")" and top == "(":
+            stack.pop()
+        i += 1
+    if start is not None:
+        words.append(text[start:])
+    return words
+
+
+def _cmtidn_dequoted(word):
+    """(dropped, at): the word with the characters of _CMTIDN_SET_UNREAD_RE dropped, and for each character of
+    dropped, and for its end, the index in word it comes from."""
+    kept, at = [], []
+    for k, ch in enumerate(word):
+        if ch not in "\\\"'$":
+            kept.append(ch)
+            at.append(k)
+    at.append(len(word))
+    return "".join(kept), at
+
+
+def _cmtidn_assigned_values(word, regex):
+    """Yield (name, raw, dropped) for each match of regex in the word as written and in the word with the
+    characters of _CMTIDN_SET_UNREAD_RE dropped: the matched name with its '=', and the rest of the word after
+    it, as written and with those characters dropped."""
+    for m in regex.finditer(word):
+        rest = word[m.end():]
+        yield m.group(0), rest, _CMTIDN_SET_UNREAD_RE.sub("", rest)
+    dropped, at = _cmtidn_dequoted(word)
+    for m in regex.finditer(dropped):
+        yield m.group(0), word[at[m.end()]:], dropped[m.end():]
+
+
+def _cmtidn_value_ai(raw, dropped):
+    """The AI identity match that an assigned value names, as written or with the characters of
+    _CMTIDN_SET_UNREAD_RE dropped, else None."""
+    return AI_IDENTITY_RE.search(raw) or AI_IDENTITY_RE.search(dropped)
 
 
 def _cmtidn_identity_set_ai(command):
-    """A hit label when the raw command text, heredoc bodies, redirect words and here-strings included, names an
-    identity in an assignment or default-value form (_CMTIDN_IDENTITY_SET_RE) and also names an AI identity
-    (AI_IDENTITY_RE) anywhere, each sought in the text as written and once the characters of
-    _CMTIDN_SET_UNREAD_RE are dropped; else None. The two need not stand together: a value the shell builds
-    from a nested expansion (${EMAIL:=${USER:-u}@anthropic.com}) or from another word cannot be told from a
-    value that names no AI, so the rule fails closed. The cost is a disclosed over-deny of a command that
-    names both for another reason (a commit message that mentions EMAIL=X and an AI product, an echo, a
-    quoted heredoc that writes such text). Bounded: a command longer than _CMTIDN_READ_LIMIT is not searched
-    here, since the too-long fallback already denies one that names an AI and holds any of these names
-    (_commit_identity_fallback), and each search is one pass of a regex over the text."""
+    """A hit label when the raw command text, heredoc bodies, redirect words and here-strings included, assigns
+    an AI identity, else None. Each word of the text (_cmtidn_raw_words) that names an identity in an
+    assignment or default-value form (_CMTIDN_IDENTITY_SET_RE), as written or once the characters of
+    _CMTIDN_SET_UNREAD_RE are dropped, is judged by the VALUE it assigns: the rest of that word after the '='.
+    The value denies when it names an AI identity (AI_IDENTITY_RE). A value that the text does not spell, one
+    that holds an expansion (_CMTIDN_EXPANSION_RE: EMAIL=$ME, ${EMAIL:=${USER:-u}@x}, $'\\x43laude') or the
+    environment variable name of a --config-env pair (--config-env=author.name=V), cannot be told from one
+    that names no AI, so for it the rule fails closed and denies when the command names an AI identity
+    anywhere, as written or once those characters are dropped. A GIT_CONFIG_VALUE_<n> assignment is judged the
+    same way when a GIT_CONFIG_KEY_<n> assignment in the text names a user, author or committer name or email
+    key, or holds an expansion (GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0=X). So a
+    command that sets a human identity by a spelled value is allowed whatever else its text names (git -c
+    user.email=me@example.com commit -m 'regenerate .claude/rules'). The cost is a disclosed over-deny of
+    text that only quotes an assignment of an AI value (a commit message that holds EMAIL=X@anthropic.com, an
+    echo, a quoted heredoc that writes such text), and of a command that names an AI beside an assignment of
+    an unspelled value. Bounded: a command longer than _CMTIDN_READ_LIMIT is not searched here, since the
+    too-long fallback already denies one that names an AI and holds any of these names
+    (_commit_identity_fallback); the words are read in one pass and each word is searched a fixed number of
+    times."""
     if len(command) > _CMTIDN_READ_LIMIT:
         return None
-    text = _CMTIDN_SET_UNREAD_RE.sub("", command.replace("\\\n", ""))
-    named = _CMTIDN_IDENTITY_SET_RE.search(command) or _CMTIDN_IDENTITY_SET_RE.search(text)
-    if named is None:
+    unspelled = None  # an identity assignment whose value the text does not spell
+    config_key = None  # a GIT_CONFIG_KEY_<n> assignment that names an identity key or holds an expansion
+    config_values = []
+    previous = ""
+    for word in _cmtidn_raw_words(command.replace("\\\n", "")):
+        for name, raw, dropped in _cmtidn_assigned_values(word, _CMTIDN_IDENTITY_SET_RE):
+            ai = _cmtidn_value_ai(raw, dropped)
+            if ai is not None:
+                return "identity assignment {!r} whose value names an AI identity ({!r})".format(name, ai.group(0))
+            config_env = previous == "--config-env" or _CMTIDN_SET_UNREAD_RE.sub("", word).startswith(
+                "--config-env=")
+            if unspelled is None and (config_env or _CMTIDN_EXPANSION_RE.search(raw)):
+                unspelled = name
+        for name, raw, dropped in _cmtidn_assigned_values(word, _CMTIDN_CONFIG_KEY_SET_RE):
+            if config_key is None and (IDENTITY_CONF_NAME_RE.search(dropped) or _CMTIDN_EXPANSION_RE.search(raw)):
+                config_key = name
+        config_values.extend(_cmtidn_assigned_values(word, _CMTIDN_CONFIG_VALUE_SET_RE))
+        previous = _CMTIDN_SET_UNREAD_RE.sub("", word)
+    if config_key is not None:
+        for name, raw, dropped in config_values:
+            ai = _cmtidn_value_ai(raw, dropped)
+            if ai is not None:
+                return ("identity assignment {!r} beside {!r}, whose value names an AI identity ({!r})"
+                        .format(name, config_key, ai.group(0)))
+            if unspelled is None and _CMTIDN_EXPANSION_RE.search(raw):
+                unspelled = name
+    if unspelled is None:
         return None
+    text = _CMTIDN_SET_UNREAD_RE.sub("", command.replace("\\\n", ""))
     ai = AI_IDENTITY_RE.search(command) or AI_IDENTITY_RE.search(text)
     if ai is None:
         return None
-    return "identity assignment {!r} in a command that names an AI identity ({!r})".format(named.group(0),
-                                                                                           ai.group(0))
+    return ("identity assignment {!r} of a value the text does not spell, in a command that names an AI identity "
+            "({!r})".format(unspelled, ai.group(0)))
 
 
 def _alias_identity_ai(value):
@@ -5482,11 +5683,16 @@ def _cmtidn_config_setting(tokens):
 # git command's subcommand is an alias ('env git lg --grep git commit --author=...'); the remaining gap is a
 # git-named operand of a program off the list followed by a word spelled as a git command name. 'command -v
 # NAME' and 'command -V NAME' only look a name up, so a command word 'command' whose options carry v or V runs
-# no git command. A wrapper off this list (builtin, doas, ionice, ...) is not read. The list and the reserved
+# no git command. A wrapper off this list (builtin, doas, ...) is not read. The list and the reserved
 # words below are this check's own (the _CMTIDN_ prefix), so one shared wrapper-aware finder can later replace
 # them.
 _CMTIDN_GIT_WRAPPERS = frozenset((
     "env", "timeout", "command", "exec", "nohup", "xargs", "sudo", "nice", "setsid", "stdbuf", "time"))
+# The git command finder (_cmtidn_git_commands) also reads these, which run a command from their operands (find
+# -exec and -execdir, flock FILE CMD, ionice -c3 CMD), so a git config that sets an author or committer name or
+# email behind one is judged as one behind env is (find . -exec git config author.name X ';'). They are kept off
+# _CMTIDN_GIT_WRAPPERS, which other guards share, and off the assignment-word reader (_cmtidn_assignment_words).
+_CMTIDN_FINDER_WRAPPERS = _CMTIDN_GIT_WRAPPERS | frozenset(("find", "flock", "ionice"))
 # The shell reserved words that can stand before a segment's command word ('! git ...', 'if git ...',
 # 'then git ...', '{ git ...; }'); the same words the gate-discipline check passes over (_GATE_RESERVED).
 _CMTIDN_RESERVED = frozenset(("{", "}", "!", "if", "then", "else", "elif", "fi", "for", "while", "until",
@@ -5533,7 +5739,7 @@ def _cmtidn_git_commands(tokens):
     linear in its length. Leading reserved words (_CMTIDN_RESERVED) and VAR=value words are passed over to the
     command word, and so is the NAME after 'function' or 'coproc' when a compound opener follows it
     (_CMTIDN_COMPOUND_OPENERS). When the command word is git (a path to git included), that one git command
-    is read and the index of its subcommand is yielded. When it is a wrapper (_CMTIDN_GIT_WRAPPERS), the finder
+    is read and the index of its subcommand is yielded. When it is a wrapper (_CMTIDN_FINDER_WRAPPERS), the finder
     yields CANDIDATES: a later word that is git and not a VAR=value word starts a candidate git command, a
     git-named option value or operand included, until a held candidate (its git word does not stand right
     after a word that may be an option taking it as a value) has a subcommand that is a git command name
@@ -5562,7 +5768,7 @@ def _cmtidn_git_commands(tokens):
     if i >= n:
         return
     word = tokens[i].rsplit("/", 1)[-1]
-    wrapped = word in _CMTIDN_GIT_WRAPPERS
+    wrapped = word in _CMTIDN_FINDER_WRAPPERS
     if word != "git" and not wrapped:
         return
     i += 1
@@ -5829,7 +6035,7 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
     for same, segments in readings:
         keys = [reading for reading in paths if reading in same] or [None]
         for tokens, _sep in segments:
-            hit = _identity_assignment_ai(tokens)
+            hit = _identity_assignment_ai(tokens) or _cmtidn_stdin_identity_ai(tokens, command)
             if hit is not None:
                 return hit
             subs = list(_cmtidn_git_commands(tokens))
@@ -5873,6 +6079,32 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
     if error is not None and depth == 0:
         raise error
     return None
+
+
+def _cmtidn_stdin_identity_ai(tokens, command):
+    """A hit label when one segment's command word (past reserved words and VAR=value words) is xargs, the git
+    command it runs is a git config that sets a value (_cmtidn_config_setting) and names a user, author or
+    committer name or email key, and the command line names an AI identity anywhere, as written or once the
+    characters of _CMTIDN_SET_UNREAD_RE are dropped; else None. xargs adds the words it reads from its input
+    to that command, so the value can come from another segment (echo X | xargs git config author.name), and
+    the check fails closed there, as the raw-text rule does on a value the text does not spell; the cost is a
+    disclosed over-deny of such a line that names an AI for another reason."""
+    n = len(tokens)
+    i = 0
+    while i < n and tokens[i] in _CMTIDN_RESERVED:
+        i += 1
+    while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i >= n or tokens[i].rsplit("/", 1)[-1] != "xargs":
+        return None
+    start = _cmtidn_config_setting(tokens)
+    if start is None or not any(IDENTITY_CONF_NAME_RE.fullmatch(tok) for tok in tokens[start:]):
+        return None
+    ai = AI_IDENTITY_RE.search(command) or AI_IDENTITY_RE.search(_CMTIDN_SET_UNREAD_RE.sub("", command))
+    if ai is None:
+        return None
+    return ("identity config name whose value xargs may read from its input, in a command line that names an AI "
+            "identity ({!r})".format(ai.group(0)))
 
 
 def _cmtidn_identity_word(command):
@@ -5986,12 +6218,9 @@ def commit_identity(data):
         return _deny_missing_tool_name("cmtidn")
     if tool_name != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    command = (data.get("tool_input") or {}).get("command")
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule cmtidn (commit-identity): the Bash payload carried no readable command string, "
-            "so the commit-identity check could not run; failing closed.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule cmtidn, fail-closed).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("cmtidn (commit-identity)", "commit-identity check", unread)
     reads = _SubstHeredocs.reads
     raw = False  # True when the hit comes from the raw-text rule rather than the word reader
     try:
@@ -6023,7 +6252,8 @@ def commit_identity(data):
         raw = True
     if hit is None:
         # Nothing the reader judges sets an AI identity: the raw text decides next, failing closed when it
-        # names an identity in an assignment or default-value form and an AI anywhere (_cmtidn_identity_set_ai).
+        # assigns an identity a value that names an AI, or a value it does not spell in a command that names an AI
+        # anywhere (_cmtidn_identity_set_ai).
         hit = _cmtidn_identity_set_ai(command)
         raw = hit is not None
     if hit is None:
@@ -7209,14 +7439,16 @@ def bash_absolute_paths(data):
         return _deny_missing_tool_name("abspth")
     if tool != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or not command:
-        # Cannot read the command to resolve either position: allow with a note (absolute-paths is a
-        # convention nudge, not a hazard; hooks never ask).
+    command, unread = _bash_command(data)
+    if unread is not None:
+        # A truncating redirect to a relative target, the deny tier, may sit in what was not read.
+        return _deny_unreadable_command("abspth (absolute-paths)", "relative-cwd check", unread)
+    if not command:
+        # An empty command runs nothing: allow with a note (absolute-paths is a convention nudge, not a
+        # hazard; hooks never ask).
         return _allow_note(
-            "AIQT guardrail (rule abspth, absolute-paths): the Bash payload carried no readable command "
-            "string, so the relative-cwd check could not run. Allowing; prefer absolute paths so a command "
+            "AIQT guardrail (rule abspth, absolute-paths): the Bash command is empty, so it runs nothing and "
+            "the relative-cwd check had nothing to judge. Allowing; prefer absolute paths so a command "
             "cannot resolve against a working directory that differs between calls.")
     # Partial lex so an unparseable construct (a heredoc, here-string, process substitution, {fd} redirect,
     # or an unbalanced quote or escape) no longer discards every segment before it: a resolvable relative
@@ -8896,13 +9128,16 @@ def git_explicit_binding(data):
         return _deny_missing_tool_name("expbnd")
     if tool != "Bash":
         return _allow()
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or not command:
+    command, unread = _bash_command(data)
+    if unread is not None:
+        # The breadth-then-publish pair, the deny tier, may sit in what was not read.
+        return _deny_unreadable_command("expbnd (explicit-binding-over-ambient-context)",
+                                        "explicit-binding check", unread)
+    if not command:
         return _allow_note(
-            "AIQT guardrail (rule expbnd, explicit-binding): the Bash command was absent or unreadable, so "
-            "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
-            "it is allowed; prefer an explicit '-C' target and enumerated scope.")
+            "AIQT guardrail (rule expbnd, explicit-binding): the Bash command is empty, so it runs nothing "
+            "and names no git target or scope to check. This is a binding convention, not a hazard, so it "
+            "is allowed; prefer an explicit '-C' target and enumerated scope.")
     reads = _SubstHeredocs.reads
     try:
         # Both scans below read only each segment's words, and a segment with no word names no command
@@ -9045,12 +9280,13 @@ def git_stash_ref(data):
     another stash verb, or an operand the lexer could not read: an over-note, never a refusal), and text
     naming no such pair allows. A command whose '#' the lexer cannot judge that way gets the note when its
     text (_hash_doubt_scan) names git and stash, or holds quoting that text does not decode
-    (_hash_doubt_opaque), since the lexer read nothing past that '#'. An absent/unreadable command gets the
-    sibling's convention note.
+    (_hash_doubt_opaque), since the lexer read nothing past that '#'. An empty command gets the sibling's
+    convention note; a tool_input that is missing or not an object, or a command that is missing, not a
+    string or holds a NUL, denies (_bash_command, _deny_unreadable_command), as it does in the sibling.
     This note can co-occur with git_discard's raw/pristine fallback note on a wrapped or compound
     pop/apply, and with git_explicit_binding's note on a relocated form (e.g. `cd /x && git stash
     pop`); such sibling notes are consistent, never conflicting.
-    Only missing tool_name produces a structured deny;
+    Only a missing tool_name and an unreadable command produce a structured deny;
     a miswired event hard-blocks and dispatcher errors retain the manifest's fail-closed posture."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: git_stash_ref wired to unexpected event {!r}; failing "
@@ -9060,13 +9296,15 @@ def git_stash_ref(data):
         return _deny_missing_tool_name("expbnd")
     if tool != "Bash":
         return _allow()
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or not command:
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("expbnd (explicit-binding-over-ambient-context)", "stash-ref check",
+                                        unread)
+    if not command:
         return _allow_note(
-            "AIQT guardrail (rule expbnd, explicit-binding): the Bash command was absent or unreadable, so "
-            "its git target and scope could not be checked. This is a binding convention, not a hazard, so "
-            "it is allowed; prefer an explicit '-C' target and enumerated scope.")
+            "AIQT guardrail (rule expbnd, explicit-binding): the Bash command is empty, so it runs nothing "
+            "and names no git target or scope to check. This is a binding convention, not a hazard, so it "
+            "is allowed; prefer an explicit '-C' target and enumerated scope.")
     try:
         # The loop below passes over a segment with no word (it has no command word), so one with no word
         # and no redirect is not built at all. The command reading (_CommandReading) adds each segment read
@@ -9647,7 +9885,10 @@ def inline_errexit(data):
     change that may not run (true || set -e), or only inside a function body the rest may call, is unseen.
     Another tool silently allows. A tool_name that is missing, empty or not a string, a tool_input that is not
     an object, and a command that is missing, empty or not a string each allow with a note naming that field
-    (_errexit_unreadable), never silently and never with a deny."""
+    (_errexit_unreadable), never silently and never with a deny. The command comes through the reader every
+    Bash hook shares (_bash_command), so a command string holding a NUL (bash runs only the text before it)
+    also allows with that note, carrying the reader's detail: this guard is note-only, so its fail-closed
+    outcome is a note, not a deny."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: inline_errexit wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -9656,12 +9897,20 @@ def inline_errexit(data):
         return _errexit_unreadable("tool_name", "tool_name" in data, tool, "a string")
     if tool != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    tool_input = data.get("tool_input")
-    if not isinstance(tool_input, dict):
-        return _errexit_unreadable("tool_input", "tool_input" in data, tool_input, "an object")
-    command = tool_input.get("command")
-    if not isinstance(command, str) or not command:
-        return _errexit_unreadable("command", "command" in tool_input, command, "a string")
+    # The command comes through the reader every Bash hook shares; where it cannot read the command, the raw
+    # field is read only to word the note naming what the field held.
+    command, unreadable = _bash_command(data)
+    if unreadable is not None:
+        tool_input = data.get("tool_input")
+        if not isinstance(tool_input, dict):
+            return _errexit_unreadable("tool_input", "tool_input" in data, tool_input, "an object")
+        command = tool_input.get("command")
+        if not isinstance(command, str):
+            return _errexit_unreadable("command", "command" in tool_input, command, "a string")
+        return _allow_note(_ERREXIT_UNREADABLE_NOTE.format(  # a command string holding a NUL
+            "command", "a string holding a NUL ({})".format(unreadable)))
+    if not command:
+        return _errexit_unreadable("command", True, command, "a string")
     pairs, tail, exact, unread = _errexit_statements(command)
     hazard, on = _errexit_hazard(pairs, tail)
     if not hazard:
@@ -10813,7 +11062,7 @@ _RECOVERY_SIZE_CAP = 100 * 1024 * 1024  # 100 MiB
 _RECOVERY_LEDGER_PARTS = ("aiqt-guardrails", "recovery.jsonl")
 
 
-def _recovery_git(repo, args, env_extra=None, timeout=10):
+def _recovery_git(repo, args, env_extra=None, timeout=10, text=True):
     """Run a git subcommand against repo and return the CompletedProcess. INERT TO WORKING STATE: across all
     of its git calls it never touches the real index (a snapshot call uses a TEMP GIT_INDEX_FILE via
     env_extra), the worktree, HEAD, or a branch, and in a NORMAL repo writes only objects and one private ref
@@ -10831,12 +11080,14 @@ def _recovery_git(repo, args, env_extra=None, timeout=10):
     PATH-based git resolution, and partial-clone object availability, all read by git by design and none
     neutralized here.
     Raises subprocess.SubprocessError / OSError on a spawn or timeout failure, which the caller treats as a
-    snapshot failure. offline, bounded by `timeout`."""
+    snapshot failure. offline, bounded by `timeout`. text=False returns the output as bytes (the Stop
+    family's root read, _orch_stop_root, decodes the toplevel itself); every other caller keeps the
+    text-mode default."""
     cmd = ["git", "-C", repo] + list(args)
     env = _isolate_git_env(dict(os.environ))  # real-state calls must see the REAL repo, not an ambient decoy
     if env_extra:
         env.update(env_extra)  # a snapshot call sets its own GIT_INDEX_FILE here, applied AFTER the scrub
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+    return subprocess.run(cmd, capture_output=True, text=text, timeout=timeout, env=env)
 
 
 def _recovery_toplevel(repo):
@@ -12784,7 +13035,7 @@ def git_discard(data):
     ancestry cannot be evaluated, DENIES under brnrot, see _reset_ancestry_refusal) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
     reserved for the TRUE boundary (a present non-Bash tool, a non-git command, or no recognized lossy
     verb); a payload with NO tool_name is malformed, not another tool, and DENIES under the shared
-    missing-tool_name contract, and a tool_input whose command is MISSING or NOT A STRING is a
+    missing-tool_name contract, and a tool_input whose command is MISSING, NOT A STRING or HOLDS A NUL is a
     cannot-evaluate input, not that boundary, and DENIES under the shared fail-closed contract
     (check-fails-closed-on-unreadable), since a discard could hide in what was not read. A wrapper is in
     scope while the raw scan, the continuation-joined text or
@@ -12867,17 +13118,12 @@ def git_discard(data):
         return _deny_missing_tool_name("prsunc")
     if tool_name != "Bash":
         return _allow()  # boundary: a present non-Bash tool is out of scope
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
+    command, unread = _bash_command(data)
+    if unread is not None:
         # A missing, non-object or non-string command container is a cannot-evaluate input, not the true
         # boundary: a discard could hide in what was not read, so it denies under the shared fail-closed
         # contract (check-fails-closed-on-unreadable) rather than passing clean.
-        return _deny(
-            "AIQT rule prsunc (preserve-uncommitted-work): the Bash payload carried no readable command "
-            "string, so the discard check could not run; failing closed. Re-issue the call with a string "
-            "command.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule prsunc, fail-closed).")
+        return _deny_unreadable_command("prsunc (preserve-uncommitted-work)", "discard check", unread)
     try:
         # Segments with no word and no redirect are skipped unbuilt: the lossy scan below passes over a
         # segment with no command word, and _pristine_single_bare_git returns before reading the segments
@@ -15094,12 +15340,9 @@ def protected_line(data):
         return _deny_missing_tool_name("prtbrn")
     if tool_name != "Bash":
         return _allow()
-    command = (data.get("tool_input") or {}).get("command")
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule prtbrn (protected-branch-integrity): the Bash payload carried no readable command "
-            "string, so the protected-line check could not run; failing closed.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule prtbrn, fail-closed).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("prtbrn (protected-branch-integrity)", "protected-line check", unread)
     # After the input validation above (the PreToolUse
     # event, the Bash tool, and a readable command string), the raw-text backstop runs
     # unconditionally on every call, ahead of the commit-grammar reading and the lexer, so no
@@ -15754,13 +15997,9 @@ def branch_root(data):
         return _deny_missing_tool_name("brnrot")
     if tool_name != "Bash":
         return _allow()
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule brnrot (branch-rooted-on-live-main): the Bash payload carried no readable "
-            "command string, so branch creation could not be checked; failing closed.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule brnrot, fail-closed).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("brnrot (branch-rooted-on-live-main)", "branch-creation check", unread)
     named = _git_alias_named(command)
     built = False  # a git command that reads as under an alias only through a word built at run time (_BRNROT_BUILT)
     reads = _SubstHeredocs.reads
@@ -18792,12 +19031,9 @@ def gate_weakening(data):
         return _deny_missing_tool_name("gatdis")
     if tool_name != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    command = (data.get("tool_input") or {}).get("command")
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule gatdis (gate-discipline): the Bash payload carried no readable command string, "
-            "so the gate-weakening check could not run; failing closed.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule gatdis, fail-closed).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("gatdis (gate-discipline)", "gate-weakening check", unread)
     reads = _SubstHeredocs.reads
     try:
         # Each reading of an uncertain '#' (the shared lexer's comment rule) is kept apart for the deny tier
@@ -19234,15 +19470,10 @@ def commit_msg_subst(data):
         return _deny_missing_tool_name("sectvl")
     if tool_name != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule sectvl (tool-argument-validation): the Bash payload carried no readable command "
-            "string, so the git-commit argument substitution check could not run; it is denied fail-safe "
-            "(the payload could not be parsed safely). Re-issue a well-formed Bash command.",
-            "AIQT guardrail: denied a Bash call with no readable command; re-issue a well-formed command "
-            "(rule sectvl, fail-safe).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("sectvl (tool-argument-validation)",
+                                        "git-commit argument substitution check", unread)
     reads = _SubstHeredocs.reads
     try:
         # _commit_msg_subst_hit reads only the segment's own words, and finds no git commit in a segment with
@@ -19648,8 +19879,10 @@ def pgrep_self_match(data):
     strings too), since the checking shell, its ancestors and the pipeline stages and subshells it forks
     carry the command text on their command lines. A pattern written as the bracket idiom ([j]ob7) is
     allowed. Hooks never ask. BEST EFFORT: a command word built at run time is not seen; the residue in the hook
-    manifest states the shapes read and the misses. A missing tool_name takes the shared deny and a
-    non-string command denies fail-safe, as the sibling deny hooks do."""
+    manifest states the shapes read and the misses. A missing tool_name takes the shared deny, and a
+    tool_input that is missing or not an object, or a command that is missing, not a string or holds a NUL,
+    denies through the reader every Bash hook shares (_bash_command, _deny_unreadable_command), as the
+    sibling deny hooks do."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: pgrep_self_match wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -19658,14 +19891,9 @@ def pgrep_self_match(data):
         return _deny_missing_tool_name("trkasy")
     if tool_name != "Bash":
         return _allow()                     # a present-but-different tool is out of scope
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule trkasy (track-launched-work): the Bash payload carried no readable command string, so "
-            "the process self-match check could not run; it is denied fail-safe. Re-issue a well-formed Bash "
-            "command.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule trkasy, fail-safe).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return _deny_unreadable_command("trkasy (track-launched-work)", "process self-match check", unread)
     hit = _psm_hit(command)
     if hit is None:
         return _allow()
@@ -19886,13 +20114,18 @@ def secrets_shift_left(data):
     # A non-dict tool_input cannot answer the scan; fail CLOSED cleanly in-handler (mirrors git_discard's
     # isinstance-dict guard) rather than raising an AttributeError only the dispatcher would catch.
     tool_input = data.get("tool_input")
-    if not isinstance(tool_input, dict):
+    if tool_name == "Bash":
+        # The Bash command comes through the reader every Bash hook shares.
+        target, unread = _bash_command(data)
+        if unread is not None:
+            return _deny_unreadable_command("secsec (keep-secrets-out)", "secret scan", unread)
+    elif not isinstance(tool_input, dict):
         return _deny(
             "AIQT rule secsec (keep-secrets-out): the {} payload carried no readable tool_input, so the "
             "secret scan could not run over what would be written; failing closed.".format(tool_name),
             "AIQT guardrail: denied a {} call with no readable payload (rule secsec, fail-closed)."
             .format(tool_name))
-    if tool_name == "MultiEdit":
+    elif tool_name == "MultiEdit":
         target = _secsec_multiedit_text(tool_input)
         if target is None:
             return _deny(
@@ -21511,8 +21744,10 @@ def _gensrc_mentions(entries, command, root_c):
 
 def _gensrc_bash(data):
     """The Bash channel verdict of gensrc_guard: ("allow",), ("note", message) or ("deny", reason, banner);
-    gensrc_guard turns it into the decision. A payload with no object tool_input or no readable command
-    string DENIES fail-closed (the detector cannot read it). The command is lexed under every reading of its
+    gensrc_guard turns it into the decision. The command comes through the reader every Bash hook shares
+    (_bash_command): a tool_input that is missing or not an object, or a command that is missing, not a
+    string or holds a NUL, DENIES fail-closed with a reason naming the malformed field (the detector cannot
+    read it), and so does an empty or blank command. The command is lexed under every reading of its
     uncertain '#' characters (_gensrc_lex) and the write effects of each reading collected on its own
     (_bash_write_effects), only where a segment can add one (_gensrc_reach); a complete lex with no effect
     ALLOWS before any registry read or git call (reads are never judged). Where the lexer cannot judge those
@@ -21535,13 +21770,12 @@ def _gensrc_bash(data):
     (_gensrc_mentions, a deliberate disclosed over-denial), and NOTE otherwise (the command runs, with a
     note that its writes were not cleared). The first deny wins, then the joined notes. A fault inside the
     detector (OSError, ValueError, RecursionError, MemoryError) DENIES fail-closed."""
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or not command.strip():
+    command, unread = _bash_command(data)
+    if unread is not None or not command.strip():
         return ("deny",
                 "AIQT rule gensrc (generated-artefact-source-only, fail-closed): the Bash payload carried no "
-                "readable command string, so the generated-artefact write-sink detector cannot read it and "
-                "denies the call.",
+                "readable command string ({}), so the generated-artefact write-sink detector cannot read it "
+                "and denies the call.".format(unread or "its tool_input.command is empty or blank"),
                 "AIQT guardrail: denied a Bash call with no readable command (rule gensrc, fail-closed).")
     cwd = data.get("cwd")
     if not isinstance(cwd, str) or not os.path.isabs(cwd) or any(ord(ch) < 0x20 for ch in cwd):
@@ -22038,6 +22272,53 @@ def _orch_root(data):
     return _recovery_toplevel(cwd)
 
 
+def _orch_stop_root(data):
+    """The Stop family's repo root: (root, undecodable). The same scrubbed `git rev-parse
+    --show-toplevel` as _orch_root, read as BYTES, so a toplevel path that is not decodable text is
+    never read as out of scope. _recovery_toplevel (and so _orch_root and the snapshot caller) answers
+    None there, since its text-mode decode raises, and the Stop family would then ALLOW a stop in an
+    orchestrated tree. Here the toplevel is decoded the way the os module decodes a path
+    (os.fsdecode), so the registry, the lease and the state directory under it are still reached;
+    undecodable is True when those bytes are not strict text in the filesystem encoding, and the
+    caller then HOLDS (cannot-evaluate). (None, False) for a missing or non-string cwd, a git failure,
+    a non-zero exit or an empty or relative answer, exactly where _orch_root answers None; (None, True)
+    when the undecodable bytes cannot be decoded as a path at all (no POSIX platform: os.fsdecode
+    escapes every byte there)."""
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return (None, False)
+    try:
+        result = _recovery_git(cwd, ["rev-parse", "--show-toplevel"], timeout=5, text=False)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return (None, False)
+    raw = result.stdout
+    if result.returncode != 0 or not isinstance(raw, bytes):
+        return (None, False)
+    # strip git's ONE output terminator only, as _recovery_toplevel does
+    raw = raw[:-1] if raw.endswith(b"\n") else raw
+    if not raw:
+        return (None, False)
+    try:
+        raw.decode(sys.getfilesystemencoding(), "strict")
+        undecodable = False
+    except (UnicodeDecodeError, LookupError):
+        undecodable = True
+    try:
+        top = os.fsdecode(raw)
+    except (UnicodeDecodeError, ValueError):
+        return (None, True)
+    if not os.path.isabs(top):
+        return (None, False)
+    return (top, undecodable)
+
+
+# The cannot-evaluate entry a Stop-family decision carries when the repository toplevel is not
+# decodable text (_orch_stop_root): the stop HOLDS below the loop bound, never a silent out-of-scope allow.
+_ORCH_TOPLEVEL_UNDECODABLE_DETAIL = ("the repository top-level path is not decodable text, so this "
+                                     "guard cannot vouch for the paths and records it reads under it; "
+                                     "rename the repository directory to a UTF-8 name")
+
+
 # Orchestration-scope discovery: the truncation guard decides scope by the UNION of two legs.
 # Leg one walks the session cwd's PHYSICAL ancestor chain directly with no-follow, descriptor-anchored
 # lookups and needs no git at all, so a git discovery failure alone (no git binary on PATH, a
@@ -22454,6 +22735,27 @@ def _state_dir_from_registry(root, reg_data):
                                                             ".local", "state")
     key = __import__("hashlib").sha256(root.encode("utf-8", "replace")).hexdigest()[:16]
     return os.path.join(base, "aiqt-guardrails", "orch", key)
+
+
+_ORCH_STATE_DIR_UNUSABLE_DETAIL = ("the orchestration state directory {state_dir} cannot be resolved "
+                                   "({reason}), so the turn state, the dispatch ledger and the denial counter "
+                                   "cannot be read or saved; correct state_dir in the registry (the "
+                                   "confinement's trust root)")
+
+
+def _orch_state_dir_problem(root, reg_data):
+    """None when the state directory resolved from the ALREADY-READ registry (see _state_dir_from_registry)
+    can be resolved by os.path.realpath, else the formatted _ORCH_STATE_DIR_UNUSABLE_DETAIL naming it: a NUL
+    character, or a character the filesystem encoding cannot encode, makes every state reader and writer
+    fail (or raise), so no counter can bound a deny and no state can be trusted."""
+    sd = _state_dir_from_registry(root, reg_data)
+    try:
+        os.path.realpath(sd)
+    except (OSError, ValueError) as exc:
+        return _ORCH_STATE_DIR_UNUSABLE_DETAIL.format(
+            state_dir=_orch_clip(repr(sd), _ORCH_NAMED_REASON_MAX),
+            reason=_orch_clip("{}: {}".format(type(exc).__name__, exc), _ORCH_NAMED_REASON_MAX))
+    return None
 
 
 def _orch_state_dir_for_root(root):
@@ -22902,29 +23204,87 @@ _ORCH_SCOPE_CANNOT_DETAIL = ("the declared lease max_age_hours horizon is not us
                              "scope cannot be evaluated; correct it in the registry (the "
                              "confinement's trust root)")
 
+# The 'unreadable' scope answer's detail: a declared lease path that exists but cannot be read (any failure
+# other than genuine absence). Formatted with the declared path (repr, so a NUL or a lone surrogate shows
+# escaped) and the reason; _orch_scope_eval returns it formatted.
+_ORCH_SCOPE_UNREADABLE_DETAIL = ("the declared lease {lease} cannot be read ({reason}), so lease scope "
+                                 "cannot be evaluated; repair the lease file or correct its path in the "
+                                 "registry (the confinement's trust root)")
+
+# The cannot-evaluate row id each truthy non-True scope answer is held under.
+_ORCH_SCOPE_HOLD_IDS = {"cannot": "lease:max_age_hours", "unreadable": "lease:path"}
+
+
+def _orch_scope_unreadable(path, reason):
+    """The 'unreadable' scope answer for the declared lease path: ('unreadable', its formatted detail)."""
+    return ("unreadable", _ORCH_SCOPE_UNREADABLE_DETAIL.format(
+        lease=_orch_clip(repr(path), _ORCH_NAMED_REASON_MAX), reason=_orch_clip(reason, _ORCH_NAMED_REASON_MAX)))
+
 
 def _orch_scope_live(reg, root, session_id=None):
-    """The D11 scope check: True when a declared orchestrator lease file is live (present, non-empty,
-    within max_age_hours when declared) OR a declared mode record carries a mode line; False when scope
-    is provably not live; the string 'cannot' when a DECLARED max_age_hours horizon is not usable (a
-    boolean, zero, negative, NaN, infinite or non-number) on a lease that would otherwise read live
-    and no mode record reads live, so liveness cannot be evaluated. 'cannot' is TRUTHY on purpose: a
-    caller that only truth-tests this answer stays armed (the fail-closed direction), and every caller
-    handles it explicitly (the stop family and the yield guard route it into their existing
-    cannot-evaluate deny path; the dispatch ledger and the prompt stamp stay armed and surface it;
-    none turns a lease-scoped guard off over it). When the lease declares holder_is_session_id AND the
-    caller's session_id is known, a LIVE lease must additionally NAME that session_id, so a co-located
-    NON-holder session (a bounded worker) does not inherit the global backlog; a session the
-    lease does not name is a NON-holder (False) even under an unusable horizon. Where the lease
+    """The D11 scope answer alone (see _orch_scope_eval, which also returns the detail of a held answer)."""
+    return _orch_scope_eval(reg, root, session_id)[0]
+
+
+def _orch_scope_eval(reg, root, session_id=None):
+    """The D11 scope check, as (scope, detail). scope is True when a declared orchestrator lease file is
+    live (present, non-empty, within max_age_hours when declared) OR a declared mode record carries a mode
+    line; False when scope is provably not live; the string 'cannot' when a DECLARED max_age_hours horizon
+    is not usable (a boolean, zero, negative, NaN, infinite or non-number) on a lease that would otherwise
+    read live and no mode record reads live, so liveness cannot be evaluated; the string 'unreadable' when
+    the declared lease path cannot be read for any reason other than genuine absence (a FileNotFoundError):
+    a NUL character or a character the filesystem encoding cannot encode in the path, a permission error,
+    any other OSError, or a path that is not a regular file (a directory, a FIFO or a device), and no mode
+    record reads live. 'unreadable' follows the precedence 'cannot' uses (orchestrator decision of
+    2026-11-15T19:09Z): a live mode record is an independent scope source and outranks both, and it holds
+    only where 'cannot' would hold, so in holder mode a caller with no session id is a NON-holder (False)
+    whether or not the lease can be read. A genuinely absent lease is not live (False in holder mode, else
+    the mode record decides). detail is _ORCH_SCOPE_CANNOT_DETAIL for 'cannot', the formatted
+    _ORCH_SCOPE_UNREADABLE_DETAIL (naming the lease and the reason) for 'unreadable', else None. 'cannot' and 'unreadable' are TRUTHY on
+    purpose: a caller that only truth-tests this answer stays armed (the fail-closed direction), and every
+    caller handles both explicitly (the stop family, the yield guard and the ask guard route them into
+    their existing cannot-evaluate deny path under the _ORCH_SCOPE_HOLD_IDS row id; the dispatch ledger and
+    the prompt stamp stay armed and surface the detail; none turns a lease-scoped guard off over them).
+    When the lease declares holder_is_session_id AND the caller's session_id is known, a LIVE lease must
+    additionally NAME that session_id, so a co-located NON-holder session (a bounded worker) does not
+    inherit the global backlog; a session the lease does not name is a NON-holder (False) even under an
+    unusable horizon, while a lease that cannot be read names no one, so for a caller that carries a
+    session id it is 'unreadable' unless a mode record reads live. Where the lease
     records no comparable session identity, scope is repo-coarse (a co-located session may inherit the
     backlog): a disclosed residual, not a strict boundary."""
     lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
     cannot = False
+    unreadable = None  # the deferred 'unreadable' answer: a live mode record outranks it, as it does 'cannot'
     if lease:
         path = _orch_path(root, lease.get("path"))
         if path:
             try:
                 st = os.stat(path)
+            except FileNotFoundError:
+                st = None  # genuinely absent: not live (holder mode), else the mode record decides below
+            except OSError as exc:
+                # present but unreadable (a permission error, a non-directory component, a loop): a
+                # cannot-evaluate, never 'lease not live'
+                st = None
+                unreadable = _orch_scope_unreadable(path, "{}: {}".format(type(exc).__name__,
+                                                                          exc.strerror or exc))
+            except ValueError as exc:
+                # a NUL character, or a character the filesystem encoding cannot encode, in the path
+                st = None
+                unreadable = _orch_scope_unreadable(path, "{}: {}".format(type(exc).__name__, exc))
+            if st is not None and not stat.S_ISREG(st.st_mode):
+                st = None
+                unreadable = _orch_scope_unreadable(path, "not a regular file")
+            if unreadable is not None:
+                if lease.get("holder_is_session_id") and not (isinstance(session_id, str) and session_id):
+                    # holder mode, a caller with no session id: a NON-holder whatever the lease holds,
+                    # exactly as under 'cannot', so reading the lease could not change the answer
+                    return (False, None)
+                # otherwise the mode record decides below, as it does for 'cannot'
+            elif st is None:
+                if lease.get("holder_is_session_id"):
+                    return (False, None)  # holder mode: an absent lease -> caller cannot be confirmed holder
+            else:
                 fresh = True
                 max_age = lease.get("max_age_hours")
                 if max_age is not None:
@@ -22945,25 +23305,32 @@ def _orch_scope_live(reg, root, session_id=None):
                         # must be readable AND name that id as a whole token; anything else is a NON-holder
                         # (a co-located worker or an id-less session never inherits the global backlog).
                         if not (isinstance(session_id, str) and session_id):
-                            return False
+                            return (False, None)
+                        held = None
                         try:
                             with open(path, "r", encoding="utf-8", errors="replace") as fh:
                                 held = fh.read()
-                        except OSError:
-                            return False
-                        if not _orch_token_present(session_id, held):
-                            return False
-                        if not cannot:
-                            return True
+                        except FileNotFoundError:
+                            return (False, None)  # removed since the stat: genuinely absent, not live
+                        except (OSError, ValueError) as exc:
+                            # present but unopenable (a permission error): it names no one, so the
+                            # holder question cannot be evaluated; the mode record decides below
+                            unreadable = _orch_scope_unreadable(path, "{}: {}".format(
+                                type(exc).__name__, getattr(exc, "strerror", None) or exc))
+                        if held is not None:
+                            if not _orch_token_present(session_id, held):
+                                return (False, None)
+                            if not cannot:
+                                return (True, None)
                     elif not cannot:
-                        return True
-            except OSError:
-                if lease.get("holder_is_session_id"):
-                    return False  # holder mode: an unreadable lease -> caller cannot be confirmed holder
-                # otherwise an absent/unreadable lease is not live; fall through to the mode check
+                        return (True, None)
+                # otherwise an empty or stale lease is not live; fall through to the mode check
     if _orch_mode(reg, root) is not None:
-        return True  # a live mode record is an independent scope source; it outranks a lease 'cannot'
-    return "cannot" if cannot else False
+        # a live mode record is an independent scope source; it outranks 'cannot' and 'unreadable'
+        return (True, None)
+    if unreadable is not None:
+        return unreadable
+    return ("cannot", _ORCH_SCOPE_CANNOT_DETAIL) if cannot else (False, None)
 
 
 def _orch_escape_stat(path):
@@ -22981,6 +23348,8 @@ def _orch_escape_stat(path):
                      | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
     except OSError:
         return None
+    except ValueError:
+        return None  # a path holding a NUL character: unopenable, never an exception out of the guard
     try:
         return os.fstat(fd)
     finally:
@@ -23004,8 +23373,13 @@ def _orch_escape_active(reg, root):
     CATEGORICAL residual (closed only by an operator-owned, assistant-non-writable state dir at the OS
     layer); component resolution is a best-effort lstat walk under the anchor rather than a fully
     race-free openat-under-anchor (a narrow TOCTOU window between the walk and the O_NOFOLLOW open); and
-    uid inequality proves not-self, never operator identity."""
-    anchor = os.path.realpath(_orch_state_dir_for_root(root))
+    uid inequality proves not-self, never operator identity. A state dir realpath cannot resolve (a NUL
+    character, or a character the filesystem encoding cannot encode) is no trusted anchor, so no sentinel
+    is active: (False, None), never an exception out of the guard."""
+    try:
+        anchor = os.path.realpath(_orch_state_dir_for_root(root))
+    except (OSError, ValueError):
+        return (False, None)
     declared = (reg.get("escape") or {}).get("path") if isinstance(reg.get("escape"), dict) else None
     if declared is not None and (not isinstance(declared, str) or not declared):
         return (False, None)
@@ -23029,6 +23403,8 @@ def _orch_escape_active(reg, root):
                 return (False, "escape sentinel has a symlinked path component (rejected)")
         except OSError:
             return (False, None)  # a missing intermediate directory is simply no sentinel
+        except ValueError:
+            return (False, None)  # a component holding a NUL character names no sentinel
     # a symlink AT the final name is a spoof: classify via lstat so it surfaces a detail (the seam's
     # O_NOFOLLOW open would otherwise report it only as an unopenable None)
     try:
@@ -23036,6 +23412,8 @@ def _orch_escape_active(reg, root):
             return (False, "escape sentinel is a symlink (not followed; ignored)")
     except OSError:
         pass  # absent on disk here: the seam is authoritative (and may be injected under test)
+    except ValueError:
+        pass  # a name holding a NUL character: the seam reads it as unopenable (None)
     st = _orch_escape_stat(norm)
     if st is None:
         return (False, None)
@@ -23140,8 +23518,17 @@ def _orch_enumerate(reg, root):
     timeout = spec.get("timeout")
     timeout = timeout if isinstance(timeout, (int, float)) and 0 < timeout <= 600 else 60
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=root)
-    except (OSError, subprocess.SubprocessError) as exc:
+        # encoding="utf-8" (strict) so the enumerator's answer decodes the same under every locale:
+        # a valid UTF-8 title never denies under LC_ALL=C, and an undecodable byte always raises
+        # into the except below rather than only where the locale happens to be UTF-8.
+        result = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                                timeout=timeout, cwd=root)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # ValueError covers the UnicodeDecodeError that text-mode decoding raises on undecodable
+        # (non-UTF-8) enumerator output, on stdout or stderr: an enumerator whose answer cannot be
+        # read is an enumerator error (the same cannot-evaluate path an enumerator that cannot run
+        # takes, which the stop and schedule guards DENY on), never an uncaught crash that the
+        # dispatcher's Stop-family error posture would turn into a fail-open allow.
         return ("ENUMERATOR_ERROR", "enumerator failed to run: {}".format(
             _orch_clip(exc, _ORCH_NAMED_REASON_MAX)))
     if result.returncode != 0:
@@ -23872,10 +24259,19 @@ def _orch_record_forced_exit(root, event_name, ctx, reason):
 def _orch_stop_family(data, event_name, kind):
     """The shared Stop/TeammateIdle binding: scope, decide, map the verdict to the event's block
     mechanism (exit 2, doc-confirmed for both events 2026-08-29). Fail-OPEN on its own I/O errors;
-    a cannot-evaluate DENIES (FIX 1)."""
-    root = _orch_root(data)
+    a cannot-evaluate DENIES (FIX 1). The root is read by _orch_stop_root, so a toplevel path that is
+    not decodable text is a cannot-evaluate HOLD in an orchestrated tree, never an out-of-scope allow."""
+    root, undecodable = _orch_stop_root(data)
     if root is None:
-        return _allow()
+        if not undecodable:
+            return _allow()
+        # an undecodable toplevel with no usable path at all: no counter can be read, so the
+        # stop-hook loop signal is the bound
+        reason = "{} (cannot-evaluate)".format(_ORCH_TOPLEVEL_UNDECODABLE_DETAIL)
+        if data.get("stop_hook_active") is True:
+            return _stop_warn("AIQT guardrail ({}): loop signal set; yielding with a finding: {}"
+                              .format(event_name, reason))
+        return (2, None, reason)
     status, reg = _orch_registry(root)
     if status == "absent":
         return _allow()
@@ -23884,16 +24280,32 @@ def _orch_stop_family(data, event_name, kind):
                           "({}); the {} fails open on its own read error and, because the registry is "
                           "unreadable, writes NO guard-event (no record).".format(reg,
                                                                                   event_name))
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()
+    sd_problem = _orch_state_dir_problem(root, reg)
+    if sd_problem is not None:
+        # a state directory that cannot be resolved: no turn state, ledger or denial counter can be read
+        # or saved, so this HOLDS (cannot-evaluate) with the stop-hook loop signal as the bound, never an
+        # exception out of the handler (which the dispatcher turns into an allowed stop)
+        reason = "{} (cannot-evaluate)".format(sd_problem)
+        if data.get("stop_hook_active") is True:
+            return _stop_warn("AIQT guardrail ({}): loop signal set; yielding with a finding: {}"
+                              .format(event_name, reason))
+        return (2, None, reason)
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data)
-    if scope == "cannot":
-        # D11 scope CANNOT be evaluated (a declared but unusable max_age_hours): routed into this
-        # guard's existing cannot-evaluate deny path (FIX 1: ignorance refuses the wind-down; the
-        # loop bound and the operator escape still release), never a silent guards-off _allow().
+    if scope in _ORCH_SCOPE_HOLD_IDS:
+        # D11 scope CANNOT be evaluated (a declared but unusable max_age_hours, or a declared lease that
+        # cannot be read): routed into this guard's existing cannot-evaluate deny path (FIX 1: ignorance
+        # refuses the wind-down; the loop bound and the operator escape still release), never a silent
+        # guards-off _allow().
         ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
-            ("lease:max_age_hours", "cannot-evaluate", _ORCH_SCOPE_CANNOT_DETAIL)]
+            (_ORCH_SCOPE_HOLD_IDS[scope], "cannot-evaluate", scope_detail)]
+    if undecodable:
+        # an undecodable repository toplevel: routed into the same cannot-evaluate deny path (the loop
+        # bound and the operator escape still release), never the out-of-scope allow a None root reads as
+        ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
+            ("repo:toplevel", "cannot-evaluate", _ORCH_TOPLEVEL_UNDECODABLE_DETAIL)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     verdict, reason, disposition = decide_yield(ctx)
@@ -23991,7 +24403,7 @@ def orch_yield_tool(data):
             "work rather than parking or stopping the run.".format(reg),
             "AIQT guardrail: denied a scheduling call under an unreadable orchestration registry "
             "(ignorance refuses the wind-down); fix the registry or keep working.")
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()
     tool = data.get("tool_name")
@@ -24002,11 +24414,12 @@ def orch_yield_tool(data):
     kind = "stop" if tool_input.get("stop") is True else "schedule_idle"
     wake_text = " ".join(str(v) for v in tool_input.values() if isinstance(v, str))
     ctx, ts, basis = _orch_build_ctx(reg, root, kind, data, wake_text=wake_text)
-    if scope == "cannot":
-        # D11 scope cannot be evaluated: routed into this guard's existing cannot-evaluate deny
-        # path (the schedule cap and the operator escape still release), never a silent _allow().
+    if scope in _ORCH_SCOPE_HOLD_IDS:
+        # D11 scope cannot be evaluated ('cannot' or 'unreadable'): routed into this guard's existing
+        # cannot-evaluate deny path (the schedule cap and the operator escape still release), never a
+        # silent _allow().
         ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
-            ("lease:max_age_hours", "cannot-evaluate", _ORCH_SCOPE_CANNOT_DETAIL)]
+            (_ORCH_SCOPE_HOLD_IDS[scope], "cannot-evaluate", scope_detail)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     # Measured quiet beats a claimed quiet duration (estsep: the two grades never blend silently).
@@ -24174,12 +24587,14 @@ def _orch_ask_attended(data, reg, root):
     the live scope (a bounded co-located worker a holder-scoped lease does not name) does not
     inherit the global backlog, so the judgement allows there. Under a holder-scoped lease
     (holder_is_session_id) the judgement is off for EVERY session, the orchestrator included, where no
-    holder can be confirmed: a lease file that cannot be stat'ed, and, for a NON-EMPTY lease the
-    session-id and holder-token checks run on (one the age classifier reads as fresh or cannot-evaluate
-    under a declared max_age_hours, or, with no horizon declared, every non-empty lease whatever its
-    mtime), a lease that cannot be read, a call that carries no session id, or a lease that names no
-    session. Every other lease shape skips the holder check and falls through to the live-mode scope
-    source: an empty lease, a lease that declares no path (an absent, empty or non-string path), a
+    holder can be confirmed: a lease file that is genuinely absent, a lease that cannot be read by a
+    call that carries no session id, and, for a NON-EMPTY lease the session-id and holder-token checks
+    run on (one the age classifier reads as fresh or cannot-evaluate under a declared max_age_hours, or,
+    with no horizon declared, every non-empty lease whatever its mtime), a call that carries no session
+    id or a lease that names no session. A lease that cannot be read (stat'ed or opened) by a call that
+    carries a session id is 'unreadable', which the live mode record of this branch outranks, so the
+    judgement stays on there. Every other lease shape skips the holder check and falls through to the
+    live-mode scope source: an empty lease, a lease that declares no path (an absent, empty or non-string path), a
     lease stale past a declared max_age_hours, and a lease future-dated past the tolerated clock skew
     under a declared usable max_age_hours (an unusable one reads cannot-evaluate whatever the mtime,
     so the holder check runs); a live mode record then keeps every session in scope there, an id-less
@@ -24212,15 +24627,23 @@ def _orch_ask_attended(data, reg, root):
     not enumerable), so it denies as cannot-evaluate with a guard-events row exactly as in the yield
     guard, never a silent allow; the operator escape sentinel releases the deny exactly as in the yield
     guard; a deny whose counter cannot be saved stands and says so."""
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         # the same scope gate as the yield guard: a non-holder session never inherits the backlog.
-        # In this attended branch the mode record reads live, so _orch_scope_live is never 'cannot'
-        # here: it is False only through the holder-scoped lease check.
+        # In this attended branch the mode record reads live, so the scope is never 'cannot' or
+        # 'unreadable' here (a live mode record outranks both): it is False only through the
+        # holder-scoped lease check.
         return _allow()
     if "enumerator" not in reg:
         return _allow()  # no declared backlog enumerator: the attended backlog judgement is out of scope
     ctx, ts, basis = _orch_build_ctx(reg, root, "ask", data)
+    if scope in _ORCH_SCOPE_HOLD_IDS:
+        # defence in depth: the live mode record of this branch outranks 'cannot' and 'unreadable', so
+        # a held scope is not expected here; were one to arrive, it is routed into this guard's existing
+        # cannot-evaluate deny path (bounded by the ask cap; the operator escape still releases), never a
+        # silent _allow()
+        ctx["cannot_evaluate"] = list(ctx.get("cannot_evaluate", [])) + [
+            (_ORCH_SCOPE_HOLD_IDS[scope], "cannot-evaluate", scope_detail)]
     spoof_warn = (_orch_record_escape_spoof(root, ctx["escape_spoof"])
                   if ctx.get("escape_spoof") else "")
     verdict, reason, _disposition = decide_yield(ctx)
@@ -24354,9 +24777,10 @@ def _orch_heredoc_data_command(command):
     _orch_heredoc_data_line accepts, then its body, then a line that is exactly its delimiter, the writes
     separated only by newlines. No other command word may appear anywhere: a later '.', source, bash or
     ./path can run a written file, and an earlier hash, alias, function, enable, builtin, command, exec,
-    eval or PATH or other assignment can make `cat` run something else, so any such line makes every body
-    code. Only then does cat copy each body into its file with nothing in the command running it, and only
-    then are the bodies data. The word cat is trusted as written: a function, alias or builtin named cat
+    eval or PATH or other assignment can make `cat` run something else, so any such line keeps every body
+    from this skip (_orch_foreground_scan then reads each on its own or as code). Only then does cat copy
+    each body into its file with nothing in the command running it, and only then are the bodies skipped
+    unread as data. The word cat is trusted as written: a function, alias or builtin named cat
     the shell already holds, or an inherited PATH or other environment that resolves cat to a shell or
     another program, is not seen (disclosed in the manifest). An empty command is not such a command."""
     lines = command.split("\n")
@@ -24378,7 +24802,7 @@ def _orch_heredoc_data_command(command):
     return writes > 0
 
 
-def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True):
+def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True, body=False):
     """One quote- and escape-tracking pass over a foreground command: "detach" when it meets an executable,
     unquoted, unescaped bare `&` control operator, "unbalanced" when it ends still inside a single or double
     quote or meets a `#` whose comment reading depends on context, None otherwise. amps, when given, is a
@@ -24400,11 +24824,34 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
     a double-quoted delimiter), each with its body and delimiter line, separated only by newlines, with no
     other command word anywhere (_orch_heredoc_data_command); each body, whose delimiter this pass also
     parses (_orch_heredoc_spec) with nothing open on the nesting stack, then resumes the pass past its
-    delimiter line unread. In every other command, one where a write is followed or preceded by any other
-    command (a '.', source, bash or ./path that can run the written file, a hash, alias, function, PATH or
-    other assignment that can rename cat) included, every body is read as shell text, as it is when
-    skip_bodies is False."""
+    delimiter line unread. In every other command (one where a write is followed or preceded by any other
+    command, a '.', source, bash or ./path that can run the written file, a hash, alias, function, PATH or
+    other assignment that can rename cat included) a body can be a shell's input, so its bare `&` is still
+    read; but bash never reads a quote, comment or operator in a body as part of the command, quoted
+    delimiter or not, so a body opened at the top level with nothing open, under a delimiter this pass
+    parses and ended at its exact delimiter line, is read ON ITS OWN (_orch_heredoc_body_spans): a pass
+    over the body text alone (body set) reads its `&`, `#` and quotes as a shell reading that text would for
+    its bare `&` (it does NOT model an unquoted delimiter's expansions and backslash removal, nor a
+    here-document nested inside the body, so a detach reached only through those stays a disclosed miss),
+    and the command's pass resumes past the delimiter line in the state the line before the body left, so
+    a body quote no longer opens or closes the command's quote state. That body pass returns "unbalanced"
+    for an uncertain `#`, and for a quote still open at the body's end where the body text that quote hides
+    holds an `&` (body); a quote it closes nowhere hides nothing after the body, but a shell reading that
+    body with other text (a later body appended to one file, or the file run) can pair it, so once a body
+    leaves one open (body_open) every bare `&` this pass reads in the command is "unbalanced", never a
+    detach the lexer could lift as a quoted body's `&` nor no detach. A body read on its own, unless the
+    WHOLE command is proved a safe data-writing shape (_orch_heredoc_data_shape), is read as its consumer's
+    COMMANDS: a quote it leaves open returns
+    "unbalanced", as a quote left open in the command's own text does, and a bare `&` in it returns
+    "detach" even when amps is given, so no lift reads it as a quoted body's `&`. A body this pass
+    does not read on its own is read as shell text, as every body is when skip_bodies is False: one opened
+    after a '(', backquote or '$[' anywhere before it or with something open, under a delimiter this pass
+    does not parse, after a body read as text, one whose delimiter line never comes, and an unquoted
+    delimiter's body holding a command substitution, a '${' that holds more than a name, or a
+    backslash-newline (_orch_heredoc_body_runs), since bash runs that substitution in the command's own
+    shell and this pass has no reader that ends it wherever bash does."""
     in_single = in_double = escaped = False
+    quote_at = 0  # the index of the quote that opened the current single- or double-quoted span
     prev_dup = False  # the previous char was an unquoted, unescaped >, <, or | (a dup/pipe operator lead)
     prev = "break"  # the comment rule's class of the previous character (_hash_comment_reading)
     after_dollar = False  # the previous char was an unquoted, unescaped `$` (a following `{` opens ${...})
@@ -24416,12 +24863,18 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
     # Set once a here-document body is read as code: a line in it may be a nested shell's input or data
     # bash ends elsewhere, so no later here-document is skipped.
     code_body = False
+    # Set once a body read on its own ends with a quote open over no '&' ("open"): every bare `&` read in
+    # the command then reads as "unbalanced", never as a detach the lexer could lift or as no detach.
+    body_open = False
     # The first '(', backquote or '$[' anywhere in the command: a here-document opened after one may sit in
     # a substitution or an arithmetic expansion, whose body bash can end elsewhere, so it is never skipped.
     grouped = min((at for at in (command.find("("), command.find("`"), command.find("$[")) if at != -1),
                   default=len(command))
     # Whether the whole command is nothing but plain cat writes, the one case whose bodies are data.
     data_command = skip_bodies and _orch_heredoc_data_command(command)
+    # Whether the WHOLE command is a safe data-writing shape, proved once over the outer text: when it is,
+    # every here-document body is data; when it is not, every body is read as its consumer's commands.
+    data_shape = skip_bodies and _orch_heredoc_data_shape(command)
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
@@ -24486,13 +24939,41 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
             # is nothing but plain cat writes to files (_orch_heredoc_data_command) does nothing in it run a
             # body, so only there is a quoted body literal data the scan resumes past, its quotes shifting
             # nothing. In any other command (a write followed by '. ./s.sh' or 'bash s.sh', or preceded by
-            # 'hash -p /usr/bin/bash cat', included) the body is read as shell text, as before.
+            # 'hash -p /usr/bin/bash cat', included) a body can be a shell's input, so its '&' is still read.
             specs, heredocs = heredocs, []
             literal = (data_command and not nest and not code_body
                        and all(spec and spec[1] for spec in specs))
             end, closed = (_orch_heredoc_bodies_end(command, i + 1, n, [(spec[0], spec[2]) for spec in specs])
                            if literal else (i, False))
             if closed:
+                prev_dup, prev, after_dollar = False, "break", False
+                i = end
+                continue
+            # Any other body opened at the top level with nothing open, under a delimiter this pass parses,
+            # is read on its own (_orch_heredoc_body_spans), its '&' read as a shell reading the body would:
+            # bash never reads a quote in a body as a quote of the command, so a body quote no longer opens
+            # or closes the command's quote state, and the text after the delimiter line is read from where
+            # the line before the body left it. Every other body is read as shell text, as before.
+            spans, end = ((None, i) if literal or nest or code_body or not all(specs)
+                          else _orch_heredoc_body_spans(command, i + 1, n, specs))
+            if spans is not None:
+                for start, stop in spans:
+                    # Unless the WHOLE command is a safe data-writing shape (_orch_heredoc_data_shape, proved
+                    # once as data_shape), every body is read as its consumer's COMMANDS: a quote it leaves
+                    # open is the "unbalanced" a quote left open in the command's own text gives, and a bare
+                    # '&' in it is a detach no lift reads as quoted body text, so the pass returns it even
+                    # when amps is given.
+                    runs = not data_shape
+                    found = [] if amps is not None else None
+                    kind = _orch_foreground_scan(command[start:stop], bash_word_starts, found, False, True)
+                    if kind == "open" and not runs:
+                        body_open = True
+                    elif kind is not None:
+                        return "unbalanced" if body_open or kind == "open" else kind
+                    if found and runs:
+                        return "unbalanced" if body_open else "detach"
+                    if found:
+                        amps.extend(start + at for at in found)
                 prev_dup, prev, after_dollar = False, "break", False
                 i = end
                 continue
@@ -24507,11 +24988,11 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
             i += 1
             continue
         if ch == "'":
-            in_single, prev_dup, prev, after_dollar = True, False, "word", False
+            in_single, prev_dup, prev, after_dollar, quote_at = True, False, "word", False, i
             i += 1
             continue
         if ch == '"':
-            in_double, prev_dup, prev, after_dollar = True, False, "word", False
+            in_double, prev_dup, prev, after_dollar, quote_at = True, False, "word", False, i
             i += 1
             continue
         if ch == "&":
@@ -24531,7 +25012,9 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
                 i += 1
                 continue
             if amps is None:
-                return "detach"  # an executable bare `&` control operator: a foreground detach
+                # An executable bare `&` control operator: a foreground detach, unless a body read on its own
+                # left a quote open that a shell reading that body with later text can pair (body_open).
+                return "unbalanced" if body_open else "detach"
             amps.append(i)
             i += 1
             continue
@@ -24551,8 +25034,244 @@ def _orch_foreground_scan(command, bash_word_starts, amps=None, skip_bodies=True
         after_dollar = ch == "$"
         i += 1
     # A scan that ended still inside an unbalanced quote could not prove a later `&` was quoted; it fails
-    # toward the DENY (with its own reason) rather than silently allowing a possibly-real detach.
-    return "unbalanced" if in_single or in_double else None
+    # toward the DENY (with its own reason) rather than silently allowing a possibly-real detach. A body
+    # read on its own (body) hides no text of the command after it, which the caller reads past the
+    # delimiter line: its open quote is "unbalanced" where the body text it hides holds an '&', and else
+    # "open", which the caller records (body_open).
+    if in_single or in_double:
+        return ("open" if body and "&" not in command[quote_at:] else "unbalanced")
+    # A body read on its own left a quote open: a shell reading that body with other text (a later body
+    # appended to the same file, or a file the command runs) can pair it with a later quote, so a bare `&`
+    # this pass read anywhere in the command (amps) is not shown to be a detach or quoted text either way.
+    return "unbalanced" if body_open and amps else None
+
+
+# One escape or expansion opener in an unquoted here-document body (_orch_heredoc_body_runs): a backslash
+# with the character it escapes there ('$', backquote, backslash or newline), a backquote, '$(' or '${'; and
+# a '${' that holds nothing but a name, which runs no command.
+_ORCH_BODY_EXPANSION_RE = re.compile(r"\\[$`\\\n]|`|\$[({]")
+_ORCH_BODY_PLAIN_BRACE_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def _orch_heredoc_body_runs(command, start, stop):
+    """True when the unquoted here-document body command[start:stop] holds what bash expands by running or
+    joining text: a command substitution ('$(' or a backquote, an arithmetic '$((' included), a '${' that
+    holds more than a name, or a backslash-newline, which bash removes before it reads the body. A backslash
+    before '$', a backquote or a backslash escapes it, so the escaped character opens nothing."""
+    for match in _ORCH_BODY_EXPANSION_RE.finditer(command, start, stop):
+        text = match.group()
+        if text == "\\\n":
+            return True
+        if text[0] == "\\":
+            continue
+        if text == "${" and _ORCH_BODY_PLAIN_BRACE_RE.match(command, match.start(), stop):
+            continue
+        return True
+    return False
+
+
+def _orch_heredoc_body_spans(command, i, n, specs):
+    """The bodies of the here-documents opened on one line, each spec a _orch_heredoc_spec (delimiter,
+    quoted, strip_tabs), read from index i (just past that line's newline) in the order their `<<` operators
+    appeared, as ([(start, stop), ...], end): each body runs from its first line to the line that is EXACTLY
+    its delimiter (leading tabs stripped for the <<- form, from that line only), and end is the index just
+    past the last delimiter line. (None, i) when any delimiter line never comes (bash reads the rest of the
+    command as that body), or an unquoted delimiter's body holds a command substitution, a '${' that holds
+    more than a name or a backslash-newline (_orch_heredoc_body_runs): bash runs such a substitution in the
+    command's own shell, and this pass has no reader that ends one wherever bash does, so the caller reads
+    those bodies as shell text, as it reads every body it does not read on its own. Every other body holds
+    text bash never reads for quotes, comments or operators, quoted delimiter or not, so the caller reads
+    each alone, apart from the command's quote state."""
+    spans = []
+    for delimiter, quoted, strip_tabs in specs:
+        start, stop = i, None
+        while i < n:
+            nl = command.find("\n", i)
+            line = command[i:(nl if nl != -1 else n)]
+            at, i = i, (n if nl == -1 else nl + 1)
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                stop = at
+                break
+        if stop is None or (not quoted and _orch_heredoc_body_runs(command, start, stop)):
+            return None, i
+        spans.append((start, stop))
+    return spans, i
+
+
+# A short allowlist of command words a safe data-writing command may hold besides the cat that writes a
+# here-document body (_orch_heredoc_data_shape): each reads, lists, hashes, makes a directory or tests, and
+# runs or renames no file it names. cat writes the bodies. An interpreter (python3 and the like), git, cp,
+# mv, ln, eval, exec, source, a lone '.', read and printf are NOT here: each can run or rename a file.
+_ORCH_DATA_SHAPE_ALLOWED = frozenset((
+    "cat", "echo", "mkdir", "sha256sum", "sha1sum", "sha224sum", "sha384sum", "sha512sum", "md5sum",
+    "b2sum", "cksum", "wc", "ls", "stat", "cmp", "diff", "test", "true"))
+# A plain word of a data-writing command: no quote, backslash, '$', backquote, parenthesis, brace, glob,
+# pipe, '&' or redirection character (a cat write target and a here-document delimiter use these bytes).
+_ORCH_DATA_SHAPE_WORD_RE = re.compile(r"[A-Za-z0-9_./+,:@%=-]+")
+# An assignment at a command word's start (NAME= or NAME+=), anchored to the word so the scan stays linear.
+_ORCH_DATA_SHAPE_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
+# One here-document delimiter word: plain characters and single-, double- or backslash-quoted runs of them
+# (EOF, 'EOF', "EOF", \EOF, EO'F'); the value is the delimiter with its quoting removed.
+_ORCH_DATA_SHAPE_DELIM_RE = re.compile(
+    r"[A-Za-z0-9_.+-]+|'[A-Za-z0-9_.+-]*'|\"[A-Za-z0-9_.+-]*\"|\\[A-Za-z0-9_.+-]")
+# Cost ceilings of the proof, each failing TOWARD reading the bodies as commands (the safe side): a command
+# longer than this many characters, or holding more here-documents than this, is not proved a data shape.
+# The proof is one left-to-right pass, so its work is linear in the command length within these ceilings.
+_ORCH_DATA_SHAPE_TEXT_LIMIT = 65536
+_ORCH_DATA_BODY_LIMIT = 64
+
+
+def _orch_data_shape_delim(command, i, n):
+    """Parse a here-document delimiter word at command[i:n] (just past '<<' or '<<-' and any blanks) as
+    (delimiter with quoting removed, index past it), or (None, i) when no delimiter word begins there."""
+    parts, start = [], i
+    while i < n:
+        match = _ORCH_DATA_SHAPE_DELIM_RE.match(command, i)
+        if match is None:
+            break
+        token = match.group()
+        if token[0] in "'\"":
+            parts.append(token[1:-1])
+        elif token[0] == "\\":
+            parts.append(token[1:])
+        else:
+            parts.append(token)
+        i = match.end()
+    if i == start:
+        return None, i
+    return "".join(parts), i
+
+
+def _orch_heredoc_data_shape(command):
+    """True when the WHOLE command is a safe data-writing shape in which every here-document body is DATA (the
+    scan then reads each body on its own for its bare `&` alone, apart from the command's quote state), proved
+    by ONE left-to-right pass over the command with each body skipped unread. The proof is positive and narrow
+    and fails toward reading the bodies as commands (the safe, over-refusing side) on anything it does not
+    recognise: every simple command outside the bodies is made only of plain words (no quote, backslash, '$',
+    backquote, parenthesis, brace, glob, pipe, bare '&' or redirection other than a cat write target), none is
+    an assignment, and the only separators are ';', '&&', '||' and newline, so none sits in a group, compound
+    command, pipeline or substitution; the command holding each body is a plain cat (its only words `cat`, its
+    only redirections '>'/'>>' to plain targets, writing to those files or, with none, to standard output),
+    and no write target is reached through a '..', is an ABSOLUTE path under /dev or /proc other than exactly
+    /dev/null or a path under /dev/shm/, or has a last path component that is an allowlisted word (or `cat`),
+    so a cat write cannot place a body where a later word runs it (a RELATIVE dev/ or proc/ target is an
+    ordinary project path); and
+    every other simple command's first word is in _ORCH_DATA_SHAPE_ALLOWED, a short list of readers and the
+    like that run or rename no file they name. A python3 -c or any interpreter, git, cp, mv, ln, eval, exec,
+    source, a dot, read or printf -v fails the proof, as does any first word (echo and printf among them, and
+    cat with a file redirect but no here-document body: `cat a > b`) that redirects to a file without holding
+    a body, so such a command's body is read as commands. The work is linear in the command length within two
+    cost ceilings, each failing toward commands: a command longer than _ORCH_DATA_SHAPE_TEXT_LIMIT characters,
+    or holding more than _ORCH_DATA_BODY_LIMIT here-documents."""
+    n = len(command)
+    if n > _ORCH_DATA_SHAPE_TEXT_LIMIT:
+        return False
+    i, bodies = 0, 0
+    first_word, is_cat, has_heredoc, has_redirect, extra_word = None, False, False, False, False
+    pending = []  # (delimiter, strip_tabs) for the here-documents opened on the current line
+
+    def segment_ok():
+        if first_word is None:
+            return not has_heredoc and not has_redirect
+        if has_heredoc:
+            return is_cat and not extra_word
+        if has_redirect:
+            return False
+        return first_word in _ORCH_DATA_SHAPE_ALLOWED
+
+    while i < n:
+        ch = command[i]
+        if ch in " \t":
+            i += 1
+            continue
+        if ch == "\n":
+            i += 1
+            if pending:
+                for delimiter, strip_tabs in pending:
+                    found = False
+                    while i < n:
+                        nl = command.find("\n", i)
+                        line = command[i:(n if nl == -1 else nl)]
+                        i = n if nl == -1 else nl + 1
+                        if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                            found = True
+                            break
+                    if not found:
+                        return False  # a body whose delimiter line never comes is not a clean data shape
+                pending = []
+            if not segment_ok():
+                return False
+            first_word, is_cat, has_heredoc, has_redirect, extra_word = None, False, False, False, False
+            continue
+        if ch in ";&|":
+            if ch == ";" and command.startswith(";;", i):
+                return False
+            if ch in "&|" and not command.startswith(ch * 2, i):
+                return False
+            i += 2 if ch in "&|" else 1
+            if not segment_ok():
+                return False
+            first_word, is_cat, has_heredoc, has_redirect, extra_word = None, False, False, False, False
+            continue
+        if ch == ">":
+            i += 2 if command.startswith(">>", i) else 1
+            has_redirect = True
+            while i < n and command[i] in " \t":
+                i += 1
+            match = _ORCH_DATA_SHAPE_WORD_RE.match(command, i)
+            if match is None:
+                return False
+            target = match.group()
+            parts = [part for part in target.split("/") if part not in ("", ".")]
+            # A write target the proof cannot read as an ordinary file is not a data shape, and each case
+            # below fails the proof toward reading the bodies as commands. First, a target reached through a
+            # '..' can traverse to a place the plain word does not name (/abs/../dev/stdout).
+            if not parts or ".." in parts:
+                return False
+            # Second, an ABSOLUTE target under /dev or /proc can be the shell's own stream, not a file
+            # (/dev/stdout, /dev/stderr, /dev/fd/N, /dev/tty, any /proc path), except exactly /dev/null and a
+            # path under /dev/shm/, a regular tmpfs file. A RELATIVE dev/ or proc/ target is an ordinary
+            # project path here, read as any other relative file.
+            if (target.startswith("/") and parts[0] in ("dev", "proc")
+                    and parts != ["dev", "null"] and not (len(parts) > 2 and parts[:2] == ["dev", "shm"])):
+                return False
+            # Third, a last path component that is an allowlisted word (or cat) names the very program a
+            # reader segment resolves, so the write could REPLACE a program the same command then runs.
+            if parts[-1] in _ORCH_DATA_SHAPE_ALLOWED:
+                return False
+            i = match.end()
+            continue
+        if ch == "<":
+            if command.startswith("<<<", i) or not command.startswith("<<", i):
+                return False
+            strip_tabs = command.startswith("<<-", i)
+            i += 3 if strip_tabs else 2
+            while i < n and command[i] in " \t":
+                i += 1
+            delimiter, i = _orch_data_shape_delim(command, i, n)
+            if delimiter is None:
+                return False
+            has_heredoc = True
+            bodies += 1
+            if bodies > _ORCH_DATA_BODY_LIMIT:
+                return False
+            pending.append((delimiter, strip_tabs))
+            continue
+        match = _ORCH_DATA_SHAPE_WORD_RE.match(command, i)
+        if match is None:
+            return False  # a forbidden character: a quote, '$', backquote, '(', '{', a glob and the like
+        word = match.group()
+        i = match.end()
+        if first_word is None:
+            if _ORCH_DATA_SHAPE_ASSIGN_RE.match(word):
+                return False
+            first_word, is_cat = word, word == "cat"
+        else:
+            extra_word = True
+        continue
+    if pending:
+        return False  # a here-document opened on the last line with no body and delimiter line after it
+    return segment_ok()
 
 
 def _orch_foreground_detach_kind(command, skip_bodies=True):
@@ -24704,14 +25423,16 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     the delimiter and holds the closer anywhere after it, or at a backquote inside backquotes, running
     what this lex would read as body, so such a body records as "body" and is never
     lifted, fail closed), or the commit message form's body in "$(cat <<'EOF' ... EOF)", whose exact
-    close the lex itself resolves; (2)
+    close the lex itself resolves; a body in a command not proved a safe data-writing shape
+    (_orch_heredoc_data_shape) is never lifted, since the scan reads it as commands and gives its `&` as a
+    detach even when listing each bare `&` (_orch_foreground_scan); (2)
     a single- or double-quoted string; or (3) a '#' comment. Every other case where the lexer and the scan
     disagree still denies: an `&` the lexer places in a substitution or expansion that a double-quoted string
     holds (one in a quoted string or comment nested there included, since the lexer skips it whole), in an
     ANSI-C $'...' quote or behind an escape; a scan that ends inside a quote or meets an uncertain '#'
-    ("unbalanced", an apostrophe in a here-document body the scan reads as shell text included: an
-    unquoted delimiter's, or a quoted one's the scan does not skip); and a command the lexer reads
-    in more than one way. The lexer's quoting model is a best-effort reading of bash, not a guarantee, so
+    ("unbalanced", an apostrophe in a here-document body the scan reads as shell text included: one it
+    does not read on its own, _orch_foreground_scan, or a body quote left open over an '&'); and a command
+    the lexer reads in more than one way. The lexer's quoting model is a best-effort reading of bash, not a guarantee, so
     where it places an `&` inside one of the three shapes but bash reads that `&` as an operator, the detach
     is allowed (the disclosed lexer-path false-allow residual). lifts, when given, is a list the call
     appends True to where that narrowing reads the scan's "detach" as None, or where the scan reads None
@@ -24804,28 +25525,56 @@ def _orch_foreground_detach(command):
     is a disclosed residual; where such a construct still leaves an unquoted bare `&`, or leaves the scan
     inside an unbalanced quote at the end, it errs toward the DENY, but a detacher that carries no bare `&`
     (setsid worker, a nested `bash -c '... &'`) is NOT caught here and is a silent-allow residual disclosed
-    in the manifest. It judges only the `&` the top-level shell reads: a here-document body fed to a shell
-    is read as code, but the guard's lexer narrowing still lifts an `&` such a body holds under a quoted
-    delimiter where the scan reads the rest of the command to its end (`bash <<'EOF'` then `job &`), a
-    silent allow disclosed in the manifest.
+    in the manifest. A here-document body it reads on its own, in a command not proved a safe data-writing
+    shape (_orch_heredoc_data_shape: `bash <<'EOF'` then `job &`, `cat <<'EOF' | bash`, `cat > s.sh <<'EOF'`
+    then `bash s.sh`), is read as its consumer's commands, so the guard's lexer narrowing never lifts its
+    `&`. A cat write in a command the proof accepts whose file is run later without the command naming it
+    (a hook, a configuration a later program reads, or a later call, such as a body written into a shell
+    snapshot file a later shell sources) is read as data, a silent allow disclosed in the manifest's HONEST
+    RESIDUAL.
 
-    OVER-REFUSAL RESIDUAL (disclosed): this scan skips a here-document body as data only when the WHOLE
-    command is nothing but one or more plain cat writes (_orch_heredoc_data_command): each a line holding
-    only cat, one output redirect to a plain file and one quoted here-document operator (<<'EOF' or
-    <<"EOF") it parses, opened with no '(', backquote or '$[' anywhere before it and nothing open, then its
-    body and a line that is, whole, its delimiter, the writes separated only by newlines, with no other
-    command word anywhere. Only in such a command does a quote, `&` or substitution in a body (`cat > f
-    <<'EOF'` then `the user's file`) read as no detach. Every other body it reads as CODE: a quoted
-    delimiter's in a cat write followed or preceded by any other command (the same write followed by a
-    line `true` included), an unquoted delimiter's, one fed to a shell or any consumer it cannot show only
-    writes the body to a file (cat to standard output and tee included), the commit-message form's in
-    "$(cat <<'EOF' ... EOF)", one in a subshell or after any '(' or backquote, one after a body read as
-    code, and one with no delimiter line.
+    OVER-REFUSAL RESIDUAL (disclosed): this scan reads a here-document body as data (its bare `&` alone, the
+    body's quotes shifting nothing in the command) only when the WHOLE command is proved a safe data-writing
+    shape, by ONE positive proof over the outer text
+    (_orch_heredoc_data_shape): every simple command outside the bodies made only of plain words (no quote,
+    backslash, '$', backquote, parenthesis, brace, glob, pipe, bare '&' or redirection other than a cat
+    write target), none an assignment, none in a group, compound command, pipeline or substitution; the
+    command holding each body a plain cat writing to plain targets (none reached through a '..', none an
+    ABSOLUTE path under /dev or /proc other than exactly /dev/null or a path under /dev/shm/, and none whose
+    last path component is an allowlisted word or cat) or to standard output; and every
+    other simple command's first word in a short allowlist of readers that run or rename no file they name
+    (cat, mkdir, the checksum tools, wc, ls, stat, cmp, diff, test, true, echo). Only in such a command does a
+    quote, `&` or substitution in a body (`cat > f <<'EOF'` then `the user's file`, or a cat to standard
+    output alone, itself a data shape) read as no detach. Every command reads a body opened at the top level
+    with nothing open, under a delimiter the scan parses and ended at its delimiter line, ON ITS OWN, as a
+    shell reading that text would for its bare `&`, apart from the command's quote state (_orch_foreground_scan,
+    which does not model an unquoted delimiter's expansions or a nested here-document), so a body apostrophe no
+    longer leaves the command's quote open; the detach then stands only where the command is not a data shape.
+    A body opened at the top level (not in the commit-message form below) fed to a shell (bash, sh, dash,
+    zsh, source /dev/stdin, a cat piped onward), under a consumer the proof does not accept (a python3 -c or
+    any interpreter, git, echo or printf writing to a file, cp, mv, ln, eval, exec, source, a dot, read or
+    printf -v), or written to a file the same command then runs (bash FILE, sh FILE, source FILE, ./FILE,
+    python3 FILE) is read as those COMMANDS: a quote it leaves open denies beside an `&` or a runtime start
+    form, as one in the command's own text does, with or without an apostrophe elsewhere, and its bare `&` is
+    never lifted. The commit-message form "$(cat <<'EOF' ... EOF)" is not read that way under any consumer:
+    under eval, sh -c or python3 -c its body `&` sits inside the double-quoted substitution, so the scan
+    reads no bare `&` and the command allows on the scan alone although the consumer runs the body and can
+    start a background job, a disclosed false allow (the manifest's KNOWN FALSE-ALLOW RESIDUAL (1) and (2)
+    and the nested shell string of its HONEST RESIDUAL). That
+    over-refuses a body `&` under a consumer that does not run it (`git commit -F -`, the no-op `:`) and a
+    written file a reader not on the allowlist names without running it. Every other body it reads as CODE at
+    the outer quoting level: the commit-message form's in "$(cat <<'EOF' ... EOF)", one in a subshell or
+    after any '(' or backquote, one after a body read as code, one with no delimiter line, and an unquoted
+    delimiter's holding a command substitution, a '${' that holds more than a name or a backslash-newline
+    (_orch_heredoc_body_runs).
     The guard's lexer reading lifts that for an `&` only: a body `&` under a quoted delimiter (`say "a &
     b"` in the commit-message form) is allowed where the scan reads the rest of the command to its end. A
-    body the scan reads as code at the outer quoting level with an unbalanced apostrophe (`cat <<'EOF'`
-    to standard output, or one with no delimiter line), or one whose quote leaves the scan open at the end,
-    is still DENIED although nothing detaches where the command holds an `&` or a runtime start form
+    body the scan reads as code at the outer quoting level with an unbalanced apostrophe (one with no
+    delimiter line, or an unquoted delimiter's holding a command substitution), a body quote that leaves
+    the scan open at the end, a body read on its own whose quote stays open over an `&`, and any body
+    quote left open in a command holding a bare `&` (a body fed to a shell, `bash <<'EOF'` then `job &`
+    and `echo it's`, included), are still
+    DENIED although nothing detaches where the command holds an `&` or a runtime start form
     (_ORCH_RUNTIME_START_RE), and so is a body `&` under an unquoted delimiter, which the lexer refuses; the
     guard allows such a body in a command that holds neither (_orch_foreground_detach_lexed), where the
     open quote has no `&` to hide. The commit-message form's body is NOT denied for an unbalanced
@@ -24848,14 +25597,18 @@ def _orch_foreground_detach(command):
     (e'v'al 'job &', {eval,} 'job &', \\eval 'job &'); (3) after an ANSI-C $'...' quote with an escaped
     quote that leaves the scan balanced but misaligned; (4) inside an arithmetic subscript that runs a
     substitution; (5) QUOTE SHIFT: after a quote character that bash reads as data but the scan reads as a
-    quote, above all an apostrophe or double quote in a here-document body the scan reads as code (an
-    unquoted delimiter's, a quoted one's it does not skip, the double-quoted commit-message form's), which
-    flips the scan's quote state so that a LATER real bare `&` (between two here-documents, or before a
-    second stray quote that rebalances the scan)
-    reads as quoted text and is allowed; and (6) COMMENT SHIFT: after a `#` that bash reads as quoted text
-    but the scan reads as a comment, where a double-quoted string nested inside a double-quoted "$(...)"
-    ends the scan's double quote early, so a `#` inside the nested string reads as a word-start comment
-    and a real bare `&` later on that line is skipped (echo "$(echo "a" "b # ")" & job # ")."""
+    quote, above all an apostrophe or double quote in a here-document body the scan reads as code at the
+    outer quoting level (one it does not read on its own, as listed above, the double-quoted commit-message
+    form's included), which flips the scan's quote state so that a LATER real bare `&` (between two
+    here-documents, or before a second stray quote that rebalances the scan) reads as quoted text and is
+    allowed; a body the scan reads on its own shifts nothing, and a quote opened in one such body and
+    closed in a later one is no longer read across them: where the command runs the file both bodies are
+    written to, each reads as commands and the first one's open quote denies, so an `&` that pairing
+    leaves bare is missed only where the consumer reading misses that run; and (6) COMMENT SHIFT: after a
+    `#` that bash reads as quoted text but the scan reads as a comment, where a double-quoted string nested
+    inside a double-quoted "$(...)" ends the scan's double quote early, so a `#` inside the nested string
+    reads as a word-start comment and a real bare `&` later on that line is skipped
+    (echo "$(echo "a" "b # ")" & job # ")."""
     return _orch_foreground_detach_kind(command) is not None
 
 
@@ -26141,8 +26894,9 @@ def _orch_registry_required():
 
 def _orch_oos_unreadable_input_note(detail):
     """The out-of-scope note for a Bash call whose tool input this guard cannot read (a tool_input that
-    is missing, null or not a JSON object, a command that is missing or not a string, or a
-    run_in_background that is present but not a real boolean): allowed WITH A NOTE naming the field it
+    is missing, null or not a JSON object, a command that is missing, not a string or holds a NUL, as
+    _bash_command reads it, or a run_in_background that is present but not a real boolean): allowed WITH
+    A NOTE naming the field it
     could not read, never the silent allow such a call once was here (a detach such an input carries is
     never scanned, so silence would read ignorance as clean) and never a deny (outside registry scope
     this guard denies nothing)."""
@@ -26190,7 +26944,8 @@ def orch_truncation_guard(data):
 
     MALFORMED INPUT FAILS CLOSED (check-fails-closed-on-unreadable): a tool_input that is missing, null, or
     not a JSON object, a run_in_background that is present but not a real boolean (the string "true" is
-    malformed, never read as foreground), and a command that is not a string are each DENIED with a
+    malformed, never read as foreground), and a command that is not a string or holds a NUL (read, as in
+    every Bash hook, through _bash_command) are each DENIED with a
     reason naming the defect, never silently allowed. REGISTRY SCOPE (a disclosed residual, not a
     fail-closed case): the registry is this suite's scope declaration, located by the UNION of a walk of
     the cwd's physical ancestor chain with no-follow, descriptor-anchored lookups (_orch_registry_walk,
@@ -26227,7 +26982,8 @@ def orch_truncation_guard(data):
     or disown it names. A call there whose input cannot be read (a tool_input that is missing, null or not an
     object, a command that is missing or not a string, or a run_in_background that is present but not a
     real boolean) is allowed WITH A NOTE naming the field this guard could not read
-    (_orch_oos_unreadable_input_note), never silently and never a deny; a readable background dispatch
+    (_orch_oos_unreadable_input_note), never silently; a command string holding a NUL is not absent (the
+    text before the NUL runs) and DENIES there too (_bash_command_holds_nul); a readable background dispatch
     (run_in_background exactly true) and a readable foreground command neither reader flags are the
     silent allow. REGISTRY-REQUIRED MODE (opt-in, default
     unchanged): with the environment variable AIQT_ORCH_REQUIRE_REGISTRY set to anything but an explicit
@@ -26324,10 +27080,11 @@ def orch_truncation_guard(data):
                 "registry found (rule trkasy, fail-closed).")
         # Not an orchestrated session: no registry on the chain or at a git toplevel. A call whose input this
         # guard cannot read (a tool_input that is missing, null or not an object, a command that is missing
-        # or not a string, or a run_in_background that is present but not a real boolean) is allowed with a
+        # or not a string, read through the shared _bash_command, or a run_in_background that is
+        # present but not a real boolean) is allowed with a
         # note naming the field it could not read, never silently (a detach such an input carries is never
-        # scanned, so silence would read ignorance as clean) and never a deny (no fail-closed case outside
-        # registry scope); a readable background dispatch (run_in_background exactly true) keeps the silent
+        # scanned, so silence would read ignorance as clean); a command string holding a NUL is not absent
+        # (the text before the NUL runs) and denies here too; a readable background dispatch (run_in_background exactly true) keeps the silent
         # allow. A readable foreground command gets ONE note when either reader finds work that may detach:
         # the detector the registry scope denies on (a bare-& detach, or quoting or comments it cannot read
         # to the end, where a later '&' can be a hidden detach) gives its own note, and otherwise the note
@@ -26338,17 +27095,15 @@ def orch_truncation_guard(data):
         # reading the vouched here-document shapes as data, so a setsid, nohup or disown command word
         # anywhere, a line continuation, an unclosed expansion, and every other cause outside those
         # shapes keeps its note (the single note is the true union of both readers).
-        out_input = data.get("tool_input")
-        if not isinstance(out_input, dict):
-            kind = "missing" if "tool_input" not in data else _orch_json_kind(out_input)
-            return _orch_oos_unreadable_input_note(
-                "its tool_input is {}, not a JSON object, so neither its command nor its "
-                "run_in_background flag can be read".format(kind))
-        out_command = out_input.get("command")
-        if not isinstance(out_command, str):
-            kind = "missing" if "command" not in out_input else _orch_json_kind(out_command)
-            return _orch_oos_unreadable_input_note(
-                "its command is {}, not a string, so it cannot be scanned".format(kind))
+        out_command, out_unread = _bash_command(data)
+        if out_unread is not None and _bash_command_holds_nul(data):
+            # a command string holding a NUL is not absent: the text before the NUL runs, so it
+            # denies outside registry scope too, as every Bash hook that judges the command does
+            return _deny_unreadable_command("trkasy (track-launched-work)", "foreground detach scan",
+                                            out_unread)
+        if out_unread is not None:
+            return _orch_oos_unreadable_input_note("{}; it cannot be scanned".format(out_unread))
+        out_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
         out_rib = out_input.get("run_in_background", False)
         if out_rib is True:
             # A readable background dispatch: not a foreground call, so the foreground detach note does
@@ -26461,17 +27216,20 @@ def orch_truncation_guard(data):
             "guard active).",
             "AIQT guardrail: denied a Bash call in registry-required mode whose git toplevel could not be "
             "opened for the orchestration registry (rule trkasy, fail-closed).")
+    # The command comes through the reader every Bash hook shares. A tool_input it cannot read as an object
+    # denies first (neither the command nor run_in_background can be read), a run_in_background that is not
+    # a boolean next, and a command it cannot read then denies in either mode.
+    command, unread = _bash_command(data)
     tool_input = data.get("tool_input")
-    if not isinstance(tool_input, dict):
-        kind = "missing" if "tool_input" not in data else _orch_json_kind(tool_input)
+    if unread is not None and not isinstance(tool_input, dict):
         return _deny(
-            "AIQT rule trkasy (track-launched-work): this Bash call's tool_input is {}, not a JSON object, "
-            "so this guard cannot read its command or its run_in_background flag. A check that cannot read "
+            "AIQT rule trkasy (track-launched-work): this Bash call's input cannot be read ({}), so this "
+            "guard cannot read its command or its run_in_background flag. A check that cannot read "
             "its input fails closed (check-fails-closed-on-unreadable): it is denied rather than allowed "
-            "unread. Re-issue the call with a tool_input object carrying a string command.".format(kind),
-            "AIQT guardrail: denied a Bash call whose tool_input is {}, not an object "
-            "(fail-closed).".format(kind))
-    command = tool_input.get("command")
+            "unread. Re-issue the call with a tool_input object carrying a string command.".format(unread),
+            "AIQT guardrail: denied a Bash call whose tool_input is not a JSON object (fail-closed).")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
     rib = tool_input.get("run_in_background", False)
     if not isinstance(rib, bool):
         return _deny(
@@ -26491,15 +27249,14 @@ def orch_truncation_guard(data):
         # takes the wait-loop exits instead, and a command the lexer refuses whose text holds the poll
         # shape's words (_orch_bg_poll_loop's fallback 'match') takes a hedged text carrying those exits,
         # since orch_untracked_wait_loop denies both and its exits forbid resubmitting the loop in either
-        # form. An
-        # unreadable (non-string) command fails closed; a non-detaching foreground command is out of scope
-        # (ALLOW).
-        if not isinstance(command, str):
+        # form. An unreadable command (not a string, or holding a NUL) fails closed; a non-detaching
+        # foreground command is out of scope (ALLOW).
+        if unread is not None:
             return _deny(
-                "AIQT rule trkasy (track-launched-work): this foreground Bash call's command is {}, not a "
-                "string, so this guard cannot scan it for a bare '&' detach; it is denied rather than "
+                "AIQT rule trkasy (track-launched-work): this foreground Bash call's command cannot be read "
+                "({}), so this guard cannot scan it for a bare '&' detach; it is denied rather than "
                 "allowed unread (check-fails-closed-on-unreadable). Re-issue with a string command."
-                .format("missing" if "command" not in tool_input else _orch_json_kind(command)),
+                .format(unread),
                 "AIQT guardrail: denied a foreground Bash call with no readable command string "
                 "(fail-closed).")
         detach_kind = _orch_foreground_detach_lexed(command)
@@ -26512,12 +27269,17 @@ def orch_truncation_guard(data):
                 "prove that a later '&' is quoted or commented text rather than a bare detach; it is denied "
                 "rather than allowed unread (check-fails-closed-on-unreadable). The open quote may be a "
                 "real unbalanced quote, or one the scan misreads: an apostrophe or double quote in a "
-                "here-document body this scan reads as code (an unquoted delimiter's, or a quoted one's it "
-                "cannot end at a whole delimiter line or whose command may run it: only a command of "
-                "nothing but plain cat > file writes is read as writing data, so write such text with "
-                "cat in a call of its own) or an ANSI-C $'...' "
-                "quote. Balance the quoting, put a blank before such a '#' outside any grouping or "
-                "substitution, or write the text to a file and pass the file.",
+                "here-document body this scan reads as code (one it cannot end at a whole delimiter line, "
+                "one opened after a '(' or backquote, an unquoted delimiter's holding a command "
+                "substitution, so quote the delimiter (<<'EOF') where the body needs no expansion, or one "
+                "whose quote stays open over an '&') or an ANSI-C $'...' "
+                "quote; a here-document body in any command this guard does not prove a safe data-writing shape "
+                "(one fed to a shell, held by a consumer other than a plain cat write to a plain file or to "
+                "standard output, written to a file the same command then runs, or beside any other command "
+                "such as a cd) is read as commands, so a "
+                "quote it leaves open counts as one. Balance the quoting, put a blank before such a '#' outside "
+                "any grouping or substitution, or write the text with cat in a call of its own and run any "
+                "other command in a separate call.",
                 "AIQT guardrail: denied a foreground command whose quoting or comments this guard could not "
                 "read to the end (rule trkasy, fail-closed).")
         # COST: the classifier below lexes the command again, so it runs ONCE per detach deny, and
@@ -26565,16 +27327,19 @@ def orch_truncation_guard(data):
                 "(run_in_background) and collect its completion, or keep the command in the foreground and "
                 "wait for it. If the detached result and completion are genuinely not needed, drop the '&' "
                 "and run it foreground. If this '&' is not a detach at all (for example a bitwise AND in an "
-                "arithmetic expansion, an '&' in the body of a here-document whose delimiter is unquoted, "
+                "arithmetic expansion, an '&' in the body of a here-document whose delimiter is unquoted or "
+                "whose command this guard does not accept as a safe data-writing shape (git commit -F -), "
                 "or one inside a substitution in a double-quoted string), quote the here-document "
-                "delimiter (<<'EOF') where its body needs no expansion, or write the text to a file and "
-                "pass the file instead; the background-dispatch advice applies only to a real detach.",
+                "delimiter (<<'EOF') where its body needs no expansion, or write the text with cat in a call "
+                "of its own and run any other command separately; the background-dispatch advice applies "
+                "only to a real detach.",
                 "AIQT guardrail: denied a foreground bare-& detach (untracked asynchronous work, rule "
                 "trkasy); use the tracked background dispatch or run it in the foreground.")
         return _allow()  # foreground without a bare-& detach operator is out of scope by design
-    if not isinstance(command, str) or not command:
+    if unread is not None or not command:
         return _deny(
-            "AIQT rule trkasy: a background dispatch carried no readable command string; failing closed.",
+            "AIQT rule trkasy: a background dispatch carried no readable command string ({}); failing closed."
+            .format(unread or "its tool_input.command is an empty string"),
             "AIQT guardrail: denied an unreadable background dispatch (fail-closed).")
     if _ORCH_PLAIN_COMMAND_RE.fullmatch(command) and not (_ORCH_SHELL_KEYWORDS & set(command.split())):
         return _allow()  # no metacharacter and no reserved word: the full stdout reaches the harness capture
@@ -26953,10 +27718,12 @@ def orch_untracked_wait_loop(data):
     allows, a bare-& detach denies) while this component stays inert. NOT lease-gated: a
     bounded worker building a fire-and-forget poll is equally wrong. A payload with NO tool_name is
     malformed, not another tool, and DENIES in every session (the shared missing-tool_name contract,
-    checked before the registry scope as orch_truncation_guard checks it). Fail-open (silent allow) on a
+    checked before the registry scope as orch_truncation_guard checks it). A command string holding a NUL
+    is not absent (the text before the NUL runs) and DENIES in every session, before the registry scope is
+    read (_bash_command_holds_nul). Fail-open (silent allow) on a
     present non-Bash tool, no git toplevel, an absent registry, or an empty command (it runs nothing); in
     registry scope a MISSING, NON-OBJECT or NON-STRING command is a cannot-evaluate input and DENIES
-    (check-fails-closed-on-unreadable), never a clean pass. A NUL, heredoc,
+    (check-fails-closed-on-unreadable), never a clean pass. A heredoc,
     unbalanced quote, or subshell-grouped detach classifies 'indeterminate' and emits nothing, deferring to
     the truncation guard's generic bare-`&` DENY-and-educate (or its open-quote deny) on the same event.
     Only a positive 'match' DENIES here. This is a specific companion to that generic deny, defence in
@@ -26970,23 +27737,23 @@ def orch_untracked_wait_loop(data):
         return _deny_missing_tool_name("trkasy")
     if tool_name != "Bash":
         return _allow()                     # a present non-Bash tool is out of scope
+    if _bash_command_holds_nul(data):
+        # the text before the NUL still runs, so it denies whatever the registry scope
+        return _deny_unreadable_command("trkasy (untracked wait loop)", "untracked background wait loop scan",
+                                        _bash_command(data)[1])
     root = _orch_root(data)
     if root is None:
         return _allow()
     status, _reg = _orch_registry(root)
     if status == "absent":
         return _allow()                     # no registry at the git toplevel: inert (the truncation guard's walk may still find one above)
-    tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-    command = tool_input.get("command")
-    if not isinstance(command, str):
+    command, unread = _bash_command(data)
+    if unread is not None:
         # In registry scope a missing, non-object or non-string command is a cannot-evaluate input: the
         # loop scan cannot run over what was not read, so it denies (check-fails-closed-on-unreadable)
         # rather than passing clean.
-        return _deny(
-            "AIQT rule trkasy (untracked wait loop): the Bash payload carried no readable command string, "
-            "so this guard could not scan it for an untracked background wait loop; failing closed. "
-            "Re-issue the call with a string command.",
-            "AIQT guardrail: denied a Bash call with no readable command (rule trkasy, fail-closed).")
+        return _deny_unreadable_command("trkasy (untracked wait loop)", "untracked background wait loop scan",
+                                        unread)
     if not command:
         return _allow()                     # an empty command runs nothing: no loop to scan, out of scope
     if _orch_bg_poll_loop(command) == "match":
@@ -27010,7 +27777,7 @@ def orch_dispatch_ledger(data):
     status, reg = _orch_registry(root)
     if status != "ok":
         return _allow()
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()  # only the holder session writes the shared dispatch ledger
     tool = data.get("tool_name")
@@ -27057,11 +27824,11 @@ def orch_dispatch_ledger(data):
     if not _orch_append_jsonl(path, row):
         return _allow_note("AIQT guardrail: the dispatch-ledger write failed; "
                            "the launched work may be invisible to the stop guard.")
-    if scope == "cannot":
+    if scope in _ORCH_SCOPE_HOLD_IDS:
         # armed and surfaced, never a silent skip: the row above was recorded anyway, so launched
-        # work stays visible to the stop guard while the operator corrects the horizon
+        # work stays visible to the stop guard while the operator corrects the horizon or the lease
         return _allow_note("AIQT guardrail: {}; this dispatch row was recorded anyway (the "
-                           "ledger stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
+                           "ledger stays armed).".format(scope_detail))
     return _allow()
 
 
@@ -29855,9 +30622,9 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False, guard=(None,
     declared command elsewhere (_rdp_mentions) is UNVERIFIABLE, and one that names none is allowed. Names
     are compared without regard to case, since a case-insensitive filesystem runs ORCH-DISPATCH as
     orch-dispatch."""
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
-        return ("unverifiable", "the Bash tool_input carries no command string")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return ("unverifiable", "the Bash payload carries no command string ({})".format(unread))
     commands = cfg["commands"]
     words, why = _rdp_plain_words(command, commands)
     if words is None:
@@ -30007,7 +30774,8 @@ def review_dispatch_pin(data):
     paths carry no uncommitted state (a checked-out submodule is compared by its HEAD only), BEFORE the
     dispatch runs; where the binding declares the draft labels, a brief naming the worker draft the commit
     applies declares every path the draft's diff headers name less the paths it records as skipped, so a
-    drafted path neither committed nor skipped is refused. Inert without a review_dispatch binding; in a
+    drafted path neither committed nor skipped is refused. A command string holding a NUL is withheld in
+    every session, bound or not (the text before the NUL runs). Inert without a review_dispatch binding; in a
     session a binding scopes, a Bash call that is not one provably plain command (its command word on the
     allowlist, or a declared dispatch command) is withheld, a plain one naming the registry is refused
     unless it only reads, a plain git command that sets configuration (every git config write, every -c or
@@ -30029,7 +30797,12 @@ def review_dispatch_pin(data):
         return _deny_missing_tool_name("vfxcmt")
     if tool_name != "Bash":
         return _allow()
-    kind, message = _rdp_decide(data)
+    if _bash_command_holds_nul(data):
+        # the text before the NUL still runs, so it is withheld whatever binding scopes the session
+        kind, message = ("unverifiable", "the Bash payload carries no readable command string ({})"
+                         .format(_bash_command(data)[1]))
+    else:
+        kind, message = _rdp_decide(data)
     if kind in ("deny", "unverifiable"):
         prefix = "UNVERIFIABLE: " if kind == "unverifiable" else ""
         return _deny("{}AIQT rule vfxcmt: review dispatch withheld: {}.".format(prefix, message),
@@ -31930,8 +32703,10 @@ def _rwh_core_worktree(directory, cache):
 
 def _rwh_decide(data):
     """The review-workdir-hold decision for one Bash payload: ("allow"|"note"|"deny"|"unverifiable",
-    message). INERT where no review-hold marker directory exists and the payload carries an absolute
-    cwd: the only state read is the markers of the repositories the command names, so adopters who
+    message). A command string holding a NUL is UNVERIFIABLE whatever the markers say (an unreadable
+    session marker state still denies first): the text before the NUL runs and can name a held
+    worktree in any repository (_bash_command_holds_nul). INERT where no review-hold marker directory
+    exists and the payload carries an absolute cwd: the only state read is the markers of the repositories the command names, so adopters who
     write no markers see nothing. A cwd that is missing, relative, carries a NUL byte or names no
     directory that exists hides the
     session repository, so every git-word command outside the read-only grammar, and an absent
@@ -32041,8 +32816,7 @@ def _rwh_decide(data):
     ignored with a note; a live marker whose recorded head differs from its worktree's HEAD notes
     the drift without denying."""
     cwd = data.get("cwd")
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    command, unread = _bash_command(data)
     views, holds, cw_cache, notes = {}, {}, {}, []
     # the NUL test runs before isdir, which raises on an embedded NUL; a nonexistent absolute cwd
     # is the same fail-closed case (git cannot be asked anything there, so neither can its holds)
@@ -32052,12 +32826,20 @@ def _rwh_decide(data):
     s_state, s_payload = _rwh_holds(sview[1], holds, notes) if isinstance(sview, tuple) \
         else ("absent", [])
     s_live = s_payload if s_state == "ok" else []
-    if not isinstance(command, str) or not command:
+    if unread is not None or not command:
         if s_state == "bad":
             return ("deny", _rwh_bad_text(s_payload))
+        if _bash_command_holds_nul(data):
+            # the text before the NUL still runs and can name a held worktree of ANY repository,
+            # not only the session's, and its targets are not read from text that is not what
+            # runs: withheld whatever the session repository's own holds say
+            return ("unverifiable", "AIQT rule rvwpin: the Bash command is unreadable ({}); the text "
+                    "before its NUL still runs and can name a held worktree in any repository, so a "
+                    "mutation of a held worktree cannot be ruled out.".format(unread))
         if s_live:
-            return ("unverifiable", "AIQT rule rvwpin: the Bash command is absent or unreadable while "
-                    "a review hold is live, so a mutation of the held worktree cannot be ruled out.")
+            return ("unverifiable", "AIQT rule rvwpin: the Bash command is absent or unreadable{} while "
+                    "a review hold is live, so a mutation of the held worktree cannot be ruled out."
+                    .format(" ({})".format(unread) if unread is not None else ""))
         if not cwd_ok:
             return ("unverifiable", _rwh_cwd_text(cwd))
         if sview is _RWH_VIEW_ERROR:
@@ -32313,7 +33095,9 @@ def review_workdir_hold(data):
     modified until the review returns or is abandoned. The hold is an adopter-written marker file in
     GIT_COMMON_DIR/aiqt/review-holds/ naming the held worktree, its head at dispatch, a dispatch id
     and a required expiry; the dispatcher writes it before the reviewer starts and removes it when the
-    review ends. INERT (silent allow) where no marker directory exists and the payload carries an
+    review ends. A command string holding a NUL is withheld (UNVERIFIABLE) whatever the holds: the
+    text before the NUL runs and can name a held worktree in any repository, and its targets are
+    not read from text that is not what runs. INERT (silent allow) where no marker directory exists and the payload carries an
     absolute cwd; a cwd that is missing, relative, carries a NUL byte or names no directory that
     exists fails closed (UNVERIFIABLE)
     for every git-word command outside the read-only grammar and for an absent command, in the
@@ -32489,7 +33273,7 @@ def orch_prompt_stamp(data):
     status, reg = _orch_registry(root)
     if status != "ok":
         return _allow()
-    scope = _orch_scope_live(reg, root, data.get("session_id"))
+    scope, scope_detail = _orch_scope_eval(reg, root, data.get("session_id"))
     if not scope:
         return _allow()  # only the holder session stamps/resets the shared turn-state
     prompt = data.get("prompt")
@@ -32511,10 +33295,10 @@ def orch_prompt_stamp(data):
         ts.pop("ask_basis", None)
         unsaved = _orch_save_turn_state(root, ts)
         if unsaved is None:
-            if scope == "cannot":
+            if scope in _ORCH_SCOPE_HOLD_IDS:
                 # armed and surfaced, never a silent skip: the stamp above was written anyway
                 return _allow_note("AIQT guardrail: {}; this prompt was stamped anyway (the "
-                                   "stamp stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
+                                   "stamp stays armed).".format(scope_detail))
             return _allow()
         # the stamp is this recorder's record; the prompt proceeds and the unwritten stamp is noted
         return _allow_note("AIQT guardrail: this prompt was read as genuine human input, but turn-state.json "
@@ -32540,10 +33324,10 @@ def orch_prompt_stamp(data):
                 "or as genuine human input; record it manually (nocncl).".format(unsaved))
         return _context_note("UserPromptSubmit", context + " Additionally, " + warn,
                              "AIQT guardrail: this prompt was read as timer-originated, but " + warn)
-    if scope == "cannot":
+    if scope in _ORCH_SCOPE_HOLD_IDS:
         return _context_note("UserPromptSubmit", context,
                              "AIQT guardrail: {}; this wake was classified anyway (the stamp "
-                             "stays armed).".format(_ORCH_SCOPE_CANNOT_DETAIL))
+                             "stays armed).".format(scope_detail))
     return (0, {"hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
         "additionalContext": context}}, None)
@@ -32842,13 +33626,20 @@ def _orch_chained_rows(path, prefix):
     64*'0' for the first; seq is the line number; ids carry the family prefix) and return
     (rows, detail): rows is None when the file is unreadable or ANY line breaks the chain, shape,
     sequence, or id-prefix discipline, so a tampered or malformed register can never read as a
-    smaller clean one. A compact inline mirror of the authoritative gate
-    (tools/check_mistakes_register.py): the hooks script is standalone in adopter repos and cannot
-    import tools/, so the CI gate remains the authoritative checker and this feeds only the audit."""
+    smaller clean one. A register that is not strict UTF-8 text (a non-UTF-8 byte, an encoded
+    surrogate, a truncated sequence) is unreadable too, never an exception out of the reader. A
+    compact inline mirror of the authoritative gate (tools/check_mistakes_register.py): the hooks
+    script is standalone in adopter repos and cannot import tools/, so the CI gate remains the
+    authoritative checker and this feeds only the audit."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             lines = fh.read().splitlines()
     except OSError as exc:
+        return (None, "unreadable ({})".format(exc))
+    except UnicodeDecodeError as exc:
+        return (None, "not UTF-8 text ({})".format(exc))
+    except ValueError as exc:
+        # a declared path holding a NUL character (read as _orch_record_surface_read reads it)
         return (None, "unreadable ({})".format(exc))
     sha = __import__("hashlib").sha256
     rows, prev = [], None
@@ -32884,16 +33675,23 @@ def _orch_register_authority(root, path):
     of an authority the actor cannot trivially forge, its git merge-base state with origin/HEAD when
     the register is tracked, else its <path>.anchor file, with seq/digest identifying the current tip;
     otherwise ('hold', detail, None), a cannot-evaluate the caller routes to a fail-closed HOLD, never
-    a clean pass. RESIDUAL (disclosed): the register is itself actor-writable, and this authority only
-    checks that the on-disk register is an append-only EXTENSION of its committed (merge-base) or
-    anchored prefix. An actor with filesystem write ALONE can therefore APPEND rows past that prefix
-    (uncommitted; git status M) and have them counted as the tip, so the git/anchor authority defends
-    the register-SWAP and prefix-REWRITE classes but not an appended approved row (A2); the categorical
-    residual is closed only by an operator-owned, assistant-non-writable register at the OS layer."""
+    a clean pass. A register, or its merge-base state, that is not strict UTF-8 text is such a HOLD
+    too, never an exception out of the reader. RESIDUAL (disclosed): the register is itself
+    actor-writable, and this authority only checks that the on-disk register is an append-only
+    EXTENSION of its committed (merge-base) or anchored prefix. An actor with filesystem write ALONE
+    can therefore APPEND rows past that prefix (uncommitted; git status M) and have them counted as
+    the tip, so the git/anchor authority defends the register-SWAP and prefix-REWRITE classes but not
+    an appended approved row (A2); the categorical residual is closed only by an operator-owned,
+    assistant-non-writable register at the OS layer."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             lines = fh.read().splitlines()
     except OSError as exc:
+        return ("hold", "register unreadable ({})".format(exc), None)
+    except UnicodeDecodeError as exc:
+        return ("hold", "register is not UTF-8 text ({})".format(exc), None)
+    except ValueError as exc:
+        # a declared path holding a NUL character (read as _orch_record_surface_read reads it)
         return ("hold", "register unreadable ({})".format(exc), None)
     env = _isolate_git_env(dict(os.environ))
     rel = None
@@ -32916,18 +33714,32 @@ def _orch_register_authority(root, path):
                     "{})".format(probe.returncode), None)
         if probe.returncode == 0:
             try:
+                # read as bytes and decoded below as strict UTF-8, never by the locale, exactly as
+                # the git show read is
                 base = subprocess.run(["git", "-C", root, "merge-base", "HEAD", "origin/HEAD"],
-                                      capture_output=True, text=True, timeout=10, env=env)
-                if base.returncode != 0 or not base.stdout.strip():
+                                      capture_output=True, timeout=10, env=env)
+                if base.returncode != 0:
                     return ("hold", "no computable merge-base with origin/HEAD", None)
-                ref = base.stdout.strip()
+                try:
+                    ref = base.stdout.decode("utf-8").strip()
+                except UnicodeDecodeError as exc:
+                    return ("hold", "the merge-base with origin/HEAD is not UTF-8 text "
+                            "({})".format(exc), None)
+                if not ref:
+                    return ("hold", "no computable merge-base with origin/HEAD", None)
                 old = subprocess.run(["git", "-C", root, "show", "{}:{}".format(ref, rel)],
-                                     capture_output=True, text=True, timeout=10, env=env)
+                                     capture_output=True, timeout=10, env=env)
             except (OSError, subprocess.SubprocessError) as exc:
                 return ("hold", "cannot read the register authority ({})".format(exc), None)
             if old.returncode != 0:
                 return ("hold", "cannot read the register at its merge-base authority", None)
-            old_lines = old.stdout.splitlines()
+            # decoded as strict UTF-8, as the register on disk is, never by the locale: a merge-base
+            # state that is not UTF-8 text is a HOLD, never an exception out of the reader
+            try:
+                old_lines = old.stdout.decode("utf-8").splitlines()
+            except UnicodeDecodeError as exc:
+                return ("hold", "the register at its merge-base authority is not UTF-8 text "
+                        "({})".format(exc), None)
             if lines[:len(old_lines)] != old_lines:
                 return ("hold",
                         "register is not an append-only extension of its merge-base state", None)
@@ -32943,6 +33755,9 @@ def _orch_register_authority(root, path):
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             return ("hold", "the register anchor is a symlink, which is never followed", None)
+        return ("hold", "declared register has no readable anchor authority", None)
+    except ValueError:
+        # an anchor path holding a NUL character: unreadable, never an exception out of the reader
         return ("hold", "declared register has no readable anchor authority", None)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -32998,8 +33813,11 @@ def _orch_pointer_resolves(root, sd, pointer):
     if os.path.isabs(pointer):
         return False
     for base in (root, sd):
-        rb = os.path.realpath(base)
-        cand = os.path.realpath(os.path.join(base, pointer))
+        try:
+            rb = os.path.realpath(base)
+            cand = os.path.realpath(os.path.join(base, pointer))
+        except ValueError:
+            continue  # a pointer or base holding a NUL character resolves to nothing real here
         if (cand == rb or cand.startswith(rb.rstrip(os.sep) + os.sep)) and os.path.exists(cand):
             return True
     return False
@@ -37333,6 +38151,3489 @@ def write_scope_guard(data):
                         .format(tool_name, slice_name))                                      # row 21
 
 
+# --- future_stamp_write (PreToolUse, warn only) ----------------------------------------------------------
+# It was a standalone script in the hand-installed preview channel; here it is a dispatcher handler (the
+# .preview/ copy stays published as it is, with its own older behaviour, and is not rendered into the
+# plugin). Every module-level name of the former script carries a _fsw_/_FSW_/_Fsw prefix here, so none
+# collides with the rest of this module.
+
+_FSW_UTC = datetime.timezone.utc
+_FSW_US = 1_000_000
+_FSW_FUTURE_SLACK_US = 60 * _FSW_US
+_FSW_EXISTING_MAX_BYTES = 4 << 20
+_FSW_MAX_REPORTED = 20
+_FSW_EPOCH = datetime.datetime(1970, 1, 1)
+_FSW_EPOCH_UTC = _FSW_EPOCH.replace(tzinfo=_FSW_UTC)
+_FSW_ONE_US = datetime.timedelta(microseconds=1)
+
+# Duplicated verbatim in stamp-truth-stop.py; the self-test asserts the two copies are identical.
+_FSW_SCHED_KEYWORDS = ("due", "deadline", "expir", "until", "next", "scheduled", "not before", "not-before", "eta",
+                  "planned", "target date", "target:", "by ", "through", "valid")
+_FSW_SCHED_GAP_TOKENS = 3
+_FSW_TIME_GRAMMAR = r"(?<!\d)(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?"
+_FSW_ZONE_GRAMMAR = r"(?:[ ]?(Z)|[ ]?([+-]\d{2}(?::?\d{2})?)|[ ](UTC|GMT|[A-Z]{2,6}))(?![A-Za-z0-9])"
+
+# A keyword matches as a WHOLE word (an optional plural `s`, then no further letter or digit), so
+# "validated", "throughput", "duet", or "etag" exempt nothing; only a listed STEM matches as a prefix ("expir"
+# covers expires, expiry, expiration).
+_FSW_SCHED_STEMS = ("expir",)
+_FSW_SCHED_RE = re.compile(r"(?<![a-z0-9])(?:" + "|".join(
+    re.escape(k) + (r"[a-z]*" if k in _FSW_SCHED_STEMS else r"(?:s(?![a-z0-9]))?(?![a-z0-9])" if k[-1].isalnum() else "")
+    for k in _FSW_SCHED_KEYWORDS) + ")", re.IGNORECASE)  # a keyword ending in a space or `:` already ends a word
+_FSW_TOKEN_RE = re.compile(r"\S+")
+_FSW_WORDCH_RE = re.compile(r"[A-Za-z0-9]")
+_FSW_STAMP_RE = re.compile(_FSW_TIME_GRAMMAR + "(?:" + _FSW_ZONE_GRAMMAR + r")?(?![\d:])")
+# Two UTC time forms that cannot be a clock reading, flagged with no clock comparison. Both follow the stamp
+# grammar above: an optional date part (YYYY-MM-DD then T or a space), HH:MM, optional :SS and fraction, and
+# a zone of the zone grammar that names UTC (_FSW_NC_UTC_ZONE: Z attached or after one space; a numeric
+# offset whose digits are all zero, +00, +0000, +00:00 or the same with -, attached or after one space; or,
+# after one space, UTC or GMT); _fsw_literal_us reads exactly these zones as UTC, which the fsw-nc-zone-derived
+# row of tools/selftest_aiqt_hooks.py holds. Another zone (an offset with a nonzero digit, a local abbreviation, a word such as AM) is not
+# read, so a prose time stays out. (1) APPROX: such a token with about, around, approximately or circa (any
+# letter case, a whole word: no letter, digit or underscore right before it; then blanks) or a tilde right
+# before it (a tilde right after a letter, digit or underscore is a range or a word, as in 00:00Z~00:33Z, and
+# opens no form). (2) PLACEHOLDER: the same shape where a digit slot, the fraction's included, holds x, X or ?
+# (02:1xZ, 0x:xx UTC, 2026-11-xxT00:33Z, 02:33:0x.5Z); a token with no such slot is an ordinary stamp and is
+# not read here. An exact-looking invented time is outside both forms.
+_FSW_NC_UTC_ZONE = r"(?:[ ]?Z|[ ]?[+-]00(?::?00)?(?!:?[0-9])|[ ](?:UTC|GMT))(?![A-Za-z0-9])"
+_FSW_NC_TIME = r"(?:[0-9]{4}-[0-9]{2}-[0-9]{2}[T ])?[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,9})?)?"
+_FSW_APPROX_RE = re.compile(r"(?<![A-Za-z0-9_])(?:(?i:about|around|approximately|circa)[ \t]+|~[ \t]*)"
+                            + _FSW_NC_TIME + _FSW_NC_UTC_ZONE)
+_FSW_NC_SLOT = "[0-9xX?]"
+_FSW_PLACEHOLDER_RE = re.compile(
+    r"(?<![0-9A-Za-z:?])(?:{d}{{4}}-{d}{{2}}-{d}{{2}}[T ])?{d}{{2}}:{d}{{2}}(?::{d}{{2}}(?:\.{d}{{1,9}})?)?".format(
+        d=_FSW_NC_SLOT) + _FSW_NC_UTC_ZONE)
+_FSW_PLACEHOLDER_CHARS = frozenset("xX?")
+_FSW_NC_ZONE_HINTS = ("Z", "UTC", "GMT", "00")  # every UTC zone above holds one of these
+
+
+class _FswNonClock(str):
+    """A flagged token that cannot be a clock reading (an APPROX or PLACEHOLDER form), as its exact text, so
+    the warning can name it apart from a future-dated literal."""
+
+
+def _fsw_nonclock_tokens(line):
+    """[(start, token)] for every APPROX or PLACEHOLDER token on one line, in line order. Linear. A line with
+    no `:` or no UTC zone hint (_FSW_NC_ZONE_HINTS) holds no such token and is not scanned."""
+    if ":" not in line or not any(h in line for h in _FSW_NC_ZONE_HINTS):
+        return []
+    found = [(m.start(), m.group(0)) for m in _FSW_APPROX_RE.finditer(line)]
+    found += [(m.start(), m.group(0)) for m in _FSW_PLACEHOLDER_RE.finditer(line)
+              if not _FSW_PLACEHOLDER_CHARS.isdisjoint(m.group(0))]
+    return sorted(found)
+_FSW_TOKEN_BEFORE = r"(?<![A-Za-z0-9_.~/-])"
+_FSW_TOKEN_AFTER = r"(?![^/\s'\"`;|&<>()])"
+# Any non-ASCII character right after `date` makes another command word, so it is never read as date.
+_FSW_DATE_CMD_RE = re.compile(r"[ \t]*(?:(?:(?:/usr)?/bin/)?env[ \t]+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^ \t`()]*[ \t]+){0,4}"
+                          r"(?:(?:/usr)?/bin/)?date(?![A-Za-z0-9_-]|[^\x00-\x7f])")
+_FSW_DATE_LOOKAHEAD = 256
+# Duplicated verbatim in stamp-truth-stop.py (code and quote exemption); the self-test asserts they are identical.
+_FSW_BTICK_RE = re.compile(r"`+")
+_FSW_FENCE_RE = re.compile(r"`{3,}|~{3,}")
+
+
+# ---- store paths ----
+
+class _FswStoreCtx:
+    """Store-root matching computed ONCE per evaluation (rather than re-reading the environment, re-testing the
+    lease file with a stat, and rebuilding the token pattern for every target word): the roots, one compiled
+    store-path token pattern, and memos for word tests, relative-path resolution, and directory tests."""
+    __slots__ = ("roots", "token_re", "names_memo", "under_memo", "isdir_memo")
+
+    def __init__(self):
+        self.roots = _fsw_store_roots_uncached()
+        pats = [_FSW_TOKEN_BEFORE + re.escape(r.rstrip("/") or "/") + _FSW_TOKEN_AFTER for r in self.roots]
+        self.token_re = re.compile("|".join(pats)) if pats else None
+        self.names_memo, self.under_memo, self.isdir_memo = {}, {}, {}
+
+    def names(self, text):
+        got = self.names_memo.get(text)
+        if got is None:
+            got = self.names_memo[text] = self.token_re is not None and self.token_re.search(text) is not None
+        return got
+
+    def under(self, p):
+        """True when the normalized absolute path `p` lies under a store root (the under_store() test)."""
+        got = self.under_memo.get(p)
+        if got is None:
+            got = any(p == r or p.startswith(r.rstrip("/") + "/") for r in self.roots)
+            self.under_memo[p] = got
+        return got
+
+    def isdir(self, p):
+        got = self.isdir_memo.get(p)
+        if got is None:
+            got = self.isdir_memo[p] = os.path.isdir(p)
+        return got
+
+
+_FSW_ACTIVE = None  # the _StoreCtx of the evaluation in progress (set by evaluate()), else None
+
+
+def _fsw_store_ctx():
+    return _FSW_ACTIVE if _FSW_ACTIVE is not None else _FswStoreCtx()
+
+
+def _fsw_store_roots():
+    """The configured store roots (env AIQT_STORE_ROOT; there is no default); see the docstring.
+    Within one evaluation the value is computed once (_StoreCtx)."""
+    if _FSW_ACTIVE is not None:
+        return _FSW_ACTIVE.roots
+    return _fsw_store_roots_uncached()
+
+
+def _fsw_store_roots_uncached():
+    env = _fsw_cfg("STORE_ROOT")
+    if env:
+        return [os.path.normpath(r) for r in env.split(os.pathsep) if r and os.path.isabs(r)]
+    return []
+
+
+def _fsw_under_store(path, cwd=None):
+    if not isinstance(path, str) or not path:
+        return False
+    if not os.path.isabs(path):
+        if not cwd:
+            return False
+        path = os.path.join(cwd, path)
+    return _fsw_store_ctx().under(os.path.normpath(path))
+
+
+def _fsw_names_store_path(cmd):
+    """True when the command text contains an explicit store path token (lexical; see the docstring)."""
+    return _fsw_store_ctx().names(cmd)
+
+
+# ---- literals ----
+
+def _fsw_naive_us(y, mo, d, hh, mi, ss, us):
+    return (datetime.datetime(y, mo, d, hh, mi, ss, us) - _FSW_EPOCH) // _FSW_ONE_US
+
+
+def _fsw_local_us(y, mo, d, hh, mi, ss, abbr=None):
+    """Epoch us for a local wall time; with `abbr`, only a reading whose zone abbreviation matches."""
+    found = []
+    for isdst in (0, 1):  # explicit isdst: deterministic, independent of earlier mktime calls
+        try:
+            ts = time.mktime((y, mo, d, hh, mi, ss, 0, 0, isdst))
+            lt = time.localtime(ts)
+        except (OverflowError, ValueError, OSError):
+            continue
+        if (lt.tm_year, lt.tm_mon, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec) != (y, mo, d, hh, mi, ss):
+            continue
+        if abbr is None or lt.tm_zone == abbr:
+            found.append(int(ts))
+    return min(found) * _FSW_US if found else None
+
+
+def _fsw_literal_us(m):
+    """Earliest plausible epoch us for a matched literal, or None (invalid, overflow, or unknown zone)."""
+    try:
+        y, mo, d, hh, mi = (int(m.group(i)) for i in range(1, 6))
+        ss = int(m.group(6) or 0)
+        us = int(((m.group(7) or "") + "000000")[:6])
+        z, off, abbr = m.group(8), m.group(9), m.group(10)
+        naive = _fsw_naive_us(y, mo, d, hh, mi, ss, us)
+        if z or abbr in ("UTC", "GMT"):
+            return naive
+        if off:
+            digits = off[1:].replace(":", "")
+            hours, mins = int(digits[:2]), int(digits[2:] or 0)
+            if hours > 18 or mins > 59:
+                return None
+            delta = (hours * 3600 + mins * 60) * _FSW_US
+            return naive - delta if off[0] == "+" else naive + delta
+        loc = _fsw_local_us(y, mo, d, hh, mi, ss, abbr)
+        if abbr:
+            return None if loc is None else loc + us
+        return None if loc is None else min(naive, loc + us)
+    except (OverflowError, ValueError, OSError, TypeError):
+        return None
+
+
+def _fsw_sched_exempter(line):
+    """A predicate pos -> True when a scheduling keyword ends at most SCHED_GAP_TOKENS word tokens before
+    position `pos` of `line` (a word token holds a letter or digit; punctuation-only tokens such as `:` or `[`,
+    and the token containing `pos`, are not counted). Linear: keyword ends and tokens are found once per line.
+    Duplicated verbatim in a companion hook; a repository gate asserts the two copies are identical."""
+    ends = [k.end() for k in _FSW_SCHED_RE.finditer(line)]
+    if not ends:
+        return lambda pos: False
+    toks = [(t.start(), t.end()) for t in _FSW_TOKEN_RE.finditer(line) if _FSW_WORDCH_RE.search(t.group())]
+    starts, tends = [s for s, _ in toks], [e for _, e in toks]
+
+    def exempt(pos):
+        k = bisect.bisect_right(ends, pos) - 1
+        if k < 0:
+            return False
+        between = bisect.bisect_right(tends, pos) - bisect.bisect_left(starts, ends[k])
+        return between <= _FSW_SCHED_GAP_TOKENS
+    return exempt
+
+
+def _fsw_code_lines(lines):
+    """Indexes of lines inside a MATCHED fenced code block (fence lines included); an unclosed fence is text."""
+    code, open_i, fch, flen = set(), None, "", 0
+    for i, ln in enumerate(lines):
+        s = ln.strip(" \t")
+        if open_i is None:
+            m = _FSW_FENCE_RE.match(s)
+            if m and not (s[0] == "`" and "`" in s[m.end():]):
+                open_i, fch, flen = i, s[0], m.end()
+        elif s and len(s) >= flen and s == fch * len(s):
+            code.update(range(open_i, i + 1))
+            open_i = None
+    return code
+
+
+def _fsw_code_spans(line):
+    """Sorted [start, end) inline code spans on one line: a backtick run closed by the next run of the same
+    length (runs of other lengths inside are content); an unclosed run opens nothing. Linear."""
+    spans, open_len, open_start = [], 0, 0
+    for r in _FSW_BTICK_RE.finditer(line):
+        n = r.end() - r.start()
+        if not open_len:
+            open_len, open_start = n, r.start()
+        elif n == open_len:
+            spans.append((open_start, r.end()))
+            open_len = 0
+    return spans
+
+
+def _fsw_in_spans(spans, pos):
+    k = bisect.bisect_right(spans, (pos, float("inf"))) - 1
+    return k >= 0 and pos < spans[k][1]
+
+
+def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_exempt=None, spans=None,
+                        nc_spans=None, nc_quoted=False):
+    """Future literals on one line not immediately preceded by a scheduling keyword. `in_subst(pos)` is true
+    for a literal starting at absolute position base+pos that lies inside a date substitution; `cache` maps
+    a literal to its converted value so a repeated literal is converted once; `extra_exempt(pos)`, when
+    given, is an ADDITIONAL exemption for a literal starting at line position pos (the table-header rule);
+    `spans`, when given, are the line's inline code spans, and a literal starting inside one is exempt. An
+    APPROX or PLACEHOLDER token (_fsw_nonclock_tokens) on the line is returned too, as a _FswNonClock, with no
+    clock comparison and under the same exemptions; `nc_spans` (code spans) and `nc_quoted` (the whole line is
+    quoted text: a blockquote or fenced line) exempt such tokens only, as the Bash route reads them."""
+    found, seen, sched = [], set(), None
+    cache = {} if cache is None else cache
+    for m in _FSW_STAMP_RE.finditer(line):
+        lit = m.group(0)
+        if lit in seen or (in_subst is not None and in_subst(base + m.start())) \
+                or (spans and _fsw_in_spans(spans, m.start())):
+            continue
+        if lit not in cache:
+            cache[lit] = _fsw_literal_us(m)
+        got = cache[lit]
+        if got is None or got - now_us <= _FSW_FUTURE_SLACK_US:
+            continue
+        if sched is None:
+            sched = _fsw_sched_exempter(line)
+        if not sched(m.start()) and not (extra_exempt is not None and extra_exempt(m.start())):
+            seen.add(lit)
+            found.append(lit)
+    for pos, tok in (() if nc_quoted else _fsw_nonclock_tokens(line)):
+        if tok in seen or (in_subst is not None and in_subst(base + pos)) or (spans and _fsw_in_spans(spans, pos)) \
+                or (nc_spans and _fsw_in_spans(nc_spans, pos)):
+            continue
+        if sched is None:
+            sched = _fsw_sched_exempter(line)
+        if not sched(pos) and not (extra_exempt is not None and extra_exempt(pos)):
+            seen.add(tok)
+            found.append(_FswNonClock(tok))
+    return found
+
+
+# a GFM delimiter row (whole stripped line): cells of optional colon, 1+ hyphens, optional colon
+_FSW_DELIM_ROW_RE = re.compile(r"\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?")
+
+
+def _fsw_pipes(line):
+    """Positions of the unescaped `|` characters of `line` (a `\\|` does not split a cell). Linear."""
+    return [i for i, c in enumerate(line) if c == "|" and (i == 0 or line[i - 1] != "\\")]
+
+
+def _fsw_leading_pipe(line, pipes):
+    """1 when the first unescaped pipe of `line` has only whitespace before it (a leading pipe), else 0."""
+    return 1 if pipes and not line[:pipes[0]].strip() else 0
+
+
+def _fsw_table_cells(line, pipes):
+    """The cell texts of a table line split on its unescaped pipes (`pipes`, non-empty): a leading pipe opens
+    the first cell and a trailing pipe closes the last, so neither adds an empty cell."""
+    bounds = [-1] + pipes + [len(line)]
+    cells = [line[bounds[k] + 1:bounds[k + 1]] for k in range(len(bounds) - 1)]
+    if not line[pipes[-1] + 1:].strip():
+        cells.pop()
+    return cells[_fsw_leading_pipe(line, pipes):]
+
+
+def _fsw_delim_cell_count(s):
+    """The cell count of a stripped GFM delimiter row (it must contain a pipe), else None."""
+    if "|" not in s or not _FSW_DELIM_ROW_RE.fullmatch(s):
+        return None
+    s = s[1:] if s.startswith("|") else s
+    s = s[:-1] if s.endswith("|") else s
+    return s.count("|") + 1
+
+
+def _fsw_row_exempter(line, pipes, sched_cols):
+    """A predicate pos -> True when position `pos` of table row `line` lies in a column whose header cell
+    carries a scheduling keyword (column k: k unescaped pipes, not counting a leading one, precede pos)."""
+    lead = _fsw_leading_pipe(line, pipes)
+
+    def exempt(pos):
+        return (bisect.bisect_right(pipes, pos) - lead) in sched_cols
+    return exempt
+
+
+_FSW_BLOCK_START_RE = re.compile(r"(?:[-*+]|[0-9]+[.)]|#{1,6})(?:[ \t]|$)|>|```|~~~")
+
+
+def _fsw_ends_table(line, pipes):
+    """True when `line` cannot continue the table it follows: it is blank or starts a new block (a list
+    marker, an ATX heading (`#` to `######` then whitespace or the line end), a `>` blockquote, or a code
+    fence). A pipe-free line continues the table as a one-cell row (GFM), so `pipes` does not decide it; a
+    leading pipe is optional on a row whatever the header had (GFM)."""
+    s = line.strip()
+    return not s or bool(_FSW_BLOCK_START_RE.match(s))
+
+
+def _fsw_table_walk(text, tables=True, ids=None):
+    """Yield (line, ctx, extra) for every line of `text`, linearly. ctx is an integer id of the table context
+    (header line, delimiter row) for a row of a markdown table (see the docstring's GFM forms), assigned once
+    per distinct context through `ids` (a dict shared across scans, so equal contexts get equal ids and a row
+    key never compares the header text again), and None for any other line (a header and a delimiter row
+    included); extra is the row's header-keyword exempter, or None (always None for a pipe-free row, which
+    keeps the table open but gets no header exemption). With tables False, every line is
+    (line, None, None)."""
+    ids = {} if ids is None else ids
+    prev, ctx, sched = None, None, None  # prev: (line, pipes) of a possible header; ctx, sched: table
+    for line in text.splitlines():
+        if not tables:
+            yield line, None, None
+            continue
+        pipes = _fsw_pipes(line)
+        if ctx is not None:
+            if not _fsw_ends_table(line, pipes):
+                # only a row with an unescaped pipe gets the header exemption; a pipe-free row keeps the
+                # table open (GFM) but is checked as an ordinary line
+                yield line, ctx, (_fsw_row_exempter(line, pipes, sched) if sched and pipes else None)
+                continue
+            ctx = None  # a new block (see _ends_table) ends the table
+        if prev is not None:
+            ncols = _fsw_delim_cell_count(line.strip())
+            if ncols is not None:
+                hcells = _fsw_table_cells(*prev)
+                if ncols == len(hcells):
+                    ctx = ids.setdefault((prev[0], line), len(ids))
+                    sched = {k for k, c in enumerate(hcells) if _FSW_SCHED_RE.search(c.strip())}
+                    prev = None
+                    yield line, None, None
+                    continue
+        prev = (line, pipes) if pipes else None
+        yield line, None, None
+
+
+def _fsw_future_in_changed_lines(new, old, now_us, tables=True, fences=True):
+    """Future observed-time literals on whole lines of `new` that are not unchanged carry-overs from `old`.
+    With `tables`, markdown-table context is tracked over EVERY line of `new` (carry-overs included, though
+    they are not checked), so a row's literal is also exempt when its column's header cell holds a keyword;
+    and a row is a carry-over only under the same header and delimiter it had in `old`. Quoted text is not
+    an observed-time record: a `>` blockquote line and a literal inside an inline code span are exempt, and
+    with `fences` so is every line of a MATCHED fenced code block of `new` (the Stop hook's rules)."""
+    ids = {}  # table context -> integer id, shared by both scans (a row key never re-compares a header)
+    # a carry-over is keyed by fence membership too, so a line an edit moves out of a code block is checked
+    old_code = _fsw_code_lines((old or "").splitlines()) if fences else set()
+    carry = collections.Counter((ctx, i in old_code, line)
+                                for i, (line, ctx, _x) in enumerate(_fsw_table_walk(old or "", tables, ids)))
+    bad, seen, cache = [], set(), {}
+    code = _fsw_code_lines((new or "").splitlines()) if fences else set()
+    for i, (line, ctx, extra) in enumerate(_fsw_table_walk(new or "", tables, ids)):  # one item per line of new
+        key = (ctx, i in code, line)
+        if carry[key] > 0:
+            carry[key] -= 1
+            continue
+        if i in code or line.lstrip().startswith(">"):
+            continue
+        spans = _fsw_code_spans(line) if "`" in line else None
+        for lit in _fsw_future_on_line(line, now_us, cache=cache, extra_exempt=extra, spans=spans):
+            if lit not in seen:
+                seen.add(lit)
+                bad.append(lit)
+    return bad
+
+
+def _fsw_read_existing(path, limit):
+    """(text, whole): the text of at most `limit` bytes of a REGULAR file, and whether that is the WHOLE file.
+    An absent file is ("", True); a file over `limit`, unreadable, or not regular (FIFO, device) has whole
+    False (with "" for the last two)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
+        return "", True
+    except (OSError, TypeError, ValueError):
+        return "", False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return "", False
+        chunks, got = [], 0
+        while got <= limit:
+            b = os.read(fd, min(1 << 16, limit + 1 - got))
+            if not b:
+                break
+            chunks.append(b)
+            got += len(b)
+        data = b"".join(chunks)
+        return data[:limit].decode("utf-8", "replace"), got <= limit
+    except OSError:
+        return "", False
+    finally:
+        os.close(fd)
+
+
+def _fsw_apply_edits(original, edits):
+    """The file text after applying [(old, new, replace_all)] in order, or None when an edit cannot apply."""
+    text = original
+    for old, new, every in edits:
+        if old == "":
+            if text != "":
+                return None
+            text = new
+        elif old not in text:
+            return None
+        else:
+            text = text.replace(old, new) if every else text.replace(old, new, 1)
+    return text
+
+
+# ---- shell (lexical only) ----
+
+_FSW_DS_TOP_RE = re.compile(r"[\\$`\"'()]")  # the characters date_spans() acts on outside quotes
+_FSW_DS_DQ_RE = re.compile(r'[\\$`"]')  # ... inside double quotes
+_FSW_DS_ANSI_RE = re.compile(r"[\\']")  # ... inside $'...'
+
+
+def _fsw_date_spans(cmd, budget=None):
+    """Sorted, merged [start, end) spans of `$(date ...)` and backtick `date ...` substitutions. ONE linear,
+    quote-aware pass: each frame on the stack (the top level, a `$(`, a plain `(`, or a backtick) keeps its own
+    quote state; inside single quotes (or $'...', which honours backslash escapes) nothing is special; inside
+    double quotes only `$(` and backticks open frames and a parenthesis is literal. A span is recorded only
+    when its frame closes, so an unmatched opener or an unterminated quote starts no span. The `date` test
+    looks ahead a bounded DATE_LOOKAHEAD characters. The pass jumps straight to the next character
+    that can matter in the current quote state (a regex search), not one character per step; `budget`, when
+    given, is charged one unit per step (_Exhausted when it runs out)."""
+    def is_date(j):
+        return _FSW_DATE_CMD_RE.match(cmd[j:j + _FSW_DATE_LOOKAHEAD]) is not None
+
+    # frame: [kind, start, dated, quote]; kind in "top", "$(", "(", "`"; quote in None, "'", "$'", '"'
+    spans, stack, i, n = [], [["top", 0, False, None]], 0, len(cmd)
+    steps = 0
+    while i < n:
+        steps += 1
+        top = stack[-1]
+        q = top[3]
+        if q == "'":
+            j = cmd.find("'", i)
+            if j < 0:
+                break
+            top[3], i = None, j + 1
+            continue
+        if q == "$'":
+            m = _FSW_DS_ANSI_RE.search(cmd, i)
+            if m is None:
+                break
+            i = m.start()
+            if cmd[i] == "\\":
+                i += 2
+                continue
+            top[3], i = None, i + 1
+            continue
+        m = (_FSW_DS_DQ_RE if q == '"' else _FSW_DS_TOP_RE).search(cmd, i)
+        if m is None:
+            break
+        i = m.start()
+        c = cmd[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "$" and cmd.startswith("$(", i):
+            stack.append(["$(", i, is_date(i + 2), None])
+            i += 2
+            continue
+        if c == "`":
+            if top[0] == "`":
+                stack.pop()
+                if top[2]:
+                    spans.append((top[1], i + 1))
+            else:
+                stack.append(["`", i, is_date(i + 1), None])
+            i += 1
+            continue
+        if q == '"':
+            if c == '"':
+                top[3] = None
+        elif c == "'":
+            top[3] = "'"
+        elif c == '"':
+            top[3] = '"'
+        elif c == "$" and cmd.startswith("$'", i):
+            top[3] = "$'"
+            i += 2
+            continue
+        elif c == "(":
+            stack.append(["(", i, False, None])
+        elif c == ")" and top[0] in ("$(", "("):
+            stack.pop()
+            if top[2]:
+                spans.append((top[1], i + 1))
+        i += 1
+    if budget is not None:
+        budget.spend(steps)
+    spans.sort()
+    merged = []
+    for s, e in spans:
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return merged
+
+
+_FSW_WRITE_COMMANDS = frozenset(("tee", "cp", "mv", "install", "dd", "truncate", "ed", "ex"))
+_FSW_INPLACE_COMMANDS = frozenset(("sed", "perl"))
+_FSW_INPLACE_OPT_RE = re.compile(r"-[A-Za-z0-9]*i")  # the short forms; a `--` word goes through _resolve_long
+_FSW_FD_DUP_RE = re.compile(r"[0-9]+-?|-")
+_FSW_SHELL_SEPARATORS = ";|&\n"
+_FSW_CMD_PREFIX_WORDS = frozenset(("{", "then", "do", "else", "!", "if", "elif", "while", "until"))  # the next word is again in command position
+# bash's `time` reserved word keeps command position too, and so do its options `-p` then `--`, or `--` alone
+# (observed in bash 5.3: `time -p -- [[ a > b ]]` is a conditional; `time -p -p` and `time -x` run a command)
+_FSW_TIME_OPTS = {1: {"-p": 2, "--": 0}, 2: {"--": 0}}  # time state -> option word -> next time state
+# Prefix commands that run the command named after them: name -> (options that take a SEPARATE argument,
+# count of leading positional operands before the command). Their other options are skipped.
+_FSW_PREFIX_COMMANDS = {
+    "sudo": (frozenset(("-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-T", "-U", "--user", "--group", "--host",
+                        "--prompt", "--close-from", "--chdir", "--role", "--type", "--command-timeout",
+                        "--other-user")), 0),
+    "doas": (frozenset(("-u", "-C")), 0),
+    "env": (frozenset(("-u", "-C", "-S", "--unset", "--chdir", "--split-string")), 0),
+    "command": (frozenset(), 0), "builtin": (frozenset(), 0), "exec": (frozenset(("-a",)), 0),
+    "nohup": (frozenset(), 0), "time": (frozenset(("-f", "-o", "--format", "--output")), 0),
+    "nice": (frozenset(("-n", "--adjustment")), 0),
+    "ionice": (frozenset(("-c", "-n", "-p", "-P", "-u", "--class", "--classdata")), 0),
+    "stdbuf": (frozenset(("-i", "-o", "-e", "--input", "--output", "--error")), 0),
+    "timeout": (frozenset(("-s", "-k", "--signal", "--kill-after")), 1),
+    "chroot": (frozenset(("--userspec", "--groups")), 1),
+    "flock": (frozenset(("-w", "-E", "--timeout", "--conflict-exit-code")), 1),
+    "xargs": (frozenset(("-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s", "--arg-file", "--delimiter",
+                         "--max-args", "--max-procs", "--max-chars", "--eof", "--max-lines")), 0),
+}
+_FSW_EXEC_WORDS = frozenset(("-exec", "-execdir", "-ok", "-okdir"))  # find: the next word is a command
+_FSW_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=.*", re.S)
+
+
+class _FswExhausted(Exception):
+    """The Bash analysis spent its work budget (BASH_WORK_BUDGET); the hook then fails open."""
+
+
+class _FswBudget:
+    """A counter of Bash analysis steps (tokenizer iterations, heredoc lines, tokens and units walked),
+    shared by one evaluation and its nested shell -c analyses; spend() raises _Exhausted when it runs out."""
+    __slots__ = ("left",)
+
+    def __init__(self, steps):
+        self.left = steps
+
+    def spend(self, steps):
+        self.left -= steps
+        if self.left < 0:
+            raise _FswExhausted()
+
+
+class _FswTokens:
+    """What _tokenize() returns. streams: the token streams (as _shell_tokens() returns them, the
+    top-level stream last); poss: per stream, a (start, end) raw offset pair per token ((-1, -1) for a separator
+    the tokenizer inserts itself); spans: per stream, the raw (start, end) of its frame; heredocs: (operator
+    offset, body start, body end) per here-document body; comments: the raw (start, end) of each comment."""
+    __slots__ = ("streams", "poss", "spans", "heredocs", "comments")
+
+    def __init__(self, streams, poss, spans, heredocs, comments):
+        self.streams, self.poss, self.spans, self.heredocs, self.comments = streams, poss, spans, heredocs, comments
+
+
+_FSW_HD_SPECIAL_RE = re.compile(r"\\|\$\(|`")  # what runs in an unquoted here-document body
+_FSW_PLAIN_RUN_RE = re.compile(r"[^\s\\'\"`$<>()|&;#]+")  # word characters with no shell meaning
+_FSW_PLAIN_SPECIAL = frozenset("\\'\"`$<>()|&;#")
+_FSW_DQ_RUN_RE = re.compile(r'[^"\\`$]+')  # double-quoted text with no shell meaning
+_FSW_BLANK_RUN_RE = re.compile(r"[^\S\n]+")  # whitespace other than a newline
+# the words flush() must inspect (every other word takes the fast path)
+_FSW_FLUSH_WORDS = frozenset(("case", "esac", "[[", "for", "function", "time")) | _FSW_CMD_PREFIX_WORDS
+# one SIMPLE token after optional blanks, as the tokenizer's regex fast path takes it: a plain word (ended
+# by whitespace, an operator, or the end), `>>`, `>|`, or `>` (not `>&`), a plain `<`, or a separator; group 5
+# takes any other character, which ends the run (so a finditer from any offset never skips text)
+_FSW_FAST_TOK_RE = re.compile(r"[^\S\n]*(?:([^\s\\'\"`$<>()|&;#]+)(?=[\s;|&<>()]|\Z)|(>>|>\||>(?!&))|(<(?![<>(&]))"
+                          r"|([;|\n]|&(?!>))|(.))", re.S)
+
+
+def _fsw_frame(kind, cmdpos, start, arith_cmd=False):
+    """A tokenizer frame (see _tokenize): [kind, toks, word chars, has word, in double quotes, paren depth, open
+    cases, word quoted, command position, inside [[, function header state, time state, arithmetic command or
+    `for` seen, word start, token positions, pending here-documents, awaiting a here-document delimiter, frame
+    start]."""
+    return [kind, [], [], False, False, 0, 0, False, cmdpos, False, 0, 0, arith_cmd, 0, [], [], None, start]
+
+
+def _fsw_shell_tokens(cmd):
+    """The token STREAMS of `cmd` (see _tokenize), or None when it cannot be parsed."""
+    t = _fsw_tokenize(cmd)
+    return None if t is None else t.streams
+
+
+def _fsw_tokenize(cmd, budget=None):
+    """Lexical shell token STREAMS of `cmd` in ONE linear pass: a list holding the top-level stream and one
+    stream per `$(...)` or backtick substitution, each a list of ("w", dequoted word), ("s",) for a separator
+    (`;`, `|`, `&`, `(`, `)`, a newline), ("r", dup) for an output redirection (dup True for the `>&`
+    form, whose operand may name a descriptor), and ("i",) for an input redirection (`<`, `<<<`, `<<`, `<<-`,
+    `<&`; the next word is its operand). `<>` is an output redirection; the `<` of a `<(` process substitution
+    is dropped. Inside a `[[ ... ]]` conditional (a `[[` word in command position up to its closing `]]`),
+    everything is operand text: `<` and `>` are string comparisons and `(`, `)`, `|`, `&`, and `;` are
+    grouping, logical, or regex operand text, all emitting nothing and splitting no word, a newline only
+    ends a word, and a `#` is word text, never a comment (a `<(` or `>(` there opens a process substitution,
+    a frame like a `$(...)`; quoting and substitutions work as outside). The conditional closes only at a
+    `]]` that starts a word (after unquoted whitespace) and is followed by whitespace, `;`, `&`, `|`, `<`,
+    `>`, `)`, the end, or (in a backtick frame) that frame's closing backtick, never at a `]]` glued to
+    preceding text; a `[[` word ended by a metacharacter
+    (`[[(-f x) ]]`) opens it with that metacharacter as conditional text; the closing `]]` word is
+    followed by a separator (bash takes a `do`, `then`, or `{` after it with or without a `;` first). A
+    conditional still open when its frame ends (at the end of input, at a closing backtick, or at an
+    unterminated quote; a `)` inside it is operand text, so a `$(...)` never closes over it) makes the whole
+    result None, never a silent pass (there is no loose re-read, so a grouping `)` glued to `]]`,
+    `[[ ( -n x )]]`, which bash does close, leaves the conditional open here and the command unparseable). This
+    never applies to `[ ... ]` or `test`, where an unquoted `>` is a real redirection. A substitution, unquoted or inside double quotes, is its own
+    frame with its own quoting context (as in date_spans()), its body a separate stream, and it leaves a `$`
+    placeholder in the enclosing word. Single quotes and $'...' make everything literal; double quotes make
+    every operator literal except a substitution opener; a backslash escapes the next character; an unquoted
+    `#` at a word start comments out the rest of its line. Inside a `$(...)`, an unquoted `case` word in
+    command position opens a case construct until its unquoted `esac` in command position, and while one is
+    open a `)` is a pattern terminator (a separator), not the end of the substitution. Command position is
+    the first word of the substitution or the first word after a separator, `(`, `)`, or a reserved word
+    (`{`, `then`, `do`, `else`, `!`, `if`, `elif`, `while`, `until`) that is itself in command position, so a
+    `case` argument (`rg case <file>`, `rg then case <file>`) is not a keyword. The `time` reserved word in
+    command position, and after it `-p` then `--` or `--` alone, also keep command position (`if time [[`).
+    A function header restores command position at its body: after `function NAME` (with or without `()`),
+    the body's opening `{` keeps it (a `(` or `()` is a separator anyway, as is the newline of `NAME ()`
+    followed by `{` on the next line), and after `function NAME` with no `()` the body word is itself in
+    command position (bash takes any compound command there: `((`, `[[`, `(`, `{`, `if`, `while`, `until`,
+    `for`, `case`), so the header words themselves are never command words. A `((` in
+    command position (or right after a `for` in command position) opens an arithmetic command, and `$((` an
+    arithmetic expansion, each through its matching `))` (nested parentheses counted, adapted from the
+    block-truncated-reads hook's _arith_end): it contributes a `$` placeholder word to the enclosing stream,
+    a `(` ends any word before it first (so `if((`, `while((`, `until((`, `elif((`, and `!((` keep their
+    reserved word's command position), a closed arithmetic command (a `for ((...))` header or a plain
+    `((...))`, not a `$((` expansion) is followed by a separator (bash takes its `do`, `then`, or `{` with or
+    without a `;` first, so the body stays in command position), and inside it `<`, `>`, `<<`, `>>`, separators, and `#` are arithmetic text that emits nothing, while a
+    `$(...)` or backtick substitution inside it is still its own scanned stream. A `)` at the arithmetic's
+    own level not followed by `)` (bash then re-reads the text as nested groups) returns None. Returns None
+    for an unterminated quote, substitution, arithmetic, or `[[` conditional (in any frame).
+    The pass also records where each token lies in `cmd` (the raw offsets the analysis attributes
+    literals and writes by), each substitution frame's span, each comment, and each here-document body: at
+    the newline ending a line that holds `<<` or `<<-` operators, their bodies run through their delimiter
+    lines, and they are never tokenized as commands: when every such delimiter was quoted (no expansion in the
+    body), or the bodies hold no `$(` and no backtick, they are skipped, and otherwise only the substitutions
+    in them are tokenized (body mode, see bodies()), as bash expands them. Runs of characters with no shell
+    meaning are consumed
+    in one step. With `budget` (a _Budget) the pass raises _Exhausted once it has taken that many steps."""
+    # frame: see _frame(); kind in "top", "$(", "`", or "((" (an arithmetic command or expansion, whose own text
+    # emits no tokens and is never appended as a stream; paren depth counts its nested parentheses)
+    streams, poss, spans, heredocs, comments = [], [], [], [], []
+    stack, i, n = [_fsw_frame("top", True, 0)], 0, len(cmd)
+    limit = budget.left + 1 if budget is not None else 1 << 62
+    steps = 0
+
+    def flush(f, closing=False):  # closing: this word is the `]]` that closes a [[ ... ]] conditional
+        if f[3]:
+            w = "".join(f[2])
+            f[1].append(("w", w))
+            f[14].append((f[13], i))
+            if f[16] is not None:  # the delimiter word of a pending here-document
+                f[15].append((w, f[16][0], f[7], f[16][1]))
+                f[16] = None
+            if not f[9] and not f[10] and not f[11] and w not in _FSW_FLUSH_WORDS:
+                f[8] = f[12] = False  # the common case, an ordinary word, decided without the chain below
+                f[2], f[3], f[7] = [], False, False
+                return
+            nonlocal steps
+            steps += 2  # the full chain below
+            if f[0] == "$(" and not f[7] and f[8]:
+                if w == "case":
+                    f[6] += 1
+                elif w == "esac" and f[6]:
+                    f[6] -= 1
+            closed = False  # this word is the `]]` that closes a [[ ... ]] conditional command
+            if f[9]:  # the main loop decides where the conditional closes, never the word alone
+                closed = closing
+                f[9] = False if closing else f[9]
+            elif not f[7] and f[8] and w == "[[":
+                f[9] = i  # where it opened (never 0: the `[[` precedes i), so the flag is always truthy
+            pos = f[8] and not f[7]
+            f[12] = pos and w == "for"  # `for ((` opens an arithmetic header
+            if f[10] == 1:  # the function name: the body, a compound command, follows in command position, so
+                f[8], f[10] = True, 2  # a `((`, `[[`, `(`, `for ((`, or `case` there opens its construct
+            elif f[10] == 2:  # the function body opens: `{`, `if`, `while`, `until` keep command position
+                f[8], f[10] = pos and w in _FSW_CMD_PREFIX_WORDS, 0
+            elif pos and w == "function":
+                f[8], f[10], f[11] = False, 1, 0
+            elif pos and w in _FSW_TIME_OPTS.get(f[11], ()):
+                f[11] = _FSW_TIME_OPTS[f[11]][w]  # an option of the time reserved word; the position is kept
+            else:
+                f[11] = 1 if pos and w == "time" else 0
+                f[8] = pos and (w in _FSW_CMD_PREFIX_WORDS or w == "time")  # only a reserved word keeps the position
+            if closed:  # as after a closed arithmetic command: the `do`, `then`, or `{` after `]]`, with or
+                sep(f, i, True)  # without a `;` or newline first, is again in command position, here and in the stream
+        f[2], f[3], f[7] = [], False, False
+
+    def sep(f, at, synthetic=False):
+        f[1].append(("s",))
+        f[14].append((at, at) if synthetic else (at, at + 1))  # an inserted separator is zero-width
+        f[8], f[10], f[11], f[12] = True, 0, 0, False
+        f[16] = None  # a separator before a here-document's delimiter word: bash rejects it; no body
+
+    def bodies(f, start):
+        """Record the bodies of the here-documents pending in frame `f`, which start at `start` (just
+        past the newline ending their operator's line), each through its delimiter line (tabs stripped first
+        for `<<-`), or to the end of input when none follows. When EVERY pending delimiter was quoted the bodies
+        are literal text in bash (no expansion), and when the bodies hold no `$(` and no backtick nothing in them
+        can run a command, so in either case tokenizing resumes after the last delimiter line; otherwise the
+        bodies are scanned in BODY MODE (an "hd" frame through their end), where only a `$(`, `$((`, or backtick
+        substitution is tokenized (as its own stream) and a backslash escapes the next character, as bash expands
+        an unquoted here-document. Returns where to resume."""
+        nonlocal steps
+        at, skip = start, all(quoted for _w, _strip, quoted, _op in f[15])
+        for delim, strip, _quoted, op in f[15]:
+            body = at
+            while True:
+                steps += 1
+                e = cmd.find("\n", at)
+                end = n if e < 0 else e
+                line = cmd[at:end]
+                if (line.lstrip("\t") if strip else line) == delim:
+                    heredocs.append((op, body, at))
+                    at = n if e < 0 else e + 1
+                    break
+                if e < 0:
+                    heredocs.append((op, body, n))
+                    at = n
+                    break
+                at = e + 1
+        f[15] = []
+        if steps >= limit:
+            raise _FswExhausted()
+        if skip or ("$(" not in cmd[start:at] and "`" not in cmd[start:at]):
+            return at
+        body = _fsw_frame("hd", False, start)
+        body[5] = at  # the end of the bodies
+        stack.append(body)
+        return start
+
+    while i < n:
+        steps += 3  # a character-loop step costs about three times a token taken by the regex fast path
+        if steps >= limit:
+            raise _FswExhausted()
+        f, c = stack[-1], cmd[i]
+        if f[0] == "hd":  # here-document body mode (see bodies()): only substitutions run
+            m = _FSW_HD_SPECIAL_RE.search(cmd, i, f[5])
+            if m is None:
+                stack.pop()
+                i = f[5]
+                continue
+            i = m.start()
+            c = cmd[i]
+            if c == "\\":
+                i += 2
+                continue
+        # runs of characters with no shell meaning are consumed whole (identical results, far fewer steps)
+        if f[4]:
+            if c not in '"\\`$':
+                m = _FSW_DQ_RUN_RE.match(cmd, i)
+                f[2].append(m.group())
+                i = m.end()
+                continue
+        elif not f[9] and f[0] not in ("((", "hd"):
+            if not f[3] and f[16] is None and not f[10] and not f[11]:
+                # a run of SIMPLE tokens (a plain word that is none of _FLUSH_WORDS, `;`, `|`, `&`, a
+                # newline unless a here-document is pending, `>`, `>>`, `>|`, or a plain `<`, each after optional
+                # blanks) is tokenized by anchored regex matches, exactly as the character loop below would
+                toks, tpos, f8, f12, pend, at = f[1], f[14], f[8], f[12], f[15], i
+                for t in _FSW_FAST_TOK_RE.finditer(cmd, i):  # every position matches: a group 5 match stops the run
+                    g = t.lastindex
+                    if g == 1:
+                        w = t.group(1)
+                        if w in _FSW_FLUSH_WORDS:
+                            break
+                        toks.append(("w", w))
+                        tpos.append((t.start(1), t.end()))
+                        f8 = f12 = False
+                    elif g == 4:
+                        a = t.start(4)
+                        if pend and cmd[a] == "\n":
+                            break
+                        toks.append(("s",))
+                        tpos.append((a, a + 1))
+                        f8, f12 = True, False
+                    elif g == 2:
+                        toks.append(("r", False))
+                        tpos.append((t.start(2), t.end()))
+                    elif g == 3:
+                        a = t.start(3)
+                        toks.append(("i",))
+                        tpos.append((a, a + 1))
+                    else:
+                        break
+                    steps += 1
+                    at = t.end()
+                if at != i:  # some token was taken: resume after it (else the loop below handles cmd[i])
+                    f[8], f[12], i = f8, f12, at
+                    if steps >= limit:
+                        raise _FswExhausted()
+                    continue
+            if c not in _FSW_PLAIN_SPECIAL:
+                if c.isspace():
+                    if c != "\n":
+                        flush(f)
+                        i = _FSW_BLANK_RUN_RE.match(cmd, i).end()
+                        continue
+                else:
+                    m = _FSW_PLAIN_RUN_RE.match(cmd, i)
+                    if not f[3]:
+                        f[13] = i
+                    f[2].append(m.group())
+                    f[3] = True
+                    i = m.end()
+                    continue
+        if c == "\\":
+            if i + 1 < n and cmd[i + 1] != "\n":
+                if not f[3]:
+                    f[13] = i
+                f[2].append(cmd[i + 1])
+                f[3] = f[7] = True
+            i += 2
+            continue
+        if c == "`" and f[0] == "`":
+            flush(f)
+            if f[9]:  # a conditional still open when its backtick frame closes: unparseable
+                return None
+            streams.append(f[1])
+            poss.append(f[14])
+            spans.append((f[17], i + 1))
+            stack.pop()
+            i += 1
+            continue
+        if c == "$" and cmd.startswith("$((", i):  # an arithmetic expansion: its value joins the enclosing word
+            if not f[3]:
+                f[13] = i
+            f[2].append("$")
+            f[3] = f[7] = True
+            steps += _FSW_STREAM_COST
+            stack.append(_fsw_frame("((", False, i))
+            i += 3
+            continue
+        if c == "`" or (c == "$" and cmd.startswith("$(", i)):
+            if not f[3]:
+                f[13] = i
+            f[2].append("$")  # the substitution's value, in the enclosing word
+            f[3] = f[7] = True
+            steps += _FSW_STREAM_COST
+            stack.append(_fsw_frame(c if c == "`" else "$(", True, i))
+            i += 1 if c == "`" else 2
+            continue
+        if f[4]:
+            if c == '"':
+                f[4] = False
+            else:
+                f[2].append(c)
+            i += 1
+            continue
+        if c == "'" or (c == "$" and cmd.startswith("$'", i)):
+            if not f[3]:
+                f[13] = i
+            if c == "'":  # the quoted text is taken whole, not one character per step
+                j = cmd.find("'", i + 1)
+                if j < 0:
+                    return None
+                f[2].append(cmd[i + 1:j])
+            else:  # $'...': a backslash escapes the next character (it is kept, the backslash dropped)
+                i += 1
+                j = i + 1
+                while True:
+                    steps += 1
+                    m = _FSW_DS_ANSI_RE.search(cmd, j)
+                    if m is None:
+                        return None
+                    k = m.start()
+                    f[2].append(cmd[j:k])
+                    if cmd[k] == "'":
+                        j = k
+                        break
+                    if k + 1 >= n:
+                        return None
+                    f[2].append(cmd[k + 1])
+                    j = k + 2
+            f[3], f[7], i = True, True, j + 1
+            continue
+        if c == '"':
+            if not f[3]:
+                f[13] = i
+            f[3] = f[4] = f[7] = True
+            i += 1
+            continue
+        if f[9]:  # inside [[ ... ]]: everything up to the closing `]]` is operand text
+            if c in "<>" and cmd.startswith("(", i + 1):  # a process substitution: its body is its own
+                flush(f)  # scanned stream, as a `$(...)` is, and its value joins the word
+                f[13] = i
+                f[2].append("$")
+                f[3] = f[7] = True
+                steps += _FSW_STREAM_COST
+                stack.append(_fsw_frame("$(", True, i))
+                i += 2
+                continue
+            if cmd.startswith("]]", i) and (i + 2 >= n or cmd[i + 2].isspace() or cmd[i + 2] in ";&|<>)" or (
+                    cmd[i + 2] == "`" and f[0] == "`")) and not f[3] and cmd[i - 1].isspace():
+                flush(f)  # the `]]` word closes the conditional: it starts a word (after unquoted whitespace;
+                f[2], f[3], f[7], f[13] = ["]", "]"], True, False, i  # a glued `)]]` never closes) and
+                flush(f, True)  # a metacharacter, the end, or the closing backtick of this backtick frame
+                i += 2  # follows it; the next word is again in command position, with or without a `;` first
+                continue
+            if c.isspace():  # a newline too: bash takes one only after `[[`, `&&`, `||`, `(`, or `!`, never as a
+                flush(f)  # separator
+            elif c not in "<>()|&;":  # comparison, grouping, logical, and regex operand text emit nothing: never
+                if not f[3]:  # a redirection, a separator, or a command boundary (a `;`, a lone `&`, or a lone
+                    f[13] = i  # `|` outside a regex operand is a bash syntax error here); a `#` is word text
+                f[2].append(c)
+                f[3] = True
+            i += 1
+            continue
+        if f[0] == "((":  # arithmetic text: `<`, `>`, `<<`, `>>`, separators, and `#` are operators, not shell syntax
+            if c == "(":
+                f[5] += 1
+            elif c == ")":
+                if f[5]:
+                    f[5] -= 1
+                elif cmd.startswith("))", i):
+                    stack.pop()  # an arithmetic frame is not an executable stream
+                    i += 2
+                    if f[12]:  # a closed arithmetic COMMAND (a `for ((...))` header or a plain `((...))`, never
+                        flush(stack[-1])  # a `$((` expansion, whose value joins the word): the `do`, `then`,
+                        sep(stack[-1], i, True)  # or `{` after it, with or without a `;` or newline first, is again in
+                    continue  # command position, in the tokenizer state and, through a separator, in the stream
+                else:  # bash then re-reads the `((` as nested groups: not emulated, fails toward writing
+                    return None
+            i += 1
+            continue
+        if c in "<>()|&":
+            flush(f)  # a metacharacter ends the word before it (`if((`, `while((`, `!((` first end their reserved
+            if f[9]:  # word); a `[[` ended so opens the conditional: re-read this character as
+                continue  # conditional text, never as a separator or a redirection (`[[(-f x) ]]`)
+        if c == "(" and cmd.startswith("((", i) and (f[8] or f[12]):
+            if not f[3]:
+                f[13] = i
+            f[2].append("$")  # an arithmetic command (or a `for ((` header): one opaque word
+            f[3] = f[7] = True
+            steps += _FSW_STREAM_COST
+            stack.append(_fsw_frame("((", False, i, True))
+            i += 2
+            continue
+        if c == "#" and not f[3]:  # (inside [[ ... ]] a `#` never reaches here: it is operand text)
+            nl = cmd.find("\n", i)
+            comments.append((i, n if nl < 0 else nl))  # recorded, so a literal there feeds no write
+            i = n if nl < 0 else nl
+            continue
+        if c == ">" or (c == "&" and cmd.startswith("&>", i)):
+            flush(f)
+            at, amp = i, c == "&"
+            i += 2 if amp else 1
+            dup = False
+            if i < n and cmd[i] in ">|":
+                i += 1
+            elif not amp and i < n and cmd[i] == "&":
+                i += 1
+                dup = True
+            f[1].append(("r", dup))
+            f[14].append((at, i))
+            continue
+        if c == ")" and f[0] == "$(" and f[5] == 0:
+            flush(f)
+            if f[6]:  # a case pattern terminator inside the substitution, not its closing paren
+                sep(f, i)
+                i += 1
+                continue
+            streams.append(f[1])
+            poss.append(f[14])
+            spans.append((f[17], i + 1))
+            stack.pop()
+            i += 1
+            continue
+        if c in "()":
+            if f[0] == "$(":
+                f[5] += 1 if c == "(" else -1
+            flush(f)
+            sep(f, i)
+            i += 1
+            continue
+        if c in _FSW_SHELL_SEPARATORS:
+            flush(f)
+            sep(f, i)
+            if c == "\n" and f[15]:  # here-document bodies start after this newline
+                i = bodies(f, i + 1)
+                continue
+            i += 1
+            continue
+        if c == "<":
+            flush(f)
+            if cmd.startswith("<>", i) or cmd.startswith("<(", i):  # `<>` is read-write, an output
+                i += 1  # redirection (the `>` branch emits it); `<(` opens a process substitution group
+                continue
+            at = i
+            heredoc = cmd.startswith("<<", i) and not cmd.startswith("<<<", i)
+            strip = cmd.startswith("<<-", i)
+            i += 3 if cmd.startswith(("<<<", "<<-"), i) else 2 if cmd.startswith(("<<", "<&"), i) else 1
+            f[1].append(("i",))
+            f[14].append((at, i))
+            if heredoc:
+                f[16] = (strip, at)  # the next word is the here-document's delimiter
+            continue
+        if c.isspace():
+            flush(f)
+            i += 1
+            continue
+        if not f[3]:
+            f[13] = i
+        f[2].append(c)
+        f[3] = True
+        i += 1
+    if budget is not None:
+        budget.spend(steps)
+    if len(stack) > 1 and stack[-1][0] == "hd":  # a here-document body that ran to the end of the input
+        stack.pop()
+    if len(stack) > 1 or stack[0][4]:
+        return None
+    flush(stack[0])
+    if stack[0][9]:  # a conditional still open at the end of input: unparseable, never a silent pass
+        return None
+    streams.append(stack[0][1])
+    poss.append(stack[0][14])
+    spans.append((0, n))
+    return _FswTokens(streams, poss, spans, heredocs, comments)
+
+
+def _fsw_bash_writes(cmd):
+    """True when the command text shows a WRITE indicator (lexical; see the docstring) in ANY of its token
+    streams (the top level or any substitution body, each with independent state): an unquoted output
+    redirection (`>`, `>>`, `>|`, `&>`, `N>`, `<>`) whose target is not /dev/null and not a `>&` descriptor
+    duplication; or, in command position of any simple command, a word (its basename) among WRITE_COMMANDS,
+    or sed or perl followed in the same simple command by an in-place option (`-i`, a letter-and-digit short cluster
+    holding i such as `-pi`, `-i.bak`, or `-0777pi`, or `--in-place`). An unterminated quote or
+    substitution, or a redirection with no target, fails toward writing (True)."""
+    streams = _fsw_shell_tokens(cmd)
+    return True if streams is None else any(_fsw_stream_writes(toks) for toks in streams)
+
+
+def _fsw_bash_store_write(cmd, cwd=None):
+    """True when a write in the command TARGETS a store path: a redirection target, a tee operand, a
+    sed -i or perl -i operand, a cp, mv, or install destination (the -t or --target-directory argument, else the
+    last operand), a dd of= operand, or a truncate, ed, or ex operand, each tested with the same lexical store
+    path token rule as names_store_path(). A PARSED target that is a store path establishes the store
+    write by itself (an attached `cp -t<store dir>` spelling included, which the raw command text does not show
+    as a standalone store path token); only a command that cannot be parsed, or a write whose target is unknown
+    (a redirection with no operand, a `$` target, an xargs-run write), falls back to the raw test and counts as
+    a store write when the command text names a store path anywhere (the fail-toward-writing direction). A
+    relative target is resolved against `cwd` and any cd before it, and a literal shell -c string's writes
+    count (see _analyze); a command that spends BASH_WORK_BUDGET is reported as no store write (fail open)."""
+    start = frozenset((os.path.normpath(cwd) if isinstance(cwd, str) and os.path.isabs(cwd) else None,))
+    try:
+        return _fsw_analyze(cmd, start, _fsw_store_ctx(), _FswBudget(_FSW_BASH_WORK_BUDGET)).store
+    except _FswExhausted:
+        return False
+
+
+# How each modeled write command's options take arguments, so an option's argument (a sed script
+# file, a truncate reference file, an install mode) is consumed before the destination operands are collected
+# and is never read as a write target. Per command: "req", short letters taking a REQUIRED argument (the rest of
+# the cluster, else the next word); "opt", short letters taking an OPTIONAL argument only when attached (the
+# rest of the cluster, which they end); "run", short letters followed by an attached run the regex matches
+# (perl's -0777, -l0, -C), after which the cluster continues; "long", long options taking a REQUIRED argument
+# (`--opt value` or `--opt=value`; any other long option takes none, or only an attached `=value`); "target",
+# the letters and long options whose argument IS a write target; "script", the letters and long options that
+# supply the program, or None for a command with no program operand (a sed or perl given none of them takes its
+# FIRST operand as the program, not as a file); "text", the letters and long options whose argument
+# is SCRIPT TEXT the tool runs (a sed expression, an ex command, a perl program), and "text_prog", whether the
+# dropped program operand is script text too (sed's, never perl's, which names a program FILE): script text
+# that names a store path makes the write's target UNKNOWN (a sed `w` command or `s///w` flag, or an ex `w!`,
+# can write that path), while an option argument that names a FILE (sed -f, truncate -r, perl -I) stays
+# consumed; "stop", option parsing ends at the FIRST operand, as the real tool does, so every later
+# word is an operand; "all", the letters and long options under which EVERY operand (and every
+# target-directory argument) is written: mv's --exchange swaps each source with its destination, and install's
+# -d or --directory creates every operand as a directory (an existing one has its mode set); "optsep",
+# long options whose optional argument one implementation takes only attached (`--opt=value`: GNU
+# install's --context) and another also takes as the SEPARATE next word when that word is `-` or does not
+# start with `-` (uutils install 0.8.0, this host's install), so that word is kept as an operand AND the
+# destination is also computed without it (the union of both readings); "exit", long options on
+# which the tool exits at once, touching no file and running no program, when they are met while options are
+# still parsed (perl's --help and --version; an attached `=value` is unrecognized; also --help and
+# --version of cp, mv, install, tee, truncate, ed, and sed, which permute, so either stops them wherever it
+# stands before `--`; "exit_eq", the tool also rejects an attached `=value` before writing anything, observed
+# on this host with GNU cp and mv 9.7, GNU sed 4.9, GNU ed 1.22.4, and uutils install, tee, and truncate 0.8.0;
+# ex is not given them, since vim opens a -w script-out file before it reaches --version). Observed on this host:
+# perl 5.40.1 stops at its first operand (`perl -pi -e
+# CODE X -I S` edits X, fails to open `-I`, and edits S); GNU sed 4.9, GNU cp and mv 9.7, GNU ed 1.22.4, vim 9.1
+# as ex, and uutils 0.8.0 install, truncate, and tee all permute (an option after an operand is still an
+# option); GNU sed, cp, and mv stop at the first operand only under POSIXLY_CORRECT (not modeled; disclosed).
+_FSW_EXITS = ("--help", "--version")  # long options on which the tool exits at once, writing nothing
+_FSW_OPTION_SPECS = {
+    "cp": {"req": "St", "long": ("--suffix", "--target-directory", "--sparse", "--no-preserve"),
+           "target": ("t", "--target-directory"), "exit": _FSW_EXITS, "exit_eq": True},
+    "mv": {"req": "St", "long": ("--suffix", "--target-directory"), "target": ("t", "--target-directory"),
+           "all": ("--exchange",), "exit": _FSW_EXITS, "exit_eq": True},
+    "install": {"req": "mogSt", "long": ("--mode", "--owner", "--group", "--suffix", "--target-directory",
+                                         "--strip-program"), "target": ("t", "--target-directory"),
+                "all": ("d", "--directory"), "optsep": ("--context",), "exit": _FSW_EXITS, "exit_eq": True},
+    "tee": {"exit": _FSW_EXITS, "exit_eq": True},
+    "truncate": {"req": "rs", "long": ("--reference", "--size"), "exit": _FSW_EXITS, "exit_eq": True},
+    "ed": {"req": "p", "long": ("--prompt",), "exit": _FSW_EXITS, "exit_eq": True},
+    # ex (vim in Ex mode): -i names the viminfo file and -w/-W a script-out file, both written, so both are targets
+    "ex": {"req": "cSuUiTtwW", "long": ("--cmd", "--startuptime", "--log"),
+           "target": ("i", "w", "W", "--startuptime", "--log"), "text": ("c", "--cmd")},
+    "sed": {"req": "efl", "opt": "i", "long": ("--expression", "--file", "--line-length"),
+            "script": ("e", "f", "--expression", "--file"), "text": ("e", "--expression"), "text_prog": True,
+            "exit": _FSW_EXITS, "exit_eq": True},
+    "perl": {"req": "eEIMm", "opt": "ixDF",
+             "run": {"0": re.compile(r"[xX][0-9A-Fa-f]*|[0-7]*"), "l": re.compile(r"[0-7]*"),
+                     "C": re.compile(r"[0-9]+|[IOESioDALa]*"), "d": re.compile(r"t?(?::.*)?"),
+                     "V": re.compile(r"(?::.*)?")},
+             "script": ("e", "E"), "text": ("e", "E"), "stop": True, "exit": _FSW_EXITS},
+}
+_FSW_DEST_COMMANDS = frozenset(("cp", "mv", "install"))  # the destination is the -t argument, else the last operand
+
+# Every long option each modeled command accepts, so an abbreviated spelling resolves as the real tool
+# resolves it (a MISS before: `sed --expr='s/x/<future>/w <store file>' log` and `sed --in s/x/<future>/ <store
+# file>` wrote the store unseen). Observed on this host: GNU sed 4.9, GNU cp and mv 9.7, and GNU ed 1.22.4
+# (getopt_long, or ed's own parser) and uutils 0.8.0 install, tee, and truncate (clap, inferring long names)
+# accept any UNAMBIGUOUS prefix, a prefix of several aliases of ONE option counting once (`sed --z`, `sed
+# --q`), and reject an ambiguous one (`sed --f`: --file or --follow-symlinks; `cp --s`; `ed --s`); vim 9.1 as ex
+# accepts only an exact long option (`--cm` and `--cmdx` are errors, and `--CMD` is not --cmd); perl 5.40.1
+# accepts exactly two, --help and --version, each only exact and without `=value` (`perl --vers`,
+# `perl --version=1`, and `perl --in` are unrecognized switches), and exits at once on either. The sets are the
+# tools' --help lists plus the hidden spellings observed (sed --binary and --zero-terminated, cp --path) and
+# ex's modeled --startuptime and --log. ed's --script is its -s, not an alias of --quiet (-q).
+# A sweep checked every long option here, and each modeled command's short letters, for separate-word
+# consumption against the real tools on this host (the tool run with the option followed by a word, and
+# whether that word was then used as an operand); every recorded arity matched except uutils install's
+# --context, now modeled ("optsep").
+_FSW_LONG_OPTIONS = {
+    "sed": ("--binary", "--debug", "--expression", "--file", "--follow-symlinks", "--help", "--in-place",
+            "--line-length", "--null-data", "--posix", "--quiet", "--regexp-extended", "--sandbox", "--separate",
+            "--silent", "--unbuffered", "--version", "--zero-terminated"),
+    "cp": ("--archive", "--attributes-only", "--backup", "--context", "--copy-contents", "--debug", "--dereference",
+           "--force", "--help", "--interactive", "--keep-directory-symlink", "--link", "--no-clobber",
+           "--no-dereference", "--no-preserve", "--no-target-directory", "--one-file-system", "--parents", "--path",
+           "--preserve", "--recursive", "--reflink", "--remove-destination", "--sparse", "--strip-trailing-slashes",
+           "--suffix", "--symbolic-link", "--target-directory", "--update", "--verbose", "--version"),
+    "mv": ("--backup", "--context", "--debug", "--exchange", "--force", "--help", "--interactive", "--no-clobber",
+           "--no-copy", "--no-target-directory", "--strip-trailing-slashes", "--suffix", "--target-directory",
+           "--update", "--verbose", "--version"),
+    "install": ("--backup", "--compare", "--context", "--directory", "--group", "--help", "--mode",
+                "--no-target-directory", "--owner", "--preserve-context", "--preserve-timestamps", "--strip",
+                "--strip-program", "--suffix", "--target-directory", "--unprivileged", "--verbose", "--version"),
+    "tee": ("--append", "--help", "--ignore-interrupts", "--output-error", "--version"),
+    "truncate": ("--help", "--io-blocks", "--no-create", "--reference", "--size", "--version"),
+    "ed": ("--extended-regexp", "--help", "--loose-exit-status", "--prompt", "--quiet", "--restricted", "--script",
+           "--silent", "--strip-trailing-cr", "--traditional", "--unsafe-names", "--verbose", "--version"),
+    "ex": ("--clean", "--cmd", "--help", "--log", "--noplugin", "--not-a-term", "--startuptime", "--ttyfail",
+           "--version"),
+    "perl": ("--help", "--version"),
+}
+_FSW_LONG_ALIASES = {  # (command, alias): the option it names, so a prefix of both is not ambiguous
+    ("sed", "--silent"): "--quiet", ("sed", "--zero-terminated"): "--null-data", ("cp", "--path"): "--parents",
+    ("ed", "--silent"): "--quiet"}
+_FSW_ABBREV_COMMANDS = frozenset(("sed", "cp", "mv", "install", "tee", "truncate", "ed"))
+_FSW_STRICT_LONG_COMMANDS = frozenset(("sed", "perl", "ex"))  # an unresolvable `--` word: the target is UNKNOWN
+
+
+def _fsw_resolve_long(kind, name):
+    """The long option `name` (a `--` word up to any `=`) stands for on command `kind`, or None when it
+    is UNRECOGNIZED or AMBIGUOUS. An exact known name is itself; on a command whose tool accepts abbreviations
+    (_ABBREV_COMMANDS) a prefix of exactly one known option, or of several aliases of one option, is that
+    option (its canonical name when it is an alias's); any other word is None. A command with no recorded set
+    returns `name` unchanged."""
+    known = _FSW_LONG_OPTIONS.get(kind)
+    if known is None:
+        return name
+    if name in known:
+        return _FSW_LONG_ALIASES.get((kind, name), name)
+    if kind not in _FSW_ABBREV_COMMANDS or len(name) < 3:
+        return None
+    options = {_FSW_LONG_ALIASES.get((kind, n), n) for n in known if n.startswith(name)}
+    return options.pop() if len(options) == 1 else None
+
+
+def _fsw_is_inplace_opt(kind, w):
+    """True when the argument word `w` of sed or perl `kind` is an in-place option: a short cluster
+    _INPLACE_OPT_RE matches, or a `--` word resolving to sed's --in-place (`--in-place`, `--in`, `--in=.bak`)."""
+    if w.startswith("--"):
+        return _fsw_resolve_long(kind, w.partition("=")[0]) == "--in-place"
+    return bool(_FSW_INPLACE_OPT_RE.match(w))
+
+# The GNU sed program grammar the read-only classifier accepts (observed with GNU sed 4.9). Commands
+# taking no argument, commands taking an optional number, and the command-ending characters.
+_FSW_SED_PLAIN = frozenset("=dDgGhHnNpPxzF")
+_FSW_SED_NUMBERED = frozenset("lqQ")
+_FSW_SED_S_FLAGS = frozenset("gpiImM0123456789")
+
+
+def _fsw_sed_program_cannot_write(prog):
+    """True only when the sed program `prog` (its -e pieces joined by newlines, as sed joins them) is
+    parsed with CONFIDENCE and holds no command that can write a file or run one: no `w` or `W` command, no `e`
+    command, and no `w` or `e` flag on an `s` command (GNU sed opens a `w` file while parsing, so any `w` counts,
+    wherever the program later fails). Anything this conservative parser does not recognize with confidence
+    returns False (the caller then keeps the script-text UNKNOWN target): a `$` anywhere (shell text the tokenizer
+    left unexpanded, or a substitution placeholder, could expand into a command), a backslash or newline inside
+    a bracket expression, a newline inside a regex, an a, i, or c text line ending in a backslash or an
+    `a\\text` one-liner, a label holding anything unusual, a second `!`, unbalanced braces, an unknown command
+    or `s` flag, or trailing characters after a command. Grammar followed (observed with GNU sed 4.9): an
+    address is a number (with `~step`), `/re/`, or `\\cREc` (`$` is refused, above), a regex address taking I or
+    M flags, and an optional second address after `,` (also `+N` or `~N`), then optional spaces and one `!`;
+    in a regex a backslash escapes the next character and a bracket expression protects the delimiter; the `s`
+    replacement and the `y` operands are delimited by backslash escapes only; `s` flags may be separated by
+    spaces; a, i, and c text, and r, R, w, and W file names run to the end of the line; `b`, `t`, `T`, `:`, and
+    `v` labels end at `;` or whitespace; `#` starts a comment to the end of the line; a command ends at `;`, a
+    newline, `}`, `#`, or the end."""
+    if "$" in prog:
+        return False
+    n, i, depth = len(prog), 0, 0
+
+    def spaces(j):
+        while j < n and prog[j] in " \t":
+            j += 1
+        return j
+
+    def regex_end(j, delim):
+        """Index just past the closing `delim` of a regex starting at j, or -1 (not parsed with confidence)."""
+        while j < n:
+            c = prog[j]
+            if c == "\n":
+                return -1
+            if c == "\\":
+                if j + 1 >= n or prog[j + 1] == "\n":
+                    return -1
+                j += 2
+            elif c == "[":
+                k = j + 1
+                if k < n and prog[k] == "^":
+                    k += 1
+                if k < n and prog[k] == "]":
+                    k += 1
+                while k < n and prog[k] != "]":
+                    if prog[k] in "\\\n":
+                        return -1
+                    if prog[k] == "[" and k + 1 < n and prog[k + 1] in ":=.":
+                        close = prog.find(prog[k + 1] + "]", k + 2)
+                        if close < 0 or "\n" in prog[k:close] or "\\" in prog[k:close]:
+                            return -1
+                        k = close + 2
+                    else:
+                        k += 1
+                if k >= n:
+                    return -1
+                j = k + 1
+            elif c == delim:
+                return j + 1
+            else:
+                j += 1
+        return -1
+
+    def plain_end(j, delim):
+        """Index just past the closing `delim` of an s replacement or y operand (backslash escapes only)."""
+        while j < n:
+            c = prog[j]
+            if c == "\\":
+                if j + 1 >= n:
+                    return -1
+                j += 2
+            elif c == delim:
+                return j + 1
+            elif c == "\n":
+                return -1
+            else:
+                j += 1
+        return -1
+
+    def address(j):
+        """Index past one address at j (j itself when there is none), or -1."""
+        if j < n and prog[j].isdigit():
+            while j < n and prog[j].isdigit():
+                j += 1
+            if j < n and prog[j] == "~":
+                j += 1
+                if not (j < n and prog[j].isdigit()):
+                    return -1
+                while j < n and prog[j].isdigit():
+                    j += 1
+            return j
+        if j < n and prog[j] in "/\\":
+            if prog[j] == "\\":
+                if j + 1 >= n or prog[j + 1] in "\n\\":
+                    return -1
+                delim, j = prog[j + 1], j + 2
+            else:
+                delim, j = "/", j + 1
+            j = regex_end(j, delim)
+            while j >= 0 and j < n and prog[j] in "IM":
+                j += 1
+            return j
+        return j
+
+    def line_end(j):
+        k = prog.find("\n", j)
+        return n if k < 0 else k
+
+    def command_end(j):
+        """Index of the separator after a command (at j after optional spaces), or -1 when trailing text follows."""
+        j = spaces(j)
+        if j >= n or prog[j] in ";\n}#":
+            return j
+        return -1
+
+    while i < n:
+        i = spaces(i)
+        if i >= n:
+            break
+        c = prog[i]
+        if c in ";\n":
+            i += 1
+            continue
+        if c == "#":
+            i = line_end(i)
+            continue
+        if c == "}":
+            if depth == 0:
+                return False
+            depth -= 1
+            i = command_end(i + 1)
+            if i < 0:
+                return False
+            continue
+        j = address(i)
+        if j < 0:
+            return False
+        if j > i and j < n and prog[j] == ",":
+            if j + 1 < n and prog[j + 1] in "+~":
+                k = j + 2
+                if not (k < n and prog[k].isdigit()):
+                    return False
+                while k < n and prog[k].isdigit():
+                    k += 1
+                j = k
+            else:
+                k = address(j + 1)
+                if k <= j + 1:
+                    return False  # no second address after the `,` (a `$` one is refused above)
+                j = k
+        j = spaces(j)
+        if j < n and prog[j] == "!":
+            j = spaces(j + 1)
+            if j < n and prog[j] == "!":
+                return False  # GNU sed rejects multiple `!`s
+        if j >= n:
+            return False
+        c = prog[j]
+        if c in "wWe":
+            return False  # a command that writes a file or runs one
+        if c == "{":
+            depth += 1
+            i = j + 1
+            continue
+        if c in _FSW_SED_PLAIN:
+            i = command_end(j + 1)
+        elif c in _FSW_SED_NUMBERED:
+            k = spaces(j + 1)
+            while k < n and prog[k].isdigit():
+                k += 1
+            i = command_end(k)
+        elif c in "btTv:":
+            k = spaces(j + 1)
+            while k < n and prog[k] not in " \t;\n":
+                if prog[k] in "}#\\{":
+                    return False  # a label holding a brace, `#`, or backslash: not parsed with confidence
+                k += 1
+            if c == ":" and k == spaces(j + 1):
+                return False  # `:` needs a label
+            i = command_end(k)
+        elif c in "rR":
+            i = line_end(j + 1)  # the file name (read, never written) runs to the end of the line
+        elif c in "aic":
+            k = spaces(j + 1)
+            if k + 1 < n and prog[k] == "\\" and prog[k + 1] == "\n":
+                k += 2  # the classic `a\` form: the text is the next line
+            elif k < n and prog[k] in "\\\n":
+                return False  # an `a\text` one-liner or an empty text: not parsed with confidence
+            e = line_end(k)
+            if e > k and prog[e - 1] == "\\":
+                return False  # a text line ending in a backslash continues: not parsed with confidence
+            i = e
+        elif c in "sy":
+            if j + 1 >= n or prog[j + 1] in "\n\\":
+                return False
+            delim = prog[j + 1]
+            k = regex_end(j + 2, delim) if c == "s" else plain_end(j + 2, delim)
+            if k < 0:
+                return False
+            k = plain_end(k, delim)
+            if k < 0:
+                return False
+            if c == "s":
+                while k < n and prog[k] not in ";\n}#":
+                    if prog[k] in "we":
+                        return False  # an s///w or s///e flag (spaces may separate flags)
+                    if prog[k] not in _FSW_SED_S_FLAGS and prog[k] not in " \t":
+                        return False
+                    k += 1
+            i = command_end(k)
+        else:
+            return False  # an unknown command
+        if i < 0:
+            return False
+    return depth == 0
+
+
+def _fsw_write_targets(kind, words, inplace=True):
+    """The TARGET words of one write command `kind` given its argument `words`: the destination of
+    cp, mv, or install (every -t, -tDIR, --target-directory DIR, or --target-directory=DIR argument, else the
+    last operand); the of= operand of dd; and every operand (a word that is not an option, and every word
+    after `--`) of tee, truncate, ed, ex, and an in-place sed or perl, plus ex's written-file option arguments.
+    Every option argument the command's _OPTION_SPECS entry declares is consumed first (a short
+    cluster is walked letter by letter, as getopt does), so `sed -f <file>`, `sed -e <script>`, `truncate -r
+    <file>`, or `perl -I <dir>` never names a target, and a sed or perl given no -e/-f style option drops its
+    first operand, the program. For a command whose spec sets "stop" (perl), option parsing ends at
+    the FIRST operand, as the real tool's does, so a later option-looking word (`X -I S`) is an operand; and
+    None (an UNKNOWN target) when any SCRIPT TEXT argument ("text", or sed's dropped program) names a store
+    path, since that text can itself write the path (a sed `w` command or `s///w` flag, an ex `w!`). With
+    `inplace` False (a sed or perl with no in-place option, which edits no operand) the result is [] unless
+    such script text makes it None. Under an "all" option (mv --exchange, install -d or --directory)
+    every operand and every target-directory argument is a target; after install's bare --context the next
+    word, when it is `-` or does not start with `-`, may be its argument (uutils) or an operand (GNU), so the
+    destination candidates are the last operand under BOTH readings; and a perl --help or --version met while
+    options are parsed makes the command write nothing ([])."""
+    if kind == "dd":
+        return [w[3:] for w in words if w.startswith("of=")]
+    spec = _FSW_OPTION_SPECS.get(kind, {})
+    req, opt, run = spec.get("req", ""), spec.get("opt", ""), spec.get("run", {})
+    long_req, target, script = spec.get("long", ()), spec.get("target", ()), spec.get("script")
+    text, stop = spec.get("text", ()), spec.get("stop", False)
+    operands, dirs, ends, pending, scripted, texts = [], [], False, None, False, []
+    filescript = False  # a program option whose argument names a FILE (sed -f, --file) was given
+    posix = False  # sed's --posix, or an unambiguous abbreviation of it, was given
+    every_opts, optsep, exits = spec.get("all", ()), spec.get("optsep", ()), spec.get("exit", ())
+    every = False  # an "all" option was given: every operand is written
+    maybe, optional = set(), False  # operand indices an "optsep" option may have consumed
+    for w in words:
+        optional_next, optional = optional, False
+        if pending is not None:  # the separate argument word of the option `pending`
+            if pending in target:
+                dirs.append(w)
+            if pending in text:
+                texts.append(w)
+            pending = None
+        elif optional_next and not ends and (w == "-" or not w.startswith("-")):
+            maybe.add(len(operands))  # install --context's argument (uutils) or an operand (GNU)
+            operands.append(w)
+        elif ends or not w.startswith("-") or w == "-":
+            operands.append(w)
+            ends = ends or stop  # perl parses no option after its first operand
+        elif w == "--":
+            ends = True
+        elif w.startswith("--"):
+            name, eq, value = w.partition("=")
+            name = _fsw_resolve_long(kind, name)  # `--expr` is --expression, as the real tool reads it
+            if name is None:
+                if kind in _FSW_STRICT_LONG_COMMANDS:
+                    return None  # an ambiguous or unrecognized long option on sed, perl, or ex: target UNKNOWN
+                continue  # elsewhere the tool rejects it and writes nothing: an option with no argument
+            posix = posix or name == "--posix"
+            if name in exits:
+                # perl exits at once on --help or --version, and `=value` is an unknown switch;
+                # GNU cp, mv, sed, and ed and uutils install, tee, and truncate also exit at once on either (an
+                # abbreviation included), wherever it stands before `--`, and reject `=value` without writing
+                return None if eq and not spec.get("exit_eq") else []
+            every = every or name in every_opts
+            optional = name in optsep and not eq
+            if name in long_req:
+                scripted = scripted or (script is not None and name in script)
+                filescript = filescript or (script is not None and name in script and name not in text)
+                if not eq:
+                    pending = name
+                else:
+                    if name in target:
+                        dirs.append(value)
+                    if name in text:
+                        texts.append(value)
+        else:
+            j = 1
+            while j < len(w):
+                c = w[j]
+                every = every or c in every_opts
+                if c in req:
+                    scripted = scripted or (script is not None and c in script)
+                    filescript = filescript or (script is not None and c in script and c not in text)
+                    if j + 1 < len(w):
+                        if c in target:
+                            dirs.append(w[j + 1:])
+                        if c in text:
+                            texts.append(w[j + 1:])
+                    else:
+                        pending = c
+                    break
+                if c in opt:
+                    break  # an attached optional argument: the rest of the cluster
+                j = run[c].match(w, j + 1).end() if c in run else j + 1  # every run pattern matches empty
+    if script is not None and not scripted:
+        if operands and spec.get("text_prog"):
+            texts.append(operands[0])  # sed's program operand is script text; perl's names a program FILE
+        operands = operands[1:]  # no -e/-f style option: the first operand is the program, never a target
+    if any(_fsw_names_store_path(t) for t in texts):
+        # a sed with no in-place option whose program is parsed with confidence and holds no command
+        # that can write (no w, W, or e command, and no s///w or s///e flag) edits nothing, so a store path it
+        # merely MENTIONS (a search pattern) is no write target; any other script text naming a store path (an
+        # in-place sed, a program read from a -f file, a program not parsed with confidence, an ex -c command,
+        # a perl program) keeps the script-text UNKNOWN target
+        read_only = (kind == "sed" and not inplace and not filescript and not posix
+                     and _fsw_sed_program_cannot_write("\n".join(texts)))
+        if not read_only:
+            return None  # script text naming a store path can write it: the target is UNKNOWN
+    if not inplace:
+        return []
+    if kind in _FSW_DEST_COMMANDS:
+        if every:
+            return operands + dirs  # mv --exchange or install -d writes every operand
+        if dirs or not operands:
+            return dirs
+        # the last operand, and (after install's bare --context) the last one not possibly consumed
+        last = {len(operands) - 1} | {max((i for i in range(len(operands)) if i not in maybe), default=-1)}
+        return [operands[i] for i in sorted(last) if i >= 0]
+    return operands + dirs
+
+
+def _fsw_stream_writes(toks):
+    """True when one token stream of _shell_tokens shows a write indicator (see bash_writes). A WRITE_COMMANDS
+    word, and the sed or perl word an in-place option must follow, count only in COMMAND position: the
+    stream's first word, the first word after a separator, after a reserved word that keeps the position
+    (_CMD_PREFIX_WORDS), after VAR=value assignments, after an input or output redirection and its operand,
+    after a PREFIX_COMMANDS word with its options, option arguments, and leading operands, or, in a simple
+    command whose command word is find, after its -exec-style word (up to that command's terminating `;` or
+    `+` word), or at the body of a function header (`function NAME {`, or `function NAME if`, `while`, or
+    `until`; the `NAME() {` forms restore it through their `(` and `)` separators). A write inside a function body is thus detected whether or not the
+    function is ever called (the conservative direction). The output-redirection test is position-free."""
+    return bool(_fsw_stream_targets(toks))
+
+
+def _fsw_stream_targets(toks):
+    """The write indicators of one token stream (see _stream_writes, whose command-position rules this
+    applies), one entry per indicator: the list of that write's TARGET words (_write_targets for a
+    write command, possibly empty, as for a bare `tee`; the operand word for an output redirection), or None
+    when its target is unknown: a redirection with no operand, a target word holding a `$` expansion or a find
+    `{}` placeholder, or a write command run through xargs (which supplies more operands on stdin)."""
+    return [targets for targets, _k in _fsw_stream_write_detail(toks)]
+
+
+def _fsw_stream_write_detail(toks):
+    """_stream_targets() with each entry paired with the index in `toks` of the token that makes it
+    (the write command's word, or the redirection's operand or operator), so the analysis can tell which
+    simple command, and so which data, each write belongs to."""
+    out, cur = [], None  # cur: the simple command's write command, [kind, argument words, in-place option
+    # seen, run through xargs, token index]
+    via_xargs = False  # the simple command's prefix chain includes xargs
+
+    def finish():
+        if cur is not None:
+            in_place = cur[0] not in _FSW_INPLACE_COMMANDS or cur[2]
+            # a sed or perl with no in-place option edits no operand, but its script text can still
+            # write a named store path (a sed `w`), so it is a write of UNKNOWN target exactly when that text
+            # names one; otherwise it is no write at all
+            targets = _fsw_write_targets(cur[0], cur[1], in_place)
+            if targets is None:
+                out.append((None, cur[4]))
+            elif in_place:
+                out.append((None if cur[3] or any("$" in w or "{}" in w for w in targets) else targets, cur[4]))
+    inplace, target = False, None  # target: None, "in" (an input redirection awaiting its operand), or the dup
+    # flag of an output redirection awaiting its operand
+    cmdpos, prefix, optarg = True, None, False  # prefix: [options taking an argument, operands still to skip]
+    in_find, in_exec = False, False  # the simple command is find; inside one of its -exec-style commands
+    fdef = 0  # function header: 1 awaiting the name, 2 awaiting the body
+    for k, t in enumerate(toks):
+        if t[0] in ("r", "i"):
+            if target not in (None, "in"):
+                out.append((None, k))  # a redirection with no operand: its target is unknown
+            target = t[1] if t[0] == "r" else "in"
+            continue
+        if t[0] == "s":
+            if target not in (None, "in"):
+                out.append((None, k))
+            target = None
+            finish()
+            cur, via_xargs = None, False
+            inplace, cmdpos, prefix, optarg, in_find, in_exec, fdef = False, True, None, False, False, False, 0
+            continue
+        w = t[1]
+        if target == "in":
+            target = None  # the operand of an input redirection (a file, here-string, delimiter, or descriptor)
+            continue
+        if target is not None:
+            if w != "/dev/null" and not (target and _FSW_FD_DUP_RE.fullmatch(w)):
+                out.append((None if "$" in w else [w], k))  # the redirection's target (a `$` expansion: unknown)
+            target = None
+            continue
+        if cmdpos and w.isdigit() and k + 1 < len(toks) and toks[k + 1][0] in ("r", "i"):
+            continue  # the descriptor of an `N>` or `N<` redirection, not a command word
+        if fdef:
+            # the name; then the body's `{`, `if`, `while`, or `until` (a bash function body is any compound command)
+            fdef, cmdpos = (2, False) if fdef == 1 else (0, w in _FSW_CMD_PREFIX_WORDS)
+            continue
+        if cmdpos:
+            base = os.path.basename(w)  # computed only where it is used (a command word)
+            if prefix is not None:
+                if optarg:
+                    optarg = False
+                elif w.startswith("-") and w != "-":
+                    optarg = w in prefix[0]
+                elif prefix[1] > 0:
+                    prefix[1] -= 1
+                else:
+                    prefix = None
+            if prefix is None and not (_FSW_ASSIGN_RE.fullmatch(w) or w in _FSW_CMD_PREFIX_WORDS):
+                if w == "function":
+                    cmdpos, fdef = False, 1
+                    continue
+                if base in _FSW_PREFIX_COMMANDS:
+                    prefix = [_FSW_PREFIX_COMMANDS[base][0], _FSW_PREFIX_COMMANDS[base][1]]
+                    via_xargs = via_xargs or base == "xargs"
+                else:
+                    cmdpos, inplace = False, base in _FSW_INPLACE_COMMANDS
+                    if base in _FSW_WRITE_COMMANDS or inplace:
+                        finish()
+                        cur = [base, [], False, via_xargs, k]  # its argument words follow; targets read at its end
+                    if not in_exec:
+                        in_find = base == "find"
+        elif in_exec and w in (";", "+"):
+            finish()
+            cur = None
+            in_exec = inplace = False  # the end of a find -exec-style command; find's own arguments resume
+        elif in_find and not in_exec and w in _FSW_EXEC_WORDS:
+            cmdpos = in_exec = True
+        else:
+            if cur is not None:
+                cur[1].append(w)
+            if inplace and _fsw_is_inplace_opt(cur[0], w):
+                cur[2] = True
+    if target not in (None, "in"):
+        out.append((None, len(toks) - 1))
+    finish()
+    return out
+
+
+# ---- which data each write carries ----
+
+# The work budget of one Bash evaluation (tokenizer steps, here-document lines, tokens and units walked,
+# nested shell -c analyses included). A command that spends it is ALLOWED unchecked (fail open), so no input can
+# hold the hook past its latency bound; ordinary commands, and 64 KiB of ordinary text, stay well inside it.
+_FSW_BASH_WORK_BUDGET = 80_000
+_FSW_STREAM_COST = 8  # budget steps charged per substitution frame, in the tokenizer and again in the analysis
+_FSW_SHELL_C_COST = 30  # budget steps charged per nested shell -c analysis
+_FSW_SHELL_C_DEPTH = 3  # nesting depth to which literal bash/sh/dash/zsh -c strings are analysed
+_FSW_CWD_COST = 6  # budget steps charged per directory, BEFORE a cd is resolved from, or a target or staged
+#               word resolved against, each directory the command can be in, and per directory in a set union
+_FSW_MAX_CWDS = 32  # the most directories a command point can be in; a larger set spends the budget (fail open)
+# Commands that only read (their output goes to the caller, never into a file of their own choosing), so
+# a literal in a pipeline of these, with no redirection or write anywhere in it, feeds no write
+_FSW_READ_COMMANDS = frozenset((
+    "grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "wc", "ls", "stat", "file", "diff", "cmp", "echo",
+    "printf", "test", "[", "true", "false", ":", "date", "pwd", "basename", "dirname", "realpath", "readlink",
+    "cut", "tr", "jq", "nl", "od", "xxd", "md5sum", "sha1sum", "sha256sum", "cksum", "which"))
+_FSW_SHELLS = frozenset(("bash", "sh", "dash", "zsh"))
+_FSW_CD_COMMANDS = frozenset(("cd", "pushd", "popd"))
+_FSW_OPENERS = frozenset(("{", "if", "while", "until", "for", "select"))
+_FSW_CLOSER_OF = {"}": ("{",), "fi": ("if",), "done": ("while", "until", "for", "select"), "esac": ()}
+_FSW_CONTINUERS = frozenset(("then", "do", "else", "elif", "!"))
+_FSW_UNRELIABLE_WORDS = frozenset(("case", "function", "coproc"))
+_FSW_CD_HINT_RE = re.compile(r"(?<![^\s;&|()`{}])(?:cd|pushd|popd)(?![^\s;&|()`<>])")
+_FSW_SHELL_HINT_RE = re.compile(r"(?<![^\s;&|()`{}/])(?:bash|sh|dash|zsh)(?![^\s;&|()`<>])")
+
+
+def _fsw_is_pipe(b):
+    """True when the separator text `b` between two simple commands is a pipe (`|` or `|&`, possibly
+    with a subshell's parentheses or newlines after it), not a list operator (`;`, `&`, `&&`, `||`, a newline)."""
+    s = b.replace("(", "").replace(")", "")
+    if "~" in s:  # the separator the tokenizer inserted after `]]` or `))`: one command, not a list
+        s = s.replace("~", "")
+        if not s:
+            return True
+    if s.strip("\n"):
+        s = s.replace("\n", "")
+    return s in ("|", "|&")
+
+
+def _fsw_units(toks, pos, cmd):
+    """Split one token stream into its simple commands. Returns (units, bounds, tok_unit): units are
+    [first token, end token (exclusive), raw start, raw end] per simple command, bounds[k] the separator text
+    before unit k (bounds[len(units)] the text after the last; a separator the tokenizer inserted after a closed
+    `]]` or `))` reads `~`, joining its neighbours like a pipe), and tok_unit the unit index of every token (a
+    separator maps to the unit before it, or 0)."""
+    units, bounds, bnd, cur, tok_unit = [], [], [], None, []
+    for k, t in enumerate(toks):
+        if t[0] == "s":
+            if cur is not None:
+                units.append(cur)
+                cur = None
+            a, b = pos[k]
+            bnd.append(cmd[a] if b > a else "~")
+            tok_unit.append(max(len(units) - 1, 0))
+            continue
+        if cur is None:
+            bounds.append("".join(bnd))
+            bnd = []
+            cur = [k, k + 1, pos[k][0], pos[k][1]]
+        else:
+            cur[1] = k + 1
+            if pos[k][1] > cur[3]:
+                cur[3] = pos[k][1]
+        tok_unit.append(len(units))
+    if cur is not None:
+        units.append(cur)
+    bounds.append("".join(bnd))
+    return units, bounds, tok_unit
+
+
+def _fsw_unit_words(toks, a, b):
+    """The (token index, word) pairs of tokens a..b, less redirection operands and the descriptor
+    number of an `N>` or `N<` redirection."""
+    out, skip = [], False
+    for k in range(a, b):
+        t = toks[k]
+        if t[0] != "w":
+            skip = t[0] in ("r", "i")
+            continue
+        if skip:
+            skip = False
+            continue
+        if t[1].isdigit() and k + 1 < b and toks[k + 1][0] in ("r", "i"):
+            continue
+        out.append((k, t[1]))
+    return out
+
+
+def _fsw_classify(words, cmd, pos):
+    """(kind, rest) of one simple command whose leading reserved words are already removed: "empty" (no
+    command word), "assign" (assignments only), "exec" (a bare exec: its redirections apply to every later
+    command), "shell" (bash, sh, dash, or zsh; rest: its argument words), "cd" or "popd" (rest: the arguments),
+    "tee", "read" (a READ_COMMANDS word, printf without -v, `[[`, or an arithmetic command), or "other". Leading
+    assignments and PREFIX_COMMANDS with their options are passed over; xargs makes it "other"."""
+    j, nw = 0, len(words)
+    while j < nw and _FSW_ASSIGN_RE.fullmatch(words[j][1]):
+        j += 1
+    if not nw:
+        return "empty", None
+    if j == nw:
+        return "assign", None
+    saw_exec = False
+    while j < nw:
+        base = os.path.basename(words[j][1])
+        if base not in _FSW_PREFIX_COMMANDS:
+            break
+        if base == "xargs":
+            return "other", None
+        saw_exec = saw_exec or base == "exec"
+        opts, nops = _FSW_PREFIX_COMMANDS[base]
+        j += 1
+        while j < nw:
+            w = words[j][1]
+            if w.startswith("-") and w != "-":
+                j += 2 if w in opts else 1
+            elif base == "env" and _FSW_ASSIGN_RE.fullmatch(w):
+                j += 1
+            elif nops:
+                nops -= 1
+                j += 1
+            else:
+                break
+    if j >= nw:
+        return ("exec" if saw_exec else "empty"), None
+    k, w = words[j]
+    base, rest = os.path.basename(w), words[j + 1:]
+    if base in _FSW_SHELLS:
+        return "shell", rest
+    if base in _FSW_CD_COMMANDS:
+        return ("popd" if base == "popd" else "cd"), rest
+    if base == "tee":
+        return "tee", None
+    if w == "[[" or (w == "$" and cmd.startswith("((", pos[k][0])):
+        return "read", None
+    if base in _FSW_READ_COMMANDS and not (base == "printf" and any(x.startswith("-v") for _k, x in rest)):
+        return "read", None
+    return "other", None
+
+
+class _FswStructure:
+    """The compound structure of one token stream (see _structure())."""
+    __slots__ = ("kinds", "rest", "depth", "tainted", "opens", "closes", "unreliable")
+
+
+def _fsw_structure(toks, pos, units, bounds, cmd):
+    """Walk the simple commands of one stream, tracking compound commands: a `(` in a separator opens
+    a subshell and a `)` closes it; a leading `{`, `if`, `while`, `until`, `for`, or `select` opens a compound and
+    a leading `}`, `fi`, or `done` closes it (a `then`, `do`, `else`, `elif`, or `!` passes). A compound whose
+    output is redirected (a `>` after its closer) or piped onward TAINTS every simple command inside it: all their
+    literals are data of that write. Per unit it records its kind (_classify), depth, and whether it opened or
+    closed a compound; the stream is UNRELIABLE (no literal is then excluded as unrelated) when it holds a
+    `case`, a function definition (`function` or `NAME()`), `coproc`, a bare `exec`, or a closer that does not
+    match, or leaves a compound open."""
+    nu = len(units)
+    st = _FswStructure()
+    st.kinds, st.rest, st.depth = [None] * nu, [None] * nu, [0] * nu
+    st.opens, st.closes = [False] * nu, [False] * nu
+    diff, stack, unreliable = [0] * (nu + 2), [], False
+
+    def close(accept, first_ok, u_end, tainting):
+        nonlocal unreliable
+        if not stack or stack[-1][0] not in accept:
+            unreliable = True
+            return
+        _kind, first = stack.pop()
+        if tainting and first_ok:
+            diff[first] += 1
+            diff[u_end + 1] -= 1
+
+    for u in range(nu + 1):
+        b = bounds[u]
+        if "()" in b.replace(" ", ""):
+            unreliable = True  # a NAME() function header
+        for x, ch in enumerate(b):
+            if ch == "(":
+                stack.append(("(", u))
+            elif ch == ")":
+                after = b[x + 1:]
+                redirected = after == "" and u < nu and toks[units[u][0]][0] == "r"
+                close(("(",), True, u - 1 if not redirected else u, redirected or _fsw_is_pipe(after))
+        if u == nu:
+            break
+        a, e = units[u][0], units[u][1]
+        words = _fsw_unit_words(toks, a, e)
+        j = 0
+        while j < len(words):
+            w = words[j][1]
+            if w in _FSW_OPENERS:
+                stack.append((w, u))
+                st.opens[u] = True
+                j += 1
+                if w in ("for", "select"):
+                    st.kinds[u] = "header"  # its words (the list) are data of the loop body
+                    break
+            elif w in _FSW_CONTINUERS:
+                st.opens[u] = True
+                j += 1
+            elif w in _FSW_CLOSER_OF:
+                if w == "esac":
+                    unreliable = True
+                st.closes[u] = True
+                redirected = any(toks[k][0] == "r" for k in range(words[j][0] + 1, e))
+                close(_FSW_CLOSER_OF[w], True, u, redirected or _fsw_is_pipe(bounds[u + 1]))
+                j += 1
+            elif w in _FSW_UNRELIABLE_WORDS:
+                unreliable = True
+                j += 1
+            else:
+                break
+        st.depth[u] = len(stack)
+        if st.kinds[u] is None:
+            st.kinds[u], st.rest[u] = _fsw_classify(words[j:], cmd, pos)
+            if st.kinds[u] == "exec":
+                unreliable = True
+    if stack:
+        unreliable = True
+    run, st.tainted = 0, [False] * nu
+    for u in range(nu):
+        run += diff[u]
+        st.tainted[u] = run > 0
+    st.unreliable = unreliable
+    return st
+
+
+def _fsw_cd_target(kind, rest, cwds, ctx, budget=None):
+    """The directories a cd or pushd with arguments `rest` (word pairs) can leave, from each directory
+    in `cwds` (None: unknown): an existing directory named literally, else None (unknown); popd is unknown.
+    CWD_COST per directory of `cwds` is charged to `budget` BEFORE any is resolved."""
+    if budget is not None:
+        budget.spend(_FSW_CWD_COST * (len(cwds) + 1))
+    if kind != "cd":
+        return frozenset((None,))
+    args = [w for _k, w in rest]
+    while args and args[0] in ("-L", "-P", "-e", "-@", "-LP", "-PL", "-Pe"):
+        args.pop(0)
+    if args and args[0] == "--":
+        args.pop(0)
+    if len(args) != 1 or args[0] in ("-", "") or args[0].startswith("~") or "$" in args[0]:
+        return frozenset((None,))
+    d = args[0]
+    if not d.startswith("/") and not d.startswith(("./", "../")) and d not in (".", "..") \
+            and os.environ.get("CDPATH"):
+        return frozenset((None,))  # CDPATH may send a relative cd elsewhere
+    out = set()
+    for c in cwds:
+        if d.startswith("/"):
+            p = os.path.normpath(d)
+        elif c is None:
+            out.add(None)
+            continue
+        else:
+            p = os.path.normpath(os.path.join(c, d))
+        out.add(p if ctx.isdir(p) else None)
+    return frozenset(out)
+
+
+def _fsw_target_status(w, cwds, ctx, budget=None):
+    """Whether one write TARGET word is "store", "unknown", or "other". A word holding a store path token is a
+    store target (the original lexical rule); any other relative word is resolved against every
+    directory the command can be in at that point (`cwds`, from the payload cwd and any cd before it): under a store root from any of them is a
+    store target, and an unknown directory (None) or a `~` word makes it unknown. CWD_COST per
+    directory is charged to `budget` BEFORE the resolution."""
+    if budget is not None:
+        budget.spend(_FSW_CWD_COST * (len(cwds) + 1))
+    if ctx.names(w):
+        return "store"  # a store path token anywhere in the word (the original lexical rule)
+    if w.startswith("/"):
+        return "other"
+    if w.startswith("~"):
+        return "unknown"
+    unknown = False
+    for c in cwds:
+        if c is None:
+            unknown = True
+        elif ctx.under(os.path.normpath(os.path.join(c, w))):
+            return "store"
+    return "unknown" if unknown else "other"
+
+
+def _fsw_shell_c_string(rest):
+    """The token index of the command string of a shell run with -c (a short option cluster holding
+    c; `-o`, `-O`, `--rcfile`, and `--init-file` take a separate argument), or None."""
+    cflag, j = False, 0
+    while j < len(rest):
+        w = rest[j][1]
+        if w == "--":
+            j += 1
+            break
+        if w in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
+            j += 2
+            continue
+        if w.startswith("--"):
+            j += 1
+            continue
+        if len(w) > 1 and w[0] in "-+":
+            cflag = cflag or (w[0] == "-" and "c" in w[1:])
+            j += 1
+            continue
+        break
+    return rest[j][0] if cflag and j < len(rest) else None
+
+
+_FSW_SEARCH_ARG_OPTS = frozenset(("-f", "--file", "-m", "--max-count", "-A", "-B", "-C", "--after-context",
+                              "--before-context", "--context", "-d", "-D", "-g", "--glob", "-t", "--type", "-T",
+                              "--type-not", "-M", "--max-columns", "-j", "--threads", "--color", "--colors"))
+
+
+_FSW_SEARCH_QUIET_LONG = {"rg": frozenset(("--count", "--count-matches", "--quiet", "--files-with-matches",
+                                        "--files-without-match")),
+                      "grep": frozenset(("--count", "--quiet", "--silent", "--files-with-matches",
+                                         "--files-without-match"))}
+_FSW_SEARCH_QUIET_SHORT = {"rg": frozenset("cql"), "grep": frozenset("cqlL")}
+_FSW_SEARCH_ARG_SHORT = frozenset("efmABCdDgtTMj")  # a short option taking an argument: the rest of a cluster is it
+
+
+def _fsw_search_patterns(toks, pos=None, cmd=""):
+    """The token indices of the PATTERN words in a token stream made only of grep, egrep, fgrep, rg,
+    and wc commands (each unit's first word; no redirection, here-string, or here-document; no rg -r or
+    --replace, which prints the replacement text, and no grep --label, which prints its text), else an empty
+    set. A pattern is the argument of -e or --regexp (attached or separate), else the first operand; an option
+    listed in _SEARCH_ARG_OPTS takes the next word; anything else starting with `-` is taken as a flag.
+    A MATCHING search prints file text that holds its pattern (with -o, exactly the pattern), so a
+    pattern is returned only when its pipeline's output cannot hold it: the pipeline's LAST command is wc, or a
+    search with a count, quiet, or file-list option (-c, -q, -l, grep -L, or the long forms --count,
+    --count-matches, --quiet, --silent, --files-with-matches, --files-without-match; exact spellings only, an
+    abbreviation is not recognized, the conservative direction). `pos` and `cmd` give each separator's text (a
+    `|` joins a pipeline); without them every separator is taken as a list operator."""
+    out, j, n = set(), 0, len(toks)
+    pipeline, safe_last = set(), False  # the patterns of the current pipeline, and whether its last command hides them
+
+    def flush():
+        if safe_last:
+            out.update(pipeline)
+        pipeline.clear()
+    sep = ""
+    while j < n:
+        if toks[j][0] == "s":
+            a, b = pos[j] if pos is not None else (0, 0)
+            sep += cmd[a] if b > a else "~"
+            j += 1
+            continue
+        if sep and not (pos is not None and _fsw_is_pipe(sep)):
+            flush()  # a list operator (`;`, `&&`, `||`, `&`, a newline) or an unknown separator ends the pipeline
+        sep = ""
+        k = j
+        while k < n and toks[k][0] != "s":
+            if toks[k][0] != "w":
+                return set()  # a redirection or input of any kind
+            k += 1
+        words = [(x, toks[x][1]) for x in range(j, k)]
+        cw = os.path.basename(words[0][1])
+        if cw == "wc":
+            safe_last = True
+            j = k
+            continue
+        if cw not in ("grep", "egrep", "fgrep", "rg"):
+            return set()
+        fam = "rg" if cw == "rg" else "grep"
+        quiet = False
+        for _x, w in words[1:]:
+            if w == "--":
+                break
+            if w.startswith("--"):
+                quiet = quiet or w in _FSW_SEARCH_QUIET_LONG[fam]
+            elif w.startswith("-") and w != "-":
+                for ch in w[1:]:
+                    if ch in _FSW_SEARCH_QUIET_SHORT[fam]:
+                        quiet = True
+                    if ch in _FSW_SEARCH_ARG_SHORT:
+                        break
+        safe_last = quiet
+        seen_e, x, found = False, 1, None  # this search's patterns join `pipeline`, kept only if it hides them
+        while x < len(words):
+            idx, w = words[x]
+            if w.startswith("--label") or (cw == "rg" and (w.startswith("--replace") or (
+                    w.startswith("-") and not w.startswith("--") and "r" in w[1:]))):
+                return set()
+            if w == "--":
+                if not seen_e and x + 1 < len(words) and found is None:
+                    found = words[x + 1][0]
+                break
+            if w in ("-e", "--regexp"):
+                if x + 1 < len(words):
+                    pipeline.add(words[x + 1][0])
+                seen_e, x = True, x + 2
+                continue
+            if w.startswith("--regexp=") or (w.startswith("-e") and len(w) > 2 and not w.startswith("--")):
+                pipeline.add(idx)
+                seen_e, x = True, x + 1
+                continue
+            if w in _FSW_SEARCH_ARG_OPTS:
+                seen_e = seen_e or w in ("-f", "--file")
+                x += 2
+                continue
+            if w.startswith("-") and w != "-":
+                x += 1
+                continue
+            if found is None:
+                found = idx
+            x += 1
+        if found is not None and not seen_e:
+            pipeline.add(found)
+        j = k
+    flush()
+    return out
+
+
+def _fsw_literal_shell_string(raw):
+    """(text, offsets) of a shell -c command string whose raw word `raw` is ONE single-quoted string, or
+    ONE double-quoted string with no expansion (no unescaped `$`, backtick, or quote; a backslash before `$`, a
+    backtick, `"`, or a backslash yields that character and one before a newline removes both, as bash reads
+    it); offsets[i] is the offset within `raw` of text[i]. Anything else is None (left uninspected)."""
+    if len(raw) < 2 or raw[0] != raw[-1] or raw[0] not in "'\"":
+        return None
+    if raw[0] == "'":
+        body = raw[1:-1]
+        return None if "'" in body else (body, list(range(1, len(raw) - 1)))
+    text, offs, j, end = [], [], 1, len(raw) - 1
+    while j < end:
+        c = raw[j]
+        if c in '"$`':
+            return None
+        if c == "\\":
+            if j + 1 >= end:
+                return None  # the closing quote is escaped: not one string
+            nx = raw[j + 1]
+            if nx in '$`"\\':
+                text.append(nx)
+                offs.append(j + 1)
+                j += 2
+                continue
+            if nx == "\n":
+                j += 2
+                continue
+        text.append(c)
+        offs.append(j)
+        j += 1
+    return "".join(text), offs
+
+
+class _FswAnalysis:
+    """The result of _analyze(): `store`, whether the command writes a store path (a parsed store
+    target, or an unknown target in a command naming a store path); `counts(p)`, whether a literal starting at
+    offset p is data of a store write (see _analyze). For an enclosing analysis of a shell -c string:
+    `targets`, the (word, directories) pairs of its writes to KNOWN non-store files; `unknown`, whether it has a
+    write whose target is unknown; `words()`, the (word, directories) pairs of every word it holds (the files
+    its store write can read, for staging)."""
+    __slots__ = ("store", "counts", "targets", "unknown", "words")
+
+    def __init__(self, store, counts, targets=(), unknown=False, words=lambda: ()):
+        self.store, self.counts = store, counts
+        self.targets, self.unknown, self.words = targets, unknown, words
+
+
+def _fsw_span_index(spans, starts, p):
+    k = bisect.bisect_right(starts, p) - 1
+    return k if k >= 0 and p < spans[k][1] else -1
+
+
+def _fsw_analyze(cmd, cwds, ctx, budget, depth=0):
+    """Which store writes a Bash command makes, and which literals are their DATA. A literal counts
+    only for the write it can feed: the store write's own simple command (its arguments, its here-string, its
+    redirections), its here-document bodies, and the other commands of its pipeline (their output is its input),
+    or every command inside a compound command whose output is redirected or piped to it. A literal is NOT
+    counted when it lies in a comment (outside a here-document body), or in a pipeline of READ_COMMANDS with no
+    redirection and no write anywhere in it, standing outside any such compound (a search: `grep -F <literal>
+    <store file>; echo checked >> <store file>`), or in a pipeline whose only writes go to other known files that
+    no store-writing command then names (so `printf <literal> > x; cp x <store dir>` still counts: x flows into
+    the store). Every other literal counts, the conservative direction: an assignment, an unknown program, a
+    loop's word list, and anything in a command the analysis finds unreliable (see _structure) or cannot parse.
+    Relative write targets are resolved against `cwds`, the directories the command can be in (the payload cwd,
+    then each confidently understood cd or pushd: an existing directory named literally, replacing the set when
+    the cd runs unconditionally at the top of its stream, joining it otherwise; any other cd adds an unknown).
+    A bash, sh, dash, or zsh -c whose command string is a single- or double-quoted literal with no expansion is
+    analysed recursively (to SHELL_C_DEPTH) with the same directories; its store writes are the enclosing
+    command's, and literals inside the string are decided by that inner analysis. A `( ... )` subshell
+    scopes the directory set (restored at its `)`); directory work is charged to `budget` before it is done and
+    a set above MAX_CWDS spends it; a literal inside a shell -c string ALSO counts when the wrapper's output
+    reaches a store write (wrapper_counts), and the string's writes and, for a string with a store write, its
+    words join the enclosing staging walk."""
+    ds = _fsw_date_spans(cmd, budget)
+    ds_starts = [s for s, _ in ds]
+
+    def dated(p):
+        return _fsw_span_index(ds, ds_starts, p) >= 0
+
+    tk = _fsw_tokenize(cmd, budget)
+    if tk is None:  # unparseable: a store write when the text names a store path, and every literal counts
+        return _FswAnalysis(ctx.names(cmd), lambda p: not dated(p), unknown=True)
+    streams, poss, fspans = tk.streams, tk.poss, tk.spans
+    budget.spend(_FSW_STREAM_COST * len(streams))
+    top, ns = len(streams) - 1, len(streams)
+    infos = [None] * ns
+
+    def info(s):
+        if infos[s] is None:
+            budget.spend(len(streams[s]))
+            infos[s] = _fsw_units(streams[s], poss[s], cmd)
+        return infos[s]
+
+    structs = [None] * ns
+
+    def struct(s):
+        if structs[s] is None:
+            units, bounds, _tu = info(s)
+            budget.spend(3 * len(streams[s]) + 4 * len(units))
+            structs[s] = _fsw_structure(streams[s], poss[s], units, bounds, cmd)
+        return structs[s]
+
+    # the directories each simple command can run in (only a command that can change directory needs the walk)
+    unit_cwds = {}
+    if _FSW_CD_HINT_RE.search(cmd):
+        order = sorted(range(ns), key=lambda s: (fspans[s][0], -fspans[s][1], -s))
+        pstack, ustarts = [], {}
+        for s in order:
+            while pstack and fspans[pstack[-1]][1] <= fspans[s][0]:
+                pstack.pop()
+            if s == top or not pstack:
+                start = cwds
+            else:
+                par = pstack[-1]
+                if par not in ustarts:
+                    ustarts[par] = [u[2] for u in info(par)[0]]
+                pu = bisect.bisect_right(ustarts[par], fspans[s][0]) - 1
+                start = unit_cwds[par][pu] if pu >= 0 and unit_cwds.get(par) else cwds
+            units, bounds, _tu = info(s)
+            st = struct(s)
+            cur, out, saved = start, [], []
+            for u in range(len(units)):
+                if not st.unreliable:
+                    # a `( ... )` subshell SCOPES directory state: the set in force at its `(` is restored at its
+                    # `)` (so a subshell's cd never leaks into the parent); a `{ ... }` group does not scope, as in
+                    # bash. An unreliable stream keeps the join-only walk.
+                    for ch in bounds[u]:
+                        if ch == "(":
+                            saved.append(cur)
+                        elif ch == ")" and saved:
+                            cur = saved.pop()
+                out.append(cur)
+                if st.kinds[u] in ("cd", "popd"):
+                    new = _fsw_cd_target(st.kinds[u], st.rest[u], cur, ctx, budget)
+                    before = bounds[u].replace("(", "").replace(")", "")
+                    after = bounds[u + 1]
+                    # replaced only when the cd surely runs, in this shell, before what follows: at the depth of
+                    # its innermost enclosing subshell (0 at the top) inside no other compound, first in its
+                    # list (after nothing, `;`, or a newline, once any subshell parentheses are set aside), not
+                    # piped and not in the background; otherwise it may or may not have run, so both are kept
+                    sure = (not st.unreliable and st.depth[u] == len(saved) and (saved or not st.tainted[u])
+                            and set(before) <= {";", "\n"} and not _fsw_is_pipe(after) and after.strip("\n;") != "&")
+                    if not sure:
+                        budget.spend(_FSW_CWD_COST * (len(cur) + len(new)))  # the union, charged first
+                    cur = new if sure else cur | new
+                    if len(cur) > _FSW_MAX_CWDS:
+                        raise _FswExhausted()  # too many possible directories: fail open
+            unit_cwds[s] = out
+            pstack.append(s)
+
+    def cwd_of(s, k):  # the directories token k of stream s runs in
+        got = unit_cwds.get(s)
+        return got[info(s)[2][k]] if got else cwds
+
+    # every write: (stream, token index, status, known non-store target words, directories); a sub-stream's
+    # write belongs to the top-level simple command holding the substitution
+    writes, memo, fallback = [], {}, None
+    store_toks, store_pos = [], []  # the top-stream token indices, and the raw offsets, of store writes
+    for s in range(ns):
+        budget.spend(2 * len(streams[s]))  # the command-position walk costs about two fast-path tokens a token
+        det = _fsw_stream_write_detail(streams[s])
+        for targets, k in det:
+            dirs = cwd_of(s, min(k, len(streams[s]) - 1)) if unit_cwds else cwds
+            if targets is None:
+                status = "unknown"
+            else:
+                status = "other"
+                for w in targets:
+                    key = (w, dirs)
+                    got = memo.get(key)
+                    if got is None:
+                        got = memo[key] = _fsw_target_status(w, dirs, ctx, budget)
+                    if got == "store":
+                        status = "store"
+                        break
+                    if got == "unknown":
+                        status = "unknown"
+            if status == "unknown":
+                if fallback is None:
+                    fallback = ctx.names(cmd)
+                if fallback:
+                    status = "store"  # an unknown target in a command naming a store path counts as a store write
+            writes.append((s, k, status, targets if status == "other" else None, dirs))
+            if status == "store":
+                if s == top:
+                    store_toks.append(k)
+                else:
+                    store_pos.append(fspans[s][0])
+    # literal shell -c strings, analysed recursively
+    delegates = []
+    if depth < _FSW_SHELL_C_DEPTH and _FSW_SHELL_HINT_RE.search(cmd):
+        for s in range(ns):
+            if not any(t[0] == "w" and os.path.basename(t[1]) in _FSW_SHELLS for t in streams[s]):
+                continue
+            st, units = struct(s), info(s)[0]
+            for u in range(len(units)):
+                if st.kinds[u] != "shell":
+                    continue
+                k = _fsw_shell_c_string(st.rest[u])
+                if k is None:
+                    continue
+                a, b = poss[s][k]
+                got = _fsw_literal_shell_string(cmd[a:b])
+                if got is None:
+                    continue  # not one quoted literal with no expansion: left uninspected
+                inner, offs = got
+                budget.spend(_FSW_SHELL_C_COST)
+                sub = _fsw_analyze(inner, cwd_of(s, k), ctx, budget, depth + 1)
+                delegates.append((a + 1, b - 1, sub, [a + o for o in offs], s, k, a))
+                if sub.store:
+                    store_pos.append(a)
+    targets_out = [(w, dirs) for _fsw_s, _k, status, targets, dirs in writes if status == "other" for w in targets]
+    targets_out.extend(t for d in delegates for t in d[2].targets)
+    unknown_out = any(w[2] == "unknown" for w in writes) or any(d[2].unknown for d in delegates)
+
+    def words_out():
+        """The (word, directories) pairs of every word of this command (its streams and its literal
+        shell -c strings), for an enclosing staging walk."""
+        got = []
+        for s in range(ns):
+            budget.spend(len(streams[s]))
+            for k, t in enumerate(streams[s]):
+                if t[0] == "w":
+                    got.append((t[1], cwd_of(s, k) if unit_cwds else cwds))
+        for d in delegates:
+            got.extend(d[2].words())
+        return got
+    if not store_toks and not store_pos:
+        return _FswAnalysis(False, lambda p: False, targets_out, unknown_out, words_out)
+    delegates.sort(key=lambda d: d[0])
+    d_starts = [d[0] for d in delegates]
+    hd = sorted((a, b, op) for op, a, b in tk.heredocs if b > a)
+    hd_starts = [h[0] for h in hd]
+    cm, cm_starts = tk.comments, [c[0] for c in tk.comments]
+    store_toks.sort()
+    store_pos.sort()
+    ttoks, tposs = streams[top], poss[top]
+    tok_starts, sep_idx, unit_memo = [], [], {}  # built on first use; unit_memo: first token -> decision
+
+    def local_unit(q):
+        """The (first, end) token indices of the top-level simple command holding offset q, or None."""
+        if not tok_starts:
+            tok_starts.extend(ps[0] for ps in tposs)
+            sep_idx.extend(k for k, t in enumerate(ttoks) if t[0] == "s")
+            budget.spend(len(ttoks) // 4)
+        k = bisect.bisect_right(tok_starts, q) - 1
+        if k < 0 or ttoks[k][0] == "s" or q >= tposs[k][1]:
+            return None
+        x = bisect.bisect_left(sep_idx, k)
+        return (sep_idx[x - 1] + 1 if x else 0), (sep_idx[x] if x < len(sep_idx) else len(ttoks))
+
+    def local_store(a, b):
+        """True when the top-level simple command of tokens a..b holds a store write (its own, one inside a
+        substitution in it, or one in a literal shell -c string in it)."""
+        x = bisect.bisect_left(store_toks, a)
+        if x < len(store_toks) and store_toks[x] < b:
+            return True
+        budget.spend(b - a)
+        lo, hi = tposs[a][0], max(ps[1] for ps in tposs[a:b])
+        x = bisect.bisect_left(store_pos, lo)
+        return x < len(store_pos) and store_pos[x] < hi
+
+    lazy = {}
+
+    def pipelines():
+        """Per top-level pipeline: its class ("store", "read", "stage", or "other"), the known files a "stage"
+        pipeline writes, and the words each simple command names (for staging), computed once."""
+        if lazy:
+            return lazy
+        st = struct(top)
+        units, bounds, tok_unit = info(top)
+        nt = len(units)
+        tstarts = [u[2] for u in units]
+
+        def unit_at(p):
+            return max(bisect.bisect_right(tstarts, p) - 1, 0)
+        t_store, t_write, t_unknown = [False] * nt, [False] * nt, [False] * nt
+        t_targets = [[] for _ in range(nt)]
+        for s, k, status, targets, dirs in writes:
+            u = tok_unit[k] if s == top and k < len(tok_unit) else unit_at(fspans[s][0])
+            t_write[u] = True
+            if status == "store":
+                t_store[u] = True
+            elif status == "unknown":
+                t_unknown[u] = True
+            else:
+                t_targets[u].extend((w, dirs) for w in targets)
+        # the store writes of a literal shell -c string, kept apart per unit (d_store: the raw offsets
+        # of the delegated strings with a store write), and its other writes, which are the unit's writes too
+        own = list(t_store)
+        d_store, extra = [[] for _ in range(nt)], [[] for _ in range(nt)]
+        d_at = {d[6] for d in delegates if d[2].store}
+        for p in store_pos:
+            u = unit_at(p)
+            t_store[u] = True
+            if p in d_at:
+                d_store[u].append(p)
+            else:
+                own[u] = True
+        for d in delegates:
+            u = tok_unit[d[5]] if d[4] == top and d[5] < len(tok_unit) else unit_at(fspans[d[4]][0])
+            if d[2].targets or d[2].unknown:
+                t_write[u] = True
+            t_unknown[u] = t_unknown[u] or d[2].unknown
+            t_targets[u].extend(d[2].targets)
+            if d[2].store:
+                extra[u].extend(d[2].words())  # the files its store write can read: staged through
+        nonread = [False] * nt
+        words = [set() for _ in range(nt)]
+        for s in range(ns):
+            if s == top:
+                continue
+            u = unit_at(fspans[s][0])
+            sst = struct(s)
+            if sst.unreliable or any(kd not in ("read", "empty") for kd in sst.kinds):
+                nonread[u] = True
+            words[u].update(t[1] for t in streams[s] if t[0] == "w")
+        budget.spend(len(ttoks) + nt)  # charged before the walk below, not after it
+        pipe = [0] * nt
+        for u in range(1, nt):
+            pipe[u] = pipe[u - 1] if _fsw_is_pipe(bounds[u]) else u
+        members = {}
+        for u in range(nt):
+            members.setdefault(pipe[u], []).append(u)
+            words[u].update(t[1] for t in ttoks[units[u][0]:units[u][1]] if t[0] == "w")
+        # each pipeline's aggregates, computed ONCE (charged before the pass), so that excluding one unit (a
+        # shell -c wrapper, see wrapper_counts) takes constant time; rescanning the whole pipeline and rebuilding
+        # its separator text per wrapper would be work of wrappers x pipeline length the budget never sees.
+        # Per pipeline: whether it is not plain or holds a non-read substitution or an unknown write ("bad"), and
+        # how many of its units are not a non-writing read, are not a read or tee, and have a store write.
+        budget.spend(4 * nt + sum(map(len, bounds)) + len(store_pos) + sum(map(len, t_targets)))
+        agg = {}
+        for pid, us in members.items():
+            plain = (not any("(" in bounds[u] or ")" in bounds[u] or st.opens[u] for u in us[1:])
+                     and not any(st.closes[u] for u in us))
+            agg[pid] = (not plain or any(nonread[u] or t_unknown[u] for u in us),
+                        sum(1 for u in us if st.kinds[u] != "read" or t_write[u]),
+                        sum(1 for u in us if st.kinds[u] not in ("read", "tee")),
+                        sum(1 for u in us if t_store[u]))
+        # per unit, whether its delegated store writes hold two distinct strings, and its first (so that
+        # "a delegated store write other than this wrapper's" is a constant-time test)
+        d_multi = [bool(x) and any(y != x[0] for y in x) for x in d_store]
+
+        def klass(pid, as_read=-1):
+            """The class of pipeline `pid` apart from any store write in it, the unit `as_read` (a shell -c
+            wrapper whose string is judged by its own analysis, a member of the pipeline) taken as a read.
+            Computed from the pipeline's aggregates, adjusted for `as_read` in constant time."""
+            bad, n_read, n_stage, _n = agg[pid]
+            if bad:
+                return "other"
+            if as_read >= 0:  # its term: a read (whatever its kind) that writes nothing, and a read for staging
+                n_read -= (st.kinds[as_read] != "read" or t_write[as_read]) - t_write[as_read]
+                n_stage -= st.kinds[as_read] not in ("read", "tee")
+            if n_read == 0:
+                return "read"
+            if n_stage == 0:
+                return "stage"
+            return "other"
+        pclass, ptargets = {}, {}
+        for pid, us in members.items():
+            if not any(t_unknown[u] for u in us):  # the known files it writes: its data can flow on through them
+                ptargets[pid] = [t for u in us for t in t_targets[u]]
+            pclass[pid] = "store" if agg[pid][3] else klass(pid)
+        lazy.update(st=st, pipe=pipe, pclass=pclass, ptargets=ptargets, members=members, words=words, live=None,
+                    unit_at=unit_at, units=units, klass=klass, own=own, d_store=d_store, t_store=t_store,
+                    extra=extra, tok_unit=tok_unit, agg=agg, d_multi=d_multi)
+        return lazy
+
+    def resolved(w, dirs):
+        budget.spend(_FSW_CWD_COST * (len(dirs) + 1))  # charged before the resolution
+        out = {w}
+        if w.startswith("/"):
+            out.add(os.path.normpath(w))
+        elif not w.startswith("~") and "$" not in w:
+            out.update(os.path.normpath(os.path.join(c, w)) for c in dirs if c is not None)
+        return out
+
+    def live():
+        """The pipelines whose written files a store-writing pipeline names, directly or through a chain of
+        pipelines that each name a file the next one wrote (`echo <literal> > a; cp a b; mv b <store file>`): a
+        staging pipeline's literals reach the store through those files."""
+        pl = pipelines()
+        if pl["live"] is not None:
+            return pl["live"]
+        by_target = {}
+        for pid, targets in pl["ptargets"].items():
+            for w, dirs in targets:
+                for r in resolved(w, dirs):
+                    by_target.setdefault(r, set()).add(pid)
+        alive = {pid for pid, c in pl["pclass"].items() if c == "store"}
+        queue = list(alive)
+        while queue:
+            pid = queue.pop()
+            for u in pl["members"][pid]:
+                budget.spend(len(pl["words"][u]) + 1)
+                dirs = cwd_of(top, pl["units"][u][0])
+                # a literal shell -c string's store write names files too (`bash -c 'cp <staged file>
+                # <store file>'`), each resolved against the directories it runs in
+                for w, wd in [(w, dirs) for w in pl["words"][u]] + pl["extra"][u]:
+                    for r in resolved(w, wd):
+                        for q in by_target.get(r, ()):
+                            if q not in alive:
+                                alive.add(q)
+                                queue.append(q)
+        pl["live"] = alive
+        return alive
+
+    patterns = {}  # sub-stream -> the token indices of its search patterns (see search_pattern)
+    sub_order, sub_starts, sub_parent = [], [], {}
+
+    def search_pattern(p):
+        """True when offset p lies in the PATTERN word of a grep, egrep, fgrep, or rg inside a command
+        substitution whose every command is such a search or wc, reading no here-string, here-document, or
+        other input redirection and writing nothing (rg with a replacement, or grep with --label, excluded),
+        and whose pipeline ends in wc or a counting, quiet, or file-list search (see _search_patterns):
+        that output is a count, a status, or file names, never the pattern, so the pattern feeds no write
+        (`n=$(grep -cF <literal> <store file>); echo "n=$n" >> <store file>`). A matching search printing
+        lines prints text holding its pattern, so its pattern is not exempted."""
+        if ns < 2:
+            return False
+        if not sub_order:  # the substitution streams by start, each with its enclosing one (spans nest)
+            sub_order.extend(sorted(range(ns - 1), key=lambda x: (fspans[x][0], -fspans[x][1])))
+            sub_starts.extend(fspans[x][0] for x in sub_order)
+            stack = []
+            for x in sub_order:
+                while stack and fspans[stack[-1]][1] <= fspans[x][0]:
+                    stack.pop()
+                sub_parent[x] = stack[-1] if stack else None
+                stack.append(x)
+            budget.spend(ns)
+        j = bisect.bisect_right(sub_starts, p) - 1
+        best = sub_order[j] if j >= 0 else None
+        while best is not None and not fspans[best][0] <= p < fspans[best][1]:
+            best = sub_parent[best]
+        if best is None:
+            return False
+        if best not in patterns:
+            budget.spend(len(streams[best]))
+            patterns[best] = _fsw_search_patterns(streams[best], poss[best], cmd)
+        pats = patterns[best]
+        if not pats:
+            return False
+        k = bisect.bisect_right(poss[best], (p, float("inf"))) - 1
+        return k in pats and p < poss[best][k][1]
+
+    def counts(p):
+        if dated(p):
+            return False
+        k = _fsw_span_index(delegates, d_starts, p)
+        if k >= 0:
+            d = delegates[k]
+            offs = d[3]  # the outer offset of each inner character, ascending
+            if d[2].counts(bisect.bisect_left(offs, p)):
+                return True
+            # whatever the inner analysis decides, a literal in the string is also data of the WRAPPER
+            # command, as for echo: it counts when the wrapper's output reaches a store write
+            got = wrapper_memo.get(d[6])
+            if got is None:
+                got = wrapper_memo[d[6]] = wrapper_counts(d)
+            return got
+        k = _fsw_span_index(hd, hd_starts, p)
+        if k >= 0:
+            q = hd[k][2]  # a here-document body is data of the command holding its operator
+        elif _fsw_span_index(cm, cm_starts, p) >= 0:
+            return False  # a comment feeds no write
+        elif search_pattern(p):
+            return False  # a counting or quiet search's pattern in a substitution: its output cannot hold it
+        else:
+            q = p
+        loc = local_unit(q)
+        if loc is None:
+            return True
+        got = unit_memo.get(loc[0])
+        if got is None:
+            got = unit_memo[loc[0]] = unit_counts(q, *loc)
+        return got
+
+    wrapper_memo = {}
+
+    def wrapper_counts(d):
+        """Whether the output of the shell -c wrapper of delegate `d` reaches a store write: the
+        wrapper's own redirection or substitution writes a store path, another command of its pipeline writes
+        one, it lies in an unreliable stream or a compound whose output is redirected or piped, or its pipeline,
+        the wrapper taken as a read, is not a pure read (a staging one only when a store write names a file it
+        writes). The store writes of the string itself are judged by the inner analysis, so they are set aside
+        (a string with its own store write does not, by that alone, make every literal in it data)."""
+        pl = pipelines()
+        budget.spend(1)  # constant work per wrapper, from the pipeline aggregates (see pipelines)
+        s, k, a = d[4], d[5], d[6]
+        u = pl["tok_unit"][k] if s == top and k < len(pl["tok_unit"]) else pl["unit_at"](fspans[s][0])
+        if pl["st"].unreliable or pl["st"].tainted[u]:
+            return True
+        ds = pl["d_store"][u]
+        if pl["own"][u] or (ds and (pl["d_multi"][u] or ds[0] != a)):  # a delegated store write not this one's
+            return True
+        pid = pl["pipe"][u]
+        if pl["agg"][pid][3] - pl["t_store"][u] > 0:  # another unit of its pipeline has a store write
+            return True
+        cls = pl["klass"](pid, u)
+        if cls == "read":
+            return False
+        if cls == "stage":
+            return pid in live()
+        return True
+
+    def unit_counts(q, a, b):
+        """Whether the literals of the top-level simple command of tokens a..b (holding offset q) are data of a
+        store write (see _analyze)."""
+        if local_store(a, b):
+            return True
+        pl = pipelines()
+        u = pl["unit_at"](q)
+        if pl["st"].unreliable or pl["st"].tainted[u]:
+            return True
+        cls = pl["pclass"][pl["pipe"][u]]
+        if cls == "read":
+            return False
+        if cls == "stage":
+            return pl["pipe"][u] in live()
+        return True
+
+    return _FswAnalysis(True, counts, targets_out, unknown_out, words_out)
+
+
+def _fsw_bash_future(cmd, now_us, cwd=None):
+    """Future observed-time literals that are DATA of a Bash command's store write (else []; see _analyze).
+    `cwd` is the payload's working directory, against which relative write targets resolve. The analysis
+    runs under BASH_WORK_BUDGET; a command that spends it is allowed (fail open)."""
+    if _FSW_STAMP_RE.search(cmd) is None and (not any(h in cmd for h in _FSW_NC_ZONE_HINTS)
+                                              or not any(_fsw_nonclock_tokens(line) for line in cmd.split("\n"))):
+        return []  # no literal and no non-clock token: nothing to warn on, and the tokenizer need not run
+    start = frozenset((os.path.normpath(cwd) if isinstance(cwd, str) and os.path.isabs(cwd) else None,))
+    try:
+        an = _fsw_analyze(cmd, start, _fsw_store_ctx(), _FswBudget(_FSW_BASH_WORK_BUDGET))
+        if not an.store:
+            return []
+        bad, seen, cache, base = [], set(), {}, 0
+        lines = cmd.split("\n")
+        # the Write and Edit quoted-text exemptions (a `>` line, a matched fence, an inline code span), read
+        # lexically on the command's lines, exempt an APPROX or PLACEHOLDER token only: in shell text a
+        # backtick or a leading `>` can be syntax (a substitution, a redirection), so a future literal keeps
+        # no such exemption here (the residue discloses both directions)
+        code = _fsw_code_lines(lines) if "```" in cmd or "~~~" in cmd else ()
+        for i, line in enumerate(lines):
+            quoted = i in code or line.lstrip().startswith(">")
+            nc_spans = _fsw_code_spans(line) if "`" in line else None
+            for lit in _fsw_future_on_line(line, now_us, base, lambda p: not an.counts(p), cache,
+                                           nc_spans=nc_spans, nc_quoted=quoted):
+                if lit not in seen:
+                    seen.add(lit)
+                    bad.append(lit)
+            base += len(line) + 1
+        return bad
+    except _FswExhausted:
+        return []  # the work budget ran out: fail open, as for any input the hook cannot evaluate
+
+
+def _fsw_s(value):
+    return value if isinstance(value, str) else ""
+
+
+# every literal _STAMP_RE matches starts with this 16-character prefix, and none is longer than LITERAL_MAX_LEN:
+# 16, plus `:SS` (3), plus `.` and 9 fraction digits (10), plus a 7-character zone (` ABCDEF` or ` +HH:MM`)
+_FSW_LIT_PREFIX_RE = re.compile(r"(?=\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2})")
+_FSW_LITERAL_MIN_LEN, _FSW_LITERAL_MAX_LEN = 16, 36
+
+
+def _fsw_literal_substrings(text):
+    """The set of substrings of `text` that COULD equal a literal: from every position where the literal prefix
+    starts, each length from LITERAL_MIN_LEN to LITERAL_MAX_LEN. `lit in _literal_substrings(text)` is exactly
+    `lit in text` for any literal _STAMP_RE matched, in time linear in `text`, once per text, instead
+    of a full rescan of `text` per literal."""
+    held = set()
+    for m in _FSW_LIT_PREFIX_RE.finditer(text):
+        p = m.start()
+        held.update(text[p:p + n] for n in range(_FSW_LITERAL_MIN_LEN, min(_FSW_LITERAL_MAX_LEN, len(text) - p) + 1))
+    return held
+
+
+def _fsw_evaluate(payload, now):
+    """Return a list of offending future literals (empty = allow). `now` is an aware datetime. The
+    store roots are read once for the whole evaluation (_StoreCtx). With no store root configured the hook is
+    inert: nothing is evaluated and the call is allowed."""
+    global _FSW_ACTIVE
+    _FSW_ACTIVE = _FswStoreCtx()
+    try:
+        if not _FSW_ACTIVE.roots:
+            return []
+        return _fsw__evaluate(payload, now)
+    finally:
+        _FSW_ACTIVE = None
+
+
+def _fsw__evaluate(payload, now):
+    now_us = (now - _FSW_EPOCH_UTC) // _FSW_ONE_US
+    tool = payload.get("tool_name")
+    ti = payload.get("tool_input") or {}
+    if not isinstance(ti, dict):
+        return []
+    cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+    if tool in ("Write", "Edit", "MultiEdit"):
+        fp = ti.get("file_path")
+        if not _fsw_under_store(fp, cwd):
+            return []
+        if not os.path.isabs(fp):
+            fp = os.path.join(cwd, fp)
+        original, whole = _fsw_read_existing(fp, _FSW_EXISTING_MAX_BYTES)
+        if tool == "Write":
+            return _fsw_future_in_changed_lines(_fsw_s(ti.get("content")), original, now_us)
+        if tool == "Edit":
+            edits = [(_fsw_s(ti.get("old_string")), _fsw_s(ti.get("new_string")), ti.get("replace_all") is True)]
+        else:
+            edits = [(_fsw_s(e.get("old_string")), _fsw_s(e.get("new_string")), e.get("replace_all") is True)
+                     for e in (ti.get("edits") or []) if isinstance(e, dict)]
+        if whole:
+            result = _fsw_apply_edits(original, edits)
+            # an edit that cannot apply to the WHOLE file makes the tool itself fail: nothing is written
+            return [] if result is None else _fsw_future_in_changed_lines(result, original, now_us)
+        # not read whole (over the cap, unreadable, not regular): no reconstruction is possible, so each
+        # fragment is checked on its own lines with no table context; a time-only fragment here is a disclosed miss
+        # an UNREADABLE target (not read at all: "" with whole False, unlike an over-cap prefix) fails
+        # OPEN except for what the new content itself introduces: a literal already in the edit's old_string (text
+        # the file held) is not counted, so only a future literal the new_string brings in can deny
+        unreadable = original == ""
+        bad, seen = [], set()
+        for old, new, _every in edits:
+            held = None  # old's literal-shaped substrings, indexed once per edit (not `lit in old` per literal)
+            for lit in _fsw_future_in_changed_lines(new, old, now_us, tables=False, fences=False):
+                if unreadable and isinstance(lit, _FswNonClock):
+                    if lit in old:
+                        continue
+                elif unreadable:
+                    if held is None:
+                        held = _fsw_literal_substrings(old)
+                    if lit in held:
+                        continue
+                if lit not in seen:
+                    seen.add(lit)
+                    bad.append(lit)
+        return bad
+    if tool == "Bash":
+        cmd = ti.get("command")
+        return _fsw_bash_future(cmd, now_us, cwd) if isinstance(cmd, str) else []
+    return []
+
+
+_FSW_WARN_MAX = 100  # the warning is one line of at most this many characters
+
+
+def _fsw_warn_line(bad, now):
+    """The one-line warning for the future literals `bad`, at most WARN_MAX characters: the first literal, the
+    count of the others, the UTC clock to the minute, and a pointer to `date -u`. When it is too long the pointer,
+    then the clock reading, then the count are dropped, in that order; the first literal is never dropped, only
+    cut to fit with a trailing `...`. When the first entry is a _FswNonClock (an approximate or placeholder
+    time), the line names it as no clock reading and points at stamping by command substitution at write
+    time; there the count is dropped before that pointer."""
+    first = " ".join(str(bad[0]).split())
+    more = f" (+{len(bad) - 1} more)" if len(bad) > 1 else ""
+    if isinstance(bad[0], _FswNonClock):
+        head = "future-stamp-write: not a clock reading: "
+        tries = ((more, "", "; stamp with $(date -u +%FT%RZ)"), ("", "", "; stamp with $(date -u +%FT%RZ)"),
+                 ("", "", ""))
+    else:
+        head = "future-stamp-write: future stamp "
+        clock = "; now " + now.strftime("%Y-%m-%dT%H:%MZ")
+        tries = ((more, clock, "; run date -u"), (more, clock, ""), (more, "", ""), ("", "", ""))
+    for parts in tries:
+        line = head + first + "".join(parts)
+        if len(line) <= _FSW_WARN_MAX:
+            return line
+    return head + first[:_FSW_WARN_MAX - len(head) - 3] + "..."
+
+
+def _fsw_cfg(name, env=None):
+    """AIQT_<name>, or None when it is unset; no other spelling is read, and callers treat an empty value as
+    not configured."""
+    env = os.environ if env is None else env
+    return env.get("AIQT_" + name)
+
+
+def future_stamp_write(data):
+    """tstamp, PreToolUse (Write|Edit|MultiEdit|Bash), WARN ONLY (stage bake): warn on writing a FUTURE-dated
+    observed-time literal to a store.
+
+    THREAT MODEL. An ACCIDENTAL-DRIFT discipline guard: it catches the model composing times instead of reading
+    the clock and writing them into a store in its NORMAL record format. It is NOT an adversarial boundary: an
+    evasion that needs deliberately unusual construction (a variable, a glob, a literal built from parts, a
+    schedule word placed before the time) is a disclosed residual, not a defect. It fails OPEN on malformed input.
+
+    Motivated by an assistant composing timestamps from its own sense of time instead of reading the clock,
+    drifting up to 4h40m ahead, and persisting those invented times into its durable records
+    (timestamp-from-clock; records-first). An observed-time record (a heartbeat, a recorded-at) must come from
+    the clock, so one dated in the future is a composed value. A scheduled value (a deadline, a next run) is
+    legitimately future and is allowed.
+
+    Store roots. env AIQT_STORE_ROOT (no other spelling is read, see _cfg): one or more
+    absolute paths joined by os.pathsep; an empty or relative entry is ignored. There is NO default: when it is
+    unset, when it is set but empty, or when the
+    value names no absolute path, no store is configured and the hook is INERT (every call is
+    allowed). No store is derived from the project directory or the cwd. For Write/Edit/MultiEdit a relative
+    file_path is resolved against the payload cwd.
+
+    Write. Checked only when tool_input.file_path lies under a store root. The new content's lines are compared
+    with the existing file's lines as a MULTISET of whole lines: a new line identical to an existing line is an
+    unchanged carry-over and is exempt (as many times as it occurs there); every other line is checked whole. A
+    markdown table row is compared together with its table context (see the table-header exemption below).
+
+    Quoted text (Write, and Edit/MultiEdit; the preview Stop hook's rules, .preview/stamp-truth-stop.py, whose
+    helpers the fsw-parity row of tools/selftest_aiqt_hooks.py holds equal to these). Quoted text is not an observed-time record, so these are exempt:
+    a line whose stripped form starts with `>` (a blockquote); a literal starting inside an inline code span (a
+    backtick run closed by the next run of the same length on the same line; an unclosed run opens nothing);
+    and, on a reconstructed whole file only, every line of a MATCHED fenced code block (``` or ~~~, closed by a
+    fence of the same character at least as long; an UNCLOSED fence is not code, so its lines are checked). A
+    line's carry-over is keyed by its fence membership as well as its text, so an edit that moves an existing
+    line out of a code block (by deleting a fence, say) checks it. A bare field on its own line stays checked.
+
+    Non-clock times (all routes; the forms, their zones and the tilde and word-start rules are stated at
+    _FSW_NC_UTC_ZONE). An approximate (about, around, approximately, circa, a tilde) or placeholder (x, X, or ?
+    in a digit slot, the fraction included) UTC time token warns with no clock comparison, under the same
+    exemptions as a future literal. Bash reads the quoted-text rules above (a `>` line, a matched fence, an
+    inline code span) on the command's own lines, lexically, for these tokens ONLY: a future literal in Bash
+    text keeps no such exemption, because a backtick or a leading `>` there can be shell syntax (a
+    substitution, a redirection), so a token in a backtick substitution or on a line starting with a `>`
+    redirection is exempt (a disclosed miss) and a blockquote written by one echo line warns. Double quotes are
+    not quotation (a JSON value warns).
+
+    Edit and MultiEdit. Checked only under a store root. The COMPLETE resulting file is reconstructed by applying
+    the edits in tool order to the existing file content (old_string replaced once, or everywhere with
+    replace_all; an empty old_string creates an empty or absent file), and every line of the result that is not
+    an unchanged carry-over from the original (the same line multiset diff) is checked WHOLE, so a fragment edit
+    that repurposes a line (renaming `deadline` to `heartbeat`, or changing only the time on a heartbeat) is
+    seen on the full resulting line, and a scheduling keyword immediately preceding the literal on that line
+    still exempts it. The existing file is opened non-blocking, must be a regular file, and at most 4 MiB is
+    read. When the WHOLE file was read (or it is absent) and an edit cannot apply (an old_string not found), the
+    call is allowed: the tool itself fails and writes nothing. When the file was NOT read whole (over the 4 MiB
+    cap, unreadable, or not a regular file), whole-line reconstruction is impossible, so each edit's new_string
+    lines (less lines identical to its old_string lines) are checked, and the call is denied only when that
+    fragment itself carries a future literal with no immediately preceding keyword (blockquote lines and code
+    spans are exempt there too, but not fences, whose context the fragment cannot see); a time-only fragment (for
+    example `17:45` to `22:25`) in such a file is not caught (disclosed below). An UNREADABLE target (it could not
+    be opened or read, or is not a regular file, so nothing of it was read) fails OPEN except for what the new
+    content itself introduces: an Edit or MultiEdit literal that already appears in that edit's
+    old_string (text the file held) is not counted, and a Write's content is checked line by line as for an
+    absent file (with the file unread, all of it is new content). No shell expansion happens in
+    these tools, so every character is literal (a `$(...)` is text, not a substitution).
+
+    Bash. A lexical rule (quoting is followed to find write indicators, their targets, the data each write
+    carries, and date substitutions): DENY when a WRITE indicator's TARGET is a store path (a word holding a store
+    path token: a configured store root spelled absolutely, standing alone within the target word: not preceded
+    by a path character and followed
+    by `/`, whitespace, a quote, a shell operator, or the end; or a RELATIVE target that resolves
+    under a store root, see WHICH DIRECTORY below) AND a future-dated literal is DATA of that write (see
+    WHICH LITERALS below; formerly any literal anywhere in the command counted). Each
+    write is bound to its target, so a command TARGETS a store path only through: a redirection's operand; a
+    tee operand; an operand of an in-place sed or perl (not its program: a sed or perl given no -e, -E,
+    -f, --expression, or --file takes its first operand as the program); the destination of cp, mv, or install
+    (every -t, -tDIR, --target-directory DIR, or --target-directory=DIR argument, else the LAST operand); a dd of=
+    operand; a truncate, ed, or ex operand; or the file ex's -i, -w, -W, --startuptime, or --log writes.
+    Each command's option arguments are consumed before its operands are collected, walking a short cluster
+    letter by letter as getopt does, so an option's argument is never read as a target: sed's -e, -f, -l,
+    --expression, --file, --line-length; perl's -e, -E, -I, -M, -m (and its attached -i, -x, -D, -F, -0, -l, -C,
+    -d, -V forms); truncate's -r, -s, --reference, --size; ed's -p, --prompt; ex's -c, -S, -u, -U, -T, -t,
+    --cmd; cp's and mv's -S, --suffix (and cp's --sparse, --no-preserve); install's -m, -o, -g, -S, --mode,
+    --owner, --group, --suffix, --strip-program. Where the real tool stops parsing options at its
+    first operand, so does this model: perl does (observed with perl 5.40.1: `perl -pi -e CODE X -I S` edits X,
+    fails to open a file named `-I`, and edits S), so every word after perl's first operand is an operand; the
+    other modeled commands permute (observed with GNU sed 4.9, GNU cp and mv 9.7, GNU ed 1.22.4, vim 9.1 as ex,
+    and uutils install, truncate, and tee 0.8.0: an option after an operand is still an option). The model also
+    reads SCRIPT TEXT: a sed expression (-e, --expression, or the program operand of a sed given no -e or -f),
+    an ex command (-c, --cmd), or a perl program (-e, -E) that names a store path makes that write's target
+    UNKNOWN (the text itself can write the path: a sed `w` command or `s///w` flag, an ex `w!`, a perl `open`),
+    whether or not the sed or perl has an in-place option; an option argument that names a FILE (sed -f, perl
+    -I or its program file, truncate -r, ex -u) is still consumed and never a target. A sed with NO
+    in-place option whose program (its -e pieces, or its program operand; not a -f file) is parsed with
+    confidence and holds no command that can write (no `w`, `W`, or `e` command, no `s///w` or `s///e` flag) is
+    no write, even when its program MENTIONS a store path (`sed -n '\\|<store file> <future>|p' audit.log`); an
+    in-place sed, a -f program, --posix, or a program not parsed with confidence (any `$` in it included) keeps
+    the script-text UNKNOWN target, and ex -c and perl -e script text is unchanged. A long option is
+    resolved as the real tool resolves it before its argument is consumed: GNU sed, cp, and mv, GNU ed, and uutils
+    install, tee, and truncate (observed on this host) accept any UNAMBIGUOUS prefix of a long option, so
+    `--expr`, `--in`, `--po`, `--targ`, or `--suf` is read as `--expression`, `--in-place`, `--posix`,
+    `--target-directory`, or `--suffix` (aliases of one option, such as sed's `--quiet` and `--silent`, count
+    once); vim's ex accepts only its exact long options and perl none, so on sed, perl, or ex a `--` word that
+    is AMBIGUOUS or UNRECOGNIZED makes the write's target UNKNOWN, while on the other commands it is read as an
+    option with no argument (the tool rejects it and writes nothing). perl accepts exactly two long
+    options, `--help` and `--version` (exact, no abbreviation, no `=value`), and exits at once on either while its
+    options are still parsed, touching no file and running no program (observed with perl 5.40.1, even after
+    `-pi -e CODE`), so such a perl writes nothing; after perl's first operand either word is an operand as before.
+    mv's `--exchange` (or an unambiguous abbreviation such as `--exch`) swaps each source with its destination
+    (observed with GNU mv 9.7: `mv -T --exchange S T` replaces S with T's content), and install's `-d` or
+    `--directory` creates every operand as a directory (an existing file operand has its mode set), so under
+    either EVERY operand and every -t or --target-directory argument is a write target. install's `--context`
+    takes an OPTIONAL argument whose arity differs between implementations: GNU install takes it only attached
+    (`--context=CTX`), so the next word is an operand, while uutils install 0.8.0 (this host's install) also
+    consumes the SEPARATE next word when it is `-` or does not start with `-` (`install src <store file>
+    --context foo` writes the store file, `foo` being the context); the model takes the conservative union, keeping
+    that word as an operand and taking as destination candidates both the last operand and the last operand
+    other than that word. A sweep also checked every recorded long option, and each modeled command's short
+    letters, for separate-word consumption against the real tools on this host; every other recorded arity
+    matched. GNU cp, mv, sed, and ed and uutils install, tee, and truncate also exit at once on `--help` or
+    `--version` (or an unambiguous abbreviation), wherever it stands before `--`, since they permute, and reject an
+    attached `=value` before writing anything (observed on this host), so such a command writes nothing (after
+    `--` either word is an operand, and as the separate argument of an option, `cp -S --version`, it is that
+    argument); ex is not given this, since vim opens a -w script-out file before it reaches --version.
+
+    WHICH DIRECTORY. A relative write target (not starting with `/` or `~`) is resolved against every
+    directory the command can be in at that point: the payload's cwd, then each confidently understood `cd` or
+    `pushd` (one literal operand, after -L, -P, -e, -@, or `--`, naming an existing directory; with CDPATH set in
+    the hook's environment, a relative operand not starting with `./` or `../` is unknown). A cd that surely runs
+    before what follows (first in its list at the top level of its stream, outside any compound command, not piped,
+    not in the background) REPLACES the set; any other cd JOINS it; a cd to anything else (a variable, `-`, `~`,
+    a missing directory), and popd, adds an UNKNOWN directory. A target that resolves under a store root from any
+    directory in the set is a store target; with an unknown directory in the set it is UNKNOWN (it then counts only
+    when the command names a store path, as any unknown target). A substitution starts from the directories of the
+    command holding it, and a cd inside it applies only there; a `( ... )` subshell SCOPES the set: the
+    set in force at its `(` is restored at its `)`, so `(cd <store dir> && ls); printf ... > state.md` resolves
+    state.md in the parent's directory (the subshell's cd never leaks into the parent); inside the subshell a
+    cd first in its list, outside any other compound, replaces the set as at the top. A `{ ... }` group does not
+    scope, as in bash. A stream the walk finds unreliable keeps the join-only walk (no replacement, no scoping). At
+    most MAX_CWDS (32) directories are tracked per command point: a larger set spends the work budget (fail OPEN).
+
+    SHELL -c. bash, sh, dash, or zsh with -c (a short option cluster holding c; -o, -O, --rcfile, and
+    --init-file take an argument) whose command string is ONE single-quoted string, or ONE double-quoted string with
+    no unescaped `$`, backtick, or quote (a backslash before `$`, a backtick, `"`, or a backslash yields that
+    character and one before a newline removes both, as bash reads it), is analysed recursively (to SHELL_C_DEPTH,
+    3 levels) with the same directories: its store writes are the enclosing command's (so that command's pipeline
+    feeds them), and a literal inside the string counts when that inner analysis decides it does; it
+    ALSO counts, as for echo, when the WRAPPER's output reaches a store write: `bash -c 'echo heartbeat: <literal>'
+    >> <store file>` and `sh -c 'echo heartbeat: <literal>' | tee <store file>` are denied. The wrapper is then
+    judged like a read command whose data is the whole string: its own redirection or substitution writing a store
+    path, another store-writing command in its pipeline, an enclosing redirected or piped compound, an unreliable
+    command, or a pipeline that is not a pure read (a staging one only when a store write names a file it writes)
+    makes every literal in the string count, even one the string itself sends elsewhere (`bash -c 'echo
+    <literal> > /tmp/x' | tee <store file>` is denied: the conservative direction). The string's own writes to known
+    files are the wrapper's writes for staging, and the words of a string holding a store write are the words that
+    write names, so `printf <literal> > stage; bash -c 'cp stage <store file>'` counts the staged literal. KNOWN GAP
+    (disclosed, not modeled): a literal inside a shell -c string that is itself inside a command substitution
+    counts whenever the enclosing command is not a pure read (the conservative direction); and staging chains
+    running through several shell -c strings are followed only as far as the words and targets each one exposes.
+    Any other command string (a variable, an expansion, a concatenation of quotes) is not inspected, as before.
+
+    WHICH LITERALS. A future literal counts only when it is DATA of a store write: in the store write's
+    own simple command (its arguments, here-string, redirections, and substitutions), in a here-document body of
+    it, in another command of its pipeline, or anywhere inside a compound command (`{ ... }`, `( ... )`, if, while,
+    until, for, select) whose output is redirected or piped onward. A literal does NOT count when it lies in a
+    comment (outside a here-document body); in a top-level pipeline made only of READ_COMMANDS (grep, rg, cat,
+    head, tail, wc, ls, echo, printf without -v, test, `[[`, and the like) with no redirection or write anywhere in
+    it, not inside a compound whose output is redirected (`grep -F <literal> <store file>; echo checked >> <store
+    file>`, or `if grep -q <literal> <store file>; then echo found >> <store file>; fi`); in a pipeline of
+    READ_COMMANDS and tee whose writes all go to KNOWN files that no store-writing command names (`echo <literal> >
+    /tmp/log; echo checked >> <store file>` is allowed, while `printf <literal> > x; cp x <store dir>` counts, the
+    store write naming x, as a word or a resolved path, transitively through further staged files); or as the
+    PATTERN of a grep, egrep, fgrep, or rg inside a command substitution made only of such searches and wc, reading
+    no redirected input, whose pipeline's output CANNOT hold the pattern: the pipeline ends in wc or in a
+    search with a count, quiet, or file-list option (-c, -q, -l, grep -L, or an exact long form such as --count or
+    --files-with-matches), as in `n=$(grep -cF <literal> <store file>); echo "n=$n" >> <store file>`. A MATCHING
+    search that prints lines prints file text holding its pattern (with -o, exactly the pattern), so `echo "$(grep
+    -oF <literal> hits.log)" >> <store file>` counts (formerly every search pattern was exempt, stating wrongly that
+    a search never prints its pattern); rg -r or --replace and grep --label, which print their argument, are
+    excluded as before. Every other literal counts, the conservative direction: an assignment (`x=<literal>; echo "$x" >>
+    <store file>`), a command outside READ_COMMANDS, a for or select word list, and every literal of a command
+    holding a case, a function definition, coproc, a bare exec (its redirections apply to everything after it), or
+    a compound the walk cannot match, or of a command that cannot be parsed. BY DESIGN (not modeled): a write in a
+    branch that never runs is judged as written, so `if false; then <future store write>; fi`, or a write guarded by
+    a sentinel test (`[ -e <missing file> ] && <future store write>`), is denied.
+
+    WORK BUDGET. The Bash analysis runs under BASH_WORK_BUDGET (80,000) steps: a character-loop step of
+    the tokenizer counts 3, a token taken by its regex fast path 1, a reserved or special word it inspects in full
+    2 more, a here-document line 1, a substitution frame 8 in the tokenizer and 8 again in the analysis, the
+    command-position walk 2 per token, a nested shell -c 30, and the later walks (simple commands, compound
+    structure, pipelines, staging) 1 to 4 per token or command they visit. DIRECTORY work is charged too,
+    BEFORE it is done (it was formerly unbudgeted, so 64 KiB of `(cd <dir>);` repeats over 400 directories took
+    about 200 ms): CWD_COST (6) per directory in the set each cd is resolved from, each write target or staged word
+    is resolved against, and each set union joins, and a set above MAX_CWDS (32) spends the budget at once; a
+    budget step of directory work measured cheaper on this host than a tokenizer step. The shell -c WRAPPER
+    check is charged too: each pipeline's aggregates are computed ONCE, charged before the pass, and each wrapper then
+    costs one step (formerly each wrapper rescanned the whole pipeline, unbudgeted, so 64 KiB of 450 piped `sh -c`
+    wrappers took about 107 ms; that input now spends the budget). A command that spends it is
+    ALLOWED unchecked (fail OPEN, as for any input the hook cannot evaluate), so no input holds the hook past its
+    latency bound: 64 KiB of dense
+    trivial commands (about 10,900 repetitions of `: > x;`, about 0.67 tokens per byte) exhausts it in roughly 20 to 40
+    ms on this host and is allowed even when it ends in a future store write (an EXOTIC, disclosed miss), while
+    ordinary commands, including 64 KiB of prose, a quoted here-document, or a script of ordinary lines such as
+    `echo <text> >> <file>`, stay inside it. A read-only search, or a
+    write whose target lies elsewhere, is allowed even when the command also names a store path and a future
+    literal. A parsed target that is a
+    store path establishes the store write by itself (as `cp -t<store dir> x`, whose attached spelling the
+    raw command text does not show as a standalone token, is caught). A write whose target is UNKNOWN counts as
+    targeting the store (the fail-toward-writing direction) only when the command text names a store path
+    anywhere: an unparseable command, a redirection with no operand, a target word holding a `$` (a variable or a
+    substitution's value), a find `{}` placeholder, a write command run through xargs, which adds operands
+    from its input, or sed, ex, or perl script text that names a store path. A write indicator is, outside quotes
+    and `#` comments, an output redirection (`>`, `>>`, `>|`, `&>`, an fd-prefixed `N>`, or `<>`) whose target
+    is not /dev/null (an fd duplication is not one: a `>&` whose operand, after optional whitespace and after
+    dequoting, is a descriptor number, a number followed by `-`, or `-`, such as `2>&1`, `>&2`, `1>& 2`, or
+    `>&'2'`), or a word in COMMAND position whose basename is among tee, cp, mv, install, dd, truncate, ed, and
+    ex (command position: the first word of a token stream, the first word after a separator `;`, `|`, `&`, a
+    newline, `(`, or `)`, so also after `&&` and `||` and at the start of a `$(...)` or backtick body; the word
+    after a reserved word `{`, `then`, `do`, `else`, `!`, `if`, `elif`, `while`, `until`, the body of a
+    function header (`function NAME {`, `function NAME () {`, `NAME() {`, or `NAME ()` then `{` on the next
+    line: the body's opening `{` or `(` is in command position, and after `function NAME` with no `()` so is
+    any compound-command body, so `function NAME (( count > 0 ))` and `function NAME [[ ... > ... ]]` are an
+    arithmetic command and a conditional, and `function NAME while tee ...` runs tee; a write in a function body is detected
+    whether or not the function is ever called, the conservative direction), after VAR=value
+    assignments, or after a leading redirection and its operand, output (`N>`) or input (`<`, `N<`, `<<<`,
+    `<<`, `<<-`, `<&`); the command a prefix command runs, a prefix
+    being sudo, doas, env, command, builtin, exec, nohup, time, nice, ionice, stdbuf, timeout, chroot, flock, or
+    xargs, whose options are skipped, together with the separate argument of the options listed for it in
+    PREFIX_COMMANDS and its leading operands (the timeout duration, the chroot root, the flock file); and the
+    word after -exec, -execdir, -ok, or -okdir in a simple command whose command word is find, up to that
+    command's terminating `;` or `+` word), so `rg -e tee <store file>` and `printf '%s' -exec tee` are reads;
+    or, in command position, sed or perl with an in-place option (`-i`, a short cluster of letters
+    and digits holding i such as `-pi`, `-i.bak`, `-0777pi`, `-0pi`, or `-l0pi`, or sed's `--in-place` or an
+    unambiguous abbreviation of it such as `--in`) later in the same simple command; an unterminated quote, an unterminated substitution, or a redirection with no target
+    counts as a write. Inside a `[[ ... ]]` conditional (a `[[` word in command position up to its `]]`
+    word; command position here also survives bash's `time` reserved word and its `-p` then `--` or `--`
+    options, and `!`, so `if time [[ ... > ... ]]` and `! [[ ... ]]` are conditionals), everything up to
+    the closing `]]` is operand text: `<` and `>` are string comparisons, not redirections, `(`, `)`, `&&`,
+    `||`, a `;`, a newline, and the `(`, `)`, and `|` of a regex operand (`[[ $r =~ op=(cp|mv) ]]`) are not
+    separators, and a `#` is not a comment (`[[ $r =~ ^[[:space:]]*(#|$) ]]`), so no word in the conditional is
+    a command word (a `[[` touching a metacharacter, as in `[[(-f x) ]]`, opens it too, and that
+    metacharacter is conditional text); the conditional closes only at a `]]` that starts a word (after
+    unquoted whitespace) and is followed by whitespace, `;`, `&`, `|`, `<`, `>`, `)`, or the end of the command,
+    or, in a backtick substitution, by that substitution's closing backtick, so a quoted `']]'` and a `]]`
+    glued to preceding text (`x]]`, the regex word `(x)]]`, a grouping `)]]`) never close it; there is no
+    re-read: a conditional still open when its frame ends (the end of the command, a closing backtick, or an
+    unterminated quote) makes the command unparseable, counted as a write, so `[[ ( -n x )]] && echo ok`, which
+    bash closes at the glued `)]]`, is unparseable here (a disclosed residual below); a `$(...)`,
+    backtick, or `<(...)` or `>(...)` process substitution inside it is still scanned as its own command stream;
+    in `[ ... ]` and `test` an unquoted `>` is
+    a real output redirection and counts. After the closing `))` of an arithmetic command and the closing `]]`
+    of a conditional, the next word is in command position whether or not a `;` or newline comes first, so
+    `while (( n > 0 )) do tee ...` and `if [[ ... ]] then tee ...` run tee. Inside an arithmetic command `(( ... ))` (a `((` in command position,
+    or the header of `for (( ... ))`, including when the `((` touches its keyword as in `if((`) and an
+    arithmetic expansion `$(( ... ))`, up to the matching `))`, `<`,
+    `>`, `<<`, and `>>` are arithmetic operators, not redirections, and no word there is in command position,
+    so `if (( count > 0 ))` and `"$(( count > 0 ))"` are reads, and the body after a `for ((...))` header is
+    in command position whether or not a `;` precedes its `do`; a `$(...)` or backtick substitution inside the
+    arithmetic is still scanned as its own command stream, and a real redirection after the closing `))`
+    (`(( x )) > <store file>`) still counts. A `$(...)` or backtick substitution, unquoted OR inside double
+    quotes, is executable text: its body is scanned as its own independent command stream with its own quoting context (as
+    date_spans() does), so `x="$(printf ... | tee <store file>)"` shows the tee write. Inside a `$(...)`, an
+    unquoted `case` word in COMMAND POSITION (the first word of the substitution, or the first word after a
+    separator `;`, `|`, `&`, a newline, `(`, `)`, or after one of the reserved words `{`, `then`, `do`, `else`,
+    `!`, `if`, `elif`, `while`, `until` that is itself in command position) opens a case
+    construct until its unquoted `esac` in command position, and while one is open a `)` is a pattern
+    terminator, not the substitution's end, so `$(case x in x) printf ... > <store file>;; esac)` shows its
+    write, while a `case` argument (`x="$(rg case <store file>)"`) is an ordinary word. A command with no write
+    indicator (a read such as `grep` or `rg` over the store) is allowed. The future-dated
+    literal must not be inside a `$(date ...)` or backtick `date ...`
+    substitution (`date` optionally after `env`, VAR=value words, or /bin/ or /usr/bin/). Substitution spans are
+    found in ONE linear pass that follows shell quoting like the shell does: single quotes (and $'...' with its
+    backslash escapes) make everything literal, double quotes keep only `$(` and backticks active (a parenthesis
+    inside quotes is not a delimiter), and each substitution starts its own quoting context; an unmatched opener
+    or an unterminated quote starts no span, so the literals it would have covered are checked.
+
+    Literals and zones. YYYY-MM-DD[T or space]HH:MM(:SS(.fraction)?)? then an optional zone: Z (attached or after
+    one space); a numeric offset +HH, +HHMM, or +HH:MM, or with - (attached or after one space); or, after one
+    space, UTC, GMT, or a letter abbreviation of 2 to 6 capitals. This zone grammar and the scheduling keyword
+    list are duplicated in the preview Stop hook .preview/stamp-truth-stop.py; the fsw-parity row of
+    tools/selftest_aiqt_hooks.py holds the two copies equal. Z, UTC, and GMT are UTC; an offset is applied as written; a letter abbreviation
+    must be the process local zone's abbreviation for that wall time (both DST abbreviations are tried; the
+    earlier instant is taken if both match); any other abbreviation is an unknown zone and that literal is
+    SKIPPED, never guessed. A literal with NO zone is compared as local wall time AND as UTC, and counts as future
+    only if it is future under both readings, so an unzoned local time up to the zone's offset ahead of the clock
+    can pass (a disclosed miss west of UTC, where the UTC reading of a composed local time lies in the past). Each literal is converted in isolation in integer microseconds (an
+    overflowing or invalid literal is skipped without disabling the rest). A literal more than 60 seconds after
+    now is future.
+
+    Observed-time vs scheduled. A future literal is allowed when a scheduling keyword IMMEDIATELY precedes it on
+    its line (a whole line of the resulting file, or a line of the Bash command text): the keyword ends at most
+    SCHED_GAP_TOKENS (3) word tokens before the literal (a word token holds a letter or digit; `:` or `[` do not
+    count), as in "next_run: T", "due T", "deadline: T", "scheduled for T", "until T", "not before T", "by T".
+    Keywords (case-insensitive, each a whole word, optionally plural, except the stem `expir`, which covers
+    expires and expiry): due, deadline, expir, until, next, scheduled, not before, not-before, eta, planned, "target date",
+    "target:", `by ` (with its trailing space), and (the validity words, as in "valid through T")
+    through and valid. Each keyword matches as a WHOLE word, optionally plural (so "validated",
+    "throughput", "duet", or "etag" exempt nothing), except the stem `expir`. A keyword after the literal, or further back, does not exempt it.
+
+    Table-header exemption (Write, and Edit/MultiEdit on a reconstructed whole file only). A future literal in a
+    markdown table row is ALSO allowed when the header cell of its column carries a scheduling keyword (the same
+    keyword regex, on the stripped header cell text), so `| Item | Due |` over `|---|---|` over a row whose Due
+    cell holds a future time is allowed. This is additive: the keyword-on-line rule above is unchanged. Table
+    context is tracked over EVERY line of the resulting file, including unchanged carry-over lines that are not
+    themselves checked, so a new row under an existing header is exempt. The recognized forms follow GFM: a
+    header is a line holding at least one unescaped `|` (a leading pipe is optional), immediately followed by a
+    delimiter row (the whole stripped line is cells of an optional colon, ONE or more hyphens, and an optional
+    colon, pipe-separated, containing at least one pipe, leading and trailing pipes optional) with the same cell
+    count as the header. Each following line is a row of that table unless it ends the table: a line with no
+    unescaped pipe is still a row for continuation (GFM continues a table on a pipe-free line, so a later piped
+    row keeps its header exemption), but a pipe-free row NEVER receives a header-column exemption: it is checked
+    like an ordinary line, so only the keyword-on-its-own-line rule can exempt its literals; a blank line, or a line whose stripped
+    form starts with a list marker (`-`, `*`, or `+`, or digits then `.` or `)`), or an ATX heading (one to six `#`), each followed by
+    whitespace or the line end, a `>` blockquote, or a code fence (three backticks or tildes) ends it; a `#` not
+    forming an ATX heading (a row such as `#123 | ...`) does not. As in GFM, leading and trailing pipes are
+    optional on every line independently: a header with a leading pipe (`| Item | Due |`) may be followed by a
+    bare row (`release | ...`), and each row's columns are counted from its own leading pipe, if any.
+    Cells are split on unescaped `|` only (a `\\|` does not split, so it
+    does not shift columns); a leading pipe (only whitespace before it) opens the first cell and a trailing pipe
+    closes the last, so a literal lies in column k when k unescaped pipes (not counting a leading one) precede
+    it. The header line and the delimiter row are themselves checked normally, as ordinary lines. A row's
+    carry-over is keyed by its table context: a row line is an unchanged carry-over only when the same line
+    existed in the old file as a row under the SAME header line and delimiter row, so when an edit changes a
+    table's header or delimiter (repurposing a `Due` column as `Observed`, say), or moves a row into or out of
+    a table, EVERY row of that table is checked as changed, even rows identical to lines of the old file.
+    Each distinct (header, delimiter) context is given an integer id once, shared by the old- and new-file scans,
+    so a row's carry-over key never re-compares the header text (linear in rows, flat in header length).
+
+    Contract: WARN ONLY, as a dispatcher handler. HANDLER_EVENT classes it PRETOOL_WARN_ONLY, one of
+    FAIL_OPEN_EVENTS, so main() gives it the fail-open posture from the argv mode alone. Silent = _allow() (no
+    stdout, exit 0); a finding = _allow_note(<line>), ONE JSON object {"systemMessage": <line>} on stdout, exit
+    0, where <line> is a single line of at most 100 characters (see _fsw_warn_line). It never denies, blocks,
+    or asks: where this text says a write is "denied" or a "false deny", read "warned" or a "false warning".
+    Fail-OPEN (a silent pass) on any internal error and on input it cannot evaluate (a tool_input that is not
+    an object, a missing or non-string field): a DISCIPLINE guard, not a security boundary. The dispatcher's
+    own error paths keep that posture: a payload main() cannot read or parse, a payload that is not an object,
+    a handler crash, a bad argv, a child exit status the probe cannot read, a stdout that cannot be written,
+    and an interpreter that starts the dispatcher but is older than its Python floor each end with exit 0,
+    with a non-blocking systemMessage warning where main() or the floor guard writes one (so such an error
+    is surfaced, where the former standalone script stayed silent), never with exit 2. An interpreter that
+    cannot start the dispatcher fails first with Python's own exit, as the module docstring's PYTHON-FLOOR
+    note states for every mode. As a fail-open mode it runs with no PreToolUse deadline: the Bash work budget
+    below bounds the analysis, and a run past the hooks.json timeout (10 seconds while the manifest's
+    on-failure-render switch is off) is ended by the host, which the host documentation describes as
+    non-blocking (not verified here). There is no worker bypass: no environment variable skips the check,
+    and the handler writes nothing to stderr. The names this docstring uses are the former script's: read each
+    as its prefixed form in this module (date_spans() as _fsw_date_spans, BASH_WORK_BUDGET as
+    _FSW_BASH_WORK_BUDGET, _cfg as _fsw_cfg).
+    Subagent calls (a payload carrying agent_id or agent_type) are DELIBERATELY checked exactly like
+    main-session calls, with no skip: a subagent applies store writes on the main session's behalf, and a helper
+    can compose a timestamp that is then relayed into a record, so exempting it would open the very drift path
+    this hook guards.
+
+    RESIDUAL COVERAGE. Quoted text is trusted as quotation (a MISS,
+    disclosed): a composed stamp placed inside a quote or code span in a record (a `>` line, an inline code
+    span, or, on a whole file, a matched fenced block) is not caught; a later edit that removes the `>`, the
+    backticks, or the fence around it does expose it to the check. Only the ISO-like literal shape above is caught:
+    a compact sess-YYYYMMDDTHHMMSSZ id, an epoch number, a 12-hour or natural-language time, or a time split
+    across tokens is not. The keyword test is lexical: a keyword (as a whole word in a path, an identifier, or prose) within three
+    word tokens before a fabricated literal exempts it (for example "hb (next check) 2099-..."). The carry-over
+    test is a line multiset (a table row keyed by its header and delimiter), not an alignment: a line that
+    already existed elsewhere in the file, in the same table context, is exempt wherever it lands. Only the first 4 MiB of an existing file count: for a larger file a Write's carry-over
+    test sees only that prefix, and an Edit is checked on its fragment only, so a time-only fragment edit
+    (`17:45` to `22:25`) there is a MISS. The table-header exemption applies only to whole files: the fragment
+    path (an Edit on a file not read whole) and Bash get no table context, so a future literal in a table row
+    under a scheduling header cell is denied there unless a keyword immediately precedes it on its own line (a
+    disclosed false positive). Table continuation follows GFM's pipe rules but recognizes only a subset of its
+    block-interruption rules (a blank line, a list marker, an ATX heading, a blockquote, or a fence end the
+    table), and that mismatch errs in BOTH directions. A MISS: a line GFM would end the table on for another
+    reason (an HTML block or a thematic break, say) is treated as a row here, so a literal in its
+    scheduling-header column is exempt, as is every later non-blank line up to the next recognized block end. A
+    FALSE POSITIVE: a new table GFM would start after such an unrecognized block is not recognized (its header and
+    delimiter row read as rows of the old table), so its scheduling column gets no exemption; and a line this hook
+    treats as a block start where GFM would not (for example a list-marker shape GFM does not let interrupt the
+    table) ends the table early, so a later row loses its header exemption.
+    The header rule is lexical like the keyword rule: a keyword-bearing header cell
+    exempts every literal in its column of a row holding an unescaped pipe. A pipe-free row gets no header
+    exemption, so a bare scheduled value on its own pipe-free row under a scheduling header cell 0 (a GFM
+    one-cell row) is denied (a disclosed false positive); the remedy is a scheduling keyword immediately before
+    the value on that line, or a pipe that makes it a piped row. MISS (disclosed): because GFM keeps a table
+    open through pipe-free lines until a blank line, prose written directly under a table with no blank line
+    stays in it, and a later prose line that happens to hold an unescaped pipe (a shell pipe, say) is read as a
+    piped row, so text before its first pipe gets column 0's header exemption; leave a blank line after a
+    table. Bash is lexical by design. FALSE POSITIVES: a future literal in an assignment, a command
+    outside READ_COMMANDS, or a loop's word list counts for a store write anywhere in the same command (`ts=<future>;
+    echo ok >> <store file>` is denied), as does every literal of a command the structure walk finds unreliable (a
+    case, a function definition, coproc, a bare exec, an unmatched compound), and a write in a branch that never
+    runs is judged as written (by design, see WHICH LITERALS); a write whose target is UNKNOWN counts as a store write
+    when the command names a store path anywhere, so `rg <future> <store file> > /dev/shm/out-$(date +%s)` (a `$`
+    in the target), a `find /elsewhere ... -exec cp <store file> {} +` (the `{}` TARGET is unknown; a
+    `-exec cp {} /elsewhere` from a store dir is allowed, `{}` being cp's source), and an xargs-run write to /elsewhere are
+    denied (a here-document body is no longer read as command text: a quoted delimiter's body is skipped,
+    and an unquoted one is scanned only for the substitutions that run in it, so a `>` in a body is text, as bash
+    reads it), as is a command where an `i` in a sed or perl short cluster is really an option
+    argument rather than the in-place switch (`sed -ei...`, `perl -Mstrict`), or where a write-command name
+    lands in command position only lexically (the argument of `command -v`, say); likewise
+    a sed expression or program, an ex -c or --cmd command, or a perl -e or -E program that merely
+    MENTIONS a store path while writing elsewhere (`sed -i 's#<store dir>/a#b#' /dev/shm/x`, a pattern) makes
+    the target unknown and is denied (narrowed for sed only: a sed with no in-place option whose
+    program parses as holding no `w`, `W`, `e`, `s///w`, or `s///e` is allowed; a sed program the conservative
+    parser does not accept, for example one holding any `$` such as `\\|<store file>$|p`, a label or a/i/c text
+    it does not model, or a backslash inside a bracket expression, is still denied, and ex is NOT narrowed: an
+    ex -c or --cmd command naming a store path is denied even when it only prints or searches, such as `-c
+    'g#<store file>#p'`, because ex's command grammar, with `|` chaining, :global and :normal nesting, shell
+    escapes, and many abbreviated write commands, cannot be parsed here with confidence); under
+    install's bare `--context` the next word is ALSO a destination candidate, so where uutils consumes a store
+    path there as the context while the real destination lies elsewhere (`install src /elsewhere --context
+    <store dir>`) the command is denied, and `install -d` or `mv --exchange` naming a store path is denied
+    whenever the command also holds a future literal; and a perl `-i`
+    placed after perl's first operand (a file name to perl,
+    not the in-place switch) still arms in-place detection; rephrase or split the
+    command. MISSES: a write whose target reaches a store file by a spelling neither the store path token rule
+    nor the directory resolution follows (a relative path after a cd the model cannot follow, a
+    symlink, a variable, a glob); the directory resolution does resolve `cd <store dir> && echo <future> > state.md`,
+    formerly a miss; a write whose
+    option parsing differs from the modeled getopt subset: an option's separate argument the model does not list
+    is read as an operand (the abbreviated-long-option case, `cp src <store file> --suf .bak`, formerly
+    disclosed as a miss, is closed: `--suf` now resolves to `--suffix` and `.bak` is consumed; a long option
+    the recorded per-command set lacks, on a command other than sed, perl, or ex, still takes no argument here;
+    the arities recorded are those of the tools observed on this host, GNU sed, cp, mv, and ed and uutils
+    install, tee, and truncate, so another implementation whose option arity differs, beyond install's
+    `--context` modeled as the union above, is not modeled),
+    and POSIXLY_CORRECT in the environment is not modeled: under it GNU sed, cp, and mv stop at
+    their first operand (observed), so `sed -i s/a/b/ X -f <store file>` then edits the store file
+    while this model consumes it as the -f script file; a store write performed by a script the command names
+    as a FILE rather than carrying as text (a sed -f file, an ex -S or -u file, a perl program file or -M
+    module, each holding a `w` or an `open`), or by script text whose store path is spelled other than as a
+    store path token (relative, or through a variable); a write command
+    run through a wrapper not listed as a prefix (ssh, su -c, parallel, watch, or a shell -c string that is not
+    one quoted literal with no expansion: a literal one is inspected), named through
+    a variable or substitution (`$T`, `"$(command -v tee)"`), or placed after an option of a listed prefix that
+    takes a separate argument but is not listed for it (the argument is then read as the command, and the write
+    command after it is not in command position); a store path reached through a variable, a glob, a `cd` the
+    model cannot follow (see WHICH DIRECTORY), a symlink, or, in an absolute word, a `..` or doubled-slash
+    spelling; a future literal that reaches the store through a file the store write names only by a variable,
+    glob, or other spelling than the staging write's (that staging pipeline's literals are then not
+    counted); a write
+    through a program or script with no write indicator in the command text (`python -c`, `python3 script.py`,
+    `awk -i inplace`, `rsync`, `ln`, an editor, a heredoc-fed interpreter), or a script that writes internally;
+    a future literal inside a `$(date ...)` span in a quoted heredoc body or a
+    comment (text the shell never runs); a literal built from parts; and a write via another tool
+    (NotebookEdit). Only the configured store roots are covered: nothing is when AIQT_STORE_ROOT is unset
+    or empty; and a store the configuration does not name, or reaches by a different spelling, is not
+    covered. The
+    date-substitution scan reads a heredoc body (of either delimiter kind) like command text, so an apostrophe there can hide a
+    later `$(date ...)` span, which then fails toward denying. date_spans() is not case-aware: a case pattern
+    `)` inside a `$(date ...)` or enclosing substitution ends that span early, which only shrinks the exempt
+    span (fails toward denying); the write test's case tracking is a lexical command-position rule, not a
+    parse: it does not follow a backtick frame (where `)` never closes anyway), and exotic placements (a `case`
+    after a leading redirection or after an unlisted reserved word such as `coproc`, a pattern word spelled `case`
+    after `;;`, or a keyword produced by an alias or eval) are not emulated; such a construct can end the
+    substitution early and hide a write inside it (a MISS) or leave it unterminated (a false deny). A `((` or
+    `$((` whose text closes with a `)` at its own level that is not followed by `)` (bash then re-reads it as a
+    subshell group or a command substitution holding one, `$((rg -c x <store file>) )`) is not emulated and
+    counts as a write (a false deny; spell it `$( (...) )`); a `((` not in command position is not arithmetic
+    (the body word after `function NAME` is in command position, so `function NAME (( ... ))` is arithmetic),
+    so its `>` counts (bash rejects it as a syntax error anyway). A store write whose future timestamp falls
+    within three words of the shell keyword `until` (for example `until tee <store file> <<< '<future>'; do :;
+    done`) is not caught, because the scheduling-keyword exemption reads it as "until <date>"; this is an exotic
+    form and a disclosed miss. Inside `[[ ... ]]` a `#` is never read as a comment, while bash starts a comment
+    at a `#` that begins a word (after whitespace) there, legal only where bash then accepts a newline (right
+    after the opening `[[`, or after `&&`, `||`, `(`, or `!`); the comment's text is scanned as conditional
+    text, so a `]]` or a quote inside it can move where the conditional or a quoted string ends, which can add a
+    command word (a false deny) or hide a later write (an exotic, disclosed possible miss). A `]]` glued to a
+    grouping `)` closes the conditional in bash (`[[ ( a )]]`), but never here: a conditional closes only at a
+    word-initial `]]`. With no later word-initial `]]` in its frame the conditional is still open when the frame
+    ends (the end of input, a closing backtick, or an unterminated quote), so the command is unparseable and
+    counts as a write, denied only when it also names a store path and holds a future literal (an exotic,
+    disclosed false deny, for example `rg <future> <store file>; [[ ( -n x )]] && echo ok`). With a later
+    word-initial `]]` in the same frame the conditional is read as running on to it, and a write between the
+    two is not caught (exotic; a disclosed miss), for example
+    `[[ ( a )]] && tee <store file> <<< '<future>'; [[ x ]]`. Inside the conditional a `;`, a lone `&`, a lone
+    `|` outside a regex operand (`[[ a =~ | ]]` is legal), and a `]]}` word are bash syntax errors, read here as
+    operand text. A wrong host clock is enforced faithfully.
+
+    Self-test: tools/selftest_aiqt_hooks.py (the fsw-* rows and the fsw-unit-* checks, which carry the former
+    standalone self-test's vectors), with the deadline shape rows of future_stamp_write; fsw-parity compares
+    the code shared with .preview/stamp-truth-stop.py.
+    """
+    try:
+        now = datetime.datetime.now(_FSW_UTC)
+        bad = _fsw_evaluate(data, now)
+    except Exception:
+        return _allow()  # fail OPEN: an input it cannot evaluate, or an internal error, is a silent pass
+    if bad:
+        return _allow_note(_fsw_warn_line(bad, now))
+    return _allow()
+# --- host clock reading (tstamp) ----------------------------------------------------------------------
+# Two context-only bindings, one per post-tool event: clock_inject_post on PostToolUse (after a tool call
+# that ran and succeeded) and clock_inject_failure on PostToolUseFailure (after one that started and
+# failed). Each adds one additionalContext line holding the host clock read at that hook event, so the
+# freshest time value in the assistant's context is a reading, not a figure it recalled. Neither refuses
+# anything: both events are in FAIL_OPEN_EVENTS, so an unreadable payload or a crash takes main()'s
+# warning on exit 0, and a payload that names another event gets a note and no reading. Residual: a
+# message written with no tool call gets no fresh reading, and neither does a call refused before it
+# runs (neither event fires for it); the value is the host clock at the hook event and goes stale as time
+# passes; it is context, not enforcement; and a host clock error carries through.
+# The shape of a POSIX TZ rule: a standard name (three or more letters, or three or more of letters,
+# digits, + and - in angle brackets) and offset, then optionally a daylight name, its offset and a
+# transition rule of two dates (Jn, n or Mm.w.d), each with an optional /time. The shape alone does not
+# make a rule: _clock_posix_rule also checks every number's range.
+_CLOCK_TZ_NAME = r"([A-Za-z]{3,}|<[A-Za-z0-9+-]{3,}>)"
+_CLOCK_TZ_OFFSET = r"([+-]?[0-9]{1,2}(?::[0-9]{1,2}){0,2})"
+_CLOCK_TZ_DATE = r"(J[0-9]{1,3}|[0-9]{1,3}|M[0-9]{1,2}\.[0-9]\.[0-9])(?:/([0-9]{1,2}(?::[0-9]{1,2}){0,2}))?"
+_CLOCK_POSIX_TZ_RE = re.compile(r"{0}{1}(?:{0}{1}?(?:,{2},{2})?)?\Z".format(
+    _CLOCK_TZ_NAME, _CLOCK_TZ_OFFSET, _CLOCK_TZ_DATE), re.ASCII)
+# Four legacy names that parse as a daylight rule with no transitions, each mapped to the zone that
+# current zone database releases make it a link to. A database without the name (some distributions
+# ship these names separately) is asked for the linked zone instead, and the conversion is checked
+# against that zone's offset and abbreviation like any other zone database name.
+_CLOCK_LEGACY_US_ZONES = {"EST5EDT": "America/New_York", "CST6CDT": "America/Chicago",
+                          "MST7MDT": "America/Denver", "PST8PDT": "America/Los_Angeles"}
+
+
+def _clock_hms(text, hours_max):
+    """Seconds for an '[+-]hh[:mm[:ss]]' text whose hours are at most hours_max and whose minutes and
+    seconds are at most 59, or None."""
+    sign = -1 if text.startswith("-") else 1
+    parts = [int(part) for part in text.lstrip("+-").split(":")] + [0, 0]
+    if parts[0] > hours_max or parts[1] > 59 or parts[2] > 59:
+        return None
+    return sign * (parts[0] * 3600 + parts[1] * 60 + parts[2])
+
+
+def _clock_posix_date_ok(text):
+    """True for a POSIX TZ rule date in range: Jn with n from 1 to 365, n from 0 to 365, or Mm.w.d with
+    m from 1 to 12, w from 1 to 5 and d from 0 to 6."""
+    if text.startswith("J"):
+        return 1 <= int(text[1:]) <= 365
+    if text.startswith("M"):
+        month, week, day = (int(part) for part in text[1:].split("."))
+        return 1 <= month <= 12 and 1 <= week <= 5 and 0 <= day <= 6
+    return 0 <= int(text) <= 365
+
+
+def _clock_posix_rule(tz):
+    """The (abbreviation, UTC offset) pairs a TZ value sets when it is a complete POSIX TZ rule, as a set
+    of (str, timedelta), or None when it is not one. Complete means every number is in range (each offset
+    and each transition time has hours at most 24 and minutes and seconds at most 59, so 24:59:59 is
+    accepted and 25:00 is not, and each transition date is valid) and a daylight name comes with its
+    transition rule: with no rule, which transitions apply is left to the implementation (glibc falls back
+    to a default or to a posixrules file), so such a value is not taken as a rule here. A rule time with a
+    sign or hours over 24 (an extension of the rule) is not accepted either."""
+    match = _CLOCK_POSIX_TZ_RE.match(tz)
+    if match is None:
+        return None
+    std, std_off, dst, dst_off, start, start_time, end, end_time = match.groups()
+    std_seconds = _clock_hms(std_off, 24)
+    if std_seconds is None or (dst is not None and start is None):
+        return None
+    pairs = {(std.strip("<>"), datetime.timedelta(seconds=-std_seconds))}
+    if dst is None:
+        return pairs
+    dst_seconds = std_seconds - 3600 if dst_off is None else _clock_hms(dst_off, 24)
+    if (dst_seconds is None or not (_clock_posix_date_ok(start) and _clock_posix_date_ok(end))
+            or any(text is not None and _clock_hms(text, 24) is None for text in (start_time, end_time))):
+        return None
+    return pairs | {(dst.strip("<>"), datetime.timedelta(seconds=-dst_seconds))}
+
+
+def _clock_regular_readable(path):
+    """True when path (followed through symlinks) is a regular file this process may read; False when it
+    is absent, is a directory, a FIFO or another non-regular file, is unreadable, or cannot be checked.
+    It reads no byte of the file."""
+    try:
+        return stat.S_ISREG(os.stat(path).st_mode) and os.access(path, os.R_OK)
+    except (OSError, ValueError):
+        return False
+
+
+def _clock_now():
+    """The host clock, read once, as an aware UTC datetime (tstamp). The self-test replaces it to fix
+    the reading."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _clock_local(now_utc, env=None, readable=None, convert=None):
+    """(local, None) with `local` the aware local time of now_utc, or (None, reason) when the checks below
+    do not establish the local zone, so the caller reports it as unknown instead of showing what the C
+    library fell back to. env defaults to os.environ, readable to _clock_regular_readable and convert to
+    datetime.astimezone() (the process zone, as the C library reads it); the self-test passes its own. The
+    zone is unknown when TZ is set but empty (an implementation-defined zone); when TZ is unset on a POSIX
+    host and /etc/localtime is not a readable regular file (absent, a directory, unreadable: what the C
+    library then shows is its fallback, not a configured zone); when TZ names an absolute file that is not
+    a regular file; when TZ is neither a complete POSIX TZ rule (_clock_posix_rule) nor a zone the zone
+    database holds (a legacy name such as EST5EDT that the database lacks is looked up under the zone it
+    is a link to, _CLOCK_LEGACY_US_ZONES), or zoneinfo cannot be imported to check the name; when the
+    conversion fails or gives no offset or no abbreviation (the C library gives an empty abbreviation for
+    a zone file it cannot read); when the abbreviation is -00, which the zone database uses for a zone
+    whose local time is unspecified (Factory); when TZ is a rule and the conversion's abbreviation and
+    offset are not one of the pairs the rule names; and when TZ is a zone database name and the zone
+    database's offset or abbreviation for it differs from the conversion's (glibc reads a name it cannot
+    load, such as Foo/Bar, as UTC under the abbreviation Foo). Residual: a regular file named by an
+    absolute TZ, or a readable /etc/localtime, that is not a valid zone file is checked only through the
+    empty abbreviation and -00; the zone database Python reads may differ from the C library's, and an
+    older or newer copy can give a different offset or abbreviation for a name, which reads unknown; and a
+    host that configures its zone somewhere other than TZ and /etc/localtime is read as libc reads it."""
+    env = os.environ if env is None else env
+    readable = _clock_regular_readable if readable is None else readable
+    tz = env.get("TZ")
+    zone = pairs = None
+    if tz is not None:
+        name = tz[1:] if tz.startswith(":") else tz
+        if not name:
+            return None, "TZ is set but empty, which leaves the zone to the implementation"
+        if name.startswith("/"):
+            if not os.path.isfile(name):
+                return None, "TZ names {!r}, which is not a regular file".format(name)
+        else:
+            pairs = _clock_posix_rule(tz)
+            if pairs is None:
+                try:
+                    import zoneinfo
+                except ImportError:
+                    return None, "TZ is {!r} and zoneinfo cannot be imported to check it".format(tz)
+                keys = (name, _CLOCK_LEGACY_US_ZONES[name]) if name in _CLOCK_LEGACY_US_ZONES else (name,)
+                for key in keys:
+                    try:
+                        zone = zoneinfo.ZoneInfo(key)
+                        break
+                    except Exception:
+                        pass
+                if zone is None:
+                    return None, ("TZ is {!r}, which is neither a complete POSIX TZ rule nor a zone the zone "
+                                  "database holds".format(tz))
+    elif os.name == "posix" and not readable("/etc/localtime"):
+        return None, ("TZ is unset and /etc/localtime is not a readable regular file, so UTC would be a "
+                      "default, not a setting")
+    try:
+        local = (now_utc.astimezone() if convert is None else convert(now_utc))
+        offset = local.utcoffset()
+        abbreviation = local.tzname()
+    except (OSError, OverflowError, ValueError) as exc:
+        return None, "the local conversion failed ({})".format(type(exc).__name__)
+    if offset is None or not abbreviation:
+        return None, "the C library gave no UTC offset or no zone abbreviation"
+    if abbreviation == "-00":
+        return None, "the zone abbreviation is -00, which marks local time as unspecified"
+    if pairs is not None and (abbreviation, offset) not in pairs:
+        return None, ("the C library's abbreviation and UTC offset are not the ones the POSIX TZ rule {!r} "
+                      "names".format(tz))
+    if zone is not None:
+        database = now_utc.astimezone(zone)
+        if (database.utcoffset(), database.tzname()) != (offset, abbreviation):
+            return None, ("the zone database's UTC offset or abbreviation for TZ {!r} differs from the C "
+                          "library's".format(tz))
+    return local, None
+
+
+def _clock_offset_text(offset):
+    """'UTC+HH:MM' for a UTC offset, with ':SS' added only when the offset has whole seconds; a part
+    below one second is dropped toward zero, and a zero offset is always written UTC+00:00."""
+    negative = offset < datetime.timedelta(0)
+    size = -offset if negative else offset
+    total = size.days * 86400 + size.seconds
+    hours, rest = divmod(total, 3600)
+    minutes, seconds = divmod(rest, 60)
+    text = "UTC{}{:02d}:{:02d}".format("-" if negative and total else "+", hours, minutes)
+    return text + (":{:02d}".format(seconds) if seconds else "")
+
+
+def _clock_context(event):
+    """The context line for `event`: the host clock read now, as UTC, beside the local time with its
+    numeric UTC offset and zone abbreviation, or with the local zone named unknown (and no local time)
+    when _clock_local cannot establish it."""
+    now = _clock_now().astimezone(datetime.timezone.utc)
+    local, reason = _clock_local(now)
+    if local is None:
+        where = "local time zone unknown ({}), so no local time is given; use the UTC value".format(reason)
+    else:
+        where = "local time {} {} ({})".format(local.strftime("%Y-%m-%d %H:%M:%S"),
+                                               _clock_offset_text(local.utcoffset()), local.tzname())
+    return ("[aiqt-clock] Host clock reading at this {} hook event: UTC {}; {}. It is the host clock at "
+            "that moment: it goes stale as time passes and carries any host clock error, and it is context "
+            "for a timestamp, not a check of one.".format(event, now.strftime("%Y-%m-%dT%H:%M:%SZ"), where))
+
+
+def _clock_wrong_event(handler_name, bound, event):
+    """The note for a clock binding whose payload names an event other than the one it is bound to."""
+    return ("AIQT guardrail: the {} clock reading is bound to {} but its payload names the event {!r}, so "
+            "no clock reading was added (a non-blocking note).".format(handler_name, bound, event))
+
+
+def clock_inject_post(data):
+    """tstamp, PostToolUse (context only, never blocks): after a tool call that ran and succeeded, add
+    the host clock at this hook event as additionalContext (_clock_context). A payload naming another
+    event gets a note and no reading."""
+    event = data.get("hook_event_name")
+    if event != "PostToolUse":
+        return _allow_note(_clock_wrong_event("clock_inject_post", "PostToolUse", event))
+    return (0, {"hookSpecificOutput": {
+        "hookEventName": "PostToolUse",
+        "additionalContext": _clock_context("PostToolUse")}}, None)
+
+
+def clock_inject_failure(data):
+    """tstamp, PostToolUseFailure (context only, never blocks): after a tool call that started and
+    failed, add the host clock at this hook event as additionalContext (_clock_context). A payload
+    naming another event gets a note and no reading."""
+    event = data.get("hook_event_name")
+    if event != "PostToolUseFailure":
+        return _allow_note(_clock_wrong_event("clock_inject_failure", "PostToolUseFailure", event))
+    return (0, {"hookSpecificOutput": {
+        "hookEventName": "PostToolUseFailure",
+        "additionalContext": _clock_context("PostToolUseFailure")}}, None)
+
+
 # --- dispatcher ---------------------------------------------------------------------------------------
 HANDLERS = {
     "diff_wall_stop": diff_wall_stop,
@@ -37366,6 +41667,9 @@ HANDLERS = {
     "orch_resume_barrier": orch_resume_barrier,
     "orch_lease_heartbeat_post": orch_lease_heartbeat_post,
     "orch_lease_heartbeat_stop": orch_lease_heartbeat_stop,
+    "future_stamp_write": future_stamp_write,
+    "clock_inject_post": clock_inject_post,
+    "clock_inject_failure": clock_inject_failure,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -37409,6 +41713,9 @@ HANDLER_EVENT = {
     "orch_resume_barrier": PRETOOL,
     "orch_lease_heartbeat_post": "PostToolUse",
     "orch_lease_heartbeat_stop": "Stop",
+    "future_stamp_write": PRETOOL_WARN_ONLY,
+    "clock_inject_post": "PostToolUse",
+    "clock_inject_failure": "PostToolUseFailure",
 }
 
 
@@ -37835,9 +42142,10 @@ def _pending_alarm_message(handler_name, seconds):
 
 def _dispatcher_fail_open_warn(handler_name, detail):
     """A fail-open dispatcher-level error for a Stop/SubagentStop/SessionStart/TeammateIdle/
-    UserPromptSubmit/PostToolUse handler or a NOTE_ONLY_PRETOOL_MODES handler: a non-blocking
-    systemMessage on exit 0, so no error on these paths can wedge a session, trap a teammate, block a
-    human prompt, or turn a note-only check into a block. It prints and flushes
+    UserPromptSubmit/PostToolUse/PostToolUseFailure handler, a warn-only PreToolUse one (HANDLER_EVENT class
+    PRETOOL_WARN_ONLY) or a NOTE_ONLY_PRETOOL_MODES handler: a non-blocking systemMessage on exit 0, so no
+    error on these paths can wedge a session, trap a teammate, block a human prompt, block a warn-only tool
+    call, or turn a note-only check into a block. It prints and flushes
     the note and returns the exit code 0, so main returns it directly (a note constructor's call is
     only ever the direct value of a return). The flush keeps the note out of the buffer os._exit at the
     entry line would discard. A print or flush failure RAISES out of this leaf (the note-shape scan
@@ -37928,8 +42236,9 @@ def main(argv):
     # a Stop/SubagentStop handler: a hard exit-2 Stop path could re-fire on the forced continuation and
     # wedge the session (an error path keeps no loop bound and never consults the stop_hook_active
     # field of the payload), so a bad-argv Stop invocation WARNS on exit 0 like every other Stop error
-    # path. A bad-argv PreToolUse handler still fails closed (exit 2), except a note-only one
-    # (NOTE_ONLY_PRETOOL_MODES), which never blocks a call and so takes the fail-open posture throughout.
+    # path. A bad-argv PreToolUse handler still fails closed (exit 2), save a warn-only one (HANDLER_EVENT
+    # class PRETOOL_WARN_ONLY, one of FAIL_OPEN_EVENTS) or a note-only one (NOTE_ONLY_PRETOOL_MODES), which
+    # never blocks a call and so takes the fail-open posture throughout.
     mode = argv[0] if argv else None
     if mode not in HANDLERS:
         _stderr_note("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))))
@@ -37938,10 +42247,11 @@ def main(argv):
     is_note_only = handler_name in NOTE_ONLY_PRETOOL_MODES
     is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS or is_note_only
     # Child exit status: with SIGCHLD ignored, a handler's failed git or other child would read as a
-    # success. A PreToolUse mode refuses (exit 2, its fail-closed posture), except a note-only one, which
-    # never blocks and so takes the fail-open branch. A fail-open mode must not exit 2 and must still run
-    # its handler (a stop guard's deliberate deny included), so it restores SIG_DFL for this one
-    # short-lived hook process, re-probes, and notes the restore; SIG_DFL is SIGCHLD's normal disposition,
+    # success. A PreToolUse mode refuses (exit 2, its fail-closed posture), except a warn-only one (classed
+    # PRETOOL_WARN_ONLY) or a note-only one, which never blocks and so takes the fail-open branch. A
+    # fail-open mode must not exit 2 and must still run its handler (a stop guard's deliberate deny
+    # included), so it restores SIG_DFL for this one short-lived hook process, re-probes, and notes the
+    # restore; SIG_DFL is SIGCHLD's normal disposition,
     # signal.signal also clears SA_NOCLDWAIT, and every spawn the fail-open handlers reach waits for its
     # child. If the re-probe still fails, it warns without running the handler.
     unobservable = _child_status_refusal()
@@ -37962,8 +42272,9 @@ def main(argv):
     if len(argv) != 1:
         detail = "expected exactly one mode argument, got {}".format(len(argv))
         if is_fail_open:
-            # A Stop handler's ERROR path never exits 2 (a deliberate deny does, via the orchestration
-            # stop guard), not even on a malformed invocation: WARN and exit 0. The warn print raising
+            # A fail-open handler's ERROR path (a Stop one's, or a warn-only PreToolUse one's) never exits 2
+            # (a deliberate deny does, via the orchestration stop guard), not even on a malformed
+            # invocation: WARN and exit 0. The warn print raising
             # (a stdout that cannot be written or flushed) loses the warning and keeps the 0.
             try:
                 return _dispatcher_fail_open_warn(handler_name, "bad invocation: {}".format(detail))
@@ -37996,15 +42307,16 @@ def main(argv):
                 # is named.
                 detail = _exception_text(exc)
                 if is_fail_open:
-                    # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so
-                    # no Stop payload (including a bare '{' or any garbage) can ever wedge the session. The
-                    # warn print raising (a stdout that cannot be written or flushed) loses the warning and
-                    # keeps the 0.
+                    # A fail-open handler's ERROR path never exits 2: surface a non-blocking warning and exit
+                    # 0, so no Stop payload (including a bare '{' or any garbage) can ever wedge the session
+                    # and no warn-only PreToolUse payload can block the call. The warn print raising (a
+                    # stdout that cannot be written or flushed) loses the warning and keeps the 0.
                     try:
                         return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
                     except BaseException:
                         return 0
-                # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
+                # A fail-closed PreToolUse hook that cannot read its payload cannot clear the action, so it
+                # fails CLOSED.
                 # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
                 _stderr_note("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail))
                 return 2
@@ -38020,15 +42332,16 @@ def main(argv):
                                     "stderr text")
             except Exception as exc:  # a handler crash is an unreadable result
                 if is_fail_open:
-                    # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws
-                    # on a pathological message): WARN and exit 0, never exit 2. The warn print raising (a
+                    # Same event-aware posture for a crash inside a fail-open handler (e.g. a Stop detector
+                    # that throws on a pathological message, or a warn-only PreToolUse check): WARN and exit
+                    # 0, never exit 2. The warn print raising (a
                     # stdout that cannot be written or flushed) loses the warning and keeps the 0.
                     try:
                         return _dispatcher_fail_open_warn(
                             handler_name, "handler crash: {}".format(_exception_text(exc)))
                     except BaseException:
                         return 0
-                # A PreToolUse handler crash fails closed (block), not pass.
+                # A fail-closed PreToolUse handler crash fails closed (block), not pass.
                 _stderr_note("aiqt_hooks: handler {} failed ({}); failing closed".format(
                     handler_name, _exception_text(exc)))
                 return 2

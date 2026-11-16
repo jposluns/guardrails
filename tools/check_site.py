@@ -20,7 +20,7 @@ open/close balance IS checked, so an unclosed one is caught, and links/ids insid
 validated (a deferred coverage gap). Non-nestable nesting IS detected (slice-2): a <form> inside a
 <form>, and an interactive element (<a>/<button>) inside another interactive element, both of which the
 parser accepts as well-balanced but which break rendering/behaviour. Download-artifact checksums are
-tracked separately (they need a final content baseline). Exit 0 clean, 1 on any finding, 2 on a read error (unreadable dir/file, fail-closed).
+tracked separately (they need a final content baseline). Exit 0 clean, 1 on any finding, 2 on a read error (unreadable dir/file, fail-closed) and on an unrecognized argument list (only none, --self-test, and the execution gate's trailing --execution-report ABS_PATH are accepted).
 
 Logo consistency: within a root, every page's header logo block must be byte-identical to the majority
 block of the pages not named 404.html. A 404 page is served at any missing URL, however deep, so it must
@@ -987,6 +987,7 @@ def _self_test():
     _card_self_test(quiet)
     _not_found_links_self_test()
     _declaration_self_test()
+    _entry_self_test()
     _use_staged_declaration(False)
     # The real declaration is the promoted one: the root's 404.html is a template page, a nested draft/ page
     # is not, and turning the staged default back on flips both (fails on purpose).
@@ -1054,6 +1055,17 @@ def _declaration_self_test():
         check("declaration/well-formed-read", got == frozenset({"site/draft/index.html"}), got)
         got = scan(good)
         check("declaration/well-formed-scan-not-refused", got[0] != 2, got)
+        # A block entry (a file the generator owns only a status line of) at the root beside a page staged
+        # under draft/ is not a template page and does not move the root's template base to "".
+        block = '{"target": "site/llms.txt", "kind": "block", "sources": ("src.toml",), "regenerate": "x"}'
+        mixed = declare("({}, {})".format(entry, block))
+        try:
+            targets = _template_pages.template_targets(mixed)
+            got = (sorted(targets), _template_pages.template_base("site", targets),
+                   _template_pages.is_template_page("site", "llms.txt", targets))
+        except (OSError, ValueError) as exc:
+            got = exc
+        check("declaration/block-entry-not-a-page", got == (["site/draft/index.html"], "draft/", False), got)
         # Each malformed entry (a literal the declaration reader accepts as a tuple of entries) must raise
         # ValueError, never a KeyError, TypeError or a non-string target.
         for name, scan_name, literal in (
@@ -1077,6 +1089,51 @@ def _declaration_self_test():
             check(name, isinstance(got, ValueError), got)
             code, err = scan(fixture)
             check(scan_name, code == 2 and "cannot read the template page targets" in err, (code, err))
+
+
+def _entry_self_test():
+    """_entry's argument handling, run with main, _self_test and the report arming replaced by recorders, so
+    no case scans the tree, starts this self-test again or arms a report. Each refused case runs the scan or
+    the self-test on the entry before strict parsing (`"--self-test" in argv`, else main()), so it is red there;
+    the accepted cases are its passing twins."""
+    import contextlib
+    import io
+    import tempfile
+    import _selftest_exit_report
+    absolute = str(Path(tempfile.gettempdir()) / "site-selftest-report-never-written")
+    g = globals()
+    saved = {name: g[name] for name in ("main", "_self_test")}
+    saved_arm = _selftest_exit_report.arm
+    for name, argv, want_result, want_arms in (
+            ("argv/no-argument-runs-scan", [], "scan", []),
+            ("argv/self-test-runs-self-test", ["--self-test"], "self-test", []),
+            ("argv/absolute-report-path-arms-self-test", ["--self-test", "--execution-report", absolute],
+             "self-test", [absolute]),
+            ("argv/bare-absolute-report-path-arms-self-test", ["--execution-report", absolute], "self-test",
+             [absolute]),
+            ("argv/unknown-argument-exits-2", ["--bogus"], 2, []),
+            ("argv/self-test-with-unknown-argument-exits-2", ["--self-test", "--bogus"], 2, []),
+            ("argv/unknown-before-self-test-exits-2", ["--bogus", "--self-test"], 2, []),
+            ("argv/relative-report-path-exits-2", ["--execution-report", "relative/report"], 2, []),
+            ("argv/self-test-relative-report-path-exits-2",
+             ["--self-test", "--execution-report", "relative/report"], 2, []),
+            ("argv/report-path-not-trailing-exits-2", ["--execution-report", absolute, "--self-test"], 2, [])):
+        calls, arms = [], []
+        g["main"] = lambda: calls.append("scan") or "scan"
+        g["_self_test"] = lambda: calls.append("self-test") or "self-test"
+        _selftest_exit_report.arm = lambda path, suite, executed: arms.append(path)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                got = _entry(list(argv))
+        except Exception as exc:  # a crash is the failure this case pins, so it is recorded, not raised
+            got = "{}: {}".format(type(exc).__name__, exc)
+        finally:
+            g.update(saved)
+            _selftest_exit_report.arm = saved_arm
+        refused_ok = want_result != 2 or (calls == [] and "unrecognized arguments" in err.getvalue())
+        check(name, got == want_result and arms == want_arms and len(calls) <= 1 and refused_ok,
+              (argv, got, calls, arms, err.getvalue()))
 
 
 _REAL_TEMPLATE_TARGETS = _template_pages.template_targets
@@ -1737,16 +1794,31 @@ def _scan_root(root, subdir, targets=None):
     return 0
 
 
-def _entry(argv):
+def _parse_argv(argv):
+    """(argv, report_path) for an accepted argument list, argv being [] or ["--self-test"] and report_path
+    None or absolute; None for any other list."""
     # The execution gate appends `--execution-report ABS_PATH` to the self-test launch; accepted only in
     # that trailing two-token form, with an absolute path, alone or after --self-test.
+    report_path = None
     if len(argv) >= 2 and argv[-2] == "--execution-report" and os.path.isabs(argv[-1]) \
             and argv[:-2] in ([], ["--self-test"]):
-        # Finalized at interpreter exit by tools/_selftest_exit_report.py; nothing writes it in band.
-        import _selftest_exit_report
-        _selftest_exit_report.arm(argv[-1], SUITE_ID, EXECUTED)
-        return _self_test()
-    if "--self-test" in argv:
+        report_path, argv = argv[-1], ["--self-test"]
+    if argv not in ([], ["--self-test"]):
+        return None
+    return argv, report_path
+
+
+def _entry(argv):
+    parsed = _parse_argv(argv)
+    if parsed is None:
+        print("error: unrecognized arguments {!r}; fail closed".format(argv), file=sys.stderr)
+        return 2
+    argv, report_path = parsed
+    if argv == ["--self-test"]:
+        if report_path is not None:
+            # Finalized at interpreter exit by tools/_selftest_exit_report.py; nothing writes it in band.
+            import _selftest_exit_report
+            _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
         return _self_test()
     return main()
 

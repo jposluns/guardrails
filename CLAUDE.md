@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.25** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.27** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -67,7 +67,11 @@ adopter-conformance suite, an enforceability-ledger drift gate with a bidirectio
 reads `actions/runs`, needing Actions: Read; under `--wait` it also reads pull requests: `pulls`, for
 which a private repository's token also needs Pull requests: Read, and `commits/<sha>/pulls`, expected
 to need the same (not verified live); see the script's header), never `gh pr checks` (a fine-grained token cannot read
-the Checks API) and never `commits/<sha>/status` (which always reads pending). The script also offers
+the Checks API), and never read the combined `state` of `commits/<sha>/status` as a green signal (for
+Actions it always reads pending). The opt-in `--pr <n> --require-status local-quality` reads only that
+context's own entries (`commits/<sha>/statuses` and `commits/<sha>/status`, never the combined state),
+pins the posting account to the `CI_STATUS_STATUS_CREATOR` environment value, and prints `MERGE-SHA` on
+success; see the script's header for its states and exits. The script also offers
 `--match-tree [--head <rev>] [--require-job-success <job name>]...`, which succeeds only on a completed
 successful run of `.github/workflows/quality.yml` whose head commit's TREE equals the queried commit's
 tree (each run's tree is read from `git/commits/<sha>`, expected to need Contents: Read, not verified
@@ -96,9 +100,9 @@ generated-file `--check` and the manifest check, run locally before its push, a 
 per head; the full roster is first proven on the train tree by the train pull request's Quality run.
 Whenever the full `tools/run_all_checks.sh` runs, it FAILS when gitleaks is not on PATH or reports another
 version than the `Secrets (gitleaks)` step of `quality.yml` pins (`tools/check_gitleaks_pin.py`; its live
-leg is local-only, and CI runs its self-test). Behind the trigger, as a second layer, the eleven heavy jobs
+leg is local-only, and CI runs its self-test). Behind the trigger, as a second layer, the 51 heavy jobs
 (`opf-tooling-a`, `opf-tooling-b`, `opf-tooling-c`, `selftest-execution`, the `git-fixture-env-core` canary,
-the five host jobs and `byte-canon-matrix`) carry one pinned job-level `if:` and run only on a push and on a pull
+the 45 host jobs and `byte-canon-matrix`) carry one pinned job-level `if:` and run only on a push and on a pull
 request whose head is a `merge-train-*` branch of this repository; every other job runs in every run. A
 label added to any other pull request into main starts a run whose heavy jobs are skipped, so its
 `Quality gates` fails by design, and a change merges only by riding a train: a squash merge of an
@@ -138,7 +142,7 @@ runs only in skippable jobs; `tools/check_opf_declaration.py`, which decodes eve
 `.html` file in the tree, also runs (live gate and self-test) in the always-run `site` job; and
 `tools/check_python_floor.py` (which reads `site/development.html`, `site/install/index.html`,
 `opf/site/adopt.md` and `opf/site/adopt/index.html`) runs live in the always-run registry job in
-every run. What the fast lane deliberately gives up for a site-only train is every check in the eleven
+every run. What the fast lane deliberately gives up for a site-only train is every check in the 51
 heavy jobs named above: every step of those jobs is skipped. Of their commands, only the
 child-status probe (`opf/tools/_child_status.py`), the opf-declaration live gate and its
 `selftest-execution` suite, and `tools/check_byte_canon.py` (live gate and self-test) also run,
@@ -186,6 +190,7 @@ that run, never refuses the commit and keeps no `--wait` polling), so a head wit
 reads as missing (exit 1), never as passing. It also refuses a commit with any non-success run other
 than an advisory one, a cancelled one included, so a cancelled run on a live head (a label added while its run is in progress, the `merge-train` label
 re-applied included, or a push back to an earlier head) needs a new head commit, labelled again.
+Before a merge, `tools/ci-status.sh --main-health` reads main's own health from the newest completed push run of `.github/workflows/quality.yml` on `main` (exit 0 success, 1 red, 2 cannot evaluate, advisory runs only named), and after it `--main-health --merge-commit <full sha>` waits, bounded by `CI_STATUS_TIMEOUT`, for main's push run on that merge commit and exits 1 loudly when it is red (see the script's THE MAIN HEALTH).
 
 The maintainer authorized on 2026-10-25 what member heads no longer get from CI; each still runs once, on
 the train head: every Quality job. Since the maintainer's decision of 2026-10-27, the train pull
@@ -201,13 +206,23 @@ ubuntu and macOS, setup-python's resolution of `3.14` on the runner, evaluation 
 current main in a clean clone, and CI evidence for each intermediate member commit have no member-head
 substitute.
 
-CI runs two Python legs. Five required jobs in `.github/workflows/quality.yml` run on the exact patch
+CI runs two Python legs. 45 required jobs in `.github/workflows/quality.yml` run on the exact patch
 release the maintainer host runs, named in `.aiqt/python-host.toml`, on `runs-on: ubuntu-24.04`:
-`opf-host-patch` runs the OPF tooling self-test, and `git-fixture-env-core-host-patch`,
-`git-fixture-env-config-combined-host-patch`, `git-fixture-env-config-malformed-host-patch` and
-`git-fixture-env-config-system-host-patch` each run one of the four git-fixture-env suites, so the four
-host suites run in parallel and take about as long as the longest of them rather than their sum. These
-host jobs are the ONLY CI run of the OPF tooling self-test and of the combined, malformed and system
+`opf-host-patch` runs the OPF tooling self-test, `git-fixture-env-core-host-patch` runs the core
+git-fixture-env suite, and each of the combined, malformed and system config suites runs as N shard
+jobs, `git-fixture-env-config-<lane>-shard-K-host-patch` running
+`tools/check_selftest_execution.py --suite git-fixture-env-config-<lane> --shard K/N` for K = 1 to N
+(N = 12, 12 and 19, the counts that file's `SHARD_COUNTS` registers; 43 shard jobs). The host jobs run
+in parallel, so the host leg takes about as long as its longest job rather than the sum. Before a shard
+runs, the gate lists the lane and every shard and refuses unless the shards partition the lane, and
+`Quality gates` requires every shard job (its `needs:` and `HEAVY_RESULTS`), so outside the site fast lane a config suite passes
+in CI only when all N of its shards pass; on a site-only train the fast lane skips the shard jobs with the other heavy
+jobs, and that accepted skip is not a pass of the suite. The counts were sized from CI run 43600403087 (combined
+112.8, malformed 113.5 and system 148.5 minutes) so that each shard's share of its lane plus its N + 1
+shard listings (15.4 s each, from one measured listing) is estimated at about 13 minutes (an estimate: shards balance member counts, not measured durations); a shard is never
+shorter than its longest member, and every shard repeats the lane's controls. The local runner keeps
+one plain `--suite` line per config suite, which `tools/check_ci_parity.py` matches to the complete CI
+shard set (its SHARDS rule). These host jobs are the ONLY CI run of the OPF tooling self-test and of the combined, malformed and system
 git-fixture-env suites; `git-fixture-env-core` stays on `3.14` as the one canary of those suites. Every
 other job there that sets up Python pins `3.14` (the Quality gates job sets up none); with `check-latest`
 off, setup-python may resolve that pin to a 3.14 already on the runner rather than the newest patch release.

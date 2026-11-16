@@ -1,6 +1,7 @@
 # Hooks preview
 
-This directory is a preview channel for AIQT Guardrails hooks that are not yet part of the pack's plugin.
+This directory is a preview channel for AIQT Guardrails hooks that are not yet part of the pack's plugin
+(`future-stamp-write.py` now also has a counterpart in the plugin; see the section Also in the pack's plugin below).
 Each hook is one self-contained Python file that you can download, check, test, and switch on in Claude
 Code by hand. This page is written so that you can hand it to your AI coding assistant and ask it to
 install a hook for you: every step below is a command it can run, and every check tells it when to stop.
@@ -40,13 +41,19 @@ the authority, and the summary further down this page only points to it.
   followed by the session's elapsed time when a lease is configured. The freshest time value in context
   is then a real reading, not one the model composed. It informs; it blocks nothing. Events:
   `PostToolUse` (after a tool call that succeeded) and `PostToolUseFailure` (after one that started and
-  failed); register both to cover both outcomes.
+  failed); register both to cover both outcomes. The pack's plugin now adds its own host clock line on
+  both events (the `clock-inject-post` and `clock-inject-failure` controls), without the elapsed time;
+  installed beside the plugin, this hook adds a second clock line after each tool call.
 - **`stamp-truth-stop.py`** checks each finished turn. When the assistant's prose carries a timestamp with
   an explicit zone that lies ahead of the clock, or an elapsed-time footer that disagrees with the
   configured lease, it blocks the stop and says why, so the assistant corrects the value before handing
   back. Text in code spans, fenced code blocks, and `>` quote lines is not checked, and a time that a
   scheduling word (such as `until`, `due`, or `next run at`) directly precedes is treated as a scheduled
-  time, not a reading. Event: `Stop`.
+  time, not a reading. Other times may run up to 1 minute ahead, but the bracketed stamp that opens a
+  message, such as `[2026-09-23 13:45 EDT]`, claims the current time and may not be ahead at all: truncate
+  it to the minute and never round up. When that opening stamp uses a zone abbreviation other than the
+  hook's local zone, the hook cannot check it and says so in a note instead of passing silently. Event:
+  `Stop`.
 - **`future-stamp-write.py`** denies a write that would record a future-dated timestamp into a folder you
   have declared as holding working records. An observed-time entry (a heartbeat, a recorded-at value) has
   to come from the clock, so one dated in the future was composed. A scheduled value (a deadline, a next
@@ -174,6 +181,23 @@ the authority, and the summary further down this page only points to it.
   an expansion, and any output redirection whose target is not the unquoted word `/dev/null` count as a
   change; an input redirection and a descriptor duplication or close (`<f`, `>&2`, `>&-`) write nothing.
 
+## Also in the pack's plugin
+
+Since plugin version 0.6.0, the pack's Claude Code plugin, `aiqt-guardrails-hooks`, carries the control of
+`future-stamp-write.py` as a handler of its own hook dispatcher, `future_stamp_write` in
+`.aiqt/core/hooks/scripts/aiqt_hooks.py`. The file here stays published unchanged, and it behaves
+differently from the plugin's handler:
+
+- The plugin's `future_stamp_write` never denies. A write that would record a future-dated timestamp into a
+  declared store gets one warning line (a `systemMessage` of at most 100 characters), and the call goes
+  ahead. The `future-stamp-write.py` here denies that write.
+- The plugin's handler has no worker skip and reads no `ORCH_` spelling: it reads only `AIQT_STORE_ROOT`.
+  The file here keeps the worker skip and the `ORCH_` fallback.
+
+Install one form of this hook, not both. If you use the plugin, remove any `settings.json` entry you made
+from this page for `future-stamp-write.py`; otherwise a future-dated store write is both warned on and
+denied.
+
 ## Integrity
 
 Every published hook file is listed below with its SHA-256 checksum and a link to the file itself. The
@@ -183,16 +207,16 @@ files are served from this repository's main branch; for a raw download, use
 
 | File | SHA-256 | Link |
 |---|---|---|
-| `char-policy-write.py` | `84a08059513f27c76e944d54c08e8ddae520f9e040ebe19296d139d49646b0f8` | [char-policy-write.py](char-policy-write.py) |
-| `clock-inject.py` | `262749a3409d0fe8821cc115db28e05f35311cc0329008ff51f67090fd3d2e54` | [clock-inject.py](clock-inject.py) |
-| `constraint-reread.py` | `725974c306e63a3f9a1b4a2be2992c9ee9792c231aaad66035a813525d10c48a` | [constraint-reread.py](constraint-reread.py) |
-| `future-stamp-write.py` | `1cf8608693f472df1c7bee03b5ab5bf5de3e79a19b00c782a7015e77d167c348` | [future-stamp-write.py](future-stamp-write.py) |
-| `pattern-self-match.py` | `b70287e2aab2b08b0cd240c6c9150feb65141f2e3612adad63e402221dfcbb2f` | [pattern-self-match.py](pattern-self-match.py) |
-| `record-remove-check.py` | `0ec9642ea95bac4ea13c71ec31ff5239ab01c0ceff94f9922a42de1458f0757f` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `5d3b5d716cdbe6255c750aec4bb44f17a583f167c055cdb26a17a27d5ccfc715` | [stamp-truth-stop.py](stamp-truth-stop.py) |
-| `unbounded-wait.py` | `9d2a8f9c26693cc87d058284427d40554e5ff0c3f2eca3df46f4369669a43859` | [unbounded-wait.py](unbounded-wait.py) |
-| `ungated-record.py` | `35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394` | [ungated-record.py](ungated-record.py) |
+| `char-policy-write.py` | `6529312e9dadd856353294d8774f09f02525f1a65b71598d88843140617894dc` | [char-policy-write.py](char-policy-write.py) |
+| `clock-inject.py` | `b796beaf2ae352bb55fab5ef5e2ca76d160b2a2c46fe18c9f7b76e58daecb3ca` | [clock-inject.py](clock-inject.py) |
+| `constraint-reread.py` | `5f8ffc633993ebb9b84b1c858b5d03fa94511c30cc1624f6c2813a0e3268a9fb` | [constraint-reread.py](constraint-reread.py) |
+| `future-stamp-write.py` | `be125990e7ba4505821be61d832bcac9e7280cca82488f1690c99cce6bda576d` | [future-stamp-write.py](future-stamp-write.py) |
+| `pattern-self-match.py` | `84bcb120cc1d30df845e4c2f77d7033a1bb9af473b9a0ffd336a622ae67fe6cd` | [pattern-self-match.py](pattern-self-match.py) |
+| `record-remove-check.py` | `6ea79f2809054e1458f679e4219db8e45188f5f1f63eeccf401aa95478fce1d6` | [record-remove-check.py](record-remove-check.py) |
+| `rerun-pass-check.py` | `319f4de2aff71cca9d1cf33ae990c264982141ca38ec44e939780a0961996f66` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `stamp-truth-stop.py` | `fcfdab3d99fe6e0868f27d10fad7fa691c5a5f58ad1f2242e8721e1df4f5312b` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `unbounded-wait.py` | `da1917e92cc4dc93585ee6eabac75040926ba3068e5241892dfb87fe83f40842` | [unbounded-wait.py](unbounded-wait.py) |
+| `ungated-record.py` | `5eedf3c960cdc34f35504ab6ea0935da31a0b3d9bf14126c8e8ee5a4c112b4e0` | [ungated-record.py](ungated-record.py) |
 
 What the checksum does and does not prove:
 
@@ -521,6 +545,12 @@ section of its opening docstring. Read that section before relying on a hook; in
   natural-language time is not checked. A fabricated time in a code span, a code block, a `>` quote line,
   or just after a scheduling word passes. A genuinely future time mentioned in plain prose without a
   scheduling word before it is blocked; the remedy is to add the word or put the time in a code span.
+  An opening stamp in another zone's abbreviation is not checked (only noted); stamp in UTC or a numeric
+  offset, or run the hook under the same `TZ`. An opening stamp read from a different clock that runs ahead
+  of this host's (a remote or container `date`) is refused while it is still later than the time the hook
+  compares it with (when the message was recorded, else when the hook runs); put it in a code span. A stamp
+  rounded up or composed ahead is likewise refused only while it is later than that time: one whose minute
+  that time has already reached, as after a long generation, passes.
   Its refusals are capped: within one continuous run of turn ends with no observed new turn it refuses at
   most three times, after which each violating stop is allowed with a cap warning; a stop that carries
   neither `stop_hook_active` nor a `transcript_path` is outside the cap (nothing can key a counter to
@@ -779,8 +809,9 @@ and checks helper-session calls.
 ## Status and retirement
 
 This is a preview channel. When a hook here becomes part of the pack's plugin, it is removed from this
-directory and its row is replaced by a pointer to where it now lives. When every hook has moved, this
-directory is removed.
+directory and its row is replaced by a pointer to where it now lives, with one exception so far:
+`future-stamp-write.py` stays published here beside the plugin's handler, as the section Also in the
+pack's plugin describes. When every hook has moved, this directory is removed.
 
 A change to any hook here ships with new checksums on this page and a matching SHA256SUMS, all in the
 same change.

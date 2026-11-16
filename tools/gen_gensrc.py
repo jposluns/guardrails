@@ -34,7 +34,10 @@ closed (exit 2) exactly like the sibling generators, never a silent clean.
 An entry whose target is on the authoring-only roster (tools/gen_hooks.py AUTHORING_ONLY_REL, read
 statically like the declarations) gains the optional key "scope": "authoring". gensrc_guard honours such an
 entry only in a tree whose root carries the authoring marker .aiqt/authoring.toml, so an adopter tree holding
-this registry keeps its own .claude/settings.json. The registry stays version 1: a guard that predates the
+this registry keeps its own .claude/settings.json. An entry on the authoring-scoped roster (tools/gen_hooks.py
+AUTHORING_SCOPED_REL: shipped files gen_hooks generates only in the authoring tree, the LICENSE and NOTICE
+copies) is scoped the same way, so an adopter tree's copies are not treated as generated there either. The
+registry stays version 1: a guard that predates the
 key tolerates it as an unknown key and honours the entry in every tree, as before it.
 
   gen_gensrc.py            regenerate .aiqt/gensrc.json
@@ -84,6 +87,16 @@ SELF = "gen_gensrc"  # this module's stem, excluded from discovery (it declares 
 # own "scope" key is refused (ENTRY_KEYS), so the roster is the one source of the scope.
 ROSTER_GEN = "gen_hooks.py"
 ROSTER_NAME = "AUTHORING_ONLY_REL"
+# The authoring-SCOPED roster: tools/gen_hooks.py AUTHORING_SCOPED_REL names SHIPPED paths that gen_hooks
+# generates and drift-checks only in the authoring tree (the plugin and .aiqt/ LICENSE and NOTICE copies; in an
+# adopter tree gen_hooks never writes, compares or deletes them). Their registry entries are scoped "authoring"
+# exactly like the never-shipped roster's, so gensrc_guard leaves an adopter tree's copies alone as gen_hooks
+# does. Unlike AUTHORING_ONLY_REL this roster carries NO never-ship duty: gen_manifest.check_authoring_only reads
+# AUTHORING_ONLY_REL alone, so these paths keep their release class, and gen_manifest.cross_check_exclusions
+# exempts a scoped entry only when it is on AUTHORING_ONLY_REL, so it refuses an exact [[exclusion]] literal
+# for one of them. It is OPTIONAL (a gen_hooks.py binding no such name has none, as every synthetic fixture); one
+# that binds it is held to every static rule of AUTHORING_ONLY_REL.
+SCOPED_ROSTER_NAME = "AUTHORING_SCOPED_REL"
 SCOPE_AUTHORING = "authoring"
 
 
@@ -336,7 +349,7 @@ def _validate_entry(raw, where, root, seen):
     return {"target": canon, "kind": kind, "sources": list(sources), "regenerate": regenerate}
 
 
-def read_authoring_roster(tools_dir):
+def read_authoring_roster(tools_dir, name=ROSTER_NAME, optional=False):
     """The authoring-only roster, tools/gen_hooks.py AUTHORING_ONLY_REL, read STATICALLY (parsed, never
     imported or run, like every declaration here). Its value must be a tuple or list whose items are
     non-empty str literals, or names bound to one (gen_hooks spells it from AUTHORING_MARKER_REL and
@@ -358,14 +371,18 @@ def read_authoring_roster(tools_dir):
     the parsed value is the value the module binds. Bounded like _read_declaration: the walk is conservative
     (an unrelated local reuse of one of these names inside a function is refused too, failing safe), a
     dynamic rebinding (globals(), setattr, exec) is out of scope, and a PEP-695 type parameter is not
-    inspected."""
+    inspected.
+
+    name selects the roster read under these same rules (SCOPED_ROSTER_NAME for the authoring-scoped roster).
+    With optional=True a gen_hooks.py that binds name NOWHERE (no plain assignment and no other binding form)
+    has that roster empty, (); any binding of it at all is held to the rules above."""
     path = Path(tools_dir) / ROSTER_GEN
     try:
         tree = _parse_module(path)
     except FileNotFoundError:
         return ()
     except SyntaxError as exc:
-        raise ValueError("{}: cannot parse for its {} roster ({})".format(ROSTER_GEN, ROSTER_NAME, exc))
+        raise ValueError("{}: cannot parse for its {} roster ({})".format(ROSTER_GEN, name, exc))
     plain = {}
     position = {}
     for index, node in enumerate(tree.body):
@@ -373,37 +390,42 @@ def read_authoring_roster(tools_dir):
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             plain.setdefault(node.targets[0].id, []).append(node)
 
-    def _bound_once(name):
-        nodes = plain.get(name, [])
+    def _bound_once(bound_name):
+        nodes = plain.get(bound_name, [])
         # The one allowed binding is the Name target of a single plain top-level assignment; any other
         # binding of the name anywhere in the module fails closed (a second plain assignment included).
-        _reject_rebinding(tree, name, {id(nodes[0].targets[0])} if len(nodes) == 1 else set(), ROSTER_GEN,
-                          "plain")
+        _reject_rebinding(tree, bound_name, {id(nodes[0].targets[0])} if len(nodes) == 1 else set(),
+                          ROSTER_GEN, "plain")
         if len(nodes) != 1:
             raise ValueError("{}: {} must be bound exactly once, by a plain module-level assignment "
-                             "(fail-closed)".format(ROSTER_GEN, name))
+                             "(fail-closed)".format(ROSTER_GEN, bound_name))
         return nodes[0]
 
-    roster_node = _bound_once(ROSTER_NAME)
+    if optional and name not in plain:
+        # No plain assignment: the optional roster is empty only when NO other form binds the name either
+        # (_reject_rebinding with no allowed node refuses every binding, nested or not).
+        _reject_rebinding(tree, name, set(), ROSTER_GEN, "plain")
+        return ()
+    roster_node = _bound_once(name)
     value = roster_node.value
     if not isinstance(value, (ast.Tuple, ast.List)) or not value.elts:
-        raise ValueError("{}: {} must be a non-empty tuple or list".format(ROSTER_GEN, ROSTER_NAME))
+        raise ValueError("{}: {} must be a non-empty tuple or list".format(ROSTER_GEN, name))
     roster = []
     for item in value.elts:
         if isinstance(item, ast.Name):
             if item.id.startswith("__") and item.id.endswith("__"):
                 raise ValueError("{}: {} must not use {}, a dunder-shaped name (every name that begins and ends "
                                  "with __ is refused, since the interpreter binds some, such as __doc__ and "
-                                 "__name__, itself) (fail-closed)".format(ROSTER_GEN, ROSTER_NAME, item.id))
+                                 "__name__, itself) (fail-closed)".format(ROSTER_GEN, name, item.id))
             bound = _bound_once(item.id)
             if position[id(bound)] >= position[id(roster_node)]:
                 raise ValueError("{}: {} must be bound before {} reads it (fail-closed)".format(
-                    ROSTER_GEN, item.id, ROSTER_NAME))
+                    ROSTER_GEN, item.id, name))
             item = bound.value
         if not (isinstance(item, ast.Constant) and isinstance(item.value, str) and item.value):
             raise ValueError("{}: every {} item must be a str literal, or a name bound once to one "
-                             "(fail-closed)".format(ROSTER_GEN, ROSTER_NAME))
-        roster.append(_canonical_target(item.value, "file", "{} {}".format(ROSTER_GEN, ROSTER_NAME)))
+                             "(fail-closed)".format(ROSTER_GEN, name))
+        roster.append(_canonical_target(item.value, "file", "{} {}".format(ROSTER_GEN, name)))
     return tuple(roster)
 
 
@@ -411,9 +433,11 @@ def collect_entries(declarations, root):
     """Union and validate the declarations of every discovered generator plus this tool's own output,
     then return the entries sorted by target for a deterministic render. Raises ValueError on any
     malformed entry or duplicate target. Every kind=file entry whose target is on the authoring-only
-    roster (read_authoring_roster over root/tools) gains "scope": "authoring"; a roster path declared as a
-    tree or block, or lying under a tree entry, raises ValueError, because an unscoped entry over it would
-    make gensrc_guard deny an adopter's edits to its own copy of that path."""
+    roster or the authoring-scoped roster (read_authoring_roster over root/tools, ROSTER_NAME and the optional
+    SCOPED_ROSTER_NAME) gains "scope": "authoring"; a roster path declared as a tree or block, or lying under
+    a tree entry, raises ValueError, because an unscoped entry over it would make gensrc_guard deny an
+    adopter's edits to its own copy of that path, and so does an authoring-scoped path no kind=file entry
+    targets."""
     entries = []
     seen = set()
     for stem, decl in declarations:
@@ -438,17 +462,26 @@ def collect_entries(declarations, root):
                 raise ValueError("tree-descendant overlap: {!r} and {!r} name the same subtree; a tree "
                                  "and any path beneath it cannot both be declared (fail-closed)"
                                  .format(a_target, b_target))
-    roster = read_authoring_roster(root / "tools")
-    for entry in entries:
+    rosters = ((ROSTER_NAME, read_authoring_roster(root / "tools")),
+               (SCOPED_ROSTER_NAME, read_authoring_roster(root / "tools", SCOPED_ROSTER_NAME, optional=True)))
+    for roster_name, roster in rosters:
         for rel in roster:
-            if entry["kind"] == "file" and entry["target"] == rel:
-                entry["scope"] = SCOPE_AUTHORING
-            elif entry["target"].rstrip("/") == rel or (
-                    entry["kind"] == "tree" and rel.startswith(entry["target"])):
-                raise ValueError("the authoring-only path {!r} ({} {}) is covered by the {} entry {!r}; it "
-                                 "must be a kind=file entry of its own so it can be scoped to the authoring "
-                                 "tree (fail-closed)".format(rel, ROSTER_GEN, ROSTER_NAME, entry["kind"],
-                                                             entry["target"]))
+            matched = False
+            for entry in entries:
+                if entry["kind"] == "file" and entry["target"] == rel:
+                    entry["scope"] = SCOPE_AUTHORING
+                    matched = True
+                elif entry["target"].rstrip("/") == rel or (
+                        entry["kind"] == "tree" and rel.startswith(entry["target"])):
+                    raise ValueError("the authoring-only path {!r} ({} {}) is covered by the {} entry {!r}; it "
+                                     "must be a kind=file entry of its own so it can be scoped to the authoring "
+                                     "tree (fail-closed)".format(rel, ROSTER_GEN, roster_name, entry["kind"],
+                                                                 entry["target"]))
+            if roster_name == SCOPED_ROSTER_NAME and not matched:
+                # A shipped authoring-scoped path names a generated output; one no declaration generates is a
+                # stale roster, refused rather than silently scoping nothing.
+                raise ValueError("the authoring-scoped path {!r} ({} {}) is not the target of any declared "
+                                 "kind=file entry (fail-closed)".format(rel, ROSTER_GEN, roster_name))
     entries.sort(key=lambda e: e["target"])
     return entries
 
@@ -1088,6 +1121,122 @@ def self_test_main():
         # with the registry there untouched; symlinked inside the root, it is read and the registry rewritten.
         failures.extend(linked_dir_failures(tmp, "aiqt", lambda base: _build_from(
             base, "gen_selftestgood.py", _FAKE_GOOD), run, ".aiqt", REGISTRY_REL))
+
+        # (u) The shipped LICENSE and NOTICE copies (tools/gen_hooks.py AUTHORING_SCOPED_REL), which gen_hooks
+        #     generates only in the authoring tree: the REAL registry built from this repository scopes each
+        #     "authoring", and none is on the never-ship AUTHORING_ONLY_REL roster (they ship). An adopter-shaped
+        #     tree (this registry and the four copies, no authoring marker) does not treat any copy as generated:
+        #     gensrc_guard's own registry loader and matcher (the shipped aiqt_hooks.py) find no entry for it, and
+        #     neither do the Bash channel's _gensrc_holds (the copy's directory) and _gensrc_mentions (a command
+        #     naming the copy). The twin adds the exact authoring marker, and then each copy matches its own scoped
+        #     entry in all three.
+        real_root = Path(__file__).resolve().parent.parent
+        copy_rels = (".aiqt/LICENSE", ".aiqt/NOTICE", "plugin/aiqt-guardrails-hooks/LICENSE",
+                     "plugin/aiqt-guardrails-hooks/NOTICE")
+        try:
+            real_registry = build_registry(real_root)
+            real_scopes = {e["target"]: e.get("scope", "no scope key")
+                           for e in json.loads(real_registry)["generated"]}
+            never_ship = read_authoring_roster(real_root / "tools")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            real_registry, real_scopes, never_ship = None, {}, ()
+            failures.append("licence copies: the real registry could not be built ({})".format(exc))
+        for rel in copy_rels:
+            if real_registry is not None and real_scopes.get(rel) != SCOPE_AUTHORING:
+                failures.append("licence copies: the real registry must scope {} \"authoring\", got {!r}".format(
+                    rel, real_scopes.get(rel, "no entry")))
+            if rel in never_ship:
+                failures.append("licence copies: {} must not be on the never-ship {} roster".format(
+                    rel, ROSTER_NAME))
+        # The synthetic authoring-scoped roster: naming a declared file scopes exactly that entry (the never-ship
+        # roster's entry stays scoped, the registry's own stays unscoped); naming a path no entry declares, a
+        # tree entry over it, and a second binding each fail closed (exit 2).
+        scoped_dir = tmp / "scopedroster"
+        _build_from(scoped_dir, "gen_hooks.py", _FAKE_HOOKS_ROSTER + 'AUTHORING_SCOPED_REL = ("OUT.md",)\n')
+        if run_quiet(scoped_dir, check=False) != 0:
+            failures.append("authoring-scoped roster: expected a clean generate")
+        try:
+            scopes = {e["target"]: e.get("scope", "no scope key") for e in
+                      json.loads((scoped_dir / REGISTRY_REL).read_text(encoding="utf-8"))["generated"]}
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            scopes = "unreadable ({})".format(exc)
+        want = {".claude/settings.json": "authoring", "OUT.md": "authoring", ".aiqt/gensrc.json": "no scope key"}
+        if scopes != want:
+            failures.append("authoring-scoped roster: expected scopes {!r}, got {!r}".format(want, scopes))
+        for idx, (label, text) in enumerate((
+                ("an undeclared path", _FAKE_HOOKS_ROSTER + 'AUTHORING_SCOPED_REL = ("NOPE.md",)\n'),
+                ("a path under a tree entry", _ROSTER_NAMES + _ROSTER + _hooks_decl(
+                    (".claude/settings.json", "file", ""), ("gen/", "tree", ""))
+                 + 'AUTHORING_SCOPED_REL = ("gen/x.md",)\n'),
+                ("a second binding", _FAKE_HOOKS_ROSTER + 'AUTHORING_SCOPED_REL = ("OUT.md",)\n'
+                 + 'AUTHORING_SCOPED_REL = ("OUT.md",)\n'),
+                ("an augmented binding alone", _FAKE_HOOKS_ROSTER + 'AUTHORING_SCOPED_REL += ("OUT.md",)\n'))):
+            fdir = tmp / "scopedfault{}".format(idx)
+            _build_from(fdir, "gen_hooks.py", text)
+            if run_quiet(fdir, check=False) != 2:
+                failures.append("authoring-scoped roster: {} expected exit 2 (fail-closed)".format(label))
+        if real_registry is not None:
+            # The shipped dispatcher, imported as the sibling tools do (orch_doctor, check_relied_exit_pipes).
+            hooks_dir = str(real_root / ".aiqt" / "core" / "hooks" / "scripts")
+            if hooks_dir not in sys.path:
+                sys.path.insert(0, hooks_dir)
+            import aiqt_hooks as guard
+            adopter = tmp / "adopter-licence"
+            (adopter / ".aiqt").mkdir(parents=True)
+            (adopter / REGISTRY_REL).write_text(real_registry, encoding="utf-8")
+            for rel in copy_rels:
+                (adopter / rel).parent.mkdir(parents=True, exist_ok=True)
+                (adopter / rel).write_text("the adopter's own file\n", encoding="utf-8")
+            root_c = os.path.realpath(adopter)
+            for label, marker in (("an adopter-shaped tree (no authoring marker)", None),
+                                  ("the authoring tree (exact marker, the twin)",
+                                   'format-version = 1\nrole = "pack-authoring-repository"\n')):
+                if marker is not None:
+                    (adopter / ".aiqt" / "authoring.toml").write_text(marker, encoding="utf-8")
+                status, loaded = guard._load_gensrc_registry(root_c)
+                if status != "ok":
+                    failures.append("licence copies: {}: gensrc_guard could not load the real registry ({}, "
+                                    "{!r})".format(label, status, loaded))
+                    continue
+                for rel in copy_rels:
+                    hit = guard._gensrc_match(loaded, os.path.realpath(adopter / rel), root_c)
+                    if marker is None and hit is not None:
+                        failures.append("licence copies: {} must not treat {} as generated, got {!r}".format(
+                            label, rel, hit))
+                    if marker is not None and (hit is None or hit is guard._GENSRC_MATCH_FAULT or hit[0] != rel
+                                               or hit[3] != ("authoring", None)):
+                        failures.append("licence copies: in {} {} must match its scoped entry, got {!r}".format(
+                            label, rel, hit))
+                    # The Bash channel's two other scope-aware matchers, each given the copy's own entry alone so
+                    # that entry's scope is what is tested: _gensrc_holds for the directory holding the copy (with
+                    # the full registry an unscoped entry in that directory answers first), and _gensrc_mentions
+                    # for a command naming it by path (with the full registry, see the basename case below).
+                    own = [e for e in loaded if e[1] == rel]
+                    held = guard._gensrc_holds(own, os.path.realpath((adopter / rel).parent), root_c)
+                    named = guard._gensrc_mentions(own, "cp x {}".format(rel), root_c)
+                    if len(own) != 1:
+                        failures.append("licence copies: {} must load exactly one entry for {}, got {!r}".format(
+                            label, rel, own))
+                    elif marker is None and (held is not None or named is not None):
+                        failures.append("licence copies: {} must not treat {} as generated in a directory or "
+                                        "command, got {!r} and {!r}".format(label, rel, held, named))
+                    elif marker is not None and (held is None or held is guard._GENSRC_MATCH_FAULT
+                                                 or held[0] != rel or held[3] != ("authoring", None)
+                                                 or named is None or named[0] != rel):
+                        failures.append("licence copies: in {} the directory and a command naming {} must "
+                                        "match its scoped entry, got {!r} and {!r}".format(label, rel, held, named))
+                    # The full shipped registry in the adopter-shaped tree: _gensrc_mentions bounds an entry's name
+                    # only by characters that cannot continue a path word, and '/' is not one of them, so the name
+                    # of the unscoped root NOTICE entry matches the basename of either NOTICE copy in a command,
+                    # which still matches that entry (a fail-safe over-denial: an uncleared write naming it is
+                    # denied). No unscoped entry is named LICENSE, so a command naming either LICENSE copy
+                    # matches none (the twin). A change to either outcome fails here.
+                    if marker is None:
+                        full = guard._gensrc_mentions(loaded, "cp x {}".format(rel), root_c)
+                        want_full = "NOTICE" if rel.endswith("/NOTICE") else None
+                        if (None if full is None else full[0]) != want_full:
+                            failures.append("licence copies: {} with the full registry: a command naming {} "
+                                            "must match {!r}, got {!r}".format(label, rel, want_full, full))
     finally:
         if unread_tools is not None:
             os.chmod(unread_tools, 0o755)  # restore even on an unexpected early exit
@@ -1119,7 +1268,14 @@ def self_test_main():
           "(exit 2), while a utf-8 cookie generates; a parser stack overflow (a chain of 200,000 unary minus "
           "signs as tools/gen_hooks.py or another generator, a RecursionError injected into every parse and a "
           "MemoryError into the byte parse alone) fails closed (exit 2) naming its cause; and a target with a "
-          ".working component (an OPF store path) fails closed (exit 2)"
+          ".working component (an OPF store path) fails closed (exit 2); the AUTHORING_SCOPED_REL roster scopes "
+          "its declared entry \"authoring\" and an undeclared, tree-covered or rebound one fails closed (exit 2); "
+          "and the real registry scopes the four shipped LICENSE and NOTICE copies \"authoring\" (off the "
+          "never-ship roster), so gensrc_guard's file matcher treats none as generated in an adopter-shaped "
+          "tree and matches each in the authoring tree, as do _gensrc_holds and _gensrc_mentions given each "
+          "copy's own entry; with the full registry in the adopter-shaped tree, _gensrc_mentions still matches "
+          "a command naming either NOTICE copy to the unscoped root NOTICE entry, whose name is that copy's "
+          "basename (a fail-safe over-denial), and matches none for either LICENSE copy"
           + note)
     return 0
 

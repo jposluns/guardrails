@@ -151,22 +151,22 @@ sidebar-active = "development"
 <section id="availability">
   <div class="wrap">
     <p class="eyebrow">Availability</p>
-    <h2>The same core, and where 1.1.0 stands</h2>
+    <h2>The same core, and where 1.2.0 stands</h2>
     <div class="card" style="margin-bottom:1rem">
       <span class="pill now">Available now</span>
       <h3>The governance core, and the chat assistant</h3>
-      <p>The standard 1.1.0 will install already exists and is readable in full, the pack on GitHub: the ordering, the
+      <p>The standard 1.2.0 will install already exists and is readable in full, the pack on GitHub: the ordering, the
         disciplines, and the universal skill. The
-        <a href="/">chat assistant (1.0.5)</a> runs this core today, so the standard
+        <a href="/">chat assistant</a> runs this core today, so the standard
         your project will adopt is the one you can hold a chat assistant to right now, and
         the pack is open to read in full.</p>
     </div>
     <div class="card">
       <span class="pill next">In development</span>
-      <h3>The development assistant (1.1.0)</h3>
+      <h3>The development assistant (1.2.0)</h3>
       <p>The wizard, the doctor, the write guard, the generated agent files,
         the CI integration, the findings loop, the five-rule workflow, the per-guardrail
-        configuration, and seed PRs described here and on the technical details page are the 1.1.0
+        configuration, and seed PRs described here and on the technical details page are the 1.2.0
         design, and we ship it when it does what these pages say it does. Until then, the
         best way to evaluate AIQT is the way we would want you to: read the source.</p>
     </div>

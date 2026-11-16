@@ -150,6 +150,14 @@ at 64 KB, 256 KB and 1 MB within CPU-time bounds set from a measured run and the
 (a case over that gate alone is re-timed once before it fails), under a 60-second hang guard. The timer and
 timing checks run in a child process.
 
+It also covers the warn-only clock-stamp handler (future_stamp_write, tstamp), ported from the former
+standalone preview script (the fsw-* and clock-* rows, _test_clock_hooks): it warns on a future-dated literal
+written into an AIQT_STORE_ROOT store and never denies, its PRETOOL_WARN_ONLY class giving it main()'s fail-open
+posture; it honours no worker marker or ORCH_ spelling; the former script's own self-test runs against the ported
+code (fsw-unit-*, less the tests of its own stdin and stdout handling, which main() now owns:
+_CLOCK_UNIT_RETIRED); the code it shares with .preview/stamp-truth-stop.py is compared as syntax trees
+(clock-parity); and it has deadline shape rows.
+
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
 import sys
@@ -2114,7 +2122,8 @@ def _test_stop_dispatch_note_sites(failures, tmp):
     permissionDecision "allow" mutant at the site fails here, in the hooks suite, not only in the
     orchestration suite: diff_wall_stop's wrong-event, unreadable-payload and diff-wall warnings;
     _orch_stop_family's unreadable-registry, unsaved-counter and failed-escape-spoof-record warnings
-    (Stop and TeammateIdle); orch_resume_audit's divergence warning; and main's unreadable-payload,
+    (Stop and TeammateIdle) and its loop-signal warnings under an unresolvable registry state_dir and a
+    toplevel that cannot be decoded as a path; orch_resume_audit's divergence warning; and main's unreadable-payload,
     handler-crash and window-error fail-open notes. The fixtures are selftest_orch_hooks.Fixture repos
     under tmp."""
     import selftest_orch_hooks as orch
@@ -2171,6 +2180,130 @@ def _test_stop_dispatch_note_sites(failures, tmp):
     finally:
         (aiqt_hooks._orch_registry, aiqt_hooks._orch_record_denial, aiqt_hooks._orch_escape_active,
          aiqt_hooks._orch_record_escape_spoof, aiqt_hooks._orch_resume_probes) = saved
+
+    # (ns-stop-state-dir-loop) _orch_stop_family's loop-signal note for a registry state_dir that cannot
+    # resolve (a NUL in the path), reached from a real fixture with no seam: without the loop signal the
+    # Stop HOLDS (exit 2) naming the state directory (the TWIN), and with stop_hook_active set the same
+    # Stop yields through _stop_warn, naming the loop signal and the state directory. A silent-allow or
+    # explicit-allow mutant at the site fails here; so does a mutant that drops the hold.
+    sd = orch.Fixture(base, "state-dir")
+    sd_regp = sd.root / ".aiqt" / "orchestration.local.json"
+    sd_reg = json.loads(sd_regp.read_text(encoding="utf-8"))
+    sd_reg["state_dir"] = str(sd.root / "st\u0000ate")
+    sd_regp.write_text(json.dumps(sd_reg), encoding="utf-8")
+    sd_hold = aiqt_hooks.orch_stop_guard(sd.payload("Stop"))
+    if not (sd_hold[0] == 2 and sd_hold[1] is None and "state directory" in str(sd_hold[2])
+            and "cannot-evaluate" in str(sd_hold[2])):
+        failures.append("(ns-stop-state-dir-hold) a Stop under an unresolvable registry state_dir expected an "
+                        "exit-2 hold naming the state directory, got {!r}".format(sd_hold))
+    sd_loop = aiqt_hooks.orch_stop_guard(sd.payload("Stop", extra={"stop_hook_active": True}))
+    note("(ns-stop-state-dir-loop) a Stop under an unresolvable registry state_dir with the loop signal set "
+         "yields with a note", sd_loop, "loop signal set")
+    if (_reduce_result(sd_loop[0], sd_loop[1]) == "allow-note"
+            and "state directory" not in sd_loop[1]["systemMessage"]):
+        failures.append("(ns-stop-state-dir-loop) the loop-signal note does not name the state directory: {!r}"
+                        .format(sd_loop[1]["systemMessage"]))
+
+    # (ns-stop-toplevel-loop) _orch_stop_family's loop-signal note for a repository toplevel that cannot be
+    # decoded as a path at all. _orch_stop_root answers (None, True) only where os.fsdecode raises, which no
+    # POSIX platform does (it escapes every byte), so a seam stands in for that answer here, as
+    # (ns-stop-registry) does for the registry read: without the loop signal the Stop HOLDS (exit 2) naming
+    # the toplevel (the TWIN), and with stop_hook_active set it yields through _stop_warn naming the loop
+    # signal and the toplevel. A silent-allow or explicit-allow mutant at the site fails here.
+    saved_root = aiqt_hooks._orch_stop_root
+    try:
+        aiqt_hooks._orch_stop_root = lambda _data: (None, True)
+        tl_hold = aiqt_hooks.orch_stop_guard(s.payload("Stop"))
+        tl_loop = aiqt_hooks.orch_stop_guard(s.payload("Stop", extra={"stop_hook_active": True}))
+    finally:
+        aiqt_hooks._orch_stop_root = saved_root
+    if not (tl_hold[0] == 2 and tl_hold[1] is None and "top-level path" in str(tl_hold[2])
+            and "cannot-evaluate" in str(tl_hold[2])):
+        failures.append("(ns-stop-toplevel-hold) a Stop whose toplevel cannot be decoded as a path expected an "
+                        "exit-2 hold naming the toplevel, got {!r}".format(tl_hold))
+    note("(ns-stop-toplevel-loop) a Stop whose toplevel cannot be decoded as a path, with the loop signal set, "
+         "yields with a note", tl_loop, "loop signal set")
+    if (_reduce_result(tl_loop[0], tl_loop[1]) == "allow-note"
+            and "top-level path" not in tl_loop[1]["systemMessage"]):
+        failures.append("(ns-stop-toplevel-loop) the loop-signal note does not name the toplevel: {!r}"
+                        .format(tl_loop[1]["systemMessage"]))
+
+    # (ns-stop-root-producer) the producer of that (None, True) answer: _orch_stop_root's own
+    # `except (UnicodeDecodeError, ValueError): return (None, True)`, reached through the real function with
+    # no seam on _orch_stop_root itself. The real scrubbed rev-parse runs against the fixture; only
+    # os.fsdecode is replaced (the aiqt_hooks.os.<name> stand-in the orchestration suite uses for lstat, stat
+    # and open), and the stand-in raises ONLY for the exact toplevel bytes git answered, delegating every
+    # other call to the real os.fsdecode. Each exception the branch names is driven once. Removing the branch
+    # lets the exception escape (caught here and reported); answering (None, False) there turns the hold
+    # into a silent allow; both fail here.
+    rp_cwd = s.payload("Stop")["cwd"]
+    rp_top = aiqt_hooks._recovery_git(rp_cwd, ["rev-parse", "--show-toplevel"], timeout=5, text=False).stdout
+    rp_top = rp_top[:-1] if rp_top.endswith(b"\n") else rp_top
+    real_fsdecode = aiqt_hooks.os.fsdecode
+
+    def root_producer(make_error):
+        hits = []
+
+        def refusing_fsdecode(filename):
+            if isinstance(filename, bytes) and filename == rp_top:
+                hits.append(filename)
+                raise make_error(filename)
+            return real_fsdecode(filename)
+
+        aiqt_hooks.os.fsdecode = refusing_fsdecode
+        try:
+            answer = aiqt_hooks._orch_stop_root(s.payload("Stop"))
+            hold = aiqt_hooks.orch_stop_guard(s.payload("Stop"))
+            loop = aiqt_hooks.orch_stop_guard(s.payload("Stop", extra={"stop_hook_active": True}))
+        except Exception as exc:  # the branch removed: the decode error escapes _orch_stop_root
+            return None, None, None, hits, "{}: {}".format(type(exc).__name__, exc)
+        finally:
+            aiqt_hooks.os.fsdecode = real_fsdecode
+        return answer, hold, loop, hits, None
+
+    if not rp_top:
+        failures.append("(ns-stop-root-fixture) the fixture's real rev-parse gave no toplevel to refuse")
+    rd_answer, rd_hold, rd_loop, rd_hits, rd_crash = root_producer(
+        lambda raw: UnicodeDecodeError("utf-8", raw, 0, 1, "self-test stand-in"))
+    if rd_crash is not None or rd_answer != (None, True) or not rd_hits:
+        failures.append("(ns-stop-root-decode-answer) _orch_stop_root, whose os.fsdecode of the real toplevel "
+                        "raises UnicodeDecodeError, expected (None, True) after reaching the decode, got "
+                        "{!r} (decode reached {} time(s), escaped {!r})".format(rd_answer, len(rd_hits), rd_crash))
+    elif not (rd_hold[0] == 2 and rd_hold[1] is None and "top-level path" in str(rd_hold[2])
+              and "cannot-evaluate" in str(rd_hold[2])):
+        failures.append("(ns-stop-root-decode-hold) a Stop whose real toplevel cannot be decoded as a path "
+                        "expected an exit-2 hold naming the toplevel, got {!r}".format(rd_hold))
+    else:
+        note("(ns-stop-root-decode-loop) a Stop whose real toplevel cannot be decoded as a path, with the loop "
+             "signal set, yields with a note naming the toplevel", rd_loop, "top-level path")
+    rv_answer, _rv_hold, _rv_loop, rv_hits, rv_crash = root_producer(
+        lambda raw: ValueError("self-test stand-in"))
+    if rv_crash is not None or rv_answer != (None, True) or not rv_hits:
+        failures.append("(ns-stop-root-value-answer) _orch_stop_root, whose os.fsdecode of the real toplevel "
+                        "raises ValueError, expected (None, True) after reaching the decode, got {!r} "
+                        "(decode reached {} time(s), escaped {!r})".format(rv_answer, len(rv_hits), rv_crash))
+    if aiqt_hooks.os.fsdecode is not real_fsdecode:
+        failures.append("(ns-stop-root-restored) the os.fsdecode stand-in was not restored")
+
+    # (ns-stop-findings) _orch_stop_family's ALLOW_WITH_FINDINGS return, its outcome asserted directly: a
+    # Stop past an actionable item DENIES (exit 2, the TWIN), and the same Stop with the loop signal set is
+    # released by decide_yield as ALLOW_WITH_FINDINGS, which this site returns as a _stop_warn note
+    # naming the loop bound. Removing the site lets the verdict fall through to the clean-allow tail (a
+    # silent allow); an explicit-allow or a re-deny there is not an allow-note either; all fail here.
+    awf = orch.Fixture(base, "findings")
+    awf.set_items([orch.item("NS-AWF-1")])
+    awf.set_turn_state(dict())
+    awf_deny = aiqt_hooks.orch_stop_guard(awf.payload("Stop"))
+    if not (awf_deny[0] == 2 and awf_deny[1] is None and "NS-AWF-1" in str(awf_deny[2])):
+        failures.append("(ns-stop-findings-deny) a Stop past an actionable item expected an exit-2 deny "
+                        "naming it, got {!r}".format(awf_deny))
+    awf_loop = aiqt_hooks.orch_stop_guard(awf.payload("Stop", extra={"stop_hook_active": True}))
+    note("(ns-stop-findings) a Stop past an actionable item with the loop signal set yields with findings",
+         awf_loop, "loop bound reached")
+    if (_reduce_result(awf_loop[0], awf_loop[1]) == "allow-note"
+            and not awf_loop[1]["systemMessage"].startswith("AIQT guardrail (Stop): loop bound reached")):
+        failures.append("(ns-stop-findings) the findings note is not the Stop ALLOW_WITH_FINDINGS banner: {!r}"
+                        .format(awf_loop[1]["systemMessage"]))
 
     def dispatch(stdin_text):
         buf, saved_stdin = io.StringIO(), sys.stdin
@@ -2232,6 +2365,303 @@ def _test_stop_dispatch_note_sites(failures, tmp):
     note("(ns-lease-heartbeat) a held lease past warn_after warns at Stop (the lease-heartbeat "
          "note site)",
          aiqt_hooks.orch_lease_heartbeat_stop(lease_fx.payload("Stop")), "heartbeat gap")
+
+
+# The clock bindings' context line for the fixed reading the ck-* cases inject (2026-09-23T17:45:02Z, read
+# in a fixed UTC-04:00 zone abbreviated EDT), spelled out whole so any change of wording, order or values
+# fails; {event} is the hook event the binding is registered for.
+_CK_KNOWN = ("[aiqt-clock] Host clock reading at this {event} hook event: UTC 2026-09-23T17:45:02Z; local time "
+             "2026-09-23 13:45:02 UTC-04:00 (EDT). It is the host clock at that moment: it goes stale as time "
+             "passes and carries any host clock error, and it is context for a timestamp, not a check of one.")
+_CK_UNKNOWN = ("[aiqt-clock] Host clock reading at this {event} hook event: UTC 2026-09-23T17:45:02Z; local time "
+               "zone unknown (ck-reason), so no local time is given; use the UTC value. It is the host clock "
+               "at that moment: it goes stale as time passes and carries any host clock error, and it is "
+               "context for a timestamp, not a check of one.")
+
+
+def _test_clock_inject(failures, tmp):
+    """(ck-*) The two context-only clock bindings, clock_inject_post (PostToolUse) and clock_inject_failure
+    (PostToolUseFailure). ck-wiring-*: each is in HANDLERS and HANDLER_EVENT under its own event, and both
+    events are fail-open. ck-known-*: with the clock fixed by replacing aiqt_hooks._clock_now and the zone
+    fixed by replacing aiqt_hooks._clock_local, each returns exactly its event's context line (_CK_KNOWN:
+    UTC, the local time, its numeric offset and the abbreviation; no permission decision, no note), and
+    ck-dispatch-* holds the same through main(). ck-unknown-text-*: a zone _clock_local cannot establish
+    is named unknown, with no local time.
+    ck-wrong-event-*: a payload naming another event gets a note and no reading. ck-offset: the offset text
+    at and on each side of zero (one second, one microsecond) and at whole and half hours. ck-zone-fixed:
+    _clock_local keeps a fixed injected zone (TZ a POSIX rule). ck-zone-known-*: each TZ the C library
+    reads correctly (unset, UTC, zone database names, an absolute zone file, complete POSIX rules, the
+    legacy EST5EDT) is kept when the injected conversion gives what the C library gives for it.
+    ck-zone-legacy-*: each of the four legacy names in _CLOCK_LEGACY_US_ZONES, on a stand-in zone database
+    that lacks the name and holds the zone it is a link to, is looked up under the name and then under that
+    zone, and is kept. ck-zone-unknown-*: TZ empty (pinned by its own reason), an unknown name, an absent
+    file, TZ unset with /etc/localtime not a readable regular file, a conversion that fails or gives no
+    abbreviation, a zone database offset or abbreviation that differs from the conversion's (the C
+    library's fallback name at offset zero included), the abbreviation -00 through TZ and through
+    /etc/localtime, a TZ that only looks like a POSIX rule (an end transition time whose hours, minutes or
+    seconds are out of range included), and a rule whose names or offsets the conversion does not match
+    each give no local time and the reason for that case. ck-rule-*: _clock_posix_rule accepts and refuses
+    each number just inside and just outside its range (in each offset, the daylight offset included, and
+    in each transition time at the start and at the end of the rule, hours are at most 24 and minutes and
+    seconds at most 59; a transition time of 24:59:59 is accepted and 25:00 is refused), refuses a daylight
+    name with no transition rule, and names the rule's (abbreviation, offset) pairs, a daylight offset with
+    minutes among them. ck-localtime-*: _clock_regular_readable on real files in tmp: a regular file and a
+    symlink to one read True; a directory, an absent path, a dangling symlink, a FIFO and (when not root) a
+    mode 000 file read False. ck-malformed-*: main() with an unparseable or a non-object payload warns on
+    exit 0 and adds no reading for both modes. ck-live: the unreplaced clock gives a line of the known or
+    the unknown shape."""
+    utc = datetime.timezone.utc
+    fixed_now = datetime.datetime(2026, 9, 23, 17, 45, 2, tzinfo=utc)
+    edt = datetime.timezone(datetime.timedelta(hours=-4), "EDT")
+    modes = (("clock_inject_post", "PostToolUse"), ("clock_inject_failure", "PostToolUseFailure"))
+    for mode, event in modes:
+        if (aiqt_hooks.HANDLERS.get(mode) is not getattr(aiqt_hooks, mode, None)
+                or aiqt_hooks.HANDLER_EVENT.get(mode) != event or event not in aiqt_hooks.FAIL_OPEN_EVENTS):
+            failures.append("(ck-wiring-{}) {} must be a HANDLERS entry bound to {} in HANDLER_EVENT, and {} "
+                            "must be in FAIL_OPEN_EVENTS".format(mode, mode, event, event))
+    saved = (aiqt_hooks._clock_now, aiqt_hooks._clock_local)
+
+    def dispatch(mode, stdin_text):
+        buf, saved_stdin = io.StringIO(), sys.stdin
+        try:
+            sys.stdin = io.StringIO(stdin_text)
+            with contextlib.redirect_stdout(buf):
+                code = aiqt_hooks.main([mode])
+        finally:
+            sys.stdin = saved_stdin
+        try:
+            return code, json.loads(buf.getvalue())
+        except ValueError:
+            return code, "unparseable stdout " + repr(buf.getvalue())
+    try:
+        aiqt_hooks._clock_now = lambda: fixed_now
+        aiqt_hooks._clock_local = lambda now: (now.astimezone(edt), None)
+        for mode, event in modes:
+            got = aiqt_hooks.HANDLERS[mode]({"hook_event_name": event, "tool_name": "Bash"})
+            want = (0, {"hookSpecificOutput": {"hookEventName": event,
+                                               "additionalContext": _CK_KNOWN.format(event=event)}}, None)
+            if got != want:
+                failures.append("(ck-known-{}) with a fixed clock and zone, {} must return {!r}, got {!r}"
+                                .format(mode, mode, want, got))
+            for kind, stdin_text in (("unparseable", "}{"), ("non-object", "[]")):
+                code, obj = dispatch(mode, stdin_text)
+                if not (code == 0 and isinstance(obj, dict) and set(obj) == {"systemMessage"}
+                        and "unreadable payload" in obj["systemMessage"]):
+                    failures.append("(ck-malformed-{}-{}) main() given the payload {!r} must warn on exit 0 "
+                                    "with no reading, got exit {!r} and {!r}".format(
+                                        mode, kind, stdin_text, code, obj))
+            code, obj = dispatch(mode, json.dumps({"hook_event_name": event, "tool_name": "Read"}))
+            if (code, obj) != (0, want[1]):
+                failures.append("(ck-dispatch-{}) main() given a well-formed {} payload must print {!r} on "
+                                "exit 0, got exit {!r} and {!r}".format(mode, event, want[1], code, obj))
+        aiqt_hooks._clock_local = lambda now: (None, "ck-reason")
+        for mode, event in modes:
+            got = aiqt_hooks.HANDLERS[mode]({"hook_event_name": event, "tool_name": "Bash"})
+            want = (0, {"hookSpecificOutput": {"hookEventName": event,
+                                               "additionalContext": _CK_UNKNOWN.format(event=event)}}, None)
+            if got != want:
+                failures.append("(ck-unknown-text-{}) a zone that cannot be established must be named "
+                                "unknown with no local time: expected {!r}, got {!r}".format(mode, want, got))
+    finally:
+        aiqt_hooks._clock_now, aiqt_hooks._clock_local = saved
+    for mode, event, other in (("clock_inject_post", "PostToolUse", "PostToolUseFailure"),
+                               ("clock_inject_failure", "PostToolUseFailure", "PostToolUse")):
+        for kind, payload in (("other", {"hook_event_name": other}), ("absent", {})):
+            code, obj, err = aiqt_hooks.HANDLERS[mode](payload)
+            if not (_reduce_result(code, obj) == "allow-note" and err is None
+                    and repr(payload.get("hook_event_name")) in obj["systemMessage"]
+                    and "no clock reading was added" in obj["systemMessage"]):
+                failures.append("(ck-wrong-event-{}-{}) {} given a payload naming {!r} must note it and add "
+                                "no reading, got {!r}".format(mode, kind, mode, payload.get("hook_event_name"),
+                                                              (code, obj, err)))
+    td = datetime.timedelta
+    for offset, want in ((td(seconds=-1), "UTC-00:00:01"), (td(0), "UTC+00:00"), (td(seconds=1), "UTC+00:00:01"),
+                         (td(microseconds=-1), "UTC+00:00"), (td(microseconds=1), "UTC+00:00"),
+                         (td(seconds=-60), "UTC-00:01"), (td(seconds=59), "UTC+00:00:59"),
+                         (td(hours=-4), "UTC-04:00"), (td(hours=5, minutes=30), "UTC+05:30"),
+                         (td(hours=14), "UTC+14:00"), (td(hours=-12), "UTC-12:00")):
+        got = aiqt_hooks._clock_offset_text(offset)
+        if got != want:
+            failures.append("(ck-offset-{}) the offset {!r} must read {!r}, got {!r}".format(
+                offset.total_seconds(), offset, want, got))
+    local, reason = aiqt_hooks._clock_local(fixed_now, env={"TZ": "EST5EDT,M3.2.0,M11.1.0"},
+                                            readable=lambda _p: True, convert=lambda now: now.astimezone(edt))
+    if reason is not None or local is None or (local.utcoffset(), local.tzname(), local.hour) != (
+            td(hours=-4), "EDT", 13):
+        failures.append("(ck-zone-fixed) a fixed injected zone under a POSIX TZ rule must be kept, got {!r} "
+                        "and {!r}".format(local, reason))
+
+    def fixed(offset, name):
+        return lambda now: now.astimezone(datetime.timezone(offset, name))
+    ck_dir = Path(tmp) / "ck-localtime"
+    ck_dir.mkdir()
+    zone_file = ck_dir / "zone"
+    zone_file.write_bytes(b"TZif")
+    for label, env, convert in (
+            ("unset", {}, fixed(td(0), "UTC")), ("utc", {"TZ": "UTC"}, fixed(td(0), "UTC")),
+            ("etc-utc", {"TZ": "Etc/UTC"}, fixed(td(0), "UTC")),
+            ("new-york", {"TZ": "America/New_York"}, fixed(td(hours=-4), "EDT")),
+            ("colon-new-york", {"TZ": ":America/New_York"}, fixed(td(hours=-4), "EDT")),
+            ("est5edt", {"TZ": "EST5EDT"}, fixed(td(hours=-4), "EDT")),
+            ("rule-ist", {"TZ": "IST-5:30"}, fixed(td(hours=5, minutes=30), "IST")),
+            ("rule-npt", {"TZ": "NPT-5:45"}, fixed(td(hours=5, minutes=45), "NPT")),
+            ("rule-quoted", {"TZ": "<+0530>-5:30"}, fixed(td(hours=5, minutes=30), "+0530")),
+            ("rule-gmt", {"TZ": "GMT+5"}, fixed(td(hours=-5), "GMT")),
+            ("rule-seconds", {"TZ": "ABC-0:00:01"}, fixed(td(seconds=1), "ABC")),
+            ("rule-full", {"TZ": "ABC5DEF,M3.2.0,M11.1.0"}, fixed(td(hours=-4), "DEF")),
+            ("kolkata", {"TZ": "Asia/Kolkata"}, fixed(td(hours=5, minutes=30), "IST")),
+            ("kathmandu", {"TZ": "Asia/Kathmandu"}, fixed(td(hours=5, minutes=45), "+0545")),
+            ("adelaide", {"TZ": "Australia/Adelaide"}, fixed(td(hours=9, minutes=30), "ACST")),
+            ("london", {"TZ": "Europe/London"}, fixed(td(hours=1), "BST")),
+            ("etc-gmt-plus-5", {"TZ": "Etc/GMT+5"}, fixed(td(hours=-5), "-05")),
+            ("absolute-path", {"TZ": str(zone_file)}, fixed(td(hours=-4), "EDT"))):
+        want = convert(fixed_now)
+        local, reason = aiqt_hooks._clock_local(fixed_now, env=env, readable=lambda _p: True, convert=convert)
+        if reason is not None or local is None or (local, local.tzname()) != (want, want.tzname()):
+            failures.append("(ck-zone-known-{}) TZ {!r} read by the C library as {} ({}) must be kept, got {!r} "
+                            "and {!r}".format(label, env.get("TZ"), want.utcoffset(), want.tzname(), local,
+                                              reason))
+    # ck-zone-legacy-*: a zone database that lacks a legacy name and holds the zone it is a link to. A
+    # stand-in zoneinfo module fixes what the database holds, so each mapping in _CLOCK_LEGACY_US_ZONES is
+    # pinned whatever the host's copy of the database ships, and the row also pins the lookup order.
+    saved_zoneinfo = sys.modules.get("zoneinfo")
+    for name, linked, offset, abbreviation in (("EST5EDT", "America/New_York", td(hours=-4), "EDT"),
+                                               ("CST6CDT", "America/Chicago", td(hours=-5), "CDT"),
+                                               ("MST7MDT", "America/Denver", td(hours=-6), "MDT"),
+                                               ("PST8PDT", "America/Los_Angeles", td(hours=-7), "PDT")):
+        asked = []
+
+        def zone_info(key, linked=linked, offset=offset, abbreviation=abbreviation, asked=asked):
+            asked.append(key)
+            if key != linked:
+                raise KeyError("ck-no-such-zone {}".format(key))
+            return datetime.timezone(offset, abbreviation)
+        stand_in = types.ModuleType("zoneinfo")
+        stand_in.ZoneInfo = zone_info
+        sys.modules["zoneinfo"] = stand_in
+        try:
+            local, reason = aiqt_hooks._clock_local(fixed_now, env={"TZ": name}, readable=lambda _p: True,
+                                                    convert=fixed(offset, abbreviation))
+        finally:
+            if saved_zoneinfo is None:
+                sys.modules.pop("zoneinfo", None)
+            else:
+                sys.modules["zoneinfo"] = saved_zoneinfo
+        want = fixed(offset, abbreviation)(fixed_now)
+        if (reason is not None or local is None or (local, local.tzname()) != (want, want.tzname())
+                or asked != [name, linked]):
+            failures.append("(ck-zone-legacy-{}) TZ {!r}, on a zone database that lacks it and holds {}, must "
+                            "be looked up as {!r} then {!r} and kept as {} ({}), got {!r} and {!r} after the "
+                            "lookups {!r}".format(name.lower(), name, linked, name, linked, offset, abbreviation,
+                                                  local, reason, asked))
+
+    def nameless(now):
+        return now.astimezone(datetime.timezone(td(hours=2), ""))
+
+    class Nameless(datetime.tzinfo):
+        def utcoffset(self, dt):
+            return td(hours=2)
+
+        def tzname(self, dt):
+            return None
+
+        def dst(self, dt):
+            return td(0)
+
+    def overflowing(now):
+        raise OverflowError("ck-overflow")
+    empty = "TZ is set but empty, which leaves the zone to the implementation"
+    neither = "which is neither a complete POSIX TZ rule nor a zone the zone database holds"
+    database = "the zone database's UTC offset or abbreviation for TZ"
+    rule_pairs = "are not the ones the POSIX TZ rule"
+    for label, env, readable, convert, want in (
+            ("empty", {"TZ": ""}, True, None, empty), ("empty-colon", {"TZ": ":"}, True, None, empty),
+            ("unknown-name", {"TZ": "Ck/NoSuchZone"}, True, None, neither),
+            ("absent-file", {"TZ": ":/nonexistent/ck-zone"}, True, None, "which is not a regular file"),
+            ("unset-no-localtime", {}, False, None, "/etc/localtime is not a readable regular file"),
+            ("no-abbreviation", {"TZ": "CKT-2"}, True, nameless, "no zone abbreviation"),
+            ("none-abbreviation", {"TZ": "CKT-2"}, True, lambda now: now.astimezone(Nameless()),
+             "no zone abbreviation"),
+            ("conversion-fails", {"TZ": "CKT-2"}, True, overflowing, "conversion failed (OverflowError)"),
+            ("database-differs", {"TZ": "Etc/GMT-3"}, True, None, database),
+            ("database-abbreviation-differs", {"TZ": "Etc/GMT-3"}, True, fixed(td(hours=3), "XYZ"), database),
+            ("database-zero-offset-fallback", {"TZ": "Etc/UTC"}, True, fixed(td(0), "Etc"), database),
+            ("factory-tz", {"TZ": "Factory"}, True, fixed(td(0), "-00"), "abbreviation is -00"),
+            ("factory-localtime", {}, True, fixed(td(0), "-00"), "abbreviation is -00"),
+            ("rule-junk-daylight-name", {"TZ": "ABC5garbage"}, True, fixed(td(hours=-4), "garbage"), neither),
+            ("rule-junk-transitions", {"TZ": "ABC5DEF,garbage"}, True, fixed(td(hours=-4), "DEF"), neither),
+            ("rule-minutes-99", {"TZ": "ABC5:99"}, True, fixed(td(hours=-5, minutes=-59), "ABC"), neither),
+            ("rule-seconds-99", {"TZ": "ABC5:30:99"}, True,
+             fixed(-td(hours=5, minutes=30, seconds=59), "ABC"), neither),
+            ("rule-end-hour-25", {"TZ": "ABC5DEF,M3.2.0,M11.1.0/25"}, True, fixed(td(hours=-4), "DEF"), neither),
+            ("rule-end-minutes-60", {"TZ": "ABC5DEF,M3.2.0,M11.1.0/2:60"}, True, fixed(td(hours=-4), "DEF"),
+             neither),
+            ("rule-end-seconds-60", {"TZ": "ABC5DEF,M3.2.0,M11.1.0/2:00:60"}, True, fixed(td(hours=-4), "DEF"),
+             neither),
+            ("rule-name-differs", {"TZ": "ABC5"}, True, fixed(td(hours=-5), "XYZ"), rule_pairs),
+            ("rule-offset-differs", {"TZ": "ABC5"}, True, fixed(td(hours=-4), "ABC"), rule_pairs)):
+        if not env and os.name != "posix":
+            continue
+        local, reason = aiqt_hooks._clock_local(fixed_now, env=env, readable=lambda _p, r=readable: r,
+                                                convert=convert or (lambda now: now.astimezone(edt)))
+        if local is not None or not (isinstance(reason, str) and want in reason):
+            failures.append("(ck-zone-unknown-{}) a zone that cannot be established must give no local time "
+                            "and a reason holding {!r}, got {!r} and {!r}".format(label, want, local, reason))
+    for text in ("ABC24", "ABC5:59", "ABC5:30:59", "ABC5DEF,J1,J365", "ABC5DEF,0,365", "ABC5DEF,M12.5.6,M1.1.0",
+                 "ABC5DEF,M3.2.0/24,M11.1.0/0:59:59", "ABC5DEF,M3.2.0/24:59:59,M11.1.0",
+                 "ABC5DEF,M3.2.0,M11.1.0/24:59:59", "ABC5DEF24,M3.2.0,M11.1.0", "ABC5DEF4:59:59,M3.2.0,M11.1.0",
+                 "<AB+1>5<AB+2>,M3.2.0,M11.1.0"):
+        if aiqt_hooks._clock_posix_rule(text) is None:
+            failures.append("(ck-rule-accepts-{}) the complete POSIX TZ rule {!r} must be accepted".format(
+                text, text))
+    for text in ("ABC25", "ABC5:60", "ABC5:30:60", "ABC5DEF,J0,J365", "ABC5DEF,J1,J366", "ABC5DEF,0,366",
+                 "ABC5DEF,M13.1.0,M11.1.0", "ABC5DEF,M0.1.0,M11.1.0", "ABC5DEF,M3.0.0,M11.1.0",
+                 "ABC5DEF,M3.6.0,M11.1.0", "ABC5DEF,M3.2.7,M11.1.0", "ABC5DEF,M3.2.0/25,M11.1.0",
+                 "ABC5DEF,M3.2.0/2:60,M11.1.0", "ABC5DEF,M3.2.0/-2,M11.1.0", "ABC5DEF,M3.2.0/25:00,M11.1.0",
+                 "ABC5DEF,M3.2.0/2:00:60,M11.1.0", "ABC5DEF,M3.2.0,M11.1.0/25", "ABC5DEF,M3.2.0,M11.1.0/25:00",
+                 "ABC5DEF,M3.2.0,M11.1.0/2:60", "ABC5DEF,M3.2.0,M11.1.0/2:00:60", "ABC5DEF,M3.2.0,M11.1.0/-2",
+                 "ABC5DEF25,M3.2.0,M11.1.0", "ABC5DEF4:60,M3.2.0,M11.1.0", "ABC5DEF4:30:60,M3.2.0,M11.1.0",
+                 "ABC5DEF", "ABC5garbage", "ABC5DEF,M3.2.0", "ABC5DEF,garbage", "AB5", ":ABC5", "ABC5 ", "ABC"):
+        if aiqt_hooks._clock_posix_rule(text) is not None:
+            failures.append("(ck-rule-refuses-{}) {!r} is not a complete POSIX TZ rule and must be refused"
+                            .format(text, text))
+    for text, want in (("ABC5DEF,M3.2.0,M11.1.0", {("ABC", td(hours=-5)), ("DEF", td(hours=-4))}),
+                       ("ABC5DEF6,J60/2,300/3", {("ABC", td(hours=-5)), ("DEF", td(hours=-6))}),
+                       ("ABC5DEF4:30,M3.2.0,M11.1.0",
+                        {("ABC", td(hours=-5)), ("DEF", -td(hours=4, minutes=30))}),
+                       ("<+0530>-5:30", {("+0530", td(hours=5, minutes=30))}),
+                       ("ABC-0:00:01", {("ABC", td(seconds=1))})):
+        got = aiqt_hooks._clock_posix_rule(text)
+        if got != want:
+            failures.append("(ck-rule-pairs-{}) the rule {!r} must name {!r}, got {!r}".format(text, text, want,
+                                                                                            got))
+    regular_link, dangling = ck_dir / "regular-link", ck_dir / "dangling-link"
+    regular_link.symlink_to(zone_file)
+    dangling.symlink_to(ck_dir / "absent")
+    rows = [("regular", zone_file, True), ("symlink-to-regular", regular_link, True),
+            ("directory", ck_dir, False), ("absent", ck_dir / "absent", False),
+            ("dangling-symlink", dangling, False)]
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(str(ck_dir / "fifo"))
+        rows.append(("fifo", ck_dir / "fifo", False))
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        unreadable = ck_dir / "unreadable"
+        unreadable.write_bytes(b"TZif")
+        unreadable.chmod(0)
+        rows.append(("unreadable", unreadable, False))
+    for label, path, want in rows:
+        if aiqt_hooks._clock_regular_readable(str(path)) is not want:
+            failures.append("(ck-localtime-{}) _clock_regular_readable must give {} for a path that is {}"
+                            .format(label, want, label.replace("-", " ")))
+    context = aiqt_hooks.clock_inject_post({"hook_event_name": "PostToolUse"})[1]["hookSpecificOutput"][
+        "additionalContext"]
+    if not re.fullmatch(r"\[aiqt-clock\] Host clock reading at this PostToolUse hook event: UTC "
+                        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z; (local time \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} "
+                        r"UTC[+-]\d{2}:\d{2}(:\d{2})? \([^()]+\)|local time zone unknown \(.+\), so no local "
+                        r"time is given; use the UTC value)\. It is the host clock at that moment: .*", context,
+                        re.ASCII):
+        failures.append("(ck-live) the unreplaced clock must give a line of the known or the unknown shape, got "
+                        "{!r}".format(context))
 
 
 def _git(repo, *args, env_identity=False):
@@ -2709,20 +3139,26 @@ def _test_git_stash_ref(failures):
         if result != aiqt_hooks._deny_missing_tool_name("expbnd"):
             failures.append("{}: expected shared missing-tool deny, got {!r}".format(label, result))
 
-    # These payloads take the sibling's exact unreadable-command note path.
-    for tool_input in (None, [], {}, {"command": None}, {"command": 42}, {"command": ""}):
+    # An unreadable command denies through the shared reader, as in the sibling; an empty command is
+    # readable and takes the sibling's exact convention note.
+    for tool_input in (None, [], {}, {"command": None}, {"command": 42}):
         data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
                 "tool_input": tool_input}
         result = run("(sr-unreadable)", data)
         code, stdout_obj, stderr = result
-        if not (result == aiqt_hooks.git_explicit_binding(data) and code == 0 and
-                isinstance(stdout_obj, dict) and
-                isinstance(stdout_obj.get("systemMessage"), str) and
-                stdout_obj["systemMessage"] and
-                "hookSpecificOutput" not in stdout_obj and
-                "permissionDecision" not in stdout_obj and stderr is None):
-            failures.append("(sr-unreadable) expected sibling note for {!r}, got {!r}"
+        if _reduce_result(code, stdout_obj) != "deny" or stderr is not None:
+            failures.append("(sr-unreadable) expected the unreadable-command deny for {!r}, got {!r}"
                             .format(tool_input, result))
+    data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "tool_input": {"command": ""}}
+    result = run("(sr-empty)", data)
+    code, stdout_obj, stderr = result
+    if not (result == aiqt_hooks.git_explicit_binding(data) and code == 0 and
+            isinstance(stdout_obj, dict) and
+            isinstance(stdout_obj.get("systemMessage"), str) and
+            stdout_obj["systemMessage"] and
+            "hookSpecificOutput" not in stdout_obj and
+            "permissionDecision" not in stdout_obj and stderr is None):
+        failures.append("(sr-empty) expected sibling note for an empty command, got {!r}".format(result))
 
     data = payload("git stash pop")
     data["tool_name"] = "Read"
@@ -2739,6 +3175,151 @@ def _test_git_stash_ref(failures):
     if (aiqt_hooks.HANDLERS.get("git_stash_ref") is not aiqt_hooks.git_stash_ref or
             aiqt_hooks.HANDLER_EVENT.get("git_stash_ref") != aiqt_hooks.PRETOOL):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
+
+
+# A Bash payload whose command cannot be read: the malformed command shapes (absent, null, an array, an
+# integer, a float, an object, an object whose only key is __str__, a boolean), then a tool_input that is
+# itself missing or not an object (the same class). Each row is (name, the payload fields beside
+# hook_event_name and tool_name, the phrase the deny reason must hold to name the malformed field).
+_MALFORMED_BASH_INPUTS = (
+    ("command-absent", {"tool_input": {}}, "tool_input.command is missing"),
+    ("command-null", {"tool_input": {"command": None}}, "tool_input.command is null"),
+    ("command-list", {"tool_input": {"command": ["git", "push"]}}, "tool_input.command is an array"),
+    ("command-int", {"tool_input": {"command": 42}}, "tool_input.command is a number"),
+    ("command-float", {"tool_input": {"command": 1.5}}, "tool_input.command is a number"),
+    ("command-object", {"tool_input": {"command": {"command": "git push"}}}, "tool_input.command is an object"),
+    ("command-str-key-object", {"tool_input": {"command": {"__str__": "git push"}}},
+     "tool_input.command is an object"),
+    ("command-bool", {"tool_input": {"command": True}}, "tool_input.command is a boolean"),
+    ("tool-input-absent", {}, "tool_input is missing"),
+    ("tool-input-null", {"tool_input": None}, "tool_input is null"),
+    ("tool-input-list", {"tool_input": ["git push"]}, "tool_input is an array"),
+    ("tool-input-string", {"tool_input": "git push"}, "tool_input is a string"),
+    ("tool-input-number", {"tool_input": 7}, "tool_input is a number"),
+)
+# A command string holding a NUL: bash ends a command string at its first NUL, so the text before it runs
+# and the text after it never does. Each row is (name, command, the reverted verdicts that are not deny):
+# the git diff family at the end, at the start, mid-word and in place of a space, then the same places in
+# a plain echo. With the NUL check reverted every echo row goes red in every hook; a git diff row stays a
+# deny where the hook's own fallback for a command its lexer refuses already fails closed, and those
+# hooks are named in the row's revert exceptions.
+_NUL_BASH_COMMANDS = (
+    ("git-diff-nul-end", "git diff\x00", ("gate_weakening",)),
+    ("git-diff-nul-start", "\x00git diff", ()),
+    ("git-diff-nul-mid", "git d\x00iff", ("gate_weakening",)),
+    ("git-diff-nul-space", "git\x00diff", ("gate_weakening", "git_discard", "protected_line", "branch_root")),
+    ("echo-nul-end", "echo hi\x00", ()),
+    ("echo-nul-start", "\x00echo hi", ()),
+    ("echo-nul-mid", "ec\x00ho hi", ()),
+    ("echo-nul-space", "echo\x00hi", ()),
+)
+# The Bash hooks with a deny tier that judge every session's commands. The others read the command only
+# inside the scope an orchestration registry, a review dispatch binding or a live review hold gives them,
+# and inert outside it, so tools/selftest_orch_hooks.py builds that scope for their rows.
+_SCOPED_BASH_HANDLERS = frozenset((
+    "orch_truncation_guard", "orch_untracked_wait_loop", "review_dispatch_pin", "review_workdir_hold"))
+# The always-on Bash hooks that deny an empty or blank command on their own (gensrc_guard: its write-sink
+# detector reads no command in it). With the shared reader reverted to the lax empty read their malformed rows
+# still deny, which is pinned; a second revert to a lax read of a harmless command (true) must go red, so
+# the deny there still comes from the reader.
+_EMPTY_COMMAND_DENIED = frozenset(("gensrc_guard",))
+
+
+def _malformed_bash_handlers():
+    """The handler of every PreToolUse hook the manifest registers for Bash with the block default, outside
+    _SCOPED_BASH_HANDLERS, read from the manifest itself so a new Bash hook is covered when it lands."""
+    hooks = load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml")["hook"]
+    return [h["handler"] for h in hooks
+            if h.get("event") == "PreToolUse" and h.get("default") == "block" and h.get("matcher")
+            and re.fullmatch(h["matcher"], "Bash") and h["handler"] not in _SCOPED_BASH_HANDLERS]
+
+
+def _test_malformed_bash_payload(failures):
+    """Every always-on Bash hook with a deny tier denies each _MALFORMED_BASH_INPUTS shape with a reason
+    naming the malformed field, and each case goes red with the shared reader (_bash_command) reverted to
+    the lax read that took an unreadable command for an empty one; a well-formed command is judged as
+    before (the rows above pin it), and an empty one still reads as a command. A hook in
+    _EMPTY_COMMAND_DENIED denies that empty read on its own, which is pinned, and goes red instead with the
+    reader reverted to a lax read of a harmless command (true)."""
+    names = _malformed_bash_handlers()
+    if len(names) < 11:
+        failures.append("(mbp-enumeration) expected at least the 11 always-on Bash hooks with a deny tier in the "
+                        "manifest, got {!r}".format(names))
+    saved = aiqt_hooks._bash_command
+    for name in names:
+        handler = aiqt_hooks.HANDLERS[name]
+        for shape, fields, phrase in _MALFORMED_BASH_INPUTS:
+            data = dict({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash"}, **fields)
+            code, stdout_obj, _stderr = handler(data)
+            got = _reduce_result(code, stdout_obj)
+            reason = (stdout_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                      if isinstance(stdout_obj, dict) else "")
+            if got != "deny" or phrase not in reason:
+                failures.append("(mbp-{}-{}) a Bash payload whose {} must deny with a reason naming it; got {} "
+                                "({!r})".format(name, shape, phrase, got, reason))
+            aiqt_hooks._bash_command = lambda payload: ("", None)
+            try:
+                code, stdout_obj, _stderr = handler(data)
+            finally:
+                aiqt_hooks._bash_command = saved
+            if (_reduce_result(code, stdout_obj) == "deny") != (name in _EMPTY_COMMAND_DENIED):
+                failures.append("(mbp-{}-{}-revert) with the shared reader reverted to the lax read the case "
+                                "must {}".format(name, shape, "still deny on the hook's own empty-command deny"
+                                                 if name in _EMPTY_COMMAND_DENIED
+                                                 else "go red (not deny), so the deny comes from the reader"))
+            if name in _EMPTY_COMMAND_DENIED:
+                aiqt_hooks._bash_command = lambda payload: ("true", None)
+                try:
+                    code, stdout_obj, _stderr = handler(data)
+                finally:
+                    aiqt_hooks._bash_command = saved
+                if _reduce_result(code, stdout_obj) == "deny":
+                    failures.append("(mbp-{}-{}-revert-true) with the shared reader reverted to a lax read of "
+                                    "true the case must go red (not deny), so the deny comes from the reader"
+                                    .format(name, shape))
+
+
+def _test_nul_bash_command(failures):
+    """Every always-on Bash hook with a deny tier denies each _NUL_BASH_COMMANDS command with a reason naming
+    the NUL, and with the shared reader's NUL check reverted (a command holding a NUL read as it stands) each
+    case goes red, except where the row names the hook as already denying on its own fallback; that
+    exception is pinned too, so a row that stops going red, or starts, is reported."""
+    names = _malformed_bash_handlers()
+    for required in ("diff_source_pretool", "gate_weakening", "protected_line", "bash_absolute_paths"):
+        if required not in names:
+            failures.append("(nul-enumeration) {} is not among the always-on Bash hooks {!r}".format(
+                required, names))
+    saved = aiqt_hooks._bash_command
+
+    def nul_lax(payload):
+        tool_input = payload.get("tool_input")
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        if isinstance(command, str) and "\x00" in command:
+            return command, None
+        return saved(payload)
+
+    for name in names:
+        handler = aiqt_hooks.HANDLERS[name]
+        for shape, command, still_denied in _NUL_BASH_COMMANDS:
+            data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "cwd": str(repo_root()),
+                    "tool_input": {"command": command}}
+            code, stdout_obj, _stderr = handler(data)
+            got = _reduce_result(code, stdout_obj)
+            reason = (stdout_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                      if isinstance(stdout_obj, dict) else "")
+            if got != "deny" or "holds a NUL character at offset {}".format(command.index("\x00")) not in reason:
+                failures.append("(nul-{}-{}) a Bash command holding a NUL must deny with a reason naming the "
+                                "NUL; got {} ({!r})".format(name, shape, got, reason))
+            aiqt_hooks._bash_command = nul_lax
+            try:
+                code, stdout_obj, _stderr = handler(data)
+            finally:
+                aiqt_hooks._bash_command = saved
+            reverted = _reduce_result(code, stdout_obj)
+            if (reverted == "deny") != (name in still_denied):
+                failures.append("(nul-{}-{}-revert) with the NUL check reverted the case must {}; got {}".format(
+                    name, shape, "still deny on the hook's own fallback" if name in still_denied
+                    else "go red (not deny), so the deny comes from the NUL check", reverted))
 
 
 # The inline_errexit mutants: each is the live hook source with one rule removed by exact source edits
@@ -2896,10 +3477,12 @@ _IE_MUTANTS = {
                            "return _allow()"),),
     "unread-command": (('return _errexit_unreadable("command", "command" in tool_input, command, "a string")',
                         "return _allow()"),),
-    "unread-empty-command": (("if not isinstance(command, str) or not command:\n"
-                              '        return _errexit_unreadable("command"',
-                              "if not isinstance(command, str):\n"
-                              '        return _errexit_unreadable("command"'),),
+    "unread-empty-command": (("if not command:\n"
+                              '        return _errexit_unreadable("command", True, command, "a string")',
+                              "if False:\n"
+                              '        return _errexit_unreadable("command", True, command, "a string")'),),
+    "unread-nul-command": (("return _allow_note(_ERREXIT_UNREADABLE_NOTE.format(  # a command string holding a NUL",
+                            "_allow_note(_ERREXIT_UNREADABLE_NOTE.format(  # a command string holding a NUL"),),
     "unread-rest": (("if _errexit_unread_mentions(unread):", "if False:"),),
     "unread-any": (("if _errexit_unread_mentions(unread):", "if unread:"),),
     "unread-on": (("if unread and on:", "if False:"),),
@@ -3103,8 +3686,8 @@ _IE_UNREAD_ROWS = (
     ("(ie-n35) a set the lexer stopped inside, never read as a set", "set -e <(true); a; b", "unread-rest", True),
     ("(ie-u4) a construct that stops the lexer at the start of a segment", "a; <<< x; set -e; false; echo after",
      "unread-rest", True),
-    ("(ie-u5) a NUL stops the lexer before any segment", "true\x00; set -e; false; echo after", "unread-none",
-     True),
+    ("(ie-u5) a here-string stops the lexer before any segment", "<<< x; set -e; false; echo after",
+     "unread-none", True),
     ("(ie-u6) a rest past an unquoted heredoc read again",
      "cat <<EOF > /abs/out.txt\nbody\nEOF\ndiff <(a) <(b); set -e; false; echo after", "unread-rest", True),
     ("(ie-u7) a rest that mentions only shopt", "cat <(true); shopt -s nullglob; a; b", "unread-shopt", True),
@@ -3419,6 +4002,32 @@ def _test_inline_errexit(failures, tmp):
         if mutants[mutant](data) != (0, None, None):
             failures.append("{}: the {} mutant must silence this row, so the row shows the note decides it; got "
                             "{!r}".format(label, mutant, mutants[mutant](data)))
+    # A command string holding a NUL (bash runs only the text before it) comes through the shared reader
+    # (_bash_command) and allows with the unreadable-input note carrying the reader's detail, which names the
+    # NUL's offset. Under the mutant that drops that note the command reaches the lexer again, and each row
+    # then gives the result pinned beside it, so the row shows the NUL note decides it.
+    for label, command, flip in (
+            ("(ie-m14) a NUL after set -e and a failing step", "set -e; false\x00; echo after",
+             aiqt_hooks._allow_note(aiqt_hooks._ERREXIT_UNREAD_NOTE)),
+            ("(ie-m15) a NUL at the start of the command", "\x00set -e; false; echo after",
+             aiqt_hooks._allow_note(aiqt_hooks._ERREXIT_UNREAD_NOTE)),
+            ("(ie-m16) a NUL at the end of a plain command", "echo hi\x00", (0, None, None))):
+        mutant = "unread-nul-command"
+        used.add(mutant)
+        detail = aiqt_hooks._bash_command(payload(command))[1]
+        want = aiqt_hooks._allow_note(unread.format("command", "a string holding a NUL ({})".format(detail)))
+        got = handler(payload(command))
+        offset = "holds a NUL character at offset {}".format(command.index("\x00"))
+        if got != want or offset not in (detail or ""):
+            failures.append("{}: expected the unreadable-input note naming the NUL ({}), got {!r}".format(
+                label, offset, got))
+        if mutant not in mutants:
+            failures.append("{}: its mutant {} was not built".format(label, mutant))
+            continue
+        flipped = mutants[mutant](payload(command))
+        if flipped != flip:
+            failures.append("{}: the {} mutant must give {!r} for this row, so the row shows the NUL note decides "
+                            "it; got {!r}".format(label, mutant, flip, flipped))
     # A command the lexer could not read in full, whose read part shows no hazard, notes that the rest was not
     # read where errexit is on where the lexer stopped, and otherwise only where that rest mentions set or
     # shopt as a word, errexit or pipefail; each row must then give the other result under its mutant.
@@ -3728,9 +4337,13 @@ def _psm_oracle(failures, handler):
 
 
 # Foreground trkasy rows with no '&' byte anywhere: a quoted here-document write followed by another command
-# reads its body as code, so an apostrophe there left the scan open and the guard denied a detach the
+# had its body read as code, so an apostrophe there left the scan open and the guard denied a detach the
 # command cannot hold. The full row has the shape of a real markdown brief (quotes, backquotes, parentheses,
-# a '#' heading) written with cat, then hashed.
+# a '#' heading) written with cat, then hashed. The scan now reads such a body apart from the command's
+# quote state, so the raw scan no longer reads those two rows as open; the rows the raw scan still reads as
+# open (_TRKASY_NOAMP_FLIP_ROWS: a stray quote, a body whose delimiter line never comes, and an unquoted
+# delimiter's body holding a command substitution, which the scan still reads as shell text) pin the no-'&'
+# branch instead.
 _TRKASY_NOAMP_FULL = (
     "cat > /abs/qa/brief.md <<'EOF'\n# Verify the fix (the ci-status check)\n\n"
     "You are an independent reviewer. Check that the findings are fixed; do not just confirm.\n\n"
@@ -3739,8 +4352,12 @@ _TRKASY_NOAMP_FULL = (
     "2. A present null head_sha was reported as \"missing required field\".\n"
     "Keep this well under one hour; the branch's newest commit holds the fix.\nEOF\n"
     "sha256sum /abs/qa/brief.md")
-_TRKASY_NOAMP_ALLOW_ROWS = (
+_TRKASY_NOAMP_FLIP_ROWS = (
     ("trkasy-noamp-min", "'"),
+    ("trkasy-noamp-heredoc-unterminated", "cat > /abs/f <<'EOF'\nit's\nsha256sum /abs/f"),
+    ("trkasy-noamp-heredoc-unquoted-subst", "cat > /abs/f <<EOF\nit's $(date)\nEOF\nsha256sum /abs/f"),
+)
+_TRKASY_NOAMP_ALLOW_ROWS = _TRKASY_NOAMP_FLIP_ROWS + (
     ("trkasy-noamp-heredoc-min", "cat > /abs/f <<'EOF'\nit's\nEOF\nsha256sum /abs/f"),
     ("trkasy-noamp-full", _TRKASY_NOAMP_FULL),
 )
@@ -3751,9 +4368,10 @@ _TRKASY_REAL_AMP_DENY_ROWS = (
     ("trkasy-amp-after-noamp-full", _TRKASY_NOAMP_FULL + "\nsleep 5 &"),
 )
 # Runtime start forms that can start a background job with no '&' byte, each beside an apostrophe in a
-# here-document body read as code and beside an uncertain '#': the open quote or '#' still denies, since
-# the guard takes the no-'&' allow only for a command holding no such form. The plain forms are the
-# disclosed silent allow and are not rows here.
+# here-document body the scan still reads as code (an unquoted delimiter's body holding a command
+# substitution) and beside an uncertain '#': the open quote or '#' still denies, since the guard takes the
+# no-'&' allow only for a command holding no such form. The plain forms are the disclosed silent allow and
+# are not rows here.
 _TRKASY_RUNTIME_START_FORMS = (
     ("coproc", "coproc sleep 5"),
     ("eval-runtime-amp", "eval \"sleep 5 $(printf '\\x26')\""),
@@ -3832,8 +4450,8 @@ _TRKASY_RUNTIME_START_QUOTED_FORMS = (
 
 def _trkasy_start_rows(forms, contexts=("heredoc-apos", "uncertain-hash")):
     """Deny rows for runtime start forms, each beside the named contexts: an apostrophe in a here-document body
-    read as code, and an uncertain '#'."""
-    prefixes = {"heredoc-apos": "cat <<'EOF'\nit's\nEOF\n", "uncertain-hash": "(true)# x\n"}
+    the scan still reads as code, and an uncertain '#'."""
+    prefixes = {"heredoc-apos": "cat <<EOF\nit's $(date)\nEOF\n", "uncertain-hash": "(true)# x\n"}
     return tuple(("trkasy-start-" + context + "-" + label, prefixes[context] + form)
                  for label, form in forms for context in contexts)
 
@@ -3941,13 +4559,538 @@ def _test_trkasy_no_amp(failures, tmp):
         return fixed(command, lifts)
     aiqt_hooks._orch_foreground_detach_lexed = unfixed
     try:
-        for label, command in _TRKASY_NOAMP_ALLOW_ROWS:
+        for label, command in _TRKASY_NOAMP_FLIP_ROWS:
             got = _decision(handler, command, cwd=str(root))
             if got != "deny":
                 failures.append("({}-flip) the row must deny with the no-'&' branch reading the raw scan, "
                                 "so it pins that branch; got {}".format(label, got))
     finally:
         aiqt_hooks._orch_foreground_detach_lexed = fixed
+
+
+# The adopter's refused command as submitted, with only its absolute host path prefix replaced by /abs/proj/
+# (a tracked file holds no host path): a mkdir, then a quoted here-document write whose body holds
+# apostrophes and the word source (a runtime start form), then a python3 -c command. It holds no '&'.
+_TRKASY_HEREDOC_ADOPTER = (
+    "mkdir -p /abs/proj/tmp/t217-220/fix4prep; cat > "
+    "/abs/proj/tmp/t217-220/fix4prep/keep-list.txt <<'EOF'\n"
+    "Keep list for fix 4 of the staged TODO 217 and TODO 220 change to dispatch-when-free.sh\n"
+    "The staged fix 3 candidate passed the orchestrator's own staging runs: test 699 of 699, with fixtures 713 "
+    "of 713,\n"
+    "mutants as expected (67 named killed, each with the guard passing), every earlier finding and both older "
+    "defects gone.\n"
+    "Each item below was validated at source by the orchestrator, most by a reproduction kept in ctx/. Fix each "
+    "across its\n"
+    "class, not only at the cited line. Every new or changed check gets a test case that fails without it and a "
+    "named\n"
+    "mutant that a case kills.\n"
+    "\n"
+    "f. dispatch-retry.sh line 10 computes its output path as "
+    '/abs/proj/tmp/dispatch-$FAMILY-$(basename "$BRIEF"\n'
+    "   .md).out. For a relative brief name starting with a hyphen, basename prints an error and the path is\n"
+    "   dispatch-claude-.out; for a name ending in a line feed, command substitution drops it. Either way the "
+    "retry script\n"
+    "   reads, keeps aside and renames another file than the one the wrapper writes. Reproduced "
+    "(ctx/val-extra.sh, E2):\n"
+    "   with an earlier output at the wrapper's path, a retry copy run for -dash.md and for tail.md LF kept "
+    "nothing aside\n"
+    "   and the wrapper overwrote the earlier output, which the retry script promises never to happen (M-87). "
+    "Compute the\n"
+    "   path with the same name rules as the wrapper (hyphen-leading names, trailing line feeds kept), and with "
+    "the same\n"
+    "   folder rule, so the two paths are equal for every brief argument.\n"
+    "g. The case reply-ok-en-US-unreadable-quote runs under en_US.UTF-8, and every other case under C.UTF-8, "
+    "both host\n"
+    "   locales. Reproduced (ctx/locale-probe.sh): with the locale name replaced by one not installed, the "
+    "candidate fails\n"
+    "   that case on a bash setlocale warning in stderr, and the reply-ok-locale-removed mutant is killed only "
+    "by that\n"
+    "   warning, not by the shape check. Make the test independent of what the host happens to have installed: "
+    "either pick\n"
+    "   at run time an installed locale that is shown to make the check matter and fail closed, naming the gap, "
+    "when there\n"
+    "   is none, or use a construction that does not depend on a host locale. The class is every case whose "
+    "locale the\n"
+    "   test sets or defaults.\n"
+    "h. Defects found at staging:\n"
+    "   1. The output path of 1 brief can be the same file as another brief of the same call. Reproduced "
+    "(ctx/val-extra.sh,\n"
+    "      E1a and E1b): with briefs y.md and <out>/dispatch-claude-y.out, the first dispatch overwrites the "
+    "second brief\n"
+    "      before its dispatch, which then sends that output as its prompt; in the reverse order the second "
+    "dispatch\n"
+    "      overwrites the first brief after its dispatch, so the brief is lost. Both exit 0. The class is any "
+    "output path\n"
+    "      of 1 call that is the same file as any brief of that call, however the 2 are spelled.\n"
+    "   2. dispatch-retry.sh prints its output path and its keep-aside path raw, in 3 lines. Reproduced "
+    "(ctx/val-extra3.sh,\n"
+    '      E3): a brief name holding a line feed splits the line "kept the earlier output as ..." over 2 lines. '
+    "The wrapper's\n"
+    "      rule (each byte outside printable ASCII shown as 1 ?) applies to every path these lines print.\n"
+    '   3. NOTES.txt line 35 says the en_US.UTF-8 case "passes either way" on a host without that locale; it '
+    "fails either\n"
+    "      way, on the stderr warning (item g). Make the sentence true for the code handed back.\n"
+    '   4. NOTES.txt line 44 says "test-dispatch-rc.sh is unchanged"; the staged copy differs from the live one '
+    "by its added\n"
+    "      Time line. Make it true.\n"
+    '   5. Test line 830 reads "accepted =ref[0]" (missing space). The mutant branch for a mutant whose guard '
+    "passed but\n"
+    "      some cases were not run cannot be reached (a case is NOT RUN only when the guard failed) and would "
+    'print "guard\n'
+    '      failed (guard passed, but N cases not run)", which contradicts itself. Fix the spacing; remove the '
+    "branch or make\n"
+    "      its text true.\n"
+    "Observation for the orchestrator, not a keep item: dist/edit-scripts/discovery-launch.sh, the only caller "
+    "of\n"
+    'dispatch-retry.sh, names its 3 launch logs by $(basename "$BRIEF" .md) without --. Its names stay '
+    "consistent between\n"
+    "the write and the read, so the effect is basename error text on its stderr for a hyphen-leading name. It "
+    "is not a file\n"
+    "of this hand-back; leave it unchanged and name it in NOTES.txt as a sibling for the orchestrator.\n"
+    "EOF\n"
+    'python3 -I -c "\n'
+    "import sys,hashlib,re\n"
+    "d=open(sys.argv[1],'rb').read(); print(hashlib.sha256(d).hexdigest(), len(d), d.count(b'\\n'), 'nonascii', "
+    "sum(b>127 for b in d), 'longest', max(len(l) for l in d.split(b'\\n')))\n"
+    '" /abs/proj/tmp/t217-220/fix4prep/keep-list.txt\n'
+)
+_TAB = "\t"
+# Here-document forms from the bash manual (Here Documents): bash reads no quote, comment or operator in a
+# body, under a quoted delimiter ('EOF', "EOF", \EOF) or an unquoted one, where only parameter expansion,
+# command substitution, arithmetic expansion and the backslash before '$', a backquote, a backslash or a
+# newline apply; <<- strips leading tabs from each body line and from the delimiter line; the bodies of two
+# here-documents on one line follow it in order. Each row is (label, command, expected decision, base
+# decision): the base decision is the guard's before the scan read a body apart from the command's quote
+# state, and every row whose two decisions differ must give its base decision under the reverted mutant.
+_TRKASY_HEREDOC_BODY_ROWS = (
+    # A DATA body's quote never leaves the command's quote open: a plain cat write (or cat to standard output)
+    # followed only by a reader of the data-writing allowlist (sha256sum, ls and the like) still allows, its
+    # delimiter form and apostrophe notwithstanding. Each delimiter-form row's body also holds a start form
+    # (coproc) beside its apostrophe or quote, so reading that body as code (the body-spans-off mutant) denies
+    # it: the row's base decision is deny, and it pins the body-on-its-own reading. A command holding anything
+    # else (the adopter's python3, a source, a coproc outside a data shape) is not a data shape, so its body
+    # is read as commands (_orch_heredoc_data_shape).
+    ("hdb-adopter-exact", _TRKASY_HEREDOC_ADOPTER, "deny", "deny"),
+    ("hdb-unquoted-apostrophe-source", "cat > /tmp/k.txt <<EOF\na'b\nsource\nEOF", "allow", "deny"),
+    ("hdb-single-quoted-delim", "cat > /abs/f <<'EOF'\ncoproc sleep 5\necho it's\nEOF\nsha256sum /abs/g",
+     "allow", "deny"),
+    ("hdb-double-quoted-delim", "cat > /abs/f <<\"EOF\"\ncoproc sleep 5\necho it's\nEOF\nsha256sum /abs/g",
+     "allow", "deny"),
+    ("hdb-backslash-delim", "cat > /abs/f <<\\EOF\ncoproc sleep 5\necho it's\nEOF\nsha256sum /abs/g",
+     "allow", "deny"),
+    ("hdb-dash-tabs-unquoted", "cat <<-EOF\n" + _TAB + "coproc sleep 5\n" + _TAB + "echo it's\n" + _TAB
+     + "EOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-dash-tabs-quoted", "cat <<-'EOF'\n" + _TAB + "coproc sleep 5\n" + _TAB + "echo it's\n" + _TAB
+     + "EOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-two-on-one-line",
+     "cat <<A <<'B'\nit's\ncoproc sleep 5\nA\nsay \"hi\ncoproc sleep 5\nB\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-double-quote-body", "cat <<EOF\nsay \"hi\ncoproc sleep 5\nEOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-plain-brace-body", "cat <<EOF\nit's ${HOME}\ncoproc sleep 5\nEOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-escaped-substitutions", "cat <<EOF\nit's \\$(date) \\`date\\`\ncoproc sleep 5\nEOF\nsha256sum /abs/f",
+     "allow", "deny"),
+    ("hdb-and-list-after-body", "cat > /abs/f <<'EOF'\nit's\nEOF\nls /abs && sha256sum /abs/f", "allow", "allow"),
+    # The quote a body left open hid a real bare '&' after the delimiter line (QUOTE SHIFT): now read.
+    ("hdb-amp-between-bodies", "cat <<A\nit's\nA\nsleep 5 & cat <<B\nx'\nB", "deny", "allow"),
+    ("hdb-amp-before-stray-quote", "cat <<EOF\nit's\nEOF\nsleep 5 & echo '", "deny", "allow"),
+    # DISCLOSED RESIDUAL the fix keeps, pinned at its current allow: a quote one data body opens and a later
+    # data body closes is not read across the two (the command never runs the file they share; a cat reading
+    # both prints them). A body a shell reads, a coproc after the body, or a written file the command runs
+    # makes the command not a data shape, so its body is read as commands (_TRKASY_HEREDOC_CONSUMER_ROWS).
+    ("hdb-residual-cross-body-pair",
+     "cat > /abs/s <<A\nit's\nA\ncat >> /abs/s <<B\nx'; sleep 5 & echo '\nB\nsha256sum /abs/s", "allow", "deny"),
+    ("hdb-residual-coproc-after-body", "cat <<EOF\nit's\nEOF\ncoproc sleep 5", "deny", "deny"),
+    # Unchanged denies: a substitution an unquoted body runs, read as today (as shell text); a body whose
+    # delimiter line never comes; a bare '&' after the delimiter line; a body fed to a shell; an open body
+    # quote hiding an '&'; an uncertain '#' in a body; and a body this scan does not read on its own.
+    ("hdb-subst-amp-apostrophe", "cat <<EOF\nit's $(sleep 5 &)\nEOF", "deny", "deny"),
+    ("hdb-subst-amp", "cat <<EOF\n$(sleep 5 &)\nEOF", "deny", "deny"),
+    ("hdb-backquote-amp-apostrophe", "cat <<EOF\nit's `sleep 5 &`\nEOF", "deny", "deny"),
+    ("hdb-brace-subst-amp", "cat <<EOF\nit's ${x:-$(sleep 5 &)}\nEOF", "deny", "deny"),
+    ("hdb-subst-setsid-apostrophe", "cat <<EOF\nit's $(setsid -f sleep 5)\nEOF", "deny", "deny"),
+    ("hdb-subst-source-apostrophe", "cat <<EOF\nit's $(date)\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-unterminated-quoted", "cat <<'EOF'\nit's\nsource /abs/f", "deny", "deny"),
+    ("hdb-unterminated-unquoted-amp", "cat <<EOF\nit's\nsleep 5 &", "deny", "deny"),
+    ("hdb-indented-delim-unterminated", "cat <<EOF\nit's\n EOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-amp-after-quoted", "cat <<'EOF'\nit's\nEOF\nsleep 5 &", "deny", "deny"),
+    ("hdb-amp-after-unquoted", "cat <<EOF\nit's\nEOF\nsleep 5 &", "deny", "deny"),
+    ("hdb-shell-body-amp", "bash <<EOF\nsleep 5 &\nEOF", "deny", "deny"),
+    ("hdb-shell-body-closed-quote-amp", "bash <<EOF\nit's\nx'\nsleep 5 &\nEOF", "deny", "deny"),
+    # A body left with a quote open makes every bare '&' in the command unreadable, so the lexer's lift of a
+    # quoted body's '&' never frees one that a shell running the body detaches.
+    ("hdb-shell-body-amp-then-apostrophe", "bash <<'EOF'\nsleep 5 &\necho it's\nEOF", "deny", "deny"),
+    ("hdb-written-file-run",
+     "cat > /abs/s.sh <<'EOF'\nsleep 5 &\nEOF\ncat > /abs/n.txt <<'EOF'\nit's\nEOF\nbash /abs/s.sh", "deny", "deny"),
+    ("hdb-open-quote-hides-amp", "cat <<EOF\nit's & more\nEOF", "deny", "deny"),
+    ("hdb-uncertain-hash-body", "cat <<'EOF'\n(x #y)\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-after-paren", "(true); cat <<'EOF'\nit's\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-backslash-newline-unquoted", "cat <<EOF\nit's \\\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-in-substitution", "x=$(cat <<EOF\nit's\nEOF\n); source /abs/f", "deny", "deny"),
+    ("hdb-appended-bodies-amp",
+     "cat > /abs/s <<A\nit's\nA\ncat >> /abs/s <<B\nx'; sleep 5 &\nB\nbash /abs/s", "deny", "deny"),
+    # Unchanged allows: a body quote that hides an '&' a shell reading the body also hides, a plain cat write
+    # call, and the commit message form.
+    ("hdb-shell-body-quoted-amp", "bash <<EOF\necho 'a & b'\nEOF", "allow", "allow"),
+    ("hdb-data-command", "cat > /abs/f <<'EOF'\nit's & so\nEOF", "allow", "allow"),
+    ("hdb-commit-form", "git commit -m \"$(cat <<'EOF'\nDon't merge & go\nEOF\n)\"", "allow", "allow"),
+)
+# The mutant reverts the fix: the scan never reads a body on its own, so every body it does not skip as a
+# plain cat write is read as shell text again, its quotes shifting the command's quote state.
+_TRKASY_HEREDOC_MUTANT_ANCHOR = "else _orch_heredoc_body_spans(command, i + 1, n, specs))"
+_TRKASY_HEREDOC_MUTANT_REPLACEMENT = "else (None, i))"
+_TRKASY_HEREDOC_MUTANT_CHILD = (
+    "import importlib.util, json, resource, sys\n"
+    "limit = int(sys.argv[3])\n"
+    "resource.setrlimit(resource.RLIMIT_AS, (limit, limit))\n"
+    "spec = importlib.util.spec_from_file_location(sys.argv[2], sys.argv[1])\n"
+    "module = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(module)\n"
+    "job = json.loads(sys.stdin.read())\n"
+    "out = []\n"
+    "for command in job['commands']:\n"
+    "    data = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_input': {'command': command},\n"
+    "            'cwd': job['cwd']}\n"
+    "    _code, obj, _err = module.orch_truncation_guard(data)\n"
+    "    hso = obj.get('hookSpecificOutput') if isinstance(obj, dict) else None\n"
+    "    out.append(hso.get('permissionDecision', 'allow') if isinstance(hso, dict) else 'allow')\n"
+    "sys.stdout.write(json.dumps(out))\n"
+)
+_TRKASY_HEREDOC_MUTANT_AS_LIMIT = 2 * 1024 ** 3
+_TRKASY_HEREDOC_MUTANT_TIMEOUT = 300
+
+
+def _trkasy_heredoc_mutant_decisions(failures, tmp, root, commands, anchor=_TRKASY_HEREDOC_MUTANT_ANCHOR,
+                                     replacement=_TRKASY_HEREDOC_MUTANT_REPLACEMENT, tag="hdb"):
+    """The reverted mutant's decision for each command, run in a child of its own session (process group)
+    under RLIMIT_AS and a wall-clock timeout, the whole group killed when it ends; None (with a failure
+    appended) when the anchor is not found exactly once or the child does not give one decision per
+    command. The mutant is the hook source with anchor replaced by replacement; tag names its failures and
+    its directory."""
+    source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+    if source.count(anchor) != 1:
+        failures.append("({}-mutant-anchor) the mutant anchor {!r} occurs {} times in the hook source, expected "
+                        "once".format(tag, anchor, source.count(anchor)))
+        return None
+    mutant_dir = tmp / ("trkasy-" + tag + "-mutant")
+    os.makedirs(mutant_dir, exist_ok=True)
+    module_name = tag + "_mutant_aiqt_hooks"
+    path = mutant_dir / (module_name + ".py")
+    path.write_text(source.replace(anchor, replacement), encoding="utf-8")
+    payload = json.dumps({"commands": list(commands), "cwd": str(root)})
+    proc = subprocess.Popen(
+        [sys.executable, "-I", "-B", "-c", _TRKASY_HEREDOC_MUTANT_CHILD, str(path), module_name,
+         str(_TRKASY_HEREDOC_MUTANT_AS_LIMIT)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True)
+    try:
+        out, err = proc.communicate(payload, timeout=_TRKASY_HEREDOC_MUTANT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        out, err = None, "timed out after {} s".format(_TRKASY_HEREDOC_MUTANT_TIMEOUT)
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait(timeout=30)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
+    try:
+        decisions = json.loads(out) if out else None
+    except ValueError:
+        decisions = None
+    if not isinstance(decisions, list) or len(decisions) != len(commands):
+        failures.append("({}-mutant-run) the reverted mutant gave no decision per row (exit {!r}, stderr {!r})"
+                        .format(tag, proc.returncode, (err or "")[-400:]))
+        return None
+    return decisions
+
+
+def _test_trkasy_heredoc_body_data(failures, tmp):
+    """Foreground trkasy rows in registry scope for here-document bodies (_TRKASY_HEREDOC_BODY_ROWS): each row
+    gives its expected decision, and each row whose decision the fix changed gives its base decision under
+    the reverted mutant (_trkasy_heredoc_mutant_decisions), so every such row fails with the fix reverted."""
+    root = tmp / "trkasy-heredoc-body"
+    (root / ".aiqt").mkdir(parents=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_truncation_guard
+    for label, command, expected, _base in _TRKASY_HEREDOC_BODY_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != expected:
+            failures.append("({}) expected {} in registry scope; got {}".format(label, expected, got))
+    changed = [(label, command, base) for label, command, expected, base in _TRKASY_HEREDOC_BODY_ROWS
+               if expected != base]
+    if not changed:
+        failures.append("(hdb-changed-rows) no row pins a changed decision")
+        return
+    decisions = _trkasy_heredoc_mutant_decisions(failures, tmp, root, [command for _l, command, _b in changed])
+    if decisions is None:
+        return
+    for (label, _command, base), got in zip(changed, decisions):
+        if got != base:
+            failures.append("({}-mutant) the row must give its base decision {} with the fix reverted, so it "
+                            "pins the fix; got {}".format(label, base, got))
+
+
+_HDC_APOS = "coproc sleep 5\necho it's\n"  # a runtime start form beside an apostrophe, no '&'
+_HDC_PLAIN = "coproc sleep 5\necho its\n"  # the same with no apostrophe
+_HDC_AMP = "sleep 5 &\n"  # a bare '&'
+
+
+def _hdc_rows(label, head, body_names, tail=""):
+    """One row per body kind for a here-document whose consumer line is head and whose delimiter is EOF:
+    (label-kind, command, expected) for each (kind, expected) in body_names."""
+    bodies = {"apos": _HDC_APOS, "plain": _HDC_PLAIN, "amp": _HDC_AMP}
+    return tuple(("hdc-{}-{}".format(label, kind), head + "\n" + bodies[kind] + "EOF" + tail, expected)
+                 for kind, expected in body_names)
+
+
+# Unless the WHOLE command is a safe data-writing shape (_orch_heredoc_data_shape), a here-document body is
+# read as its consumer's commands: a quote it leaves open denies beside a runtime start form, as in the
+# command's own text, and a bare '&' in it denies, never lifted as quoted body text. The same body with no
+# apostrophe and no '&' is the plain start form's silent allow. Each row is (label, command, expected
+# decision, decision before the consumer was read); every row whose two decisions differ must give the
+# earlier one under the mutant that reads every body as data.
+_HDC_SHELL_APOS = (("apos", "deny"), ("plain", "allow"))
+_HDC_SHELL_ALL = _HDC_SHELL_APOS + (("amp", "deny"),)
+_TRKASY_HEREDOC_CONSUMER_ROWS = tuple(
+    (label, command, expected, "allow")
+    for label, command, expected in (
+        _hdc_rows("bash-unquoted", "bash <<EOF", _HDC_SHELL_APOS)
+        + _hdc_rows("bash-quoted", "bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("bash-dq", "bash <<\"EOF\"", _HDC_SHELL_ALL)
+        + _hdc_rows("bash-s", "bash -s <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("sh", "sh <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("dash", "dash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("zsh", "zsh <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("abs-bash", "/bin/bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("env-bash", "env bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("source-stdin", "source /dev/stdin <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("dot-stdin", ". /dev/stdin <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("bash-dash-tabs", "bash <<-'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("cat-piped-to-bash", "cat <<'EOF' | bash", _HDC_SHELL_ALL)
+        + _hdc_rows("after-and-list", "cd /abs && bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("unnamed", "runner <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("git-commit-file-stdin", "git commit -F - <<'EOF'", (("amp", "deny"),))
+        + _hdc_rows("cat-renamed", "hash -p /usr/bin/bash cat; cat <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("write-bash", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nbash /abs/s.sh")
+        + _hdc_rows("write-sh", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nsh /abs/s.sh")
+        + _hdc_rows("write-source", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nsource /abs/s.sh")
+        + _hdc_rows("write-dot", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\n. /abs/s.sh")
+        + _hdc_rows("write-dot-slash", "cat > s.sh <<'EOF'", _HDC_SHELL_ALL, "\nchmod +x s.sh; ./s.sh")
+        + _hdc_rows("write-python3", "cat > /abs/s.py <<'EOF'", _HDC_SHELL_ALL, "\npython3 /abs/s.py")
+        + _hdc_rows("write-same-line-bash", "cat > /abs/s.sh <<'EOF'; bash /abs/s.sh", _HDC_SHELL_ALL)
+        + _hdc_rows("write-redirect-into-bash", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nbash < /abs/s.sh")
+        + _hdc_rows("write-piped-to-bash", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\ncat /abs/s.sh | bash")
+        + _hdc_rows("write-bash-c", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL,
+                    "\nbash -c 'source /abs/s.sh'")
+        + _hdc_rows("write-python3-c-exec", "cat > /abs/s.py <<'EOF'", _HDC_SHELL_ALL,
+                    "\npython3 -c \"exec(open('/abs/s.py').read())\"")
+        + _hdc_rows("write-mv-then-run", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL,
+                    "\nmv /abs/s.sh /abs/t.sh; bash /abs/t.sh")
+        + (("hdc-two-shell-bodies-rebalance", "bash <<'EOF'\n" + _HDC_APOS + "EOF\nbash <<'EOF'\necho it's\nEOF",
+            "deny"),
+           ("hdc-write-run-cross-body-pair",
+            "cat > /abs/s <<A\nit's\nA\ncat >> /abs/s <<B\nx'; sleep 5 & echo '\nB\nbash /abs/s", "deny"),
+           ("hdc-write-sourced-single-quoted", "cat > /abs/f <<'EOF'\nit's\nEOF\nsource /abs/f", "deny"),
+           ("hdc-write-sourced-double-quoted", "cat > /abs/f <<\"EOF\"\nit's\nEOF\nsource /abs/f", "deny"),
+           ("hdc-write-sourced-backslash", "cat > /abs/f <<\\EOF\nit's\nEOF\nsource /abs/f", "deny"))
+        # The cost ceilings, each end just inside, at and just outside (_orch_heredoc_data_shape fails toward
+        # commands): a command holding more than 64 here-documents is not proved a data shape, and neither is
+        # one longer than 65536 characters (here, a plain cat write with an '&' body padded to that length).
+        # The body-limit label is the TOTAL number of here-documents in the command (the last one carries the
+        # '&' body), so 64 is the limit itself (allow), 63 just inside it and 65 just outside it (deny).
+        + tuple(("hdc-body-limit-{}".format(total),
+                 "cat <<'E'\nx\nE\n" * (total - 1) + "cat <<'E'\n" + _HDC_AMP + "E", expected)
+                for total, expected in ((63, "allow"), (64, "allow"), (65, "deny")))
+        + tuple(("hdc-run-text-limit-{}".format(size),
+                 "cat > /abs/s <<'E'\n" + _HDC_AMP + "E\nsha256sum /" + "a" * (size - 42), expected)
+                for size, expected in ((65535, "allow"), (65536, "allow"), (65537, "deny")))
+    )
+) + tuple((label, command, expected, before) for label, command, expected, before in (
+    # Unchanged allows (the -plain rows above too): the plain start form with no apostrophe and no '&' is the
+    # silent allow (as in the command's own text), an apostrophe with no start form or '&' is allowed, a
+    # quoted '&' in a shell's body is quoted text, an unquoted shell body's '&' and a shell body's '&'
+    # before an apostrophe were denied already, and a data body (a plain cat write followed only by a reader,
+    # or a cat to standard output) keeps its allow: its quote opens nothing and the lexer lifts its quoted
+    # '&'. A python3 -c reading the file, a bash run of another written file, and the adopter (python3 after
+    # the write) are NOT data shapes, so their bodies read as commands and now deny; 'cat1>f' is the word
+    # cat1 with an fd-1 redirect, not cat, so it is not a data shape either.
+    ("hdc-bash-apostrophe-no-start-form", "bash <<'EOF'\necho it's\nEOF", "allow", "allow"),
+    ("hdc-bash-quoted-amp-text", "bash <<'EOF'\necho 'a & b'\nEOF", "allow", "allow"),
+    ("hdc-bash-unquoted-amp", "bash <<EOF\n" + _HDC_AMP + "EOF", "deny", "deny"),
+    ("hdc-bash-amp-then-apostrophe", "bash <<'EOF'\nsleep 5 &\necho it's\nEOF", "deny", "deny"),
+    ("hdc-cat-stdout-apos", "cat <<'EOF'\n" + _HDC_APOS + "EOF\necho done", "allow", "allow"),
+    ("hdc-cat-stdout-amp", "cat <<'EOF'\n" + _HDC_AMP + "EOF\necho done", "allow", "allow"),
+    ("hdc-write-hashed-apos", "cat > /abs/n.txt <<'EOF'\n" + _HDC_APOS + "EOF\nsha256sum /abs/n.txt", "allow",
+     "allow"),
+    ("hdc-write-hashed-amp", "cat > /abs/n.txt <<'EOF'\n" + _HDC_AMP + "EOF\nsha256sum /abs/n.txt", "allow",
+     "allow"),
+    ("hdc-write-python3-c-argument", "mkdir -p /abs; cat > /abs/k.txt <<'EOF'\n" + _HDC_APOS
+     + "EOF\npython3 -I -c \"import sys; print(open(sys.argv[1]).read())\" /abs/k.txt", "deny", "allow"),
+    ("hdc-write-other-file-run", "cat > /abs/n.txt <<'EOF'\n" + _HDC_APOS + "EOF\nbash /abs/other.sh", "deny",
+     "allow"),
+    ("hdc-cat1-fd-redirect", "cat1>/abs/f <<'E'\n" + _HDC_AMP + "E", "deny", "allow"),
+    ("hdc-cat-partly-quoted-delim-amp", "cat <<EO'F'\n" + _HDC_AMP + "EOF", "allow", "allow"),
+    ("hdc-bash-partly-quoted-delim-amp", "bash <<EO'F'\n" + _HDC_AMP + "EOF", "deny", "allow"),
+    ("hdc-adopter-exact", _TRKASY_HEREDOC_ADOPTER, "deny", "allow"),
+    ("hdc-adopter-unquoted", "cat > /tmp/k.txt <<EOF\na'b\nsource\nEOF", "allow", "allow"),
+))
+# The mutant reads every body as data (the reading before the command's data shape was proved).
+_TRKASY_HDC_MUTANT_ANCHOR = "runs = not data_shape"
+_TRKASY_HDC_MUTANT_REPLACEMENT = "runs = False"
+
+
+def _test_trkasy_heredoc_consumer(failures, tmp):
+    """Foreground trkasy rows in registry scope for a here-document body's consumer
+    (_TRKASY_HEREDOC_CONSUMER_ROWS): each row gives its expected decision, and each row whose decision
+    reading the consumer changed gives its earlier decision under the mutant that reads every consumer as
+    data (_trkasy_heredoc_mutant_decisions), so every such row fails with that change reverted."""
+    root = tmp / "trkasy-heredoc-consumer"
+    (root / ".aiqt").mkdir(parents=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_truncation_guard
+    labels = [row[0] for row in _TRKASY_HEREDOC_CONSUMER_ROWS]
+    if len(set(labels)) != len(labels):
+        failures.append("(hdc-labels) the consumer rows repeat a label")
+    for label, command, expected, _before in _TRKASY_HEREDOC_CONSUMER_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != expected:
+            failures.append("({}) expected {} in registry scope; got {}".format(label, expected, got))
+    changed = [(label, command, before) for label, command, expected, before in _TRKASY_HEREDOC_CONSUMER_ROWS
+               if expected != before]
+    if not changed:
+        failures.append("(hdc-changed-rows) no row pins a changed decision")
+        return
+    decisions = _trkasy_heredoc_mutant_decisions(
+        failures, tmp, root, [command for _l, command, _b in changed], _TRKASY_HDC_MUTANT_ANCHOR,
+        _TRKASY_HDC_MUTANT_REPLACEMENT, "hdc")
+    if decisions is None:
+        return
+    for (label, _command, before), got in zip(changed, decisions):
+        if got != before:
+            failures.append("({}-mutant) the row must give its earlier decision {} with every consumer read as "
+                            "data, so it pins the consumer reading; got {}".format(label, before, got))
+
+
+# Each data-shape proof rule, as (tag, anchor, replacement, rows): the anchor/replacement revert exactly that
+# rule in a scratch mutant, and every row DENIES in registry scope but ALLOWS with the rule reverted, so each
+# row is red precisely when its rule is gone. The reverts gate a condition with `False and` or widen a word
+# pattern, leaving the rest of the proof intact.
+# The cat write target rule has three clauses, each with its own revert: the '..' clause, the absolute /dev
+# and /proc clause, and the allowlisted-last-component clause.
+_DS_DOTDOT_ANCHOR = '            if not parts or ".." in parts:\n'
+_DS_DOTDOT_REPL = '            if not parts:\n'
+_DS_DEVPROC_ANCHOR = '            if (target.startswith("/") and parts[0] in ("dev", "proc")\n'
+_DS_DEVPROC_REPL = '            if False and (target.startswith("/") and parts[0] in ("dev", "proc")\n'
+_DS_READER_ANCHOR = "            if parts[-1] in _ORCH_DATA_SHAPE_ALLOWED:\n"
+_DS_READER_REPL = "            if False and parts[-1] in _ORCH_DATA_SHAPE_ALLOWED:\n"
+_DS_PIPE_ANCHOR = 'if ch in "&|" and not command.startswith(ch * 2, i):'
+_DS_PIPE_REPL = 'if ch == "&" and not command.startswith(ch * 2, i):'
+_DS_EXTRA_ANCHOR = "extra_word = True"
+_DS_EXTRA_REPL = "extra_word = False"
+_DS_REDIR_ANCHOR = (
+    "        if has_redirect:\n"
+    "            return False\n"
+    "        return first_word in _ORCH_DATA_SHAPE_ALLOWED")
+_DS_REDIR_REPL = (
+    "        if False and has_redirect:\n"
+    "            return False\n"
+    "        return first_word in _ORCH_DATA_SHAPE_ALLOWED")
+_DS_WORD_ANCHOR = '_ORCH_DATA_SHAPE_WORD_RE = re.compile(r"[A-Za-z0-9_./+,:@%=-]+")'
+_DS_WORD_REPL = '_ORCH_DATA_SHAPE_WORD_RE = re.compile(r"[^\\s;&|<>]+")'
+_TRKASY_DATA_SHAPE_RULE_GROUPS = (
+    ("dsreadername", _DS_READER_ANCHOR, _DS_READER_REPL, (
+        ("ds-target-wc", "cat > /abs/bin/wc <<'EOF'\n" + _HDC_APOS + "EOF\nwc /dev/null"),
+        ("ds-target-ls", "cat > /abs/bin/ls <<'EOF'\n" + _HDC_APOS + "EOF\nls /abs"),
+        ("ds-target-stat", "cat > /abs/bin/stat <<'EOF'\n" + _HDC_APOS + "EOF\nstat /abs"),
+        ("ds-target-mkdir", "cat > /abs/bin/mkdir <<'EOF'\n" + _HDC_APOS + "EOF\nmkdir /abs/d"),
+        ("ds-target-cat", "cat > /abs/bin/cat <<'EOF'\n" + _HDC_APOS + "EOF\ncat /abs/f"),
+    )),
+    ("dsdevproc", _DS_DEVPROC_ANCHOR, _DS_DEVPROC_REPL, (
+        ("ds-target-dev", "cat > /dev/stdout <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-fd-1", "cat > /dev/fd/1 <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-stderr", "cat > /dev/stderr <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-tty", "cat > /dev/tty <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-shm-itself", "cat > /dev/shm <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-null-prefix", "cat > /dev/nullx <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-proc", "cat > /proc/self/fd/0 <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-proc-fd-1", "cat > /proc/self/fd/1 <<'EOF'\n" + _HDC_APOS + "EOF"),
+    )),
+    ("dsdotdot", _DS_DOTDOT_ANCHOR, _DS_DOTDOT_REPL, (
+        ("ds-target-dotdot-dev", "cat > /abs/../dev/stdout <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dotdot-relative", "cat > ../x/stdout <<'EOF'\n" + _HDC_APOS + "EOF\nwc ../x/stdout"),
+    )),
+    ("dspipe", _DS_PIPE_ANCHOR, _DS_PIPE_REPL, (
+        ("ds-pipe-cat", "cat <<'EOF' | wc -c\n" + _HDC_APOS + "EOF"),
+        ("ds-pipe-after-write", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\nwc /abs/f | wc -l"),
+    )),
+    ("dsextra", _DS_EXTRA_ANCHOR, _DS_EXTRA_REPL, (
+        ("ds-extra-word", "cat x > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF"),
+    )),
+    ("dsredir", _DS_REDIR_ANCHOR, _DS_REDIR_REPL, (
+        ("ds-reader-redirect", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\nwc /abs/f > /abs/c.txt"),
+    )),
+    ("dsword", _DS_WORD_ANCHOR, _DS_WORD_REPL, (
+        ("ds-plain-word-subst", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\necho $(bash /abs/f)"),
+        ("ds-plain-word-quoted-subst", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\nls \"$(bash /abs/f)\""),
+        ("ds-plain-word-backquote", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\ntest -n `bash /abs/f`"),
+    )),
+)
+# The narrowing of the /dev and /proc clause, as (tag, anchor, replacement, rows): every row ALLOWS in registry
+# scope and DENIES with the clause put back to its wider form (any target whose first non-empty part is dev
+# or proc, absolute or relative, /dev/null and /dev/shm included), so each row is red if that wider rule
+# returns. Each is an ordinary message-body write whose bare '&' is text: a /dev/shm hand-back file alone or
+# then hashed, a write to /dev/null, and a relative project path under a directory named dev or proc.
+_DS_DEVPROC_WIDE_ANCHOR = (
+    '            if (target.startswith("/") and parts[0] in ("dev", "proc")\n'
+    '                    and parts != ["dev", "null"] and not (len(parts) > 2 and parts[:2] == ["dev", "shm"])):\n')
+_DS_DEVPROC_WIDE_REPL = '            if parts[0] in ("dev", "proc"):\n'
+_DS_AMP_BODY = "Tom & Jerry\n"
+_TRKASY_DATA_SHAPE_ALLOW_GROUPS = (
+    ("dsdevwide", _DS_DEVPROC_WIDE_ANCHOR, _DS_DEVPROC_WIDE_REPL, (
+        ("ds-allow-dev-shm-alone", "cat > /dev/shm/handoff.txt <<'EOF'\n" + _DS_AMP_BODY + "EOF"),
+        ("ds-allow-dev-shm-hashed", "cat > /dev/shm/handoff.txt <<'EOF'\n" + _DS_AMP_BODY
+         + "EOF\nsha256sum /dev/shm/handoff.txt"),
+        ("ds-allow-dev-null", "cat > /dev/null <<'EOF'\n" + _DS_AMP_BODY + "EOF"),
+        ("ds-allow-relative-dev-alone", "cat > dev/notes.md <<'EOF'\n" + _DS_AMP_BODY + "EOF"),
+        ("ds-allow-relative-dev-wc", "cat > dev/notes.md <<'EOF'\n" + _DS_AMP_BODY + "EOF\nwc dev/notes.md"),
+        ("ds-allow-relative-proc", "cat > proc/notes.md <<'EOF'\n" + _DS_AMP_BODY + "EOF\nls proc"),
+    )),
+)
+
+
+def _test_trkasy_data_shape_rules(failures, tmp):
+    """Each data-shape proof rule has rows that DENY in registry scope and ALLOW when that one rule is reverted
+    (_TRKASY_DATA_SHAPE_RULE_GROUPS, a scratch mutant per rule), so each row is red precisely when its rule is
+    gone: each clause of the cat write target restriction on its own (a '..' component, an absolute /dev or
+    /proc target other than /dev/null or a path under /dev/shm/, an allowlisted last path component), the
+    single-pipe rule, the no-extra-words-on-the-cat-line rule, the no-redirect-on-a-reader-segment rule, and the
+    plain-word rule (a substitution or quoted substitution in a reader's argument after a write). The rows of
+    _TRKASY_DATA_SHAPE_ALLOW_GROUPS ALLOW in registry scope and DENY with the /dev and /proc clause widened
+    back to every dev or proc first part, so each is red if that wider rule returns."""
+    root = tmp / "trkasy-data-shape-rules"
+    (root / ".aiqt").mkdir(parents=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_truncation_guard
+    seen = set()
+    for groups, expected, reverted in ((_TRKASY_DATA_SHAPE_RULE_GROUPS, "deny", "allow"),
+                                       (_TRKASY_DATA_SHAPE_ALLOW_GROUPS, "allow", "deny")):
+        for tag, anchor, replacement, rows in groups:
+            for label, command in rows:
+                if label in seen:
+                    failures.append("(ds-labels) the rule rows repeat a label {!r}".format(label))
+                seen.add(label)
+                got = _decision(handler, command, cwd=str(root))
+                if got != expected:
+                    failures.append("({}) expected {} in registry scope; got {}".format(label, expected, got))
+            decisions = _trkasy_heredoc_mutant_decisions(
+                failures, tmp, root, [command for _l, command in rows], anchor, replacement, tag)
+            if decisions is None:
+                continue
+            for (label, _command), got in zip(rows, decisions):
+                if got != reverted:
+                    failures.append("({}-mutant) the row must {} with its rule reverted, so it pins the rule; "
+                                    "got {}".format(label, reverted, got))
 
 
 _WAIT_LOOP_DENY_COMMAND = "while true; do gh run view 1; sleep 30; done &"
@@ -6390,6 +7533,23 @@ _DEADLINE_SHAPES = {
     "paren_hash4": lambda n, base: ("Bash", {"command": "(" * ((n - 12) // 2) + " #a #b #c #d\n"
                                              + ")" * ((n - 12) // 2)}),
     "seps_hash5": lambda n, base: ("Bash", {"command": "(" + ";" * (n - 24) + " #a #b #c #d #e\n)"}),
+    # future_stamp_write's shapes, run with `base` as its one store root (_DEADLINE_ENV): appends to a store
+    # file that each carry a past literal, so the Bash analysis runs until it decides or spends its work budget,
+    # the same with a future store write at the end (a warning while the budget lasts, a fail-open pass after),
+    # a run of unmatched command substitutions before a future store write (the shape the former script's
+    # linear-scan test grew), and Write contents whose every line is checked, one with a future literal on its
+    # last line and one with a future literal on every line.
+    "fsw_store_past_appends": lambda n, base: ("Bash", {"command": _repeat(
+        "echo 'seen 2000-01-01T00:00Z' >> " + base + "/log.md\n", n)}),
+    "fsw_store_past_appends_after": lambda n, base: ("Bash", {"command": _repeat(
+        "echo 'seen 2000-01-01T00:00Z' >> " + base + "/log.md\n", n,
+        "printf 'hb 2099-01-01T00:00Z' > " + base + "/state.md")}),
+    "fsw_open_substs_after": lambda n, base: ("Bash", {"command": "echo " + _repeat(
+        "$(", n - 5, " 2099-01-01T00:00Z > " + base + "/s.md")}),
+    "fsw_store_write_after": lambda n, base: ("Write", {"file_path": base + "/state.md", "content": _repeat(
+        "a line of the record\n", n, "hb: 2099-01-01T00:00Z\n")}),
+    "fsw_literal_lines": lambda n, base: ("Write", {"file_path": base + "/state.md", "content": _repeat(
+        "hb 2099-01-01T00:00Z\n", n)}),
 }
 # Every PreToolUse handler is timed on each uncertain '#' shape as well, and must reach the decision the pinned
 # base commit reached on it: "allow", except where this map names another for the (handler, shape) or, first,
@@ -6444,6 +7604,9 @@ _DEADLINE_CASES = {
     "commit_identity": ("nest_parens", "git_words_unbal_dq"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
+    "future_stamp_write": ("fsw_store_past_appends", "fsw_store_past_appends_after", "fsw_open_substs_after",
+                           "fsw_store_write_after", "fsw_literal_lines", "write_content", "nest_cmdsubst",
+                           "heredocs"),
     "gate_weakening": ("git_words_unbal_dq", "git_add_unbal", "git_push_words_unbal", "noverify_after",
                        "ansi_c_herestr", "ansi_c_noverify_after", "procsubst_run_after",
                        "fg_setsid_options"),
@@ -6495,7 +7658,11 @@ _DEADLINE_NOTE_CASES = frozenset((
     ("inline_errexit", "errexit_note_after"), ("inline_errexit", "errexit_unread_after"),
     ("orch_truncation_guard", "fg_detach_after"), ("orch_truncation_guard", "fg_setsid_options"),
     ("orch_truncation_guard", "fg_arith_open"), ("orch_truncation_guard", "fg_heredoc_ops_open"),
-    ("orch_truncation_guard", "fg_heredocs_amp")))
+    ("orch_truncation_guard", "fg_heredocs_amp"),
+    # future_stamp_write warns (never denies) on a Write whose changed lines carry a future literal, at every size
+    ("future_stamp_write", "fsw_store_write_after"), ("future_stamp_write", "fsw_literal_lines")))
+# The environment each named handler's cases run under.
+_DEADLINE_ENV = {"future_stamp_write": lambda cwd: {"AIQT_STORE_ROOT": cwd}}
 # The (handler, shape) cases whose known outcome outside registry scope is a silent allow, each within its
 # bound: the plain-delimiter heredoc bodies of fg_heredocs_plain (skipped data, every body closed, and no
 # `&` or quote in them, so the in-scope detector reads nothing and the note scan reads the whole command;
@@ -6513,49 +7680,68 @@ _DEADLINE_ALLOW_CASES = frozenset((
     ("orch_truncation_guard", "fg_quoted_heredoc_amps"),
     ("pgrep_self_match", "pgrep_distinct")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
-# CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
-# CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
-# 3.14.4 (2026-10-15) after the linear scans, the slowest case used at most 0.09 s of CPU at 64 KB, 0.40 s
-# at 256 KB and 1.83 s at 1 MB (on nest_parens, under git_discard or git_stash_ref), its wall-clock time
-# within 0.01 s of that; before them, five handlers took 15 to 39 s or more at 64 KB. A further run on a
-# 24-core host with Python 3.14.4 (2026-10-16) measured at most 0.10, 0.48 and 2.07 s of CPU (2.07 s on
-# nest_parens under git_stash_ref), each within 0.01 s of its wall-clock time. inline_errexit, timed on these
-# shapes later, costs more at 1 MB: at most 2.22 s of CPU on paren_hash4 (above), and a further run of it on a
-# 24-core host with Python 3.14.4 (2026-10-25) measured at most 0.10, 0.46 and 2.01 s of CPU, each on
-# paren_hash4. Every timed row, here and in
-# the lex-cost rows, compares the median of its _TIMED_RUNS (3) runs' CPU times (_judged, the
-# second-fastest) with its CPU bound and checks every run's outcome: one run slowed by a loaded host is
-# tolerated, while a slowdown on two of the three runs fails. Measured on one shared 80-CPU host
-# (2026-11-01, one-minute load average 38 to 44, no load added), as that median over 3 to 5 trials with
-# the handler's work done once (honest) and twice (doubled): cd_git_fetch_unbal under review_workdir_hold
-# at 256 KB, honest 0.861 to 0.947 s, doubled 1.801 to 1.908 s, so a 2.0 s bound would pass every doubled
-# trial and 256 KB keeps its 3.0 s bound; git_add_unbal under gate_weakening at 1 MB, honest 3.737 to
-# 3.868 s, doubled 7.925 to 8.709 s, each over the 7.0 s bound. The truncation guard on seps_hash_lines
-# with its '&' (_DEADLINE_HASH_DETACH_SHAPES) later measured about 2.9 to 3.2 s of CPU at 1 MB with Python
-# 3.14.4 (2026-11-02), which leaves the 1 MB bound a margin of about 2.2 times. These are measured bounds
-# on these cases, not a complexity guarantee: they fail a return of the growth the old scans had, but an
-# implementation whose super-linear cost is small enough on these sizes fits all three.
+# CPU seconds one in-process handler call may use on a shape of that size, judged on the calling thread's own
+# CPU clock (time.thread_time, read inside the call by _deadline_timed_call). The figures below were recorded
+# before these rows moved to that clock, on this process's CPU time plus that of the child processes it
+# reaped, which over the same span is never less than the calling thread's own. Over two runs on a 24-core
+# host with Python 3.14.4 (2026-10-15) after the linear scans, the slowest case used at most 0.09 s of CPU at
+# 64 KB, 0.40 s at 256 KB and 1.83 s at 1 MB (on nest_parens, under git_discard or git_stash_ref), its
+# wall-clock time within 0.01 s of that; before them, five handlers took 15 to 39 s or more at 64 KB. A
+# further run on a 24-core host with Python 3.14.4 (2026-10-16) measured at most 0.10, 0.48 and 2.07 s of CPU
+# (2.07 s on nest_parens under git_stash_ref), each within 0.01 s of its wall-clock time. inline_errexit,
+# timed on these shapes later, costs more at 1 MB: at most 2.22 s of CPU on paren_hash4 (above), and a further
+# run of it on a 24-core host with Python 3.14.4 (2026-10-25) measured at most 0.10, 0.46 and 2.01 s of CPU,
+# each on paren_hash4. Every timed row, here and in the lex-cost rows, compares the median of its _TIMED_RUNS
+# (3) runs' CPU times (_judged, the second-fastest) with its CPU bound and checks every run's outcome: one run
+# slowed by a loaded host is tolerated, while a slowdown on two of the three runs fails. Measured on one
+# shared 80-CPU host (2026-11-01, one-minute load average 38 to 44, no load added), as that median over 3 to 5
+# trials with the handler's work done once (honest) and twice (doubled): cd_git_fetch_unbal under
+# review_workdir_hold at 256 KB, honest 0.861 to 0.947 s, doubled 1.801 to 1.908 s, so a 2.0 s bound would
+# pass every doubled trial and 256 KB keeps its 3.0 s bound; git_add_unbal under gate_weakening at 1 MB,
+# honest 3.737 to 3.868 s, doubled 7.925 to 8.709 s, each over the 7.0 s bound. The truncation guard on
+# seps_hash_lines with its '&' (_DEADLINE_HASH_DETACH_SHAPES) later measured about 2.9 to 3.2 s of CPU at 1 MB
+# with Python 3.14.4 (2026-11-02), which leaves the 1 MB bound a margin of about 2.2 times. These are measured
+# bounds on these cases, not a complexity guarantee: they fail a return of the growth the old scans had, but
+# an implementation whose super-linear cost is small enough on these sizes fits all three.
 _DEADLINE_BOUNDS = {65536: 1.5, 262144: 3.0, 1048576: 7.0}
 _TIMED_RUNS = 3
-# Wall-clock seconds one such call may take on any size: PRETOOL_BUDGET_SECONDS, the deadline main() gives
-# the same call in production, so a regression whose time goes to waiting (a sleep, a lock, a slow
-# filesystem), which the CPU bounds do not see, fails here as that call would fail closed there. Against
-# the 2026-10-16 wall-clock times above at 64 KB and 256 KB (at most 0.10 and 0.49 s) the 8-second gate
-# leaves a margin of about 80 and 16 times; at 1 MB the truncation guard on seps_hash_lines with its '&'
-# (_DEADLINE_HASH_DETACH_SHAPES) measured about 2.9 to 3.2 s of CPU, its wall-clock time within 0.01 s of
-# that, a margin of about 2.5 times, and against the 2026-11-01 honest 1 MB runs above, whose wall-clock
-# medians were 3.738 to 3.869 s on the loaded host (the figures above are those runs' CPU medians), about
-# 2.1 times. inline_errexit's CPU time at 1 MB (at most 2.22 s, above; its wall-clock time was not
-# recorded) is under those 1 MB figures. Like the CPU bounds, this bound judges the median of the case's _TIMED_RUNS runs: a hang or
-# wait on two of the three runs fails, while one run stalled by a loaded host does not fail the case, so a
-# wait on only one run in three passes here. A case whose median wall-clock time is over it, with at least
-# one run reaching a decision, fails and is run once more only as a diagnostic, which never clears it; the
-# failure carries every run's wall-clock time, CPU time and outcome, and the diagnostic run's as well.
-_DEADLINE_WALL_BOUND = aiqt_hooks.PRETOOL_BUDGET_SECONDS
+# Seconds of its own work one such call may take on any size: PRETOOL_BUDGET_SECONDS, the deadline main()
+# gives the same call in production. A call whose own CPU time and own waits (a sleep, a lock, a slow
+# filesystem, a child or another thread it waits for) add up to more than that fails here in every mode. In
+# production the same overrun fails closed with exit 2 only in a mode that fails closed: a note-only
+# PreToolUse mode (NOTE_ONLY_PRETOOL_MODES) warns on exit 0 when its deadline passes, and a fail-open mode is
+# not held to that deadline. The two also measure differently: production's deadline is a wall-clock window
+# armed before the payload read, so it also charges reading the payload and any time queued for a CPU, while
+# this budget times only the handler call and judges the median of its runs' own work (below). Its own work is
+# its wall-clock time less the time its thread spent runnable but queued for a CPU (_deadline_run_own), read
+# as the second field (nanoseconds, converted to seconds) of the calling thread's /proc/thread-self/schedstat
+# before and after the call (_deadline_run_queue_seconds), so a loaded host's queueing of the calling thread
+# is not charged; time a child or thread the call waits for spends queued for a CPU is charged, since the
+# calling thread is then waiting, not queued. Where that file is missing, unreadable or all zeros (scheduler
+# statistics off), the case reports its own work as not evaluated rather than judging a guess. No reading is
+# scaled by a load factor. Own work is at most wall-clock time, so against the 2026-10-16 wall-clock times
+# above at 64 KB and 256 KB (at most 0.10 and 0.49 s) the 8-second budget leaves a margin of at least about 80
+# and 16 times; at 1 MB the truncation guard on seps_hash_lines with its '&' (_DEADLINE_HASH_DETACH_SHAPES)
+# measured about 2.9 to 3.2 s of CPU, its wall-clock time within 0.01 s of that, a margin of about 2.5 times,
+# and against the 2026-11-01 honest 1 MB runs above, whose wall-clock medians were 3.738 to 3.869 s on the
+# loaded host (the figures above are those runs' CPU medians), at least about 2.1 times. inline_errexit's CPU
+# time at 1 MB (at most 2.22 s, above; its wall-clock time was not recorded) is under those 1 MB figures. The
+# loaded-host truncation-guard runs that dl-shape-load-absorbed-wall starts from (3.9 s of CPU in 3.93, 8.47
+# and 8.92 s wall-clock, recorded on an 80-CPU host at a load of 30 to 40) recorded no run-queue delay, so how
+# much of their 4.57 and 5.02 s off the CPU was queueing is not known: had all of it been the call's own
+# waiting, their median, 8.47 s, would fail here. The CPU work is also bounded per size on the thread clock
+# (_DEADLINE_BOUNDS). Like the CPU bounds, this budget judges the median of the case's _TIMED_RUNS runs: own
+# work over it on two of the three runs fails, on only one run in three passes. A case whose median own work
+# is over it, with at least one run reaching a decision, fails and is run once more only as a diagnostic,
+# which never clears it; the failure carries every run's wall-clock time, CPU time, run-queue delay, own work
+# and outcome, and the diagnostic run's as well.
+_DEADLINE_OWN_WORK_BOUND = aiqt_hooks.PRETOOL_BUDGET_SECONDS
 # Each case runs under a _DeadlineWindow of this many wall-clock seconds, a hang guard only: it ends a case
-# that would run on for minutes, so the run reports it instead of stalling. The wall-clock gate is
-# _DEADLINE_WALL_BOUND, well below it.
+# that would run on for minutes, so the run reports it instead of stalling. The own-work gate is
+# _DEADLINE_OWN_WORK_BOUND, well below it.
 _DEADLINE_HANG_SECONDS = 60.0
+# The deadline child's fixed wall-clock limit (_deadline_child_wait): a child still running after it is
+# killed, whatever the load, and nothing is divided by anything.
 _DEADLINE_CHILD_TIMEOUT = 900
 
 
@@ -6580,12 +7766,6 @@ def _deadline_fixtures(tmp):
     (gensrc / ".aiqt" / "gensrc.json").write_text(
         json.dumps({"version": 1, "generated": entries}), encoding="utf-8")
     return plain, orch, gensrc
-
-
-def _cpu_seconds():
-    """CPU seconds this process has used (every thread), plus those of the child processes it reaped."""
-    children = os.times()
-    return time.process_time() + children.children_user + children.children_system
 
 
 def _hook_cpu_timed(call, bound=None, runs=3):
@@ -6615,10 +7795,10 @@ def _hook_cpu_timed(call, bound=None, runs=3):
     of CPU per call at 400 KB, so about five minutes), while the rows that time a small probe first
     fail on that probe; a call that keeps state between runs (a memoised quadratic helper, for example)
     can read low on its second and third runs, and its least reading then passes the bound. The
-    median-judged rows (_timed_runs over the
-    lex-cost and deadline-shape cases) keep their existing clocks, time.process_time in the lex-cost
-    rows and _cpu_seconds in the deadline-shape cases, and judge the median of three runs, which
-    already tolerates one slowed run."""
+    median-judged rows (_timed_runs over the lex-cost and deadline-shape cases) judge the median of
+    three runs, which already tolerates one slowed run: the lex-cost rows on time.process_time, the
+    deadline-shape cases on time.thread_time read inside the call (_deadline_timed_call), with no
+    collector hold."""
     import gc
     spent = None
     for _ in range(max(1, runs)):
@@ -6678,26 +7858,89 @@ def _lex_cost_problems(name, guard, length, cpu, runs, want):
     return out
 
 
+def _deadline_run_queue_seconds():
+    """The calling thread's run-queue delay so far, in seconds: the second field of
+    /proc/thread-self/schedstat (nanoseconds it spent runnable but waiting for a CPU), or None where that
+    cannot be read: no such file (not Linux, or a kernel before 3.17), an unreadable or malformed one, or
+    one whose first field (the thread's time on a CPU) is 0, which a kernel without scheduler statistics
+    reports for every thread."""
+    try:
+        with open("/proc/thread-self/schedstat", "rb") as handle:
+            fields = handle.read(256).split()
+        on_cpu, queued = int(fields[0]), int(fields[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    if on_cpu <= 0 or queued < 0:
+        return None
+    return queued / 1e9
+
+
+def _deadline_timed_call(call):
+    """(cpu_seconds, wall_seconds, outcome, queued_seconds) for outcome = call(): cpu_seconds the CPU time
+    of the calling thread alone (time.thread_time, read inside the timed span), wall_seconds its
+    time.monotonic span, queued_seconds the calling thread's run-queue delay across the call
+    (_deadline_run_queue_seconds, read inside the span before and after it), or None where either reading
+    failed. Other threads' and children's CPU time is not directly charged to the thread clock, and time
+    the thread spent runnable but queued for a CPU is neither on that clock nor in the call's own work
+    (_deadline_run_own: wall-clock time less that delay), which is judged at full length against the
+    production budget."""
+    began = time.monotonic()
+    queued_began = _deadline_run_queue_seconds()
+    cpu_began = time.thread_time()
+    outcome = call()
+    cpu = time.thread_time() - cpu_began
+    queued_ended = _deadline_run_queue_seconds()
+    wall = time.monotonic() - began
+    if queued_began is None or queued_ended is None:
+        return cpu, wall, outcome, None
+    return cpu, wall, outcome, max(0.0, queued_ended - queued_began)
+
+
 def _deadline_shape_case(name, shape, size, cwd):
-    """One (handler, shape, size) case, in-process under a _DeadlineWindow of _DEADLINE_HANG_SECONDS:
-    (cpu_seconds, wall_seconds, outcome), the outcome being the reduced decision, "deadline" when the window
-    fired, "hard-block" for an exit 2, or "crash: <type>"."""
+    """One (handler, shape, size) case, in-process under a _DeadlineWindow of _DEADLINE_HANG_SECONDS and the
+    handler's _DEADLINE_ENV environment, timed by _deadline_timed_call: (cpu_seconds, wall_seconds, outcome,
+    queued_seconds), the outcome being the reduced decision, "deadline" when the window fired, "hard-block"
+    for an exit 2, or "crash: <type>"."""
     tool, tool_input = _DEADLINE_HASH_DETACH_SHAPES.get((name, shape), _DEADLINE_SHAPES[shape])(size, cwd)
     data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
             "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
     window = aiqt_hooks._DeadlineWindow(_DEADLINE_HANG_SECONDS)
-    began, cpu_began = time.monotonic(), _cpu_seconds()
-    try:
-        with window:
-            code, stdout_obj, _stderr = aiqt_hooks.HANDLERS[name](data)
-        outcome = "hard-block" if code == 2 else _reduce_result(code, stdout_obj)
-    except aiqt_hooks._HookDeadline as exc:
-        if exc.args[:1] != (window,):
-            raise
-        outcome = "deadline"
-    except Exception as exc:
-        outcome = "crash: {}".format(type(exc).__name__)
-    return _cpu_seconds() - cpu_began, time.monotonic() - began, outcome
+
+    def call():
+        try:
+            with window:
+                code, stdout_obj, _stderr = aiqt_hooks.HANDLERS[name](data)
+            return "hard-block" if code == 2 else _reduce_result(code, stdout_obj)
+        except aiqt_hooks._HookDeadline as exc:
+            if exc.args[:1] != (window,):
+                raise
+            return "deadline"
+        except Exception as exc:
+            return "crash: {}".format(type(exc).__name__)
+    with _env_values(**_DEADLINE_ENV.get(name, lambda _cwd: {})(cwd)):
+        return _deadline_timed_call(call)
+
+
+def _deadline_run_own(run):
+    """The own work of one timed run (cpu_seconds, wall_seconds, outcome, queued_seconds)
+    (_deadline_timed_call): its wall-clock seconds less its run-queue delay, never under 0, so its own CPU
+    time plus every second it waited on a sleep, a lock, I/O, a child or another thread, at full length
+    (the time that child or thread spent queued for a CPU included); None when the run-queue delay could
+    not be read (never a guess). A recorded run given as (cpu_seconds, wall_seconds, outcome) is recorded
+    with no run-queue delay, its whole wall-clock time its own work."""
+    queued = run[3] if len(run) > 3 else 0.0
+    return None if queued is None else max(0.0, run[1] - queued)
+
+
+def _deadline_run_text(run):
+    """One run's account for a dl-shape line: its raw times, its run-queue delay, its own work and its
+    outcome."""
+    own = _deadline_run_own(run)
+    if own is None:
+        queued_text = "run-queue delay unread, own work not evaluated"
+    else:
+        queued_text = "{:.2f}s queued, {:.2f}s own work".format(run[3] if len(run) > 3 else 0.0, own)
+    return "{:.2f}s wall-clock, {:.2f}s of CPU time, {}, outcome {}".format(run[1], run[0], queued_text, run[2])
 
 
 def _deadline_shape_runs(tmp, sizes):
@@ -6744,10 +7987,10 @@ def _no_registry_above(root):
         aiqt_hooks._orch_dirfd_has_registry = probe
 
 
-def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
-    """What one run of a (handler, shape, size) case got wrong, cpu and wall being the CPU and wall-clock
-    times judged: the medians of the case's runs (_judged), or a diagnostic re-run's own, as a list of
-    phrases ([] for none)."""
+def _deadline_shape_problems(name, shape, size, cpu, own, outcome):
+    """What one run of a (handler, shape, size) case got wrong, cpu and own being the calling thread's CPU
+    time and the own work judged (_deadline_run_own, None when not evaluated): the medians of the case's
+    runs (_judged), or a diagnostic re-run's own, as a list of phrases ([] for none)."""
     if outcome == "deadline":
         return ["reached no decision within the {:g}-second hang guard".format(_DEADLINE_HANG_SECONDS)]
     problems = []
@@ -6755,9 +7998,12 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
         problems.append("a note-only mode must never deny, whatever its timing")
     if cpu > _DEADLINE_BOUNDS[size]:
         problems.append("used {:.2f}s of CPU time, over its {}s bound".format(cpu, _DEADLINE_BOUNDS[size]))
-    if wall > _DEADLINE_WALL_BOUND:
-        problems.append("took {:.2f}s wall-clock, over the {:g}s wall-clock bound".format(
-            wall, _DEADLINE_WALL_BOUND))
+    if own is None:
+        problems.append("own work not evaluated: the calling thread's run-queue delay "
+                        "(/proc/thread-self/schedstat) could not be read")
+    elif own > _DEADLINE_OWN_WORK_BOUND:
+        problems.append("took {:.2f}s of its own work (wall-clock time less its run-queue delay), over the "
+                        "{:g}s production budget".format(own, _DEADLINE_OWN_WORK_BOUND))
     if (name, shape) in _DEADLINE_DENY_CASES and outcome != "deny":
         problems.append("expected deny, got {}".format(outcome))
     elif (name, shape) in _DEADLINE_NOTE_CASES and outcome != "allow-note":
@@ -6772,49 +8018,69 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
 
 
 def _deadline_shape_verdicts(runs, retime):
-    """The dl-shape failures for runs [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome) for
-    each run...)]: one line for each case whose median CPU time (_judged) is over its CPU bound, whose median
-    wall-clock time is over the wall-clock bound, or any of whose runs fails another check. A case whose
-    median wall-clock time is over the wall-clock bound, with at least one run reaching a decision, is run
-    once more by retime(handler, shape, size, cwd) only as a diagnostic: the line still records the
-    failure, carries every run's wall-clock time, CPU time and outcome, and applies every check to the
-    diagnostic run as well."""
+    """The dl-shape failures for runs [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome,
+    queued_seconds) for each run...)] (_deadline_timed_call): one line for each case whose median CPU time
+    of the calling thread (_judged) is over its CPU bound, whose median own work (_deadline_run_own) is over
+    the production budget or could not be evaluated on some run, or any of whose runs fails another check.
+    A case whose median own work is over the budget, with at least one run reaching a decision, is run once
+    more by retime(handler, shape, size, cwd) only as a diagnostic: the line still records the failure,
+    carries every run's wall-clock time, CPU time, run-queue delay, own work and outcome, and applies every
+    check to the diagnostic run as well."""
     out = []
     for name, shape, size, cwd, *timed in runs:
-        cpu_judged = _judged([cpu for cpu, _wall, _outcome in timed])
-        wall_judged = _judged([wall for _cpu, wall, _outcome in timed])
+        cpu_judged = _judged([run[0] for run in timed])
+        owns = [_deadline_run_own(run) for run in timed]
+        own_judged = None if None in owns else _judged(owns)
         problems = []
-        for _cpu, _wall, outcome in timed:
+        for run in timed:
             problems += [problem for problem
-                         in _deadline_shape_problems(name, shape, size, cpu_judged, wall_judged, outcome)
+                         in _deadline_shape_problems(name, shape, size, cpu_judged, own_judged, run[2])
                          if problem not in problems]
         if not problems:
             continue
         line = "(dl-shape-{}-{}-{}) {} (median times judged; {})".format(
-            name, shape, size, "; ".join(problems), "; ".join(
-                "run: {:.2f}s wall-clock, {:.2f}s of CPU time, outcome {}".format(wall, cpu, outcome)
-                for cpu, wall, outcome in timed))
-        if wall_judged > _DEADLINE_WALL_BOUND and any(
-                outcome != "deadline" for _cpu, _wall, outcome in timed):
-            cpu_again, wall_again, outcome_again = retime(name, shape, size, cwd)
-            again = _deadline_shape_problems(name, shape, size, cpu_again, wall_again, outcome_again)
-            line += ("; a diagnostic re-run, which never clears the case's failure, took {:.2f}s "
-                     "wall-clock and {:.2f}s of CPU time with outcome {} ({})".format(
-                         wall_again, cpu_again, outcome_again, "; ".join(again) if again else "within every check"))
+            name, shape, size, "; ".join(problems), "; ".join("run: " + _deadline_run_text(run) for run in timed))
+        if (own_judged is not None and own_judged > _DEADLINE_OWN_WORK_BOUND
+                and any(run[2] != "deadline" for run in timed)):
+            again_run = retime(name, shape, size, cwd)
+            again = _deadline_shape_problems(name, shape, size, again_run[0], _deadline_run_own(again_run),
+                                             again_run[2])
+            line += ("; a diagnostic re-run, which never clears the case's failure, took {} ({})".format(
+                _deadline_run_text(again_run).replace(", outcome ", " with outcome ", 1),
+                "; ".join(again) if again else "within every check"))
         out.append(line)
     return out
 
 
 def _deadline_shape_failures(tmp):
-    """(dl-shape) Every PreToolUse handler has shapes here, and on each shape at 64 KB, 256 KB and 1 MB it
-    reaches a decision within the hang guard, that size's CPU-time bound and the wall-clock bound, denying
-    where the case carries a hazard and reaching the pinned base commit's decision on each uncertain '#'
-    shape (_DEADLINE_HASH_SHAPES, which every handler runs) (_deadline_shape_verdicts: a case whose median
-    wall-clock time is over the wall-clock bound fails, and a diagnostic re-run is reported beside it, never
-    in its place)."""
+    """(dl-shape) Every PreToolUse handler (the warn-only PreToolUse class, PRETOOL_WARN_ONLY, included) has
+    shapes here, and on each shape at 64 KB, 256 KB and 1 MB it reaches a decision within the hang guard,
+    that size's CPU-time bound and the production budget on its own work (below), denying where the case
+    carries a hazard and reaching the pinned base commit's decision on each uncertain '#' shape
+    (_DEADLINE_HASH_SHAPES, which every handler runs) (_deadline_shape_verdicts: a case whose median own
+    work is over the budget fails, and a diagnostic re-run is reported beside it, never in its place).
+
+    LOAD: the CPU bounds judge the calling thread's own CPU clock (time.thread_time read inside the call,
+    _deadline_timed_call), to which other threads' and children's CPU time is not directly charged. The
+    call's own work (_deadline_run_own: wall-clock time less the calling thread's run-queue delay from
+    /proc/thread-self/schedstat) is its CPU time plus its own waits, judged at full length against
+    PRETOOL_BUDGET_SECONDS, the budget the same call has in production (where an overrun fails closed only
+    in a mode that fails closed; see _DEADLINE_OWN_WORK_BOUND), while time the calling thread spent
+    runnable but queued for a CPU on a loaded host is not charged; no reading is scaled by a load factor.
+    Where the run-queue delay cannot be read, every case reports its own work as not evaluated, a failure
+    line, rather than judging a guess. Residual, exactly: (1) time the calling thread is queued for a CPU
+    is bounded only by the 60-second hang guard, a fixed wall-clock bound; (2) shared-cache,
+    memory-bandwidth and frequency effects of other work on the host still move the thread clock and the
+    own work somewhat, and no measurement here bounds how much; (3) CPU work the handler moves to another
+    thread or a child is not on the thread clock, so while the call waits for it it is judged only as own
+    work against the 8 s budget, that worker's own time queued for a CPU included, not the per-size CPU
+    bound, and work it leaves running after the call returns is not measured at all; (4) own work counts
+    the thread's waits on I/O and locks at full length, so a slow filesystem on the runner can fail an
+    honest case; and (5) as before, these are measured bounds, not a complexity guarantee: a super-linear
+    cost small enough on these sizes passes."""
     out = []
     missing = sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
-                     if event == aiqt_hooks.PRETOOL and name not in _DEADLINE_CASES)
+                     if event in (aiqt_hooks.PRETOOL, aiqt_hooks.PRETOOL_WARN_ONLY) and name not in _DEADLINE_CASES)
     if missing:
         out.append("(dl-shape-coverage) PreToolUse handlers with no timed shape: {}".format(", ".join(missing)))
     return out + _deadline_shape_verdicts(_deadline_shape_runs(tmp, _DEADLINE_SIZES), _deadline_shape_case)
@@ -6822,23 +8088,24 @@ def _deadline_shape_failures(tmp):
 
 def _deadline_shape_rerun_failures():
     """(dl-shape-rerun-*) A failed case is never erased by its diagnostic re-run. _deadline_shape_verdicts
-    is given recorded runs and a re-run that returns a recorded result, with no handler run:
-    dl-shape-rerun-pass: a run over the wall-clock bound (9.25 s, 0.03 s of CPU, allow) whose re-run passes
+    is given recorded runs and a re-run that returns a recorded result, with no handler run. These
+    recorded runs carry no run-queue delay, so each one's own work is its whole wall-clock time.
+    dl-shape-rerun-pass: a run over the own-work budget (9.25 s, 0.03 s of CPU, allow) whose re-run passes
     (0.15 s, 0.02 s, allow) must still fail, with both runs' wall-clock times, CPU times and outcomes.
-    dl-shape-rerun-decision: a deny case run over the wall-clock bound that allowed (9.25 s, 0.03 s, allow)
+    dl-shape-rerun-decision: a deny case run over the own-work budget that allowed (9.25 s, 0.03 s, allow)
     and whose re-run denies in time (0.15 s, 0.02 s, deny) must fail on the allow as well as the time.
-    dl-shape-rerun-both: a deny case run over the bound that denied (9.25 s, 0.03 s, deny) and whose re-run
+    dl-shape-rerun-both: a deny case run over the budget that denied (9.25 s, 0.03 s, deny) and whose re-run
     allows (0.15 s, 0.02 s, allow) must fail with both outcomes and the re-run's wrong decision named.
     dl-shape-rerun-control, a control, which also passes on the pinned base commit: a run within every
     check gives no line and no re-run.
-    dl-shape-rerun-bounds: each bound at its edge, both inclusive. A run a microsecond inside or exactly at
-    the wall-clock bound (8 s) or the 64 KB CPU bound (1.5 s) gives no line and no re-run; one a microsecond
-    over the wall-clock bound whose re-run passes gives one line and one re-run; one a microsecond over the
-    CPU bound gives one line and no re-run (its time within the wall-clock bound). Both bounds judge the
-    median of a case's runs: three runs at 9 s, 5 s and 5 s wall-clock give no line and no re-run, three at
-    9 s, 9 s and 5 s give one line and one re-run. Three runs at 256 KB, one a second over its CPU bound
-    (3.0 s), one at 0.5 s and the median a microsecond inside or exactly at the bound, give no line; with
-    the median a microsecond over it, one line and no re-run.
+    dl-shape-rerun-bounds: each bound at its edge, both inclusive. A run with 0.5 s of CPU time whose own
+    work is a microsecond inside or exactly at the 8 s budget, or at the 64 KB CPU bound (1.5 s), gives no
+    line and no re-run; one a microsecond over the budget whose re-run passes gives one line and one
+    re-run; one a microsecond over the CPU bound gives one line and no re-run (its own work within the
+    budget). Both bounds judge the median of a case's runs: three runs at 9 s, 5 s and 5 s wall-clock give
+    no line and no re-run, three at 9 s, 9 s and 5 s give one line and one re-run. Three runs at 256 KB,
+    one a second over its CPU bound (3.0 s), one at 0.5 s and the median a microsecond inside or exactly
+    at the bound, give no line; with the median a microsecond over it, one line and no re-run.
     dl-shape-rerun-outcomes: every run's outcome is checked. A deny case whose three runs are within every
     bound and decide deny, allow and deny gives one line naming the allow, and none when all three deny.
     timed-runs-count and timed-runs-median: _timed_runs calls its timed function three times, whatever an
@@ -6869,7 +8136,7 @@ def _deadline_shape_rerun_failures():
         retimed.clear()
         lines = _deadline_shape_verdicts([run], recorded(result))
         if len(lines) != 1 or retimed != [run[:3]] or not all(want in lines[0] for want in wants):
-            out.append("(dl-shape-rerun-{}) a run over the wall-clock bound must stay a failure carrying both "
+            out.append("(dl-shape-rerun-{}) a run over the own-work budget must stay a failure carrying both "
                        "runs' times and outcomes {!r}, got {!r} with re-runs {!r}".format(
                            label, wants, lines, retimed))
     retimed.clear()
@@ -6877,12 +8144,12 @@ def _deadline_shape_rerun_failures():
     if lines or retimed:
         out.append("(dl-shape-rerun-control) a run within every check must give no line and no re-run, got "
                    "{!r} with re-runs {!r}".format(lines, retimed))
-    wall_bound, cpu_bound = float(_DEADLINE_WALL_BOUND), _DEADLINE_BOUNDS[65536]
+    own_bound, cpu_bound = float(_DEADLINE_OWN_WORK_BOUND), _DEADLINE_BOUNDS[65536]
     plain_256k, cpu_bound_256k = plain[:2] + (262144,) + plain[3:], 3.0
     for edge, run, want_lines, want_reruns in (
-            ("just inside the wall-clock bound", plain + ((0.03, wall_bound - 1e-6, "allow"),), 0, 0),
-            ("at the wall-clock bound", plain + ((0.03, wall_bound, "allow"),), 0, 0),
-            ("over the wall-clock bound", plain + ((0.03, wall_bound + 1e-6, "allow"),), 1, 1),
+            ("with own work just inside the budget", plain + ((0.5, own_bound - 1e-6, "allow"),), 0, 0),
+            ("with own work at the budget", plain + ((0.5, own_bound, "allow"),), 0, 0),
+            ("with own work over the budget", plain + ((0.5, own_bound + 1e-6, "allow"),), 1, 1),
             ("of three at 9 s, 5 s and 5 s wall-clock",
              plain + ((0.03, 9.0, "allow"), (0.03, 5.0, "allow"), (0.03, 5.0, "allow")), 0, 0),
             ("of three at 9 s, 9 s and 5 s wall-clock",
@@ -6926,6 +8193,255 @@ def _deadline_shape_rerun_failures():
             out.append("(lex-cost-runs) a lex-cost pair expecting deny whose runs decide {} must give {} "
                        "line(s), got {!r}".format(", ".join(decisions), want_lines, lines))
     return out
+
+
+def _deadline_load_judgement_failures(tmp):
+    """(dl-shape-load-*) The dl-shape bounds judge the calling thread's own CPU clock against the per-size CPU
+    bounds and each call's own work (wall-clock time less the thread's run-queue delay) at full length against
+    the production budget (_deadline_timed_call, _deadline_run_own); no reading is scaled by a load factor.
+    The rows feed _deadline_shape_verdicts recorded runs, except those marked real, which time a call: a
+    stand-in with no handler in each but dl-shape-load-real-case. Three of them, dl-shape-load-absorbed-cpu,
+    dl-shape-load-wait and dl-shape-load-thread, run hashing threads (_deadline_hashing_thread; hashlib
+    releases the interpreter lock on a 1 MB buffer, so a hashing thread computes beside the caller) on the
+    64 KB deny case, whose CPU bound is 1.5 s:
+    dl-shape-load-absorbed-cpu (real): a call that spends 0.3 s of CPU on its own thread while a worker it
+    starts hashes for 1.6 s, then joins it, gives no line: the worker's CPU time, which process CPU time
+    would add to the call's (about 1.7 to 1.9 s, over the bound), is not on the call's thread clock.
+    dl-shape-load-absorbed-wall: 1 MB truncation-guard runs of 3.9 s of CPU time in 3.93, 8.47 and 8.92 s
+    wall-clock (the wall-clock times a loaded 80-CPU host recorded) give no line when 0, 4.5 and 5.0 s of
+    each was queued for a CPU (own work 3.93, 3.97 and 3.92 s), and one line and one re-run when none of
+    it was (a median own work of 8.47 s).
+    dl-shape-load-regression: 40 s of the call's own CPU time at 1 MB gives one line naming 40.00 s.
+    dl-shape-load-bounds: each bound at its edge, both inclusive: 1 MB CPU time a microsecond under,
+    exactly at and ten microseconds over 7 s gives 0, 0 and 1 line; 3 s of CPU time with own work a
+    microsecond under, exactly at and ten microseconds over 8 s gives 0, 0 and 1 line (one re-run when
+    over), both with no time queued (a wall-clock time of 8 s at the edge) and with 3 s queued (11 s).
+    dl-shape-load-unread: a run whose run-queue delay could not be read gives one line saying its own
+    work was not evaluated, and no re-run.
+    dl-shape-load-wait (real): a call that sleeps 9.3 s while a hashing thread it starts runs for 9 s and
+    ends before the call returns gives one line on its own work and one re-run: the thread's CPU time does
+    not shorten the sleep.
+    dl-shape-load-thread (real): a call that leaves a busy hashing thread running, while a thread alive
+    before the call ends during it, and spends 1.5 times the 64 KB CPU bound (2.25 s) on its own thread
+    gives one line on its CPU time.
+    dl-shape-load-cpu-then-sleep (real, 1 MB case, CPU bound 7 s): a call that spends 4.0 s of its own CPU
+    and then sleeps 6.0 s gives one line on its own work and one re-run, as the production budget fails
+    it closed; judging only its wait (wall-clock time less CPU time, 6 s) would pass it.
+    dl-shape-load-induced (real, 1 MB case): an honest call spending 3.0 s of its own CPU while its thread
+    shares one CPU (os.sched_setaffinity) with _DEADLINE_LOAD_SPINNERS busy-loop children pinned there gives
+    no line, and the load must have pushed its wall-clock time over 8 s, or the row fails as not exercised;
+    judging its whole wall-clock time would fail it. A run over 8 s wall-clock for which schedstat reported no
+    run-queue delay at all fails the row as not evaluated, naming that, rather than as an over-budget call
+    (_deadline_induced_verdict). Each child is sys.executable -I -S -c over a loop that ends itself after
+    60 s, started in its own session and killed by its process group when the call ends; the loop opens no
+    file and makes no network call, but -I -S and a new session do not remove the environment or the account
+    credentials the child inherits. A platform without CPU affinity fails the row as not evaluated.
+    dl-shape-load-induced-verdicts: the induced row's judgement (_deadline_induced_verdict) on recorded runs
+    of 3.0 s of CPU time: 12 s wall-clock with 9 s queued gives no line; 12 s, and 8 s plus a microsecond,
+    each with nothing queued, give the not-evaluated line naming schedstat's missing delay; exactly 8 s and a
+    microsecond under it, nothing queued, give the not-exercised line.
+    dl-shape-load-real-case (real): one real handler case records its own thread's CPU time as a positive
+    number no greater than its wall-clock time."""
+    out = []
+    retimed = []
+
+    def retime(name, shape, size, cwd):
+        retimed.append((name, shape, size))
+        return 0.02, 0.15, "deny"
+    seps = ("orch_truncation_guard", "seps_hash_lines", 1048576, "/")
+    paren = ("orch_truncation_guard", "paren_hash4", 1048576, "/")
+    deny = ("protected_line", "push_force_after", 65536, "/")
+
+    def own_cpu(seconds):
+        began = time.thread_time()
+        while time.thread_time() - began < seconds:
+            pass
+
+    def absorbed_call():
+        worker = _deadline_hashing_thread("dl-shape-load-worker", 1.6)
+        own_cpu(0.3)
+        worker.join(30)
+        return "deny"
+    retimed.clear()
+    absorbed_run = _deadline_timed_call(absorbed_call)
+    lines = _deadline_shape_verdicts([deny + (absorbed_run,) * 3], retime)
+    if lines or retimed:
+        out.append("(dl-shape-load-absorbed-cpu) a call spending 0.3 s of its own CPU while a worker hashes for "
+                   "1.6 s must give no line, got {!r} with re-runs {!r} (the run {!r})".format(
+                       lines, retimed, absorbed_run))
+    for runs, want_lines, want_reruns in (
+            (((3.9, 3.93, "deny", 0.0), (3.9, 8.47, "deny", 4.5), (3.9, 8.92, "deny", 5.0)), 0, 0),
+            (((3.9, 3.93, "deny", 0.0), (3.9, 8.47, "deny", 0.0), (3.9, 8.92, "deny", 0.0)), 1, 1)):
+        retimed.clear()
+        lines = _deadline_shape_verdicts([paren + runs], retime)
+        if len(lines) != want_lines or len(retimed) != want_reruns:
+            out.append("(dl-shape-load-absorbed-wall) 1 MB runs {!r} must give {} line(s) and {} re-run(s), got "
+                       "{!r} with re-runs {!r}".format(runs, want_lines, want_reruns, lines, retimed))
+    retimed.clear()
+    lines = _deadline_shape_verdicts([seps + ((40.0, 40.15, "deny"),) * 3], retime)
+    if len(lines) != 1 or "40.00s of CPU" not in lines[0]:
+        out.append("(dl-shape-load-regression) 40 s of the call's own CPU time must give one line naming 40.00 "
+                   "s, got {!r}".format(lines))
+    cpu_bound, own_bound = _DEADLINE_BOUNDS[1048576], float(_DEADLINE_OWN_WORK_BOUND)
+    for edge, cpu, wall, queued, want_lines, want_reruns in (
+            ("CPU time just under its bound", cpu_bound - 1e-6, cpu_bound + 0.15, 0.0, 0, 0),
+            ("CPU time at its bound", cpu_bound, cpu_bound + 0.15, 0.0, 0, 0),
+            ("CPU time just over its bound", cpu_bound + 1e-5, cpu_bound + 0.15, 0.0, 1, 0),
+            ("3 s of CPU time and own work just under 8 s", 3.0, own_bound - 1e-6, 0.0, 0, 0),
+            ("3 s of CPU time and own work of 8 s", 3.0, own_bound, 0.0, 0, 0),
+            ("3 s of CPU time and own work just over 8 s", 3.0, own_bound + 1e-5, 0.0, 1, 1),
+            ("3 s queued and own work just under 8 s", 3.0, 3.0 + own_bound - 1e-6, 3.0, 0, 0),
+            ("3 s queued and own work of 8 s", 3.0, 3.0 + own_bound, 3.0, 0, 0),
+            ("3 s queued and own work just over 8 s", 3.0, 3.0 + own_bound + 1e-5, 3.0, 1, 1)):
+        retimed.clear()
+        lines = _deadline_shape_verdicts([seps + ((cpu, wall, "deny", queued),)], retime)
+        if len(lines) != want_lines or len(retimed) != want_reruns:
+            out.append("(dl-shape-load-bounds) {} must give {} line(s) and {} re-run(s), got {!r} with re-runs "
+                       "{!r}".format(edge, want_lines, want_reruns, lines, retimed))
+    retimed.clear()
+    lines = _deadline_shape_verdicts([seps + ((3.0, 3.1, "deny", None),) * 3], retime)
+    if len(lines) != 1 or retimed or "own work not evaluated" not in lines[0]:
+        out.append("(dl-shape-load-unread) a run whose run-queue delay could not be read must give one line "
+                   "saying its own work was not evaluated and no re-run, got {!r} with re-runs {!r}".format(
+                       lines, retimed))
+
+    def overlapped_wait_call():
+        worker = _deadline_hashing_thread("dl-shape-load-overlap", 9.0)
+        time.sleep(9.3)
+        worker.join(30)
+        return "deny"
+    retimed.clear()
+    wait_run = _deadline_timed_call(overlapped_wait_call)
+    lines = _deadline_shape_verdicts([deny + (wait_run,) * 3], retime)
+    if len(lines) != 1 or len(retimed) != 1 or "production budget" not in lines[0]:
+        out.append("(dl-shape-load-wait) a call sleeping 9.3 s beside a 9-second hashing thread must give one "
+                   "line on its own work and one re-run, got {!r} with re-runs {!r}".format(lines, retimed))
+    stop = threading.Event()
+    decoy = _deadline_hashing_thread("dl-shape-load-decoy", 0.5)
+    busy = []
+
+    def busy_thread_call():
+        busy.append(_deadline_hashing_thread("dl-shape-load-busy", 60.0, stop))
+        own_cpu(1.5 * _DEADLINE_BOUNDS[65536])
+        return "deny"
+    try:
+        thread_run = _deadline_timed_call(busy_thread_call)
+    finally:
+        stop.set()
+        for thread in busy + [decoy]:
+            thread.join(30)
+    retimed.clear()
+    lines = _deadline_shape_verdicts([deny + (thread_run,) * 3], retime)
+    if len(lines) != 1 or "of CPU time, over its 1.5s bound" not in lines[0]:
+        out.append("(dl-shape-load-thread) a call that leaves a busy thread running and spends 2.25 s of its own "
+                   "CPU must give one line on its CPU time, got {!r} (the run {!r})".format(lines, thread_run))
+
+    def cpu_then_sleep_call():
+        own_cpu(4.0)
+        time.sleep(6.0)
+        return "deny"
+    retimed.clear()
+    sleep_run = _deadline_timed_call(cpu_then_sleep_call)
+    lines = _deadline_shape_verdicts([seps + (sleep_run,) * 3], retime)
+    if (len(lines) != 1 or len(retimed) != 1 or "production budget" not in lines[0]
+            or "of CPU time, over" in lines[0]):
+        out.append("(dl-shape-load-cpu-then-sleep) a call spending 4.0 s of its own CPU and then sleeping 6.0 s "
+                   "must give one line on its own work and one re-run, got {!r} with re-runs {!r} (the run "
+                   "{!r})".format(lines, retimed, sleep_run))
+    out += _deadline_induced_load_failures(seps, retime, retimed, own_cpu)
+    no_delay = "not evaluated: schedstat reports no run-queue delay"
+    for wall, queued, want in ((12.0, 9.0, None), (12.0, 0.0, no_delay), (own_bound + 1e-6, 0.0, no_delay),
+                               (own_bound, 0.0, "not exercised"), (own_bound - 1e-6, 0.0, "not exercised")):
+        got = _deadline_induced_verdict(seps, (3.0, wall, "deny", queued), retime, retimed)
+        if (got != []) if want is None else (len(got) != 1 or want not in got[0]):
+            out.append("(dl-shape-load-induced-verdicts) a recorded induced run of 3.0 s of CPU time, {!r} s "
+                       "wall-clock and {!r} s queued must give {}, got {!r}".format(
+                           wall, queued, "no line" if want is None else "one line saying " + want, got))
+    plain = tmp / "load-reading"
+    plain.mkdir(parents=True, exist_ok=True)
+    real = _deadline_shape_case("orch_truncation_guard", "seps_hash", 65536, str(plain))
+    if len(real) != 4 or not (isinstance(real[0], float) and 0 < real[0] <= real[1]):
+        out.append("(dl-shape-load-real-case) a real case must record its own thread's CPU time as a positive "
+                   "number no greater than its wall-clock time, got {!r}".format(real))
+    return out
+
+
+# Busy-loop children the dl-shape-load-induced row pins to the calling thread's one CPU, so that thread
+# gets about a quarter of it and spends most of its call queued for it.
+_DEADLINE_LOAD_SPINNERS = 3
+_DEADLINE_LOAD_SPIN_SOURCE = "import time\nends = time.monotonic() + 60\nwhile time.monotonic() < ends:\n    pass\n"
+
+
+def _deadline_induced_load_failures(case, retime, retimed, own_cpu):
+    """(dl-shape-load-induced) The induced-load row of _deadline_load_judgement_failures, on case (a 1 MB
+    handler, shape, size and cwd): own_cpu(3.0) timed while _DEADLINE_LOAD_SPINNERS busy-loop children
+    share the calling thread's one CPU must give no line from _deadline_shape_verdicts, with the call's
+    wall-clock time over the production budget so the row exercises the load (_deadline_induced_verdict).
+    The calling thread's CPU affinity is restored and every child's process group killed and reaped before
+    it returns."""
+    label = "(dl-shape-load-induced)"
+    if not hasattr(os, "sched_setaffinity"):
+        return [label + " not evaluated: this platform has no os.sched_setaffinity to pin the load"]
+    saved = os.sched_getaffinity(0)
+    cpu = min(saved)
+    spinners = []
+    try:
+        os.sched_setaffinity(0, {cpu})
+        for _ in range(_DEADLINE_LOAD_SPINNERS):
+            spinners.append(subprocess.Popen(
+                [sys.executable, "-I", "-S", "-c", _DEADLINE_LOAD_SPIN_SOURCE], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True))
+            os.sched_setaffinity(spinners[-1].pid, {cpu})
+        time.sleep(0.5)
+        run = _deadline_timed_call(lambda: (own_cpu(3.0), "deny")[1])
+    finally:
+        for proc in spinners:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=30)
+        os.sched_setaffinity(0, saved)
+    return _deadline_induced_verdict(case, run, retime, retimed)
+
+
+def _deadline_induced_verdict(case, run, retime, retimed):
+    """The dl-shape-load-induced lines for run, one timed run (cpu_seconds, wall_seconds, outcome,
+    queued_seconds) of the induced-load call on case: [] when _deadline_shape_verdicts gives three copies of
+    it no line and its wall-clock time is over the production budget; a not-evaluated line when that time is
+    over the budget but schedstat reported no run-queue delay at all, so its own work would be its whole
+    wall-clock time and the delay reading, not the call's cost, is in doubt; otherwise the verdict lines, or
+    a line saying the load was not exercised."""
+    label = "(dl-shape-load-induced)"
+    retimed.clear()
+    lines = _deadline_shape_verdicts([case + (run,) * 3], retime)
+    if run[3] == 0.0 and run[1] > _DEADLINE_OWN_WORK_BOUND:
+        return ["{} not evaluated: schedstat reports no run-queue delay, though the induced load left the call's "
+                "wall-clock time at {:.2f}s, over the {:g}s budget (the run {!r}, judged {!r})".format(
+                    label, run[1], _DEADLINE_OWN_WORK_BOUND, run, lines)]
+    if lines or retimed:
+        return ["{} an honest call spending 3.0 s of its own CPU under {} pinned busy-loop children must give no "
+                "line, got {!r} with re-runs {!r} (the run {!r})".format(
+                    label, _DEADLINE_LOAD_SPINNERS, lines, retimed, run)]
+    if run[1] <= _DEADLINE_OWN_WORK_BOUND:
+        return ["{} not exercised: the induced load left the call's wall-clock time at {:.2f}s, not over the "
+                "{:g}s budget (the run {!r})".format(label, run[1], _DEADLINE_OWN_WORK_BOUND, run)]
+    return []
+
+
+def _deadline_hashing_thread(name, seconds, stop=None):
+    """A started daemon thread named name that hashes a 1 MB buffer over and over for seconds of wall-clock
+    time, or until the event stop is set: real CPU work on another thread (hashlib releases the interpreter
+    lock on a buffer this size), for the rows that check that such work neither adds to nor hides the
+    calling thread's own CPU time or wait."""
+    def run():
+        block = b"\0" * (1 << 20)
+        ends = time.monotonic() + seconds
+        while time.monotonic() < ends and not (stop is not None and stop.is_set()):
+            hashlib.sha256(block)
+    thread = threading.Thread(target=run, name=name, daemon=True)
+    thread.start()
+    return thread
 
 
 def _deadline_note_only_deny_failures():
@@ -7024,9 +8540,16 @@ def _restored_countdown_bounds(seconds, armed, read, clocks=None, holder=None):
     from the restore's clock read to the setitimer that re-arms it, which only the high end allows, each
     measured up to the monotonic read just after that setitimer returned. Rounding to the microsecond moves
     the low end by two microseconds (getitimer, and a take's setitimer, read a countdown rounded down) and the
-    high end by one (a re-arming setitimer rounds up). Nothing else is allowed for: a host stall outside the
-    two gaps moves both ends with the reads, and one inside a gap widens only that gap's end, by the stall.
-    With either gap not measured, no countdown is in bounds."""
+    high end by one (a re-arming setitimer rounds up). Nothing else is allowed for, so the bound's width is
+    the two measured spans plus both bracket widths (and those three microseconds). A host stall between
+    armed[1] and read[0] and outside both gaps moves both ends and the right countdown together; one inside
+    a gap, or inside the armed or read bracket, widens the bound by its length on one side of the right
+    countdown only: above it for a stall in the take's gap, between the setitimer that set the countdown
+    and armed[1], or between read[0] and the getitimer; below it for a stall in the restore's gap, between
+    armed[0] and that setitimer, or between the getitimer and read[1] (a stall from a gap's setitimer
+    acting to the read after it returns falls on the other side). So a wrong countdown whose error lies on
+    the widened side, and is no larger than the stall, can be in bounds under that stall; an unstalled run
+    discriminates. With either gap not measured, no countdown is in bounds."""
     early = late = 0.0
     if holder is not None:
         early, late = clocks.settled(holder, 0), clocks.settled(holder, 1)
@@ -7576,50 +9099,110 @@ def _deadline_restore_failures():
     verbatim) with its interval and handler; an inactive one stays inactive; one that comes due inside the
     window ends the window there and is delivered once; a nested window passes an outer deadline to its
     owner and the outer window restores what it found; and a caller that blocks SIGALRM, or a call off the
-    main thread, gets no deadline and keeps its state."""
+    main thread, gets no deadline and keeps its state. Every restored countdown bounded from below is
+    judged inside _restored_countdown_bounds for its own run, over the gaps a _WindowClocks measured from
+    that run's take and restore (the way dl-nested-outer reads its inner arming), so no fixed host-speed
+    slack is left in any restored-countdown bound. Other fixed limits remain here, such as
+    dl-nested-outer's 0.3-second window, dl-refused-thread's 10-second join, and the 0.4-second body
+    under the default budget. A stall in the right place can let a wrong restore pass
+    (_restored_countdown_bounds says where); an unstalled run discriminates."""
     out = []
     fired = []
 
     def caller_alarm(signum, frame):
         fired.append(signum)
 
+    finished = []
+
     def as_caller(value, interval, stub_seconds, budget=None):
         fired.clear()
+        finished.clear()
+
+        def body(_data):
+            time.sleep(stub_seconds)
+            finished.append(True)
+            return (0, None, None)
+
         signal.signal(signal.SIGALRM, caller_alarm)
+        # The window's own gaps are measured at source: `clocks` stands in for aiqt_hooks.time and
+        # aiqt_hooks.signal, and _restored_countdown_bounds widens its ends by exactly the measured
+        # spans from the take's clock read to the cancel that takes the caller's timer (a span the
+        # window counts twice: the kernel countdown runs on through it and the restore subtracts it
+        # again, as _take discloses) and from the restore's clock read to the re-arming setitimer. A
+        # host stall widens the measured span or armed/read bracket it falls in, never a fixed slack,
+        # so a stall inside the take no longer fails a correct restore. The bound's width is those
+        # two spans plus both bracket widths, so a wrong restore whose error lies on the side a stall
+        # widened, and is no larger than the stall, can pass under it: a stall in the restore's gap
+        # passes one that subtracts too much or twice, and one between the arming setitimer and
+        # armed[1], or between read[0] and the getitimer, passes a verbatim restore. Unstalled runs
+        # discriminate. `finished` says whether the stub's sleep ran to its end, so a deadline that
+        # cut the body is told from one that did not without comparing the run's time against any
+        # bound.
+        clocks = _WindowClocks()
+        armed = (time.monotonic(),)
         signal.setitimer(signal.ITIMER_REAL, value, interval)
-        before = signal.getitimer(signal.ITIMER_REAL)
-        began = time.monotonic()
+        armed += (time.monotonic(),)
         try:
-            with _stub_handler("diff_source_pretool", _sleeper(stub_seconds)):
-                code, err, _seconds = _main_run("diff_source_pretool", budget=budget)
-            used = time.monotonic() - began
-            return code, before, signal.getitimer(signal.ITIMER_REAL), used, signal.getsignal(signal.SIGALRM)
+            aiqt_hooks.time, aiqt_hooks.signal = clocks.time, clocks.signal
+            with _stub_handler("diff_source_pretool", body):
+                code, _err, _seconds = _main_run("diff_source_pretool", budget=budget)
+            read = (time.monotonic(),)
+            after = signal.getitimer(signal.ITIMER_REAL)
+            read += (time.monotonic(),)
+            handler = signal.getsignal(signal.SIGALRM)
         finally:
+            aiqt_hooks.time, aiqt_hooks.signal = time, signal
             signal.setitimer(signal.ITIMER_REAL, 0)
+            cancelled = time.monotonic()
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        borrowers = clocks.windows()
+        return types.SimpleNamespace(
+            code=code, after=after, armed=armed, read=read, clocks=clocks,
+            holder=borrowers[0] if len(borrowers) == 1 else None, borrowers=len(borrowers),
+            cancelled=cancelled, handler=handler, used=read[1] - armed[0])
 
     for label, interval in (("single", 0.0), ("periodic", 1800.0)):
-        code, before, after, used, handler = as_caller(3600.0, interval, 0.4)
-        if not (code == 0 and handler is caller_alarm and after[1] == interval and not fired
-                and before[0] - used - 0.1 <= after[0] <= before[0] - 0.3):
-            out.append("(dl-restore-{}) expected the caller countdown back less the {:.2f}s used, with its "
-                       "interval and handler, got exit {}, {!r} -> {!r}, fired {!r}".format(
-                           label, used, code, before, after, fired))
-    code, before, after, used, handler = as_caller(0.0, 0.0, 0.2)
-    if not (code == 0 and before == after == (0.0, 0.0) and handler is caller_alarm and not fired):
+        run = as_caller(3600.0, interval, 0.4)
+        low, high = (_restored_countdown_bounds(3600.0, run.armed, run.read, run.clocks, run.holder)
+                     if run.holder is not None else (float("inf"), float("-inf")))
+        if not (run.code == 0 and run.handler is caller_alarm and run.after[1] == interval and not fired
+                and low <= run.after[0] <= high):
+            out.append("(dl-restore-{}) expected the caller countdown back inside the run's measured "
+                       "bound [{!r}, {!r}] with its interval and handler, got exit {}, timer {!r} after "
+                       "{:.2f}s with {} window(s), fired {!r}".format(
+                           label, low, high, run.code, run.after, run.used, run.borrowers, fired))
+    run = as_caller(0.0, 0.0, 0.2)
+    if not (run.code == 0 and run.after == (0.0, 0.0) and run.handler is caller_alarm and not fired):
         out.append("(dl-restore-inactive) an inactive caller timer must stay inactive, got exit {} and {!r}"
-                   .format(code, after))
-    code, before, after, used, handler = as_caller(0.2, 0.0, 1.0)
-    if not (code == 2 and fired == [signal.SIGALRM] and after == (0.0, 0.0) and handler is caller_alarm
-            and used < 0.8):
+                   .format(run.code, run.after))
+    run = as_caller(0.2, 0.0, 1.0)
+    if not (run.code == 2 and fired == [signal.SIGALRM] and run.after == (0.0, 0.0)
+            and run.handler is caller_alarm and not finished):
         out.append("(dl-restore-due) a caller deadline due inside the window must end it and be delivered "
-                   "once, got exit {} after {:.2f}s, fired {!r}, timer {!r}".format(code, used, fired, after))
-    code, before, after, used, handler = as_caller(0.2, 0.5, 1.0)
-    if not (code == 2 and fired == [signal.SIGALRM] and after[1] == 0.5 and 0 < after[0] <= 0.5
-            and handler is caller_alarm):
+                   "once, got exit {} after {:.2f}s with the stub's sleep returned {}, fired {!r}, timer "
+                   "{!r}".format(run.code, run.used, bool(finished), fired, run.after))
+    run = as_caller(0.2, 0.5, 1.0)
+    reads = [entry[2] for entry in run.clocks.log if entry[0] == "read" and entry[1] is run.holder]
+    # The one due delivery may be followed by real period expiries when the run stalls between the
+    # restore's clock read and the row's own cancel of the timer: each full 0.5-second period in that
+    # measured span allows one more delivery, and the allowance is 0 on an unstalled run, so a second
+    # delivery with no measured period in the span still fails. The allowance ignores the re-arm's
+    # phase inside the period: the restore re-arms the due timer one period less its overdue time
+    # (taken modulo the period; 0.15 to 0.27 ms in one host's measurement) ahead, so a stall from the
+    # restore's clock read to the cancel whose length lands within about that overdue time below a
+    # multiple of 0.5 s delivers one more than the allowance, and such a run turns this row red with
+    # the hook right, a disclosed residual. The phase could be bounded from the measured clock reads
+    # and brackets, not derived exactly; the allowance does not use it. The high end allows the
+    # microsecond a re-arming setitimer rounds up.
+    allowed = 1 + (int((run.cancelled - reads[-1]) // 0.5) if len(reads) == 2 else 0)
+    if not (run.code == 2 and fired and fired == [signal.SIGALRM] * len(fired) and len(fired) <= allowed
+            and run.after[1] == 0.5 and 0 < run.after[0] <= 0.5 + 1e-6
+            and run.handler is caller_alarm and not finished):
         out.append("(dl-restore-due-periodic) a periodic caller deadline due inside the window must be "
-                   "delivered once and resume its period, got exit {}, fired {!r}, timer {!r}".format(
-                       code, fired, after))
+                   "delivered once (plus one delivery per full 0.5s period measured from its restore to "
+                   "the row's cancel, {} allowed here) and resume its period, got exit {}, fired {!r}, "
+                   "timer {!r}, with the stub's sleep returned {}".format(
+                       allowed, run.code, fired, run.after, bool(finished)))
 
     # The inner call's body reads the inner window's countdown, then sleeps 60 s, so once that read is made
     # only a deadline ends the body: a sleep that returns means the outer deadline did not end the inner
@@ -7674,15 +9257,52 @@ def _deadline_restore_failures():
     if problem:
         out.append("(dl-nested-outer) an enclosing window's deadline must reach that window's owner and leave "
                    "the timer as found, {}".format(problem))
-    with aiqt_hooks._DeadlineWindow(5.0):
-        with _stub_handler("diff_source_pretool", _sleeper(1.0)):
-            code, err, seconds = _main_run("diff_source_pretool", budget=0.1)
-        inside = signal.getitimer(signal.ITIMER_REAL)
-    if (code != 2 or seconds >= 0.8 or not 4.0 < inside[0] <= 5.0
+    finished_inner = []
+
+    def outlasting(_data):
+        time.sleep(60.0)
+        finished_inner.append(True)
+        return (0, None, None)
+
+    # The outer window is wide enough (600 s) that no host stall brings it due over the run; the inner
+    # deadline is proved to have cut the body by the sleep not returning; and the outer countdown is
+    # judged inside _restored_countdown_bounds for this run, over the gaps `clocks` measured from the
+    # inner window's own take and restore: the low end allows exactly the measured span from the inner
+    # take's clock read to the cancel that takes the countdown (the span the window counts twice), the
+    # high end exactly the measured span from the restore's clock read to the re-arming setitimer, each
+    # plus setitimer's microsecond rounding. A host stall only widens the measured span or bracket it
+    # falls in, so no fixed host-speed slack is left, and the bound's width is the two measured spans
+    # plus both bracket widths. A wrong restore whose error lies on the side a stall widened, and is
+    # no larger than the stall, can pass under it: a verbatim restore (too high by at least the
+    # 0.1-second budget) fails on the high end on an unstalled run, but passes under a stall longer
+    # than that error between the outer window's arming setitimer and armed[1] or between read[0]
+    # and the getitimer, and a stall in the inner restore's gap can likewise pass one that subtracts
+    # too much or twice. Unstalled runs discriminate.
+    clocks = _WindowClocks()
+    outer = aiqt_hooks._DeadlineWindow(600.0)
+    armed = (time.monotonic(),)
+    try:
+        aiqt_hooks.time, aiqt_hooks.signal = clocks.time, clocks.signal
+        with outer:
+            armed += (time.monotonic(),)
+            with _stub_handler("diff_source_pretool", outlasting):
+                code, _err, _seconds = _main_run("diff_source_pretool", budget=0.1)
+            read = (time.monotonic(),)
+            inside = signal.getitimer(signal.ITIMER_REAL)
+            read += (time.monotonic(),)
+    finally:
+        aiqt_hooks.time, aiqt_hooks.signal = time, signal
+    used = read[1] - armed[0]
+    inner = [window for window in clocks.windows() if window is not outer]
+    low, high = (_restored_countdown_bounds(600.0, armed, read, clocks, inner[0]) if len(inner) == 1
+                 else (float("inf"), float("-inf")))
+    if (code != 2 or finished_inner or not low <= inside[0] <= high
             or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
             or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
-        out.append("(dl-nested-inner) an inner deadline must end only the inner call and give the outer window "
-                   "its countdown back, got exit {} after {:.2f}s, outer timer {!r}".format(code, seconds, inside))
+        out.append("(dl-nested-inner) an inner deadline must end only the inner call and give the outer "
+                   "window its countdown back inside the run's measured bound [{!r}, {!r}], got exit {} "
+                   "after {:.2f}s with the stub's sleep returned {}, outer timer {!r} and {} inner "
+                   "window(s)".format(low, high, code, used, bool(finished_inner), inside, len(inner)))
 
     old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
     try:
@@ -8538,8 +10158,10 @@ def _deadline_enclosing_restore_failures():
     under a caller with a counting handler and a periodic 30-second timer, ends normally; SIGALRM is raised,
     as the outer window's expiry, from an opcode trace event at each instruction of the inner window's
     frames once the outer window's handler is back (one run per instruction). The outer deadline must reach
-    its owner each time, with the caller's handler and periodic timer back, no caller delivery, and neither
-    window left armed."""
+    its owner each time, with the caller's handler and periodic timer back (its countdown judged inside
+    _restored_countdown_bounds for the run, over the gaps a _WindowClocks measured from the outer window's
+    take and restore, with no fixed host-speed slack), no caller delivery, and neither window left
+    armed."""
     out = []
     calls = []
 
@@ -8549,8 +10171,11 @@ def _deadline_enclosing_restore_failures():
     def run(index):
         calls.clear()
         counted = [0]
+        clocks = _WindowClocks()
         signal.signal(signal.SIGALRM, counting)
+        armed = (time.monotonic(),)
         signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
+        armed += (time.monotonic(),)
         outer, inner = aiqt_hooks._DeadlineWindow(600.0), aiqt_hooks._DeadlineWindow(5.0)
 
         def when(frame):
@@ -8562,6 +10187,7 @@ def _deadline_enclosing_restore_failures():
         tracer, at = _window_tracer(inner, (when, lambda: signal.raise_signal(signal.SIGALRM)))
         escaped = None
         try:
+            aiqt_hooks.time, aiqt_hooks.signal = clocks.time, clocks.signal
             try:
                 with outer:
                     with inner:
@@ -8572,17 +10198,29 @@ def _deadline_enclosing_restore_failures():
                 escaped = type(exc).__name__
             finally:
                 sys.settrace(None)
-            handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+            handler = signal.getsignal(signal.SIGALRM)
+            # The reads either side of the final getitimer close the bracket _restored_countdown_bounds
+            # judges the caller countdown in: the outer window is the borrower that took and re-armed
+            # the caller's timer, so the bound widens by exactly the spans `clocks` measured from the
+            # outer take's and restore's clock reads to their setitimers, with no fixed host-speed slack.
+            read = (time.monotonic(),)
+            timer = signal.getitimer(signal.ITIMER_REAL)
+            read += (time.monotonic(),)
         finally:
+            aiqt_hooks.time, aiqt_hooks.signal = time, signal
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
         if index is None:
             return counted[0]
+        low, high = _restored_countdown_bounds(30.0, armed, read, clocks, outer)
+        used = read[1] - armed[0]
         if (at and escaped == "the outer deadline" and handler is counting and timer[1] == 30.0
-                and 29.0 < timer[0] <= 30.0 and not calls and not inner.armed and not outer.armed):
+                and low <= timer[0] <= high and not calls and not inner.armed
+                and not outer.armed):
             return ""
-        return "at {!r}: escaped {}, handler {!r}, timer {!r}, caller deliveries {}, armed {} and {}".format(
-            at, escaped, handler, timer, len(calls), inner.armed, outer.armed)
+        return ("at {!r}: escaped {}, handler {!r}, timer {!r} with {:.2f}s used and the measured bound "
+                "[{!r}, {!r}], caller deliveries {}, armed {} and {}".format(
+                    at, escaped, handler, timer, used, low, high, len(calls), inner.armed, outer.armed))
 
     total = run(None)
     failed = [problem for problem in (run(index) for index in range(total)) if problem]
@@ -8616,7 +10254,7 @@ def _deadline_rearm_failures():
     scheduling delay at the exit, and fails if the window's own timer is armed for real again.
     Neither case shows that no delay can fail the run: two bounds remain that these checks do not remove,
     the 1 s allowed for the kernel to expire the re-armed timer and the deadline child's
-    _DEADLINE_CHILD_TIMEOUT (900 s)."""
+    _DEADLINE_CHILD_TIMEOUT (900 s of wall-clock time, _deadline_child_wait)."""
     out = []
     take = aiqt_hooks._DeadlineWindow._take.__code__
     twice = aiqt_hooks._DeadlineWindow._twice.__code__
@@ -9364,9 +11002,15 @@ def _deadline_restore_fault_failures():
     caller's periodic 30-second timer (unnested) and for a 600-second outer window (nested), raising on its
     first call ("once") and on its first two calls ("twice"). Each operation runs in the scenario
     _RESTORE_OPERATIONS gives it: "plain", a 5-second window whose body sleeps 0.05 s, so that a restore
-    that counts the window's time twice, or not at all, is off by at least that much, while a host stall
-    inside the restore's gap widens the bounds by only the stall (_restored_countdown_bounds) and passes
-    such a restore only when it lasts about as long as the body; "expired", a 0.2-second
+    that counts the window's time twice, or not at all, is off by at least that much. A host stall widens
+    the bounds by only the stall (_restored_countdown_bounds), and on one side only, so it passes such a
+    restore only when it lasts about as long as the body and falls on that restore's side. The one that
+    counts twice (too low) can pass under a stall in the restore's gap, between armed[0] and the arming
+    setitimer, or between the getitimer and read[1]; the one that counts not at all (too high) under a
+    stall between the arming setitimer and armed[1], between read[0] and the getitimer, or from the
+    re-arming setitimer's action to the read after it returns. A stall in the take's gap, or anywhere
+    between the take's clock read and the restore's, adds to either wrong restore's error as much as it
+    widens the bound, so it passes neither; "expired", a 0.2-second
     window whose body ends while the first instruction of _give_back waits (up to 1 s, from an opcode trace
     stage) until the window's own expiry is pending, so the restore discards it; "due", the window's own
     expiry at a caller timer due 0.05 s in. Each case is checked at return from the with statement, before
@@ -9950,10 +11594,124 @@ def _deadline_relation_failures():
     return out
 
 
+# How long _deadline_child_wait waits for a child it killed to be reaped before it stops waiting.
+_DEADLINE_CHILD_REAP_SECONDS = 10.0
+
+
+def _deadline_child_within(waited, limit):
+    """Whether a child's wall-clock seconds (_deadline_child_wait) are within its limit, the limit included."""
+    return waited <= limit
+
+
+def _deadline_child_wait(code, args, limit):
+    """(subprocess.CompletedProcess with text stdout and stderr, or None when the child was stopped or
+    finished past its limit, and a phrase giving the wall-clock seconds waited) for a child running the
+    Python source code with the arguments args (sys.executable -I -B -c code args...), judged against limit
+    as a fixed wall-clock bound, nothing divided by anything: the child is accepted only if it has finished
+    and both pipes reached their end within limit seconds of its start (_deadline_child_within). A child
+    still running at limit is killed and waited for up to _DEADLINE_CHILD_REAP_SECONDS, and leaving the
+    with block closes both pipes without waiting for anything else that holds them (a grandchild the child
+    started), so a hang (a blocked wait or an endless loop) fails after about limit seconds, whatever
+    threads the child runs or however busy the host is. Residual: a killed child the kernel does not reap
+    within that bound (one in an uninterruptible sleep) still blocks leaving the with block, since
+    Popen's exit waits for it with no timeout."""
+    began = time.monotonic()
+    argv = [sys.executable, "-I", "-B", "-c", code] + list(args)
+    with subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=limit)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=_DEADLINE_CHILD_REAP_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+            return None, "stopped after {:.1f}s wall-clock".format(time.monotonic() - began)
+    waited = time.monotonic() - began
+    if not _deadline_child_within(waited, limit):
+        return None, "finished past its limit, after {:.1f}s wall-clock".format(waited)
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr), "{:.1f}s wall-clock".format(waited)
+
+
+def _deadline_child_wait_failures(tmp):
+    """(dl-child-wait-*) _deadline_child_wait stops a child that outlives its wall-clock limit and returns
+    one that finishes within it:
+    dl-child-wait-hang: a child sleeping 600 s under a 1-second limit is stopped (None), and not before
+    that second of wall-clock time.
+    dl-child-wait-done: a child that prints and exits at once returns its exit status and output.
+    dl-child-wait-last-stretch: a child sleeping 1.3 s under a 1-second limit is refused (None).
+    dl-child-wait-edge: the acceptance at the limit's edge (_deadline_child_within), the limit included:
+    a wait a microsecond under and exactly at a 1-second limit is within it, a microsecond over is not.
+    dl-child-wait-busy-child: a child sleeping 6.2 s while its own thread hashes for 6 s, under a 4-second
+    limit, is stopped (None), within 4 s plus the reap bound: the child's CPU work does not shorten its
+    wait.
+    dl-child-wait-grandchild: a child that starts a grandchild sleeping 30 s on the same output pipes and
+    then sleeps 600 s, under a 1-second limit, is stopped within 15 s, not when the grandchild lets go of
+    the pipes; the grandchild, found by its pid and the marker path in its arguments, is then killed."""
+    out = []
+    began = time.monotonic()
+    proc, waited = _deadline_child_wait("import time; time.sleep(600)", (), 1.0)
+    spent = time.monotonic() - began
+    if proc is not None or spent < 1.0:
+        out.append("(dl-child-wait-hang) a child sleeping 600 s under a 1-second limit must be stopped, "
+                   "and not within 1 s, got {!r} after {:.1f}s ({})".format(proc, spent, waited))
+    proc, waited = _deadline_child_wait("print('done')", (), 900)
+    if proc is None or proc.returncode != 0 or proc.stdout != "done\n":
+        out.append("(dl-child-wait-done) a child that prints and exits must return exit 0 and its output, got "
+                   "{!r} ({})".format(proc, waited))
+    proc, waited = _deadline_child_wait("import time; time.sleep(1.3)", (), 1.0)
+    if proc is not None:
+        out.append("(dl-child-wait-last-stretch) a child sleeping 1.3 s under a 1-second limit must be "
+                   "refused, got {!r} ({})".format(proc, waited))
+    for waited, want in ((1.0 - 1e-6, True), (1.0, True), (1.0 + 1e-6, False)):
+        if _deadline_child_within(waited, 1.0) is not want:
+            out.append("(dl-child-wait-edge) {!r} s waited against a 1-second limit must read within: {}".format(
+                waited, want))
+    code = ("import hashlib, threading, time; block = b'\\0' * (1 << 20); ends = time.monotonic() + 6.0\n"
+            "def run():\n    while time.monotonic() < ends:\n        hashlib.sha256(block)\n"
+            "threading.Thread(target=run, daemon=True).start(); time.sleep(6.2)")
+    began = time.monotonic()
+    proc, waited = _deadline_child_wait(code, (), 4.0)
+    spent = time.monotonic() - began
+    if proc is not None or spent >= 4.0 + _DEADLINE_CHILD_REAP_SECONDS:
+        out.append("(dl-child-wait-busy-child) a child sleeping 6.2 s beside its own 6-second hashing thread must "
+                   "be stopped under a 4-second limit, got {!r} after {:.1f}s ({})".format(proc, spent, waited))
+    marker = Path(tmp) / "dl-child-wait-grandchild.pid"
+    code = ("import subprocess, sys, time; g = subprocess.Popen([sys.executable, '-I', '-S', '-c', "
+            "'import time; time.sleep(30)', sys.argv[1]]); open(sys.argv[1], 'w').write(str(g.pid)); "
+            "time.sleep(600)")
+    began = time.monotonic()
+    try:
+        proc, waited = _deadline_child_wait(code, (str(marker),), 1.0)
+        spent = time.monotonic() - began
+    finally:
+        _deadline_kill_marked(marker)
+    if proc is not None or spent >= 15.0:
+        out.append("(dl-child-wait-grandchild) a child whose grandchild holds its pipes must be stopped within "
+                   "15 s under a 1-second limit, got {!r} after {:.1f}s ({})".format(proc, spent, waited))
+    return out
+
+
+def _deadline_kill_marked(marker):
+    """Kill the process whose pid the file marker holds, only while /proc shows that pid running with the
+    marker's path among its arguments (so a reused pid is never signalled); nothing where there is no
+    marker, no /proc, or no such process."""
+    try:
+        pid = int(marker.read_text(encoding="ascii"))
+        with open("/proc/{}/cmdline".format(pid), "rb") as handle:
+            arguments = handle.read().split(b"\0")
+        if os.fsencode(str(marker)) in arguments:
+            os.kill(pid, signal.SIGKILL)
+    except (OSError, ValueError):
+        pass
+
+
 def _test_deadline_posture(failures, tmp):
     """(dl-*) The PreToolUse deadline posture; see the section comment above."""
     failures.extend(_deadline_relation_failures())
     failures.extend(_deadline_shape_rerun_failures())
+    failures.extend(_deadline_load_judgement_failures(Path(tmp)))
     failures.extend(_deadline_note_only_deny_failures())
     failures.extend(_raw_sequence_failures())
     failures.extend(_raw_mirror_failures())
@@ -9969,16 +11727,16 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_lex_repeats_failures())
     failures.extend(_lex_fork_failures())
     failures.extend(_errexit_runs_failures())
+    failures.extend(_deadline_child_wait_failures(tmp))
     child_tmp = tmp / "deadline"
     child_tmp.mkdir()
     code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "
             "sys.stdout.write(json.dumps(m._deadline_child(sys.argv[2])))")
-    try:
-        proc = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(Path(__file__).resolve().parent),
-                               str(child_tmp)], capture_output=True, text=True, timeout=_DEADLINE_CHILD_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        failures.append("(dl-child-timeout) the deadline child did not finish within {}s".format(
-            _DEADLINE_CHILD_TIMEOUT))
+    proc, waited = _deadline_child_wait(code, (str(Path(__file__).resolve().parent), str(child_tmp)),
+                                        _DEADLINE_CHILD_TIMEOUT)
+    if proc is None:
+        failures.append("(dl-child-timeout) the deadline child did not finish within its {}s wall-clock limit ({})"
+                        .format(_DEADLINE_CHILD_TIMEOUT, waited))
         return
     try:
         found = json.loads(proc.stdout)
@@ -9989,6 +11747,3690 @@ def _test_deadline_posture(failures, tmp):
             proc.returncode, (proc.stdout + proc.stderr)[-2000:]))
         return
     failures.extend(found)
+
+
+# --- clock hooks: future_stamp_write (the dispatcher handler ported from the former standalone preview
+# script) ------------------------------------------------------------------------------------------------
+# _CLOCK_HOOK_NAMES maps each module-level name of the former script to its prefixed name in aiqt_hooks; the
+# unit suite binds those names, and the parity rows read the map backwards.
+_CLOCK_HOOK_NAMES = {
+    'fsw': {
+        'BASH_WORK_BUDGET': '_FSW_BASH_WORK_BUDGET',
+        'CWD_COST': '_FSW_CWD_COST',
+        'DATE_LOOKAHEAD': '_FSW_DATE_LOOKAHEAD',
+        'EXISTING_MAX_BYTES': '_FSW_EXISTING_MAX_BYTES',
+        'FUTURE_SLACK_US': '_FSW_FUTURE_SLACK_US',
+        'INPLACE_COMMANDS': '_FSW_INPLACE_COMMANDS',
+        'LITERAL_MAX_LEN': '_FSW_LITERAL_MAX_LEN',
+        'LITERAL_MIN_LEN': '_FSW_LITERAL_MIN_LEN',
+        'MAX_CWDS': '_FSW_MAX_CWDS',
+        'MAX_REPORTED': '_FSW_MAX_REPORTED',
+        'PREFIX_COMMANDS': '_FSW_PREFIX_COMMANDS',
+        'READ_COMMANDS': '_FSW_READ_COMMANDS',
+        'SCHED_GAP_TOKENS': '_FSW_SCHED_GAP_TOKENS',
+        'SCHED_KEYWORDS': '_FSW_SCHED_KEYWORDS',
+        'SCHED_STEMS': '_FSW_SCHED_STEMS',
+        'SHELL_C_COST': '_FSW_SHELL_C_COST',
+        'SHELL_C_DEPTH': '_FSW_SHELL_C_DEPTH',
+        'STREAM_COST': '_FSW_STREAM_COST',
+        'TIME_GRAMMAR': '_FSW_TIME_GRAMMAR',
+        'US': '_FSW_US',
+        'UTC': '_FSW_UTC',
+        'WARN_MAX': '_FSW_WARN_MAX',
+        'WRITE_COMMANDS': '_FSW_WRITE_COMMANDS',
+        'ZONE_GRAMMAR': '_FSW_ZONE_GRAMMAR',
+        '_ABBREV_COMMANDS': '_FSW_ABBREV_COMMANDS',
+        '_ACTIVE': '_FSW_ACTIVE',
+        '_ASSIGN_RE': '_FSW_ASSIGN_RE',
+        '_Analysis': '_FswAnalysis',
+        '_BLANK_RUN_RE': '_FSW_BLANK_RUN_RE',
+        '_BLOCK_START_RE': '_FSW_BLOCK_START_RE',
+        '_BTICK_RE': '_FSW_BTICK_RE',
+        '_Budget': '_FswBudget',
+        '_CD_COMMANDS': '_FSW_CD_COMMANDS',
+        '_CD_HINT_RE': '_FSW_CD_HINT_RE',
+        '_CLOSER_OF': '_FSW_CLOSER_OF',
+        '_CMD_PREFIX_WORDS': '_FSW_CMD_PREFIX_WORDS',
+        '_CONTINUERS': '_FSW_CONTINUERS',
+        '_DATE_CMD_RE': '_FSW_DATE_CMD_RE',
+        '_DELIM_ROW_RE': '_FSW_DELIM_ROW_RE',
+        '_DEST_COMMANDS': '_FSW_DEST_COMMANDS',
+        '_DQ_RUN_RE': '_FSW_DQ_RUN_RE',
+        '_DS_ANSI_RE': '_FSW_DS_ANSI_RE',
+        '_DS_DQ_RE': '_FSW_DS_DQ_RE',
+        '_DS_TOP_RE': '_FSW_DS_TOP_RE',
+        '_EPOCH': '_FSW_EPOCH',
+        '_EPOCH_UTC': '_FSW_EPOCH_UTC',
+        '_EXEC_WORDS': '_FSW_EXEC_WORDS',
+        '_EXITS': '_FSW_EXITS',
+        '_Exhausted': '_FswExhausted',
+        '_FAST_TOK_RE': '_FSW_FAST_TOK_RE',
+        '_FD_DUP_RE': '_FSW_FD_DUP_RE',
+        '_FENCE_RE': '_FSW_FENCE_RE',
+        '_FLUSH_WORDS': '_FSW_FLUSH_WORDS',
+        '_HD_SPECIAL_RE': '_FSW_HD_SPECIAL_RE',
+        '_INPLACE_OPT_RE': '_FSW_INPLACE_OPT_RE',
+        '_LIT_PREFIX_RE': '_FSW_LIT_PREFIX_RE',
+        '_LONG_ALIASES': '_FSW_LONG_ALIASES',
+        '_LONG_OPTIONS': '_FSW_LONG_OPTIONS',
+        '_ONE_US': '_FSW_ONE_US',
+        '_OPENERS': '_FSW_OPENERS',
+        '_OPTION_SPECS': '_FSW_OPTION_SPECS',
+        '_PLAIN_RUN_RE': '_FSW_PLAIN_RUN_RE',
+        '_PLAIN_SPECIAL': '_FSW_PLAIN_SPECIAL',
+        '_SCHED_RE': '_FSW_SCHED_RE',
+        '_SEARCH_ARG_OPTS': '_FSW_SEARCH_ARG_OPTS',
+        '_SEARCH_ARG_SHORT': '_FSW_SEARCH_ARG_SHORT',
+        '_SEARCH_QUIET_LONG': '_FSW_SEARCH_QUIET_LONG',
+        '_SEARCH_QUIET_SHORT': '_FSW_SEARCH_QUIET_SHORT',
+        '_SED_NUMBERED': '_FSW_SED_NUMBERED',
+        '_SED_PLAIN': '_FSW_SED_PLAIN',
+        '_SED_S_FLAGS': '_FSW_SED_S_FLAGS',
+        '_SHELLS': '_FSW_SHELLS',
+        '_SHELL_HINT_RE': '_FSW_SHELL_HINT_RE',
+        '_SHELL_SEPARATORS': '_FSW_SHELL_SEPARATORS',
+        '_STAMP_RE': '_FSW_STAMP_RE',
+        '_STRICT_LONG_COMMANDS': '_FSW_STRICT_LONG_COMMANDS',
+        '_StoreCtx': '_FswStoreCtx',
+        '_Structure': '_FswStructure',
+        '_TIME_OPTS': '_FSW_TIME_OPTS',
+        '_TOKEN_AFTER': '_FSW_TOKEN_AFTER',
+        '_TOKEN_BEFORE': '_FSW_TOKEN_BEFORE',
+        '_TOKEN_RE': '_FSW_TOKEN_RE',
+        '_Tokens': '_FswTokens',
+        '_UNRELIABLE_WORDS': '_FSW_UNRELIABLE_WORDS',
+        '_WORDCH_RE': '_FSW_WORDCH_RE',
+        '_analyze': '_fsw_analyze',
+        '_cd_target': '_fsw_cd_target',
+        '_cfg': '_fsw_cfg',
+        '_classify': '_fsw_classify',
+        '_code_lines': '_fsw_code_lines',
+        '_code_spans': '_fsw_code_spans',
+        '_delim_cell_count': '_fsw_delim_cell_count',
+        '_ends_table': '_fsw_ends_table',
+        '_evaluate': '_fsw__evaluate',
+        '_frame': '_fsw_frame',
+        '_in_spans': '_fsw_in_spans',
+        '_is_inplace_opt': '_fsw_is_inplace_opt',
+        '_is_pipe': '_fsw_is_pipe',
+        '_leading_pipe': '_fsw_leading_pipe',
+        '_literal_shell_string': '_fsw_literal_shell_string',
+        '_literal_substrings': '_fsw_literal_substrings',
+        '_local_us': '_fsw_local_us',
+        '_naive_us': '_fsw_naive_us',
+        '_pipes': '_fsw_pipes',
+        '_resolve_long': '_fsw_resolve_long',
+        '_row_exempter': '_fsw_row_exempter',
+        '_s': '_fsw_s',
+        '_search_patterns': '_fsw_search_patterns',
+        '_sed_program_cannot_write': '_fsw_sed_program_cannot_write',
+        '_shell_c_string': '_fsw_shell_c_string',
+        '_shell_tokens': '_fsw_shell_tokens',
+        '_span_index': '_fsw_span_index',
+        '_store_ctx': '_fsw_store_ctx',
+        '_store_roots_uncached': '_fsw_store_roots_uncached',
+        '_stream_targets': '_fsw_stream_targets',
+        '_stream_write_detail': '_fsw_stream_write_detail',
+        '_stream_writes': '_fsw_stream_writes',
+        '_structure': '_fsw_structure',
+        '_table_cells': '_fsw_table_cells',
+        '_table_walk': '_fsw_table_walk',
+        '_target_status': '_fsw_target_status',
+        '_tokenize': '_fsw_tokenize',
+        '_unit_words': '_fsw_unit_words',
+        '_units': '_fsw_units',
+        '_warn_line': '_fsw_warn_line',
+        '_write_targets': '_fsw_write_targets',
+        'apply_edits': '_fsw_apply_edits',
+        'bash_future': '_fsw_bash_future',
+        'bash_store_write': '_fsw_bash_store_write',
+        'bash_writes': '_fsw_bash_writes',
+        'date_spans': '_fsw_date_spans',
+        'evaluate': '_fsw_evaluate',
+        'future_in_changed_lines': '_fsw_future_in_changed_lines',
+        'future_on_line': '_fsw_future_on_line',
+        'literal_us': '_fsw_literal_us',
+        'names_store_path': '_fsw_names_store_path',
+        'read_existing': '_fsw_read_existing',
+        'sched_exempter': '_fsw_sched_exempter',
+        'store_roots': '_fsw_store_roots',
+        'under_store': '_fsw_under_store',
+    },
+}
+
+_HOOK_FILE = os.path.abspath(aiqt_hooks.__file__)
+_FSW_DOC = aiqt_hooks.future_stamp_write.__doc__
+_FSW_GLOBALS = {old: getattr(aiqt_hooks, new) for old, new in _CLOCK_HOOK_NAMES["fsw"].items()}
+# The former script's tests NOT carried into the unit suite, with why: each tested the script's own stdin or
+# stdout handling, which the dispatcher's main() now owns (its stream-failure and payload checks above).
+_CLOCK_UNIT_RETIRED = (
+    ("fsw", "test_payload_read_as_bytes", "main() reads the payload as text, not bytes"),
+    ("fsw", "test_emit_rescue_failure_exits_0", "the script's own output writer, _emit_line, is gone"),
+)
+
+
+def _wall_clock_asserts(source, exempt=()):
+    """Self-test helper of the clock-hook unit suites (a copy of the former scripts' helper, which the
+    preview hooks keep in their own copies): [(function, line)] of every assertion in
+    `source` whose operand is a TIME figure, so no test's verdict rests on a wall-clock bound, which depends on
+    the host's speed. A time figure is a clock reading (time.time, perf_counter, monotonic, process_time,
+    thread_time, clock_gettime, or an _ns variant; datetime.now, utcnow, or today), a result of a timing
+    harness (run_timed, growth_in_child), a name assigned from one (a for target or unpacking included), or
+    arithmetic, a comparison, a subscript, an attribute, min, max, abs, sum, int, float, round, or a method
+    call on one; a quotient of two time figures is a dimensionless ratio and may be bounded. A tuple or list
+    literal assigned to a tuple or list target is matched element by element, so only the names that receive
+    a time figure are tainted, and a shape it cannot match (a starred element, a length mismatch) taints
+    nothing, the not-flagging direction. A clock read through an alias
+    counts too: a module alias (`import time as t`, `import datetime as d`), an imported one (`from time import
+    X as Y`, or `*`; `from datetime import datetime as Y`), and an assigned one (a plain `name = time.X` or
+    `name = X` of a clock or alias), each bound at module level or within the function. An assertion's operands
+    are its leading positional arguments and every keyword argument but msg. Every assertion in the source is
+    scanned, under its enclosing test_ function (else its innermost function); `exempt` names the hang-guard
+    tests, whose bound on elapsed time is their point. Residual (disclosed): the taint is by name within one
+    test_ function and its nested functions, so a time figure passed through a container mutation, a global, a
+    call to another helper, or a harness this list does not name escapes the scan; so does one routed through
+    an expression form the scan does not follow: an assignment expression (walrus) in an asserted operand, a
+    dict literal, a container built by a comprehension or filled by a store into a subscript, or any other
+    routing not listed above; so does the time figure in a starred or mismatched unpacking; a clock this list does not
+    name (os.times, date.today, time.localtime or gmtime, a third-party clock, a file's mtime) escapes too, as
+    does an alias bound any other way (an attribute, a tuple target, getattr, a module or class assigned to a
+    name); a subprocess timeout is not an assertion and is not scanned."""
+    import ast
+    clocks = {"perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns", "process_time", "process_time_ns",
+              "thread_time", "thread_time_ns", "clock_gettime", "clock_gettime_ns", "run_timed", "growth_in_child"}
+    stdclocks = {"time", "time_ns", "perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns",
+                 "process_time", "process_time_ns", "thread_time", "thread_time_ns", "clock_gettime",
+                 "clock_gettime_ns"}
+    dtclocks = ("now", "utcnow", "today")
+    single = {"assertTrue", "assertFalse", "assertIsNone", "assertIsNotNone"}
+
+    def dtclass(node, al):  # a reference to the datetime class: a class alias, or <datetime module>.datetime
+        if isinstance(node, ast.Name):
+            return node.id in al["dtclass"]
+        return isinstance(node, ast.Attribute) and node.attr == "datetime" and \
+            isinstance(node.value, ast.Name) and node.value.id in al["datetime"]
+
+    def timed(node, names, al):
+        if isinstance(node, ast.Call):
+            f = node.func
+            if isinstance(f, ast.Name):
+                if f.id in clocks or f.id in al["clock"]:
+                    return True
+                return f.id in ("min", "max", "abs", "sum", "int", "float", "round") and any(
+                    timed(a, names, al) for a in node.args)
+            if isinstance(f, ast.Attribute):
+                if f.attr in ("time", "time_ns"):
+                    return isinstance(f.value, ast.Name) and f.value.id in al["time"]
+                if f.attr in dtclocks and dtclass(f.value, al):
+                    return True
+                return f.attr in clocks or timed(f.value, names, al)
+            return False
+        if isinstance(node, ast.Name):
+            return node.id in names
+        if isinstance(node, ast.BinOp):
+            left, right = timed(node.left, names, al), timed(node.right, names, al)
+            return left != right if isinstance(node.op, ast.Div) else left or right
+        if isinstance(node, ast.Compare):
+            return any(timed(x, names, al) for x in [node.left] + node.comparators)
+        if isinstance(node, ast.BoolOp):
+            return any(timed(x, names, al) for x in node.values)
+        if isinstance(node, ast.UnaryOp):
+            return timed(node.operand, names, al)
+        if isinstance(node, (ast.Subscript, ast.Starred, ast.Attribute)):
+            return timed(node.value, names, al)
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            return any(timed(e, names, al) for e in node.elts)
+        if isinstance(node, ast.IfExp):
+            return timed(node.body, names, al) or timed(node.orelse, names, al)
+        return False
+
+    def targets(node):
+        if isinstance(node, ast.Name):
+            yield node.id
+        elif isinstance(node, (ast.Tuple, ast.List)):
+            for e in node.elts:
+                yield from targets(e)
+        elif isinstance(node, ast.Starred):
+            yield from targets(node.value)
+
+    def split(target, value):  # an assignment's (target, value) pairs, a tuple or list literal matched in step
+        if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)):
+            if len(target.elts) == len(value.elts) and not any(
+                    isinstance(e, ast.Starred) for e in target.elts + value.elts):
+                for t, v in zip(target.elts, value.elts):
+                    yield from split(t, v)
+            return  # otherwise a shape it cannot match: nothing is tainted, the not-flagging direction
+        yield target, value
+
+    def aliases(node, al):  # the (kind, name) aliases node binds; kind: time, datetime (modules), dtclass, clock
+        if isinstance(node, ast.Import):
+            return [(a.name, a.asname or a.name) for a in node.names if a.name in ("time", "datetime")]
+        if isinstance(node, ast.ImportFrom) and node.module == "time" and not node.level:
+            bound = []
+            for a in node.names:
+                if a.name == "*":
+                    bound += [("clock", c) for c in stdclocks]
+                elif a.name in stdclocks:
+                    bound.append(("clock", a.asname or a.name))
+            return bound
+        if isinstance(node, ast.ImportFrom) and node.module == "datetime" and not node.level:
+            return [("dtclass", a.asname or "datetime") for a in node.names if a.name in ("datetime", "*")]
+        if isinstance(node, ast.Assign) and (
+                isinstance(node.value, ast.Name) and (node.value.id in clocks or node.value.id in al["clock"]) or
+                isinstance(node.value, ast.Attribute) and node.value.attr in stdclocks and
+                isinstance(node.value.value, ast.Name) and node.value.value.id in al["time"] or
+                isinstance(node.value, ast.Attribute) and node.value.attr in dtclocks and
+                dtclass(node.value.value, al)):
+            return [("clock", t.id) for t in node.targets if isinstance(t, ast.Name)]
+        return []
+
+    tree, parent, cache = ast.parse(source), {}, {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
+
+    def scope(node):  # the enclosing test_ function, else the innermost function (None at module level)
+        inner, up = None, parent.get(node)
+        while up is not None:
+            if isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if up.name.startswith("test_"):
+                    return up
+                inner = inner or up
+            up = parent.get(up)
+        return inner
+
+    def bind(nodes, al):  # add the aliases nodes bind to al, to a fixed point; True if any was new
+        grew, changed = False, True
+        while changed:
+            changed = False
+            for node in nodes:
+                for kind, name in aliases(node, al):
+                    if name not in al[kind]:
+                        al[kind].add(name)
+                        grew = changed = True
+        return grew
+
+    binders = [node for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom, ast.Assign))]
+    top = {"time": {"time"}, "datetime": {"datetime"}, "dtclass": {"datetime"}, "clock": set()}
+    bind([node for node in binders if scope(node) is None], top)
+
+    def tainted(fn):  # (names, al): the time figures and aliases fn (nested functions included) binds
+        if fn not in cache:
+            names, al = set(), {kind: set(bound) for kind, bound in top.items()}
+            nodes = list(ast.walk(fn))
+            changed = True
+            while changed:
+                changed = bind(nodes, al)
+                for node in nodes:
+                    if isinstance(node, ast.Assign):
+                        pairs = [pair for t in node.targets for pair in split(t, node.value)]
+                    elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr)) and \
+                            node.value is not None:
+                        pairs = [(node.target, node.value)]
+                    elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                        pairs = [(node.target, node.iter)]
+                    elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+                        pairs = [(node.optional_vars, node.context_expr)]
+                    else:
+                        continue
+                    for target, value in pairs:
+                        new = set(targets(target)) - names if timed(value, names, al) else set()
+                        if new:
+                            names |= new
+                            changed = True
+            cache[fn] = names, al
+        return cache[fn]
+
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert):
+            operands = [node.test]
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
+                node.func.attr.startswith("assert"):
+            operands = node.args[:1] if node.func.attr in single else node.args[:2]
+            operands = operands + [k.value for k in node.keywords if k.arg != "msg"]
+        else:
+            continue
+        fn = scope(node)
+        name = fn.name if fn is not None else "<module>"
+        names, al = tainted(fn) if fn is not None else (set(), top)
+        if name not in exempt and any(timed(x, names, al) for x in operands):
+            found.append((name, node.lineno))
+    return sorted(found, key=lambda item: item[1])
+
+
+def _wall_clock_alias_fixtures():
+    """Self-test data of the clock-hook unit suites (a copy of the former scripts' data): (bad, flagged, good) for _wall_clock_asserts.
+    `bad` bounds a time figure read through each alias form, through keyword operands, and from each added
+    clock (datetime.now, utcnow, today; clock_gettime), and every function it names in `flagged` must be
+    flagged; `good` uses the same alias forms and clocks only for a hang-guard timeout, an assertion on a count,
+    a msg keyword, a ratio, a datetime constructor, or a name that is an alias only in another function, and
+    nothing in it may be flagged."""
+    bad = ("import time as tm\nfrom time import perf_counter as clock\ntick = tm.monotonic_ns\n"
+           "import datetime as dt\n"
+           "def test_i(self):\n    t = clock()\n    self.assertLess(clock() - t, 0.5)\n"
+           "def test_j(self):\n    my_time = time.time\n    t0 = my_time()\n    self.assertLess(my_time() - t0, 1)\n"
+           "def test_k(self):\n    t0 = tm.time()\n    self.assertLessEqual(tm.time() - t0, 1)\n"
+           "def test_l(self):\n    self.assertLess(tick() - start, 10)\n"
+           "def test_m(self):\n    from time import process_time as cpu\n    c0 = cpu()\n"
+           "    assert cpu() - c0 < 2\n"
+           "def test_n(self):\n    c1 = clock\n    c2 = c1\n    self.assertGreater(1.0, c2() - base)\n"
+           "def test_o(self):\n    from time import time\n    self.assertTrue(time() - t0 < 1)\n"
+           "def test_p(self):\n    from time import *\n    self.assertLess(time_ns() - t0, 5)\n"
+           "def test_q(self):\n    t = time.monotonic()\n    self.assertLess(a=time.monotonic()-t, b=0.5)\n"
+           "def test_r(self):\n    self.assertTrue(expr=time.perf_counter() - t0 < 1, msg='slow')\n"
+           "def test_s(self):\n    now = tm.perf_counter\n    elapsed = now() - t0\n"
+           "    self.assertLessEqual(first=elapsed, second=2)\n"
+           "def test_t(self):\n    pc = perf_counter\n    self.assertLess(pc() - t, 1)\n"
+           "def test_ba(self):\n    t0 = datetime.datetime.now()\n"
+           "    self.assertLess((datetime.datetime.now() - t0).total_seconds(), 2.0)\n"
+           "def test_bb(self):\n    from datetime import datetime as DT\n    t0 = DT.utcnow()\n"
+           "    self.assertLess((DT.utcnow() - t0).total_seconds(), 2)\n"
+           "def test_bc(self):\n    stamp = dt.datetime.now\n    t0 = stamp()\n"
+           "    self.assertLess((stamp() - t0).seconds, 2)\n"
+           "def test_bd(self):\n    t0 = time.clock_gettime(time.CLOCK_MONOTONIC)\n"
+           "    self.assertLess(time.clock_gettime(time.CLOCK_MONOTONIC) - t0, 1)\n"
+           "def test_be(self):\n    from time import clock_gettime_ns as cg\n    t0 = cg(1)\n"
+           "    assert cg(1) - t0 < 10\n"
+           "def test_bf(self):\n    from datetime import *\n    self.assertLess((datetime.today() - t0).seconds, 5)\n"
+           "def test_bj(self):\n    elapsed, n = clock() - t0, 3\n    self.assertLess(elapsed, 1)\n"
+           "def test_bk(self):\n    t0 = time.monotonic()\n    e = int((time.monotonic() - t0) * 1000)\n"
+           "    self.assertLess(e, 500)\n")
+    flagged = ["test_i", "test_j", "test_k", "test_l", "test_m", "test_n", "test_o", "test_p", "test_q", "test_r",
+               "test_s", "test_t", "test_ba", "test_bb", "test_bc", "test_bd", "test_be", "test_bf", "test_bj",
+               "test_bk"]
+    good = ("import time as tm\nfrom time import perf_counter as clock\ntick = tm.monotonic\n"
+            "import datetime as dt\n"
+            "def test_u(self):\n    deadline = clock() + HANG_TIMEOUT\n    out = run(timeout=deadline - clock())\n"
+            "    proc.wait(timeout=tick() + 1)\n    self.assertEqual(len(out), 3)\n"
+            "def test_v(self):\n    my_time = tm.time\n    proc.wait(timeout=my_time() + 30)\n"
+            "    self.assertEqual(proc.returncode, 0, msg=my_time())\n"
+            "def test_w(self):\n    from time import process_time as cpu\n    limit = cpu() + 5\n"
+            "    calls = count_calls(limit)\n    self.assertEqual(first=calls, second=2, msg=cpu() - limit)\n"
+            "def test_x(self):\n    from time import time\n    subprocess.run(cmd, timeout=time() + 5)\n"
+            "    self.assertEqual(n_lines, 4)\n"
+            "def test_y(self):\n    my_time = len\n    self.assertEqual(my_time([1, 2]), 2)\n"
+            "def test_z(self):\n    a, b = clock(), clock()\n    self.assertLess(b / max(a, 1e-3), LIMIT)\n"
+            "def test_bg(self):\n    stamp = dt.datetime.now(dt.timezone.utc)\n"
+            "    self.assertEqual(len(render(stamp)), 17)\n    self.assertEqual(dt.time(12, 0).hour, 12)\n"
+            "    self.assertEqual(datetime.date(2026, 9, 24).day, 24)\n"
+            "def test_bh(self):\n    t0 = time.clock_gettime(time.CLOCK_MONOTONIC)\n"
+            "    lines = run(timeout=HANG_TIMEOUT - (time.clock_gettime(time.CLOCK_MONOTONIC) - t0))\n"
+            "    self.assertEqual(lines.count, 2)\n"
+            "def test_bi(self):\n    started, count = clock(), 3\n    self.assertEqual(count, 3)\n"
+            "    [(t1, n), m] = [(tick(), 4), 5]\n    self.assertEqual(n + m, 9)\n"
+            "    first, *rest = clock(), 1, 2\n    self.assertEqual(rest, [1, 2])\n")
+    return bad, flagged, good
+
+
+def _fsw_unit_suite():
+    """(fsw-unit-*) The former standalone future-stamp-write.py self-test, run against the dispatcher
+    handler's code: every module-level name of the script is bound here to its prefixed name in aiqt_hooks
+    (evaluate to _fsw_evaluate, and so on), main is the dispatcher's main() for this mode, and the few tests of
+    the former script's own stdin and stdout handling are adapted to main()'s fail-open posture or retired
+    (named in _CLOCK_UNIT_RETIRED). Returns (the TestCase class, the fixture base directory to remove)."""
+    BASH_WORK_BUDGET = aiqt_hooks._FSW_BASH_WORK_BUDGET
+    EXISTING_MAX_BYTES = aiqt_hooks._FSW_EXISTING_MAX_BYTES
+    LITERAL_MAX_LEN = aiqt_hooks._FSW_LITERAL_MAX_LEN
+    UTC = aiqt_hooks._FSW_UTC
+    WARN_MAX = aiqt_hooks._FSW_WARN_MAX
+    _Budget = aiqt_hooks._FswBudget
+    _Exhausted = aiqt_hooks._FswExhausted
+    _LONG_OPTIONS = aiqt_hooks._FSW_LONG_OPTIONS
+    _OPTION_SPECS = aiqt_hooks._FSW_OPTION_SPECS
+    _STAMP_RE = aiqt_hooks._FSW_STAMP_RE
+    _StoreCtx = aiqt_hooks._FswStoreCtx
+    _analyze = aiqt_hooks._fsw_analyze
+    _cfg = aiqt_hooks._fsw_cfg
+    _is_inplace_opt = aiqt_hooks._fsw_is_inplace_opt
+    _literal_shell_string = aiqt_hooks._fsw_literal_shell_string
+    _literal_substrings = aiqt_hooks._fsw_literal_substrings
+    _resolve_long = aiqt_hooks._fsw_resolve_long
+    _sed_program_cannot_write = aiqt_hooks._fsw_sed_program_cannot_write
+    _shell_tokens = aiqt_hooks._fsw_shell_tokens
+    _tokenize = aiqt_hooks._fsw_tokenize
+    _warn_line = aiqt_hooks._fsw_warn_line
+    _write_targets = aiqt_hooks._fsw_write_targets
+    bash_writes = aiqt_hooks._fsw_bash_writes
+    evaluate = aiqt_hooks._fsw_evaluate
+    names_store_path = aiqt_hooks._fsw_names_store_path
+    read_existing = aiqt_hooks._fsw_read_existing
+    store_roots = aiqt_hooks._fsw_store_roots
+    under_store = aiqt_hooks._fsw_under_store
+
+    def main(argv):
+        """The dispatcher in place of the former script's main(argv): argv[0] is ignored as the script name
+        was, and any further argument reaches main() as the bad invocation it is."""
+        return aiqt_hooks.main(["future_stamp_write"] + list(argv)[1:])
+
+    import importlib.util
+    import inspect
+    import io
+    import shutil
+    import subprocess
+    import tempfile
+    import unittest
+
+    # Timed runs execute in a child interpreter under a subprocess timeout, so a hang is
+    # INTERRUPTED (subprocess.TimeoutExpired fails the test) rather than stalling the self-test before any bound
+    # is checked. The child loads this file, pins the zone, sets the fixture store root, and defines `best`.
+    # Every fixture path lives under one private temporary base: STORE is the fixture store root (set as
+    # AIQT_STORE_ROOT in each test) and PROJ/repo a non-store directory beside it. Neither PROJ nor
+    # anything under it is created, so a `cd` into it is to a missing directory, as for any unknown path.
+    _BASE = tempfile.mkdtemp(prefix="fsw.", dir=None)
+    PROJ = os.path.join(_BASE, "proj")
+    STORE = os.path.join(PROJ, "private")
+    HANG_TIMEOUT = 120  # seconds: far above the timed runs' own total (a few seconds), so only a hang reaches it
+    # A timing verdict compares the same code with itself on the same host, never with a wall-clock figure (a
+    # 2.0 s ceiling failed at 2.53 s on a slower CI runner). A GROWTH check (ratio in TIMED_PRELUDE) times one run
+    # at GROWTH * n against GROWTH runs at n, so the two samples do the same work when the pass is linear and
+    # span about the same time, and a preemption or load spike lands on both alike (a sample shorter than a
+    # scheduler slice escaped the preemption a longer one took, observed at 22 times on a pinned, loaded CPU);
+    # the sizes are interleaved, best of N. A PEER check bounds an adversarial command's time by an ORDINARY
+    # command of about the same size that the analysis judges in full (see TIMED_PRELUDE).
+    GROWTH = 8
+    LINEAR_LIMIT = 2.0  # GROWTH growth: about 1 when linear, about GROWTH when quadratic
+    FLAT_LIMIT = 3.0  # a pass independent of the varied size stays near 1; one linear in it grows by the step
+    PEER_LIMIT = 4.0  # adversarial over ordinary: about 1 to 2 on the development host
+    TIMED_PRELUDE = (
+        "import importlib.util as u, datetime, json, os, time\n"
+        "os.environ['TZ'] = 'EST5EDT,M3.2.0,M11.1.0'\n"
+        "time.tzset()\n"
+        "for k in ('CLAUDE_PROJECT_DIR',):\n"
+        "    os.environ.pop(k, None)\n"
+        "os.environ['AIQT_STORE_ROOT'] = %r\n"
+        "s = u.spec_from_file_location('m', %r)\n"
+        "m = u.module_from_spec(s)\n"
+        "s.loader.exec_module(m)\n"
+        "now = datetime.datetime(2026, 9, 23, 17, 45, tzinfo=datetime.timezone.utc)\n"
+        "def best(n, run):\n"
+        "    times = []\n"
+        "    for _ in range(3):\n"
+        "        t0 = time.process_time()\n"
+        "        run(n)\n"
+        "        times.append(time.process_time() - t0)\n"
+        "    return min(times)\n"
+        # a load spike during one size's runs skewed a growth ratio (one flake at load 34); the sizes
+        # are now INTERLEAVED, best of `reps` each, so a spike lands on both sizes' samples alike. A sample near
+        # the timer's and scheduler's noise floor is still a coin toss on a loaded host (a sibling's ~1 ms
+        # baseline read 2.677x on a loaded 16-core host, and sound 0.1 s wall samples still read 2.7x at load
+        # ~50), so the samples are CPU time (time.process_time), which a preemption never advances, and
+        # interleaved() retries with a larger repetition multiplier, the same for every size, until every
+        # sample of the round it returns is at least FLOOR seconds of measured work; a floor met only during
+        # a separate calibration round could rest on a stalled clock read while the measured samples stayed
+        # in the noise. A run the cap cannot lift above the floor is refused (cannot measure above the
+        # floor), never returned as sub-noise samples
+        "FLOOR = 0.1\n"
+        "def _sample(n, run, mult):\n"
+        "    t0 = time.process_time()\n"
+        "    for _ in range(mult):\n"
+        "        run(n)\n"
+        "    return time.process_time() - t0\n"
+        "def interleaved(sizes, run, reps=5):\n"
+        "    mult = 1\n"
+        "    while True:\n"
+        "        times = [[] for _ in sizes]\n"
+        "        for _ in range(reps):\n"
+        "            for n, out in zip(sizes, times):\n"
+        "                out.append(_sample(n, run, mult))\n"
+        "        fastest = min(min(t) for t in times)\n"
+        "        if fastest >= FLOOR:\n"
+        "            return [min(t) for t in times]\n"
+        "        if mult >= 1 << 20:\n"
+        "            raise RuntimeError('cannot measure above the floor: the fastest sample is '\n"
+        "                               '%%.6f s at the multiplier cap' %% fastest)\n"
+        "        mult = min(max(mult * 2, int(mult * FLOOR / max(fastest, 1e-9)) + 1), 1 << 20)\n"
+        "def ratio(n, run, reps=5):\n"
+        "    def same_work(k):\n"
+        "        for _ in range(GROWTH * n // k):\n"
+        "            run(k)\n"
+        "    return interleaved((n, GROWTH * n), same_work, reps)\n"
+        "def versus(subject, reference, reps=5):\n"
+        "    return interleaved((0, 1), lambda k: (subject, reference)[k](), reps)\n"
+        # the PEER reference: about 64 KiB of ordinary audit-log appends and a future write into `store`, which
+        # the analysis judges in full (denied), so an adversarial command's time is compared with it
+        "def ordinary(cwd, store):\n"
+        "    c = ''.join(\"echo 'line %%d of the audit log' >> /dev/shm/x%%d\\n\" %% (i, i %% 7)\n"
+        "                for i in range(1400))\n"
+        "    c += \"printf 'hb 2099-01-01T00:00Z' > \" + store + '/state.md'\n"
+        "    def run():\n"
+        "        assert m._fsw_evaluate({'tool_name': 'Bash', 'tool_input': {'command': c}, 'cwd': cwd}, now)\n"
+        "    return run\n"
+        "GROWTH = %d\n") % (STORE, _HOOK_FILE, GROWTH)
+
+    def child_env():
+        """The environment for a timed child: the parent's, minus every MALLOC_* variable and GLIBC_TUNABLES.
+        An inherited allocator override (MALLOC_TOP_PAD_, MALLOC_MMAP_THRESHOLD_, MALLOC_TRIM_THRESHOLD_,
+        MALLOC_MMAP_MAX_, a GLIBC_TUNABLES glibc.malloc.* entry) pins glibc's thresholds and disables their
+        dynamic adaptation, so a timed verdict would rest on the operator's ambient allocator policy (as
+        observed in the sibling stamp-truth-stop.py: healthy code false-REDs at 2.0 to 3.1x under load); a
+        timed child runs under the default policy only."""
+        return {k: v for k, v in os.environ.items() if not k.startswith("MALLOC_") and k != "GLIBC_TUNABLES"}
+
+    def run_timed(code, timeout):
+        """Run `code` in a fresh isolated interpreter under child_env() (the ambient allocator policy
+        neutralized), killed at `timeout` seconds (raising TimeoutExpired); return the JSON its last stdout
+        line prints. A non-zero exit raises AssertionError with its stderr."""
+        r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=timeout,
+                           env=child_env())
+        if r.returncode != 0:
+            raise AssertionError(f"timed child failed ({r.returncode}): {r.stderr}")
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    class T(unittest.TestCase):
+        def setUp(self):
+            self._tz = os.environ.get("TZ")
+            self._saved = {k: os.environ.pop(k, None) for k in ("AIQT_STORE_ROOT", "CLAUDE_PROJECT_DIR")}
+            os.environ["AIQT_STORE_ROOT"] = STORE  # the fixture store root (there is no default)
+            os.environ["TZ"] = "EST5EDT,M3.2.0,M11.1.0"  # pinned zone, no tzdata needed
+            time.tzset()
+            base = None
+            self.tmp = tempfile.mkdtemp(prefix="clk.", dir=base)
+            self.now = datetime.datetime(2026, 9, 23, 17, 45, 0, tzinfo=UTC)
+            self.store = f"{PROJ}/private/state.md"
+
+        def tearDown(self):
+            shutil.rmtree(self.tmp, ignore_errors=True)
+            for k, v in (("TZ", self._tz),) + tuple(self._saved.items()):
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            time.tzset()
+
+        def ev(self, tool, cwd=f"{PROJ}/repo", **ti):
+            return evaluate({"tool_name": tool, "tool_input": ti, "cwd": cwd}, self.now)
+
+        def store_file(self, text):
+            fp = os.path.join(self.tmp, "state.md")
+            with open(fp, "w") as f:
+                f.write(text)
+            os.environ["AIQT_STORE_ROOT"] = self.tmp
+            return fp
+
+        # -- Write / Edit / MultiEdit --
+        def test_future_utc_literal_into_store_denied(self):
+            self.assertEqual(self.ev("Write", file_path=self.store, content="hb: 2026-09-23T22:25:00Z"),
+                             ["2026-09-23T22:25:00Z"])
+
+        def test_future_local_literal_edit_denied(self):
+            fp = self.store_file("a\n")
+            self.assertTrue(self.ev("Edit", file_path=fp, old_string="a", new_string="[2026-09-23 14:10 EDT]"))
+
+        def test_multiedit_future_denied(self):
+            fp = self.store_file("x\ny\n")
+            self.assertTrue(self.ev("MultiEdit", file_path=fp, edits=[{"old_string": "x", "new_string": "ok"},
+                                                                      {"old_string": "y", "new_string": "at 2026-09-24T01:00Z"}]))
+
+        def test_past_literal_passes(self):
+            self.assertEqual(self.ev("Write", file_path=self.store, content="2026-09-23T17:44:30Z 2026-09-01 10:00"), [])
+
+        def test_within_60s_slack_passes(self):
+            self.assertEqual(self.ev("Edit", file_path=self.store, old_string="", new_string="2026-09-23T17:45:50Z"), [])
+
+        def test_non_store_path_passes(self):
+            self.assertEqual(self.ev("Write", file_path=f"{PROJ}/repo/x.md", content="2099-01-01T00:00Z"), [])
+
+        def test_write_substitution_text_is_literal(self):
+            self.assertEqual(self.ev("Write", file_path=self.store, content="$(echo 2099-01-01T00:00Z)"),
+                             ["2099-01-01T00:00Z"])
+            self.assertTrue(self.ev("Write", file_path=self.store, content="$(date -d 2099-01-01T00:00Z)"))
+
+        def test_date_only_passes(self):
+            self.assertEqual(self.ev("Write", file_path=self.store, content="due 2099-12-31, review 2027-01-01"), [])
+
+        def test_offset_literal_resolved(self):
+            self.assertEqual(self.ev("Write", file_path=self.store, content="2026-09-23T19:00+02:00"), [])
+            self.assertTrue(self.ev("Write", file_path=self.store, content="2026-09-23T23:00+02:00"))
+
+        def test_spaced_numeric_zone(self):
+            # a space-separated numeric zone is applied; dropping it would read the literal as naive local time
+            os.environ["TZ"] = "UTC0"
+            time.tzset()
+            self.assertEqual(self.ev("Write", file_path=self.store, content="[2026-09-23 22:45 +05]"), [])
+            self.assertEqual(self.ev("Write", file_path=self.store, content="[2026-09-23 13:45 -09]"),
+                             ["2026-09-23 13:45 -09"])
+
+        def test_zone_abbreviations(self):
+            self.assertEqual(self.ev("Write", file_path=self.store, content="[2026-09-23 17:45 UTC]"), [])
+            self.assertTrue(self.ev("Write", file_path=self.store, content="[2026-09-23 22:25 UTC]"))
+            os.environ["TZ"] = "JST-9"
+            time.tzset()
+            self.assertEqual(self.ev("Write", file_path=self.store, content="[2026-09-24 02:45 JST]"), [])
+            self.assertTrue(self.ev("Write", file_path=self.store, content="[2026-09-24 07:25 JST]"))
+
+        def test_unknown_zone_skipped(self):
+            self.assertEqual(self.ev("Write", file_path=self.store, content="[2099-01-01 10:00 XYZT]"), [])
+
+        def test_naive_literal_future_under_both_readings(self):
+            self.assertTrue(self.ev("Write", file_path=self.store, content="hb: 2026-09-23 18:25"))
+            self.assertEqual(self.ev("Write", file_path=self.store, content="hb: 2026-09-23 17:30"), [])
+
+        def test_dst_fold_deterministic(self):
+            now = datetime.datetime(2026, 11, 1, 5, 45, tzinfo=UTC)
+            ev = lambda c: evaluate({"tool_name": "Write", "tool_input": {"file_path": self.store, "content": c},
+                                     "cwd": "/"}, now)
+            self.assertEqual(ev("hb [2026-11-01 01:30 EDT]"), [])
+            self.assertTrue(ev("hb [2026-11-01 01:30 EST]"))
+
+        def test_overflow_literal_isolated(self):
+            self.assertEqual(self.ev("Write", file_path=self.store,
+                                     content="0001-01-01T00:00+01:00\n9999-12-31T23:59-01:00 heartbeat 2099-01-01T00:00Z"),
+                             ["9999-12-31T23:59-01:00", "2099-01-01T00:00Z"])  # integer arithmetic: no overflow
+
+        def test_scheduled_keyword_allowed(self):
+            for line in ("next_run: 2099-01-01T09:30:00Z", "Deadline 2099-01-01 09:00 UTC", "expires 2099-01-01T00:00Z",
+                         "not-before: 2099-01-01T00:00Z", "ETA 2099-01-01T00:00Z", "done by 2099-01-01T00:00Z"):
+                self.assertEqual(self.ev("Write", file_path=self.store, content=line), [], line)
+            for line in ("metadata: 2099-01-01T00:00Z", "beta 2099-01-01T00:00Z", "Last-heartbeat: 2099-01-01T00:00Z"):
+                self.assertTrue(self.ev("Write", file_path=self.store, content=line), line)
+
+        def test_unchanged_line_carry_over_allowed(self):
+            fp = self.store_file("hb: 2099-01-01T00:00Z\nother\n")
+            self.assertEqual(self.ev("Write", file_path=fp, content="hb: 2099-01-01T00:00Z\nother\nnew line\n"), [])
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="other", new_string="changed"), [])
+
+        def test_repurposed_timestamp_on_changed_line_denied(self):
+            fp = self.store_file("deadline: 2099-01-01T00:00Z\n")
+            self.assertTrue(self.ev("Write", file_path=fp, content="Last-heartbeat: 2099-01-01T00:00Z\n"))
+            fp = self.store_file("hb: 2099-01-01T00:00Z\n")
+            self.assertTrue(self.ev("Write", file_path=fp, content="hb: 2099-01-01T00:00Z\nhb: 2099-01-01T00:00Z\n"))
+
+        def test_edit_fragments_reconstructed_on_whole_lines(self):
+            # Edit is judged on the whole changed file line: the replacement fragment alone can lack the literal
+            fp = self.store_file("deadline: 2099-01-01T00:00Z\nheartbeat: 2026-09-23T17:45Z\n"
+                                 "next_run: 2099-03-01T00:00Z\n")
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="deadline", new_string="heartbeat"),
+                             ["2099-01-01T00:00Z"])
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="17:45", new_string="22:25"),
+                             ["2026-09-23T22:25Z"])
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="2099-03-01", new_string="2099-04-01"), [])
+            self.assertEqual(self.ev("MultiEdit", file_path=fp, edits=[
+                {"old_string": "heartbeat: 2026-09-23T17:45Z", "new_string": "heartbeat: X"},
+                {"old_string": "X", "new_string": "2026-09-23T23:00Z"}]), ["2026-09-23T23:00Z"])
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="99-0", new_string="99-1", replace_all=True), [])
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="T17:45Z", new_string="T17:45Z\nhb: 2099-02-02T00:00Z",
+                                     replace_all=True), ["2099-02-02T00:00Z"])
+
+        def test_edit_old_string_absent_on_whole_file_allowed(self):
+            # an edit whose old_string does not apply is not checked as bare fragments (a false deny); on a file
+            # read whole the tool itself fails, so the call is allowed
+            fp = self.store_file("a\n")
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="zzz", new_string="hb 2099-01-01T00:00Z"), [])
+            fp = self.store_file("deadline: 2026-09-23T17:45Z\n")
+            self.assertEqual(self.ev("MultiEdit", file_path=fp, edits=[
+                {"old_string": "2026-09-23T17:45Z", "new_string": "2099-01-01T00:00Z"},
+                {"old_string": "nope", "new_string": "y"}]), [])
+            self.assertEqual(self.ev("Edit", file_path=os.path.join(self.tmp, "absent.md"), old_string="x",
+                                     new_string="hb 2099-01-01T00:00Z"), [])
+
+        def test_edit_beyond_read_cap_checks_fragment(self):
+            # past the read cap the hook cannot reconstruct the file line, so the fragment is checked on its own
+            fp = self.store_file("x\n" * (EXISTING_MAX_BYTES // 2) + "hb: 2026-09-23T17:45Z\n")
+            self.assertEqual(read_existing(fp, EXISTING_MAX_BYTES)[1], False)
+            self.assertTrue(self.ev("Edit", file_path=fp, old_string="hb: 2026-09-23T17:45Z",
+                                    new_string="hb: 2026-09-23T22:25Z"))
+            self.assertTrue(self.ev("Edit", file_path=fp, old_string="zzz", new_string="hb: 2099-01-01T00:00Z"))
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="17:45", new_string="22:25"), [])  # disclosed
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="x", new_string="next run 2099-01-01T00:00Z"), [])
+            fp2 = self.store_file("x\n" * (EXISTING_MAX_BYTES // 2 - 1))
+            self.assertEqual(read_existing(fp2, EXISTING_MAX_BYTES)[1], True)
+
+        def test_fifo_existing_content_does_not_block(self):
+            fifo = os.path.join(self.tmp, "fifo")
+            os.mkfifo(fifo)
+            code = ("import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
+                    "s.loader.exec_module(m);print(repr(m._fsw_read_existing(%r, 10)))" % (_HOOK_FILE, fifo))
+            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                               timeout=HANG_TIMEOUT)  # the hang guard: a blocking FIFO open never returns
+            self.assertEqual(r.stdout.strip(), "('', False)")
+
+        def test_store_root_env_override(self):
+            os.environ["AIQT_STORE_ROOT"] = self.tmp
+            self.assertEqual(self.ev("Write", file_path=self.store, content="2099-01-01T00:00Z"), [])
+            self.assertTrue(self.ev("Write", file_path=os.path.join(self.tmp, "a.md"), content="2099-01-01T00:00Z"))
+            self.assertTrue(self.ev("Bash", command=f"echo 2099-01-01T00:00Z >> {self.tmp}/a.md"))
+            self.assertEqual(self.ev("Bash", command=f"echo 2099-01-01T00:00Z >> {self.tmp}x/a.md"), [])
+            # several roots joined by os.pathsep; an empty or relative entry is ignored
+            os.environ["AIQT_STORE_ROOT"] = os.pathsep.join(("", "rel/dir", self.tmp, STORE))
+            self.assertEqual(store_roots(), [os.path.normpath(self.tmp), STORE])
+            self.assertTrue(self.ev("Write", file_path=self.store, content="2099-01-01T00:00Z"))
+
+        def test_store_root_only_aiqt_spelling(self):
+            other = tempfile.mkdtemp(dir=self.tmp)
+            del os.environ["AIQT_STORE_ROOT"]
+            os.environ["OTHER_STORE_ROOT"] = other  # no other spelling is read: no store, so inert
+            self.assertEqual(store_roots(), [])
+            self.assertEqual(self.ev("Write", file_path=os.path.join(other, "a.md"), content="2099-01-01T00:00Z"), [])
+            os.environ["AIQT_STORE_ROOT"] = STORE
+            self.assertEqual(store_roots(), [STORE])
+            self.assertEqual(self.ev("Write", file_path=os.path.join(other, "a.md"), content="2099-01-01T00:00Z"), [])
+            self.assertTrue(self.ev("Write", file_path=self.store, content="2099-01-01T00:00Z"))
+            os.environ["AIQT_STORE_ROOT"] = ""  # set but empty: no store, so inert
+            self.assertEqual(store_roots(), [])
+            self.assertEqual(self.ev("Write", file_path=os.path.join(other, "a.md"), content="2099-01-01T00:00Z"), [])
+            self.assertEqual(_cfg("X", {"AIQT_X": "a", "OTHER_X": "o"}), "a")
+            self.assertEqual(_cfg("X", {"AIQT_X": "", "OTHER_X": "o"}), "")
+            self.assertIsNone(_cfg("X", {"OTHER_X": "o"}))
+            self.assertIsNone(_cfg("X", {}))
+
+        def test_no_store_configured_is_inert(self):
+            # there is no default store: with no root configured (or only relative ones) nothing is checked, even
+            # a project directory holding the files an earlier default treated as a store marker
+            work = os.path.join(self.tmp, ".working")
+            os.makedirs(work)
+            for name in ("state.md", "session-lease.md"):
+                with open(os.path.join(work, name), "w") as f:
+                    f.write("lease\n")
+            os.environ["CLAUDE_PROJECT_DIR"] = self.tmp
+            for value in (None, "", "rel/store", os.pathsep):
+                if value is None:
+                    os.environ.pop("AIQT_STORE_ROOT", None)
+                else:
+                    os.environ["AIQT_STORE_ROOT"] = value
+                self.assertEqual(store_roots(), [], value)
+                fp = os.path.join(work, "x.md")
+                self.assertFalse(under_store(fp), value)
+                self.assertFalse(under_store(self.store), value)
+                self.assertEqual(self.ev("Write", file_path=fp, content="hb 2099-01-01T00:00Z"), [], value)
+                self.assertEqual(self.ev("Write", file_path=self.store, content="hb 2099-01-01T00:00Z"), [], value)
+                self.assertEqual(self.ev("Bash", command=f"echo 2099-01-01T00:00Z >> {fp}"), [], value)
+                self.assertEqual(self.ev("Bash", command=f"echo 2099-01-01T00:00Z >> {self.store}"), [], value)
+                out = self.main_out({"tool_name": "Write", "cwd": self.tmp,
+                                     "tool_input": {"file_path": fp, "content": "hb 2099-01-01T00:00Z"}})
+                self.assertEqual(out, "", value)
+
+        def test_relative_path_under_store_cwd(self):
+            r = evaluate({"tool_name": "Write", "cwd": f"{PROJ}/private",
+                          "tool_input": {"file_path": "notes.md", "content": "2099-01-01T00:00Z"}}, self.now)
+            self.assertTrue(r)
+
+        # -- Bash: the simple lexical rule --
+        def test_bash_future_into_store_denied(self):
+            for cmd in (f"echo 'Last-heartbeat-UTC: 2026-09-23T19:00:00Z' >> {PROJ}/private/state.md",
+                        f"printf 'hb 2099-01-01T00:00Z' | tee -a {PROJ}/private/a.md",
+                        f"sed -i 's/x/2099-01-01T00:00Z/' {PROJ}/private/a.md",
+                        f"cp /dev/shm/2099-01-01T00:00Z {PROJ}/private/",
+                        f"printf '%s' '$(echo 2099-01-01T00:00Z)' > {PROJ}/private/log.md"):
+                self.assertTrue(self.ev("Bash", command=cmd), cmd)
+
+        def test_bash_parse_evasions_now_denied(self):
+            # a comment heredoc, wrapper options, and $(echo ...) must not hide a store write from the parse
+            for cmd in (f"# <<EOF\nprintf '%s\\n' 'hb: 2099-01-01T00:00Z' > {PROJ}/private/s.md",
+                        f"printf '%s\\n' '<<EOF'\nprintf 'hb: 2099-01-01T00:00Z' > {PROJ}/private/s.md",
+                        f"echo 2099-01-01T00:00Z | env -i tee {PROJ}/private/s.md",
+                        f"echo 2099-01-01T00:00Z | sudo -n tee {PROJ}/private/s.md",
+                        f"echo $(echo 2099-01-01T00:00Z) > {PROJ}/private/a.md",
+                        f"echo \"hb: `echo 2099-01-01T00:00Z`\" > '{PROJ}/private/a.md'",
+                        f"dd of={PROJ}/private/a.md <<< 2099-01-01T00:00Z"):
+                self.assertTrue(self.ev("Bash", command=cmd), cmd)
+
+        def test_bash_documented_false_positives(self):
+            # these were documented false positives (the write was not bound to the store
+            # path, so a write ELSEWHERE was denied); the write is now bound to its target, so they are allowed
+            for cmd in (f"cp -t /dev/shm/ {PROJ}/private/report-2099-01-01T00:00Z.md",
+                        f"grep 2099-01-01T00:00Z {PROJ}/private/s.md > /dev/shm/out",
+                        f"echo 'hb 2099-01-01T00:00Z' >> {PROJ}/repo/n.md # cf {PROJ}/private/old.md"):
+                self.assertTrue(bash_writes(cmd), cmd)
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            # a write-command name as an ARGUMENT is no longer a write (it was a disclosed false positive)
+            self.assertEqual(self.ev("Bash", command=f"grep tee {PROJ}/private/s.md 2099-01-01T00:00Z"), [])
+
+        def test_read_only_store_inspection_allowed(self):
+            # a read-only command naming a store path is allowed, not denied; the old
+            # documented false positives for a read (grep, a quoted `>` argument) now pass
+            for cmd in (f"rg -n '2099-01-01T00:00Z' {PROJ}/private/pending-decisions.md",
+                        f"grep -c 2099-01-01T00:00Z {PROJ}/private/s.md",
+                        f"grep -n 2099-01-01T00:00Z {PROJ}/private/s.md 2>/dev/null | head -5",
+                        f"rg 2099-01-01T00:00Z {PROJ}/private/ 2>&1 | wc -l",
+                        f"cat {PROJ}/private/defect.md | grep '2099-01-01T00:00Z >> x'",
+                        f"printf '%s\\n' '>' {PROJ}/private/s.md 2099-01-01T00:00Z",
+                        f"sed -n '/2099-01-01T00:00Z/p' {PROJ}/private/s.md",
+                        f"ls {PROJ}/private/ # 2099-01-01T00:00Z > x",
+                        f"rg -i 2099-01-01T00:00Z {PROJ}/private/s.md | sed 's/a/b/'"):
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+
+        def test_write_indicators_still_denied(self):
+            for cmd in (f"echo 2099-01-01T00:00Z >> {PROJ}/private/s.md",
+                        f"echo 2099-01-01T00:00Z>{PROJ}/private/s.md",
+                        f"echo 2099-01-01T00:00Z 1> {PROJ}/private/s.md",
+                        f"echo 2099-01-01T00:00Z &> {PROJ}/private/s.md",
+                        f"echo 2099-01-01T00:00Z >| {PROJ}/private/s.md",
+                        f"echo 2099-01-01T00:00Z >&{PROJ}/private/s.md",
+                        f"printf 'hb 2099-01-01T00:00Z' | tee -a {PROJ}/private/s.md",
+                        f"printf 'hb 2099-01-01T00:00Z' | '/usr/bin/tee' {PROJ}/private/s.md",
+                        f"cp /dev/shm/x {PROJ}/private/2099-01-01T00:00Z.md",
+                        f"mv /dev/shm/2099-01-01T00:00Z.md {PROJ}/private/",
+                        f"install -m 600 /dev/shm/2099-01-01T00:00Z {PROJ}/private/x",
+                        f"truncate -s 0 {PROJ}/private/2099-01-01T00:00Z.md",
+                        f"sed -i.bak 's/x/2099-01-01T00:00Z/' {PROJ}/private/s.md",
+                        f"sed -Ei 's/x/2099-01-01T00:00Z/' {PROJ}/private/s.md",
+                        f"sed --in-place 's/x/2099-01-01T00:00Z/' {PROJ}/private/s.md",
+                        f"perl -pi -e 's/x/2099-01-01T00:00Z/' {PROJ}/private/s.md",
+                        f"echo 'unterminated 2099-01-01T00:00Z {PROJ}/private/s"):
+                self.assertTrue(self.ev("Bash", command=cmd), cmd)
+            # sed/perl without an in-place option, and a -i on another command, are reads
+            self.assertFalse(bash_writes(f"sed 's/a/b/' {PROJ}/private/s.md"))
+            self.assertFalse(bash_writes("grep -i x f; sed 's/a/b/' g"))
+            self.assertTrue(bash_writes("grep x f; sed -i 's/a/b/' g"))
+            self.assertFalse(bash_writes("cmd 2>&1 >&2 1>&- | cat"))
+            self.assertFalse(bash_writes("echo \\> x"))
+            self.assertTrue(bash_writes("cat f >"))
+
+        def test_bash_writes_is_linear(self):
+            # best of 3 in a child under the hang ceiling (one in-process run flaked on a loaded host).
+            # The verdict is the growth from n to GROWTH * n (up to the former sizes), not a wall-clock ceiling
+            code = TIMED_PRELUDE + (
+                "def run(n):\n"
+                "    for cmd in (\"'\" + 'a' * (4 * n), 'x ' * (2 * n), '2>&1 ' * n, '\\\\' * (4 * n),\n"
+                "                \"$'\\\\'\" * n):\n"
+                "        m._fsw_bash_writes(cmd)\n"
+                "print(json.dumps(ratio(12500, run, 3)))\n")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
+
+        def test_bash_date_substitution_passes(self):
+            for cmd in ('echo "hb: $(date -u +%Y-%m-%dT%H:%M:%SZ) $(date -d \'2099-01-01 10:00\')" >> '
+                        f"{PROJ}/private/s.md",
+                        f"echo `date -d '2099-01-01 10:00'` >> {PROJ}/private/s.md",
+                        f"echo \"$(TZ=UTC date -d '2099-01-01T00:00Z' +%s)\" > {PROJ}/private/s.md",
+                        f"echo $( /bin/date -d \"$(printf x) 2099-01-01T00:00Z\" ) > {PROJ}/private/s.md"):
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            self.assertTrue(self.ev("Bash", command=f"echo $(date -u) 2099-01-01T00:00Z > {PROJ}/private/s.md"))
+            self.assertTrue(self.ev("Bash", command=f"echo $(date -u 2099-01-01T00:00Z > {PROJ}/private/s.md"))
+
+        def test_bash_without_store_token_allowed(self):
+            # `echo <future> > notes.md` with the cwd in the store (formerly a documented miss) is
+            # now resolved against the cwd and denied (test_relative_targets_resolve_against_cwd_and_cd)
+            for cwd, cmd in ((f"{PROJ}/private", "printf '%s' 2099-01-01T00:00Z > /dev/shm/example"),
+                             (f"{PROJ}/repo", "echo 2099-01-01T00:00Z > notes.md"),
+                             ("/", f"echo 2099-01-01T00:00Z > {PROJ}/private.bak/x"),
+                             ("/", f"echo 2099-01-01T00:00Z > /x{PROJ}/private/y"),
+                             ("/", f"cat {PROJ}/private/s.md; echo past 2026-09-01T00:00Z > /dev/shm/x")):
+                self.assertEqual(self.ev("Bash", cwd=cwd, command=cmd), [], cmd)
+
+        def test_bash_heredoc_is_plain_text(self):
+            self.assertTrue(self.ev("Bash", command=f"cat <<'EOF' >> {PROJ}/private/s.md\nhb: 2099-01-01T00:00Z\nEOF"))
+            self.assertEqual(self.ev("Bash", command=f"cat <<EOF >> {PROJ}/private/s.md\nhb: $(date -u)\nEOF"), [])
+            self.assertEqual(self.ev("Bash", command="cat <<'EOF' > /dev/shm/x\nhb: 2099-01-01T00:00Z\nEOF"), [])
+            self.assertTrue(self.ev("Bash", command=f"echo 'unterminated 2099-01-01T00:00Z > {PROJ}/private/s"))
+
+        def test_bash_scheduled_keyword_allowed(self):
+            self.assertEqual(self.ev("Bash", command=f"echo 'next_run: 2099-01-01T09:30Z' >> {PROJ}/private/s.md"),
+                             [])
+
+        def test_bash_scan_is_linear(self):
+            # unmatched $( openers must not rescan the suffix (quadratic time)
+            # at this size (1.35 MB) the analysis spends BASH_WORK_BUDGET and fails OPEN (allowed), still
+            # within the timeout; a hundredth of it stays inside the budget and is still denied (unparseable).
+            # The timeout is the hang guard only; linearity is the growth from n to GROWTH * n (up to that size)
+            for scale, want in ((100, True), (1, False)):
+                code = ("import importlib.util as u,datetime;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
+                        "s.loader.exec_module(m);n=datetime.datetime(2026,9,23,17,45,tzinfo=datetime.timezone.utc);"
+                        f"c=': > {PROJ}/private/s; echo '+'$('*(500000//%d)+'`'*(100001//%d)+'$(A=B'*(50000//%d)"
+                        "+' 2099-01-01T00:00Z';print(m._fsw_evaluate({'tool_name':'Bash','tool_input':{'command':c}},n))"
+                        % (_HOOK_FILE, scale, scale, scale))
+                r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                                   timeout=HANG_TIMEOUT)
+                self.assertEqual("2099-01-01T00:00Z" in r.stdout, want, (scale, r.stdout, r.stderr))
+            code = TIMED_PRELUDE + (
+                "def run(n):\n"
+                f"    c = ': > {PROJ}/private/s; echo ' + '$(' * (5 * n) + '`' * (n + 1) + '$(A=B' * (n // 2)\n"
+                "    m._fsw_evaluate({'tool_name': 'Bash', 'tool_input': {'command': c + ' 2099-01-01T00:00Z'}}, now)\n"
+                "print(json.dumps(ratio(12500, run, 3)))\n")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
+
+        def test_main_warn_shape_and_fail_open(self):
+            payload = json.dumps({"tool_name": "Write", "tool_input": {"file_path": self.store,
+                                                                       "content": "2099-01-01T00:00:00Z"}})
+            # no environment variable skips the check: a worker marker is evaluated like any session
+            for stdin_text, env, want_warn in ((payload, {}, True), ("not json", {}, False),
+                                               (payload, {"AIQT_HOOKS_WORKER": "1"}, True),
+                                               (payload, {"AIQT_HOOKS_WORKER": "0"}, True),
+                                               (payload, {"AIQT_HOOKS_WORKER": ""}, True)):
+                old_in, old_out, old_env = sys.stdin, sys.stdout, dict(os.environ)
+                sys.stdin, sys.stdout = io.StringIO(stdin_text), io.StringIO()
+                try:
+                    os.environ.pop("AIQT_HOOKS_WORKER", None)
+                    os.environ.update(env)
+                    rc = main(["future-stamp-write.py"])
+                    out = sys.stdout.getvalue()
+                finally:
+                    sys.stdin, sys.stdout = old_in, old_out
+                    os.environ.clear()
+                    os.environ.update(old_env)
+                self.assertEqual(rc, 0)
+                if want_warn:
+                    obj = json.loads(out)
+                    self.assertEqual(list(obj), ["systemMessage"])
+                    self.assertIn("2099-01-01T00:00:00Z", obj["systemMessage"])
+                    self.assertLessEqual(len(obj["systemMessage"]), WARN_MAX)
+                    self.assertNotIn("\n", obj["systemMessage"])
+                else:  # dispatcher form: main()'s fail-open warning for a payload it cannot parse
+                    self.assertTrue(json.loads(out)["systemMessage"].startswith(
+                        "AIQT guardrail: the future_stamp_write check could not run (unreadable payload"), out)
+
+
+        # -- date spans, keyword adjacency, and scan cost --
+        def test_date_span_respects_quoting(self):
+            # a quoted paren inside $(date ...) must not extend the span over a later literal
+            deny = (f"echo \"$(date '+(')\" \"hb: 2099-01-01T00:00Z\" > {PROJ}/private/s.md; echo ')'",
+                    f"echo '$(date -d 2099-01-01T00:00Z)' > {PROJ}/private/s.md",
+                    f"echo $'$(date \\' 2099-01-01T00:00Z' > {PROJ}/private/s.md",
+                    f"echo \"(\" $(date -u) \")\" hb 2099-01-01T00:00Z > {PROJ}/private/s.md",
+                    f"echo \"$(date -u\" 2099-01-01T00:00Z > {PROJ}/private/s.md")
+            for cmd in deny:
+                self.assertTrue(self.ev("Bash", command=cmd), cmd)
+            allow = (f"echo \"$(date '+%H:%M (%Z)' -d 2099-01-01T00:00Z)\" > {PROJ}/private/s.md",
+                     f"echo \"hb $(date -d \"2099-01-01T00:00Z\")\" > {PROJ}/private/s.md",
+                     f"echo \"$(date -d \"$(echo ')') 2099-01-01T00:00Z\")\" > {PROJ}/private/s.md",
+                     f"echo `date -d '2099-01-01T00:00Z'` > {PROJ}/private/s.md")
+            for cmd in allow:
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+
+        def test_env_prefix_date_span(self):
+            # `env TZ=UTC date` is a date substitution too
+            for cmd in (f"echo \"hb $(env TZ=UTC date -d 2099-01-01T00:00Z)\" > {PROJ}/private/s.md",
+                        f"echo \"hb $(/usr/bin/env TZ=UTC date -d 2099-01-01T00:00Z)\" > {PROJ}/private/s.md"):
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            self.assertTrue(self.ev("Bash", command=f"echo $(/usrdate 2099-01-01T00:00Z) > {PROJ}/private/s.md"))
+            self.assertTrue(self.ev("Bash", command=f"echo $(envdate 2099-01-01T00:00Z) > {PROJ}/private/s.md"))
+
+        def test_non_ascii_after_date_is_not_a_date_span(self):
+            # a non-ASCII digit, letter or space glued to `date` makes another command word, so its literal counts
+            for glued in ("٣", "é", " ", "　"):
+                cmd = f"echo $(date{glued} -d 2099-01-01T00:00Z) > {PROJ}/private/s.md"
+                self.assertTrue(self.ev("Bash", command=cmd), ascii(cmd))
+
+        def test_keyword_must_immediately_precede(self):
+            for line in ("hb: 2099-01-01T00:00Z next", "target branch pushed, hb: 2099-01-01T00:00Z",
+                         "next we did a b c and hb 2099-01-01T00:00Z"):
+                self.assertTrue(self.ev("Write", file_path=self.store, content=line), line)
+            for line in ("next run at 2099-01-01T00:00Z", "target date: 2099-01-01T00:00Z", "due: **[2099-01-01T00:00Z]**"):
+                self.assertEqual(self.ev("Write", file_path=self.store, content=line), [], line)
+
+        def test_scan_is_linear(self):
+            # a 1.0 s wall-clock budget flaked on a loaded host (1.094 s observed); the
+            # check is now the growth ratio from N to 2N (best of 3 each), which does not depend on host speed.
+            # The in-process 30 s ceiling ran only after every timed run had returned, so it
+            # could not interrupt a hang; the runs now execute in a child under a subprocess timeout (the hang guard)
+            code = TIMED_PRELUDE + (
+                f"S='{PROJ}/private/state.md'\n"
+                "def ev(tool, **ti):\n"
+                f"    return m._fsw_evaluate({{'tool_name': tool, 'tool_input': ti, 'cwd': '{PROJ}/repo'}}, now)\n"
+                "def past(n):\n"
+                "    c = '2026-09-23T17:45Z ' * n\n"
+                "    assert ev('Write', file_path=S, content=c) == []\n"
+                f"    assert ev('Bash', command='echo ' + c + '> {PROJ}/private/s.md') == []\n"
+                "def future(n):\n"
+                "    got = ev('Write', file_path=S, content='next ' + '2099-01-01T00:00Z x ' * n)\n"
+                "    assert got == ['2099-01-01T00:00Z'], got\n"
+                "print(json.dumps({r.__name__: ratio(n, r) for r, n in ((past, 12500), (future, 6250))}))\n")
+            # the step is now GROWTH (N to 8N, up to the former sizes, equal work per sample): a 2N step bounded
+            # at 3.0 left little room between a linear pass (about 2) and a quadratic one (about 4)
+            for name, (small, large) in run_timed(code, HANG_TIMEOUT).items():
+                self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (name, small, large))
+
+        def test_many_distinct_literals_linear_and_bounded(self):
+            # the fragment path must not rescan the growing literal list once per literal (quadratic time)
+            lits = [f"2099-{1 + i % 12:02d}-{1 + (i // 12) % 28:02d}T{(i // 336) % 24:02d}:{(i // 8064) % 60:02d}Z"
+                    for i in range(40000)]
+            fp = self.store_file("x\n" * (EXISTING_MAX_BYTES // 2 + 1))  # over the cap: the fragment path
+            r = self.ev("MultiEdit", file_path=fp, edits=[{"old_string": "x", "new_string": "\n".join(lits[:20000])},
+                                                          {"old_string": "x", "new_string": "\n".join(lits[20000:])}])
+            w = self.ev("Write", file_path=os.path.join(self.tmp, "w.md"), content=" ".join(lits))
+            self.assertEqual((len(r), len(w)), (40000, 40000))
+            # linear: the growth from n to GROWTH * n literals (up to 40,000) in a child under the hang ceiling,
+            # not a wall-clock ceiling (a 1.0 s one depended on the host's speed)
+            code = TIMED_PRELUDE + (
+                "fp = %r\n"
+                "os.environ['AIQT_STORE_ROOT'] = os.path.dirname(fp)\n"
+                "lits = [f'2099-{1 + i %% 12:02d}-{1 + (i // 12) %% 28:02d}T{(i // 336) %% 24:02d}:"
+                "{(i // 8064) %% 60:02d}Z' for i in range(40000)]\n"
+                "def ev(tool, **ti):\n"
+                "    return m._fsw_evaluate({'tool_name': tool, 'tool_input': ti, 'cwd': %r}, now)\n"
+                "def run(n):\n"
+                "    edits = [{'old_string': 'x', 'new_string': '\\n'.join(lits[:n // 2])},\n"
+                "             {'old_string': 'x', 'new_string': '\\n'.join(lits[n // 2:n])}]\n"
+                "    wp = os.path.join(os.path.dirname(fp), 'w.md')\n"
+                "    got = (len(ev('MultiEdit', file_path=fp, edits=edits)),\n"
+                "           len(ev('Write', file_path=wp, content=' '.join(lits[:n]))))\n"
+                "    assert got == (n, n), got\n"
+                "print(json.dumps(ratio(5000, run, 3)))\n") % (fp, f"{PROJ}/repo")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
+            old_out = sys.stdout
+            sys.stdout = io.StringIO()
+            try:
+                print(json.dumps(aiqt_hooks._allow_note(_warn_line(w, self.now))[1]))
+                obj = json.loads(sys.stdout.getvalue())
+            finally:
+                sys.stdout = old_out
+            self.assertEqual(list(obj), ["systemMessage"])
+            self.assertLessEqual(len(obj["systemMessage"]), WARN_MAX)
+            self.assertIn(w[0], obj["systemMessage"])
+
+        # -- markdown-table header exemption --
+        def tw(self, *lines):
+            return self.ev("Write", file_path=self.store, content="\n".join(lines) + "\n")
+
+        def test_table_header_keyword_column_allowed(self):
+            # the scheduling keyword may live in the header cell, not on the row's line
+            self.assertEqual(self.tw("| Item | Due | Owner |", "|---|---|---|", "| x | 2099-01-01T00:00Z | me |"), [])
+            self.assertEqual(self.tw("| Item | Next run |", "| :--- | ---: |", "| x | 2099-01-01T00:00Z |",
+                                     "| y | 2099-02-01T00:00Z |"), [])
+            self.assertEqual(self.tw("  | Item | Due", "  ---|:---:", "  | x | 2099-01-01T00:00Z"), [])
+
+        def test_table_non_keyword_column_denied(self):
+            self.assertEqual(self.tw("| Item | Seen |", "|---|---|", "| x | 2099-01-01T00:00Z |"),
+                             ["2099-01-01T00:00Z"])
+            self.assertEqual(self.tw("| Due | Seen |", "|---|---|", "| 2099-01-01T00:00Z | 2099-02-01T00:00Z |"),
+                             ["2099-02-01T00:00Z"])
+
+        def test_table_ended_row_denied(self):
+            self.assertTrue(self.tw("| Item | Due |", "|---|---|", "| x | 2099-01-01T00:00Z |", "",
+                                    "| y | 2099-02-01T00:00Z |"))
+            # a pipe-free line is a one-cell row (GFM), so it no longer ends the table
+            self.assertEqual(self.tw("| Item | Due |", "|---|---|", "text", "| y | 2099-02-01T00:00Z |"), [])
+
+        def test_table_without_delimiter_denied(self):
+            for lines in (("| Item | Due |", "| x | 2099-01-01T00:00Z |"),
+                          ("| Item | Due |", "|---|", "| x | 2099-01-01T00:00Z |"),  # cell count mismatch
+                          ("| Item | Due |", "", "|---|---|", "| x | 2099-01-01T00:00Z |"),
+                          ("| Item | Due |", "|---|---|x", "| x | 2099-01-01T00:00Z |"),  # not a delimiter row
+                          ("| Item | Due |", "| |---|", "| x | 2099-01-01T00:00Z |"),  # an empty delimiter cell
+                          ("Item Due", "---|---", "x | 2099-01-01T00:00Z"),  # a header needs an unescaped pipe
+                          ("Item \\| Due", "---|---", "x | 2099-01-01T00:00Z")):
+                self.assertTrue(self.tw(*lines), lines)
+
+        def test_table_escaped_pipe_does_not_shift_columns(self):
+            self.assertEqual(self.tw("| Item | Due |", "|---|---|", "| a \\| b | 2099-01-01T00:00Z |"), [])
+            self.assertTrue(self.tw("| Item \\| Due | Seen |", "|---|---|", "| x | 2099-01-01T00:00Z |"))
+            self.assertTrue(self.tw("| Seen | Due |", "|---|---|", "| a \\| 2099-02-01T00:00Z | c |"))
+
+        def test_table_header_carried_over_edit_allowed(self):
+            fp = self.store_file("# log\n| Item | Due |\n|---|---|\n| a | 2026-09-01T00:00Z |\n")
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="| a | 2026-09-01T00:00Z |",
+                                     new_string="| a | 2026-09-01T00:00Z |\n| b | 2099-01-01T00:00Z |"), [])
+            fp = self.store_file("| Item | Seen |\n|---|---|\n| a | 2026-09-01T00:00Z |\n")
+            self.assertTrue(self.ev("Edit", file_path=fp, old_string="| a | 2026-09-01T00:00Z |",
+                                    new_string="| a | 2026-09-01T00:00Z |\n| b | 2099-01-01T00:00Z |"))
+
+        def test_table_context_absent_on_fragment_path_and_bash(self):
+            # disclosed: no table context on the Bash path or the fragment path
+            self.assertTrue(self.ev("Bash", command="printf '| Item | Due |\n|---|---|\n| x | 2099-01-01T00:00Z |\n' "
+                                                    f">> {PROJ}/private/s.md"))
+            fp = self.store_file("x\n" * (EXISTING_MAX_BYTES // 2 + 1))  # over the cap: the fragment path
+            self.assertTrue(self.ev("Edit", file_path=fp, old_string="x",
+                                    new_string="| Item | Due |\n|---|---|\n| x | 2099-01-01T00:00Z |"))
+
+        def test_table_scan_is_linear(self):
+            rows = ["| x | 2099-01-01T00:00Z |"] * 50000
+            self.assertEqual(self.tw("| Item | Due |", "|---|---|", *rows), [])
+            self.assertEqual(self.tw(*(["| a | b |"] * 50000)), [])
+            # linear: the growth from n to GROWTH * n rows (up to 50,000) in a child under the hang ceiling, not
+            # a wall-clock ceiling (a 1.0 s one depended on the host's speed)
+            code = TIMED_PRELUDE + (
+                "def tw(*lines):\n"
+                f"    ti = {{'file_path': '{PROJ}/private/state.md', 'content': '\\n'.join(lines) + '\\n'}}\n"
+                f"    return m._fsw_evaluate({{'tool_name': 'Write', 'tool_input': ti, 'cwd': '{PROJ}/repo'}}, now)\n"
+                "def run(n):\n"
+                "    assert tw('| Item | Due |', '|---|---|', *(['| x | 2099-01-01T00:00Z |'] * n)) == []\n"
+                "    assert tw(*(['| a | b |'] * n)) == []\n"
+                "print(json.dumps(ratio(6250, run, 3)))\n")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
+
+        # -- substitution writes, in-place clusters, table forms, and fd duplication --
+        def test_dq_substitution_write_seen(self):
+            # a write inside a double-quoted command substitution must be seen, not hidden
+            for cmd in (f"result=\"$(printf '%s\\n' 'heartbeat: 2099-01-01T00:00Z' | tee {PROJ}/private/s.md)\"",
+                        f"r=\"`printf 'hb 2099-01-01T00:00Z' | tee {PROJ}/private/s.md`\"",
+                        f"r=\"x $(echo \"$(printf 'hb 2099-01-01T00:00Z' > {PROJ}/private/s.md)\") y\"",
+                        f"r=\"$(sed -i 's/a/2099-01-01T00:00Z/' {PROJ}/private/s.md)\"",
+                        f"r=\"$(echo ')' | tee {PROJ}/private/s.md) 2099-01-01T00:00Z\"",
+                        f"echo \"$(printf 2099-01-01T00:00Z\" > {PROJ}/private/s.md"):  # unterminated
+                self.assertTrue(self.ev("Bash", command=cmd), cmd)
+            # substitutions stay independent: a write-free substitution and quoted text remain reads
+            for cmd in (f"n=\"$(grep -c 2099-01-01T00:00Z {PROJ}/private/s.md)\"",
+                        f"grep \"$(echo 2099-01-01T00:00Z)\" {PROJ}/private/s.md 2>&1",
+                        f"grep '$(tee x)' {PROJ}/private/s.md 2099-01-01T00:00Z",
+                        f"grep \"\\$(tee x)\" {PROJ}/private/s.md 2099-01-01T00:00Z",
+                        f"echo \"$(sed 's/a/b/' {PROJ}/private/s.md)\" -i 2099-01-01T00:00Z"):
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            self.assertTrue(bash_writes("sed \"$(echo x)\" -i f"))  # the outer stream continues past a substitution
+
+        def test_perl_digit_clusters_in_place(self):
+            # a perl switch cluster with digits (such as -0777pi) must not hide the in-place i
+            for cmd in (f"perl -0777pi -e 's/old/2099-01-01T00:00Z/' {PROJ}/private/s.md",
+                        f"perl -0pi -e 's/old/2099-01-01T00:00Z/' {PROJ}/private/s.md",
+                        f"perl -l0pi -e 's/old/2099-01-01T00:00Z/' {PROJ}/private/s.md",
+                        f"perl -0777 -pi.bak -e 's/old/2099-01-01T00:00Z/' {PROJ}/private/s.md",
+                        f"sed -E -s -i 's/x/2099-01-01T00:00Z/' {PROJ}/private/s.md",
+                        f"sed -nEi 's/x/2099-01-01T00:00Z/' {PROJ}/private/s.md"):
+                self.assertTrue(self.ev("Bash", command=cmd), cmd)
+            for cmd in (f"perl -0777 -ne 'print if /2099-01-01T00:00Z/' {PROJ}/private/s.md",
+                        f"sed -n -E '/2099-01-01T00:00Z/p' {PROJ}/private/s.md"):
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+
+        def test_gfm_table_forms(self):
+            # no outer pipes, and a one-hyphen delimiter, are valid GFM tables
+            self.assertEqual(self.tw("Item | Due", "---|---", "x | 2099-01-01T00:00Z"), [])
+            self.assertEqual(self.tw("| Item | Due |", "|-|-|", "| x | 2099-01-01T00:00Z |"), [])
+            self.assertEqual(self.tw("| Item | Due |", "|--|--|", "| x | 2099-01-01T00:00Z |"), [])
+            self.assertEqual(self.tw("Item | Due |", "|:-|-:|", "| x | 2099-01-01T00:00Z |"), [])
+            self.assertEqual(self.tw("Item | Due", "- | -", "x | 2099-01-01T00:00Z", "y | 2099-02-01T00:00Z"), [])
+            self.assertEqual(self.tw("Due | Seen", "---|---", "2099-01-01T00:00Z | 2099-02-01T00:00Z"),
+                             ["2099-02-01T00:00Z"])
+            self.assertEqual(self.tw("Item | Due", "---|---", "x | 2099-01-01T00:00Z", "no pipe here",
+                                     "y | 2099-02-01T00:00Z"), [])  # a pipeless line is a row (GFM)
+
+        def test_header_repurpose_rechecks_rows(self):
+            # a header or delimiter change must re-check every row of its table
+            fp = self.store_file("| Item | Due |\n|---|---|\n| x | 2099-01-01T00:00Z |\n")
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="Due", new_string="Observed"),
+                             ["2099-01-01T00:00Z"])
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="| Item | Due |", new_string="| Due | Seen |"),
+                             ["2099-01-01T00:00Z"])  # column shift
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="|---|---|\n", new_string=""),
+                             ["2099-01-01T00:00Z"])  # the row leaves its table
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="Due", new_string="Due date"), [])
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="|---|---|", new_string="|:--|--:|"), [])
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="| Item |", new_string="| Thing |"), [])
+            fp = self.store_file("| A | Seen |\n|---|---|\n| r | 2026-09-01T00:00Z |\n\n"
+                                 "| B | Due |\n|---|---|\n| x | 2099-01-01T00:00Z |\n")
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="\n\n| B | Due |\n|---|---|\n", new_string="\n"),
+                             ["2099-01-01T00:00Z"])  # the row joins the Seen table
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="| r |", new_string="| s |"), [])
+
+        def test_spaced_and_quoted_fd_duplication(self):
+            # the redirection operand is classified whole, after dequoting
+            for cmd in (f"grep 2099-01-01T00:00Z {PROJ}/private/s.md 1>& 2",
+                        f"grep 2099-01-01T00:00Z {PROJ}/private/s.md >&'2'",
+                        f"grep 2099-01-01T00:00Z {PROJ}/private/s.md 2>& \"1\"",
+                        f"grep 2099-01-01T00:00Z {PROJ}/private/s.md >& -",
+                        f"grep 2099-01-01T00:00Z {PROJ}/private/s.md 3>&1-",
+                        f"grep 2099-01-01T00:00Z {PROJ}/private/s.md >& /dev/null"):
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            for cmd in (f"echo 2099-01-01T00:00Z >& {PROJ}/private/s.md",
+                        f"echo 2099-01-01T00:00Z >&'{PROJ}/private/s.md'",
+                        f"echo 2099-01-01T00:00Z >& $fd {PROJ}/private/s.md"):  # a `$` target is unknown: denied
+                self.assertTrue(self.ev("Bash", command=cmd), cmd)
+            # `&> 2` and `>& 2x` are still writes (to files named 2 and 2x, not duplications),
+            # but their targets are not the store path, which appears only as a comment or an echo argument
+            for cmd in (f"echo 2099-01-01T00:00Z &> 2 # {PROJ}/private/s.md",
+                        f"echo 2099-01-01T00:00Z >& 2x {PROJ}/private/s.md"):
+                self.assertTrue(bash_writes(cmd), cmd)
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+
+        def test_subagent_store_write_is_checked(self):
+            # by design: a subagent's store write is checked, never skipped
+            for extra in ({"agent_id": "a1b2"}, {"agent_id": "a1b2", "agent_type": "general-purpose"}):
+                payload = dict({"tool_name": "Write", "cwd": "/",
+                                "tool_input": {"file_path": self.store, "content": "hb 2099-01-01T00:00Z"}}, **extra)
+                self.assertEqual(evaluate(payload, self.now), ["2099-01-01T00:00Z"], extra)
+                payload = dict({"tool_name": "Bash", "cwd": "/", "tool_input": {
+                    "command": f"echo 'hb 2099-01-01T00:00Z' >> {PROJ}/private/s.md"}}, **extra)
+                self.assertTrue(evaluate(payload, self.now), extra)
+            self.assertIn("DELIBERATELY checked", _FSW_DOC)
+
+        def test_shell_tokens_linear(self):
+            # best of 3 in a child under the hang ceiling (2.08 s in-process was observed at load 30,
+            # and a 2.0 s ceiling failed at 2.53 s on a slower CI runner). The verdict is the growth from n to
+            # GROWTH * n (up to the former sizes), not a wall-clock ceiling
+            code = TIMED_PRELUDE + (
+                "def run(n):\n"
+                "    for cmd in ('\"$(' * n, '\"$(x)\"' * n, '\"`x`\"' * n, '$((' * n + '))' * n, '1>& 2 ' * n):\n"
+                "        m._fsw_bash_writes(cmd)\n"
+                "print(json.dumps(ratio(12500, run, 3)))\n")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
+
+        # -- table boundaries and rows, and case patterns in substitutions --
+        def test_new_block_ends_table(self):
+            # a list item, heading, blockquote, or fence after a Due table must not inherit its context
+            hdr = ("| Item | Due |", "|---|---|", "| a | 2026-09-01T00:00Z |")
+            for tail in (("- heartbeat | 2099-01-02T00:00Z",), ("* hb | 2099-01-02T00:00Z",),
+                         ("+ hb | 2099-01-02T00:00Z",), ("1. hb | 2099-01-02T00:00Z",), ("2) hb | 2099-01-02T00:00Z",),
+                         ("# hb | 2099-01-02T00:00Z",),
+                         ("```text | x", "| b | 2099-01-02T00:00Z |"), ("~~~ | x", "| b | 2099-01-02T00:00Z |"),
+                         ("", "hb | 2099-01-02T00:00Z"), ("hb 2099-01-02T00:00Z",)):
+                self.assertEqual(self.tw(*(hdr + tail)), ["2099-01-02T00:00Z"], tail)
+            # a `>` line ends the table AND is quoted text, exempt whatever its column
+            self.assertEqual(self.tw(*(hdr + ("> hb | 2099-01-02T00:00Z", "| b | 2099-01-02T00:00Z |"))),
+                             ["2099-01-02T00:00Z"])  # the row after the quote is outside the table: checked
+            # still rows: a leading-pipe row, a row of a pipeless-header table, a hyphen cell that is no list marker
+            self.assertEqual(self.tw(*(hdr + ("  | b | 2099-01-02T00:00Z |",))), [])
+            self.assertEqual(self.tw("Item | Due", "---|---", "x | 2026-09-01T00:00Z", "y | 2099-01-02T00:00Z"), [])
+            self.assertEqual(self.tw("Item | Due", "---|---", "-| 2099-01-02T00:00Z"), [])
+            # a new table may start right after the interrupting block
+            self.assertEqual(self.tw(*(hdr + ("# next", "| Item | Due |", "|---|---|",
+                                              "| b | 2099-01-02T00:00Z |"))), [])
+
+        def test_bare_row_under_leading_pipe_header(self):
+            # GFM leading pipes are optional per line, so a bare row continues a `| ... |` table
+            self.assertEqual(self.tw("| Item | Due |", "|---|---|", "release | 2099-01-01T00:00Z"), [])
+            self.assertEqual(self.tw("| Item | Due |", "|---|---|", "| a | x |", "release | 2099-01-01T00:00Z |"), [])
+            # the column is counted from the row's own leading pipe: a bare row's Item column is not exempt
+            self.assertEqual(self.tw("| Item | Due |", "|---|---|", "2099-01-01T00:00Z | x"),
+                             ["2099-01-01T00:00Z"])
+            # the genuine block-ending checks still end it
+            for gap in ("", "- x", "# h", "> q", "```"):
+                self.assertEqual(self.tw("| Item | Due |", "|---|---|", gap, "release | 2099-01-01T00:00Z"),
+                                 ["2099-01-01T00:00Z"], gap)
+            self.assertNotIn("stricter than GFM", _FSW_DOC)
+
+        def test_pipe_free_row_continues_table(self):
+            # GFM example 202, a pipe-free body row continues the table (one cell, column 0)
+            body = "| Item | Due |\n|---|---|\nTBD\nrelease | %s\n"
+            self.assertEqual(self.tw(*(body % "2099-01-01T00:00Z").splitlines()), [])
+            fp = os.path.join(self.tmp, "pipe-free-row.md")
+            os.environ["AIQT_STORE_ROOT"] = self.tmp  # the Edit must reach a store path to count
+            with open(fp, "w") as f:
+                f.write(body % "2026-09-01T00:00Z")
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="2026-09-01T00:00Z",
+                                     new_string="2099-01-01T00:00Z"), [])
+            # control: the same Edit with the row's pipe removed (no header exemption) is denied, so the
+            # allow above comes from the table rule, not from the path falling outside the store
+            with open(fp, "w") as f:
+                f.write(body.replace("release | ", "release ") % "2026-09-01T00:00Z")
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="2026-09-01T00:00Z",
+                                     new_string="2099-01-01T00:00Z"), ["2099-01-01T00:00Z"])
+            os.environ["AIQT_STORE_ROOT"] = STORE  # back to the fixture store root
+            # a blank line still ends the table
+            self.assertEqual(self.tw("| Item | Due |", "|---|---|", "TBD", "", "release | 2099-01-01T00:00Z"),
+                             ["2099-01-01T00:00Z"])
+
+        def test_pipe_free_line_is_column_zero(self):
+            # a pipe-free paragraph line after a table stays in it until a blank line, but it never
+            # gets a header exemption: it is checked like an ordinary line, even under a scheduling cell 0
+            self.assertEqual(self.tw("| Item | Due |", "|---|---|", "| a | x |", "hb 2099-01-01T00:00Z"),
+                             ["2099-01-01T00:00Z"])
+            self.assertEqual(self.tw("| Item | Due |", "|---|---|", "| a | x |", "note", "more text",
+                                     "release | 2099-01-01T00:00Z"), [])
+            self.assertEqual(self.tw("| Item | Due |", "|---|---|", "note", "", "hb 2099-01-01T00:00Z",
+                                     "release | 2099-01-01T00:00Z"),
+                             ["2099-01-01T00:00Z"])
+            self.assertEqual(self.tw("| Due | Item |", "|---|---|", "| x | a |", "2099-01-01T00:00Z"),
+                             ["2099-01-01T00:00Z"])
+            # the keyword-on-its-own-line rule still exempts a pipe-free row
+            self.assertEqual(self.tw("| Due | Item |", "|---|---|", "| x | a |", "due 2099-01-01T00:00Z"), [])
+            # and the table stays open past it: a later piped row keeps its Due exemption
+            self.assertEqual(self.tw("| Due | Item |", "|---|---|", "note", "| 2099-01-01T00:00Z | a |"), [])
+            self.assertNotIn("a line with no unescaped pipe, or", _FSW_DOC)
+            self.assertNotIn("so it is exempt only when header cell 0 carries a keyword", _FSW_DOC)
+
+        def test_pipe_free_heartbeat_under_due_header_denied(self):
+            # a pipe-free line under `| Due | Item |` inherited column 0's exemption, so
+            # a fabricated future heartbeat was allowed through Write, Edit, and MultiEdit
+            fut = "2099-01-01T00:00Z"
+            body = "| Due | Item |\n| --- | --- |\n| 2099-02-01T09:00Z | release |\nLast-heartbeat: %s\n"
+            fp = os.path.join(self.tmp, "pipe-free-heartbeat.md")
+            os.environ["AIQT_STORE_ROOT"] = self.tmp
+            self.assertEqual(self.ev("Write", file_path=fp, content=body % fut), [fut])
+            with open(fp, "w") as f:
+                f.write(body % "2026-09-01T00:00Z")
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="2026-09-01T00:00Z", new_string=fut), [fut])
+            self.assertEqual(self.ev("MultiEdit", file_path=fp,
+                                     edits=[{"old_string": "2026-09-01T00:00Z", "new_string": fut}]), [fut])
+            # the piped Due row itself stays exempt (unchanged scheduled row, and a fresh one)
+            self.assertEqual(self.ev("Write", file_path=fp, content=body % "2026-09-01T00:00Z"), [])
+            self.assertIn("A pipe-free row gets no header", _FSW_DOC)
+
+        def test_table_context_carry_over_scales(self):
+            # a row key must not compare the full header text, or time grows with header x rows
+            # interleaved best of 3 in a child under the hang ceiling (formerly one in-process run each)
+            code = TIMED_PRELUDE + (
+                "def run(hl):\n"
+                "    old = '\\n'.join(['| Item | Due | ' + 'h' * hl + ' |', '|---|---|---|']\n"
+                "                     + ['| x | 2026-09-01T00:00Z | y |'] * 160000) + '\\n'\n"
+                "    assert m._fsw_future_in_changed_lines(old, old, 0) == []\n"
+                "print(json.dumps(interleaved((10000, 160000), run, 3)))\n")
+            times = run_timed(code, HANG_TIMEOUT)
+            # flat in header length (16 times longer): a ratio, with no wall-clock ceiling or absolute slack
+            self.assertLess(times[1] / max(times[0], 1e-3), FLAT_LIMIT, times)
+
+        def test_case_pattern_paren_in_substitution(self):
+            # a case pattern `)` must not close the $(...) frame early and hide the write (an exotic form)
+            deny = (f'result="$(case ok in ok) printf \'%s\\n\' \'hb 2099-01-02T00:00Z\' > {PROJ}/private/s.md;; esac)"',
+                    f'r=$(case ok in (ok) tee {PROJ}/private/s.md <<< "2099-01-02T00:00Z";; esac)',
+                    f'r="$(case a in a) case b in b) :;; esac; printf 2099-01-02T00:00Z > {PROJ}/private/s.md;; esac)"')
+            for cmd in deny:
+                self.assertTrue(bash_writes(cmd), cmd)
+                self.assertEqual(self.ev("Bash", command=cmd), ["2099-01-02T00:00Z"], cmd)
+            # a quoted case/esac is no keyword, and a read inside a case construct stays a read
+            allow = (f'r="$(case ok in ok) grep 2099-01-02T00:00Z {PROJ}/private/s.md;; esac)"',
+                     f'r="$(echo \'case\'; grep 2099-01-02T00:00Z {PROJ}/private/s.md)"')
+            for cmd in allow:
+                self.assertFalse(bash_writes(cmd), cmd)
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+
+        def test_hash_row_continues_pipeless_table(self):
+            # a false deny: any `#` line ended a table, so an issue-number row lost its
+            # Due-column exemption; only an ATX heading (1 to 6 `#` then whitespace or the line end) ends one
+            for rows in (("#123 | 2099-12-31T00:00Z",), ("x | 2026-09-01T00:00Z", "#7 | 2099-12-31T00:00Z"),
+                         ("####### | 2099-12-31T00:00Z",), ("#tag | 2099-12-31T00:00Z",)):
+                self.assertEqual(self.tw("Issue | Due", "---|---", *rows), [], rows)
+            for head in ("# h | 2099-12-31T00:00Z", "###### h | 2099-12-31T00:00Z", "#\t| 2099-12-31T00:00Z",
+                         "## | 2099-12-31T00:00Z"):
+                self.assertEqual(self.tw("Issue | Due", "---|---", head), ["2099-12-31T00:00Z"], head)
+
+        def test_case_counted_only_in_command_position(self):
+            # a false deny: a `case` ARGUMENT inside a substitution opened a case
+            # construct, left the substitution unterminated, and read as a write
+            reads = (f'x="$(rg case {PROJ}/private/s.md | grep 2099-12-31T00:00Z)"',
+                     f'x="$(echo case; grep 2099-12-31T00:00Z {PROJ}/private/s.md)"',
+                     f'x="$(rg then case {PROJ}/private/s.md | grep 2099-12-31T00:00Z)"',
+                     f'x=$(grep -e esac -e case 2099-12-31T00:00Z {PROJ}/private/s.md)')
+            for cmd in reads:
+                self.assertIsNotNone(_shell_tokens(cmd), cmd)
+                self.assertFalse(bash_writes(cmd), cmd)
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            # a case in command position, after a separator or a reserved word, still shows the write inside it
+            writes = (f'r="$(true; case a in a) printf 2099-12-31T00:00Z > {PROJ}/private/s.md;; esac)"',
+                      f'r="$(if true; then case a in a) tee {PROJ}/private/s.md <<< 2099-12-31T00:00Z;; esac; fi)"',
+                      f'r="$(! case a in a) printf 2099-12-31T00:00Z > {PROJ}/private/s.md;; esac)"',
+                      f'r="$(case a in a) echo esac; printf 2099-12-31T00:00Z > {PROJ}/private/s.md;; esac)"')
+            for cmd in writes:
+                self.assertTrue(bash_writes(cmd), cmd)
+                self.assertEqual(self.ev("Bash", command=cmd), ["2099-12-31T00:00Z"], cmd)
+
+        def test_threat_model_stated(self):
+            self.assertIn("THREAT MODEL", _FSW_DOC.split("\n\n")[1])
+
+        # -- write words only in command position, and quoted text in a store write --
+        def main_out(self, payload):
+            old_in, old_out, old_env = sys.stdin, sys.stdout, dict(os.environ)
+            sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
+            try:
+                self.assertEqual(main(["future-stamp-write.py"]), 0)
+                return sys.stdout.getvalue()
+            finally:
+                sys.stdin, sys.stdout = old_in, old_out
+                os.environ.clear()
+                os.environ.update(old_env)
+
+        def test_write_word_only_in_command_position(self):
+            # only the command word, not every argument's basename, is compared against WRITE_COMMANDS (no false deny)
+            store = f"{PROJ}/private/state.md"
+            reads = (f"rg -e tee -e '2099-01-01T00:00Z' {store}", f"grep -n -e cp -e mv 2099-01-01T00:00Z {store}",
+                     f"rg 'dd|truncate' {store} | grep 2099-01-01T00:00Z", f"echo install 2099-01-01T00:00Z; cat {store}",
+                     f"sudo rg -e tee 2099-01-01T00:00Z {store}", f"env LC_ALL=C grep tee 2099-01-01T00:00Z {store}",
+                     f"x=\"$(rg -c ed {store})\" 2099-01-01T00:00Z", f"find {PROJ}/private -name tee 2099-01-01T00:00Z")
+            for cmd in reads:
+                self.assertFalse(bash_writes(cmd), cmd)
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            self.assertEqual(self.main_out({"tool_name": "Bash", "tool_input": {"command": reads[0]}}), "")
+            writes = ("echo 2099-01-01T00:00Z | tee -a S", "true && tee S <<< 2099-01-01T00:00Z",
+                      "false || tee S <<< 2099-01-01T00:00Z", "true; cp /dev/shm/2099-01-01T00:00Z S",
+                      "true\ntee S <<< 2099-01-01T00:00Z", "x=$(tee S <<< 2099-01-01T00:00Z)",
+                      "x=`tee S <<< 2099-01-01T00:00Z`", "(tee S <<< 2099-01-01T00:00Z)",
+                      "{ tee S <<< 2099-01-01T00:00Z; }", "if true; then tee S <<< 2099-01-01T00:00Z; fi",
+                      "! tee S <<< 2099-01-01T00:00Z", "FOO=1 BAR=2 tee S <<< 2099-01-01T00:00Z",
+                      "2>/dev/null tee S <<< 2099-01-01T00:00Z", "sudo -u root -n tee S <<< 2099-01-01T00:00Z",
+                      "sudo --user root /usr/bin/tee S <<< 2099-01-01T00:00Z", "env -i FOO=1 tee S <<< 2099-01-01T00:00Z",
+                      "env -u HOME -- tee S <<< 2099-01-01T00:00Z", "command tee S <<< 2099-01-01T00:00Z",
+                      "nohup nice -n 5 tee S <<< 2099-01-01T00:00Z", "time -p tee S <<< 2099-01-01T00:00Z",
+                      "timeout -s KILL 5 tee S <<< 2099-01-01T00:00Z", "flock -w 3 /dev/shm/l tee S <<< 2099-01-01T00:00Z",
+                      "ls | xargs -I {} cp {} S 2099-01-01T00:00Z", "find . -name x -exec tee S \\; 2099-01-01T00:00Z",
+                      "echo 2099-01-01T00:00Z | sudo sed -i 's/a/b/' S")
+            for cmd in writes:
+                cmd = cmd.replace("S", store)
+                self.assertTrue(bash_writes(cmd), cmd)
+                self.assertEqual(self.ev("Bash", command=cmd), ["2099-01-01T00:00Z"], cmd)
+            self.assertIn("systemMessage", self.main_out({"tool_name": "Bash", "tool_input": {
+                "command": f"echo 2099-01-01T00:00Z | tee -a {store}"}}))
+            # redirection, in-place, and substitution detection are position-free, as before
+            for cmd in ("rg tee 2099-01-01T00:00Z > S", "rg x | sed -n -i 2099-01-01T00:00Z S",
+                        "echo \"$(rg tee S)\" 2099-01-01T00:00Z >> S"):
+                self.assertTrue(self.ev("Bash", command=cmd.replace("S", store)), cmd)
+
+        def test_quoted_text_in_store_write_exempt(self):
+            # a blockquote, inline code span, or fenced block holding a future literal is quoted text (no false deny)
+            fut = "2099-01-01T00:00Z"
+            for content in (f"> quoted: {fut}\n", f"  > nested > {fut}\n", f"example `{fut}` shape\n",
+                            f"example ``a ` {fut}`` shape\n", f"```\nhb: {fut}\n```\n", f"~~~~\n{fut}\n~~~~~\n",
+                            f"| Item | Seen |\n|---|---|\n| x | `{fut}` |\n"):
+                self.assertEqual(self.ev("Write", file_path=self.store, content=content), [], content)
+            # bare observed-time fields stay checked, including beside an exempt copy on the same line
+            for content in (f"Last-heartbeat: {fut}\n", f"`x` then {fut} outside\n", f"quote `{fut}` and {fut}\n",
+                            f"unclosed `{fut} shape\n", f"```\nhb: {fut}\n", f"x > {fut}\n",
+                            f"```\ncode\n```\nLast-heartbeat: {fut}\n"):
+                self.assertEqual(self.ev("Write", file_path=self.store, content=content), [fut], content)
+            # Edit: the reconstructed whole file decides; breaking a fence exposes its lines
+            fp = self.store_file(f"# log\n```\nhb: {fut}\n```\nStatus: ok\n")
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="Status: ok", new_string=f"> was {fut}"), [])
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="hb: ", new_string="hb2: "), [])
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="```\nStatus", new_string="Status"), [fut])
+            # the fragment path (file not read whole) exempts quote lines and code spans, never fences
+            fp = self.store_file("x\n" * (EXISTING_MAX_BYTES // 2 + 1))
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="x", new_string=f"> {fut}\n`{fut}`"), [])
+            self.assertEqual(self.ev("Edit", file_path=fp, old_string="x", new_string=f"```\n{fut}\n```"), [fut])
+            # Bash is unchanged: text in a command is not markdown
+            os.environ["AIQT_STORE_ROOT"] = STORE  # back to the fixture store root
+            self.assertTrue(self.ev("Bash", command=f"echo '> {fut}' >> {PROJ}/private/s.md"))
+            self.assertEqual(self.main_out({"tool_name": "Write", "tool_input": {"file_path": self.store,
+                                                                                  "content": f"> {fut}\n"}}), "")
+            self.assertIn("a composed stamp placed inside a quote", " ".join(_FSW_DOC.split()))
+
+
+        # -- command position after redirections, find -exec, in-place options, [[ comparisons, worker env --
+        def assert_writes(self, cmds, want):
+            store = f"{PROJ}/private/state.md"
+            for cmd in cmds:
+                # F first: the store path comes from the temporary directory, whose name may hold an F
+                cmd = cmd.replace("F", "2099-01-01T00:00Z").replace("S", store)
+                self.assertEqual(bash_writes(cmd), want, cmd)
+                self.assertEqual(self.ev("Bash", command=cmd), ["2099-01-01T00:00Z"] if want else [], cmd)
+
+        def test_leading_input_redirection_keeps_command_position(self):
+            # a leading input redirection's operand must not be read as the command word
+            self.assert_writes(("<<<'Last-heartbeat: F' tee S", "< /dev/shm/in tee S F", "0</dev/shm/in tee S F",
+                      "<&0 tee S F", "<<-E tee S\nF\nE", "sudo < /dev/shm/in tee S F", "echo F <> S",
+                      "x=$(<<<F tee S)", "cat < /dev/shm/in | tee -a S F"), True)
+            self.assert_writes(("cat < S F", "rg x < S F", "while read l; do echo; done < <(rg x S) F",
+                      "diff <(sort S) /dev/shm/b F", "rg -c x <<< F S"), False)
+
+        def test_exec_only_under_find(self):
+            # an -exec word re-enters command position only under find (no false deny elsewhere)
+            self.assert_writes(("printf '%s\\n' '-exec' tee F S", "echo -ok cp F S", "rg -e -execdir -e mv F S",
+                      "find . -exec rg x {} + -name tee F S", "find . -exec rg x {} \\; -name cp F S"), False)
+            self.assert_writes(("find . -name x -exec tee S \\; F", "sudo find . -okdir cp x S \\; F",
+                      "find . -exec rg x {} + -exec tee S \\; F", "find . -execdir sed -i s/a/b/ S + F"), True)
+
+        def test_inplace_only_in_command_position(self):
+            # sed or perl as a mere argument (a search pattern) must not arm in-place detection (no false deny)
+            self.assert_writes(("rg -e sed -i -e F S", "grep -e perl -i F S", "echo sed -i F; cat S"), False)
+            self.assert_writes(("sed -i s/a/b/ S F", "echo F | sudo sed -i 's/a/b/' S", "perl -pi -e 1 S F",
+                      "ls S | xargs sed -i s/a/F/", "LC_ALL=C sed --in-place s/a/b/ S F"), True)
+
+        def test_conditional_comparison_is_not_redirection(self):
+            # inside [[ ]], `>` and `<` compare strings and are no redirection (no false deny)
+            self.assert_writes(("stamp=$(cat S); [[ \"$stamp\" > 'F' ]]", "stamp=$(cat S); [[ \"$stamp\" < 'F' ]]",
+                      "if [[ $(cat S) > F ]]; then echo late; fi", "[[ a > b && ( c < F ) ]] && cat S"), False)
+            # [ ] and test are commands: an unquoted `>` there IS an output redirection (real bash creates b)
+            self.assert_writes(("[ \"$(cat F)\" > S ]", "test x > S F", "[[ a < b ]] && echo F > S",
+                      "[[ $(tee S <<< F) > a ]]", "[[ a > b ]]; echo F >> S", "echo '[[' > S F",
+                      "[[ a > b F S"), True)
+
+        def test_real_bash_agrees_on_input_redirection_and_comparison(self):
+            # the redirection semantics the fixes rest on, observed in real bash
+            if not shutil.which("bash"):
+                self.skipTest("bash absent")
+            cmds = ("<<<'x' tee o1 >/dev/null", "< in tee o2 >/dev/null", "0<in tee o3 >/dev/null",
+                    "[ a > b1 ]", "[[ a > c1 ]]", "[[ z < c2 ]]", "test a > b2")
+            with open(os.path.join(self.tmp, "in"), "w") as f:
+                f.write("i\n")
+            subprocess.run(["bash", "-c", "; ".join(cmds)], cwd=self.tmp, capture_output=True, timeout=5)
+            made = set(os.listdir(self.tmp))
+            self.assertTrue({"o1", "o2", "o3", "b1", "b2"} <= made, made)
+            self.assertFalse({"c1", "c2"} & made, made)
+
+        def test_worker_env_does_not_skip(self):
+            # no worker bypass exists: a worker marker in the environment does not skip main()
+            payload = {"tool_name": "Write", "tool_input": {"file_path": self.store, "content": "2099-01-01T00:00Z"}}
+            for k, v in (("AIQT_HOOKS_WORKER", "1"),):
+                old = os.environ.get(k)
+                os.environ[k] = v
+                try:
+                    self.assertIn("systemMessage", self.main_out(payload))
+                    self.assertEqual(os.environ.get(k), v)  # the environment is restored afterwards
+                finally:
+                    if old is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = old
+
+        # -- function bodies, and time and ! before a conditional --
+        def test_function_body_is_command_position(self):
+            # `function NAME {` must keep command position for its body, or an in-place
+            # write in the body is missed; detected whether or not the function is called (conservative)
+            self.assert_writes(("function update_state { sed -i 's/OLD/F/' S; }; update_state",
+                      "function update_state { perl -pi -e 's/OLD/F/' S; }; update_state",
+                      "function update_state { sed -i 's/OLD/F/' S; }", "function u\n{ tee S <<< F; }",
+                      "function u () { sed -i s/a/F/ S; }", "function u() ( perl -pi -e 1 S F )",
+                      "update_state() { sed -i 's/OLD/F/' S; }; update_state", "u ()\n{ perl -pi -e 's/a/F/' S; }",
+                      "u () ( sed -i s/a/b/ S F )", "function u ( sed -i s/a/b/ S F )",
+                      "x=$(function u { tee S <<< F; }; u)", "if true; then function u { cp F S; }; fi"),
+                     True)
+            # the header words are never command words, and a conditional in a body still compares
+            self.assert_writes(("rg function S -e F", "function tee { rg x S F; }", "function u { [[ $(cat S) > F ]]; }",
+                      "u() { [[ $(cat S) < F ]] && echo late; }", "echo function sed -i F S"), False)
+
+        def test_time_and_negation_keep_conditional(self):
+            # command position must survive `time`, or `[[` is not a conditional and its
+            # `>` reads as a redirection (a false deny)
+            self.assert_writes(("if time [[ $(cat S) > F ]]; then echo corrupt; fi", "time [[ $(cat S) > F ]]",
+                      "time -p [[ $(cat S) > F ]] && echo corrupt", "time -- [[ $(cat S) > F ]]",
+                      "time -p -- [[ $(cat S) > F ]]", "! [[ $(cat S) > F ]] && echo ok",
+                      "if ! time [[ $(cat S) > F ]]; then echo corrupt; fi", "time ! [[ $(cat S) > F ]]",
+                      "x=$(time [[ $(cat S) > F ]] && echo late)"), False)
+            # bash runs a command after `time -p -p`, `time -x`, or `time -- -p`: there `>` IS a redirection;
+            # and a write after time or ! is still a write
+            self.assert_writes(("time -p -p [[ a > S F", "time -x [[ a > S F", "time -- -p [[ a > S F",
+                      "time echo F > S", "time -p tee S <<< F", "! tee S <<< F", "time ! sed -i s/a/F/ S"), True)
+
+        def test_real_bash_agrees_on_time_negation_and_function_bodies(self):
+            # the reserved-word and function semantics the fixes rest on, observed in real bash
+            if not shutil.which("bash"):
+                self.skipTest("bash absent")
+            cmds = ("time [[ a > c1 ]]", "time -p [[ a > c2 ]]", "time -- [[ a > c3 ]]", "time -p -- [[ a > c4 ]]",
+                    "time ! [[ a > c5 ]]", "! time [[ a > c6 ]]", "if time [[ a > c7 ]]; then :; fi",
+                    "time -p -p [[ a > b1 ]]", "time -x [[ a > b2 ]]", "time -- -p [[ a > b3 ]]",
+                    "function f { echo > b4; }; f", "g() { echo > b5; }; g", "function h { [[ a > c8 ]]; }; h")
+            for c in cmds:
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+            made = set(os.listdir(self.tmp))
+            self.assertTrue({"b1", "b2", "b3", "b4", "b5"} <= made, made)
+            self.assertFalse({"c%d" % k for k in range(1, 9)} & made, made)
+
+        # -- arithmetic is not redirection --
+        def test_arithmetic_is_not_redirection(self):
+            # a false deny: `>` inside `(( ... ))` and `$(( ... ))` read as a redirection
+            self.assert_writes(("count=$(grep -Fc 'F' S)\nif (( count > 0 )); then printf '%s\\n' \"$count\"; fi",
+                      "count=$(grep -Fc 'F' S)\nprintf '%s\\n' \"$(( count > 0 ))\"",
+                      "rg -c F S; (( x = 1 << 2 ))", "rg -c F S; echo $(( a >> 1 ))", "rg F S; (( a > b ))",
+                      "rg F S; echo $(( (a) > (b) ))", "rg F S; for ((i = 0; i < 2; i++)); do (( i > 0 )); done",
+                      "rg F S; for (( ; ; )) do break; done", "x=$(( $(rg -c F S) > 1 ))",
+                      "if ! (( $(rg -c F S) > 0 )); then echo none; fi", "time (( $(rg -c F S) > 0 ))",
+                      "x=$(rg F S; (( 2 > 1 )) && echo y)", "echo \"$(( `rg -c F S` > 0 ))\"",
+                      "(( a > b )) && rg F S", "echo $(( 16#ff > 1 )) F S", "x=$(( $(( 1 > 0 )) << 1 )) F S"),
+                     False)
+            # a write inside a substitution nested in arithmetic, a real redirect after `))`, a `((` not in
+            # command position, and the unemulated `((` fallback all still count as writes
+            self.assert_writes(("(( $(echo F > S; echo 1) > 0 ))", "echo $(( `tee S <<< F` + 1 ))",
+                      "x=$(( $(sed -i s/a/F/ S) + 1 ))", "echo F | (( 1 > 0 )) > S", "echo $(( 1 )) > S F",
+                      "for ((i = 0; i < 1; i++)); do :; done > S F", "if echo F | (( 1 > 0 )) > S; then :; fi",
+                      "echo ((x > S)) F", "rg for ((x > S)) F", "((echo F) > S)", "x=$((cat S) > S) F",
+                      "$(( 1 > 0 S F"), True)
+
+        def test_real_bash_agrees_on_arithmetic(self):
+            # the arithmetic semantics the fix rests on, observed in real bash
+            if not shutil.which("bash"):
+                self.skipTest("bash absent")
+            cmds = ("count=2; if (( count > 0 )); then :; fi", "count=2; printf '%s' \"$(( count > 0 ))\"",
+                    "(( x = 1 << 2 ))", "a=8; echo $(( a >> 1 ))", "for ((i = 0; i < 2; i++)); do (( i > 0 )); done",
+                    "(( $(echo > b1; echo 1) > 0 ))", "(( 1 > 0 )) > b2", "((echo x) > b3)",
+                    "x=$((echo x) > b4)", "echo $(( `echo > b5` 1 > 0 ))")
+            before = set(os.listdir(self.tmp))
+            for c in cmds:
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+            self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4", "b5"})
+
+        # -- arithmetic headers, and reserved words touching `((` --
+        def test_for_arith_header_restores_command_position(self):
+            # a MISS (a regression): after a `for ((...))` header the body
+            # lost command position, so `do tee` and `do sed -i` were missed; bash takes `do` with or without a
+            # `;` or newline before it, and `{` in place of `do`
+            self.assert_writes(("for ((i=0;i<1;i++)) do tee S <<< 'Last-heartbeat: F'; done",
+                      "for ((i=0;i<1;i++)); do tee S <<< 'Last-heartbeat: F'; done",
+                      "for ((i=0;i<1;i++))\ndo tee S <<< 'Last-heartbeat: F'; done",
+                      "for ((i=0;i<1;i++))do tee S <<< F; done", "for ((i=0;i<1;i++)) ;do tee S <<< F; done",
+                      "for ((i=0;i<1;i++)) do sed -i 's/Last/F/' S; done",
+                      "for ((i=0;i<1;i++)); do sed -i 's/Last/F/' S; done",
+                      "for((i=0;i<1;i++)) do sed -i 's/Last/F/' S; done",
+                      "for ((i=0;i<1;i++)) { tee S <<< F; }", "for (( ; ; )) do cp /dev/shm/x S; break; done F",
+                      "x=$(for ((i=0;i<1;i++)) do tee S <<< F; done)",
+                      "for ((i=0;i<1;i++)) do for ((j=0;j<1;j++)) do tee S <<< F; done; done"), True)
+            self.assert_writes(("for ((i=0;i<1;i++)) do rg -c F S; done", "for ((i=0;i<1;i++)) do echo tee S F; done",
+                      "for ((i=0;i<1;i++)) { rg F S; }", "rg F S; for ((i=0;i<2;i++)) do (( i > 0 )); done"),
+                     False)
+            # the tokenizer emits a separator after the closed header, so the stream sees `do` in command position
+            toks = _shell_tokens("for ((i=0;i<1;i++)) do tee x; done")[-1]
+            self.assertEqual(toks[:4], [("w", "for"), ("w", "$"), ("s",), ("w", "do")], toks)
+
+        def test_keyword_touching_arith_is_arithmetic(self):
+            # a false deny: the reserved word before `((` was not flushed at the `(`
+            # metacharacter, so `if((` read as a subshell and its `>` as a redirection
+            self.assert_writes(("count=$(grep -Fc 'F' S); if(( count > 0 )); then echo found; fi",
+                      "count=$(grep -Fc 'F' S); while(( count > 5 )); do break; done",
+                      "count=$(grep -Fc 'F' S); until(( count > -1 )); do break; done",
+                      "if false; then :; elif(( $(rg -c F S) > 0 )); then echo found; fi",
+                      "count=$(rg -c F S); !(( count > 5 )) && echo ok", "if !(( $(rg -c F S) > 0 )); then :; fi",
+                      "rg F S; for((i=0;i<2;i++)); do (( i > 0 )); done", "x=$(if(( 2 > 1 )); then rg F S; fi)"),
+                     False)
+            # a non-keyword word touching `((` is still no arithmetic, and a write after `if((` still counts
+            self.assert_writes(("if(( 1 > 0 )); then tee S <<< F; fi", "echo((x > S)) F", "rg((x > S)) F",
+                      "while(( 1 > 0 )); do sed -i s/a/F/ S; break; done"), True)
+
+        def test_real_bash_agrees_on_arith_headers_and_touching_keywords(self):
+            # the syntax the fixes rest on, observed in real bash: the header body runs without a `;` before
+            # `do`, and a keyword touching `((` opens arithmetic (no file named by the `>` operand appears)
+            if not shutil.which("bash"):
+                self.skipTest("bash absent")
+            cmds = ("for ((i=0;i<1;i++)) do echo > b1; done", "for ((i=0;i<1;i++))do echo > b2; done",
+                    "for ((i=0;i<1;i++)) { echo > b3; }", "for((i=0;i<1;i++)) do echo > b4; done",
+                    "c=2; if(( c > c1 )); then :; fi", "c=2; while(( c > c2 )); do break; done",
+                    "c=2; until(( c > c3 )); do break; done", "if false; then :; elif(( 1 > c4 )); then :; fi",
+                    "!(( 1 > c5 ))")
+            before = set(os.listdir(self.tmp))
+            for c in cmds:
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+            self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4"})
+
+        # -- function compound bodies without `()` --
+        def test_function_compound_body_without_parens(self):
+            # a false deny: after `function NAME` with no `()` the body word lost command
+            # position, so `function NAME (( ... ))` read its `>` as a redirection; a sibling of the same class
+            # (a MISS) hid a write in a `function NAME while|until|if` body
+            self.assert_writes(("count=$(grep -c 'F' S); function has_matches (( count > 0 ))", "function g [[ 1 < 2 ]]",
+                      "function g [[ $(rg -c F S) > 0 ]]", "count=$(rg -c F S); function h (( count > 0 )); h",
+                      "function h (( $(rg -c F S) >> 1 ))", "function w while rg -q F S; do break; done",
+                      "function tee { rg x S F; }", "function u { [[ $(cat S) > F ]]; }"), False)
+            self.assert_writes(("function f { tee S <<< 'F'; }", "function f (( $(tee S <<< F) ))",
+                      "function f (( `tee S <<< F` ))", "function f [[ $(tee S <<< F) ]]",
+                      "function f (( 1 > 0 )) > S; echo F", "function f (( 1 > 0 )) >> S F",
+                      "function f [[ 1 < 2 ]] > S F", "function f ( tee S <<< F )",
+                      "function f while tee S <<< F; do break; done", "function f if tee S <<< F; then :; fi", "function f for ((i=0;i<1;i++)) do tee S <<< F; done",
+                      "x=$(function f (( 1 > 0 )) > S; echo F)"), True)
+            # an `until` body is in command position too (the literal right after `until` would be exempt as a
+            # schedule, so the write test is asserted directly)
+            self.assertTrue(bash_writes(f"function f until tee {PROJ}/private/state.md; do :; done"))
+            self.assertFalse(bash_writes(f"function f until rg -q x {PROJ}/private/state.md; do :; done"))
+            # the tokenizer opens an arithmetic frame for the body: one `$` word, no redirection token (and the
+            # separator that restores command position after a closed arithmetic command)
+            self.assertEqual(_shell_tokens("function f (( c > 0 ))")[-1],
+                             [("w", "function"), ("w", "f"), ("w", "$"), ("s",)])
+
+        def test_real_bash_agrees_on_function_compound_bodies(self):
+            # the syntax the fix rests on, observed in real bash: after `function NAME` with no `()`, a `((` or
+            # `[[` body is arithmetic or a conditional (no file named by a `>` operand appears), and an if,
+            # while, until, for, or subshell body runs its commands; a redirection after the body still applies
+            if not shutil.which("bash"):
+                self.skipTest("bash absent")
+            cmds = ("function f (( 1 > c1 )); f", "function g [[ b > c2 ]]; g", "function h if true; then echo > b1; fi; h",
+                    "function k while echo > b2; do break; done; k", "function m until echo > b3; do :; done; m",
+                    "function n ( echo > b4 ); n", "function p (( 1 )) > b5; p",
+                    "function q for ((i=0;i<1;i++)) do echo > b6; done; q")
+            before = set(os.listdir(self.tmp))
+            for c in cmds:
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+            self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4", "b5", "b6"})
+
+        # -- command position after closed arithmetic and conditional commands, and conditional operands --
+        def test_arith_and_conditional_command_restore_command_position(self):
+            # a MISS (a regression): only a `for ((...))` header restored command position
+            # at its closing `))`, so a `while`, `until`, or `if` condition that is a plain `((...))` or a
+            # `[[ ... ]]`, followed by `do` or `then` with no `;`, hid the body's write
+            self.assert_writes(("until ((a>b)) do tee S <<< 'Last-heartbeat: F'; break; done",
+                      "while !((a>0)) do tee S <<< F; break; done", "until ((a>b)) do sed -i s/x/F/ S; done",
+                      "if (( 1 > 0 )) then tee S <<< F; fi", "while [[ 1 > 0 ]] do tee S <<< F; break; done",
+                      "if [[ 1 > 0 ]] then tee S <<< F; fi", "until [[ a > b ]] do sed -i s/x/F/ S; done",
+                      "if false; then :; elif (( 1 )) then tee S <<< F; fi", "x=$(if (( 1 > 0 )) then tee S <<< F; fi)",
+                      "while ! [[ -n x ]] do cp /dev/shm/x S; break; done F", "(( x )) > S F", "[[ x ]] > S F",
+                      "if echo F | (( 1 )) > S; then :; fi"), True)
+            # pure arithmetic and conditional reads in the same no-separator form stay reads, and a `$((` expansion
+            # does not restore command position (its value is a word of the enclosing command)
+            self.assert_writes(("until ((a>b)) do rg F S; break; done", "if (( 1 > 0 )) then rg -c F S; fi",
+                      "while [[ 1 > 0 ]] do rg F S; break; done", "if [[ $(cat S) > F ]] then echo later; fi",
+                      "while !((a>0)) do echo tee S F; break; done", "if (( $(rg -c F S) > 0 )) then echo y; fi",
+                      "(( x )) && rg F S", "[[ x ]] && rg F S", "echo $(( 1 > 0 )) tee F S", "rg $((1)) tee F S",
+                      "printf '%s' \"$(( 1 > 0 ))\" do tee F S"), False)
+            toks = _shell_tokens("until ((a>b)) do tee x; done")[-1]
+            self.assertEqual(toks[:4], [("w", "until"), ("w", "$"), ("s",), ("w", "do")], toks)
+            toks = _shell_tokens("while [[ a > b ]] do tee x; done")[-1]
+            self.assertEqual(toks[:6], [("w", "while"), ("w", "[["), ("w", "a"), ("w", "b"), ("w", "]]"), ("s",)], toks)
+            self.assertEqual(_shell_tokens("echo $((1)) tee")[-1], [("w", "echo"), ("w", "$"), ("w", "tee")])
+
+        def test_conditional_operand_text_is_not_a_separator(self):
+            # a pre-existing false deny: inside [[ ... ]] a regex operand's `(`, `)`, and
+            # `|` were separators, so `cp` in `=~ operation=(cp|mv)` read as a command word
+            self.assert_writes(("record=$(grep -c 'F' S)\n[[ \"$record\" =~ operation=(cp|mv) ]]",
+                      "record=$(grep -c 'F' S); function check [[ \"$record\" =~ operation=(cp|mv) ]]",
+                      "record=$(grep -c 'F' S); function check [[ $record =~ (tee|dd) ]]; check",
+                      "rg F S; [[ a && (b || c) ]]", "rg F S; [[ x =~ ^(tee|dd)$ ]] && echo y",
+                      "rg F S; [[ ( a > b ) || (cp) ]]", "if [[ $(rg -c F S) =~ (sed|tee) ]] then echo y; fi"), False)
+            # a substitution inside the conditional is still its own scanned stream, and a redirection after `]]`
+            # still counts; a `>(...)` process substitution is now scanned too (its `>` inside [[ was formerly dropped)
+            self.assert_writes(("[[ x =~ ($(tee S <<< F)|y) ]]", "[[ x =~ (`tee S <<< F`|y) ]]",
+                      "function check [[ x =~ ($(tee S <<< F)) ]]", "[[ -n <(tee S <<< F) ]]",
+                      "[[ -e >(cat > S <<< F) ]]", "[[ x =~ (cp|mv) ]] > S F",
+                      "[[ x =~ (cp|mv) ]] && cp F S"), True)
+
+        def test_real_bash_agrees_on_conditions_and_regex_operands(self):
+            # the syntax the fixes rest on, observed in real bash: a `((...))` or `[[ ... ]]` condition takes `do`
+            # or `then` with no `;` and runs the body; a regex operand's `(`, `)`, and `|` are operand text (no
+            # file named by a `>` operand appears), and a substitution inside the conditional still runs
+            if not shutil.which("bash"):
+                self.skipTest("bash absent")
+            cmds = ("a=0; b=1; until ((a>b)) do echo > b1; break; done", "a=0; while !((a>0)) do echo > b2; break; done",
+                    "if (( 1 > 0 )) then echo > b3; fi", "while [[ 1 > 0 ]] do echo > b4; break; done",
+                    "if [[ b > a ]] then echo > b5; fi", "r=operation=cp; [[ $r =~ operation=(cp|mv) ]] && echo > b6",
+                    "[[ x =~ ($(echo > b7)|y) ]]", "function f [[ a =~ (b|c) ]]; f; [[ 1 > c1 ]]",
+                    "if (( 2 > c2 )) then :; fi", "[[ a && (b || c > c3) ]]")
+            before = set(os.listdir(self.tmp))
+            for c in cmds:
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+            self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4", "b5", "b6", "b7"})
+
+        # -- `#` and the closing `]]` inside a conditional --
+        def test_conditional_hash_is_operand_text(self):
+            # a long-standing false deny: inside [[ ... ]] the `#` of a regex
+            # operand such as `(#|$)` started a comment that swallowed the closing `]]`, so the command read as
+            # an unterminated conditional (a write); a newline inside the conditional is no separator either
+            self.assert_writes(("record=$(grep 'F' S)\n[[ \"$record\" =~ ^[[:space:]]*(#|$) ]]",
+                      "record=$(grep 'F' S); [[ \"$record\" =~ ^[[:space:]]*(#|$) ]] && echo skip",
+                      "record=$(grep 'F' S); [[ $record =~ ^# ]] && echo comment", "rg F S; [[ x =~ a#b ]] || echo no",
+                      "record=$(grep 'F' S); if [[ $record =~ (#|;) ]] then echo y; fi",
+                      "rg F S; [[ a &&\n tee ]] && echo ok", "rg F S; if [[ a ||\n cp ]]; then echo y; fi"), False)
+            self.assert_writes(("[[ x =~ (#|$) ]] && tee S <<< F", "[[ x =~ a#b ]]\ntee S <<< F", "[[ x =~ ^# ]] > S F",
+                      "[[ x =~ (#|$($(tee S <<< F))) ]]"), True)
+
+        def test_conditional_closes_only_at_a_closing_word(self):
+            # a miss: a `]]` glued to a regex word's `)` closed the conditional, so the
+            # real closing `]]` read as a command word and the `then` body after it lost command position
+            self.assert_writes(("if [[ 'x]]' =~ (x)]] ]] then tee S <<< 'Last-heartbeat: F'; fi",
+                      "if [[ 'x]]' =~ (x)]] ]]\nthen tee S <<< 'Last-heartbeat: F'; fi",
+                      "[[ x == x]] ]] && tee S <<< F", "[[ a ]]>S F", "while [[ a =~ (b)]] ]] do tee S <<< F; done",
+                      "[[ ( a )]] && tee S <<< F"), True)
+            # a regex word glued to `]]` before the real `]]` is no false deny (a grouping `)` glued to
+            # `]]` with no later close leaves the command unparseable; see
+            # test_conditional_open_at_frame_end_is_unparseable and test_glued_group_close_is_disclosed_false_deny)
+            self.assert_writes(("rg F S; [[ x =~ (a)]] ]] && echo ok",
+                      "rg F S; ( [[ x ]])", "if [[ $(rg -c F S) =~ (x)]] ]] then echo y; fi"), False)
+            self.assertEqual(_shell_tokens("[[ a =~ (#|x)]] ]] && tee y")[-1],
+                             [("w", "[["), ("w", "a"), ("w", "=~"), ("w", "#x]]"), ("w", "]]"), ("s",), ("s",),
+                              ("s",), ("w", "tee"), ("w", "y")])
+            self.assertIsNone(_shell_tokens("[[ ( a )]] && echo ok"))  # no loose re-read
+
+        def test_real_bash_agrees_on_conditional_hash_and_closing_words(self):
+            # the syntax the rules above rest on, observed in real bash: a `#` inside a regex word is no comment, a `]]`
+            # glued to a regex word's `)` does not close the conditional while one glued to a grouping `)` does, a
+            # newline after `&&` stays inside the conditional, and a `>` right after the closing `]]` redirects
+            if not shutil.which("bash"):
+                self.skipTest("bash absent")
+            cmds = ("r='  #x'; [[ $r =~ ^[[:space:]]*(#|$) ]] && echo > b1", "[[ '#' =~ ^# ]] && echo > b2",
+                    "[[ a#b =~ a#b ]] && echo > b3", "if [[ 'x]]' =~ (x)]] ]] then echo > b4; fi",
+                    "if [[ 'x]]' =~ (x)]] ]]\nthen echo > b5; fi", "[[ ( a )]] && echo > b6",
+                    "[[ a &&\n b ]] && echo > b7", "[[ a ]]>b8", "[[ ';' =~ (#|;) ]] && echo > b9",
+                    "[[ x =~ (a>c1) ]]", "[[ x == x]] ]] && [[ y > c2 ]]")
+            before = set(os.listdir(self.tmp))
+            for c in cmds:
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+            self.assertEqual(set(os.listdir(self.tmp)) - before, {"b%d" % k for k in range(1, 10)})
+
+        # -- a compact `[[(` opener, and glued closes --
+        def test_touching_conditional_opener_is_no_separator(self):
+            # a false deny (a regression): in a compact `[[(`, flushing `[[` opened the
+            # conditional only after its branch was passed, so the `(` became a separator (and, in a substitution,
+            # a depth change that left the substitution unterminated)
+            self.assert_writes(("result=$( [[(-f S) ]] && grep -c 'F' S )", "result=$( [[(-f S) ]] &&\n grep -c 'F' S )",
+                      "record=$(grep 'F' S); [[(tee == \"$record\") ]] && echo same",
+                      "rg F S; [[((-n x)) ]] && echo ok", "rg F S; [[<(rg F S) ]] || echo no"), False)
+            self.assert_writes(("[[(-f S) ]] && tee S <<< F", "[[(x) ]]>S F", "x=$( [[(-n y) ]] && tee S <<< F )"), True)
+            self.assertEqual(_shell_tokens("[[(tee == x) ]] && y")[-1],
+                             [("w", "[["), ("w", "tee"), ("w", "=="), ("w", "x"), ("w", "]]"), ("s",), ("s",),
+                              ("s",), ("w", "y")])
+
+        def test_glued_close_never_closes_before_a_later_close(self):
+            # a false deny: the removed alternate reading closed at the regex word `(x)]]`
+            # and invented a redirection out of the string comparison `>` after it; with the single rule a `]]`
+            # glued to preceding text never closes while a word-initial `]]` follows
+            self.assert_writes(("record=$(grep 'F' S)\n[[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]]",
+                      "record=$(grep 'F' S); [[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]] && echo ok"), False)
+            # the glued-regex-close miss stays caught, and a lone glued close (now unparseable) still
+            # denies a write after it
+            self.assert_writes(("if [[ 'x]]' =~ (x)]] ]] then tee S <<< 'Last-heartbeat: F'; fi",
+                      "[[ ( -n x )]] && tee S <<< F", "[[ ( a )]] && [[ ( b )]] && tee S <<< F"), True)
+            # a strict parse is kept as is
+            self.assertEqual(_shell_tokens("[[ x =~ (a)]] ]] && y")[-1],
+                             [("w", "[["), ("w", "x"), ("w", "=~"), ("w", "a]]"), ("w", "]]"), ("s",), ("s",),
+                              ("s",), ("w", "y")])
+            self.assertIsNone(_shell_tokens("[[ ( a )]] && echo 'x"))
+            # the disclosed miss (module docstring): a glued grouping `)]]`, then a write, then a later
+            # word-initial `]]`; pinned so a future fix flips this deliberately
+            self.assertFalse(bash_writes(f"[[ ( a )]] && tee {PROJ}/private/state.md <<< 2099-01-01T00:00Z; [[ x ]]"))
+
+        def test_real_bash_agrees_on_touching_opener_and_glued_close(self):
+            # the syntax the rules above rest on, observed in real bash: a compact `[[(` opens the conditional, a regex
+            # word `(x)]]` does not close it before a later `]]` (so the `>` after it compares strings), a comment
+            # may follow the opening `[[`, a lone `|` is a legal regex operand, and the disclosed miss is real
+            if not shutil.which("bash"):
+                self.skipTest("bash absent")
+            cmds = ("[[(-n x) ]] && echo > b1", "[[ \"x\" =~ (x)]] || \"x\" > c1 ]] && echo > b2",
+                    "[[ # c\n a ]] && echo > b3", "[[ a =~ | ]] && echo > b4", "[[((-n x)) ]] && echo > b5",
+                    "[[(tee == \"x\") ]] || echo > b6", "r=$( [[(-f c2) ]] && echo hi ); echo > b7",
+                    "[[ ( a )]] && echo > b8; [[ x ]]")
+            before = set(os.listdir(self.tmp))
+            for c in cmds:
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+            self.assertEqual(set(os.listdir(self.tmp)) - before, {"b%d" % k for k in range(1, 9)})
+
+        # -- a conditional still open at its frame end --
+        def test_conditional_open_at_frame_end_is_unparseable(self):
+            # a miss (a regression): a backtick frame closed while its conditional was
+            # open, so the loose-closing fallback never ran and the write read as conditional operand text; the
+            # fallback is removed, and a conditional open when its frame ends makes the command unparseable
+            self.assert_writes(("result=`[[ ( -n x )]] && tee S <<< 'Last-heartbeat: F'`",
+                      "result=`[[ ( -n x )]]` && tee S <<< F", "x=$( [[ ( -n y )]] && tee S <<< F )",
+                      "r=`[[` && tee S <<< F"), True)
+            for c in ("r=`[[ ( -n x )]] && echo ok`", "r=`[[`", "r=$( [[ a )", "[[ ( -n x )]] && echo ok",
+                      "[[ a ]] && [[ ( b )]] && echo ok", "[[ ( a )]] && echo 'x"):
+                self.assertIsNone(_shell_tokens(c), c)
+            self.assertEqual(list(inspect.signature(_shell_tokens).parameters), ["cmd"])  # no re-read machinery
+
+        def test_glued_group_close_is_disclosed_false_deny(self):
+            # a false deny (from the fallback's loose closing, now removed): the rule leaves
+            # the first conditional's glued `)]]` unclosed, so the command is unparseable and denies only
+            # because it names a store and holds a future literal (the disclosed exotic false deny); the same
+            # holds for the former glued-close allows, pinned here so a future fix flips them deliberately
+            self.assert_writes(("record=$(grep 'F' S)\n[[ ( -n x )]] # it's fine\n[[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]]",
+                      "rg F S; [[ ( -n x )]] && echo ok", "rg F S; [[ x =~ (a)]] && echo ok",
+                      "rg F S; [[ ( a )]] # it's fine"), True)
+            # with no store path and no future literal an unparseable command has nothing to deny: allowed
+            # end to end through the hook entry point
+            for c in ("[[ ( -n x )]] && echo ok", "result=`[[ ( -n x )]] && echo ok`"):
+                self.assertTrue(bash_writes(c), c)
+                self.assertEqual(self.ev("Bash", command=c), [], c)
+                payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": c}, "cwd": f"{PROJ}/repo"})
+                old_in, old_out, old_env = sys.stdin, sys.stdout, dict(os.environ)
+                sys.stdin, sys.stdout = io.StringIO(payload), io.StringIO()
+                try:
+                    rc = main(["future-stamp-write.py"])
+                    out = sys.stdout.getvalue()
+                finally:
+                    sys.stdin, sys.stdout = old_in, old_out
+                    os.environ.clear()
+                    os.environ.update(old_env)
+                self.assertEqual((rc, out), (0, ""), c)
+
+        def test_real_bash_agrees_on_glued_group_close_in_frames(self):
+            # the syntax the rules above rest on, observed in real bash: a glued grouping `)]]` closes the conditional
+            # inside a backtick or `$(...)` frame and at top level (so the backtick counterexample writes), and
+            # three-line command writes nothing (the pinned deny above is a genuine false deny)
+            if not shutil.which("bash"):
+                self.skipTest("bash absent")
+            cmds = ("r=`[[ ( -n x )]] && echo > b1`", "r=$( [[ ( -n x )]] && echo > b2 )",
+                    "[[ ( -n x )]] && echo > b3",
+                    "r=x\n[[ ( -n x )]] # it's fine\n[[ \"$r\" =~ (x)]] || \"$r\" > 'c1' ]]")
+            before = set(os.listdir(self.tmp))
+            for c in cmds:
+                subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
+            self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3"})
+
+        # -- a word-initial `]]` before the closing backtick --
+        def test_word_initial_close_before_closing_backtick(self):
+            # a false deny (a regression): a word-initial `]]` glued to the closing
+            # backtick of the backtick frame being scanned was not a close, so the conditional was still open at
+            # the frame end and a read was unparseable; that backtick now closes it, as `)` does for `$(...)`
+            self.assert_writes(("record=`grep 'F' S && [[ -s S ]]`", "record=`grep 'F' S && [[ -s S ]] `",
+                      "record=`grep 'F' S && [[ -s S ]]\t`", "record=`grep 'F' S && [[ -s S ]]\n`",
+                      "record=$(grep 'F' S && [[ -s S ]])", "record=$(grep 'F' S && [[ -s S ]] )",
+                      "x=$(echo `rg F S && [[ -s S ]]`)", "r=`[[ -s S ]]`; rg F S"), False)
+            self.assertEqual(_shell_tokens("r=`g && [[ -s x ]]`")[0],
+                             [("w", "g"), ("s",), ("s",), ("w", "[["), ("w", "-s"), ("w", "x"), ("w", "]]"), ("s",)])
+            # the glued-grouping backtick write still denies, and a write after the close is caught
+            self.assert_writes(("result=`[[ ( -n x )]] && tee S <<< 'Last-heartbeat: F'`",
+                      "result=`[[ -n x ]]` && tee S <<< F", "result=`[[ -n x ]] && tee S <<< F`"), True)
+            # genuinely unclosed conditionals stay unparseable: a glued close, a `]]` glued to a following word,
+            # a top-level `]]` before an OPENING backtick (not a frame end), and a backtick that closes a
+            # different frame than the one the conditional is in
+            for c in ("r=`[[ -s x`", "r=`[[ -s x ]]y`", "r=`[[ ( -n x )]]`", "[[ -s x ]]`echo`",
+                      "r=`[[ -s x ]]\\``", "x=$( [[ -s y ]]` )", "[[ -s x ]]`"):
+                self.assertIsNone(_shell_tokens(c), c)
+
+        def test_real_bash_agrees_on_close_before_closing_backtick(self):
+            # the syntax the rules above rest on, observed in real bash: a word-initial `]]` glued to the closing
+            # backtick closes the conditional (the command runs and its status is the conditional's), while a
+            # `]]` glued to a following word inside the backtick does not
+            if not shutil.which("bash"):
+                self.skipTest("bash absent")
+            ok = subprocess.run(["bash", "-c", "r=`[[ -n x ]]` && r=`[[ -n x ]] ` && echo > b1"], cwd=self.tmp,
+                                capture_output=True, timeout=5)
+            bad = subprocess.run(["bash", "-c", "r=`[[ -n x ]]y` && echo > b2"], cwd=self.tmp, capture_output=True,
+                                 timeout=5)
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+            self.assertNotEqual(bad.returncode, 0)
+            self.assertTrue(os.path.exists(os.path.join(self.tmp, "b1")))
+            self.assertFalse(os.path.exists(os.path.join(self.tmp, "b2")))
+
+
+        # -- field validation: writes bound to their store target, and unreadable targets --
+        def test_write_bound_to_store_target(self):
+            # a write-indicator word, a store path, and a future literal merely co-occurring must not deny
+            # read-only searches and writes elsewhere; a Bash command is denied only when a write TARGETS the store
+            S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
+            allowed = (f"rg {F} {S} > /dev/shm/hits.txt", f"rg {F} {S} | tee /dev/shm/hits.txt",
+                       f"cp {S} /dev/shm/copy.md && rg {F} /dev/shm/copy.md", f"cp -t /dev/shm/out {S}; echo {F}",
+                       f"grep -c x {S} > /dev/null; echo {F} > /dev/shm/note.txt",
+                       f"install -m 644 {S} /dev/shm/x.md <<< {F}", f"dd if={S} of=/dev/shm/x bs=1 <<< {F}",
+                       f"mv {S} /dev/shm/old.md; echo {F}")
+            for cmd in allowed:
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            denied = (f"echo 'Last-heartbeat: {F}' > {S}", f"echo 'hb {F}' | tee -a {S}",
+                      f"sed -i 's/^hb.*/hb {F}/' {S}", f"perl -pi -e 's/x/{F}/' {S}",
+                      f"cp /dev/shm/x.md {S} <<< 'hb {F}'", f"printf 'hb {F}' | dd of={S}",
+                      f"cp -t {PROJ}/private /dev/shm/{F}.md", f"cp --target-directory={S} x <<< {F}",
+                      f"install -m 644 /dev/shm/x {S} <<< {F}", f"mv /dev/shm/{F}.md {S}", f"truncate -s 0 {S} <<< {F}",
+                      f"X={S}; echo {F} > \"$X\"", f"find {PROJ}/private -exec sed -i s/a/{F}/ {{}} \\;",
+                      f"ls {S} | xargs sed -i s/a/{F}/", f"echo {F} > {S} 2>/dev/null",
+                      f"x=$(tee {S} <<< {F})")
+            for cmd in denied:
+                self.assertEqual(self.ev("Bash", command=cmd), [F], cmd)
+            self.assertEqual(_write_targets("cp", ["-S", ".bak", "a", "b", "-t", "d1", "--target-directory=d2"]),
+                             ["d1", "d2"])
+            self.assertEqual(_write_targets("install", ["-m", "644", "src", "dst"]), ["dst"])
+            self.assertEqual(_write_targets("tee", ["-a", "--", "-x", "f"]), ["-x", "f"])
+
+        def test_unreadable_target_fails_open(self):
+            # an unreadable target must not make the Edit path deny a literal the file already held; it fails OPEN
+            # now, except that a future literal the new content itself introduces still counts
+            F = "2099-01-01T00:00Z"
+            fp = self.store_file(f"Last-heartbeat: {F}\nStatus: ok\n")
+            os.chmod(fp, 0)
+            try:
+                if os.access(fp, os.R_OK):
+                    self.skipTest("privileges bypass mode 0")
+                self.assertEqual(self.ev("Edit", file_path=fp, old_string=f"Last-heartbeat: {F}",
+                                         new_string=f"Last-heartbeat: {F} (confirmed)"), [])
+                self.assertEqual(self.ev("Edit", file_path=fp, old_string="Status: ok", new_string="Status: done"), [])
+                self.assertEqual(self.ev("Edit", file_path=fp, old_string="Status: ok",
+                                         new_string="Status: ok 2098-01-01T00:00Z"), ["2098-01-01T00:00Z"])
+                self.assertEqual(self.ev("MultiEdit", file_path=fp, edits=[
+                    {"old_string": f"hb {F}", "new_string": f"hb {F}!"},
+                    {"old_string": "a", "new_string": "hb 2098-01-01T00:00Z"}]), ["2098-01-01T00:00Z"])
+                self.assertEqual(self.ev("Write", file_path=fp, content="Status: ok\n"), [])
+                self.assertEqual(self.ev("Write", file_path=fp, content="hb 2098-01-01T00:00Z\n"),
+                                 ["2098-01-01T00:00Z"])
+            finally:
+                os.chmod(fp, 0o600)
+            # an OVER-CAP file (read, but not whole) keeps the fragment rule unchanged
+            big = self.store_file(f"hb {F}\n" + "x\n" * (EXISTING_MAX_BYTES // 2 + 1))
+            self.assertEqual(self.ev("Edit", file_path=big, old_string=f"hb {F}", new_string=f"hb {F} (confirmed)"),
+                             [F])
+
+        # -- generic port: bytes payload, a failed output rescue, fail-open before evaluation --
+
+        def run_stream(self, stream, argv=("future_stamp_write",)):
+            old_in, old_out, old_env = sys.stdin, sys.stdout, dict(os.environ)
+            sys.stdin, sys.stdout = stream, io.StringIO()
+            try:
+                rc = main(list(argv) if isinstance(argv, tuple) else argv)
+                return rc, sys.stdout.getvalue()
+            finally:
+                sys.stdin, sys.stdout = old_in, old_out
+                os.environ.clear()
+                os.environ.update(old_env)
+
+        def test_fail_open_before_evaluation(self):
+            # dispatcher form: main() reads the payload before the handler runs, so input it cannot read or
+            # parse is its fail-open warning on exit 0 (the former script stayed silent), never exit 2
+            class Unreadable:
+                def read(self, *a):
+                    raise OSError("unreadable stdin")
+            for stdin in (Unreadable(), io.StringIO("[1, 2]"), io.StringIO('"text"'), io.StringIO("null"),
+                          io.StringIO("")):
+                rc, out = self.run_stream(stdin)
+                self.assertEqual(rc, 0)
+                self.assertTrue(json.loads(out)["systemMessage"].startswith(
+                    "AIQT guardrail: the future_stamp_write check could not run (unreadable payload"), out)
+            p = json.dumps({"tool_name": "Write", "tool_input": {"file_path": self.store,
+                                                                 "content": "hb 2099-01-01T00:00Z"}})
+            for argv in (["future_stamp_write", "extra"], ["future_stamp_write", None]):  # a bad argv count
+                rc, out = self.run_stream(io.StringIO(p), argv=argv)
+                self.assertEqual(rc, 0, argv)
+                self.assertIn("bad invocation", json.loads(out)["systemMessage"], argv)
+            rc, out = self.run_stream(io.StringIO(p))  # evaluated as a hook
+            self.assertEqual((rc, list(json.loads(out))), (0, ["systemMessage"]))
+
+        def test_output_error_fails_open(self):
+            # a failed stdout write (a full device) is swallowed: the hook still exits 0
+            if not os.path.exists("/dev/full"):
+                self.skipTest("/dev/full absent")
+            env = dict(os.environ)
+            env["AIQT_STORE_ROOT"] = STORE
+            payload = {"tool_name": "Bash", "tool_input": {"command": f"echo 2099-01-01T00:00Z > {PROJ}/private/s.md"}}
+            with open("/dev/full", "w") as full:
+                p = subprocess.run([sys.executable, "-I", "-B", _HOOK_FILE, "future_stamp_write"], stdout=full,
+                                   stderr=subprocess.PIPE, text=True, env=env, timeout=30, input=json.dumps(payload))
+            self.assertEqual(p.returncode, 0, p.stderr)
+
+        def test_keywords_match_whole_words(self):
+            # a keyword matches only as a whole word: as a PREFIX, a word that merely STARTS with one would exempt a
+            # future literal
+            S = f"{PROJ}/private/state.md"
+            for bad in ("hb validated 2099-01-01T00:00Z", "hb throughput 2099-01-01T00:00Z",
+                        "hb duet 2099-01-01T00:00Z", "hb etag 2099-01-01T00:00Z", "hb nextcloud 2099-01-01T00:00Z"):
+                self.assertEqual(self.ev("Write", file_path=S, content=bad), ["2099-01-01T00:00Z"], bad)
+            for ok in ("valid through 2099-01-01T00:00Z", "due 2099-01-01T00:00Z", "next_run: 2099-01-01T00:00Z",
+                       "Deadlines: 2099-01-01T00:00Z", "expiration 2099-01-01T00:00Z", "ETA 2099-01-01T00:00Z"):
+                self.assertEqual(self.ev("Write", file_path=S, content=ok), [], ok)
+            self.assertEqual(self.ev("Write", file_path=S, content="| Item | Validated |\n|---|---|\n| a | "
+                                     "2099-01-01T00:00Z |"), ["2099-01-01T00:00Z"])  # the header rule too
+
+        def test_disclosures_local_time_store_target_and_fail_open(self):
+            doc = " ".join(_FSW_DOC.split())
+            for s in ("compared as local wall time", "TARGETS a store path", "fails OPEN", "through", "valid"):
+                self.assertIn(s, doc)
+
+        # -- the find -exec false-positive example --
+        def test_find_exec_false_positive_example_is_accurate(self):
+            # the FALSE POSITIVES text must not name `find <store dir> ... -exec cp {} /elsewhere` as
+            # denied, since it is allowed ({} is cp's source); the example has {} as the TARGET, and each
+            # disclosed form is checked against the hook, not only against the text
+            doc = " ".join(_FSW_DOC.split())
+            self.assertIn("`find /elsewhere ... -exec cp <store file> {} +`", doc)
+            self.assertNotIn("`find <store dir> ... -exec cp {} /elsewhere`", doc)
+            S, F = f"{PROJ}/private", "2099-01-01T00:00Z"
+            for term in ("+", "\\;"):
+                self.assertEqual(self.ev("Bash", command=f"find /elsewhere -type f -exec cp {S}/s.md {{}} {term} <<< {F}"),
+                                 [F], term)
+            self.assertEqual(self.ev("Bash", command=f"find {S} -type f -exec cp {{}} /elsewhere \\; <<< {F}"), [])
+            # a {} target under a find over the store itself is a true store write, denied
+            self.assertEqual(self.ev("Bash", command=f"find {S} -type f -exec tee {{}} \\; <<< {F}"), [F])
+
+        # -- option arguments, parsed store targets, literal indexing, the hang guard, a trailing flag --
+        def test_option_arguments_are_not_targets(self):
+            # a command-specific option argument is never a write target; read as one, a read-only store
+            # file named by sed -f or truncate -r would deny a write elsewhere; handled at class width for every
+            # modeled command (sed, perl, truncate, ed, ex, cp, mv, install)
+            S, F, X = f"{PROJ}/private", "2099-01-01T00:00Z", "/dev/shm/X"
+            allowed = (f"sed -i -f {S}/rules.sed -e 's/new/{F}/' {X}", f"sed -i --file={S}/rules.sed {X} <<< {F}",
+                       # a sed EXPRESSION or program naming a store path (formerly `--expression
+                       # {S}/x` and `'s#{S}/a#b#'` here) is script text that can write it, now an unknown
+                       # target and denied (test_script_text_naming_store_is_unknown_target)
+                       f"sed -i --file {S}/rules.sed {X} <<< {F}", f"sed -i -e 's/a/b/' --expression 's/c/d/' {X} <<< {F}",
+                       f"sed -ni -f{S}/r.sed {X} <<< {F}", f"sed -i -l 80 -f {S}/r.sed {X} <<< {F}",
+                       f"truncate -r {S}/reference {X} <<< {F}",
+                       f"truncate --reference {S}/r {X} <<< {F}", f"truncate -cr {S}/r {X} <<< {F}",
+                       f"perl -pi {S}/prog.pl {X} <<< {F}", f"perl -pi -I {S}/lib -e 1 {X} <<< {F}",
+                       f"perl -pi -M{S}/x -e 1 {X} <<< {F}", f"perl -0777 -pi -e 's/a/{F}/' {X} # {S}/s.md",
+                       f"perl -pi.bak -e 1 {X} <<< '{F} {S}/s.md'", f"ed -p {S}/p {X} <<< {F}", f"ed --prompt={S}/p {X} <<< {F}",
+                       f"ex -c wq -u {S}/vimrc {X} <<< {F}", f"cp --no-preserve {S}/a /dev/shm/src /dev/shm/dst <<< {F}",
+                       f"cp --sparse always {S}/s.md /dev/shm/dst <<< {F}")
+            for cmd in allowed:
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            denied = (f"sed -i -f /dev/shm/r.sed {S}/s.md <<< {F}", f"sed -i -e 's/a/{F}/' {S}/s.md",
+                      f"sed -i 's/a/{F}/' {S}/s.md", f"sed -ie 's/a/{F}/' {S}/s.md",  # -ie: -i with suffix e
+                      f"truncate -r /dev/shm/ref {S}/s.md <<< {F}", f"truncate -s 0 {S}/s.md <<< {F}",
+                      f"perl -pi -I /dev/shm/lib -e 1 {S}/s.md <<< {F}", f"perl -pi /dev/shm/prog.pl {S}/s.md <<< {F}",
+                      f"perl -0777pi -e 's/a/{F}/' {S}/s.md", f"perl -l0pi -e 1 {S}/s.md <<< {F}",
+                      f"ed -p x {S}/s.md <<< {F}", f"ex -w {S}/scriptout /dev/shm/x <<< {F}", f"ex -i {S}/viminfo x <<< {F}",
+                      f"cp -vt {S} /dev/shm/x <<< {F}", f"cp --sparse always /dev/shm/x {S}/s.md <<< {F}",
+                      f"install --strip-program strip /dev/shm/x {S}/s.md <<< {F}", f"mv --suffix .x /dev/shm/x {S}/s.md <<< {F}")
+            for cmd in denied:
+                self.assertEqual(self.ev("Bash", command=cmd), [F], cmd)
+            self.assertEqual(_write_targets("sed", ["-i", "-f", "a", "-e", "b", "c"]), ["c"])
+            self.assertEqual(_write_targets("sed", ["-i", "s/x/y/", "c", "d"]), ["c", "d"])
+            self.assertEqual(_write_targets("truncate", ["-r", "a", "-s", "0", "b"]), ["b"])
+            self.assertEqual(_write_targets("perl", ["-0777", "-pi.bak", "-e", "code", "f"]), ["f"])
+            self.assertEqual(_write_targets("ex", ["-c", "wq", "-wout", "f"]), ["f", "out"])
+            self.assertEqual(_write_targets("cp", ["-vt", "d", "a"]), ["d"])
+            # the read-only-argument semantics the fix rests on, observed with the real tools
+            for tool in ("bash", "sed", "truncate", "perl"):
+                if not shutil.which(tool):
+                    self.skipTest(f"{tool} absent")
+            with open(os.path.join(self.tmp, "rules.sed"), "w") as f:
+                f.write("s/a/b/\n")
+            for name, text in (("X", "a\n"), ("ref", "abc"), ("prog.pl", "1;\n"), ("P", "x\n")):
+                with open(os.path.join(self.tmp, name), "w") as f:
+                    f.write(text)
+            before = {n: open(os.path.join(self.tmp, n)).read() for n in ("rules.sed", "ref", "prog.pl")}
+            subprocess.run(["bash", "-c", "sed -i -f rules.sed -e 's/b/c/' X && truncate -r ref T && "
+                            "perl -pi -I . -e 's/x/y/' P && perl -i prog.pl P"], cwd=self.tmp, timeout=10, check=True)
+            self.assertEqual({n: open(os.path.join(self.tmp, n)).read() for n in before}, before)
+            self.assertEqual((open(os.path.join(self.tmp, "X")).read(), os.path.getsize(os.path.join(self.tmp, "T")),
+                              open(os.path.join(self.tmp, "P")).read()), ("c\n", 3, "y\n"))
+
+        def test_parsed_store_target_needs_no_raw_token(self):
+            # the raw-command prefilter names_store_path(cmd) misses an attached -tDIR, so a parsed store
+            # destination must not depend on it, or the future literal reaches the store unflagged
+            F = "2099-01-01T00:00Z"
+            for root, dest in ((None, f"{PROJ}/private"), (self.tmp, self.tmp)):
+                if root:
+                    os.environ["AIQT_STORE_ROOT"] = root
+                for cmd in (f"printf '%s' {F} > /dev/shm/X; cp -t{dest} /dev/shm/X", f"cp -t{dest} /dev/shm/{F}.md",
+                            f"mv -t{dest} /dev/shm/{F}.md", f"install -t{dest} /dev/shm/{F}.md",
+                            f"cp -vt{dest} /dev/shm/{F}.md"):
+                    self.assertFalse(names_store_path(cmd), cmd)  # the raw text shows no standalone store token
+                    self.assertEqual(self.ev("Bash", command=cmd), [F], cmd)
+            os.environ["AIQT_STORE_ROOT"] = STORE  # back to the fixture store root
+            # the raw test remains the fallback for an UNKNOWN target only
+            self.assertEqual(self.ev("Bash", command=f"echo {F} > \"$X\""), [])  # no store named: allowed
+            self.assertEqual(self.ev("Bash", command=f"X={PROJ}/private/s.md; echo {F} > \"$X\""), [F])
+            self.assertEqual(self.ev("Bash", command=f"echo 'unterminated {F} {PROJ}/private/s"), [F])
+            self.assertEqual(self.ev("Bash", command=f"echo 'unterminated {F} /dev/shm/s"), [])
+            # and a known non-store target stays allowed beside a named store path
+            self.assertEqual(self.ev("Bash", command=f"cp -t/dev/shm {PROJ}/private/s.md <<< {F}"), [])
+
+        def test_unreadable_edit_literal_index_is_linear(self):
+            # each new literal must not run `lit in old` over the whole old fragment (quadratic); the old
+            # fragment's literal-shaped substrings are indexed once, with exactly the substring semantics
+            corpus = ("x2099-01-01T00:00Z", "12099-01-01T00:00Z", "2099-01-01 00:00 UTC", "2099-01-01T00:00:00Z",
+                      "2099-01-01T00:00:00.123456789 ABCDEF", "2099-01-01T00:00 +05:30", "2099-01-01T00:00Z",
+                      "\N{ARABIC-INDIC DIGIT TWO}099-01-01T00:00Z", "2099-01-01T00:0", "")
+            news = [m.group(0) for c in corpus for m in _STAMP_RE.finditer(c)] + [
+                "2099-01-01T00:00", "2099-01-01 00:00", "2099-01-01T00:00:00.123456789 ABCDEF", "2099-01-01T00:00Z"]
+            for old in corpus + ("".join(corpus), " ".join(corpus)):
+                held = _literal_substrings(old)
+                for lit in news:
+                    self.assertEqual(lit in held, lit in old, (old, lit))
+            self.assertEqual(max(len(lit) for lit in news), LITERAL_MAX_LEN)
+            code = TIMED_PRELUDE + (
+                "fifo = %r\n"
+                "os.mkfifo(fifo)\n"
+                "os.environ['AIQT_STORE_ROOT'] = os.path.dirname(fifo)\n"
+                "def lits(n, off):\n"
+                "    return [f'2099-{1 + i %% 12:02d}-{1 + (i // 12) %% 28:02d}T{(i // 336) %% 24:02d}:"
+                "{(i // 8064) %% 60:02d}Z' for i in range(off, off + n)]\n"
+                "def run(n):\n"
+                "    old, new = '\\n'.join(lits(n, 100000)), '\\n'.join(lits(n, 0))\n"
+                "    got = m._fsw_evaluate({'tool_name': 'Edit', 'tool_input': {'file_path': fifo, 'old_string': old,"
+                " 'new_string': new}}, now)\n"
+                "    assert len(got) == n, len(got)\n"
+                "print(json.dumps(ratio(4000, run)))\n") % os.path.join(self.tmp, "fifo")
+            small, large = run_timed(code, HANG_TIMEOUT)
+            # N to GROWTH * N (up to the former 32,000): about 1 when linear, about GROWTH when quadratic
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
+
+        def test_hang_guard_interrupts(self):
+            # a growth test's ceiling asserted only after every run returns could
+            # not interrupt a hang; timed runs now go through run_timed, which kills the child at its timeout
+            t0 = time.monotonic()
+            with self.assertRaises(subprocess.TimeoutExpired):
+                run_timed("import time\ntime.sleep(60)\n", 1)
+            self.assertLess(time.monotonic() - t0, 30.0)
+            for test in (T.test_scan_is_linear, T.test_unreadable_edit_literal_index_is_linear):
+                src = inspect.getsource(test)
+                self.assertIn("run_timed(code, HANG_TIMEOUT)", src)
+                self.assertNotIn("self.assertLess(large, 30.0)", src)
+
+        def test_trailing_flag_residual_removed(self):
+            # no residual may say `install src <store file> -v` is skipped, since it is denied; only a
+            # demonstrated unsupported-option case is disclosed now (that case, `--suf`, is closed by the
+            # long-option resolution, so it is denied too)
+            doc = " ".join(_FSW_DOC.split())
+            self.assertNotIn("`install src <store file> -v`", doc)
+            self.assertIn("`cp src <store file> --suf .bak`", doc)
+            S, F = f"{PROJ}/private/s.md", "2099-01-01T00:00Z"
+            self.assertEqual(self.ev("Bash", command=f"install /dev/shm/src {S} -v <<< {F}"), [F])
+            self.assertEqual(self.ev("Bash", command=f"cp /dev/shm/src {S} --suf .bak <<< {F}"), [F])  # closed by the long-option resolution
+            if not shutil.which("cp"):
+                self.skipTest("cp absent")
+            os.mkdir(os.path.join(self.tmp, "store"))
+            with open(os.path.join(self.tmp, "src"), "w") as f:
+                f.write("s\n")
+            subprocess.run(["cp", "src", "store/s.md", "--suf", ".bak"], cwd=self.tmp, timeout=10, check=True)
+            self.assertTrue(os.path.exists(os.path.join(self.tmp, "store", "s.md")))  # the write is real
+
+        # -- perl option parsing, and script text naming a store path --
+        def real_env(self):
+            # the real tools run with POSIXLY_CORRECT removed, as the model assumes (test hermeticity)
+            return {k: v for k, v in os.environ.items() if k != "POSIXLY_CORRECT"}
+
+        def test_perl_stops_parsing_options_at_first_operand(self):
+            # a regression: the option parser consumed `-I S` after perl's first
+            # operand, but perl parses no option there, so S was a file perl edited in place and the store write
+            # was allowed (an earlier version denied it)
+            S, F, X = f"{PROJ}/private", "2099-01-01T00:00Z", "/dev/shm/X"
+            for cmd in (f"perl -pi -e 's/old/{F}/' {X} -I {S}/s.md", f"perl -pi -e 1 {X} -e {S}/s.md <<< {F}",
+                        f"perl -pi /dev/shm/prog.pl {X} -I {S}/s.md <<< {F}", f"perl -pi -e 1 {X} -- {S}/s.md <<< {F}",
+                        f"perl -pi -e 1 {X} -M {S}/s.md <<< {F}", f"perl -0777 -pi -e 1 {X} -x {S}/s.md <<< {F}"):
+                self.assertEqual(self.ev("Bash", command=cmd), [F], cmd)
+            # before the first operand an option still consumes its argument (as before)
+            for cmd in (f"perl -pi -I {S}/lib -e 1 {X} <<< {F}", f"perl -pi -e 1 {X} -I /dev/shm/lib <<< '{F} {S}/s.md'",
+                        f"perl -pi -M{S}/x -e 1 {X} <<< {F}"):
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            self.assertEqual(_write_targets("perl", ["-pi", "-e", "c", "X", "-I", "S"]), ["X", "-I", "S"])
+            self.assertEqual(_write_targets("perl", ["-pi", "prog.pl", "X", "-e", "S"]), ["X", "-e", "S"])
+            # the other modeled commands permute, like getopt: an option after an operand is still an option
+            self.assertEqual(_write_targets("sed", ["-i", "s/a/b/", "X", "-f", "S"]), ["s/a/b/", "X"])
+            self.assertEqual(_write_targets("truncate", ["X", "-r", "S"]), ["X"])
+            self.assertEqual(_write_targets("ex", ["X", "-u", "S"]), ["X"])
+            for spec in ("sed", "ex", "ed", "cp", "mv", "install", "truncate", "tee"):
+                self.assertFalse(_OPTION_SPECS[spec].get("stop"), spec)
+            self.assertTrue(_OPTION_SPECS["perl"]["stop"])
+            # the real tools, observed: perl stops at its first operand, GNU sed and truncate permute
+            for tool in ("perl", "sed", "truncate"):
+                if not shutil.which(tool):
+                    self.skipTest(f"{tool} absent")
+            for name in ("X", "S"):
+                with open(os.path.join(self.tmp, name), "w") as f:
+                    f.write("old\n")
+            r = subprocess.run(["perl", "-pi", "-e", f"s/old/{F}/", "X", "-I", "S"], cwd=self.tmp, timeout=10,
+                               capture_output=True, text=True, env=self.real_env())
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("-I", r.stderr)  # perl tried to open a FILE named -I
+            self.assertEqual([open(os.path.join(self.tmp, n)).read() for n in ("X", "S")], [F + "\n"] * 2)
+            r = subprocess.run(["sed", "s/old/new/", "S", "-n"], cwd=self.tmp, timeout=10, capture_output=True,
+                               text=True, env=self.real_env())
+            self.assertEqual((r.returncode, r.stdout), (0, ""))  # -n after the operand is still an option
+            with open(os.path.join(self.tmp, "T"), "w") as f:
+                f.write("abc")
+            subprocess.run(["truncate", "T", "-s", "0"], cwd=self.tmp, timeout=10, check=True, env=self.real_env())
+            self.assertEqual(os.path.getsize(os.path.join(self.tmp, "T")), 0)
+
+        def test_script_text_naming_store_is_unknown_target(self):
+            # a regression: a sed program or an ex -c argument that itself writes a
+            # store file was allowed once option arguments were consumed and the sed program dropped; script
+            # text naming a store path now makes the target UNKNOWN, while a FILE-naming argument stays consumed
+            S, F, X = f"{PROJ}/private", "2099-01-01T00:00Z", "/dev/shm/X"
+            denied = (f"sed -i 's/ts: .*/ts: {F}/w {S}/cap.md' /dev/shm/in",
+                      f"sed -i -e 'w {S}/cap.md' -e 's/x/{F}/' /dev/shm/in",
+                      f"ex -c \"w! {S}/s.md\" -c q /dev/shm/in <<< {F}",
+                      f"sed -i 's#{S}/a#b#' {X} <<< {F}", f"sed -i -e 's/a/b/' --expression {S}/x {X} <<< {F}",
+                      f"sed -i --expression='w {S}/c' /dev/shm/in <<< {F}", f"sed -i -e'w {S}/c' {X} <<< {F}",
+                      f"sed -ne 'w {S}/cap.md' /dev/shm/in <<< {F}", f"sed 's/x/{F}/w {S}/cap.md' /dev/shm/in",
+                      f"ex --cmd 'w! {S}/s.md' /dev/shm/in <<< {F}", f"ex -s '+w! {S}/s.md' +q /dev/shm/in <<< {F}",
+                      f"perl -pi -e 'open my $f, \">\", \"{S}/s.md\"' {X} <<< {F}",
+                      f"perl -e 'open F, \">{S}/s.md\"; print F \"{F}\"'", f"perl -E 'say 1' -e '{S}/x' <<< {F}")
+            for cmd in denied:
+                self.assertEqual(self.ev("Bash", command=cmd), [F], cmd)
+            allowed = (f"sed -i -f {S}/rules.sed {X} <<< {F}", f"truncate -r {S}/ref {X} <<< {F}",
+                       f"perl -pi -I {S}/lib -e 1 {X} <<< {F}", f"perl -pi {S}/prog.pl {X} <<< {F}",
+                       f"ex -u {S}/vimrc -c wq {X} <<< {F}", f"sed -n '/x/p' {S}/s.md <<< {F}",
+                       f"sed 's/a/{F}/' {S}/s.md", f"ex -c 'w! /dev/shm/out' -c q {X} <<< '{F} {S}/s.md'",
+                       f"sed -i 's/a/b/w {S}/cap.md' {X}")  # no future literal at all
+            for cmd in allowed:
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            self.assertIsNone(_write_targets("sed", ["-i", f"s/x/y/w {S}/c", "f"]))
+            self.assertIsNone(_write_targets("sed", ["-n", f"w {S}/c"], False))
+            self.assertEqual(_write_targets("sed", ["-n", "p"], False), [])
+            self.assertEqual(_write_targets("sed", ["-i", "--expression", "s/c/d/", "X"]), ["X"])
+            self.assertIsNone(_write_targets("ex", ["-c", f"w! {S}/s.md", "f"]))
+            self.assertEqual(_write_targets("perl", ["-pi", f"{S}/prog.pl", "f"]), ["f"])  # a program FILE
+            self.assertTrue(bash_writes(f"sed 's/x/y/w {S}/c' in"))
+            self.assertFalse(bash_writes(f"sed -n p {S}/s.md"))
+            doc = " ".join(_FSW_DOC.split())
+            for s in ("SCRIPT TEXT", "POSIXLY_CORRECT", "perl 5.40.1", "MENTIONS a store path",
+                      "as a FILE rather than carrying as text"):
+                self.assertIn(s, doc)
+            # the real tools, observed: sed's `w` flag and `w` command, and an ex -c `w!`, write the named file
+            if not shutil.which("sed"):
+                self.skipTest("sed absent")
+            os.mkdir(os.path.join(self.tmp, "store"))
+            cap = os.path.join(self.tmp, "store", "cap.md")
+            with open(os.path.join(self.tmp, "in"), "w") as f:
+                f.write("ts: old\n")
+            subprocess.run(["sed", "-i", f"s/ts: .*/ts: {F}/w {cap}", "in"], cwd=self.tmp, timeout=10, check=True,
+                           env=self.real_env())
+            self.assertEqual(open(cap).read(), f"ts: {F}\n")
+            os.unlink(cap)
+            subprocess.run(["sed", "-n", "-e", f"w {cap}", "in"], cwd=self.tmp, timeout=10, check=True,
+                           env=self.real_env())
+            self.assertEqual(open(cap).read(), f"ts: {F}\n")
+            if not shutil.which("ex"):
+                self.skipTest("ex absent")
+            exw = os.path.join(self.tmp, "store", "ex.md")
+            subprocess.run(["ex", "-s", "-c", f"w! {exw}", "-c", "q", "in"], cwd=self.tmp, timeout=10,
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           env=self.real_env())
+            self.assertEqual(open(exw).read(), f"ts: {F}\n")
+
+        # -- read-only sed programs that mention a store path --
+        def test_read_only_sed_mentioning_store_is_no_write(self):
+            # a regression: `sed -n '\|S F|p' audit.log` only prints matching lines,
+            # but its program MENTIONS a store path, so the script-text rule made its target unknown and denied it
+            # (it was allowed before that rule); a sed with no in-place option whose program parses as unable to write is now no write
+            S, F = f"{PROJ}/private", "2099-01-01T00:00Z"
+            allowed = (f"sed -n '\\|{S}/s.md {F}|p' audit.log", f"sed -n 's|{S}/s.md|X|p' audit.log <<< {F}",
+                       f"sed -n -e '/x/p' -e '\\|{S}/s.md|=' audit.log <<< {F}", f"sed '/{F}/d;\\|{S}|d' audit.log",
+                       f"sed -n '\\,{S}/s.md,{{p;q}}' audit.log <<< {F}", f"sed -n '/[/]x/p;\\|{S}|p' audit.log <<< {F}",
+                       f"sed -n '1a {S}/w' audit.log <<< {F}", f"sed -n '1r {S}/s.md' audit.log <<< {F}",
+                       f"grep -c x audit.log && sed -n '\\|{S}/s.md {F}|p' audit.log")
+            for cmd in allowed:
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            denied = (f"sed -n '\\|{F}|w {S}/s.md' audit.log", f"sed 's/x/{F}/ w {S}/s.md' audit.log",
+                      f"sed -n 's/x/{F}/gw {S}/s.md' audit.log", f"sed -n '1{{w {S}/s.md}}' audit.log <<< {F}",
+                      f"sed -n '1e cat {S}/s.md' audit.log <<< {F}", f"sed 's/x/y/e;\\|{S}|p' audit.log <<< {F}",
+                      f"sed -n 'W {S}/s.md' audit.log <<< {F}",
+                      # an in-place sed keeps the script-text treatment even when its program cannot write
+                      f"sed -i 's#{S}/a#b#' /dev/shm/x <<< {F}", f"sed -ni '\\|{S}|p' /dev/shm/x <<< {F}",
+                      # a program read from a FILE, or under --posix, is not parsed: kept unknown
+                      f"sed -n -f /dev/shm/r.sed -e '\\|{S}|p' audit.log <<< {F}",
+                      f"sed --posix -n '\\|{S}|p' audit.log <<< {F}",
+                      # a program not parsed with confidence: a `$`, a backslash in a bracket, a trailing command
+                      f"sed -n '\\|{S}/s.md$|p' audit.log <<< {F}", f"sed -n \"\\|{S}/$D|p\" audit.log <<< {F}",
+                      f"sed -n 's/[\\\\/]/X/;\\|{S}|p' audit.log <<< {F}", f"sed -n '1{{p}}p;\\|{S}|p' audit.log <<< {F}",
+                      f"sed -n -e '1a foo\\\\' -e '\\|{S}|p' audit.log <<< {F}",
+                      # ex is NOT narrowed: a read-only ex -c command naming a store path is still denied
+                      f"ex -c 'g#{S}/s.md#p' -c 'q!' /dev/shm/x <<< {F}",
+                      f"ex --cmd 'echo \"{S}/s.md\"' /dev/shm/x <<< {F}")
+            for cmd in denied:
+                self.assertEqual(self.ev("Bash", command=cmd), [F], cmd)
+            cannot = ("p", f"\\|{S}/s.md {F}|p", "s/[/]/X/p", "1,+2p", "0~2p", "/x/I,/y/Mp", "1 ! p",
+                      ":a;s/x/y/;ta;p", "1{p};2p", "y/ab/AB/", "1a w out", "1a\\\nw out", "p # w out", "l 5", "q5",
+                      "s/a/b/ 2 g p", "s/[[:alpha:]/]/Z/gp", "", "s/a/1\\\n2/p", "/a/{\np\n}")
+            can_or_unsure = ("w x", "W x", "e ls", "s/a/b/w x", "s/a/b/ w x", "s/a/b/e", "1{w x}", "/a/!w x", "$p",
+                             "s/[\\/]/X/", "1{p}p", "1!!p", "1a foo\\", "1a\\text", "{p", "p}", "L", "s/a/b/X",
+                             "s/a/b/#c\nw x", "b a}", "p x")
+            for prog in cannot:
+                self.assertTrue(_sed_program_cannot_write(prog), prog)
+            for prog in can_or_unsure:
+                self.assertFalse(_sed_program_cannot_write(prog), prog)
+            self.assertEqual(_write_targets("sed", ["-n", f"\\|{S}/s.md|p", "log"], False), [])
+            self.assertIsNone(_write_targets("sed", ["-n", f"\\|{S}/s.md|w x", "log"], False))
+            self.assertIsNone(_write_targets("sed", ["-n", "-f", "r.sed", "-e", f"\\|{S}|p", "log"], False))
+            self.assertIsNone(_write_targets("sed", ["-i", f"s#{S}/a#x#", "log"]))
+            self.assertIsNone(_write_targets("ex", ["-c", f"g#{S}/s.md#p", "x"]))
+            doc = " ".join(_FSW_DOC.split())
+            for s in ("A sed with NO in-place option", "ex is NOT narrowed", "MENTIONS a store path"):
+                self.assertIn(s, doc)
+            # the real tool, observed: the read-only search writes nothing; a `w` file is opened while the program is
+            # PARSED (so even a program that later fails writes it), and an s flag after a space is still a flag
+            if not shutil.which("sed"):
+                self.skipTest("sed absent")
+            store = os.path.join(self.tmp, "store")
+            os.mkdir(store)
+            with open(os.path.join(self.tmp, "audit.log"), "w") as f:
+                f.write(f"read {store}/s.md {F}\nother\n")
+            r = subprocess.run(["sed", "-n", f"\\|{store}/s.md {F}|p", "audit.log"], cwd=self.tmp, timeout=10,
+                               capture_output=True, text=True, env=self.real_env())
+            self.assertEqual((r.returncode, r.stdout, os.listdir(store)), (0, f"read {store}/s.md {F}\n", []))
+            r = subprocess.run(["sed", "-n", f"1{{w {store}/early}}", "audit.log"], cwd=self.tmp, timeout=10,
+                               capture_output=True, text=True, env=self.real_env())
+            self.assertNotEqual(r.returncode, 0)  # the script fails (unmatched `{`) ...
+            self.assertEqual(os.listdir(store), ["early}"])  # ... after its `w` file was created
+            subprocess.run(["sed", "-n", f"s/other/{F}/ w {store}/flag", "audit.log"], cwd=self.tmp, timeout=10,
+                           check=True, env=self.real_env())
+            self.assertEqual(open(os.path.join(store, "flag")).read(), f"{F}\n")
+
+        # -- long-option abbreviations --
+        def test_long_option_abbreviations_resolved(self):
+            # GNU long-option ABBREVIATIONS were not modelled, so `sed --expr='s/x/F/w S' log`
+            # and `sed --in 's/x/F/' S` were allowed while real GNU sed 4.9 wrote the store; a long option is now
+            # resolved as the real tool resolves it, and on sed, perl, or ex an ambiguous or unrecognized one makes
+            # the target UNKNOWN
+            S, F = f"{PROJ}/private", "2099-01-01T00:00Z"
+            denied = (f"sed --expr='s/x/{F}/w {S}/s.md' audit.log", f"sed --in 's/x/{F}/' {S}/state.md",
+                      f"sed --in=.bak 's/x/{F}/' {S}/state.md", f"sed --expr 's/x/{F}/w {S}/s.md' audit.log",
+                      f"sed -n --e='w {S}/c' audit.log <<< {F}", f"sed --i -n 'p' {S}/s.md <<< {F}",
+                      f"sed --po -n '\\|{S}|p' audit.log <<< {F}",  # --posix: the program is not parsed
+                      f"sed --f -n '\\|{S}|p' audit.log <<< {F}",  # ambiguous: --file or --follow-symlinks
+                      f"sed --bogus -n '\\|{S}|p' audit.log <<< {F}",  # unrecognized
+                      f"perl --in -pe 1 {S}/s.md <<< {F}",  # perl has no long options
+                      f"ex --cm 'w! {S}/s.md' /dev/shm/in <<< {F}", f"ex --CMD 'w! {S}/s.md' /dev/shm/in <<< {F}",
+                      f"cp --targ {S} /dev/shm/src <<< {F}", f"cp /dev/shm/src {S}/s.md --suf .bak <<< {F}",
+                      f"mv --t={S} /dev/shm/src <<< {F}", f"install --target {S} -m 600 /dev/shm/src <<< {F}",
+                      f"tee --a {S}/s.md < /dev/shm/x <<< {F}", f"truncate --si 0 {S}/s.md <<< {F}")
+            for cmd in denied:
+                self.assertEqual(self.ev("Bash", command=cmd), [F], cmd)
+            allowed = (f"sed -n --expr='\\|{S}/s.md {F}|p' audit.log", f"sed --z -n '\\|{S}|p' audit.log <<< {F}",
+                       f"sed --q '\\|{S}|p' audit.log <<< {F}", f"sed --debug -n '\\|{S}|p' audit.log <<< {F}",
+                       # an abbreviated option now consumes its argument: a store path there is no target
+                       f"cp --targ /dev/shm/out {S}/s.md <<< {F}", f"truncate --ref {S}/s.md /dev/shm/x <<< {F}",
+                       f"install --m 600 {S}/s.md /dev/shm/x <<< {F}", f"ed --prom {S}/p /dev/shm/x <<< {F}")
+            for cmd in allowed:
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            for kind, name, want in (("sed", "--expr", "--expression"), ("sed", "--in", "--in-place"),
+                                     ("sed", "--i", "--in-place"), ("sed", "--po", "--posix"),
+                                     ("sed", "--f", None), ("sed", "--s", None), ("sed", "--z", "--null-data"),
+                                     ("sed", "--silent", "--quiet"), ("sed", "--posix", "--posix"),
+                                     ("sed", "--bogus", None), ("ex", "--cmd", "--cmd"), ("ex", "--cm", None),
+                                     ("ex", "--CMD", None), ("perl", "--in", None), ("cp", "--pa", "--parents"),
+                                     ("cp", "--s", None), ("cp", "--targ", "--target-directory"),
+                                     ("ed", "--s", None), ("ed", "--si", "--quiet"), ("install", "--strip", "--strip"),
+                                     ("truncate", "--r", "--reference"), ("dd", "--x", "--x")):
+                self.assertEqual(_resolve_long(kind, name), want, (kind, name))
+            for kind, w, want in (("sed", "--in", True), ("sed", "--in=.bak", True), ("sed", "--in-place", True),
+                                  ("sed", "-i", True), ("sed", "--i", True), ("sed", "--inx", False),
+                                  ("sed", "--debug", False), ("perl", "--in-place", False), ("perl", "-pi", True)):
+                self.assertEqual(_is_inplace_opt(kind, w), want, (kind, w))
+            self.assertEqual(_write_targets("sed", ["--in", "s/a/b/", "X"]), ["X"])
+            self.assertEqual(_write_targets("sed", ["--expr=p", "X"], False), [])
+            self.assertIsNone(_write_targets("sed", ["--bogus", "p", "X"], False))
+            self.assertIsNone(_write_targets("perl", ["--in", "-pe", "1", "X"], False))
+            self.assertEqual(_write_targets("cp", ["--targ", "D", "a", "b"]), ["D"])
+            self.assertEqual(_write_targets("cp", ["a", "D", "--suf", ".bak"]), ["D"])
+            self.assertEqual(_write_targets("truncate", ["--ref", "R", "X"]), ["X"])
+            doc = " ".join(_FSW_DOC.split())
+            for s in ("A long option is resolved as the real tool resolves it", "UNAMBIGUOUS prefix",
+                      "AMBIGUOUS or UNRECOGNIZED makes the write's target UNKNOWN"):
+                self.assertIn(s, doc)
+            # the real tools, observed: GNU sed accepts the abbreviations and writes the store, and rejects an
+            # ambiguous prefix; GNU cp resolves --targ; perl rejects any long option
+            if not shutil.which("sed"):
+                self.skipTest("sed absent")
+            store = os.path.join(self.tmp, "store")
+            os.mkdir(store)
+            with open(os.path.join(self.tmp, "audit.log"), "w") as f:
+                f.write("x\n")
+            subprocess.run(["sed", f"--expr=s/x/{F}/w {store}/s.md", "audit.log"], cwd=self.tmp, timeout=10,
+                           check=True, capture_output=True, env=self.real_env())
+            self.assertEqual(open(os.path.join(store, "s.md")).read(), f"{F}\n")
+            with open(os.path.join(store, "state.md"), "w") as f:
+                f.write("x\n")
+            subprocess.run(["sed", "--in", f"s/x/{F}/", f"{store}/state.md"], cwd=self.tmp, timeout=10, check=True,
+                           env=self.real_env())
+            self.assertEqual(open(os.path.join(store, "state.md")).read(), f"{F}\n")
+            r = subprocess.run(["sed", "--f", "-n", "p", "audit.log"], cwd=self.tmp, timeout=10, capture_output=True,
+                               text=True, env=self.real_env())
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("ambiguous", r.stderr)
+            if shutil.which("cp"):
+                subprocess.run(["cp", "--targ", store, "audit.log"], cwd=self.tmp, timeout=10, check=True,
+                               env=self.real_env())
+                self.assertTrue(os.path.exists(os.path.join(store, "audit.log")))
+            if shutil.which("perl"):
+                r = subprocess.run(["perl", "--in", "-e", "1"], cwd=self.tmp, timeout=10, capture_output=True,
+                                   text=True, env=self.real_env())
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("Unrecognized switch", r.stderr)
+
+        # -- options that exit at once, every-operand writes, install --context, recorded arities --
+        def test_perl_help_and_version_exit_writing_nothing(self):
+            # a regression: perl's option table was empty, so `perl --version` (a
+            # read-only diagnostic) made the target UNKNOWN and a later read-only store search in the same command
+            # was denied; perl accepts exactly --help and --version and exits at once on either
+            S, F = f"{PROJ}/private", "2099-01-01T00:00Z"
+            allowed = (f"perl --version; grep -F '{F}' {S}/s.md", f"perl --help; grep -F '{F}' {S}/s.md",
+                       f"perl --version && rg '{F}' {S}", f"perl --version -pi -e 's/x/{F}/' {S}/s.md",
+                       f"perl -pi -e 's/x/{F}/' --help {S}/s.md")
+            for cmd in allowed:
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            denied = (f"perl -pi -e 's/x/{F}/' {S}/s.md --version",  # after the first operand: an operand
+                      f"perl --vers -pi -e 1 {S}/s.md <<< {F}", f"perl --version=1 -pi -e 1 {S}/s.md <<< {F}",
+                      f"perl --VERSION -pi -e 1 {S}/s.md <<< {F}", f"perl --in -pe 1 {S}/s.md <<< {F}")
+            for cmd in denied:
+                self.assertEqual(self.ev("Bash", command=cmd), [F], cmd)
+            for name, want in (("--version", "--version"), ("--help", "--help"), ("--vers", None), ("--hel", None),
+                               ("--in", None)):
+                self.assertEqual(_resolve_long("perl", name), want, name)
+            self.assertEqual(_write_targets("perl", ["--version", "-pi", "-e", "1", "X"]), [])
+            self.assertEqual(_write_targets("perl", ["-pi", "-e", "1", "X", "--version"]), ["X", "--version"])
+            self.assertIsNone(_write_targets("perl", ["--version=1", "-pi", "-e", "1", "X"]))
+            doc = " ".join(_FSW_DOC.split())
+            self.assertIn("perl accepts exactly two long options", doc)
+            with open(_HOOK_FILE) as f:
+                self.assertNotIn("perl has " + "none", f.read())  # the earlier comment, corrected
+            # the real tool, observed: it exits 0 on either, before editing the file or running the program
+            if not shutil.which("perl"):
+                self.skipTest("perl absent")
+            x = os.path.join(self.tmp, "x")
+            for args, edited in ((["--version"], False), (["--help"], False),
+                                 (["-pi", "-e", "s/a/b/", "--version", "x"], False),
+                                 (["-e", "open F, q(>x); print F 1", "--help"], False),
+                                 (["-pi", "-e", "s/a/b/", "x", "--version"], True)):
+                with open(x, "w") as f:
+                    f.write("a\n")
+                r = subprocess.run(["perl"] + args, cwd=self.tmp, timeout=10, capture_output=True,
+                                   stdin=subprocess.DEVNULL, env=self.real_env())
+                self.assertEqual((r.returncode, open(x).read()), (0, "b\n" if edited else "a\n"), args)
+            for bad in ("--vers", "--version=1"):
+                r = subprocess.run(["perl", bad], cwd=self.tmp, timeout=10, capture_output=True, text=True,
+                                   stdin=subprocess.DEVNULL, env=self.real_env())
+                self.assertIn("Unrecognized switch", r.stderr, bad)
+
+        def test_every_operand_written_under_exchange_or_directory(self):
+            # `mv -T --exchange S T` swaps S and T, so it WRITES S (the first
+            # operand), but only the destination was a target; under mv's --exchange, and install's -d or
+            # --directory, every operand (and every -t directory) is now a target
+            S, F = f"{PROJ}/private", "2099-01-01T00:00Z"
+            denied = (f"printf '%s\\n' 'heartbeat: {F}' > /dev/shm/t; mv -T --exchange {S}/s.md /dev/shm/t",
+                      f"mv --exchange {S}/s.md /dev/shm/t <<< {F}", f"mv --exch -t /dev/shm/d {S}/s.md <<< {F}",
+                      f"mv --e {S}/s.md /dev/shm/t <<< {F}", f"mv --exchange {S}/s.md /dev/shm/a /dev/shm/D <<< {F}",
+                      f"install -d {S}/new /dev/shm/x <<< {F}", f"install --directory {S}/new /dev/shm/x <<< {F}",
+                      f"install -vd {S}/new /dev/shm/x <<< {F}")
+            for cmd in denied:
+                self.assertEqual(self.ev("Bash", command=cmd), [F], cmd)
+            allowed = (f"mv {S}/s.md /dev/shm/t <<< {F}", f"mv --exchange /dev/shm/a /dev/shm/b <<< {F}",
+                       f"install -d /dev/shm/a /dev/shm/b <<< {F}", f"cp -d {S}/s.md /dev/shm/t <<< {F}")
+            for cmd in allowed:
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            self.assertEqual(_write_targets("mv", ["-T", "--exchange", "S", "T"]), ["S", "T"])
+            self.assertEqual(_write_targets("mv", ["--exch", "-t", "D", "S"]), ["S", "D"])
+            self.assertEqual(_write_targets("mv", ["-T", "S", "T"]), ["T"])
+            self.assertEqual(_write_targets("install", ["-d", "A", "B"]), ["A", "B"])
+            self.assertEqual(_write_targets("install", ["--dir", "A", "B"]), ["A", "B"])
+            self.assertEqual(_write_targets("cp", ["-d", "A", "B"]), ["B"])  # cp's -d is --no-dereference
+            doc = " ".join(_FSW_DOC.split())
+            self.assertIn("so under either EVERY operand and every -t or --target-directory argument is a write target",
+                          doc)
+            # the real tools, observed: mv --exchange rewrites its FIRST operand; install -d writes every operand
+            store = os.path.join(self.tmp, "store")
+            os.mkdir(store)
+            with open(os.path.join(store, "s.md"), "w") as f:
+                f.write("old\n")
+            with open(os.path.join(self.tmp, "t"), "w") as f:
+                f.write(f"heartbeat: {F}\n")
+            r = subprocess.run(["mv", "-T", "--exchange", os.path.join(store, "s.md"), "t"], cwd=self.tmp,
+                               timeout=10, capture_output=True, text=True, env=self.real_env())
+            if r.returncode != 0 and "exchange" in r.stderr:
+                self.skipTest("this mv has no --exchange")
+            self.assertEqual((r.returncode, open(os.path.join(store, "s.md")).read()), (0, f"heartbeat: {F}\n"))
+            if shutil.which("install"):
+                subprocess.run(["install", "-d", os.path.join(store, "d1"), "d2"], cwd=self.tmp, timeout=10,
+                               check=True, env=self.real_env())
+                self.assertTrue(os.path.isdir(os.path.join(store, "d1")))
+
+        def test_install_context_arity_union(self):
+            # uutils install 0.8.0 consumes a SEPARATE word after --context (GNU install takes
+            # only an attached value), so `install src <store file> --context foo` wrote the store file while the
+            # model read `foo` as the destination; the model now takes the union of both readings
+            S, F = f"{PROJ}/private", "2099-01-01T00:00Z"
+            denied = (f"install /dev/shm/src {S}/s.md --context foo <<< {F}",
+                      f"install /dev/shm/src {S}/s.md --cont foo <<< {F}",
+                      f"install /dev/shm/src {S}/s.md --context - <<< {F}",
+                      f"install --context foo /dev/shm/src {S}/s.md <<< {F}",
+                      f"install /dev/shm/src /dev/shm/dst --context {S}/s.md <<< {F}")  # GNU reads S as the dest
+            for cmd in denied:
+                self.assertEqual(self.ev("Bash", command=cmd), [F], cmd)
+            allowed = (f"install /dev/shm/src /dev/shm/dst --context foo <<< {F}",
+                       f"install --context -m 600 {S}/s.md /dev/shm/x <<< {F}",
+                       f"install --context=foo {S}/s.md /dev/shm/x <<< {F}",
+                       f"install {S}/s.md /dev/shm/x --context <<< {F}")
+            for cmd in allowed:
+                self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
+            for words, want in ((["src", "S", "--context", "foo"], ["S", "foo"]),
+                                (["src", "S", "--cont", "foo"], ["S", "foo"]),
+                                (["--context", "foo", "src", "D"], ["D"]), (["src", "D", "--context", "-"], ["D", "-"]),
+                                (["src", "D", "--context", "--", "x"], ["x"]), (["src", "D", "--context"], ["D"]),
+                                (["-t", "D", "--context", "a"], ["D"]), (["--context=foo", "a", "D"], ["D"])):
+                self.assertEqual(_write_targets("install", words), want, words)
+            self.assertEqual(_write_targets("cp", ["src", "D", "--context", "foo"]), ["foo"])  # GNU cp: attached only
+            doc = " ".join(_FSW_DOC.split())
+            for s in ("GNU install takes it only attached", "the model takes the conservative union",
+                      "another implementation whose option arity differs"):
+                self.assertIn(s, doc)
+            # the real tool, observed: uutils install consumes the separate word (GNU install would not)
+            if not shutil.which("install"):
+                self.skipTest("install absent")
+            v = subprocess.run(["install", "--version"], capture_output=True, text=True, timeout=10,
+                               env=self.real_env())
+            if "uutils" not in v.stdout:
+                self.skipTest("install is not uutils")
+            store = os.path.join(self.tmp, "store")
+            os.mkdir(store)
+            with open(os.path.join(self.tmp, "src"), "w") as f:
+                f.write(f"heartbeat: {F}\n")
+            subprocess.run(["install", "src", os.path.join(store, "s.md"), "--context", "foo"], cwd=self.tmp,
+                           timeout=10, check=True, capture_output=True, env=self.real_env())
+            self.assertEqual(open(os.path.join(store, "s.md")).read(), f"heartbeat: {F}\n")
+            r = subprocess.run(["install", "src", "--context", os.path.join(store, "t.md")], cwd=self.tmp,
+                               timeout=10, capture_output=True, text=True, env=self.real_env())
+            self.assertNotEqual(r.returncode, 0)  # the store path was consumed as the context: no destination
+            self.assertIn("missing destination", r.stderr)
+
+        def test_recorded_long_option_arity_matches_real_tools(self):
+            # the arity sweep, kept as a check: for cp, mv, and install, every recorded long option is run as
+            # `TOOL a D OPT WORD` (D an existing directory, WORD a name that does not exist); the tool CONSUMED
+            # WORD as the option's argument exactly when it copied or moved a into D and succeeded, and read WORD
+            # as an operand exactly when it failed on WORD as the destination. The model must agree: an option
+            # the spec lists as taking an argument consumes it, any other does not, and an "optsep" option may
+            # do either (the union is modeled)
+            values = {"--suffix": "x", "--mode": "600", "--owner": str(os.getuid()), "--group": str(os.getgid()),
+                      "--strip-program": "true", "--sparse": "auto", "--no-preserve": "mode"}
+            skip = {"--help", "--version", "--target-directory", "--no-target-directory", "--directory",
+                    "--exchange", "--strip"}  # exits, or changes the operand shape, so this probe cannot read it
+            checked = 0
+            for tool in ("cp", "mv", "install"):
+                if not shutil.which(tool):
+                    continue
+                spec = _OPTION_SPECS[tool]
+                for opt in _LONG_OPTIONS[tool]:
+                    if opt in skip:
+                        continue
+                    d = tempfile.mkdtemp(dir=self.tmp)
+                    with open(os.path.join(d, "a"), "w") as f:
+                        f.write("A\n")
+                    os.mkdir(os.path.join(d, "D"))
+                    word = values.get(opt, "Wn")
+                    # one literal argv head per tool, so the maintenance-pin scan can read each launch
+                    if tool == "cp":
+                        r = subprocess.run(["cp", "a", "D", opt, word], cwd=d, timeout=10, capture_output=True,
+                                           text=True, stdin=subprocess.DEVNULL, env=self.real_env())
+                    elif tool == "mv":
+                        r = subprocess.run(["mv", "a", "D", opt, word], cwd=d, timeout=10, capture_output=True,
+                                           text=True, stdin=subprocess.DEVNULL, env=self.real_env())
+                    else:
+                        r = subprocess.run(["install", "a", "D", opt, word], cwd=d, timeout=10,
+                                           capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                           env=self.real_env())
+                    consumed = r.returncode == 0 and os.path.lexists(os.path.join(d, "D", "a"))
+                    if not consumed:
+                        self.assertNotEqual(r.returncode, 0, (tool, opt, r.stderr))
+                        self.assertFalse(os.path.lexists(os.path.join(d, word)), (tool, opt))
+                    canon = _resolve_long(tool, opt)
+                    if canon in spec.get("optsep", ()):
+                        checked += 1
+                        continue
+                    self.assertEqual(consumed, canon in spec.get("long", ()), (tool, opt, r.stderr))
+                    checked += 1
+            if not checked:
+                self.skipTest("cp, mv, and install absent")
+            self.assertGreater(checked, 40)
+
+        # -- work budget, directories, shell -c strings, which literals count, and tool exits --
+        def bash_run(self, cmd, cwd):
+            """Run `cmd` in real bash in `cwd` (inside self.tmp), with no inherited environment beyond PATH."""
+            return subprocess.run(["bash", "-c", cmd], cwd=cwd, capture_output=True, text=True, timeout=10,
+                                  stdin=subprocess.DEVNULL, env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                                                                 "HOME": self.tmp, "LC_ALL": "C"})
+
+        def make_store(self):
+            store = os.path.join(self.tmp, "store")
+            os.makedirs(store, exist_ok=True)
+            with open(os.path.join(store, "state.md"), "w") as f:
+                f.write("old\n")
+            os.environ["AIQT_STORE_ROOT"] = store
+            return store
+
+        def test_work_budget_bounds_the_bash_analysis(self):
+            # a 65,536-byte command of `: > x;` repeats before a future store write took about
+            # 75 ms of analysis; the analysis now runs under a work budget and fails OPEN when it is spent, with the
+            # per-token work cut (store roots read once, regex fast path, lazy per-literal decisions)
+            S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
+            tail = f"printf '%s\\n' 'heartbeat: {F}' > {S}"
+            dense = ": > x;" * ((65536 - len(tail)) // 6) + tail
+            self.assertEqual(self.ev("Bash", command=dense), [])  # the budget is spent: fail open
+            with self.assertRaises(_Exhausted):  # deterministic: the budget, not the host's speed, bounds it
+                _analyze(dense, frozenset((f"{PROJ}/repo",)), _StoreCtx(), _Budget(BASH_WORK_BUDGET))
+            small = ": > x;" * 1000 + tail
+            self.assertEqual(self.ev("Bash", command=small), [F])  # inside the budget: still judged
+            ordinary = "".join(f"echo 'line {i} of the audit log' >> /dev/shm/x{i % 7}\n" for i in range(1400)) + tail
+            self.assertGreater(len(ordinary), 60000)
+            self.assertEqual(self.ev("Bash", command=ordinary), [F])  # 64 KiB of ordinary lines stays inside it
+            # load-robust timing: the growth ratio from N to GROWTH * N (interleaved, best of 5) of an in-budget
+            # command, and a subprocess ceiling (a hang or a runaway is interrupted, never waited out). The dense
+            # command's latency is bounded by an ORDINARY 64 KiB command judged in full on the same host (a PEER
+            # check), not by a wall-clock ceiling
+            code = TIMED_PRELUDE + (
+                f"S = '{PROJ}/private/state.md'\n"
+                "def run(n):\n"
+                "    c = ''.join('echo line %d >> /dev/shm/x\\n' % i for i in range(n)) + "
+                "\"printf 'hb 2099-01-01T00:00Z' > \" + S\n"
+                "    assert m._fsw_evaluate({'tool_name': 'Bash', 'tool_input': {'command': c}, 'cwd': '/'}, now), n\n"
+                "t = ': > x;' * 10900 + \"printf 'hb 2099-01-01T00:00Z' > \" + S\n"
+                "def dense():\n"
+                "    m._fsw_evaluate({'tool_name': 'Bash', 'tool_input': {'command': t}, 'cwd': '/'}, now)\n"
+                "print(json.dumps(ratio(250, run) + versus(dense, ordinary('/', os.path.dirname(S)))))\n")
+            small_t, large_t, dense_t, ref_t = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(large_t / max(small_t, 1e-3), LINEAR_LIMIT, (small_t, large_t))
+            self.assertLess(dense_t / max(ref_t, 1e-3), PEER_LIMIT, (dense_t, ref_t))
+            doc = " ".join(_FSW_DOC.split())
+            for s in ("WORK BUDGET. The Bash analysis", "is ALLOWED unchecked (fail OPEN", "an EXOTIC, disclosed miss"):
+                self.assertIn(s, doc)
+
+        def test_relative_targets_resolve_against_cwd_and_cd(self):
+            # a relative Bash destination must not bypass store detection: `printf ... > store/state.md`
+            # with the cwd holding store/, and `cd <store> && printf ... > state.md`, wrote the future heartbeat
+            store = self.make_store()
+            F = "2099-01-01T00:00Z"
+            denied = ((self.tmp, f"printf '%s\\n' 'heartbeat: {F}' > store/state.md"),
+                      (self.tmp, f"cd {store} && printf '%s\\n' 'heartbeat: {F}' > state.md"),
+                      (self.tmp, f"cd store; echo 'heartbeat: {F}' >> ./state.md"),
+                      (self.tmp, f"cd -P -- store && echo 'heartbeat: {F}' >> state.md"),
+                      (self.tmp, f"(cd {store} && echo 'heartbeat: {F}' > state.md)"),
+                      (self.tmp, f"x=$(cd store && echo 'heartbeat: {F}' | tee -a state.md)"),
+                      (store, f"echo 'heartbeat: {F}' >> state.md"),
+                      (os.path.join(store, "sub") + "/..", f"echo 'heartbeat: {F}' >> state.md"),
+                      (self.tmp, f"cd /dev/shm; cd {store}; echo 'heartbeat: {F}' >> state.md"),
+                      (self.tmp, f"true || cd {store}; echo 'heartbeat: {F}' >> store/state.md"),
+                      (self.tmp, f"cp /dev/null store/state.md <<< {F}"),
+                      (self.tmp, f"cd {self.tmp}/nowhere; echo 'heartbeat: {F}' >> state.md # {store}"))
+            for cwd, cmd in denied:
+                self.assertEqual(self.ev("Bash", cwd=cwd, command=cmd), [F], (cwd, cmd))
+            allowed = ((self.tmp, f"cd /dev/shm && echo 'heartbeat: {F}' > not-a-store"),
+                       (store, f"cd {self.tmp} && echo 'heartbeat: {F}' >> state.md"),
+                       (self.tmp, f"echo 'heartbeat: {F}' >> storex/state.md"),
+                       (self.tmp, f"echo 'heartbeat: {F}' >> state.md"),
+                       (self.tmp, f"cd \"$D\" && echo 'heartbeat: {F}' >> state.md"),  # unknown, and no store named
+                       (self.tmp, "printf '%s\\n' 'heartbeat: 2020-01-01T00:00Z' > store/state.md"))
+            for cwd, cmd in allowed:
+                self.assertEqual(self.ev("Bash", cwd=cwd, command=cmd), [], (cwd, cmd))
+            # no payload cwd: a relative target is UNKNOWN, a store write only when the command names a store path
+            self.assertEqual(evaluate({"tool_name": "Bash", "tool_input": {"command": f"echo {F} >> x.md"}},
+                                      self.now), [])
+            self.assertEqual(evaluate({"tool_name": "Bash", "tool_input": {
+                "command": f"echo {F} >> x.md # {store}"}}, self.now), [F])
+            self.assertIn("WHICH DIRECTORY. A relative write target", " ".join(_FSW_DOC.split()))
+            # real bash agrees: every denied command above writes the future heartbeat into the store
+            if not shutil.which("bash"):
+                self.skipTest("bash absent")
+            for cwd, cmd in denied[:9]:
+                with open(os.path.join(store, "state.md"), "w") as f:
+                    f.write("old\n")
+                os.makedirs(os.path.join(store, "sub"), exist_ok=True)
+                self.bash_run(cmd, cwd)
+                with open(os.path.join(store, "state.md")) as f:
+                    self.assertIn(F, f.read(), cmd)
+
+        def test_literal_shell_c_strings_are_inspected(self):
+            # `bash -c "printf ... > <store file>"` must not be allowed, since real bash writes the
+            # future heartbeat; a statically known -c string is now analysed recursively with the same cwd
+            store = self.make_store()
+            S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
+            denied = (f"bash -c \"printf '%s\\n' 'heartbeat: {F}' > {S}\"", f"sh -c 'echo heartbeat: {F} >> {S}'",
+                      f"dash -c 'echo heartbeat: {F} >> {S}'", f"zsh -c 'echo heartbeat: {F} >> {S}'",
+                      f"bash -lc 'echo heartbeat: {F} >> {S}'", f"bash -e -o pipefail -c 'echo {F} >> {S}'",
+                      f"/bin/bash -c \"echo \\\"heartbeat: {F}\\\" >> {S}\"",
+                      f"sudo -n bash -c 'echo heartbeat: {F} >> {S}'",
+                      f"bash -c \"sh -c 'echo heartbeat: {F} >> {S}'\"",
+                      f"bash -c 'cd {store} && echo heartbeat: {F} >> state.md'",
+                      f"bash -c 'echo heartbeat: {F} >> store/state.md'",  # the payload cwd (self.tmp)
+                      f"echo heartbeat: {F} | bash -c 'cat >> {S}'")  # the enclosing pipeline feeds it
+            for cmd in denied:
+                self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [F], cmd)
+            allowed = (f"bash -c 'grep -F {F} {S}; echo checked >> {S}'", f"bash -c 'echo heartbeat: {F} > /dev/null'",
+                       f"bash -c 'echo checked >> {S} # {F}'", f"bash -c \"echo {F} >> {S}; echo $HOME\"",
+                       f"bash -c 'next run: {F}' >> /dev/null")
+            for cmd in allowed:
+                self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [], cmd)
+            self.assertEqual(_literal_shell_string("'a b'"), ("a b", [1, 2, 3]))
+            self.assertEqual(_literal_shell_string('"a\\"b"'), ('a"b', [1, 3, 4]))
+            for raw in ('"a $x"', '"a `b`"', "'a'b'", '"a', '"a\\"'):
+                self.assertIsNone(_literal_shell_string(raw), raw)
+            self.assertIn("SHELL -c. bash, sh, dash, or zsh with -c", " ".join(_FSW_DOC.split()))
+            if not shutil.which("bash"):
+                self.skipTest("bash absent")
+            for cmd in denied[:3] + denied[6:7] + denied[8:9]:
+                with open(S, "w") as f:
+                    f.write("old\n")
+                self.bash_run(cmd, self.tmp)
+                with open(S) as f:
+                    self.assertIn(F, f.read(), cmd)
+
+        def test_literal_counts_only_for_the_write_it_feeds(self):
+            # an unrelated literal must not taint every store write in the command: a search for the
+            # literal, then an audit append, and a literal only in a comment, were denied although bash appended
+            # only `checked`; a literal now counts only as DATA of a store write
+            store = self.make_store()
+            S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
+            allowed = (f"grep -F '{F}' {S}; echo checked >> {S}", f"echo checked >> {S} # {F}",
+                       f"rg -c '{F}' {S} | wc -l; date -u >> {S}",
+                       f"if grep -qF '{F}' {S}; then echo found >> {S}; else echo none >> {S}; fi",
+                       f"n=$(grep -cF '{F}' {S}); echo \"n=$n\" >> {S}",
+                       f"echo \"matches: $(grep -cF -e '{F}' {S})\" >> {S}",
+                       f"echo 'seen {F}' > {self.tmp}/log.txt; echo checked >> {S}",
+                       f"grep -F '{F}' {S} > {self.tmp}/hits; echo checked >> {S}",
+                       f"echo checked >> {S}\n# note: {F} was already recorded",
+                       f"test -s {S} && echo ok >> {S} # compare against {F}")
+            for cmd in allowed:
+                self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [], cmd)
+            denied = (f"printf '%s\\n' 'heartbeat: {F}' >> {S}", f"echo 'hb {F}' | tee -a {S}",
+                      f"cat >> {S} <<< 'hb {F}'", f"cat <<'EOF' >> {S}\nhb {F}\nEOF",
+                      f"cat <<EOF >> {S}\n# hb {F}\nEOF", f"cat <<-EOF >> {S}\n\thb {F}\n\tEOF",
+                      f"printf 'hb {F}\\n' > {self.tmp}/stage; cp {self.tmp}/stage {S}",
+                      f"echo 'hb {F}' > {self.tmp}/a; cp {self.tmp}/a {self.tmp}/b; mv {self.tmp}/b {S}",
+                      f"{{ grep -F '{F}' {S}; echo checked; }} >> {S}", f"( echo 'hb {F}' ) >> {S}",
+                      f"for t in '{F}'; do echo \"hb $t\" >> {S}; done", f"ts='{F}'; echo \"hb $ts\" >> {S}",
+                      f"echo 'hb {F}' | while read l; do echo \"$l\" >> {S}; done",
+                      f"x=$(grep -o '{F}' <<< 'hb {F}'); echo \"$x\" >> {S}",
+                      f"rg -r '{F}' old {S} > {self.tmp}/o; cp {self.tmp}/o {S}",
+                      f"exec >> {S}; echo 'hb {F}'", f"f() {{ echo 'hb {F}'; }}; f >> {S}",
+                      f"echo \"$(echo 'hb {F}')\" >> {S}")
+            for cmd in denied:
+                self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [F], cmd)
+            self.assertIn("WHICH LITERALS. A future literal counts only", " ".join(_FSW_DOC.split()))
+            # real bash: the allowed commands never put the literal into the store; the denied ones do
+            if not shutil.which("bash"):
+                self.skipTest("bash absent")
+            for cmd, want in [(c, False) for c in allowed] + [(c, True) for c in denied[:8] + denied[9:14]]:
+                with open(S, "w") as f:
+                    f.write("old\n")
+                self.bash_run(cmd, self.tmp)
+                with open(S) as f:
+                    self.assertEqual(F in f.read(), want, cmd)
+
+        def test_unexecuted_conditional_write_is_judged_as_written(self):
+            # by design: a write in a branch that never runs is judged as
+            # written, and the docstring says so
+            S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
+            for cmd in (f"if false; then printf '%s\\n' 'heartbeat: {F}' > {S}; fi",
+                        f"[ -e /dev/shm/missing-sentinel ] && echo 'heartbeat: {F}' >> {S}"):
+                self.assertEqual(self.ev("Bash", command=cmd), [F], cmd)
+            doc = " ".join(_FSW_DOC.split())
+            self.assertIn("BY DESIGN (not modeled): a write in a branch that never runs is judged as written", doc)
+
+        def test_help_and_version_exit_on_every_modeled_tool(self):
+            # only perl's --help and --version were modeled as exiting, so `cp --version src
+            # <store file>` was denied although cp exits at once; GNU cp, mv, sed, and ed and uutils install, tee,
+            # and truncate exit on either wherever it stands before `--` (they permute)
+            store = self.make_store()
+            S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
+            allowed = (f"cp --version src {S} <<< {F}", f"cp src {S} --help <<< {F}", f"mv --help src {S} <<< {F}",
+                       f"mv src {S} --vers <<< {F}", f"install --version src {S} <<< {F}",
+                       f"echo {F} | tee --help {S}", f"echo {F} | tee {S} --version=1",
+                       f"sed --version -i s/old/{F}/ {S}", f"sed -i s/old/{F}/ {S} --help",
+                       f"truncate -s0 {S} --help <<< {F}", f"ed -s {S} --version <<< {F}")
+            for cmd in allowed:
+                self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [], cmd)
+            denied = (f"echo {F} | tee -- {S} --help", f"cp -S --version src {S} <<< {F}",
+                      f"sed -i s/old/{F}/ -- {S} --help", f"cp src {S} <<< {F}",
+                      f"ex -c 'w! {S}' --version src <<< {F}")
+            for cmd in denied:
+                self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [F], cmd)
+            for kind in ("cp", "mv", "install", "tee", "truncate", "ed", "sed"):
+                self.assertEqual(_write_targets(kind, ["--help", "a", "b"]), [], kind)
+                self.assertEqual(_write_targets(kind, ["a", "b", "--version=1"]), [], kind)
+            self.assertIsNone(_write_targets("perl", ["--version=1", "-pi", "-e", "1", "X"]))  # unchanged
+            self.assertNotIn("exit", _OPTION_SPECS["ex"])
+            # the real tools, observed: each exits 0 and leaves the store file unchanged
+            with open(os.path.join(self.tmp, "src"), "w") as f:
+                f.write("src\n")
+            for cmd in allowed:
+                tool = cmd.split("| ")[-1].split()[0]
+                if not shutil.which(tool):
+                    continue
+                with open(S, "w") as f:
+                    f.write("old\n")
+                r = self.bash_run(cmd, self.tmp)
+                with open(S) as f:
+                    self.assertEqual((r.returncode == 0 or "--version=1" in cmd, f.read()), (True, "old\n"), cmd)
+
+        def test_tokenizer_records_positions_heredocs_and_comments(self):
+            # the analysis attributes literals by raw offsets: a word's (start, end) spans its text, a quoted
+            # here-document body is skipped as bash reads it (its `>` is text), an unquoted one still tokenized, and
+            # comments are recorded; the regex fast path and the character loop agree token for token
+            cmd = "echo a > /tmp/x; cat <<'EOF' >> y\nb > z\nEOF\nls # c\ncat <<E\n$(tee w)\nE\n"
+            t = _tokenize(cmd)
+            words = [(tok[1], cmd[a:b]) for tok, (a, b) in zip(t.streams[-1], t.poss[-1]) if tok[0] == "w"]
+            self.assertTrue(all(w == raw for w, raw in words if w != "$" and "'" not in raw), words)
+            self.assertIn(("EOF", "'EOF'"), words)  # a quoted word spans its quotes
+            self.assertNotIn("z", [w for w, _ in words])  # the quoted body is not command text
+            self.assertEqual([cmd[a:b] for _op, a, b in t.heredocs], ["b > z\n", "$(tee w)\n"])
+            self.assertEqual([cmd[a:b] for a, b in t.comments], ["# c"])
+            self.assertEqual(len(t.streams), 2)  # the unquoted body's substitution is still scanned
+            # a body is text, never commands: its `>` writes nothing (formerly a false deny), while a write in
+            # a substitution in an unquoted body still counts
+            S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
+            for delim in ("E", "'E'"):
+                self.assertEqual(self.ev("Bash", command=f"cat <<{delim} > /dev/shm/heredoc-out\nhb > {S} {F} $(date -u)\nE"),
+                                 [], delim)
+            self.assertEqual(self.ev("Bash", command=f"cat <<E > /dev/shm/heredoc-out\n$(echo hb {F} >> {S})\nE"), [F])
+            self.assertEqual(self.ev("Bash", command=f"cat <<'E' > /dev/shm/heredoc-out\n$(echo hb {F} >> {S})\nE"), [])
+            for c in ("a;b|c&&d||e > f >> g < h 2>&1 &", "x=1 y=2 cmd -o --long=v 'q' \"d\" $v `b`",
+                      "if a; then b; fi; for i in 1; do :; done; [[ a > b ]] && (( c > d ))"):
+                self.assertEqual(_shell_tokens(c), _tokenize(c).streams)
+            self.assertEqual(_shell_tokens("a  b\t;c"), [[("w", "a"), ("w", "b"), ("s",), ("w", "c")]])
+
+        def test_disclosures_directory_shell_c_literals_and_budget(self):
+            doc = " ".join(_FSW_DOC.split())
+            for s in ("WHICH DIRECTORY. A relative write target", "SHELL -c. bash, sh, dash, or zsh with -c",
+                      "WHICH LITERALS. A future literal counts only", "WORK BUDGET. The Bash analysis",
+                      "GNU cp, mv, sed, and ed and uutils install, tee, and truncate also exit at once",
+                      "one quoted literal with no expansion: a literal one is inspected",
+                      "the directory resolution does resolve `cd <store dir> && echo <future> > state.md`"):
+                self.assertIn(s, doc)
+            for s in ("(a relative path is never resolved", "no heredoc or wrapper analysis",
+                      "AND the command holds a future-dated literal"):
+                self.assertNotIn(s, doc)
+
+        # -- directory budget, subshell scoping, shell -c output and staging, matching searches, timing --
+        def assert_bash_agrees(self, cases, store, cwd=None):
+            """Real bash agrees with each (command, wants-denied) case: it writes F into the store exactly when the
+            hook denies."""
+            if not shutil.which("bash"):
+                self.skipTest("bash absent")
+            S = os.path.join(store, "state.md")
+            for cmd, want in cases:
+                for p in (S, os.path.join(self.tmp, "state.md"), os.path.join(self.tmp, "stage")):
+                    if os.path.exists(p):
+                        os.unlink(p)
+                with open(S, "w") as f:
+                    f.write("old\n")
+                self.bash_run(cmd, cwd or self.tmp)
+                with open(S) as f:
+                    self.assertEqual("2099-01-01T00:00Z" in f.read(), want, cmd)
+
+        def test_directory_work_is_budgeted(self):
+            # directory-set expansion, path resolution, and set union were not charged to the
+            # work budget, so 64 KiB of `(cd <dir>);` over 400 directories took about 200 ms in-process. They are
+            # now charged BEFORE they are done, and a set above MAX_CWDS spends the budget (fail open)
+            store = self.make_store()
+            F = "2099-01-01T00:00Z"
+            cap, cost = _FSW_GLOBALS.get("MAX_CWDS", 32), _FSW_GLOBALS.get("CWD_COST", 6)  # defaults if the hook defines neither
+            dirs = []
+            for i in range(cap + 8):
+                d = os.path.join(self.tmp, f"d{i}")
+                os.mkdir(d)
+                dirs.append(d)
+            tail = f"printf '%s\\n' 'heartbeat: {F}' > {store}/state.md"
+            grow = "".join(f"true && cd {d}; " for d in dirs) + tail  # each cd JOINS the set: it grows past the bound
+            self.assertLess(len(grow), 4096)
+            with self.assertRaises(_Exhausted):  # deterministic: the bound, not the host's speed
+                _analyze(grow, frozenset((self.tmp,)), _StoreCtx(), _Budget(BASH_WORK_BUDGET))
+            self.assertEqual(self.ev("Bash", cwd=self.tmp, command=grow), [])  # fail open
+            # inside the bound every directory resolution is charged: 31 directories, then 50 relative targets
+            few = "".join(f"true && cd {d}; " for d in dirs[:cap - 1]) + \
+                "".join(f"echo x > t{i}; " for i in range(50)) + tail
+            b = _Budget(BASH_WORK_BUDGET)
+            self.assertTrue(_analyze(few, frozenset((self.tmp,)), _StoreCtx(), b).store)
+            self.assertGreater(BASH_WORK_BUDGET - b.left, 50 * cost * cap)
+            self.assertEqual(self.ev("Bash", cwd=self.tmp, command=few), [F])  # still judged
+            # the construct: 400 directories, 800 `(cd .);`, a future store write, padded to 65,536 bytes:
+            # analysed in-process well under the latency bound, or the budget is spent (best of 5 in a child). The
+            # bound is a PEER check: at most PEER_LIMIT times an ordinary 64 KiB command judged in full on the same
+            # host (directory work, formerly uncharged, took about 200 ms), not a wall-clock ceiling
+            code = TIMED_PRELUDE + (
+                "D = %r\n"
+                "os.environ['AIQT_STORE_ROOT'] = os.path.join(D, 'store')\n"
+                "ds = []\n"
+                "for i in range(400):\n"
+                "    p = os.path.join(D, 'c%%d' %% i)\n"
+                "    os.mkdir(p)\n"
+                "    ds.append(p)\n"
+                "body = ''.join('(cd %%s);' %% p for p in ds) + '(cd .);' * 800\n"
+                "tail = \"printf '%%s\\\\n' 'heartbeat: 2099-01-01T00:00Z' > \" + D + '/store/state.md'\n"
+                "c = body + ' ' * (65536 - len(body) - len(tail)) + tail\n"
+                "assert len(c) == 65536\n"
+                "def run():\n"
+                "    m._fsw_evaluate({'tool_name': 'Bash', 'tool_input': {'command': c}, 'cwd': D}, now)\n"
+                "print(json.dumps(versus(run, ordinary(D, os.path.join(D, 'store')))))\n") % self.tmp
+            t, ref_t = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(t / max(ref_t, 1e-3), PEER_LIMIT, (t, ref_t))  # about 1.7 on the development host
+            self.assertEqual((_FSW_GLOBALS.get("CWD_COST"), _FSW_GLOBALS.get("MAX_CWDS")), (6, 32))
+
+        def test_subshell_scopes_directory_state(self):
+            # a regression: a subshell's cd leaked into the parent, so
+            # `(cd <store> && ls >/dev/null); printf ... > state.md` was denied although bash wrote only the cwd's
+            # state.md; `( ... )` now scopes the directory set, and `{ ... }` does not, as in bash
+            store = self.make_store()
+            F = "2099-01-01T00:00Z"
+            w = f"printf '%s\\n' 'heartbeat: {F}' > state.md"
+            allowed = (f"(cd {store} && ls >/dev/null); {w}", f"(cd {store}) && {w}", f"( (cd {store}); ls ); {w}",
+                       f"(cd {store}; ls)\n{w}", f"x=$(cd {store}; ls); {w}")
+            denied = (f"{{ cd {store}; }}; {w}", f"(cd {store} && {w})", f"(cd {store}; (ls); {w})",
+                      f"cd {store}; (cd /); {w}", f"(cd /; cd {store}; {w})")
+            for cmd in allowed:
+                self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [], cmd)
+            for cmd in denied:
+                self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [F], cmd)
+            self.assert_bash_agrees([(c, False) for c in allowed] + [(c, True) for c in denied], store)
+
+        def test_shell_c_output_reaching_the_store_counts(self):
+            # a literal shell -c string whose OUTPUT is redirected or piped into a store
+            # target must not be allowed; a literal in the string is also data of the wrapper, as for echo
+            store = self.make_store()
+            S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
+            denied = (f"bash -c 'echo heartbeat: {F}' >> {S}", f"sh -c 'echo heartbeat: {F}' | tee {S}",
+                      f"bash -c \"printf 'hb {F}\\n'\" > {S}", f"bash -c 'echo hb {F}' | cat >> {S}",
+                      f"bash -c 'echo hb {F}' > stage; cp stage {S}",
+                      f"{{ bash -c 'echo hb {F}'; }} >> {S}", f"bash -c \"sh -c 'echo hb {F}'\" >> {S}")
+            allowed = (f"bash -c 'echo hb {F}'; echo checked >> {S}", f"bash -c 'echo hb {F}' > /dev/null; date >> {S}",
+                       f"bash -c 'grep -cF {F} {S}; echo checked >> {S}'",
+                       f"bash -c 'echo hb {F}' > {self.tmp}/log; echo checked >> {S}")
+            for cmd in denied:
+                self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [F], cmd)
+            for cmd in allowed:
+                self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [], cmd)
+            self.assert_bash_agrees([(c, True) for c in denied] + [(c, False) for c in allowed], store)
+
+        def test_staging_through_shell_c(self):
+            # a file staged by the outer command and copied by a literal shell -c string
+            # (`printf ... > stage; bash -c 'cp stage <store file>'`) was allowed; the string's store write now
+            # exposes the words it names, and its own writes, to the enclosing staging walk
+            store = self.make_store()
+            S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
+            denied = (f"printf '%s\\n' 'heartbeat: {F}' > stage; bash -c 'cp stage {S}'",
+                      f"echo 'hb {F}' > stage; sh -c 'cat stage >> {S}'",
+                      f"bash -c 'echo hb {F} > stage'; cp stage {S}",
+                      f"echo 'hb {F}' > stage; bash -c 'cd {self.tmp} && cp stage {S}'")
+            allowed = (f"printf '%s\\n' 'heartbeat: {F}' > stage; bash -c 'cp /dev/null {S}'",
+                       f"bash -c 'echo hb {F} > stage'; cp /dev/null {S}")
+            for cmd in denied:
+                self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [F], cmd)
+            for cmd in allowed:
+                self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [], cmd)
+            self.assert_bash_agrees([(c, True) for c in denied] + [(c, False) for c in allowed], store)
+
+        def test_matching_search_pattern_counts(self):
+            # an exotic miss: every grep/rg pattern in a search-only substitution was exempt, "a search
+            # prints file text or a count, never its pattern", but a MATCHING search prints file text holding its
+            # pattern (with -o, exactly it); only a pipeline ending in wc or a counting/quiet/file-list search is
+            # exempt now
+            store = self.make_store()
+            S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
+            hits = os.path.join(self.tmp, "hits.log")
+            with open(hits, "w") as f:
+                f.write(f"seen {F}\n")
+            denied = (f"echo \"$(grep -oF '{F}' {hits})\" >> {S}", f"x=$(grep -F '{F}' {hits}); echo \"$x\" >> {S}",
+                      f"echo \"$(rg -F '{F}' {hits})\" >> {S}", f"echo \"$(grep -F '{F}' {hits} | grep -v none)\" >> {S}",
+                      f"echo \"$(grep -F '{F}' {hits} || wc -l {hits})\" >> {S}")
+            allowed = (f"echo \"n=$(grep -cF '{F}' {hits})\" >> {S}", f"echo \"f=$(grep -lF '{F}' {hits})\" >> {S}",
+                       f"echo \"n=$(grep -F '{F}' {hits} | wc -l)\" >> {S}", f"echo \"n=$(rg --count -F '{F}' {hits})\" >> {S}",
+                       f"echo \"f=$(grep -LF '{F}' {S})\" >> {S}", f"echo \"q=$(grep -qF '{F}' {hits}; echo $?)\" >> {S}",
+                       f"echo \"n=$(grep -F '{F}' {hits} | grep -c seen)\" >> {S}")
+            for cmd in denied:
+                self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [F], cmd)
+            for cmd in allowed[:5] + allowed[6:]:
+                self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [], cmd)
+            # a substitution that also runs echo is not search-only: its pattern counts (the conservative direction)
+            self.assertEqual(self.ev("Bash", cwd=self.tmp, command=allowed[5]), [F])
+            if not shutil.which("rg"):
+                denied, allowed = denied[:2] + denied[3:], allowed[:3] + allowed[4:]
+            self.assert_bash_agrees([(c, True) for c in denied] + [(c, False) for c in allowed], store)
+            doc = " ".join(_FSW_DOC.split())
+            self.assertIn("A MATCHING search that prints lines prints file text holding its pattern", doc)
+            self.assertNotIn("a search prints file text or a count, never its pattern", doc)
+
+        def test_timing_tests_are_interleaved_and_hang_guarded(self):
+            # the load-sensitive growth-ratio tests (one flaked at load 34) now interleave their sizes, best of N,
+            # at larger sizes, in a child under the hang ceiling
+            self.assertIn("def interleaved(sizes, run, reps=5)", TIMED_PRELUDE)
+            self.assertIn("return interleaved((n, GROWTH * n), same_work, reps)", TIMED_PRELUDE)
+            self.assertIn("GROWTH = %d\n" % GROWTH, TIMED_PRELUDE)
+            for test, needle in ((T.test_scan_is_linear, "ratio(n, r)"),
+                                 (T.test_unreadable_edit_literal_index_is_linear, "ratio(4000, run)"),
+                                 (T.test_work_budget_bounds_the_bash_analysis, "ratio(250, run)"),
+                                 (T.test_table_context_carry_over_scales, "interleaved((10000, 160000), run, 3)"),
+                                 (T.test_bash_writes_is_linear, "ratio(12500, run, 3)"),
+                                 (T.test_shell_tokens_linear, "ratio(12500, run, 3)"),
+                                 (T.test_bash_scan_is_linear, "ratio(12500, run, 3)"),
+                                 (T.test_many_distinct_literals_linear_and_bounded, "ratio(5000, run, 3)"),
+                                 (T.test_table_scan_is_linear, "ratio(6250, run, 3)"),
+                                 (T.test_directory_work_is_budgeted, "versus(run, ordinary("),
+                                 (T.test_wrapper_check_is_constant_per_wrapper, "versus(run_adv, ordinary(")):
+                src = inspect.getsource(test)
+                self.assertIn(needle, src)
+                self.assertIn("run_timed(code, HANG_TIMEOUT)", src)
+                self.assertNotIn("best(2 * n, r)", src)
+            # a wall-clock bound in any test is rejected by test_no_wall_clock_verdict (an AST scan)
+
+        def test_interleaved_refuses_sub_floor_samples(self):
+            # at the multiplier cap interleaved() returned sub-floor samples, voiding
+            # the every-sample floor; it now fails closed. The child's CPU clock is replaced by a counter
+            # that barely advances, so the cap is reached the same way on any host
+            code = TIMED_PRELUDE + (
+                "ticks = [0.0]\n"
+                "def _fake_clock():\n"
+                "    ticks[0] += 1e-09\n"
+                "    return ticks[0]\n"
+                "time.process_time = _fake_clock\n"
+                "def run(n):\n"
+                "    pass\n"
+                "print(json.dumps(interleaved((1000, 8000), run, 1)))\n")
+            with self.assertRaises(AssertionError) as ctx:
+                run_timed(code, HANG_TIMEOUT)
+            self.assertIn("cannot measure above the floor", str(ctx.exception))
+
+        def test_timed_child_ignores_ambient_allocator_policy(self):
+            # as observed in the sibling stamp-truth-stop.py, a timed child inherited the
+            # parent's environment, so an ambient MALLOC_* variable or GLIBC_TUNABLES entry pinned glibc's
+            # thresholds and false-REDed healthy code under load (2.0 to 3.1x); every timed child now
+            # launches with child_env(). Deterministic: the probe reports the child's environment, no
+            # clock is read
+            ambient = {"MALLOC_TOP_PAD_": "131072", "MALLOC_MMAP_THRESHOLD_": "131072",
+                       "MALLOC_TRIM_THRESHOLD_": "0", "MALLOC_MMAP_MAX_": "65536",
+                       "GLIBC_TUNABLES": "glibc.malloc.mmap_threshold=131072"}
+            probe = ("import json, os\n"
+                     "leaked = [k for k in os.environ if k.startswith('MALLOC_') or k == 'GLIBC_TUNABLES']\n"
+                     "assert not leaked, 'ambient allocator policy reached the timed child: %r' % leaked\n"
+                     "print(json.dumps(sorted(leaked)))\n")
+            saved = {k: os.environ.get(k) for k in ambient}
+            os.environ.update(ambient)
+            try:
+                # the builder drops the overrides and nothing else
+                dropped = set(os.environ) - set(child_env())
+                self.assertTrue(dropped.issuperset(ambient), dropped)
+                self.assertTrue(all(k.startswith("MALLOC_") or k == "GLIBC_TUNABLES" for k in dropped),
+                                dropped)
+                # the real launch path: the child observes none of them (a leak raises AssertionError)
+                run_timed(probe, HANG_TIMEOUT)
+                # the builder bypassed (the environment inherited, the pre-fix launch): the same child is RED
+                r = subprocess.run([sys.executable, "-I", "-B", "-c", probe], capture_output=True, text=True,
+                                   timeout=HANG_TIMEOUT)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("ambient allocator policy reached the timed child", r.stderr)
+                self.assertIn("MALLOC_TOP_PAD_", r.stderr)
+            finally:
+                for k, v in saved.items():
+                    os.environ.pop(k, None)
+                    if v is not None:
+                        os.environ[k] = v
+
+        def test_disclosures_subshell_scope_and_directory_budget(self):
+            doc = " ".join(_FSW_DOC.split())
+            for s in ("a `( ... )` subshell SCOPES the set", "A `{ ... }` group does not scope, as in bash",
+                      "At most MAX_CWDS (32) directories are tracked", "it ALSO counts, as for echo, when the WRAPPER's "
+                      "output reaches a store write", "KNOWN GAP (disclosed, not modeled)", "DIRECTORY work is charged too, "
+                      "BEFORE it is done", "(cd <store dir> && ls); printf ... > state.md"):
+                self.assertIn(s, doc)
+
+        def test_wrapper_check_is_constant_per_wrapper(self):
+            # a regression: each shell -c wrapper rescanned its whole pipeline and
+            # rebuilt its separator text, work of wrappers x pipeline length the budget never saw: 64 KiB of 450
+            # piped `sh -c` wrappers and 1,050 `:` took about 107 ms in-process (14.5 ms before the regression) with 1,794
+            # budget steps left. Each pipeline's aggregates are now computed once, charged before the pass
+            store = self.make_store()
+            F = "2099-01-01T00:00Z"
+            tail = f"; echo checked > {store}/state.md"
+
+            def build(w, n):
+                return " |\n".join([f"sh -c 'echo {F}'"] * w + [":"] * n) + tail
+
+            def spend(c):  # the analysis, then every literal's decision, on one budget as bash_future runs them
+                b = _Budget(BASH_WORK_BUDGET)
+                an = _analyze(c, frozenset((self.tmp,)), _StoreCtx(), b)
+                left = b.left
+                for i in range(len(c)):
+                    if c.startswith(F, i):
+                        an.counts(i)
+                return left - b.left
+            adv = build(450, 1050).ljust(65536)
+            self.assertEqual(len(adv), 65536)
+            with self.assertRaises(_Exhausted):  # deterministic: the budget, not the host's speed, bounds it
+                spend(adv)
+            self.assertEqual(self.ev("Bash", cwd=self.tmp, command=adv), [])  # fail open
+            # inside the budget it is still judged (the conservative direction: each wrapper's output is piped into
+            # a command outside READ_COMMANDS), and the per-literal phase pays for the pipeline walk up front
+            for w in (120, 300):
+                c = build(w, 3 * w)
+                self.assertEqual(self.ev("Bash", cwd=self.tmp, command=c), [F])
+                self.assertGreaterEqual(spend(c), 4 * 4 * w)
+            # in a child under the hang ceiling: the construction in-process against an ordinary 64 KiB
+            # command judged in full (a PEER check, about 1.2 on the development host; the regression took about
+            # 107 ms), and the growth from 37 to GROWTH * 37 wrappers (interleaved, best of 5; the per-wrapper
+            # rescan grew it by about 3.2 times per doubling)
+            code = TIMED_PRELUDE + (
+                "D = %r\n"
+                "os.environ['AIQT_STORE_ROOT'] = os.path.join(D, 'store')\n"
+                "tail = '; echo checked > ' + D + '/store/state.md'\n"
+                "def build(w, n):\n"
+                "    return ' |\\n'.join([\"sh -c 'echo 2099-01-01T00:00Z'\"] * w + [':'] * n) + tail\n"
+                "adv = build(450, 1050).ljust(65536)\n"
+                "def run(w):\n"
+                "    m._fsw_evaluate({'tool_name': 'Bash', 'tool_input': {'command': build(w, 3 * w)}, 'cwd': D}, now)\n"
+                "def run_adv():\n"
+                "    m._fsw_evaluate({'tool_name': 'Bash', 'tool_input': {'command': adv}, 'cwd': D}, now)\n"
+                "print(json.dumps(versus(run_adv, ordinary(D, os.path.join(D, 'store'))) + ratio(37, run)))\n"
+                ) % self.tmp
+            t_adv, ref_t, small, large = run_timed(code, HANG_TIMEOUT)
+            self.assertLess(t_adv / max(ref_t, 1e-3), PEER_LIMIT, (t_adv, ref_t))
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
+            doc = " ".join(_FSW_DOC.split())
+            self.assertIn("The shell -c WRAPPER check is charged too", doc)
+
+        # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
+        HANG_GUARD_TESTS = ("test_hang_guard_interrupts",)
+
+        def test_no_wall_clock_verdict(self):
+            """Residual (disclosed): the scan covers direct calls, imported aliases, and assigned aliases within a
+            function, not values passed between functions, so a time figure handed to a helper that asserts on it
+            is not flagged. Nor is a reading from a clock the scan does not name (os.times, date.today,
+            time.localtime or gmtime, a third-party clock, a file's mtime), nor a time figure routed through an
+            expression form the scan does not follow: an assignment expression (walrus), a dict literal, a
+            container built by a comprehension or filled by a store into a subscript, a starred or mismatched
+            unpacking, or any other routing; see _wall_clock_asserts."""
+            # every assertion of this file is scanned (see _wall_clock_asserts): none bounds a time figure, a
+            # ratio of two time figures excepted, outside the hang-guard tests named in HANG_GUARD_TESTS
+            src = inspect.getsource(_fsw_unit_suite)  # this suite's own source, not the whole self-test file
+            self.assertEqual(_wall_clock_asserts(src, self.HANG_GUARD_TESTS), [])
+            flagged = [name for name, _line in _wall_clock_asserts(src)]
+            for name in self.HANG_GUARD_TESTS:  # an exemption names a real hang guard the scan would flag
+                self.assertIn(name, flagged)
+            # the forms a substring check missed are caught: a harness result, an elapsed name, a bare assert, a
+            # for target, a time.time difference, and a comparison inside assertTrue
+            bad = ("def test_a(self):\n    small, large = run_timed(code, HANG_TIMEOUT)\n"
+                   "    self.assertLess(large, 2.0)\n"
+                   "def test_b(self):\n    started = time.monotonic()\n    run()\n"
+                   "    elapsed = time.monotonic() - started\n    self.assertLess(elapsed, 0.5)\n"
+                   "def test_c(self):\n    t0 = time.perf_counter()\n    assert time.perf_counter() - t0 < 1\n"
+                   "def test_d(self):\n    for name, (s, big) in run_timed(c, 9).items():\n"
+                   "        self.assertTrue(big < 3, name)\n"
+                   "def test_e(self):\n    t = time.time()\n    self.assertLessEqual(time.time() - t, 1)\n"
+                   "def test_f(self):\n    def inner():\n        self.assertLess(growth_in_child(src, 9)[1], 1)\n")
+            self.assertEqual([name for name, _line in _wall_clock_asserts(bad)],
+                             ["test_a", "test_b", "test_c", "test_d", "test_e", "test_f"])
+            # a ratio of two time figures, a time figure in the message only, and an exempt hang guard pass
+            good = ("def test_g(self):\n    small, large = run_timed(code, HANG_TIMEOUT)\n"
+                    "    self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))\n"
+                    "    self.assertTrue(large / small < 2, (small, large))\n"
+                    "def test_h(self):\n    t0 = time.monotonic()\n    self.assertLess(time.monotonic() - t0, 30.0)\n")
+            self.assertEqual(_wall_clock_asserts(good, ("test_h",)), [])
+            self.assertEqual(_wall_clock_asserts(good), [("test_h", 7)])
+            # a clock read through an alias (import-as, from-import, an assigned name) or a keyword operand is
+            # caught; the same aliases used for a hang-guard timeout, a count, or a msg keyword are not
+            bad, want, good = _wall_clock_alias_fixtures()
+            self.assertEqual([name for name, _line in _wall_clock_asserts(bad)], want)
+            self.assertEqual(_wall_clock_asserts(good), [])
+    return T, _BASE
+
+
+@contextlib.contextmanager
+def _env_values(**values):
+    """Set (a str) or unset (None) each named environment variable for the block, then restore the prior state."""
+    saved = {key: os.environ.get(key) for key in values}
+    try:
+        for key, value in values.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+# Every variable the clock-stamp handler could be thought to read, unset for a row unless the row sets it: only
+# AIQT_STORE_ROOT is read; the worker markers and the ORCH_ spelling are proven inert.
+_CLOCK_ENV = ("AIQT_STORE_ROOT", "AIQT_HOOKS_WORKER", "ORCH_STORE_ROOT", "ORCH_WORKER", "ORCH_VERIFY_OWNER")
+_FSW_WARN_PREFIX = "future-stamp-write: future stamp "
+
+
+def _clock_dispatch(mode, stdin):
+    """aiqt_hooks.main([mode]) in-process over stdin text: (exit code, stdout text, stderr text)."""
+    saved = sys.stdin
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        sys.stdin = io.StringIO(stdin)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = aiqt_hooks.main([mode])
+    finally:
+        sys.stdin = saved
+    return code, out.getvalue(), err.getvalue()
+
+
+def _clock_definitions(tree):
+    """{name: node} for the module-level function definitions and single-name assignments of tree."""
+    out = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            out[node.name] = node
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            out[node.targets[0].id] = node
+    return out
+
+
+class _ClockUnprefix(ast.NodeTransformer):
+    """Rename every Name (and a function's own name) from its prefixed form back to the former script's name."""
+
+    def __init__(self, back):
+        self.back = back
+
+    def visit_Name(self, node):
+        node.id = self.back.get(node.id, node.id)
+        return node
+
+    def visit_FunctionDef(self, node):
+        node.name = self.back.get(node.name, node.name)
+        self.generic_visit(node)
+        return node
+
+
+def _clock_shape(node, back=None):
+    """ast.dump of a definition with no docstring, its names read back to the former script's when back is given."""
+    import copy
+    node = copy.deepcopy(node)
+    if (isinstance(node, ast.FunctionDef) and node.body and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant) and isinstance(node.body[0].value.value, str)):
+        node.body = node.body[1:]
+    if back:
+        node = _ClockUnprefix(back).visit(node)
+    if isinstance(node, ast.Assign):
+        node = node.value
+    return ast.dump(node, include_attributes=False)
+
+
+# The definitions the handler shares with .preview/stamp-truth-stop.py (the former script's parity list, less
+# _cfg, _is_worker and the self-test helpers: the handler reads no legacy spelling and keeps no worker skip).
+_FSW_PARITY = ("SCHED_KEYWORDS", "SCHED_GAP_TOKENS", "SCHED_STEMS", "TIME_GRAMMAR", "ZONE_GRAMMAR", "_SCHED_RE",
+               "_TOKEN_RE", "_WORDCH_RE", "_BTICK_RE", "_FENCE_RE", "sched_exempter", "_code_lines", "_code_spans",
+               "_in_spans")
+
+
+def _clock_parity_problems(hook_text, preview_text):
+    """The shared definitions whose code differs between the handlers in hook_text and the preview Stop hook in
+    preview_text, compared as syntax trees with docstrings dropped and the handlers' prefixed names read back."""
+    return _clock_parity_definition_problems(_clock_definitions(ast.parse(hook_text)),
+                                             _clock_definitions(ast.parse(preview_text)))
+
+
+def _clock_parity_definition_problems(hook, preview):
+    """_clock_parity_problems over the two sides' parsed definitions ({name: node}, _clock_definitions)."""
+    out = []
+    for kind, shared in (("fsw", _FSW_PARITY),):
+        names = _CLOCK_HOOK_NAMES[kind]
+        back = {new: old for old, new in names.items()}
+        for name in shared:
+            ours, theirs = hook.get(names[name]), preview.get(name)
+            if ours is None or theirs is None:
+                out.append("{}: {} is missing from {}".format(kind, name, "aiqt_hooks" if ours is None else
+                                                              ".preview/stamp-truth-stop.py"))
+            elif _clock_shape(ours, back) != _clock_shape(theirs):
+                out.append("{}: {} differs from .preview/stamp-truth-stop.py".format(kind, name))
+    return out
+
+
+def _clock_parity_mutants(hook):
+    """(label, mutated hook definitions, the one parity problem it must be reported as) for every shared definition
+    of the handler: its value (an assignment) or body (a function) changed; its name in aiqt_hooks changed, so
+    the map no longer finds it; and, through _CLOCK_HOOK_NAMES, each prefixed name its value or body reads, and a
+    function's own name, changed to another prefixed name of the same handler."""
+    import copy
+    for kind, shared in (("fsw", _FSW_PARITY),):
+        names = _CLOCK_HOOK_NAMES[kind]
+        prefixed = sorted(names.values())
+        differs = "{}: {{}} differs from .preview/stamp-truth-stop.py".format(kind)
+        for name in shared:
+            new = names[name]
+            node = copy.deepcopy(hook[new])
+            if isinstance(node, ast.Assign):
+                node.value = ast.Tuple(elts=[node.value, ast.Constant(value=None)], ctx=ast.Load())
+            else:
+                node.body.append(ast.Pass())
+            yield "{} {} value or body".format(kind, name), dict(hook, **{new: node}), differs.format(name)
+            moved = {key: value for key, value in hook.items() if key != new}
+            moved[new + "_moved"] = hook[new]
+            yield "{} {} definition name".format(kind, name), moved, "{}: {} is missing from aiqt_hooks".format(
+                kind, name)
+            is_function = isinstance(hook[new], ast.FunctionDef)
+            read = sorted({n.id for n in ast.walk(hook[new] if is_function else hook[new].value)
+                           if isinstance(n, ast.Name) and n.id in prefixed})
+            for target, own in ([(new, True)] if is_function else []) + [(item, False) for item in read]:
+                other = next(item for item in prefixed if item != target)
+                node = copy.deepcopy(hook[new])
+                if own:
+                    node.name = other
+                else:
+                    next(n for n in ast.walk(node if is_function else node.value)
+                         if isinstance(n, ast.Name) and n.id == target).id = other
+                yield ("{} {} name map {} to {}".format(kind, name, target, other), dict(hook, **{new: node}),
+                       differs.format(name))
+
+
+def _test_clock_hooks(failures, tmp):
+    """(fsw-*) The clock-stamp dispatcher handler ported from the former standalone preview script.
+    future_stamp_write (PreToolUse, stage bake) WARNS, never denies, on a future-dated literal written into an
+    AIQT_STORE_ROOT store, and its HANDLER_EVENT class PRETOOL_WARN_ONLY gives it main()'s fail-open posture, so
+    no path of it exits 2. The rows below drive the handler and main() for its mode; fsw-unit-* runs the former
+    script's own self-test against the ported code (_clock_hook_unit_failures); fsw-parity holds the code shared
+    with .preview/stamp-truth-stop.py equal; and fsw-preview-dup keeps the plugin-and-preview pair documented,
+    the form the former hook-scripts gate's no-preview-duplicate leg takes now that the preview copy stays
+    published. The pack's clock reading (clock_inject_post, clock_inject_failure) is _test_clock_inject's."""
+    store = tmp / "clock-store"
+    other = tmp / "clock-elsewhere"
+    store.mkdir()
+    other.mkdir()
+    st, ot = str(store), str(other)
+    unset = {key: None for key in _CLOCK_ENV}
+
+    def fsw(label, tool, tool_input, want, cwd=None, extra=None, prefix=_FSW_WARN_PREFIX, **env):
+        data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input}
+        if tool is None:
+            del data["tool_name"]
+        if cwd is not None:
+            data["cwd"] = cwd
+        data.update(extra or {})
+        with _env_values(**dict(unset, **dict({"AIQT_STORE_ROOT": st}, **env))):
+            code, stdout_obj, stderr_text = aiqt_hooks.future_stamp_write(data)
+        got = _reduce_result(code, stdout_obj)
+        note = stdout_obj.get("systemMessage") if isinstance(stdout_obj, dict) else None
+        if got != want or stderr_text is not None:
+            failures.append("{}: expected {}, got {} (stderr {!r})".format(label, want, got, stderr_text))
+        elif got == "allow-note" and not (note.startswith(prefix) and "\n" not in note
+                                          and len(note) <= aiqt_hooks._FSW_WARN_MAX):
+            failures.append("{}: the warning must be one line of at most {} characters opening {!r}, got {!r}"
+                            .format(label, aiqt_hooks._FSW_WARN_MAX, prefix, note))
+        return note
+
+    future, past = "2099-01-01T00:00:00Z", "2000-01-01T00:00:00Z"
+    (store / "edit.md").write_text("a\nb\n", encoding="utf-8")
+    fsw("(fsw-write-future-warns) a Write of a future literal into a store warns", "Write",
+        {"file_path": st + "/state.md", "content": "hb: " + future}, "allow-note")
+    fsw("(fsw-write-past-silent) a Write of a past literal into a store passes silently", "Write",
+        {"file_path": st + "/state.md", "content": "hb: " + past}, "allow")
+    fsw("(fsw-write-scheduled-silent) a future literal right after a scheduling word passes silently", "Write",
+        {"file_path": st + "/state.md", "content": "next_run: " + future}, "allow")
+    fsw("(fsw-write-elsewhere-silent) a future literal written outside every store passes silently", "Write",
+        {"file_path": ot + "/state.md", "content": "hb: " + future}, "allow")
+    fsw("(fsw-write-quoted-silent) a future literal in a blockquote or a code span passes silently", "Write",
+        {"file_path": st + "/state.md", "content": "> hb: " + future + "\n`" + future + "`\n"}, "allow")
+    fsw("(fsw-write-due-column-silent) a future literal under a Due table header passes silently", "Write",
+        {"file_path": st + "/state.md", "content": "| Item | Due |\n|---|---|\n| x | " + future + " |\n"}, "allow")
+    fsw("(fsw-edit-future-warns) an Edit that brings a future literal into a store file warns", "Edit",
+        {"file_path": st + "/edit.md", "old_string": "a", "new_string": "hb " + future}, "allow-note")
+    fsw("(fsw-multiedit-future-warns) a MultiEdit that brings a future literal into a store file warns", "MultiEdit",
+        {"file_path": st + "/edit.md", "edits": [{"old_string": "a", "new_string": "ok"},
+                                                  {"old_string": "b", "new_string": "hb " + future}]}, "allow-note")
+    fsw("(fsw-edit-absent-old-silent) an Edit whose old_string the whole file lacks passes silently", "Edit",
+        {"file_path": st + "/edit.md", "old_string": "zzz", "new_string": "hb " + future}, "allow")
+    fsw("(fsw-relative-under-store-cwd-warns) a relative file_path resolved under a store from the cwd warns",
+        "Write", {"file_path": "notes.md", "content": future}, "allow-note", cwd=st)
+    fsw("(fsw-bash-append-warns) a Bash append of a future literal to a store file warns", "Bash",
+        {"command": "echo 'hb {}' >> {}/state.md".format(future, st)}, "allow-note", cwd="/")
+    fsw("(fsw-bash-tee-warns) a future literal piped into tee on a store file warns", "Bash",
+        {"command": "printf 'hb {}' | tee -a {}/state.md".format(future, st)}, "allow-note", cwd="/")
+    fsw("(fsw-bash-read-silent) a read-only search of a store for a future literal passes silently", "Bash",
+        {"command": "grep -F '{}' {}/state.md".format(future, st)}, "allow", cwd="/")
+    fsw("(fsw-bash-date-subst-silent) a future literal inside a $(date ...) substitution passes silently", "Bash",
+        {"command": "echo \"hb $(date -d {})\" > {}/state.md".format(future, st)}, "allow", cwd="/")
+    fsw("(fsw-bash-elsewhere-silent) a Bash write of a future literal outside every store passes silently", "Bash",
+        {"command": "echo {} > {}/x.md".format(future, ot)}, "allow", cwd="/")
+    fsw("(fsw-bash-budget-spent-silent) a command that spends the work budget passes unchecked (fail open)",
+        "Bash", {"command": ": > x; " * 20000 + "echo 'hb {}' >> {}/state.md".format(future, st)}, "allow", cwd="/")
+    note = fsw("(fsw-many-literals-counted) three future literals warn once, naming the first and counting the rest",
+               "Write", {"file_path": st + "/state.md",
+                         "content": "hb 2099-01-01T00:00Z\nhb 2099-02-01T00:00Z\nhb 2099-03-01T00:00Z\n"}, "allow-note")
+    if note is not None and not note.startswith(_FSW_WARN_PREFIX + "2099-01-01T00:00Z (+2 more)"):
+        failures.append("(fsw-many-literals-counted) expected the first literal and (+2 more), got {!r}".format(note))
+    # A time qualified as approximate, or one with a placeholder digit, is no clock reading: it warns with no
+    # clock comparison (a past date included), naming the token and pointing at $(date -u ...) at write time.
+    nc = "future-stamp-write: not a clock reading: "
+    for label, content in (
+            ("(fsw-approx-about-warns) about before a time-only UTC token warns", "hb: about 00:33Z"),
+            ("(fsw-approx-around-past-stamp-warns) around before a past full stamp warns", "seen around 2000-01-01T00:33Z"),
+            ("(fsw-approx-approximately-warns) Approximately in any letter case warns", "Approximately 00:33Z done"),
+            ("(fsw-approx-circa-warns) circa before a time with seconds warns", "circa 00:33:10Z"),
+            ("(fsw-approx-tilde-warns) a tilde right before a time warns", "hb ~00:33Z"),
+            ("(fsw-placeholder-minute-warns) a placeholder minute digit warns", "hb 02:1xZ"),
+            ("(fsw-placeholder-all-warns) placeholder hour and minute digits warn", "hb 0x:xxZ"),
+            ("(fsw-placeholder-stamp-warns) a placeholder in a full stamp warns", "hb 2026-11-16T0?:xxZ")):
+        note = fsw(label, "Write", {"file_path": st + "/state.md", "content": content}, "allow-note", prefix=nc)
+        if note is not None and "$(date -u" not in note:
+            failures.append("{}: the warning must point at $(date -u ...), got {!r}".format(label, note))
+    fsw("(fsw-approx-edit-warns) an Edit that brings an approximate time into a store file warns", "Edit",
+        {"file_path": st + "/edit.md", "old_string": "a", "new_string": "hb about 00:33Z"}, "allow-note", prefix=nc)
+    fsw("(fsw-approx-bash-append-warns) a Bash append of an approximate time to a store file warns", "Bash",
+        {"command": "echo 'hb ~00:33Z' >> {}/state.md".format(st)}, "allow-note", cwd="/", prefix=nc)
+    for label, content in (
+            ("(fsw-exact-stamp-silent) an exact past stamp and an exact time-only token pass silently",
+             "hb 2000-01-01T00:33Z at 00:33Z"),
+            ("(fsw-about-not-before-time-silent) about not right before a time passes silently",
+             "about the 00:33Z run"),
+            ("(fsw-prose-time-silent) a prose time with no stamp shape passes silently",
+             "about 10:30 in the morning, around 9:45 am, ~10:30, circa 1900"),
+            ("(fsw-approx-code-span-silent) an approximate time inside a code span passes silently",
+             "`about 00:33Z`")):
+        fsw(label, "Write", {"file_path": st + "/state.md", "content": content}, "allow")
+    fsw("(fsw-approx-elsewhere-silent) an approximate time written outside every store passes silently", "Write",
+        {"file_path": ot + "/state.md", "content": "hb about 00:33Z"}, "allow")
+    # Every zone of the stamp grammar that names UTC opens both forms (a spaced Z, UTC, GMT, an all-zero
+    # offset); fractional seconds take placeholder slots too; a JSON value or a spaced tilde is not quotation.
+    for label, content in (
+            ("(fsw-approx-utc-word-warns) about before a time with a UTC zone word warns", "hb about 00:33 UTC"),
+            ("(fsw-approx-gmt-stamp-warns) about before a full stamp with a GMT zone word warns",
+             "about 2026-11-16T00:33 GMT"),
+            ("(fsw-approx-zero-offset-warns) about before a full stamp with a +00:00 offset warns",
+             "about 2026-11-16T00:33+00:00"),
+            ("(fsw-approx-spaced-z-warns) about before a time with a Z after one space warns", "hb about 00:33 Z"),
+            ("(fsw-placeholder-utc-warns) a placeholder in a full stamp with a UTC zone word warns",
+             "hb 2026-11-16T0x:33 UTC"),
+            ("(fsw-placeholder-fraction-warns) a placeholder in the fraction warns", "hb 02:33:00.xxZ"),
+            ("(fsw-placeholder-seconds-fraction-warns) a placeholder seconds digit before a fraction warns",
+             "hb 02:33:0x.5Z"),
+            ("(fsw-approx-json-value-warns) an approximate time in a double-quoted JSON value warns",
+             '{"hb": "about 00:33Z"}'),
+            ("(fsw-approx-spaced-tilde-warns) a tilde after a space before a time warns", "x ~00:33Z")):
+        fsw(label, "Write", {"file_path": st + "/state.md", "content": content}, "allow-note", prefix=nc)
+    for label, content in (
+            ("(fsw-approx-other-zone-silent) an approximate time with a zone that does not name UTC passes silently",
+             "about 00:33 PST, around 00:33+01:00, ~00:33 +0530, circa 00:33+0030, about 00:33 Zulu"),
+            ("(fsw-prose-time-zone-hints-silent) a prose time on a line holding zone words passes silently",
+             "about 10:30 am, around 09:45 PST; Z: UTC: GMT: 00"),
+            ("(fsw-placeholder-other-zone-silent) a placeholder time with a local zone passes silently", "hb 0x:33 PST"),
+            ("(fsw-exact-fraction-silent) an exact time with a fraction passes silently", "hb 02:33:00.5Z"),
+            ("(fsw-approx-underscore-silent) about glued to an identifier by an underscore passes silently",
+             "hb_about 00:33Z"),
+            ("(fsw-approx-glued-tilde-silent) a tilde range or a tilde glued to a word passes silently",
+             "window 00:00Z~00:33Z and x~00:33Z"),
+            ("(fsw-approx-blockquote-silent) an approximate time on a blockquote line passes silently",
+             "> about 00:33Z"),
+            ("(fsw-approx-fence-silent) an approximate time in a matched fence passes silently",
+             "```\nabout 00:33Z\n```\n")):
+        fsw(label, "Write", {"file_path": st + "/state.md", "content": content}, "allow")
+    # The Bash route reads the same quoted-text exemptions on the command's lines for these two forms.
+    for label, command, want in (
+            ("(fsw-approx-bash-code-span-silent) a Bash append of an approximate time in a code span passes silently",
+             "echo '`about 00:33Z`' >> {}/state.md", "allow"),
+            ("(fsw-approx-bash-fence-silent) a Bash here-document holding an approximate time in a fence passes "
+             "silently", "cat >> {}/state.md <<'EOF'\n```\nhb about 00:33Z\n```\nEOF", "allow"),
+            ("(fsw-placeholder-bash-blockquote-silent) a Bash here-document blockquote line with a placeholder "
+             "passes silently", "cat >> {}/state.md <<'EOF'\n> hb 0x:xxZ\nEOF", "allow"),
+            ("(fsw-approx-bash-unclosed-fence-warns) a Bash here-document with an unclosed fence warns",
+             "cat >> {}/state.md <<'EOF'\n```\nhb about 00:33Z\nEOF", "allow-note"),
+            ("(fsw-approx-bash-after-span-warns) a Bash approximate time after a closed code span warns",
+             "echo '`x` about 00:33Z' >> {}/state.md", "allow-note"),
+            ("(fsw-approx-bash-utc-warns) a Bash append of an approximate time with a UTC zone word warns",
+             "echo 'hb about 00:33 UTC' >> {}/state.md", "allow-note")):
+        fsw(label, "Bash", {"command": command.format(st)}, want, cwd="/", prefix=nc)
+    fsw("(fsw-bash-future-blockquote-warns) a Bash future literal on a blockquote line still warns", "Bash",
+        {"command": "cat >> {}/state.md <<'EOF'\n> hb {}\nEOF".format(st, future)}, "allow-note", cwd="/")
+    # The non-clock zone is the UTC subset of the stamp zone grammar: a zone opens the forms exactly when the
+    # stamp grammar matches it whole and _fsw_literal_us reads it as UTC (Z, UTC, GMT, an all-zero offset).
+    for zone in ("Z", " Z", "+00", "+0000", "+00:00", "-00", "-0000", "-00:00", " +00", " -00:00", " UTC", " GMT",
+                 "+01", "+0100", " +05:30", "+0030", "-00:30", " PST", " EST", " AM", " Zulu", "UTC", " UTCx"):
+        text = "2026-11-16T00:33" + zone
+        m = aiqt_hooks._FSW_STAMP_RE.fullmatch(text)
+        utc = m is not None and (m.group(8) is not None or m.group(10) in ("UTC", "GMT") or (
+            m.group(9) is not None and set(m.group(9)[1:].replace(":", "")) == {"0"}))
+        if utc and aiqt_hooks._fsw_literal_us(m) != aiqt_hooks._fsw_naive_us(2026, 11, 16, 0, 33, 0, 0):
+            failures.append("(fsw-nc-zone-utc-value) the stamp grammar read zone {!r} as UTC with another value"
+                            .format(zone))
+        for form in ("about " + text, "20x6" + text[4:]):  # an APPROX and a PLACEHOLDER token with this zone
+            tokens = [t for _p, t in aiqt_hooks._fsw_nonclock_tokens("hb " + form + " done")]
+            if bool(tokens) != utc or (utc and tokens != [form]):
+                failures.append("(fsw-nc-zone-derived) zone {!r} in {!r}: non-clock tokens {!r}, the stamp grammar "
+                                "reads it as UTC {}".format(zone, form, tokens, utc))
+        nc_zone = re.fullmatch(aiqt_hooks._FSW_NC_UTC_ZONE, zone) is not None
+        if nc_zone != utc:
+            failures.append("(fsw-nc-zone-pattern) zone {!r}: the non-clock zone accepts it {}, the stamp grammar "
+                            "reads it as UTC {}".format(zone, nc_zone, utc))
+    fsw("(fsw-no-store-root-inert) with AIQT_STORE_ROOT unset the handler is inert", "Write",
+        {"file_path": st + "/state.md", "content": "hb: " + future}, "allow", AIQT_STORE_ROOT=None)
+    fsw("(fsw-empty-store-root-inert) with AIQT_STORE_ROOT empty the handler is inert", "Write",
+        {"file_path": st + "/state.md", "content": "hb: " + future}, "allow", AIQT_STORE_ROOT="")
+    fsw("(fsw-relative-store-root-inert) a relative AIQT_STORE_ROOT entry names no store", "Write",
+        {"file_path": st + "/state.md", "content": "hb: " + future}, "allow", AIQT_STORE_ROOT="rel/store")
+    fsw("(fsw-orch-spelling-unread) ORCH_STORE_ROOT alone configures no store", "Write",
+        {"file_path": st + "/state.md", "content": "hb: " + future}, "allow", AIQT_STORE_ROOT=None,
+        ORCH_STORE_ROOT=st)
+    for marker, value in (("AIQT_HOOKS_WORKER", "1"), ("ORCH_WORKER", "1"), ("ORCH_VERIFY_OWNER", "x")):
+        fsw("(fsw-worker-marker-{}-checked) a worker marker skips nothing: the write still warns".format(
+            marker.lower()), "Write", {"file_path": st + "/state.md", "content": "hb: " + future}, "allow-note",
+            **{marker: value})
+    fsw("(fsw-subagent-checked) a subagent's store write is checked like the main session's", "Write",
+        {"file_path": st + "/state.md", "content": "hb: " + future}, "allow-note",
+        extra={"agent_id": "a1", "agent_type": "general-purpose"})
+    fsw("(fsw-tool-input-not-object-silent) a tool_input that is not an object passes silently (fail open)", "Write",
+        "not an object", "allow")
+    fsw("(fsw-missing-tool-name-silent) a payload with no tool_name passes silently (warn only, no deny)", None,
+        {"file_path": st + "/state.md", "content": "hb: " + future}, "allow")
+    fsw("(fsw-other-tool-silent) a NotebookEdit is out of scope and passes silently", "NotebookEdit",
+        {"notebook_path": st + "/n.ipynb", "new_source": "hb: " + future}, "allow")
+
+    # The handler's own internal error is a silent pass: _fsw_evaluate raising stands in for any fault.
+    saved_evaluate = aiqt_hooks._fsw_evaluate
+
+    def raising(payload, now):
+        raise RuntimeError("injected")
+    aiqt_hooks._fsw_evaluate = raising
+    try:
+        fsw("(fsw-internal-error-silent) an internal error passes silently (fail open)", "Write",
+            {"file_path": st + "/state.md", "content": "hb: " + future}, "allow")
+    finally:
+        aiqt_hooks._fsw_evaluate = saved_evaluate
+
+    # Dispatcher rows: main() for the mode, on the paths the former script handled itself.
+    with _env_values(**dict(unset, AIQT_STORE_ROOT=st)):
+        payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Write",
+                              "tool_input": {"file_path": st + "/state.md", "content": "hb: " + future}})
+        for label, mode, stdin, needle in (
+                ("(fsw-dispatch-warns-exit-0) main() writes the warning and exits 0", "future_stamp_write", payload,
+                 _FSW_WARN_PREFIX),
+                ("(fsw-dispatch-unreadable-exit-0) an unparseable payload is main()'s warning on exit 0, never 2",
+                 "future_stamp_write", "not json", "could not run (unreadable payload"),
+                ("(fsw-dispatch-non-object-exit-0) a payload that is not an object is a warning on exit 0",
+                 "future_stamp_write", "[1, 2]", "could not run (unreadable payload")):
+            code, out, _err = _clock_dispatch(mode, stdin)
+            if code != 0 or needle not in out or len(out.strip().splitlines()) != 1:
+                failures.append("{}: expected exit 0 with one stdout line holding {!r}, got exit {} and {!r}"
+                                .format(label, needle, code, out))
+        for mode in ("future_stamp_write",):
+            def crash(_data):
+                raise RuntimeError("injected crash")
+            with _stub_handler(mode, crash):
+                code, out, _err = _clock_dispatch(mode, payload)
+            if code != 0 or "handler crash" not in out:
+                failures.append("(clock-dispatch-crash-exit-0) a {} crash must be main()'s warning on exit 0, got "
+                                "exit {} and {!r}".format(mode, code, out))
+    for mode in ("future_stamp_write",):
+        if (mode not in aiqt_hooks.FLOOR_FAIL_OPEN_MODES
+                or aiqt_hooks.HANDLER_EVENT.get(mode) not in aiqt_hooks.FAIL_OPEN_EVENTS
+                or aiqt_hooks.HANDLERS.get(mode) is not getattr(aiqt_hooks, mode)):
+            failures.append("(clock-posture-fail-open) {} must be a HANDLERS entry whose HANDLER_EVENT class is in "
+                            "FAIL_OPEN_EVENTS and whose mode is in FLOOR_FAIL_OPEN_MODES".format(mode))
+    if (aiqt_hooks.HANDLER_EVENT.get("future_stamp_write") != aiqt_hooks.PRETOOL_WARN_ONLY
+            or [mode for mode, event in aiqt_hooks.HANDLER_EVENT.items()
+                if event == aiqt_hooks.PRETOOL_WARN_ONLY] != ["future_stamp_write"]):
+        failures.append("(clock-posture-classes) future_stamp_write must be the one PRETOOL_WARN_ONLY mode")
+    hooks = {hook["id"]: hook for hook in load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml")["hook"]}
+    for hook_id, want in (("future-stamp-write", {"event": "PreToolUse", "handler": "future_stamp_write",
+                                                  "default": "warn", "stage": "bake"}),):
+        row = hooks.get(hook_id, {})
+        if any(row.get(key) != value for key, value in want.items()):
+            failures.append("(clock-manifest-rows) the {} manifest row must carry {!r}, got {!r}".format(
+                hook_id, want, {key: row.get(key) for key in want}))
+
+    # (fsw-parity) the code shared with the preview Stop hook, and the mutants the comparison must catch:
+    # one edit of the hook text, then every mutant _clock_parity_mutants makes of each shared definition.
+    hook_text = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+    preview_text = (repo_root() / ".preview" / "stamp-truth-stop.py").read_text(encoding="utf-8")
+    for problem in _clock_parity_problems(hook_text, preview_text):
+        failures.append("(clock-parity) {}".format(problem))
+    mutant = hook_text.replace("_FSW_SCHED_GAP_TOKENS = 3\n", "_FSW_SCHED_GAP_TOKENS = 4\n", 1)
+    if mutant == hook_text or _clock_parity_problems(mutant, preview_text) != [
+            "fsw: SCHED_GAP_TOKENS differs from .preview/stamp-truth-stop.py"]:
+        failures.append("(clock-parity-mutant) a changed SCHED_GAP_TOKENS must be the one parity problem reported")
+    hook_definitions = _clock_definitions(ast.parse(hook_text))
+    preview_definitions = _clock_definitions(ast.parse(preview_text))
+    for label, mutated, want in _clock_parity_mutants(hook_definitions):
+        got = _clock_parity_definition_problems(mutated, preview_definitions)
+        if got != [want]:
+            failures.append("(clock-parity-definition-mutant) {}: must be the one parity problem {!r}, got {!r}".format(
+                label, want, got))
+
+    # (fsw-preview-dup) a plugin control whose preview copy stays published is documented as a pair to keep one of.
+    preview_ids = {entry["id"] for entry in load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "preview.toml")
+                   .get("preview", [])}
+    both = sorted(set(hooks) & preview_ids)
+    readme = (repo_root() / ".preview" / "README.md").read_text(encoding="utf-8")
+    section = readme.split("\n## Also in the pack's plugin\n", 1)[1].split("\n## ", 1)[0] if (
+        "\n## Also in the pack's plugin\n" in readme) else ""
+    if both != ["future-stamp-write"] or "Install one form of this hook, not both." \
+            not in section or any("`{}.py`".format(hook_id) not in section for hook_id in both):
+        failures.append("(fsw-preview-dup) the plugin controls whose preview copy stays published must be exactly "
+                        "future-stamp-write, named in the .preview README section Also in the pack's plugin with "
+                        "its keep-one instruction; got {!r}".format(both))
+
+    failures.extend(_clock_hook_unit_failures())
+
+
+def _clock_hook_unit_failures():
+    """(fsw-unit-*) Run the ported unit suite; one line per failing or erroring test, and one for a suite that ran
+    no test."""
+    import unittest
+    out = []
+    for prefix, suite in (("fsw-unit", _fsw_unit_suite),):
+        case, base = suite()
+        try:
+            stream = io.StringIO()
+            result = unittest.TextTestRunner(stream=stream, verbosity=0).run(
+                unittest.TestLoader().loadTestsFromTestCase(case))
+        finally:
+            if base is not None:
+                shutil.rmtree(base, ignore_errors=True)
+        if result.testsRun == 0:
+            out.append("({}-none) the suite ran no test".format(prefix))
+        for test, trace in result.failures + result.errors:
+            last = trace.strip().splitlines()[-1] if trace.strip() else ""
+            out.append("({}-{}) {}".format(prefix, test._testMethodName, last[:400]))
+    return out
 
 
 # THE BOUNDED HERE-DOCUMENT END (_heredoc_body_ends_early and the span comment in _lex_pass). Each row hides
@@ -25292,7 +30734,7 @@ def _main_isolated(monitor):
         cmexpect("(cm-residual-global-subst) pre-subcommand unquoted $( fragments the segment and allows",
                  'git -C $(x) commit -m "$(y)"', "allow")
 
-        # Payload postures: unreadable command ASKS; only the shared missing-tool contract DENIES.
+        # Payload postures: a missing command and a missing tool_name each DENY (fail closed).
         cmdataexpect("(cm-ae) missing command denies",
                      {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}, "deny")
         cmdataexpect("(cm-af) missing tool_name denies",
@@ -25706,9 +31148,10 @@ def _main_isolated(monitor):
                 ("(ci-idc-c18) git log with author.email and an AI path as pathspecs allows",
                  "git log -1 --format='%an' -- author.email claude.txt")):
             ciexpect(_ci_label, _ci_cmd, "allow")
-        # A command whose raw text names an identity in an assignment or default-value form and an AI anywhere
-        # denies (_cmtidn_identity_set_ai), so text that only quotes such an assignment beside an AI name, which
-        # the word reader leaves alone, is the disclosed over-deny of that fail-closed rule.
+        # A command whose raw text assigns an identity a value that names an AI, or a value the text does not
+        # spell in a command that names an AI anywhere, denies (_cmtidn_identity_set_ai), so text that only
+        # quotes such an assignment, which the word reader leaves alone, is the disclosed over-deny of that
+        # fail-closed rule.
         for _ci_label, _ci_cmd in (
                 ("(ci-idc-o1) a commit message that starts with an AI EMAIL assignment denies (over-deny)",
                  "git commit -m 'EMAIL=noreply@anthropic.com is the bot address'"),
@@ -25721,12 +31164,85 @@ def _main_isolated(monitor):
                  "git commit -m 'use -c author.name=Claude in an alias'"),
                 ("(ci-idc-o6) a git clone -o value that holds c and an AI author.name pair denies (over-deny)",
                  "git clone -q -ocauthor.name=Claude . c2"),
-                ("(ci-idc-o7) a commit message that names an AI beside a human EMAIL assignment denies (over-deny)",
-                 "EMAIL=alice@example.com git commit -m 'fix the claude adapter'")):
+                ("(ci-idc-o8) an EMAIL value the text does not spell beside an AI product name denies (over-deny)",
+                 "EMAIL=\"$ME\" git commit -m 'fix the claude adapter'")):
             ciexpect(_ci_label, _ci_cmd, "deny")
+        # The raw-text rule judges the VALUE assigned to an identity key, not an AI name anywhere in the command,
+        # so a commit that sets the maintainer's identity by a spelled value is allowed when its message or paths
+        # name .claude/ or CLAUDE.md. The first two rows are the review's examples verbatim; the next two are
+        # written to the same shape for author.* pairs and an exported EMAIL before git add of such paths. Each
+        # allowed row is checked to name an identity assignment form and an AI name (ci-idc-p-shape), so it pins
+        # the over-deny of the rule that denied both anywhere: that rule cannot return without turning it red.
+        # Each AI twin sets the same keys to an AI identity and denies.
+        _ci_maint_rows = (
+            ("(ci-idc-p1) the maintainer's -c user.name and user.email beside a .claude/ message allow",
+             "git -c user.name='Jeff Posluns' -c user.email=jeff@posluns.ca commit -m 'rules: regenerate "
+             ".claude/rules'",
+             "git -c user.name='Claude' -c user.email=noreply@anthropic.com commit -m 'rules: regenerate "
+             ".claude/rules'"),
+            ("(ci-idc-p2) the maintainer's EMAIL beside a CLAUDE.md message allows",
+             "EMAIL=jeff@posluns.ca git commit -m 'gen: refresh CLAUDE.md index'",
+             "EMAIL=noreply@anthropic.com git commit -m 'gen: refresh CLAUDE.md index'"),
+            ("(ci-idc-p3) the maintainer's -c author.name and author.email beside a .claude/ message allow",
+             "git -c author.name='Jeff Posluns' -c author.email=jeff@posluns.ca commit -m 'hooks: sync "
+             ".claude/settings.json'",
+             "git -c author.name='Claude' -c author.email=noreply@anthropic.com commit -m 'hooks: sync "
+             ".claude/settings.json'"),
+            ("(ci-idc-p4) the maintainer's exported EMAIL before git add of .claude/ and CLAUDE.md paths allows",
+             "export EMAIL=jeff@posluns.ca; git add .claude/rules CLAUDE.md; git commit -m 'rules: refresh'",
+             "export EMAIL=noreply@anthropic.com; git add .claude/rules CLAUDE.md; git commit -m 'rules: refresh'"),
+            ("(ci-idc-p5) a human EMAIL beside a commit message that names an AI product allows (the over-deny "
+             "this rule had, pinned so it cannot return)",
+             "EMAIL=alice@example.com git commit -m 'fix the claude adapter'",
+             "EMAIL=claude@anthropic.com git commit -m 'fix the claude adapter'"))
+        for _ci_label, _ci_allow, _ci_twin in _ci_maint_rows:
+            if not (aiqt_hooks._CMTIDN_IDENTITY_SET_RE.search(_ci_allow)
+                    and aiqt_hooks.AI_IDENTITY_RE.search(_ci_allow)):
+                failures.append("(ci-idc-p-shape) {}: the row no longer names an identity assignment form and an AI "
+                                "name, so it does not pin the over-deny".format(_ci_label))
+            ciexpect(_ci_label, _ci_allow, "allow")
+            ciexpect(_ci_label + " [AI twin denies]", _ci_twin, "deny")
+        # author.* and committer.* writes behind find -exec, flock, ionice and xargs are judged as user.* ones
+        # are, xargs reading the value from its input included; a GIT_CONFIG_VALUE_<n> is judged when a
+        # GIT_CONFIG_KEY_<n> names an identity key. Each deny vector allowed before this change; the controls set
+        # a value that names no AI or a key that is not an identity key.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-w1) find -exec git config author.name naming an AI denies",
+                 "find . -exec git config author.name Claude ';'"),
+                ("(ci-idc-w2) find -execdir git config committer.email naming an AI denies",
+                 "find . -execdir git config committer.email noreply@anthropic.com ';'"),
+                ("(ci-idc-w3) flock git config author.name naming an AI denies", "flock L git config author.name Claude"),
+                ("(ci-idc-w4) ionice git config committer.name naming an AI denies",
+                 "ionice -c3 git config committer.name Claude"),
+                ("(ci-idc-w5) xargs git config author.name with an AI value on its input denies",
+                 "echo Claude | xargs git config author.name"),
+                ("(ci-idc-w6) xargs git config committer.email with an AI value on its input denies",
+                 "echo noreply@anthropic.com | xargs git config committer.email"),
+                ("(ci-idc-g1) a GIT_CONFIG_VALUE_0 naming an AI for GIT_CONFIG_KEY_0=author.name denies",
+                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0=Claude git commit -m x"),
+                ("(ci-idc-g2) an exported GIT_CONFIG_VALUE_0 naming an AI for a quoted Committer.Email key denies",
+                 "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0='Committer.Email' "
+                 "GIT_CONFIG_VALUE_0=\"noreply@anthropic.com\"; git commit -m x"),
+                ("(ci-idc-g3) a --config-env identity pair beside an AI value denies",
+                 "V=Claude git --config-env=author.name=V commit -m x")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-w-c1) xargs git config author.name with a human value on its input allows",
+                 "echo Alice | xargs git config author.name"),
+                ("(ci-idc-w-c2) find -exec git config author.name with a human value allows",
+                 "find . -exec git config author.name Alice ';'"),
+                ("(ci-idc-w-c3) find -exec git add of .claude/ files allows",
+                 "find .claude -name '*.md' -exec git add {} ';'"),
+                ("(ci-idc-g-c1) a GIT_CONFIG_VALUE_0 for a key that is not an identity key allows",
+                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=claude-pager git log"),
+                ("(ci-idc-g-c2) a human GIT_CONFIG_VALUE_0 for author.name beside a CLAUDE.md message allows",
+                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0=Alice git commit -m 'docs: "
+                 "CLAUDE.md'")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
         # The raw-text rule finds only that the text names an identity assignment form and an AI identity, so its
         # deny says that and that it fails closed, never that a git command sets an AI identity: on a command
-        # that runs no git (ci-idc-m1), one that sets a human identity (ci-idc-m2) and one the reader cannot
+        # that runs no git (ci-idc-m1), one that may set a human identity by a value its text does not spell
+        # (ci-idc-m2) and one the reader cannot
         # parse (ci-idc-m3). A hit of the word reader keeps the message that a git command sets one (ci-idc-m4).
         _ci_raw_wants = ("names an identity assignment form and an AI identity", "fails closed",
                          "identity assignment 'EMAIL=")
@@ -25734,8 +31250,8 @@ def _main_isolated(monitor):
         for _ci_label, _ci_cmd, _ci_wants, _ci_banner, _ci_unwanted in (
                 ("(ci-idc-m1) an AI EMAIL that echo only prints denies with the fail-closed raw-text message",
                  "echo EMAIL=noreply@anthropic.com", _ci_raw_wants, _ci_raw_banner, "this git command sets"),
-                ("(ci-idc-m2) a human EMAIL assignment beside an AI product name denies with the fail-closed "
-                 "raw-text message", "EMAIL=alice@example.com git commit -m 'fix the claude adapter'",
+                ("(ci-idc-m2) an EMAIL assignment of an unspelled value beside an AI product name denies with the "
+                 "fail-closed raw-text message", "EMAIL=\"$ME\" git commit -m 'fix the claude adapter'",
                  _ci_raw_wants, _ci_raw_banner, "this git command sets"),
                 ("(ci-idc-m3) an AI EMAIL assignment in a command the reader cannot parse denies with the "
                  "fail-closed raw-text message", "EMAIL=noreply@anthropic.com git commit -m 'x",
@@ -30072,15 +35588,18 @@ def _main_isolated(monitor):
         # malformed / out-of-scope payloads for the Bash floor
         _bap = aiqt_hooks.bash_absolute_paths
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                          "tool_input": {"command": 5}}) != "allow-note":
-            failures.append("(ap-c29) non-string command allows with a note (abspth is a convention, not a "
-                            "hazard; cannot read)")
+                          "tool_input": {"command": 5}}) != "deny":
+            failures.append("(ap-c29) non-string command denies (a truncating redirect, the deny tier, may sit "
+                            "in what was not read)")
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                          "tool_input": None}) != "allow-note":
-            failures.append("(ap-c30) non-mapping tool_input allows with a note (cannot read command)")
+                          "tool_input": None}) != "deny":
+            failures.append("(ap-c30) non-mapping tool_input denies (cannot read command)")
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                          "tool_input": {}}) != "allow-note":
-            failures.append("(ap-c31) missing command allows with a note (cannot read)")
+                          "tool_input": {}}) != "deny":
+            failures.append("(ap-c31) missing command denies (cannot read)")
+        if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                          "tool_input": {"command": ""}}) != "allow-note":
+            failures.append("(ap-c31b) an empty command is readable and still allows with a note")
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Read",
                           "tool_input": {"command": "cd rel"}}) != "allow":
             failures.append("(ap-c32) out-of-scope tool must allow (matcher governs)")
@@ -30167,9 +35686,13 @@ def _main_isolated(monitor):
         ebexpect("(eb-e16) unparseable command outside the visible patterns allows",
                  'ls -la "unbalanced', "allow")
         if _reduce(aiqt_hooks.git_explicit_binding,
-                   {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}) != "allow-note":
-            failures.append("(eb-e17) absent command allows with a note (expbnd is a binding convention, not a "
-                            "hazard; cannot evaluate target or scope)")
+                   {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}) != "deny":
+            failures.append("(eb-e17) absent command denies (the breadth-then-publish pair, the deny tier, may "
+                            "sit in what was not read)")
+        if _reduce(aiqt_hooks.git_explicit_binding,
+                   {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": {"command": ""}}) != "allow-note":
+            failures.append("(eb-e17b) an empty command is readable and still allows with a note")
         if _reduce(aiqt_hooks.git_explicit_binding,
                    {"hook_event_name": "PreToolUse", "tool_input": {"command": "git commit -m x"}}) != "deny":
             failures.append("(eb-e18) missing tool_name must DENY (shared fail-closed contract)")
@@ -30628,9 +36151,14 @@ def _main_isolated(monitor):
                             "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
 
         _test_git_stash_ref(failures)
+        _test_malformed_bash_payload(failures)
+        _test_nul_bash_command(failures)
         _test_inline_errexit(failures, tmp)
         _test_pgrep_self_match(failures)
         _test_trkasy_no_amp(failures, tmp)
+        _test_trkasy_heredoc_body_data(failures, tmp)
+        _test_trkasy_heredoc_consumer(failures, tmp)
+        _test_trkasy_data_shape_rules(failures, tmp)
         _test_wait_loop_deny_text(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
@@ -30641,6 +36169,8 @@ def _main_isolated(monitor):
         _test_cannot_evaluate_paths(failures, tmp)
         _test_reset_ancestry(failures, tmp)
         _test_cmtidn_oracle(failures, tmp)
+        _test_clock_inject(failures, tmp)
+        _test_clock_hooks(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
@@ -31605,10 +37135,12 @@ def _main_isolated(monitor):
           "returns permissionDecision 'ask' over the exercised vectors, and the _ask constructor is "
           "removed; every decision is allow / allow-with-note / snapshot-then-allow / deny-and-educate. "
           "Current outcomes, by guard: "
+          "tstamp (future_stamp_write) WARNS, and never denies, on a future-dated literal written into a "
+          "declared store, as a fail-open, warn-only PreToolUse mode. "
           "cnsdif (diff_source_pretool) DENIES-and-educates a confirmed console diff dump and ALLOWS "
           "with a note any producer-capable-but-unproven or unparseable form (a convention, not a "
           "hazard). abspth (bash_absolute_paths) ALLOWS with a note a relative or opaque cd/redirect and "
-          "an unreadable command (a convention nudge), and DENIES-and-educates a TRUNCATING redirect "
+          "an empty command (a convention nudge), and DENIES-and-educates a TRUNCATING redirect "
           "('>'/'>|'/'&>'/'>&') to a relative or opaque target (it could zero the wrong file). "
           "expbnd (git_explicit_binding) ALLOWS with a note an ambient git target or a relocated whole-tree "
           "breadth op, and DENIES-and-educates a whole-tree breadth stage paired with a publish in one "

@@ -7,6 +7,9 @@ This tool renders them into the shipped, NESTED plugin surface under plugin/aiqt
   plugin/aiqt-guardrails-hooks/hooks/hooks.json             the plugin hook config
   plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py  the dispatcher, copied byte-identical
   plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json   the plugin manifest
+  plugin/aiqt-guardrails-hooks/LICENSE, .../NOTICE          the root LICENSE and NOTICE, copied byte for byte
+  .aiqt/LICENSE, .aiqt/NOTICE                               the same two copies for the .aiqt/ set
+                                                            (both pairs in the authoring tree only)
   .claude/settings.json                                     this repository's own project hook registration
                                                             (the authoring tree only, never an adopter tree)
 The plugin is nested (not the whole repo) so an adopter installs only the plugin, never the authoring
@@ -23,11 +26,11 @@ repository's project settings must not oblige. Validation is
 fail-closed: every manifest `rules` entry must name a real corpus-id in .aiqt/core/rules/ (via
 gen_rules.load_corpus), the event must be on the known-event whitelist, a tool event must carry a
 compilable matcher and a non-tool event must not, `default` must be an allowed keyword with the
-non-blocking `warn` legal only on a WARN_EVENTS event (PostToolUse, UserPromptSubmit, Stop,
-SubagentStop, SessionStart), under an explicit bake stage, or for a PreToolUse handler the dispatcher
-lists in NOTE_ONLY_PRETOOL_MODES (whose control must declare it), the named handler must exist in the
-source script, and `residue` must be non-empty, so a typo can never silently no-op an enforcement
-control.
+non-blocking `warn` legal only on a WARN_EVENTS event (PostToolUse, PostToolUseFailure,
+UserPromptSubmit, Stop, SubagentStop, SessionStart, TeammateIdle), under an explicit bake stage, or for
+a PreToolUse handler the dispatcher lists in NOTE_ONLY_PRETOOL_MODES (whose control must declare it),
+the named handler must exist in the source script, and `residue` must be non-empty, so a typo can never
+silently no-op an enforcement control.
 
 Per-hook timeout and derived onFailure, OFF by default. A [[hook]] may author an optional integer
 `timeout` (TIMEOUT_MIN to TIMEOUT_MAX seconds), and the [plugin] table may author
@@ -75,7 +78,9 @@ import json
 import math
 import os
 import re
+import shutil
 import stat
+import subprocess
 import tomllib
 from fractions import Fraction
 from pathlib import Path
@@ -84,6 +89,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
 from _standards import dir_chain_or_absent, dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
+# The pack-version alignment rule shared with the chat skill: one first-version constant for both components.
+from gen_skill import PACK_ALIGN_FIRST_VERSION, pack_alignment_problem, resolve_pack_version  # noqa: E402
 
 # The nested plugin surface, as repo-root-relative forward-slash paths. hooks/ under the plugin root is
 # the reserved subtree (fully generated, orphan-scanned); .claude-plugin/ is NOT walked, only its
@@ -125,13 +132,44 @@ AUTHORING_MARKER_REL = ".aiqt/authoring.toml"
 AUTHORING_MARKER = {"format-version": 1, "role": "pack-authoring-repository"}
 AUTHORING_MARKER_MAX_BYTES = 1_000_000
 AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)
+# The pack version file (generated from changelog.toml by tools/gen_changelog.py). From pack
+# PACK_ALIGN_FIRST_VERSION (gen_skill) on, the [plugin] version must equal the pack version
+# (check_plugin_version), in the authoring tree only, where this file is the pack version
+# (gen_skill.resolve_pack_version, which reads and bounds it); an adopter tree is not re-checked.
+PACK_VERSION_REL = "VERSION"
+# The licence copies (Apache License 2.0 section 4(a) and 4(d)): a recipient of either vendored set, the nested
+# plugin an adopter installs alone or the .aiqt/ set an adopter install creates, must receive a copy of the
+# licence and of the NOTICE. Each LICENCE_FILES member at the repository root is copied BYTE FOR BYTE (read and
+# compared as bytes, never decoded, so a line-ending or encoding change is drift) into each LICENCE_HOMES
+# directory. run() renders them ONLY in the authoring tree (authoring_tree), because in an adopter tree the root
+# LICENSE and NOTICE are the adopter's own: there the shipped copies are never written, compared or deleted.
+# build_desired() never carries them, so conformance.py C5 does not oblige an adopter install to hold them. They
+# sit outside the reserved hooks/ subtree and are never orphan-pruned. A root source that is absent or is not a
+# regular file (a symlink is not followed) fails closed (exit 2).
+LICENCE_FILES = ("LICENSE", "NOTICE")
+LICENCE_HOMES = (PLUGIN_ROOT_REL, ".aiqt")
+# The authoring-SCOPED roster: SHIPPED paths this tool generates and drift-checks ONLY in the authoring tree, the
+# licence copies above (every LICENCE_HOMES x LICENCE_FILES path; self-test case 36 pins the equality). Unlike
+# AUTHORING_ONLY_REL these ship: they keep their release class, because gen_manifest.check_authoring_only (the
+# never-ship check) reads AUTHORING_ONLY_REL alone, so they are never on that roster. gen_gensrc reads this
+# roster statically (read_authoring_roster with SCOPED_ROSTER_NAME) and scopes their registry entries
+# "authoring", so gensrc_guard honours them only where the authoring marker is exact, matching run(), which
+# never touches them in an adopter tree. gen_manifest.cross_check_exclusions exempts only scoped entries that are
+# also on AUTHORING_ONLY_REL, so an EXACT [[exclusion]] literal for one of these copies is refused as
+# swallowing a gensrc target. The same binding rules as AUTHORING_ONLY_REL apply: a tuple of str literals bound
+# once by one plain top-level assignment.
+AUTHORING_SCOPED_REL = (".aiqt/LICENSE", ".aiqt/NOTICE", "plugin/aiqt-guardrails-hooks/LICENSE",
+                        "plugin/aiqt-guardrails-hooks/NOTICE")
 
 # The event whitelist, in the fixed render order (doc-confirmed event names, 2026-08-17; SessionStart
-# and TeammateIdle re-confirmed against the hooks reference 2026-08-29). A typo'd event must fail
-# closed here, never silently produce a hook no platform will fire.
-KNOWN_EVENTS = ("PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "SubagentStop",
-                "SessionStart", "TeammateIdle")
-TOOL_EVENTS = {"PreToolUse", "PostToolUse"}  # these require a matcher; the others must omit it
+# and TeammateIdle re-confirmed against the hooks reference 2026-08-29). PostToolUseFailure, the tool
+# event fired after a tool call that started and failed, is the name the preview .preview/clock-inject.py
+# documents and registers; it was not re-confirmed against the hooks reference for this list. A typo'd
+# event must fail closed here, never silently produce a hook no platform will fire.
+KNOWN_EVENTS = ("PreToolUse", "PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "Stop",
+                "SubagentStop", "SessionStart", "TeammateIdle")
+# these require a matcher; the others must omit it
+TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
 # A non-blocking "warn" default is legal on every event EXCEPT PreToolUse: on a PreToolUse control a
 # silent non-decision would weaken an enforcement point, so warn there requires the explicit,
 # recorded stage = "bake" posture below, or a handler the dispatcher names in NOTE_ONLY_PRETOOL_MODES: such
@@ -140,8 +178,8 @@ TOOL_EVENTS = {"PreToolUse", "PostToolUse"}  # these require a matcher; the othe
 # SessionStart cannot block at the platform (exit 2 only shows
 # stderr, doc-confirmed 2026-08-29), so a SessionStart control MUST declare warn: a block/ask claim
 # there would be an overclaim the platform cannot honour.
-WARN_EVENTS = {"PostToolUse", "UserPromptSubmit", "Stop", "SubagentStop", "SessionStart",
-               "TeammateIdle"}
+WARN_EVENTS = {"PostToolUse", "PostToolUseFailure", "UserPromptSubmit", "Stop", "SubagentStop",
+               "SessionStart", "TeammateIdle"}
 NONBLOCK_EVENTS = {"SessionStart"}  # the platform cannot block these: default must be "warn"
 STAGES = {"bake", "enforce"}  # stage is optional authoring metadata; absent means "enforce"
 NOTE_ONLY_NAME = "NOTE_ONLY_PRETOOL_MODES"  # the dispatcher's tuple of note-only PreToolUse handlers
@@ -189,7 +227,10 @@ _PRETOOL_BUDGET_LINE_RE = re.compile(
     r"^PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - (\d+(?:\.\d+)?)$", re.M | re.ASCII)
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
-# only, it does not affect what this generator produces.
+# only, it does not affect what this generator produces. The sources are the content-bearing inputs only:
+# the pack version source (VERSION in the authoring tree, gen_skill.resolve_pack_version)
+# is read by the alignment check and changes no output byte, so neither generator declares it (gen_skill's
+# GENSRC_OUTPUTS does not either).
 GENSRC_OUTPUTS = (
     {"target": "plugin/aiqt-guardrails-hooks/hooks/", "kind": "tree",
      "sources": (".aiqt/core/hooks/manifest.toml", ".aiqt/core/hooks/scripts/aiqt_hooks.py"),
@@ -199,6 +240,18 @@ GENSRC_OUTPUTS = (
      "regenerate": "python3 tools/gen_hooks.py"},
     {"target": ".claude/settings.json", "kind": "file",
      "sources": (".aiqt/core/hooks/manifest.toml",),
+     "regenerate": "python3 tools/gen_hooks.py"},
+    {"target": "plugin/aiqt-guardrails-hooks/LICENSE", "kind": "file",
+     "sources": ("LICENSE",),
+     "regenerate": "python3 tools/gen_hooks.py"},
+    {"target": "plugin/aiqt-guardrails-hooks/NOTICE", "kind": "file",
+     "sources": ("NOTICE",),
+     "regenerate": "python3 tools/gen_hooks.py"},
+    {"target": ".aiqt/LICENSE", "kind": "file",
+     "sources": ("LICENSE",),
+     "regenerate": "python3 tools/gen_hooks.py"},
+    {"target": ".aiqt/NOTICE", "kind": "file",
+     "sources": ("NOTICE",),
      "regenerate": "python3 tools/gen_hooks.py"},
 )
 
@@ -586,15 +639,68 @@ def authoring_tree(root):
     return True
 
 
+def check_plugin_version(root, plugin, name):
+    """Fail closed (ValueError) when the [plugin] version differs from the pack version from
+    PACK_ALIGN_FIRST_VERSION on (gen_skill.pack_alignment_problem, the same rule and first version as the chat
+    skill). The rule is a release-time rule of the authoring repository: gen_skill.resolve_pack_version, the one
+    reader both generators share, applies it only in the authoring tree (authoring_tree), where the root VERSION
+    is the pack version; an adopter tree is not re-checked (None: its own root VERSION and its installed
+    .aiqt/manifest.toml are never read for the rule). In the authoring tree an absent VERSION cannot be evaluated
+    (exit 2), so deleting VERSION never turns the rule off, and a symlinked, hard-linked, non-regular, oversized
+    or malformed VERSION is exit 2 too. Deleting the marker does not turn it off where the git index tracks the
+    marker (exit 2, gen_skill.authoring_marker_tracked); outside a git work tree, or with the marker also
+    untracked, a deleted marker reads as an adopter tree (the residual resolve_pack_version discloses). The
+    comparison is against the SOURCE value, before render_plugin_json, so a plugin.json that faithfully mirrors
+    a wrong manifest version still fails --check. Below the first version the plugin stays independently
+    versioned (0.5.0 under pack 1.0.5 builds)."""
+    resolved = resolve_pack_version(root)
+    if resolved is None:
+        return
+    problem = pack_alignment_problem("hooks plugin", plugin["version"], resolved[0], source=resolved[1])
+    if problem is not None:
+        raise ValueError("{}: [plugin] {}; set [plugin] version in .aiqt/core/hooks/manifest.toml and "
+                         "regenerate".format(name, problem))
+
+
+def licence_copies(root):
+    """The licence copies for the authoring tree at root: {rel: bytes}, each LICENCE_FILES member read as
+    bytes from the repository root and keyed under every LICENCE_HOMES directory. Raises ValueError on a
+    source that is absent or is not a regular file (lstat first, so a symlink is never followed and a FIFO
+    never blocks; the open is O_NOFOLLOW and re-checked with fstat), and OSError on an unreadable one; the
+    caller maps both to exit 2."""
+    out = {}
+    for name in LICENCE_FILES:
+        path = root / name
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            raise ValueError("{}: the licence source is absent; the vendored copies cannot be "
+                             "generated (cannot evaluate)".format(name)) from None
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("{}: the licence source must be a regular file (a symlink is not "
+                             "followed)".format(name))
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with open(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise ValueError("{}: the licence source must be a regular file".format(name))
+            data = handle.read()
+        for home in LICENCE_HOMES:
+            out[home + "/" + name] = data
+    return out
+
+
 def build_desired(root, src_dir):
     """The desired generated surface for an install rooted at root: {rel: content}. Raises ValueError
     or OSError on any malformed or unreadable input (the caller maps both to exit 2). Parameterized
-    on root so conformance.py can reuse it under --root (the C5 check) without calling main()."""
+    on root so conformance.py can reuse it under --root (the C5 check) without calling main(). From pack
+    PACK_ALIGN_FIRST_VERSION on, the [plugin] version must equal the pack version (check_plugin_version): the
+    root VERSION, in the authoring tree only; an adopter's install is not re-checked."""
     manifest_path = src_dir / "manifest.toml"
     script_src = src_dir / "scripts" / SCRIPT_NAME
     if not _exists(manifest_path):
         raise ValueError("{} exists but holds no manifest.toml".format(src_dir))
     plugin, hooks = load_manifest(manifest_path)
+    check_plugin_version(root, plugin, manifest_path.name)
     rules_dir = root / ".aiqt" / "core" / "rules"
     # dir_or_absent (not is_dir): a corpus that is there but cannot be read as a directory (a
     # regular file, or a symlink that is dangling, whose target is not a directory or resolves outside the
@@ -624,7 +730,9 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
     registering project_ids is reconciled too, outside build_desired() so conformance.py C5 never requires
     it of an adopter. In any other tree it is not in the desired set, so it is never written or compared,
     and it is never pruned: .claude/ is not a reserved subtree. The self-test's synthetic manifests carry
-    no project control, so its plugin-surface cases pass project_ids=()."""
+    no project control, so its plugin-surface cases pass project_ids=(). In the authoring tree the licence
+    copies (licence_copies) are reconciled too, whatever project_ids holds, compared and written as bytes; in
+    any other tree they are never written, compared or deleted."""
     src_dir = root / ".aiqt" / "core" / "hooks"
     desired = {}
     try:
@@ -641,9 +749,11 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
             return 2
         if dir_present(src_dir, root=root):
             desired = build_desired(root, src_dir)
-            if project_ids and authoring_tree(root):
-                _plugin, hooks = load_manifest(src_dir / "manifest.toml")
-                desired[PROJECT_SETTINGS_REL] = render_project_settings(hooks, project_ids)
+            if authoring_tree(root):
+                if project_ids:
+                    _plugin, hooks = load_manifest(src_dir / "manifest.toml")
+                    desired[PROJECT_SETTINGS_REL] = render_project_settings(hooks, project_ids)
+                desired.update(licence_copies(root))
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))
         return 2
@@ -677,12 +787,22 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
                 return 2
         for rel, content in sorted(desired.items()):
             target = root / rel
-            current = target.read_text(encoding="utf-8") if _exists(target) else None
+            # A bytes value (a licence copy) is compared and written as bytes, so the copy is byte for byte.
+            raw = isinstance(content, bytes)
+            if not _exists(target):
+                current = None
+            elif raw:
+                current = target.read_bytes()
+            else:
+                current = target.read_text(encoding="utf-8")
             if current != content:
                 drift.append(rel)
                 if not check:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(content, encoding="utf-8")
+                    if raw:
+                        target.write_bytes(content)
+                    else:
+                        target.write_text(content, encoding="utf-8")
         # Orphan scan, scoped to the RESERVED plugin hooks/ subtree (100% generated) plus the one
         # managed .claude-plugin/plugin.json; nothing else is ever walked, written, or deleted.
         if probed[hooks_dir]:
@@ -715,7 +835,12 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
 def main():
     args = sys.argv[1:]
     if "--self-test" in args:
-        return self_test_main()
+        # The whole self-test runs inside the fixture git lifecycle, so the code under test
+        # (gen_skill.authoring_marker_tracked's git ls-files, which strips GIT_* and so drops the scrub's config
+        # pins) reads no caller HOME, XDG or system git configuration either.
+        from _git_fixture_env import fixture_git_lifecycle
+        with fixture_git_lifecycle():
+            return self_test_main()
     return run(repo_root(), "--check" in args)
 
 
@@ -745,12 +870,16 @@ def main():
 #  11. the FULL "warn" default policy, table-driven across every KNOWN_EVENTS event: warn is REJECTED
 #      (exit 2) on every non-warn event and ACCEPTED (clean generate + drift-clean) on Stop and
 #      SubagentStop, the only WARN_EVENTS,
+# 11b. PostToolUseFailure, spelled literally rather than read from the event sets: a warn hook on it with an
+#      all-tools matcher generates drift-clean and renders between PostToolUse and UserPromptSubmit, and the
+#      same hook with no matcher fails closed (exit 2), as on any tool event,
 #  12. render byte-identity: an otherwise-identical Stop hook renders the SAME hooks.json bytes whether
 #      its default is "block" or "warn" (default is authoring metadata, never rendered into output),
 #  13. a malformed/unknown default keyword fails closed (exit 2): the default whitelist.
-#  14. 'warn' on PreToolUse is legal under stage = "bake", or for a handler the dispatcher lists in
-#      NOTE_ONLY_PRETOOL_MODES, and fails closed (exit 2) otherwise; a listed handler that declares "block",
-#      and a list that is not one module-level tuple of string literals, fail closed too.
+#  14. 'warn' on PreToolUse is legal under stage = "bake" and fails closed (exit 2) without it,
+# 14b. 'warn' on PreToolUse is also legal for a handler the dispatcher lists in NOTE_ONLY_PRETOOL_MODES, and
+#      fails closed (exit 2) for any other handler; a listed handler that declares "block", and a list that
+#      is not one module-level tuple of string literals, fail closed too.
 #  15. a SessionStart control declaring 'block' fails closed (exit 2): the platform cannot block there.
 #  16. the repository-local .claude/settings.json renders exactly one PreToolUse group for the project
 #      control, its matcher copied from the manifest and its launcher the exact isolated shell string,
@@ -812,6 +941,9 @@ def main():
 #      unremovable root link is a named failure with the outside tree untouched.
 #      Confinement holds up to the disclosed replacement race between an entry's lstat
 #      classification and the chmod or walk that follows (stated at the helper).
+#  29. the suite's OWN final cleanup: a fault in the final removal of the suite temporary tree never replaces
+#      an escaping ORIGINAL exception and never skips printing the named failures (the removal fault is named
+#      in the escaping-failure block, and the ORIGINAL stays the last traceback line),
 #  30. the PreToolUse deadline derives from TIMEOUT: a script whose HOOK_TIMEOUT_SECONDS differs from
 #      TIMEOUT, that lacks either deadline line, or that binds either name a second time (in any form, or
 #      with the budget line only inside a string) fails closed (exit 2), while reading the budget is
@@ -853,6 +985,23 @@ def main():
 #      refused just below it and generate just above it, so the rule cannot narrow to the onFailure
 #      predicate or to the first hook; with the switch false or absent the below, at and above values
 #      still generate and render the default timeout.
+#  36. the licence copies: an authoring tree generates LICENSE and NOTICE under the plugin root and under .aiqt/
+#      byte-identical to the root sources (a CRLF, non-ASCII NOTICE fixture included) and --check is clean; each
+#      copy missing, differing by one byte, or with its line ends flipped fails --check (exit 1) and a write
+#      run restores it; a root source that is absent or a symlink fails closed (exit 2); build_desired() never
+#      carries them; and an adopter-shaped tree (no marker) never creates, overwrites or deletes them.
+#  37. the plugin version follows the pack version from PACK_ALIGN_FIRST_VERSION (pinned literally as 1.1.1)
+#      on: a tree generated clean at VERSION 1.0.5, whose plugin.json therefore mirrors its manifest version,
+#      fails closed (exit 2, in --check and a normal run, nothing written) once VERSION reads 1.1.1 or 1.2.0;
+#      the equal twins generate and check clean with that version in plugin.json; VERSION 1.0.5 leaves the
+#      plugin independent (main before the 1.1.1 cut); an absent VERSION cannot be evaluated (exit 2 in both
+#      modes, nothing written, build_desired refuses it); a malformed, oversized, symlinked, hard-linked,
+#      directory or FIFO VERSION fails closed (exit 2; a non-regular one is refused as an input, never git
+#      rm); and build_desired itself refuses the differing tree (conformance.py C5 reuses it). Those legs run
+#      in authoring trees. 37b: an adopter tree (no marker) is not re-checked: with or without an installed
+#      .aiqt/manifest.toml (at 1.0.5, 1.1.1 or unparseable) and whatever its own VERSION, it generates and checks
+#      clean; an authoring repository whose git-tracked marker was deleted is exit 2, its never-tracked twin
+#      passes. 37c: no GENSRC_OUTPUTS entry declares the pack version source.
 # Every vector that removes the entries its own faults caused (cases 20b, 21b, 27 and 28)
 # does so by PROVENANCE, never by message text: each named entry from the staged cleanup,
 # the removal and absence helpers and the launch diagnostic carries its stage and the
@@ -923,6 +1072,20 @@ def _build_tree(base, cid="tsthk1", residue="A self-test control catches nothing
     (src / "hooks" / "scripts" / SCRIPT_NAME).write_text(_SCRIPT, encoding="utf-8")
     (src / "hooks" / "manifest.toml").write_text(
         _MANIFEST.format(cid=cid, residue=residue), encoding="utf-8")
+    # The root VERSION is a declared input of the plugin/pack alignment rule in a tree given the authoring marker
+    # (an absent one is exit 2 there), so every synthetic tree carries one below PACK_ALIGN_FIRST_VERSION, where
+    # the plugin stays independent (the state of main before the 1.1.1 cut). A tree without the marker (an
+    # adopter's) is not re-checked and never reads it. No installed .aiqt/manifest.toml is written: the rule never
+    # reads one. Case 37 overwrites or removes VERSION and plants a manifest where a leg needs one.
+    (base / PACK_VERSION_REL).write_bytes(b"1.0.5\n")
+
+
+def _write_installed_manifest(base, release_version):
+    """The header of the installed pack manifest tools/gen_manifest.py writes, recording release_version (case
+    37b plants one in adopter trees to show the alignment rule never reads it)."""
+    (base / ".aiqt" / "manifest.toml").write_text(
+        "# generated by tools/gen_manifest.py; do not hand-edit (VER-CORE 4.1)\nformat-version = 1\n"
+        "release-version = \"{}\"\ngenesis = false\n".format(release_version), encoding="utf-8")
 
 
 # A second control appended to the synthetic manifest for the project-settings cases. Its matcher differs
@@ -958,8 +1121,17 @@ def _padded_marker(size):
     return _MARKER_TEXT + "#" + "x" * (size - len(_MARKER_TEXT) - 2) + "\n"
 
 
+#   The root licence sources an authoring tree copies (case 36). The NOTICE fixture carries CRLF line ends and a
+# non-ASCII character, so a copy that decoded, normalized or re-encoded the bytes would differ.
+_LICENCE_FIXTURES = {"LICENSE": b"Self-test licence text\nsecond line\n",
+                     "NOTICE": b"Self-test NOTICE\r\nTrademark\xe2\x84\xa2 line\r\n"}
+
+
 def _write_marker(base, text=_MARKER_TEXT):
     (base / ".aiqt" / "authoring.toml").write_text(text, encoding="utf-8")
+    # An authoring tree renders the licence copies from the root sources, so every marker fixture carries them.
+    for name, data in _LICENCE_FIXTURES.items():
+        (base / name).write_bytes(data)
 
 
 def _build_project_tree(base, authoring=True):
@@ -1768,9 +1940,10 @@ def self_test_main(_nested=False):
         os.chmod(manifest, 0o644)  # restore so cleanup can remove it
 
         # 11. The FULL "warn" default policy, table-driven across every known event. warn is a
-        #     non-blocking default legal on the WARN_EVENTS (PostToolUse, UserPromptSubmit, Stop,
-        #     SubagentStop, SessionStart), so the generator must REJECT it (exit 2) on every other event
-        #     outside a bake stage and ACCEPT it on each WARN_EVENTS event, regenerating drift-clean.
+        #     non-blocking default legal on the WARN_EVENTS (PostToolUse, PostToolUseFailure,
+        #     UserPromptSubmit, Stop, SubagentStop, SessionStart, TeammateIdle), so the generator must
+        #     REJECT it (exit 2) on every other event outside a bake stage and ACCEPT it on each
+        #     WARN_EVENTS event, regenerating drift-clean.
         #     Converting the base tool hook to a non-tool event also drops the now-forbidden matcher,
         #     matching a real Stop/UserPromptSubmit control.
         tool_block = 'event = "PreToolUse"\nmatcher = "Bash"\nhandler = "test_handler"\ndefault = "block"'
@@ -1793,6 +1966,48 @@ def self_test_main(_nested=False):
             elif run_quiet(warntree, check=True) != 2:
                 failures.append("'warn' default on non-warn event {} expected exit 2 (fail-closed)"
                                 .format(event))
+
+        # 11b. PostToolUseFailure, spelled literally here rather than read from the event sets, so a
+        #      revert of any one of its set entries fails: a warn hook on it with an all-tools matcher,
+        #      beside a PostToolUse and a UserPromptSubmit hook, generates and checks drift-clean, and
+        #      hooks.json renders it, with that matcher, between those two events; the same hook with
+        #      no matcher fails closed (exit 2), as on any tool event.
+        if not ("PostToolUseFailure" in KNOWN_EVENTS and "PostToolUseFailure" in TOOL_EVENTS
+                and "PostToolUseFailure" in WARN_EVENTS):
+            failures.append("PostToolUseFailure must be in KNOWN_EVENTS, TOOL_EVENTS and WARN_EVENTS")
+        ptuf_hooks = (
+            '\n[[hook]]\nid = "selftest-post"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
+            'event = "PostToolUse"\nmatcher = "Bash"\nhandler = "post_handler"\ndefault = "warn"\n'
+            'class = "c"\nresidue = "A self-test PostToolUse control catches nothing real."\n'
+            '\n[[hook]]\nid = "selftest-prompt"\nrules = ["tsthk1"]\nplatform = "claude-code"\n'
+            'event = "UserPromptSubmit"\nhandler = "prompt_handler"\ndefault = "warn"\nclass = "c"\n'
+            'residue = "A self-test UserPromptSubmit control catches nothing real."\n')
+        ptuf_handlers = ("\ndef post_handler(data):\n    return (0, None, None)\n"
+                         "\ndef prompt_handler(data):\n    return (0, None, None)\n")
+        for label, matcher, want_exit in (("ptuf-warn", 'matcher = ".*"\n', 0), ("ptuf-no-matcher", "", 2)):
+            ptuf = tmp / label
+            ptuf.mkdir()
+            _build_tree(ptuf)
+            _mutate(ptuf, tool_block, 'event = "PostToolUseFailure"\n{}handler = "test_handler"\n'
+                    'default = "warn"'.format(matcher))
+            hsrc = ptuf / ".aiqt" / "core" / "hooks"
+            for path, tail in ((hsrc / "manifest.toml", ptuf_hooks), (hsrc / "scripts" / SCRIPT_NAME,
+                                                                       ptuf_handlers)):
+                path.write_text(path.read_text(encoding="utf-8") + tail, encoding="utf-8")
+            if want_exit:
+                if run_quiet(ptuf, check=True) != 2:
+                    failures.append("a PostToolUseFailure hook with no matcher expected exit 2 (a tool "
+                                    "event requires one)")
+                continue
+            if run_quiet(ptuf, check=False) != 0 or run_quiet(ptuf, check=True) != 0:
+                failures.append("a warn PostToolUseFailure hook with matcher '.*' expected a clean generate "
+                                "and a drift-clean check")
+                continue
+            rendered = json.loads((ptuf / HOOKS_JSON_REL).read_text(encoding="utf-8"))["hooks"]
+            if list(rendered) != ["PostToolUse", "PostToolUseFailure", "UserPromptSubmit"] or [
+                    group.get("matcher") for group in rendered["PostToolUseFailure"]] != [".*"]:
+                failures.append("hooks.json must render PostToolUseFailure, with its matcher '.*', between "
+                                "PostToolUse and UserPromptSubmit, got {!r}".format(rendered))
 
         # 12. Render byte-identity: the default is authoring metadata, never rendered into hooks.json, so
         #     an otherwise-identical Stop hook must render the SAME bytes whether its default is "block"
@@ -3944,6 +4159,337 @@ def self_test_main(_nested=False):
                  ("[[hook]] selftest-second", "timeout 9 ", "minimum authored timeout is 11")),
                 ("second-above", "second", 11, 0, ())):
             fit_case(label, switch_on, timeout, want, needles=needles, shape=shape)
+
+        # 36. The licence copies. The four paths are spelled literally (never built from LICENCE_HOMES), so a
+        #     dropped home or a renamed file fails here.
+        copy_rels = ("plugin/aiqt-guardrails-hooks/LICENSE", "plugin/aiqt-guardrails-hooks/NOTICE",
+                     ".aiqt/LICENSE", ".aiqt/NOTICE")
+        # The authoring-scoped roster (gen_gensrc scopes these registry entries "authoring") names exactly the
+        # copies run() generates only in the authoring tree, each a declared GENSRC_OUTPUTS file, and none is on
+        # the never-ship AUTHORING_ONLY_REL roster (the copies ship).
+        declared_files = {d["target"] for d in GENSRC_OUTPUTS if d["kind"] == "file"}
+        if (sorted(AUTHORING_SCOPED_REL) != sorted(copy_rels)
+                or sorted(AUTHORING_SCOPED_REL) != sorted("{}/{}".format(home, name) for home in LICENCE_HOMES
+                                                          for name in LICENCE_FILES)
+                or not set(AUTHORING_SCOPED_REL) <= declared_files
+                or set(AUTHORING_SCOPED_REL) & set(AUTHORING_ONLY_REL)):
+            failures.append("licence copies: AUTHORING_SCOPED_REL must name exactly the four declared copies, "
+                            "off AUTHORING_ONLY_REL, got {!r}".format(AUTHORING_SCOPED_REL))
+        lic = tmp / "licence-copies"
+        lic.mkdir()
+        _build_project_tree(lic)
+        if run_project(lic, check=False) != 0 or run_project(lic, check=True) != 0:
+            failures.append("licence copies: an authoring tree expected a clean generate and a clean --check")
+        for rel in copy_rels:
+            source = _LICENCE_FIXTURES[rel.rsplit("/", 1)[1]]
+            copy = lic / rel
+            try:
+                if copy.read_bytes() != source:
+                    failures.append("licence copies: {} must be byte-identical to the root source".format(rel))
+            except OSError as exc:
+                failures.append("licence copies: {} was not generated ({})".format(rel, exc))
+                continue
+            # The line-end flip (CRLF to LF, or LF to CRLF) is invisible to a text-mode comparison, which reads
+            # both as LF, so it proves the comparison is on bytes.
+            flipped = (source.replace(b"\r\n", b"\n") if b"\r\n" in source
+                       else source.replace(b"\n", b"\r\n"))
+            for label, mutate in (("missing", None), ("one byte different", source + b"x"),
+                                  ("with its line ends flipped", flipped)):
+                if mutate is None:
+                    copy.unlink()
+                else:
+                    copy.write_bytes(mutate)
+                if run_project(lic, check=True) != 1:
+                    failures.append("licence copies: {} {} expected --check exit 1".format(rel, label))
+                if (run_project(lic, check=False) != 0 or run_project(lic, check=True) != 0
+                        or copy.read_bytes() != source):
+                    failures.append("licence copies: a write run after {} {} expected the copy restored "
+                                    "byte for byte".format(rel, label))
+        try:
+            if any(rel in build_desired(lic, lic / ".aiqt" / "core" / "hooks") for rel in copy_rels):
+                failures.append("build_desired() must not carry the licence copies (adopter C5)")
+        except (ValueError, OSError) as exc:
+            failures.append("licence copies: build_desired expected to succeed: {}".format(exc))
+        for name in ("LICENSE", "NOTICE"):
+            for shape in ("absent", "a symlink"):
+                bad = tmp / "licence-{}-{}".format(name, shape.replace(" ", "-"))
+                bad.mkdir()
+                _build_project_tree(bad)
+                (bad / name).unlink()
+                if shape == "a symlink":
+                    (bad / "elsewhere").write_bytes(_LICENCE_FIXTURES[name])
+                    try:
+                        (bad / name).symlink_to("elsewhere")
+                    except OSError as exc:
+                        failures.append("NOT RUN: a root {} that is a symlink: the fixture could not be planted "
+                                        "({}); coverage that did not run fails the self-test".format(name, exc))
+                        continue
+                for check in (True, False):
+                    if run_project(bad, check=check) != 2:
+                        failures.append("a root {} that is {} expected exit 2 (check={})".format(name, shape, check))
+        lic_adopter = tmp / "licence-adopter"
+        lic_adopter.mkdir()
+        _build_project_tree(lic_adopter, authoring=False)
+        for name, data in _LICENCE_FIXTURES.items():
+            (lic_adopter / name).write_bytes(data)
+        planted = {rel: b"adopter-held copy\n" for rel in copy_rels[:2]}
+        for rel, data in planted.items():
+            (lic_adopter / rel).parent.mkdir(parents=True, exist_ok=True)
+            (lic_adopter / rel).write_bytes(data)
+        for check in (False, True):
+            if run_project(lic_adopter, check=check) != 0:
+                failures.append("licence copies: an adopter tree expected exit 0 (check={})".format(check))
+        for rel in copy_rels:
+            try:
+                held = (lic_adopter / rel).read_bytes()
+            except FileNotFoundError:
+                held = None
+            if held != planted.get(rel):
+                failures.append("licence copies: an adopter run must never create, overwrite or delete {}".format(rel))
+
+        # 37. The plugin version follows the pack version from the first aligned pack release on. The first
+        #     version is pinned literally, so moving it is a deliberate edit of this suite too. The legs below
+        #     37b run in AUTHORING trees (the marker written), where the pack version is the root VERSION
+        #     (gen_skill.resolve_pack_version). The differing
+        #     trees are generated clean at VERSION 1.0.5 first, so their plugin.json faithfully mirrors the
+        #     manifest's 0.1.0; adding VERSION 1.1.1 (or 1.2.0) must then fail closed in --check and in a normal
+        #     run (exit 2, naming both versions, nothing written), and build_desired itself must refuse it
+        #     (conformance.py C5 reuses it). Removing check_plugin_version turns those legs red, since the
+        #     mirrored surface is otherwise drift-clean. The equal twins generate and check clean and carry
+        #     the pack version in plugin.json; VERSION 1.0.5 leaves the plugin at 0.1.0 (pre-cut main); an
+        #     ABSENT VERSION cannot be evaluated (exit 2; treating it as outside the rule turns that leg red);
+        #     a malformed, oversized, symlinked, hard-linked or directory VERSION fails closed (exit 2; dropping
+        #     the link-count check turns the hard-link leg red).
+        if PACK_ALIGN_FIRST_VERSION != "1.1.1":
+            failures.append("PACK_ALIGN_FIRST_VERSION must be 1.1.1 (the documented first aligned pack "
+                            "release), got {!r}".format(PACK_ALIGN_FIRST_VERSION))
+
+        def pack_run(tree, check):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = run(tree, check, project_ids=())
+            return rc, out.getvalue()
+
+        def pack_tree(name, authoring=True):
+            tree = tmp / name
+            tree.mkdir()
+            _build_tree(tree)
+            if authoring:
+                _write_marker(tree)
+            return tree
+
+        for pack in ("1.1.1", "1.2.0"):
+            tree = pack_tree("pack-differ-" + pack)
+            if pack_run(tree, False)[0] != 0 or pack_run(tree, True)[0] != 0:
+                failures.append("pack alignment ({}): the tree must generate and check clean at VERSION "
+                                "1.0.5".format(pack))
+                continue
+            plugin_bytes = (tree / PLUGIN_JSON_REL).read_bytes()
+            if json.loads(plugin_bytes).get("version") != "0.1.0":
+                failures.append("pack alignment ({}): plugin.json must mirror the manifest version 0.1.0"
+                                .format(pack))
+            (tree / "VERSION").write_bytes(pack.encode("ascii") + b"\n")
+            for check in (True, False):
+                rc, out = pack_run(tree, check)
+                if rc != 2 or "'0.1.0' differs from the pack version '{}'".format(pack) not in out:
+                    failures.append("pack alignment ({}): a plugin at 0.1.0 under pack {} expected exit 2 naming "
+                                    "both versions ({}), got {}: {!r}".format(
+                                        pack, pack, "--check" if check else "generate", rc, out.strip()))
+            if (tree / PLUGIN_JSON_REL).read_bytes() != plugin_bytes:
+                failures.append("pack alignment ({}): a refused run must write nothing".format(pack))
+            try:
+                build_desired(tree, tree / ".aiqt" / "core" / "hooks")
+                failures.append("pack alignment ({}): build_desired must refuse a differing plugin version"
+                                .format(pack))
+            except ValueError as exc:
+                if "differs from the pack version" not in str(exc):
+                    failures.append("pack alignment ({}): build_desired refused for another reason: {}"
+                                    .format(pack, exc))
+            twin = pack_tree("pack-equal-" + pack)
+            _mutate(twin, 'version = "0.1.0"', 'version = "{}"'.format(pack))
+            (twin / "VERSION").write_bytes(pack.encode("ascii") + b"\n")
+            if pack_run(twin, False)[0] != 0 or pack_run(twin, True)[0] != 0:
+                failures.append("pack alignment ({}): a plugin at the pack version expected a clean generate "
+                                "and check".format(pack))
+            elif json.loads((twin / PLUGIN_JSON_REL).read_text(encoding="utf-8")).get("version") != pack:
+                failures.append("pack alignment ({}): plugin.json must carry the pack version".format(pack))
+        below = pack_tree("pack-below-first")
+        (below / "VERSION").write_bytes(b"1.0.5\n")
+        if pack_run(below, False)[0] != 0 or pack_run(below, True)[0] != 0:
+            failures.append("pack alignment: a plugin at 0.1.0 under pack 1.0.5 (below the first aligned "
+                            "release) expected a clean generate and check")
+        # An absent VERSION cannot be evaluated: VERSION is a declared input, so deleting it must never turn
+        # the rule off. The tree is generated clean at 1.0.5 first, so its plugin.json is drift-clean; with
+        # VERSION removed both modes exit 2 naming the missing input and write nothing, and build_desired
+        # (conformance.py C5) refuses it too.
+        absent = pack_tree("pack-absent")
+        if pack_run(absent, False)[0] != 0:
+            failures.append("pack alignment: the absent-VERSION tree must generate clean at VERSION 1.0.5 first")
+        else:
+            absent_plugin = (absent / PLUGIN_JSON_REL).read_bytes()
+            (absent / "VERSION").unlink()
+            for check in (True, False):
+                rc, out = pack_run(absent, check)
+                if rc != 2 or "the pack VERSION file is absent" not in out:
+                    failures.append("pack alignment: an absent VERSION expected exit 2 (cannot evaluate; {}), "
+                                    "got {}: {!r}".format("--check" if check else "generate", rc, out.strip()))
+            if (absent / PLUGIN_JSON_REL).read_bytes() != absent_plugin:
+                failures.append("pack alignment: a run refused for an absent VERSION must write nothing")
+            try:
+                build_desired(absent, absent / ".aiqt" / "core" / "hooks")
+                failures.append("pack alignment: build_desired must refuse a tree with no VERSION")
+            except ValueError as exc:
+                if "the pack VERSION file is absent" not in str(exc):
+                    failures.append("pack alignment: build_desired refused an absent VERSION for another "
+                                    "reason: {}".format(exc))
+
+        def hard_link(p):
+            # VERSION itself is well-formed and below the first version; only its second link is wrong.
+            p.write_bytes(b"1.0.5\n")
+            os.link(str(p), str(p.parent.parent / (p.parent.name + "-VERSION-twin")))
+
+        for label, make, needle in (
+                ("hardlink", hard_link, "hard links"),
+                ("no-newline", lambda p: p.write_bytes(b"1.0.5"), "not a bare MAJOR.MINOR.PATCH"),
+                ("crlf", lambda p: p.write_bytes(b"1.0.5\r\n"), "not a bare MAJOR.MINOR.PATCH"),
+                ("prefixed", lambda p: p.write_bytes(b"v1.1.1\n"), "not a bare MAJOR.MINOR.PATCH"),
+                ("non-ascii-digits", lambda p: p.write_bytes("1.١.1\n".encode("utf-8")),
+                 "not a bare MAJOR.MINOR.PATCH"),
+                ("non-utf8", lambda p: p.write_bytes(b"\xff1.1.1\n"), "utf-8"),
+                ("oversized", lambda p: p.write_bytes(b"1.0.5\n" + b"0" * 64), "over 64 bytes"),
+                # A non-regular input is refused naming it an input, never told to git rm it (RELEASING.md).
+                ("directory", lambda p: p.mkdir(), "never git rm an input"),
+                ("symlink", lambda p: os.symlink(str(below / "VERSION"), str(p)), "never git rm an input"),
+                ("dangling-symlink", lambda p: os.symlink(str(tmp / "no-such-VERSION"), str(p)),
+                 "never git rm an input"),
+                ("fifo", lambda p: os.mkfifo(str(p)), "never git rm an input")):
+            tree = pack_tree("pack-bad-" + label)
+            (tree / "VERSION").unlink()
+            make(tree / "VERSION")
+            rc, out = pack_run(tree, True)
+            if rc != 2 or needle not in out or "git rm VERSION" in out:
+                failures.append("pack alignment: a {} VERSION expected exit 2 naming {!r}, got {}: {!r}".format(
+                    label, needle, rc, out.strip()))
+
+        # 37b. The rule is a release-time rule of the authoring repository (gen_skill.resolve_pack_version), so a
+        #      tree WITHOUT the authoring marker (an adopter's) is not re-checked and is judged as before the rule
+        #      existed: a plugin at 0.1.0 with no installed .aiqt/manifest.toml, with one at 1.0.5 or at 1.1.1, or
+        #      with an unparseable, symlinked or hard-linked one, and whatever the adopter's own VERSION is (1.1.1,
+        #      1.2.0, another format, CRLF, absent, a dangling symlink, a directory), generates and checks clean,
+        #      and build_desired (conformance.py C5) accepts it (red if the adopter's VERSION or manifest is read
+        #      for the rule). In the authoring tree the manifest is never consulted: VERSION 1.1.1 under a stale
+        #      manifest at 1.0.5 is refused. A deleted marker never switches the authoring repository to adopter
+        #      mode where its git index tracks the marker (gen_skill.authoring_marker_tracked): that tree, with
+        #      VERSION 1.1.1 and a stale manifest at 1.0.5 (the review's MINOR A tree), is exit 2 in both modes
+        #      naming the tracked marker, nothing written (red if the git index is not consulted); its twin whose
+        #      index never tracked the marker passes.
+        def manifest_link(p):
+            p.parent.joinpath("manifest-elsewhere.toml").write_text("format-version = 1\n", encoding="utf-8")
+            os.symlink(str(p.parent / "manifest-elsewhere.toml"), str(p))
+
+        def manifest_hardlink(p):
+            _write_installed_manifest(p.parent.parent, "1.1.1")
+            os.link(str(p), str(p.parent / "manifest-twin.toml"))
+
+        for label, version, manifest in (
+                ("no-manifest", b"1.0.5\n", None),
+                ("no-manifest-version-1.1.1", b"1.1.1\n", None),
+                ("manifest-1.0.5", b"1.0.5\n", "1.0.5"),
+                ("manifest-1.1.1", b"0.4.0\n", "1.1.1"),
+                ("manifest-unparseable", b"1.0.5\n", lambda p: p.write_text("format-version = [\n",
+                                                                            encoding="utf-8")),
+                ("manifest-symlink", b"1.0.5\n", manifest_link),
+                ("manifest-hardlink", b"1.0.5\n", manifest_hardlink),
+                ("version-1.2.0", b"1.2.0\n", "1.0.5"),
+                ("version-other-format", b"v2.3\n", None),
+                ("version-crlf", b"0.4.0\r\n", None),
+                ("version-absent", None, None),
+                ("version-dangling-symlink", "link", None),
+                ("version-directory", "dir", None)):
+            tree = pack_tree("adopter-" + label, authoring=False)
+            (tree / "VERSION").unlink()
+            if version == "link":
+                os.symlink(str(tmp / "no-such-VERSION"), str(tree / "VERSION"))
+            elif version == "dir":
+                (tree / "VERSION").mkdir()
+            elif version is not None:
+                (tree / "VERSION").write_bytes(version)
+            if isinstance(manifest, str):
+                _write_installed_manifest(tree, manifest)
+            elif manifest is not None:
+                manifest(tree / ".aiqt" / "manifest.toml")
+            for check in (False, True):
+                rc, out = pack_run(tree, check)
+                if rc != 0:
+                    failures.append("pack alignment: an adopter tree ({}; plugin 0.1.0) expected exit 0 ({}): the "
+                                    "rule is not re-checked outside the authoring tree, got {}: {!r}".format(
+                                        label, "--check" if check else "generate", rc, out.strip()))
+            try:
+                build_desired(tree, tree / ".aiqt" / "core" / "hooks")
+            except (ValueError, OSError) as exc:
+                failures.append("pack alignment: build_desired must accept the adopter tree ({}), got: {}".format(
+                    label, exc))
+        tree = pack_tree("authoring-stale-manifest")
+        _write_installed_manifest(tree, "1.0.5")
+        (tree / "VERSION").write_bytes(b"1.1.1\n")
+        for check in (True, False):
+            rc, out = pack_run(tree, check)
+            if rc != 2 or "differs from the pack version '1.1.1' (VERSION)" not in out:
+                failures.append("pack alignment: an authoring tree at VERSION 1.1.1 with a stale installed manifest at "
+                                "1.0.5 expected exit 2 reading VERSION ({}), got {}: {!r}".format(
+                                    "--check" if check else "generate", rc, out.strip()))
+        # The fixture git calls run under the shared fixture scrub (git_fixture_env: every GIT_* variable dropped, a
+        # scratch HOME and XDG_CONFIG_HOME, global and system config pinned to os.devnull), so an ambient or system
+        # git configuration cannot fail or redirect the fixture's git add.
+        if shutil.which("git") is None:
+            failures.append("pack alignment: NOT RUN: the deleted-marker legs (no git on PATH)")
+        else:
+            from _git_fixture_env import git_fixture_env
+            git_env = git_fixture_env()
+            for label, track_marker, want in (("marker-tracked-deleted", True, 2), ("marker-never-tracked", False, 0)):
+                tree = pack_tree("git-" + label)
+                if pack_run(tree, False)[0] != 0:
+                    failures.append("pack alignment: the {} git tree must generate clean at VERSION 1.0.5".format(
+                        label))
+                    continue
+                tracked = [AUTHORING_MARKER_REL, PACK_VERSION_REL] if track_marker else [PACK_VERSION_REL]
+                init = subprocess.run(["git", "-c", "init.defaultBranch=main", "-c", "core.fsmonitor=false", "init",
+                                       "-q", str(tree)], capture_output=True, timeout=60, env=git_env, check=False)
+                if init.returncode != 0:
+                    failures.append("pack alignment: the {} git tree: git init failed ({}): {!r}".format(
+                        label, init.returncode, init.stderr))
+                add = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(tree), "add", "--", *tracked],
+                                     capture_output=True, timeout=60, env=git_env, check=False)
+                if add.returncode != 0:
+                    failures.append("pack alignment: the {} git tree: git add failed ({}): {!r}".format(
+                        label, add.returncode, add.stderr))
+                plugin_bytes = (tree / PLUGIN_JSON_REL).read_bytes()
+                (tree / AUTHORING_MARKER_REL).unlink()
+                _write_installed_manifest(tree, "1.0.5")
+                (tree / PACK_VERSION_REL).write_bytes(b"1.1.1\n")
+                for check in (True, False):
+                    rc, out = pack_run(tree, check)
+                    if rc != want or (want == 2 and (
+                            "tracked in this tree's git index but absent on disk" not in out
+                            or "git checkout -- .aiqt/authoring.toml" not in out)):
+                        failures.append("pack alignment: the {} git tree (VERSION 1.1.1, plugin 0.1.0, stale manifest "
+                                        "at 1.0.5) expected exit {} ({}), got {}: {!r}".format(
+                                            label, want, "--check" if check else "generate", rc, out.strip()))
+                if (tree / PLUGIN_JSON_REL).read_bytes() != plugin_bytes:
+                    failures.append("pack alignment: the {} git tree run must leave plugin.json unchanged".format(
+                        label))
+
+        # 37c. The pack version source changes no output byte, so no GENSRC_OUTPUTS entry declares it (the same in
+        #      gen_skill); the content-bearing hooks manifest stays declared for every output rendered from it,
+        #      which is every output except the licence copies (case 36), whose sources are LICENSE and NOTICE.
+        for out_decl in GENSRC_OUTPUTS:
+            if {"VERSION", ".aiqt/manifest.toml"} & set(out_decl["sources"]):
+                failures.append("GENSRC_OUTPUTS {}: the pack version source is a check input, not a content "
+                                "source; do not declare it".format(out_decl["target"]))
+            if (out_decl["target"] not in AUTHORING_SCOPED_REL
+                    and ".aiqt/core/hooks/manifest.toml" not in out_decl["sources"]):
+                failures.append("GENSRC_OUTPUTS {}: the hooks manifest must stay a declared source".format(
+                    out_decl["target"]))
     finally:
         try:
             _rmtree_verified(tmp, "suite temp cleanup")
@@ -4044,7 +4590,9 @@ def self_test_main(_nested=False):
           "the script, a missing handler script, an unreadable manifest, and a malformed default keyword "
           "all fail closed; the full 'warn' default policy holds across every known event (rejected on "
           "every non-warn event, accepted on every WARN_EVENTS event, plus warn+stage=bake on "
-          "PreToolUse and the SessionStart-cannot-block overclaim); a note-only PreToolUse handler must "
+          "PreToolUse and the SessionStart-cannot-block overclaim); a warn PostToolUseFailure hook with an "
+          "all-tools matcher renders between PostToolUse and UserPromptSubmit and one with no matcher "
+          "fails closed; a note-only PreToolUse handler must "
           "declare warn and no other PreToolUse handler may without a bake stage; a Stop hook renders "
           "byte-identical hooks.json whether its default is 'block' or 'warn'; the dispatcher's "
           "PreToolUse deadline must mirror TIMEOUT and leave a margin from DEADLINE_MIN_MARGIN up to just "
@@ -4074,7 +4622,21 @@ def self_test_main(_nested=False):
           "below the dispatcher's budget plus its own margin is refused naming the hook and the "
           "minimum (just below, at and just above the boundary, on a PreToolUse and a Stop hook and "
           "under a moved margin), a warn hook, a bake-stage hook and a second hook each refused at 9 "
-          "and generating at 11, while with it off or absent 9, 10 and 11 still render the default"
+          "and generating at 11, while with it off or absent 9, 10 and 11 still render the default; "
+          "in the authoring tree the root LICENSE and NOTICE are copied byte for byte under the plugin "
+          "root and .aiqt/, each copy missing, one byte different or with its line ends flipped fails "
+          "the check and is restored by a write run, an absent or symlinked root source fails closed, "
+          "build_desired() never carries them, and an adopter-shaped tree never gets, loses or changes them; "
+          "from pack 1.1.1 on a plugin version that differs from VERSION fails closed (exit 2, nothing "
+          "written) even when plugin.json mirrors the manifest, while the equal twins generate clean, pack "
+          "1.0.5 leaves the plugin independent, an absent VERSION cannot be evaluated (exit 2), and a "
+          "malformed, oversized, symlinked, hard-linked, directory or FIFO VERSION fails closed (a non-regular "
+          "one refused as an input, never git rm); the rule applies only in the authoring tree: an adopter "
+          "tree is not re-checked (no manifest, a manifest at 1.0.5, 1.1.1, unparseable, symlinked or "
+          "hard-linked, and an own VERSION of 1.1.1, 1.2.0, another format, CRLF, absent, dangling or a "
+          "directory all pass), an authoring tree reads VERSION, never a stale manifest, an authoring "
+          "repository whose git-tracked marker was deleted is exit 2 while its never-tracked twin passes, "
+          "and no GENSRC_OUTPUTS entry declares the pack version source"
           + note)
     return 0
 

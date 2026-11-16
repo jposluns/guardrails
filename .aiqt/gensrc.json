@@ -1,6 +1,24 @@
 {
   "generated": [
     {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_hooks.py",
+      "scope": "authoring",
+      "sources": [
+        "LICENSE"
+      ],
+      "target": ".aiqt/LICENSE"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_hooks.py",
+      "scope": "authoring",
+      "sources": [
+        "NOTICE"
+      ],
+      "target": ".aiqt/NOTICE"
+    },
+    {
       "kind": "block",
       "regenerate": "python3 tools/gen_secret_patterns.py",
       "sources": [
@@ -291,7 +309,8 @@
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
         "tools/gen_draft_site.py",
-        "opf/site/draft-src/core-files.toml"
+        "opf/site/draft-src/core-files.toml",
+        "opf/tools/opf.py"
       ],
       "target": "opf/site/core-files/index.html"
     },
@@ -318,7 +337,8 @@
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
         "tools/gen_draft_site.py",
-        "opf/site/draft-src/home.toml"
+        "opf/site/draft-src/home.toml",
+        "opf/tools/opf.py"
       ],
       "target": "opf/site/index.html"
     },
@@ -330,6 +350,15 @@
         "opf/site/draft-src/license.toml"
       ],
       "target": "opf/site/license/index.html"
+    },
+    {
+      "kind": "block",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/tools/opf.py"
+      ],
+      "target": "opf/site/llms.txt"
     },
     {
       "kind": "file",
@@ -366,6 +395,24 @@
         ".aiqt/core/hooks/scripts/aiqt_hooks.py"
       ],
       "target": "plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_hooks.py",
+      "scope": "authoring",
+      "sources": [
+        "LICENSE"
+      ],
+      "target": "plugin/aiqt-guardrails-hooks/LICENSE"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_hooks.py",
+      "scope": "authoring",
+      "sources": [
+        "NOTICE"
+      ],
+      "target": "plugin/aiqt-guardrails-hooks/NOTICE"
     },
     {
       "kind": "tree",
@@ -506,7 +553,8 @@
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
         "tools/gen_draft_site.py",
-        "site/draft-src/home.toml"
+        "site/draft-src/home.toml",
+        ".aiqt/core/hooks/manifest.toml"
       ],
       "target": "site/index.html"
     },
@@ -515,7 +563,10 @@
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
         "tools/gen_draft_site.py",
-        "site/draft-src/install-details.toml"
+        "site/draft-src/install-details.toml",
+        ".aiqt/core/hooks/manifest.toml",
+        "VERSION",
+        "changelog.toml"
       ],
       "target": "site/install/details/index.html"
     },
@@ -544,7 +595,13 @@
         "tools/gen_draft_site.py",
         "site/draft-src/mappings.toml",
         ".aiqt/standards/",
-        ".aiqt/core/rules/"
+        ".aiqt/core/rules/",
+        "VERSION",
+        "changelog.toml",
+        "tools/gen_mappings.py",
+        "tools/gen_rules.py",
+        "tools/_standards.py",
+        "tools/gen_agents.py"
       ],
       "target": "site/mappings/index.html"
     },
@@ -553,7 +610,9 @@
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
         "tools/gen_draft_site.py",
-        "site/draft-src/rules.toml"
+        "site/draft-src/rules.toml",
+        "VERSION",
+        "changelog.toml"
       ],
       "target": "site/rules/index.html"
     },
@@ -562,9 +621,20 @@
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
         "tools/gen_draft_site.py",
-        "site/draft-src/standard.toml"
+        "site/draft-src/standard.toml",
+        "VERSION",
+        "changelog.toml"
       ],
       "target": "site/standard/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "site/draft-src/teams.toml"
+      ],
+      "target": "site/teams/index.html"
     }
   ],
   "version": 1

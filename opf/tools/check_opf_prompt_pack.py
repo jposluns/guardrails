@@ -49,8 +49,11 @@ Exit convention (matches the repo's gates): 0 VALID, 1 INVALID (a finding, such 
 2 CANNOT-EVALUATE (unreadable, unparseable, out-of-vocabulary format, non-regular entry, over a bound).
 
 Inert: no writer consumes the import examples (`opf record import --batch` does not exist in this
-release), and binding a plan's prompt_pack {version, digest} to this pack is a later slice. VALID means
-the manifest agrees with the bytes on disk and each import example passes the guards above. It is not
+release). Apply binds a plan to this pack: _opf_adopt_apply.verify_prompt_pack runs validate_pack's checks
+(not the import examples) over the pack beside the tool and refuses a plan whose prompt_pack version or
+digest is not this pack.toml's. That check follows apply's unlanded-stage refusal, which every apply in
+this build still meets first, and the plan stage checks the binding for shape only. VALID means the
+manifest agrees with the bytes on disk and each import example passes the guards above. It is not
 authentication, it does not check that a content change also bumped the version, and it does not review
 what the documents say: whether an example's history, unparsed text and missingness reasons are faithful
 to a real source is not machine-checked (spec 8.3), and the example-midnight guard refuses every UTC
