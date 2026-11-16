@@ -1355,7 +1355,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 12
 end-line = 13
 canonical-text = "A derived or generated artefact is never hand-edited; it changes only by changing its source and\nregenerating."
-source-digest = "6c0069bf3e1e4e45f307fab0736cde15bdcfada5278f3e031e560ee605f0251d"
+source-digest = "573f21587d9de22cfd4c6c41df97d21343810ed0a174886e6b17bf98273bce97"
 layer = "core"
 
 [[clause]]
@@ -1365,7 +1365,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 12
 end-line = 13
 canonical-text = "A derived or generated artefact is never hand-edited; it changes only by changing its source and\nregenerating."
-source-digest = "6c0069bf3e1e4e45f307fab0736cde15bdcfada5278f3e031e560ee605f0251d"
+source-digest = "573f21587d9de22cfd4c6c41df97d21343810ed0a174886e6b17bf98273bce97"
 layer = "core"
 
 [[clause]]
@@ -1375,7 +1375,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 12
 end-line = 13
 canonical-text = "A derived or generated artefact is never hand-edited; it changes only by changing its source and\nregenerating."
-source-digest = "6c0069bf3e1e4e45f307fab0736cde15bdcfada5278f3e031e560ee605f0251d"
+source-digest = "573f21587d9de22cfd4c6c41df97d21343810ed0a174886e6b17bf98273bce97"
 layer = "core"
 
 [[clause]]
@@ -1385,7 +1385,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 13
 end-line = 13
 canonical-text = "Source and derivative land in the same change, so the two cannot drift apart."
-source-digest = "6c0069bf3e1e4e45f307fab0736cde15bdcfada5278f3e031e560ee605f0251d"
+source-digest = "573f21587d9de22cfd4c6c41df97d21343810ed0a174886e6b17bf98273bce97"
 layer = "core"
 
 [[clause]]
@@ -1395,7 +1395,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 14
 end-line = 16
 canonical-text = "Deriving an artefact leaves its source originals byte-for-byte unchanged and writes separate outputs;\nin-place derivation uses copies in an area excluding the originals and refuses any path or alias\nwriting outside it or back to an original."
-source-digest = "6c0069bf3e1e4e45f307fab0736cde15bdcfada5278f3e031e560ee605f0251d"
+source-digest = "573f21587d9de22cfd4c6c41df97d21343810ed0a174886e6b17bf98273bce97"
 layer = "core"
 
 [[clause]]
@@ -1404,8 +1404,8 @@ corpus-id = "gensrc"
 source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 18
 end-line = 20
-canonical-text = "When case-dependent behaviour is described in more than one maintained place, keep its cases and\nqualifications in one canonical source; every other maintained description references that source\nwithout restating its cases, is generated from it or is a copy a gate checks for agreement with it."
-source-digest = "6c0069bf3e1e4e45f307fab0736cde15bdcfada5278f3e031e560ee605f0251d"
+canonical-text = "When case-dependent behaviour is described in more than one maintained place, keep its cases and\nqualifications in one canonical source; every other maintained description references that source\nwithout restating its cases or qualifications, is generated from it or is a copy a gate checks for agreement with it."
+source-digest = "573f21587d9de22cfd4c6c41df97d21343810ed0a174886e6b17bf98273bce97"
 layer = "core"
 
 [[clause]]
@@ -1415,7 +1415,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 21
 end-line = 22
 canonical-text = "Where those cases are machine-checkable, use them as test inputs and expected outcomes against the\nimplementation."
-source-digest = "6c0069bf3e1e4e45f307fab0736cde15bdcfada5278f3e031e560ee605f0251d"
+source-digest = "573f21587d9de22cfd4c6c41df97d21343810ed0a174886e6b17bf98273bce97"
 layer = "core"
 
 [[clause]]
@@ -1425,7 +1425,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 23
 end-line = 24
 canonical-text = "A record of a past state, such as a commit message, a changelog entry or a review report, is not a\nmaintained description."
-source-digest = "6c0069bf3e1e4e45f307fab0736cde15bdcfada5278f3e031e560ee605f0251d"
+source-digest = "573f21587d9de22cfd4c6c41df97d21343810ed0a174886e6b17bf98273bce97"
 layer = "core"
 
 [[clause]]
