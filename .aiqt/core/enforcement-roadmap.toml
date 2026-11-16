@@ -9,11 +9,8 @@
 #   enforced or partial here, by that linkage, and the register shows it as "Preview only". partial: the
 #   same linkage invariant as enforced, and the linked mechanisms are
 #   known to cover only part of the rule (their residues name what each does not catch, not every
-#   uncovered clause of every linked rule); a partial row may carry a one-line `description` naming a
-#   known part of the rule that no linked control checks, not necessarily every such part, and the
-#   register shows it after the mechanisms. The description is hand-written and no gate checks it against
-#   the rule text, so it names clause ids and points to the rule rather than restating it. none:
-#   enforcement is not built yet. pending: not built yet, and `description` states the intended build. This file records
+#   uncovered clause of every linked rule). none: enforcement is
+#   not built yet. pending: not built yet, and `description` states the intended build. This file records
 #   the DECISION only; the linkage itself is authored in the gate and hook manifests and rendered into
 #   .aiqt/enforceability.json, never re-authored here.
 # Verified by tools/gen_enforcement_register.py (schema and ledger contradictions are fail-closed exit 2).
@@ -209,7 +206,6 @@ mechanisms = ["gate:ci-parity", "gate:relied-exit-pipes", "hook:gate-weakening-g
 corpus-id = "gensrc"
 status = "partial"
 mechanisms = ["gate:adapters-drift", "gate:agents-drift", "gate:changelog-drift", "gate:char-policy-drift", "gate:claude-drift", "gate:crosswalk-schema-drift", "gate:cursor-drift", "gate:disclosure-drift", "gate:draft-site-drift", "gate:enforceability-drift", "gate:enforcement-register-drift", "gate:first-pin-demo-drift", "gate:gensrc-failclose", "gate:gensrc-registry-drift", "gate:hooks-drift", "gate:manifest-gen-drift", "gate:mappings-page-drift", "gate:notice-drift", "gate:reference-roster-drift", "gate:renderers-drift", "gate:roadmap-drift", "gate:rules-drift", "gate:secret-patterns-drift", "gate:skill-drift", "gate:worker-pack-drift", "hook:gensrc-edit-guard"]
-description = "clauses gensrc.6 to gensrc.8, on case-dependent behaviour described in more than one maintained place. This is a hand-written pointer that no gate checks against the rule; the rule text governs."
 
 [[rule]]
 corpus-id = "goalfd"
