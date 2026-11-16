@@ -355,7 +355,11 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_no_dashes.py --default-parity
 
-      - name: Internal links
+      - name: Internal and own-site links self-test
+        shell: bash
+        run: python3 -I -B tools/check_links.py --self-test
+
+      - name: Internal and own-site links
         shell: bash
         run: python3 -I -B tools/check_links.py
 

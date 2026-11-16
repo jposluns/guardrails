@@ -258,6 +258,12 @@ disposition = "stays-outside-store"
 reason = "It renders ROADMAP.md from roadmap.toml through the shared driver tools/opf_render.py, beside the changelog renderer, whose OPF home awaits the maintainer's ruling; no OPF home for roadmap.toml has been chosen."
 
 [[reader]]
+path = "tools/check_links.py"
+records = ["roadmap.toml"]
+disposition = "stays-outside-store"
+reason = "It reads the stage link hrefs of roadmap.toml to check each own-site link as tools/gen_roadmap.py renders it, and no OPF home for roadmap.toml has been chosen."
+
+[[reader]]
 path = "tools/gen_draft_site.py"
 records = ["changelog.toml"]
 disposition = "stays-outside-store"
