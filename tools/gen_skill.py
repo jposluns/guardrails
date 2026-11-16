@@ -39,8 +39,9 @@ Threat model: the generator defends against hostile STATIC tree state, anything 
 hostile commit can plant (a symlink at any component, a hard link, a FIFO or device, a wrong type, an orphan,
 an unknown entry), and fails closed on it: such an entry is refused or named, never read through, written
 through or deleted. That holds for every output and for every other input this generator reads: LICENSE,
-skill-source.md, the hooks manifest and the evidence page are each read through the descriptor-anchored reader
-(O_NOFOLLOW on every component, O_NONBLOCK, fstat a regular file with exactly one link), so a hard link at a
+skill-source.md, the hooks manifest, the evidence page and the pack VERSION (read only for the skill/pack
+version alignment rule, and only in the authoring tree; see resolve_pack_version) are each read through the descriptor-anchored
+reader (O_NOFOLLOW on every component, O_NONBLOCK, fstat a regular file with exactly one link), so a hard link at a
 declared output or at one of those four inputs is refused, never read and accepted (so a hard-link-copied
 checkout, made with cp -al, is refused; an input's refusal says to break the link by copying the file and
 moving the copy over it, never to git rm it). The rule corpus is NOT read
@@ -79,6 +80,8 @@ import os
 import re
 import stat
 import struct
+import subprocess
+import tomllib
 import zipfile
 import zlib
 from pathlib import Path
@@ -121,10 +124,152 @@ ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named B
 ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.6.zip")  # the version-numbered copy the site
 # links to. The literal version here is tied to the skill meta version (skill-source.md) by a fail-closed
 # assertion in build_outputs, so a skill bump that forgets to update this name fails closed.
-# Skill version policy: the skill is versioned on its own today (skill 1.0.6 under pack release 1.0.5). From
-# the 1.1.1 pack release on, the skill version equals the pack version; the check that mirrors the two lands
-# with the 1.1.1 cut, not here.
+# Skill version policy: the skill is versioned on its own before the 1.1.1 pack release (skill 1.0.6 under
+# pack release 1.0.5). From the 1.1.1 pack release on, the skill version equals the pack version: build_outputs
+# refuses (exit 2) a skill meta version that differs from the pack version once it is at or above
+# PACK_ALIGN_FIRST_VERSION (pack_alignment_problem). The rule is a release-time rule of the authoring
+# repository: it is enforced only in the authoring tree, where the root VERSION is the pack version
+# (resolve_pack_version); an adopter tree is not re-checked (a release ships only after the authoring check
+# passed). Below the first version the two stay independent, so a tree at pack 1.0.5 with skill 1.0.6 still
+# builds.
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
+# The pack version file (generated from changelog.toml by tools/gen_changelog.py), read for the alignment rule
+# in the authoring tree only (resolve_pack_version); its read is bounded like opf/VERSION's in
+# tools/gen_manifest.py.
+PACK_VERSION_PARTS = ("VERSION",)
+PACK_VERSION_REL = "/".join(PACK_VERSION_PARTS)
+PACK_VERSION_MAX_BYTES = 64
+# The most characters of a refused input's text an error message echoes.
+_ECHO_MAX_CHARS = 80
+# The first pack version from which a component version (the chat skill here, the hooks plugin in
+# tools/gen_hooks.py, which imports this constant) must equal the pack version. One constant for both rules,
+# so the two cannot start at different releases. Exact MAJOR.MINOR.PATCH, compared numerically.
+PACK_ALIGN_FIRST_VERSION = "1.1.1"
+# A pack VERSION file is exactly a bare MAJOR.MINOR.PATCH and one LF (the grammar tools/gen_manifest.py and
+# tools/check_versions.py hold it to): [0-9] never \d, no leading zero, \Z never $.
+_PACK_VERSION_FILE = re.compile(r"((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))\n\Z")
+_PLAIN_SEMVER = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
+
+
+def _semver_tuple(text):
+    """(MAJOR, MINOR, PATCH) as integers for a strict plain SemVer string, or None for anything else."""
+    if not isinstance(text, str) or not _PLAIN_SEMVER.match(text):
+        return None
+    return tuple(int(part) for part in text.split("."))
+
+
+def _echo(raw, limit=_ECHO_MAX_CHARS):
+    """repr of raw for an error message, cut to limit characters, so a large hostile file never floods a log."""
+    text = repr(raw)
+    return text if len(text) <= limit else "{}... (cut from {} characters)".format(text[:limit], len(text))
+
+
+def parse_pack_version(raw, where="VERSION"):
+    """The pack version a VERSION file's raw text declares. Raises ValueError unless the text is exactly a
+    bare MAJOR.MINOR.PATCH followed by one LF (no CR, no other whitespace, no prefix or suffix). The text is
+    echoed cut to _ECHO_MAX_CHARS characters."""
+    m = _PACK_VERSION_FILE.match(raw) if isinstance(raw, str) else None
+    if m is None:
+        raise ValueError("{} {} is not a bare MAJOR.MINOR.PATCH followed by one newline; fail-closed".format(
+            where, _echo(raw)))
+    return m.group(1)
+
+
+def authoring_marker_tracked(root, marker_rel):
+    """True when the git index of the repository holding root tracks root/marker_rel (`git ls-files -z
+    --cached -- marker_rel`, run in root), else False. This is the second sign of the authoring repository that
+    resolve_pack_version consults when the marker file itself is absent: the authoring repository tracks its
+    marker (tools/gen_manifest.py check_authoring_only refuses a tracked marker that is missing on disk), and no
+    release, pin or install carries it (.aiqt/core/ownership.toml excludes it by an exact literal), so an
+    adopter's index never tracks it. Only a positive answer counts: a root that is not in a git work tree, a
+    missing git binary, a nonzero exit or a timeout is False (an adopter tree need not be a git repository, and
+    the parent behaviour judged such a tree without git). The call is pinned like gen_manifest.git_tracked: the
+    GIT_* environment is scrubbed, core.fsmonitor=false (a repository-config fsmonitor hook is attacker-chosen
+    code), protocol.allow=never and GIT_NO_LAZY_FETCH=1; ls-files --cached runs no filter, hook or transport."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    try:
+        proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+                               "ls-files", "-z", "--cached", "--", marker_rel],
+                              capture_output=True, timeout=60, env=env, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and bool(proc.stdout.strip(b"\x00"))
+
+
+def resolve_pack_version(root, root_fd=None):
+    """(pack_version, source) for the tree at root when the component/pack alignment rule (pack_alignment_problem)
+    applies to it, else None. The rule is a release-time rule of the pack authoring repository: it applies only
+    in the tree that carries the authoring marker (gen_hooks.authoring_tree, the marker gen_hooks and
+    gensrc_guard already read), where the root VERSION is the pack version; there VERSION is read through the
+    descriptor-anchored reader (_read_output: no symlink, hard link or non-regular entry, bounded) and an absent
+    VERSION cannot be evaluated (exit 2). In any other tree (an adopter's) the rule is not re-checked, because a
+    release ships only after the authoring check passed: None, and the adopter's root VERSION (its own project
+    version) and its installed .aiqt/manifest.toml are never read for it, so an adopter tree is judged as before
+    the rule existed.
+
+    A missing marker must not silently turn the authoring repository into an adopter tree (deleting the marker
+    would switch the rule off). So when the marker file is absent, the second sign of the authoring repository is
+    consulted: its git index tracks the marker (authoring_marker_tracked). A tracked but absent marker is exit 2
+    (ValueError), naming the restore. Disclosed residual: the second sign needs the tree to be a git work tree
+    with a usable git; in an export of the authoring tree without its .git (an archive, a copy), or with the
+    marker deleted AND untracked in the same change (git rm, which tools/gen_manifest.py check_authoring_only
+    still refuses while .claude/settings.json is tracked, and which review sees), a missing marker reads as an
+    adopter tree and the rule is not applied. The root VERSION and the generators are no sign: VERSION and
+    tools/** are shipped pack content (.aiqt/core/ownership.toml classes them pack-immutable), so an adopter tree
+    carries them too.
+
+    Raises ValueError (cannot evaluate, exit 2) or OSError (unreadable, exit 2); the caller fails closed on the
+    pack surfaces it builds, never on anything else."""
+    if root_fd is None:
+        own_fd = _open_root(root)
+        try:
+            return resolve_pack_version(root, own_fd)
+        finally:
+            os.close(own_fd)
+    # Lazy by design: gen_hooks imports this module at load, so the marker reader is imported at call time.
+    import gen_hooks  # noqa: PLC0415
+    if not gen_hooks.authoring_tree(root):
+        if authoring_marker_tracked(root, gen_hooks.AUTHORING_MARKER_REL):
+            raise ValueError("pack version alignment cannot be evaluated: the authoring marker {0} is tracked in "
+                             "this tree's git index but absent on disk, so this is the authoring repository with "
+                             "its marker deleted, never an adopter tree; restore it (git checkout -- {0}) and "
+                             "rerun; fail-closed".format(gen_hooks.AUTHORING_MARKER_REL))
+        return None
+    raw = _read_output(root_fd, root, root.joinpath(*PACK_VERSION_PARTS), False, single_link=True,
+                       is_input=True, max_bytes=PACK_VERSION_MAX_BYTES)
+    if raw is None:
+        raise ValueError("pack version alignment cannot be evaluated: the pack VERSION file is absent in the "
+                         "authoring tree (VERSION is a declared input of the rule; tools/gen_changelog.py "
+                         "generates it); fail-closed")
+    return parse_pack_version(raw), PACK_VERSION_REL
+
+
+def pack_alignment_problem(component, component_version, pack_version, first=None, source=PACK_VERSION_REL):
+    """None when the alignment rule is satisfied, else the refusal message. The pack version is a declared
+    input of the rule, so pack_version None (no pack version source in the tree) means the rule cannot be
+    evaluated: it raises ValueError (exit 2, per the check-fails-closed-on-unreadable rule), never a silent pass
+    that would let deleting the source turn the rule off. A pack version below first (PACK_ALIGN_FIRST_VERSION
+    when None) leaves the component independently versioned. At or above it, the component version must equal
+    the pack version exactly. source names where the pack version was read (resolve_pack_version), for the
+    message."""
+    if pack_version is None:
+        raise ValueError("{} version alignment cannot be evaluated: the pack VERSION file is absent (VERSION is "
+                         "a declared input of the rule; tools/gen_changelog.py generates it); fail-closed".format(
+                             component))
+    first = PACK_ALIGN_FIRST_VERSION if first is None else first
+    first_t = _semver_tuple(first)
+    pack_t = _semver_tuple(pack_version)
+    if first_t is None or pack_t is None:
+        raise ValueError("pack alignment: cannot compare pack version {!r} with first version {!r}".format(
+            pack_version, first))
+    if pack_t < first_t or component_version == pack_version:
+        return None
+    return ("{} version {!r} differs from the pack version {!r} ({}); from pack {} on the {} version "
+            "equals the pack version, so set it to {}".format(
+                component, component_version, pack_version, source, first, component, pack_version))
+
+
 CORPUS_PARTS = (".aiqt", "core", "rules")
 # The single canonical operator-identity source (the same file the hooks generator and the portability
 # gate read from). The public attribution line is built from the [plugin] author-name here plus
@@ -170,7 +315,9 @@ RENDERER_DECL = {"renderer-id": "skill", "semantics-revision": 2}
 # so each source list is inlined rather than shared through a name. The hooks manifest is a content-bearing
 # source: the public attribution line is rendered from its [plugin] author-name, so a change to that
 # name changes these outputs and must re-trigger regeneration. LICENSE is likewise a content-bearing source
-# of the two download zips: render_zip packs it as a member, so a LICENSE edit changes those archives.
+# of the two download zips: render_zip packs it as a member, so a LICENSE edit changes those archives. The pack
+# version source (resolve_pack_version) is NOT declared: the alignment check reads it and it changes no output
+# byte, so it is not a content-bearing source (gen_hooks' GENSRC_OUTPUTS leaves it out for the same reason).
 GENSRC_OUTPUTS = (
     {"target": "site/downloads/aiqt/", "kind": "tree",
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
@@ -642,17 +789,29 @@ def _open_dir_fd(root_fd, rel_parts, target_rel, create=False):
     return fd
 
 
-def _read_output(root_fd, root, path, binary, single_link=False, is_input=False):
+def _input_refusal(rel_posix):
+    """The fail-closed refusal for an INPUT that is a symlink or not a regular file. An input is never removed
+    (RELEASING.md: never git rm an input), so the message says to put a regular file back, never to remove it."""
+    return OSError("refusing {0}: it is an input and is a symlink or not a regular file, so it is not read "
+                   "through; replace it with the regular file it should be (never git rm an input), and "
+                   "rerun".format(rel_posix))
+
+
+def _read_output(root_fd, root, path, binary, single_link=False, is_input=False, max_bytes=None):
     """The current content of a generated output (or an input the gate reads: LICENSE, skill-source.md, the
-    hooks manifest, the evidence page), or None when absent. Descriptor-anchored: the parent is opened by
-    _open_dir_fd from the run's root descriptor and the target with O_NOFOLLOW relative to it, then
-    fstat-verified a regular file, so a symlink or non-regular file at the path, or a symlink anywhere on the
-    parent walk, is refused with OSError (exit 2), never read through (O_NONBLOCK keeps a FIFO at the name
-    from blocking the open; it is then refused by the fstat check). With single_link (every declared output,
+    hooks manifest, the evidence page, the pack version source), or None when absent. Descriptor-anchored: the
+    parent is opened by _open_dir_fd from the run's root descriptor and the target with O_NOFOLLOW relative to
+    it, then fstat-verified a regular file on the raw descriptor (before any file object is made, so a
+    directory is refused by this check and its descriptor closed, never leaked), so a symlink or non-regular
+    file at the path, or a symlink anywhere on the parent walk, is refused with OSError (exit 2), never read
+    through (O_NONBLOCK keeps a FIFO at the name from blocking the open; it is then refused by the fstat check).
+    With single_link (every declared output,
     every _read_input input and the evidence page) a file with more than one hard link is refused too: its bytes are shared with a name outside this
-    generator's control, so it is never read and accepted as the output. With is_input (the four inputs) that
-    refusal names the file as an input and says to break the link (copy the file and move the copy over it),
-    never to remove it; an output's refusal names the removal (_remove_hint)."""
+    generator's control, so it is never read and accepted as the output. With is_input (the inputs) that
+    refusal, and the refusal of a symlink or non-regular entry at the input itself, names the file as an input
+    and says to break the link or put the regular file back, never to remove it; an output's refusal names the
+    removal (_remove_hint). With max_bytes, at most max_bytes + 1 bytes are read and a longer file raises
+    ValueError (exit 2), so an oversized input is never read whole or echoed."""
     rel = Path(path).relative_to(root)
     parent_fd = _open_dir_fd(root_fd, rel.parts[:-1], rel.as_posix())
     if parent_fd is None:
@@ -664,12 +823,21 @@ def _read_output(root_fd, root, path, binary, single_link=False, is_input=False)
             return None
         except OSError as exc:
             if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                if is_input:
+                    raise _input_refusal(rel.as_posix()) from exc
                 raise _refusal(rel.as_posix(), rel.as_posix(), "regular file") from exc
             raise
-        with os.fdopen(fd, "rb") as fh:
-            st = os.fstat(fh.fileno())
+        try:
+            st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):
+                if is_input:
+                    raise _input_refusal(rel.as_posix())
                 raise _refusal(rel.as_posix(), rel.as_posix(), "regular file")
+            fh = os.fdopen(fd, "rb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with fh:
             if single_link and st.st_nlink != 1 and is_input:
                 raise OSError("refusing {0}: it is an input with {1} hard links (its bytes are shared with a name "
                               "outside this generator's control, as in a hard-link-copied checkout such as cp -al), "
@@ -680,9 +848,12 @@ def _read_output(root_fd, root, path, binary, single_link=False, is_input=False)
                 raise OSError("refusing {0}: it has {1} hard links, so it is not read, accepted or written as a "
                               "generated output (remove the other link, or {2}, and rerun)".format(
                                   rel.as_posix(), st.st_nlink, _remove_hint(rel.as_posix())))
-            data = fh.read()
+            data = fh.read() if max_bytes is None else fh.read(max_bytes + 1)
     finally:
         os.close(parent_fd)
+    if max_bytes is not None and len(data) > max_bytes:
+        raise ValueError("refusing {}: it is over {} bytes, so it is not read; fail-closed".format(
+            rel.as_posix(), max_bytes))
     return data if binary else data.decode("utf-8")
 
 
@@ -896,7 +1067,8 @@ def build_outputs(root, root_fd=None):
     Parameterized on root so the conformance suite and the self-test can call it off the real tree. The
     inputs this generator reads itself (skill-source.md, the hooks manifest, LICENSE) are read through the
     descriptor-anchored reader from root_fd, the run's root descriptor (opened here when None); the corpus is
-    read by gen_rules.load_corpus (see the module threat model)."""
+    read by gen_rules.load_corpus (see the module threat model). The pack version source (resolve_pack_version)
+    is read the same way, for the skill/pack alignment rule only (it changes no output byte)."""
     if root_fd is None:
         own_fd = _open_root(root)
         try:
@@ -915,6 +1087,17 @@ def build_outputs(root, root_fd=None):
             "versioned zip name {!r} does not match the skill meta version {!r} (expected {!r}); bump "
             "ZIP_VERSIONED_PARTS and its GENSRC_OUTPUTS target when the skill version changes".format(
                 ZIP_VERSIONED_PARTS[-1], data["meta"]["version"], expected_basename))
+    # Fail-closed skill/pack alignment (pack_alignment_problem): from pack PACK_ALIGN_FIRST_VERSION on, the
+    # skill meta version must equal the root VERSION in the authoring tree (resolve_pack_version), read through
+    # the descriptor-anchored reader (a symlink, hard link, FIFO or other non-regular entry at it is refused,
+    # exit 2); a malformed or oversized one is exit 2; an absent one means the rule cannot be evaluated (exit
+    # 2), and so does a marker tracked in git but deleted. An adopter tree is not re-checked (None).
+    resolved = resolve_pack_version(root, root_fd)
+    problem = None if resolved is None else pack_alignment_problem(
+        "skill", data["meta"]["version"], resolved[0], source=resolved[1])
+    if problem is not None:
+        raise ValueError("{} in {} (meta version), with ZIP_VERSIONED_PARTS and the rest of RELEASING.md's "
+                         "skill version bump checklist".format(problem, "/".join(SKILL_SRC_PARTS)))
     name, homepage = plugin_identity(root, root_fd)
     data["identity_name"] = name
     data["identity_homepage"] = homepage
@@ -1107,7 +1290,12 @@ def evidence_sentence_problem(text, want):
 def main():
     argv = sys.argv[1:]
     if "--self-test" in argv:
-        return self_test_main()
+        # The whole self-test runs inside the fixture git lifecycle, so the code under test
+        # (authoring_marker_tracked's git ls-files, which strips GIT_* and so drops the scrub's config pins)
+        # reads no caller HOME, XDG or system git configuration either.
+        from _git_fixture_env import fixture_git_lifecycle
+        with fixture_git_lifecycle():
+            return self_test_main()
     return run_gen(repo_root(), "--check" in argv)
 
 
@@ -1387,6 +1575,16 @@ Self-test capability note.
 """
 
 
+# The authoring marker (gen_hooks.AUTHORING_MARKER), spelled literally as gen_hooks' self-test spells it.
+_AUTHORING_MARKER_TEXT = 'format-version = 1\nrole = "pack-authoring-repository"\n'
+
+
+def _installed_manifest_text(release_version):
+    """The header of the installed pack manifest tools/gen_manifest.py writes, recording release_version."""
+    return ("# generated by tools/gen_manifest.py; do not hand-edit (VER-CORE 4.1)\nformat-version = 1\n"
+            "release-version = \"{}\"\ngenesis = false\n".format(release_version))
+
+
 def _write_fixture(root, skill_src_text):
     src = root.joinpath(*CORPUS_PARTS)
     (src / "aiqt").mkdir(parents=True)
@@ -1402,6 +1600,14 @@ def _write_fixture(root, skill_src_text):
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text('[plugin]\nauthor-name = "Self Test Operator"\nhomepage = "https://example.test"\n',
                         encoding="utf-8")
+    # This generator runs in the pack authoring repository, so a well-formed fixture is an authoring tree: it
+    # carries the authoring marker, and the root VERSION is then the pack version source of the skill/pack
+    # alignment rule (resolve_pack_version; an absent one is exit 2). VERSION sits below
+    # PACK_ALIGN_FIRST_VERSION, where the skill stays independent (the state of main before the 1.1.1 cut).
+    # Legs that need another pack version overwrite it; the adopter legs remove the marker (the rule is then
+    # not applied).
+    (root / ".aiqt" / "authoring.toml").write_text(_AUTHORING_MARKER_TEXT, encoding="utf-8")
+    (root / "VERSION").write_bytes(b"1.0.5\n")
     # build_outputs packs the pack-root LICENSE into the zip (fail-closed if absent); a well-formed
     # fixture therefore ships one so regeneration succeeds.
     (root / "LICENSE").write_text("Apache License 2.0\n\n(self-test fixture licence text)\n",
@@ -1604,6 +1810,303 @@ def self_test_main():
         if code != 2:
             failures.append("skill version mismatched to the versioned-zip literal expected exit 2, "
                             "got {}\n{}".format(code, out))
+
+        # 7b. Skill/pack version alignment. The first pack version is pinned here as a literal, so moving it is a
+        #     deliberate edit of this suite too. Below it the skill is independent (VERSION 1.0.5 with the
+        #     shipped skill version builds clean, the state of main before the 1.1.1 cut). At or above it, a skill
+        #     version that differs from VERSION fails closed (exit 2) in both modes even when the skill source,
+        #     the versioned-zip literal and every generated output agree with one another (the tree is generated
+        #     clean at VERSION 1.0.5 first, then VERSION moves to 1.1.1), and the outputs are left unchanged. The
+        #     equal twin at 1.1.1 builds and checks clean end to end. A malformed, symlinked or hard-linked
+        #     VERSION is exit 2, and so is an ABSENT one: VERSION is a declared input, so a missing VERSION is
+        #     cannot-evaluate, never a skip that would let deleting VERSION turn the rule off (every fixture
+        #     carries VERSION through _write_fixture). Removing the alignment check turns the differing-version
+        #     and malformed legs red; treating an absent VERSION as outside the rule turns the absent legs red;
+        #     comparing the versions as strings instead of numbers turns the 1.10.0 vector red.
+        if PACK_ALIGN_FIRST_VERSION != "1.1.1":
+            failures.append("PACK_ALIGN_FIRST_VERSION must be 1.1.1 (the documented first aligned pack "
+                            "release), got {!r}".format(PACK_ALIGN_FIRST_VERSION))
+
+        def pack_fixture(label, src):
+            fx = tmp / ("pack-align-" + label)
+            fx.mkdir()
+            _write_fixture(fx, src)
+            return fx
+
+        below = pack_fixture("below-first", good_src)
+        (below / "VERSION").write_bytes(b"1.0.5\n")
+        for chk in (False, True):
+            code, out = capture(below, chk)
+            if code != 0:
+                failures.append("VERSION 1.0.5 with skill {} (below the first aligned release) expected exit 0 "
+                                "({}), got {}\n{}".format(zip_versioned_version(), "--check" if chk else "generate",
+                                                          code, out))
+        differ = pack_fixture("differ", good_src)
+        code, out = capture(differ, False)
+        if code != 0:
+            failures.append("the alignment fixture expected a clean first generate at VERSION 1.0.5, got {}\n{}"
+                            .format(code, out))
+        before = {p: p.read_bytes() for p in sorted(differ.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
+        (differ / "VERSION").write_bytes(b"1.1.1\n")
+        for chk in (True, False):
+            code, out = capture(differ, chk)
+            if code != 2 or "differs from the pack version '1.1.1'" not in out:
+                failures.append("VERSION 1.1.1 with skill {} (outputs mirroring that source) expected exit 2 "
+                                "naming the pack version ({}), got {}\n{}".format(
+                                    zip_versioned_version(), "--check" if chk else "generate", code, out))
+        after = {p: p.read_bytes() for p in sorted(differ.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
+        if after != before:
+            failures.append("a refused skill/pack alignment must write nothing")
+        real_parts = ZIP_VERSIONED_PARTS
+        try:
+            globals()["ZIP_VERSIONED_PARTS"] = ("site", "downloads", versioned_zip_basename("1.1.1"))
+            equal = pack_fixture("equal", _SKILL_SRC.replace("__ZIPVER__", "1.1.1"))
+            (equal / "VERSION").write_bytes(b"1.1.1\n")
+            for chk in (False, True):
+                code, out = capture(equal, chk)
+                if code != 0:
+                    failures.append("VERSION 1.1.1 with skill 1.1.1 expected exit 0 ({}), got {}\n{}".format(
+                        "--check" if chk else "generate", code, out))
+            above = pack_fixture("above", _SKILL_SRC.replace("__ZIPVER__", "1.1.1"))
+            (above / "VERSION").write_bytes(b"1.2.0\n")
+            code, out = capture(above, False)
+            if code != 2 or "differs from the pack version '1.2.0'" not in out:
+                failures.append("VERSION 1.2.0 with skill 1.1.1 expected exit 2 (the rule holds past the first "
+                                "release), got {}\n{}".format(code, out))
+        finally:
+            globals()["ZIP_VERSIONED_PARTS"] = real_parts
+        for label, raw in (("no-newline", b"1.0.5"), ("crlf", b"1.0.5\r\n"), ("prefixed", b"v1.0.5\n"),
+                           ("leading-zero", b"01.0.5\n"), ("two-newlines", b"1.0.5\n\n"),
+                           ("prerelease", b"1.0.5-rc1\n"), ("empty", b"")):
+            bad = pack_fixture("malformed-" + label, good_src)
+            (bad / "VERSION").write_bytes(raw)
+            code, out = capture(bad, False)
+            if code != 2 or "not a bare MAJOR.MINOR.PATCH" not in out:
+                failures.append("a malformed VERSION ({}) expected exit 2 naming its grammar, got {}\n{}".format(
+                    label, code, out))
+        linked = pack_fixture("symlink", good_src)
+        (linked / "VERSION").unlink()
+        (tmp / "outside-VERSION").write_bytes(b"1.0.5\n")
+        os.symlink(str(tmp / "outside-VERSION"), str(linked / "VERSION"))
+        code, out = capture(linked, False)
+        if code != 2:
+            failures.append("a symlinked VERSION expected exit 2 (never read through), got {}\n{}".format(code, out))
+        hard = pack_fixture("hardlink", good_src)
+        os.link(str(hard / "VERSION"), str(tmp / "hardlink-VERSION-twin"))
+        code, out = capture(hard, False)
+        if code != 2 or "hard links" not in out:
+            failures.append("a hard-linked VERSION expected exit 2 naming the hard link, got {}\n{}".format(code, out))
+        # An absent VERSION cannot be evaluated: exit 2 in both modes, naming the missing input, writing nothing.
+        # The tree is generated clean at VERSION 1.0.5 first, so its outputs are drift-clean; deleting VERSION
+        # must not turn the rule off.
+        absent = pack_fixture("absent", good_src)
+        code, out = capture(absent, False)
+        if code != 0:
+            failures.append("the absent-VERSION fixture expected a clean first generate at VERSION 1.0.5, got "
+                            "{}\n{}".format(code, out))
+        (absent / "VERSION").unlink()
+        before = {p: p.read_bytes() for p in sorted(absent.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
+        for chk in (True, False):
+            code, out = capture(absent, chk)
+            if code != 2 or "the pack VERSION file is absent" not in out:
+                failures.append("an absent VERSION expected exit 2 (cannot evaluate; {}), got {}\n{}".format(
+                    "--check" if chk else "generate", code, out))
+        after = {p: p.read_bytes() for p in sorted(absent.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
+        if after != before:
+            failures.append("a refused absent-VERSION run must write nothing")
+        for comp, pack, first, want_problem in (
+                ("1.1.1", "1.2.0", None, True), ("1.2.0", "1.2.0", None, False), ("1.0.6", "1.1.0", None, False),
+                ("1.0.6", "1.1.1", None, True), ("1.1.1", "1.1.1", None, False),
+                ("1.0.0", "1.10.0", "1.9.0", True), ("1.0.0", "1.9.9", "1.10.0", False)):
+            got = pack_alignment_problem("skill", comp, pack, first) is not None
+            if got != want_problem:
+                failures.append("pack_alignment_problem(skill {}, pack {}, first {}) expected {}, got {}".format(
+                    comp, pack, first or PACK_ALIGN_FIRST_VERSION, "a problem" if want_problem else "none",
+                    "a problem" if got else "none"))
+        for first in (None, "1.9.0"):
+            try:
+                pack_alignment_problem("skill", "1.0.0", None, first)
+                failures.append("pack_alignment_problem with no pack version (first {}) must raise "
+                                "(cannot evaluate), not pass".format(first or PACK_ALIGN_FIRST_VERSION))
+            except ValueError as exc:
+                if "the pack VERSION file is absent" not in str(exc):
+                    failures.append("pack_alignment_problem with no pack version raised for another reason: "
+                                    "{}".format(exc))
+
+        # 7c. Where the rule applies (resolve_pack_version). The legs above run in authoring trees (the fixture
+        #     carries the marker), where the root VERSION is the pack version. The rule is a release-time rule of
+        #     the authoring repository, so a tree WITHOUT the marker (an adopter's) is not re-checked and builds
+        #     as before the rule existed: with no installed .aiqt/manifest.toml, with one at 1.0.5 or at 1.1.1
+        #     (the shipped skill differing from it), or with an unparseable one, and whatever its own root VERSION
+        #     is (1.1.1 or 1.2.0, which the skill differs from, another format, CRLF, absent, a dangling symlink,
+        #     a directory), it generates and checks clean (red if the adopter's VERSION or manifest is read for
+        #     the rule). The authoring tree reads VERSION and never the manifest: VERSION 1.1.1 under a stale
+        #     manifest at 1.0.5 is refused.
+        def adopter_fixture(label, src, manifest=None):
+            fx = pack_fixture("adopter-" + label, src)
+            (fx / ".aiqt" / "authoring.toml").unlink()
+            if manifest is not None:
+                (fx / ".aiqt" / "manifest.toml").write_text(manifest, encoding="utf-8")
+            return fx
+
+        for label, raw, manifest in (
+                ("no-manifest", b"1.0.5\n", None),
+                ("no-manifest-version-1.1.1", b"1.1.1\n", None),
+                ("manifest-1.0.5", b"1.0.5\n", _installed_manifest_text("1.0.5")),
+                ("manifest-1.1.1", b"0.4.0\n", _installed_manifest_text("1.1.1")),
+                ("manifest-unparseable", b"1.0.5\n", "format-version = [\n"),
+                ("version-1.2.0", b"1.2.0\n", _installed_manifest_text("1.0.5")),
+                ("version-other-format", b"v2.3\n", None),
+                ("version-crlf", b"0.4.0\r\n", None),
+                ("version-absent", None, None),
+                ("version-dangling-symlink", "link", None),
+                ("version-directory", "dir", None)):
+            fx = adopter_fixture(label, good_src, manifest)
+            (fx / "VERSION").unlink()
+            if raw == "link":
+                os.symlink(str(tmp / "no-such-VERSION"), str(fx / "VERSION"))
+            elif raw == "dir":
+                (fx / "VERSION").mkdir()
+            elif raw is not None:
+                (fx / "VERSION").write_bytes(raw)
+            for chk in (False, True):
+                code, out = capture(fx, chk)
+                if code != 0:
+                    failures.append("an adopter tree ({}; skill {}) expected exit 0 ({}): the alignment rule is not "
+                                    "re-checked outside the authoring tree, got {}\n{}".format(
+                                        label, zip_versioned_version(), "--check" if chk else "generate", code, out))
+        if resolve_pack_version(tmp / "pack-align-adopter-no-manifest") is not None:
+            failures.append("resolve_pack_version must return None (rule not applied) in a tree without the "
+                            "authoring marker")
+        fx = pack_fixture("authoring-stale-manifest", good_src)
+        (fx / ".aiqt" / "manifest.toml").write_text(_installed_manifest_text("1.0.5"), encoding="utf-8")
+        (fx / "VERSION").write_bytes(b"1.1.1\n")
+        for chk in (True, False):
+            code, out = capture(fx, chk)
+            if code != 2 or "differs from the pack version '1.1.1' (VERSION)" not in out:
+                failures.append("an authoring tree at VERSION 1.1.1 with a stale installed manifest at 1.0.5 expected "
+                                "exit 2 reading VERSION ({}), got {}\n{}".format(
+                                    "--check" if chk else "generate", code, out))
+
+        # 7c2. A deleted marker never switches the authoring repository to adopter mode. The second sign is its git
+        #      index (authoring_marker_tracked): an authoring fixture generated clean at VERSION 1.0.5 is made a git
+        #      repository with the marker tracked, then the marker is deleted, VERSION moved to 1.1.1 and a stale
+        #      installed manifest at 1.0.5 left beside it (the review's MINOR A tree). Both modes are exit 2 naming
+        #      the tracked marker, writing nothing (red if the git index is not consulted: the tree then reads as an
+        #      adopter's and passes). The twin, the same tree whose git index never tracked the marker (an adopter's
+        #      repository), passes in both modes, and a directory that is not a git work tree reads as untracked.
+        #      The fixture git calls run under the shared fixture scrub (git_fixture_env: every GIT_* variable
+        #      dropped, a scratch HOME and XDG_CONFIG_HOME, global and system config pinned to os.devnull), so an
+        #      ambient or system git configuration (a core.excludesFile that ignores VERSION, a hook path) cannot
+        #      fail or redirect the fixture's git add.
+        if shutil.which("git") is None:
+            failures.append("NOT RUN: the deleted-marker legs (no git on PATH)")
+        else:
+            from _git_fixture_env import git_fixture_env
+
+            def git_fixture(label, track_marker):
+                fx = pack_fixture("git-" + label, good_src)
+                code, out = capture(fx, False)
+                if code != 0:
+                    failures.append("the {} git fixture expected a clean first generate at VERSION 1.0.5, got "
+                                    "{}\n{}".format(label, code, out))
+                tracked = [".aiqt/authoring.toml", "VERSION"] if track_marker else ["VERSION"]
+                git_env = git_fixture_env()
+                init = subprocess.run(["git", "-c", "init.defaultBranch=main", "-c", "core.fsmonitor=false", "init",
+                                       "-q", str(fx)], capture_output=True, timeout=60, env=git_env, check=False)
+                if init.returncode != 0:
+                    failures.append("the {} git fixture: git init failed ({}): {!r}".format(
+                        label, init.returncode, init.stderr))
+                add = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(fx), "add", "--", *tracked],
+                                     capture_output=True, timeout=60, env=git_env, check=False)
+                if add.returncode != 0:
+                    failures.append("the {} git fixture: git add failed ({}): {!r}".format(
+                        label, add.returncode, add.stderr))
+                (fx / ".aiqt" / "authoring.toml").unlink()
+                (fx / ".aiqt" / "manifest.toml").write_text(_installed_manifest_text("1.0.5"), encoding="utf-8")
+                (fx / "VERSION").write_bytes(b"1.1.1\n")
+                return fx
+
+            fx = git_fixture("marker-tracked-deleted", True)
+            before = {p: p.read_bytes() for p in sorted(fx.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
+            for chk in (True, False):
+                code, out = capture(fx, chk)
+                if (code != 2 or "tracked in this tree's git index but absent on disk" not in out
+                        or "git checkout -- .aiqt/authoring.toml" not in out):
+                    failures.append("an authoring repository whose tracked marker was deleted (VERSION 1.1.1, skill "
+                                    "{}, stale manifest at 1.0.5) expected exit 2 naming the tracked marker ({}), "
+                                    "got {}\n{}".format(zip_versioned_version(), "--check" if chk else "generate",
+                                                       code, out))
+            after = {p: p.read_bytes() for p in sorted(fx.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
+            if after != before:
+                failures.append("a run refused for a deleted tracked marker must write nothing")
+            fx = git_fixture("marker-never-tracked", False)
+            for chk in (False, True):
+                code, out = capture(fx, chk)
+                if code != 0:
+                    failures.append("an adopter git repository that never tracked the marker (VERSION 1.1.1, skill "
+                                    "{}) expected exit 0 ({}), got {}\n{}".format(
+                                        zip_versioned_version(), "--check" if chk else "generate", code, out))
+            if authoring_marker_tracked(tmp / "pack-align-adopter-no-manifest", ".aiqt/authoring.toml"):
+                failures.append("authoring_marker_tracked must be False outside a git work tree")
+        # 7d. The pack VERSION is read bounded and echoed cut, and a non-regular one is refused as an input.
+        #     An oversized VERSION (a megabyte) is exit 2 naming the bound in a short message (red if it is read
+        #     whole and echoed); _echo cuts a long value; a FIFO, a dangling symlink or a
+        #     directory at VERSION is refused as an input, never told to git rm it (RELEASING.md), and a directory
+        #     there is refused by the regular-file check with its descriptor closed (red if os.fdopen meets it
+        #     first: "Is a directory" and a leaked descriptor).
+        big = pack_fixture("version-oversized", good_src)
+        (big / "VERSION").write_bytes(b"1.0.5\n" + b"0" * 1_000_000)
+        for chk in (True, False):
+            code, out = capture(big, chk)
+            if code != 2 or "over {} bytes".format(PACK_VERSION_MAX_BYTES) not in out or len(out) > 2000:
+                failures.append("a 1 MB VERSION expected exit 2 naming the {}-byte bound in a short message ({}), "
+                                "got {} with {} characters of output".format(
+                                    PACK_VERSION_MAX_BYTES, "--check" if chk else "generate", code, len(out)))
+        if len(_echo("x" * 5000)) > _ECHO_MAX_CHARS + 40 or _echo("1.0.5\r\n") != repr("1.0.5\r\n"):
+            failures.append("_echo must cut a long value and keep a short one whole")
+
+        def plant_fifo(p):
+            os.mkfifo(str(p))
+
+        for label, plant in (("fifo", plant_fifo if hasattr(os, "mkfifo") else None),
+                             ("dangling-symlink", lambda p: os.symlink(str(tmp / "no-such-VERSION"), str(p))),
+                             ("directory", lambda p: p.mkdir())):
+            if plant is None:
+                failures.append("NOT RUN: a {} VERSION (no os.mkfifo on this platform)".format(label))
+                continue
+            fx = pack_fixture("version-input-" + label, good_src)
+            (fx / "VERSION").unlink()
+            plant(fx / "VERSION")
+            for chk in (True, False):
+                code, out = capture(fx, chk)
+                if (code != 2 or "never git rm an input" not in out or "git rm VERSION" in out
+                        or "Is a directory" in out):
+                    failures.append("a {} VERSION expected exit 2 refusing it as an input, never git rm ({}), got "
+                                    "{}\n{}".format(label, "--check" if chk else "generate", code, out))
+        dir_fx = tmp / "pack-align-version-input-directory"
+        probe_before = os.open(os.devnull, os.O_RDONLY)
+        os.close(probe_before)
+        dir_fd = _open_root(dir_fx)
+        try:
+            for _ in range(3):
+                try:
+                    _read_output(dir_fd, dir_fx, dir_fx / "VERSION", False, single_link=True, is_input=True)
+                    failures.append("_read_output must refuse a directory at an input")
+                except OSError:
+                    pass
+        finally:
+            os.close(dir_fd)
+        probe_after = os.open(os.devnull, os.O_RDONLY)
+        os.close(probe_after)
+        if probe_after != probe_before:
+            failures.append("_read_output leaked a descriptor refusing a directory (lowest free descriptor {} "
+                            "before, {} after)".format(probe_before, probe_after))
+        # The pack version source changes no output byte, so no GENSRC_OUTPUTS entry declares it (gen_hooks too).
+        for out_decl in GENSRC_OUTPUTS:
+            if {"VERSION", ".aiqt/manifest.toml"} & set(out_decl["sources"]):
+                failures.append("GENSRC_OUTPUTS {}: the pack version source is a check input, not a content "
+                                "source; do not declare it".format(out_decl["target"]))
 
         # 8. The generator never deletes a file under site/downloads, and the top level is ALLOW-LISTED:
         #    a stale versioned zip, any aiqt-skill variant (case, separator, prefix, suffix, 'v', 'latest',
@@ -2557,6 +3060,15 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: well-formed source round-trips clean (SKILL.md and the zips); an unknown "
           "corpus-id, an invalid-UTF-8 target, and a version/zip-literal mismatch each fail closed (exit 2); "
+          "from pack 1.1.1 on a skill version that differs from VERSION fails closed (exit 2, writing nothing) "
+          "while the equal twin builds clean and a pack below 1.1.1 leaves the skill independent, and a "
+          "malformed, symlinked, hard-linked or absent VERSION fails closed (exit 2); the rule applies only in "
+          "the authoring tree: an adopter tree is not re-checked (no manifest, a manifest at 1.0.5, 1.1.1 or "
+          "unparseable, and an own VERSION of 1.1.1, 1.2.0, another format, CRLF, absent, dangling or a "
+          "directory all pass), while an authoring repository whose git-tracked marker was deleted is exit 2, "
+          "and its never-tracked twin passes; an oversized VERSION is refused bounded and a long value echoed cut; a "
+          "FIFO, dangling symlink or directory at VERSION is refused as an input (never git rm), with no "
+          "descriptor leaked; "
           "a drifted SKILL.md is caught (exit 1); nothing is ever deleted: an orphan reserved entry and a "
           "stale versioned zip plus fourteen other undeclared top-level entries (the allow-list) are kept "
           "and named for removal, git rm if tracked or rm if untracked (normal run exit 2 writing nothing, "

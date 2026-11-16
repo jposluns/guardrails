@@ -78,7 +78,9 @@ import json
 import math
 import os
 import re
+import shutil
 import stat
+import subprocess
 import tomllib
 from fractions import Fraction
 from pathlib import Path
@@ -87,6 +89,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
 from _standards import dir_chain_or_absent, dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
+# The pack-version alignment rule shared with the chat skill: one first-version constant for both components.
+from gen_skill import PACK_ALIGN_FIRST_VERSION, pack_alignment_problem, resolve_pack_version  # noqa: E402
 
 # The nested plugin surface, as repo-root-relative forward-slash paths. hooks/ under the plugin root is
 # the reserved subtree (fully generated, orphan-scanned); .claude-plugin/ is NOT walked, only its
@@ -128,6 +132,11 @@ AUTHORING_MARKER_REL = ".aiqt/authoring.toml"
 AUTHORING_MARKER = {"format-version": 1, "role": "pack-authoring-repository"}
 AUTHORING_MARKER_MAX_BYTES = 1_000_000
 AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)
+# The pack version file (generated from changelog.toml by tools/gen_changelog.py). From pack
+# PACK_ALIGN_FIRST_VERSION (gen_skill) on, the [plugin] version must equal the pack version
+# (check_plugin_version), in the authoring tree only, where this file is the pack version
+# (gen_skill.resolve_pack_version, which reads and bounds it); an adopter tree is not re-checked.
+PACK_VERSION_REL = "VERSION"
 # The licence copies (Apache License 2.0 section 4(a) and 4(d)): a recipient of either vendored set, the nested
 # plugin an adopter installs alone or the .aiqt/ set an adopter install creates, must receive a copy of the
 # licence and of the NOTICE. Each LICENCE_FILES member at the repository root is copied BYTE FOR BYTE (read and
@@ -218,7 +227,10 @@ _PRETOOL_BUDGET_LINE_RE = re.compile(
     r"^PRETOOL_BUDGET_SECONDS = HOOK_TIMEOUT_SECONDS - (\d+(?:\.\d+)?)$", re.M | re.ASCII)
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
-# only, it does not affect what this generator produces.
+# only, it does not affect what this generator produces. The sources are the content-bearing inputs only:
+# the pack version source (VERSION in the authoring tree, gen_skill.resolve_pack_version)
+# is read by the alignment check and changes no output byte, so neither generator declares it (gen_skill's
+# GENSRC_OUTPUTS does not either).
 GENSRC_OUTPUTS = (
     {"target": "plugin/aiqt-guardrails-hooks/hooks/", "kind": "tree",
      "sources": (".aiqt/core/hooks/manifest.toml", ".aiqt/core/hooks/scripts/aiqt_hooks.py"),
@@ -627,6 +639,29 @@ def authoring_tree(root):
     return True
 
 
+def check_plugin_version(root, plugin, name):
+    """Fail closed (ValueError) when the [plugin] version differs from the pack version from
+    PACK_ALIGN_FIRST_VERSION on (gen_skill.pack_alignment_problem, the same rule and first version as the chat
+    skill). The rule is a release-time rule of the authoring repository: gen_skill.resolve_pack_version, the one
+    reader both generators share, applies it only in the authoring tree (authoring_tree), where the root VERSION
+    is the pack version; an adopter tree is not re-checked (None: its own root VERSION and its installed
+    .aiqt/manifest.toml are never read for the rule). In the authoring tree an absent VERSION cannot be evaluated
+    (exit 2), so deleting VERSION never turns the rule off, and a symlinked, hard-linked, non-regular, oversized
+    or malformed VERSION is exit 2 too. Deleting the marker does not turn it off where the git index tracks the
+    marker (exit 2, gen_skill.authoring_marker_tracked); outside a git work tree, or with the marker also
+    untracked, a deleted marker reads as an adopter tree (the residual resolve_pack_version discloses). The
+    comparison is against the SOURCE value, before render_plugin_json, so a plugin.json that faithfully mirrors
+    a wrong manifest version still fails --check. Below the first version the plugin stays independently
+    versioned (0.5.0 under pack 1.0.5 builds)."""
+    resolved = resolve_pack_version(root)
+    if resolved is None:
+        return
+    problem = pack_alignment_problem("hooks plugin", plugin["version"], resolved[0], source=resolved[1])
+    if problem is not None:
+        raise ValueError("{}: [plugin] {}; set [plugin] version in .aiqt/core/hooks/manifest.toml and "
+                         "regenerate".format(name, problem))
+
+
 def licence_copies(root):
     """The licence copies for the authoring tree at root: {rel: bytes}, each LICENCE_FILES member read as
     bytes from the repository root and keyed under every LICENCE_HOMES directory. Raises ValueError on a
@@ -657,12 +692,15 @@ def licence_copies(root):
 def build_desired(root, src_dir):
     """The desired generated surface for an install rooted at root: {rel: content}. Raises ValueError
     or OSError on any malformed or unreadable input (the caller maps both to exit 2). Parameterized
-    on root so conformance.py can reuse it under --root (the C5 check) without calling main()."""
+    on root so conformance.py can reuse it under --root (the C5 check) without calling main(). From pack
+    PACK_ALIGN_FIRST_VERSION on, the [plugin] version must equal the pack version (check_plugin_version): the
+    root VERSION, in the authoring tree only; an adopter's install is not re-checked."""
     manifest_path = src_dir / "manifest.toml"
     script_src = src_dir / "scripts" / SCRIPT_NAME
     if not _exists(manifest_path):
         raise ValueError("{} exists but holds no manifest.toml".format(src_dir))
     plugin, hooks = load_manifest(manifest_path)
+    check_plugin_version(root, plugin, manifest_path.name)
     rules_dir = root / ".aiqt" / "core" / "rules"
     # dir_or_absent (not is_dir): a corpus that is there but cannot be read as a directory (a
     # regular file, or a symlink that is dangling, whose target is not a directory or resolves outside the
@@ -797,7 +835,12 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
 def main():
     args = sys.argv[1:]
     if "--self-test" in args:
-        return self_test_main()
+        # The whole self-test runs inside the fixture git lifecycle, so the code under test
+        # (gen_skill.authoring_marker_tracked's git ls-files, which strips GIT_* and so drops the scrub's config
+        # pins) reads no caller HOME, XDG or system git configuration either.
+        from _git_fixture_env import fixture_git_lifecycle
+        with fixture_git_lifecycle():
+            return self_test_main()
     return run(repo_root(), "--check" in args)
 
 
@@ -940,6 +983,18 @@ def main():
 #      copy missing, differing by one byte, or with its line ends flipped fails --check (exit 1) and a write
 #      run restores it; a root source that is absent or a symlink fails closed (exit 2); build_desired() never
 #      carries them; and an adopter-shaped tree (no marker) never creates, overwrites or deletes them.
+#  37. the plugin version follows the pack version from PACK_ALIGN_FIRST_VERSION (pinned literally as 1.1.1)
+#      on: a tree generated clean at VERSION 1.0.5, whose plugin.json therefore mirrors its manifest version,
+#      fails closed (exit 2, in --check and a normal run, nothing written) once VERSION reads 1.1.1 or 1.2.0;
+#      the equal twins generate and check clean with that version in plugin.json; VERSION 1.0.5 leaves the
+#      plugin independent (main before the 1.1.1 cut); an absent VERSION cannot be evaluated (exit 2 in both
+#      modes, nothing written, build_desired refuses it); a malformed, oversized, symlinked, hard-linked,
+#      directory or FIFO VERSION fails closed (exit 2; a non-regular one is refused as an input, never git
+#      rm); and build_desired itself refuses the differing tree (conformance.py C5 reuses it). Those legs run
+#      in authoring trees. 37b: an adopter tree (no marker) is not re-checked: with or without an installed
+#      .aiqt/manifest.toml (at 1.0.5, 1.1.1 or unparseable) and whatever its own VERSION, it generates and checks
+#      clean; an authoring repository whose git-tracked marker was deleted is exit 2, its never-tracked twin
+#      passes. 37c: no GENSRC_OUTPUTS entry declares the pack version source.
 # Every vector that removes the entries its own faults caused (cases 20b, 21b, 27 and 28)
 # does so by PROVENANCE, never by message text: each named entry from the staged cleanup,
 # the removal and absence helpers and the launch diagnostic carries its stage and the
@@ -1010,6 +1065,20 @@ def _build_tree(base, cid="tsthk1", residue="A self-test control catches nothing
     (src / "hooks" / "scripts" / SCRIPT_NAME).write_text(_SCRIPT, encoding="utf-8")
     (src / "hooks" / "manifest.toml").write_text(
         _MANIFEST.format(cid=cid, residue=residue), encoding="utf-8")
+    # The root VERSION is a declared input of the plugin/pack alignment rule in a tree given the authoring marker
+    # (an absent one is exit 2 there), so every synthetic tree carries one below PACK_ALIGN_FIRST_VERSION, where
+    # the plugin stays independent (the state of main before the 1.1.1 cut). A tree without the marker (an
+    # adopter's) is not re-checked and never reads it. No installed .aiqt/manifest.toml is written: the rule never
+    # reads one. Case 37 overwrites or removes VERSION and plants a manifest where a leg needs one.
+    (base / PACK_VERSION_REL).write_bytes(b"1.0.5\n")
+
+
+def _write_installed_manifest(base, release_version):
+    """The header of the installed pack manifest tools/gen_manifest.py writes, recording release_version (case
+    37b plants one in adopter trees to show the alignment rule never reads it)."""
+    (base / ".aiqt" / "manifest.toml").write_text(
+        "# generated by tools/gen_manifest.py; do not hand-edit (VER-CORE 4.1)\nformat-version = 1\n"
+        "release-version = \"{}\"\ngenesis = false\n".format(release_version), encoding="utf-8")
 
 
 # A second control appended to the synthetic manifest for the project-settings cases. Its matcher differs
@@ -4170,6 +4239,250 @@ def self_test_main(_nested=False):
                 held = None
             if held != planted.get(rel):
                 failures.append("licence copies: an adopter run must never create, overwrite or delete {}".format(rel))
+
+        # 37. The plugin version follows the pack version from the first aligned pack release on. The first
+        #     version is pinned literally, so moving it is a deliberate edit of this suite too. The legs below
+        #     37b run in AUTHORING trees (the marker written), where the pack version is the root VERSION
+        #     (gen_skill.resolve_pack_version). The differing
+        #     trees are generated clean at VERSION 1.0.5 first, so their plugin.json faithfully mirrors the
+        #     manifest's 0.1.0; adding VERSION 1.1.1 (or 1.2.0) must then fail closed in --check and in a normal
+        #     run (exit 2, naming both versions, nothing written), and build_desired itself must refuse it
+        #     (conformance.py C5 reuses it). Removing check_plugin_version turns those legs red, since the
+        #     mirrored surface is otherwise drift-clean. The equal twins generate and check clean and carry
+        #     the pack version in plugin.json; VERSION 1.0.5 leaves the plugin at 0.1.0 (pre-cut main); an
+        #     ABSENT VERSION cannot be evaluated (exit 2; treating it as outside the rule turns that leg red);
+        #     a malformed, oversized, symlinked, hard-linked or directory VERSION fails closed (exit 2; dropping
+        #     the link-count check turns the hard-link leg red).
+        if PACK_ALIGN_FIRST_VERSION != "1.1.1":
+            failures.append("PACK_ALIGN_FIRST_VERSION must be 1.1.1 (the documented first aligned pack "
+                            "release), got {!r}".format(PACK_ALIGN_FIRST_VERSION))
+
+        def pack_run(tree, check):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                rc = run(tree, check, project_ids=())
+            return rc, out.getvalue()
+
+        def pack_tree(name, authoring=True):
+            tree = tmp / name
+            tree.mkdir()
+            _build_tree(tree)
+            if authoring:
+                _write_marker(tree)
+            return tree
+
+        for pack in ("1.1.1", "1.2.0"):
+            tree = pack_tree("pack-differ-" + pack)
+            if pack_run(tree, False)[0] != 0 or pack_run(tree, True)[0] != 0:
+                failures.append("pack alignment ({}): the tree must generate and check clean at VERSION "
+                                "1.0.5".format(pack))
+                continue
+            plugin_bytes = (tree / PLUGIN_JSON_REL).read_bytes()
+            if json.loads(plugin_bytes).get("version") != "0.1.0":
+                failures.append("pack alignment ({}): plugin.json must mirror the manifest version 0.1.0"
+                                .format(pack))
+            (tree / "VERSION").write_bytes(pack.encode("ascii") + b"\n")
+            for check in (True, False):
+                rc, out = pack_run(tree, check)
+                if rc != 2 or "'0.1.0' differs from the pack version '{}'".format(pack) not in out:
+                    failures.append("pack alignment ({}): a plugin at 0.1.0 under pack {} expected exit 2 naming "
+                                    "both versions ({}), got {}: {!r}".format(
+                                        pack, pack, "--check" if check else "generate", rc, out.strip()))
+            if (tree / PLUGIN_JSON_REL).read_bytes() != plugin_bytes:
+                failures.append("pack alignment ({}): a refused run must write nothing".format(pack))
+            try:
+                build_desired(tree, tree / ".aiqt" / "core" / "hooks")
+                failures.append("pack alignment ({}): build_desired must refuse a differing plugin version"
+                                .format(pack))
+            except ValueError as exc:
+                if "differs from the pack version" not in str(exc):
+                    failures.append("pack alignment ({}): build_desired refused for another reason: {}"
+                                    .format(pack, exc))
+            twin = pack_tree("pack-equal-" + pack)
+            _mutate(twin, 'version = "0.1.0"', 'version = "{}"'.format(pack))
+            (twin / "VERSION").write_bytes(pack.encode("ascii") + b"\n")
+            if pack_run(twin, False)[0] != 0 or pack_run(twin, True)[0] != 0:
+                failures.append("pack alignment ({}): a plugin at the pack version expected a clean generate "
+                                "and check".format(pack))
+            elif json.loads((twin / PLUGIN_JSON_REL).read_text(encoding="utf-8")).get("version") != pack:
+                failures.append("pack alignment ({}): plugin.json must carry the pack version".format(pack))
+        below = pack_tree("pack-below-first")
+        (below / "VERSION").write_bytes(b"1.0.5\n")
+        if pack_run(below, False)[0] != 0 or pack_run(below, True)[0] != 0:
+            failures.append("pack alignment: a plugin at 0.1.0 under pack 1.0.5 (below the first aligned "
+                            "release) expected a clean generate and check")
+        # An absent VERSION cannot be evaluated: VERSION is a declared input, so deleting it must never turn
+        # the rule off. The tree is generated clean at 1.0.5 first, so its plugin.json is drift-clean; with
+        # VERSION removed both modes exit 2 naming the missing input and write nothing, and build_desired
+        # (conformance.py C5) refuses it too.
+        absent = pack_tree("pack-absent")
+        if pack_run(absent, False)[0] != 0:
+            failures.append("pack alignment: the absent-VERSION tree must generate clean at VERSION 1.0.5 first")
+        else:
+            absent_plugin = (absent / PLUGIN_JSON_REL).read_bytes()
+            (absent / "VERSION").unlink()
+            for check in (True, False):
+                rc, out = pack_run(absent, check)
+                if rc != 2 or "the pack VERSION file is absent" not in out:
+                    failures.append("pack alignment: an absent VERSION expected exit 2 (cannot evaluate; {}), "
+                                    "got {}: {!r}".format("--check" if check else "generate", rc, out.strip()))
+            if (absent / PLUGIN_JSON_REL).read_bytes() != absent_plugin:
+                failures.append("pack alignment: a run refused for an absent VERSION must write nothing")
+            try:
+                build_desired(absent, absent / ".aiqt" / "core" / "hooks")
+                failures.append("pack alignment: build_desired must refuse a tree with no VERSION")
+            except ValueError as exc:
+                if "the pack VERSION file is absent" not in str(exc):
+                    failures.append("pack alignment: build_desired refused an absent VERSION for another "
+                                    "reason: {}".format(exc))
+
+        def hard_link(p):
+            # VERSION itself is well-formed and below the first version; only its second link is wrong.
+            p.write_bytes(b"1.0.5\n")
+            os.link(str(p), str(p.parent.parent / (p.parent.name + "-VERSION-twin")))
+
+        for label, make, needle in (
+                ("hardlink", hard_link, "hard links"),
+                ("no-newline", lambda p: p.write_bytes(b"1.0.5"), "not a bare MAJOR.MINOR.PATCH"),
+                ("crlf", lambda p: p.write_bytes(b"1.0.5\r\n"), "not a bare MAJOR.MINOR.PATCH"),
+                ("prefixed", lambda p: p.write_bytes(b"v1.1.1\n"), "not a bare MAJOR.MINOR.PATCH"),
+                ("non-ascii-digits", lambda p: p.write_bytes("1.١.1\n".encode("utf-8")),
+                 "not a bare MAJOR.MINOR.PATCH"),
+                ("non-utf8", lambda p: p.write_bytes(b"\xff1.1.1\n"), "utf-8"),
+                ("oversized", lambda p: p.write_bytes(b"1.0.5\n" + b"0" * 64), "over 64 bytes"),
+                # A non-regular input is refused naming it an input, never told to git rm it (RELEASING.md).
+                ("directory", lambda p: p.mkdir(), "never git rm an input"),
+                ("symlink", lambda p: os.symlink(str(below / "VERSION"), str(p)), "never git rm an input"),
+                ("dangling-symlink", lambda p: os.symlink(str(tmp / "no-such-VERSION"), str(p)),
+                 "never git rm an input"),
+                ("fifo", lambda p: os.mkfifo(str(p)), "never git rm an input")):
+            tree = pack_tree("pack-bad-" + label)
+            (tree / "VERSION").unlink()
+            make(tree / "VERSION")
+            rc, out = pack_run(tree, True)
+            if rc != 2 or needle not in out or "git rm VERSION" in out:
+                failures.append("pack alignment: a {} VERSION expected exit 2 naming {!r}, got {}: {!r}".format(
+                    label, needle, rc, out.strip()))
+
+        # 37b. The rule is a release-time rule of the authoring repository (gen_skill.resolve_pack_version), so a
+        #      tree WITHOUT the authoring marker (an adopter's) is not re-checked and is judged as before the rule
+        #      existed: a plugin at 0.1.0 with no installed .aiqt/manifest.toml, with one at 1.0.5 or at 1.1.1, or
+        #      with an unparseable, symlinked or hard-linked one, and whatever the adopter's own VERSION is (1.1.1,
+        #      1.2.0, another format, CRLF, absent, a dangling symlink, a directory), generates and checks clean,
+        #      and build_desired (conformance.py C5) accepts it (red if the adopter's VERSION or manifest is read
+        #      for the rule). In the authoring tree the manifest is never consulted: VERSION 1.1.1 under a stale
+        #      manifest at 1.0.5 is refused. A deleted marker never switches the authoring repository to adopter
+        #      mode where its git index tracks the marker (gen_skill.authoring_marker_tracked): that tree, with
+        #      VERSION 1.1.1 and a stale manifest at 1.0.5 (the review's MINOR A tree), is exit 2 in both modes
+        #      naming the tracked marker, nothing written (red if the git index is not consulted); its twin whose
+        #      index never tracked the marker passes.
+        def manifest_link(p):
+            p.parent.joinpath("manifest-elsewhere.toml").write_text("format-version = 1\n", encoding="utf-8")
+            os.symlink(str(p.parent / "manifest-elsewhere.toml"), str(p))
+
+        def manifest_hardlink(p):
+            _write_installed_manifest(p.parent.parent, "1.1.1")
+            os.link(str(p), str(p.parent / "manifest-twin.toml"))
+
+        for label, version, manifest in (
+                ("no-manifest", b"1.0.5\n", None),
+                ("no-manifest-version-1.1.1", b"1.1.1\n", None),
+                ("manifest-1.0.5", b"1.0.5\n", "1.0.5"),
+                ("manifest-1.1.1", b"0.4.0\n", "1.1.1"),
+                ("manifest-unparseable", b"1.0.5\n", lambda p: p.write_text("format-version = [\n",
+                                                                            encoding="utf-8")),
+                ("manifest-symlink", b"1.0.5\n", manifest_link),
+                ("manifest-hardlink", b"1.0.5\n", manifest_hardlink),
+                ("version-1.2.0", b"1.2.0\n", "1.0.5"),
+                ("version-other-format", b"v2.3\n", None),
+                ("version-crlf", b"0.4.0\r\n", None),
+                ("version-absent", None, None),
+                ("version-dangling-symlink", "link", None),
+                ("version-directory", "dir", None)):
+            tree = pack_tree("adopter-" + label, authoring=False)
+            (tree / "VERSION").unlink()
+            if version == "link":
+                os.symlink(str(tmp / "no-such-VERSION"), str(tree / "VERSION"))
+            elif version == "dir":
+                (tree / "VERSION").mkdir()
+            elif version is not None:
+                (tree / "VERSION").write_bytes(version)
+            if isinstance(manifest, str):
+                _write_installed_manifest(tree, manifest)
+            elif manifest is not None:
+                manifest(tree / ".aiqt" / "manifest.toml")
+            for check in (False, True):
+                rc, out = pack_run(tree, check)
+                if rc != 0:
+                    failures.append("pack alignment: an adopter tree ({}; plugin 0.1.0) expected exit 0 ({}): the "
+                                    "rule is not re-checked outside the authoring tree, got {}: {!r}".format(
+                                        label, "--check" if check else "generate", rc, out.strip()))
+            try:
+                build_desired(tree, tree / ".aiqt" / "core" / "hooks")
+            except (ValueError, OSError) as exc:
+                failures.append("pack alignment: build_desired must accept the adopter tree ({}), got: {}".format(
+                    label, exc))
+        tree = pack_tree("authoring-stale-manifest")
+        _write_installed_manifest(tree, "1.0.5")
+        (tree / "VERSION").write_bytes(b"1.1.1\n")
+        for check in (True, False):
+            rc, out = pack_run(tree, check)
+            if rc != 2 or "differs from the pack version '1.1.1' (VERSION)" not in out:
+                failures.append("pack alignment: an authoring tree at VERSION 1.1.1 with a stale installed manifest at "
+                                "1.0.5 expected exit 2 reading VERSION ({}), got {}: {!r}".format(
+                                    "--check" if check else "generate", rc, out.strip()))
+        # The fixture git calls run under the shared fixture scrub (git_fixture_env: every GIT_* variable dropped, a
+        # scratch HOME and XDG_CONFIG_HOME, global and system config pinned to os.devnull), so an ambient or system
+        # git configuration cannot fail or redirect the fixture's git add.
+        if shutil.which("git") is None:
+            failures.append("pack alignment: NOT RUN: the deleted-marker legs (no git on PATH)")
+        else:
+            from _git_fixture_env import git_fixture_env
+            git_env = git_fixture_env()
+            for label, track_marker, want in (("marker-tracked-deleted", True, 2), ("marker-never-tracked", False, 0)):
+                tree = pack_tree("git-" + label)
+                if pack_run(tree, False)[0] != 0:
+                    failures.append("pack alignment: the {} git tree must generate clean at VERSION 1.0.5".format(
+                        label))
+                    continue
+                tracked = [AUTHORING_MARKER_REL, PACK_VERSION_REL] if track_marker else [PACK_VERSION_REL]
+                init = subprocess.run(["git", "-c", "init.defaultBranch=main", "-c", "core.fsmonitor=false", "init",
+                                       "-q", str(tree)], capture_output=True, timeout=60, env=git_env, check=False)
+                if init.returncode != 0:
+                    failures.append("pack alignment: the {} git tree: git init failed ({}): {!r}".format(
+                        label, init.returncode, init.stderr))
+                add = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(tree), "add", "--", *tracked],
+                                     capture_output=True, timeout=60, env=git_env, check=False)
+                if add.returncode != 0:
+                    failures.append("pack alignment: the {} git tree: git add failed ({}): {!r}".format(
+                        label, add.returncode, add.stderr))
+                plugin_bytes = (tree / PLUGIN_JSON_REL).read_bytes()
+                (tree / AUTHORING_MARKER_REL).unlink()
+                _write_installed_manifest(tree, "1.0.5")
+                (tree / PACK_VERSION_REL).write_bytes(b"1.1.1\n")
+                for check in (True, False):
+                    rc, out = pack_run(tree, check)
+                    if rc != want or (want == 2 and (
+                            "tracked in this tree's git index but absent on disk" not in out
+                            or "git checkout -- .aiqt/authoring.toml" not in out)):
+                        failures.append("pack alignment: the {} git tree (VERSION 1.1.1, plugin 0.1.0, stale manifest "
+                                        "at 1.0.5) expected exit {} ({}), got {}: {!r}".format(
+                                            label, want, "--check" if check else "generate", rc, out.strip()))
+                if (tree / PLUGIN_JSON_REL).read_bytes() != plugin_bytes:
+                    failures.append("pack alignment: the {} git tree run must leave plugin.json unchanged".format(
+                        label))
+
+        # 37c. The pack version source changes no output byte, so no GENSRC_OUTPUTS entry declares it (the same in
+        #      gen_skill); the content-bearing hooks manifest stays declared for every output rendered from it,
+        #      which is every output except the licence copies (case 36), whose sources are LICENSE and NOTICE.
+        for out_decl in GENSRC_OUTPUTS:
+            if {"VERSION", ".aiqt/manifest.toml"} & set(out_decl["sources"]):
+                failures.append("GENSRC_OUTPUTS {}: the pack version source is a check input, not a content "
+                                "source; do not declare it".format(out_decl["target"]))
+            if (out_decl["target"] not in AUTHORING_SCOPED_REL
+                    and ".aiqt/core/hooks/manifest.toml" not in out_decl["sources"]):
+                failures.append("GENSRC_OUTPUTS {}: the hooks manifest must stay a declared source".format(
+                    out_decl["target"]))
     finally:
         try:
             _rmtree_verified(tmp, "suite temp cleanup")
@@ -4306,7 +4619,17 @@ def self_test_main(_nested=False):
           "in the authoring tree the root LICENSE and NOTICE are copied byte for byte under the plugin "
           "root and .aiqt/, each copy missing, one byte different or with its line ends flipped fails "
           "the check and is restored by a write run, an absent or symlinked root source fails closed, "
-          "build_desired() never carries them, and an adopter-shaped tree never gets, loses or changes them"
+          "build_desired() never carries them, and an adopter-shaped tree never gets, loses or changes them; "
+          "from pack 1.1.1 on a plugin version that differs from VERSION fails closed (exit 2, nothing "
+          "written) even when plugin.json mirrors the manifest, while the equal twins generate clean, pack "
+          "1.0.5 leaves the plugin independent, an absent VERSION cannot be evaluated (exit 2), and a "
+          "malformed, oversized, symlinked, hard-linked, directory or FIFO VERSION fails closed (a non-regular "
+          "one refused as an input, never git rm); the rule applies only in the authoring tree: an adopter "
+          "tree is not re-checked (no manifest, a manifest at 1.0.5, 1.1.1, unparseable, symlinked or "
+          "hard-linked, and an own VERSION of 1.1.1, 1.2.0, another format, CRLF, absent, dangling or a "
+          "directory all pass), an authoring tree reads VERSION, never a stale manifest, an authoring "
+          "repository whose git-tracked marker was deleted is exit 2 while its never-tracked twin passes, "
+          "and no GENSRC_OUTPUTS entry declares the pack version source"
           + note)
     return 0
 
