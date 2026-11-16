@@ -11353,7 +11353,7 @@ def self_test(report_path=None):
             [p10_case(text) for text in p10_lookalikes_marked], [(0, [])] * len(p10_lookalikes_marked),
             P10_LOOKALIKE_RE=re.compile(r"[`|*_>#+\s\d.)-]*+(BRIEF[-_\s]*+DIFF)[`|*_\s]*+(?:[:=]|[0-9a-f]{7})", re.I),
             P10_LABEL_CONFUSABLES={}))
-        # with the markup class read as Unicode (the [\W\d_] of round 2), a non-ASCII letter before the label is a
+        # with the markup class read as Unicode (a bare [\W\d_] class), a non-ASCII letter before the label is a
         # word character, so the line declares nothing and the brief passes
         check("revert/p10-lookalike-ascii-class-red", *flip(
             [p10_case(text) for text in p10_lookalikes_nonascii[:2]], [(0, [])] * 2,
