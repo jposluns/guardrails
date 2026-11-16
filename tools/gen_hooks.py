@@ -7,6 +7,9 @@ This tool renders them into the shipped, NESTED plugin surface under plugin/aiqt
   plugin/aiqt-guardrails-hooks/hooks/hooks.json             the plugin hook config
   plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py  the dispatcher, copied byte-identical
   plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json   the plugin manifest
+  plugin/aiqt-guardrails-hooks/LICENSE, .../NOTICE          the root LICENSE and NOTICE, copied byte for byte
+  .aiqt/LICENSE, .aiqt/NOTICE                               the same two copies for the .aiqt/ set
+                                                            (both pairs in the authoring tree only)
   .claude/settings.json                                     this repository's own project hook registration
                                                             (the authoring tree only, never an adopter tree)
 The plugin is nested (not the whole repo) so an adopter installs only the plugin, never the authoring
@@ -125,6 +128,29 @@ AUTHORING_MARKER_REL = ".aiqt/authoring.toml"
 AUTHORING_MARKER = {"format-version": 1, "role": "pack-authoring-repository"}
 AUTHORING_MARKER_MAX_BYTES = 1_000_000
 AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)
+# The licence copies (Apache License 2.0 section 4(a) and 4(d)): a recipient of either vendored set, the nested
+# plugin an adopter installs alone or the .aiqt/ set an adopter install creates, must receive a copy of the
+# licence and of the NOTICE. Each LICENCE_FILES member at the repository root is copied BYTE FOR BYTE (read and
+# compared as bytes, never decoded, so a line-ending or encoding change is drift) into each LICENCE_HOMES
+# directory. run() renders them ONLY in the authoring tree (authoring_tree), because in an adopter tree the root
+# LICENSE and NOTICE are the adopter's own: there the shipped copies are never written, compared or deleted.
+# build_desired() never carries them, so conformance.py C5 does not oblige an adopter install to hold them. They
+# sit outside the reserved hooks/ subtree and are never orphan-pruned. A root source that is absent or is not a
+# regular file (a symlink is not followed) fails closed (exit 2).
+LICENCE_FILES = ("LICENSE", "NOTICE")
+LICENCE_HOMES = (PLUGIN_ROOT_REL, ".aiqt")
+# The authoring-SCOPED roster: SHIPPED paths this tool generates and drift-checks ONLY in the authoring tree, the
+# licence copies above (every LICENCE_HOMES x LICENCE_FILES path; self-test case 36 pins the equality). Unlike
+# AUTHORING_ONLY_REL these ship: they keep their release class, because gen_manifest.check_authoring_only (the
+# never-ship check) reads AUTHORING_ONLY_REL alone, so they are never on that roster. gen_gensrc reads this
+# roster statically (read_authoring_roster with SCOPED_ROSTER_NAME) and scopes their registry entries
+# "authoring", so gensrc_guard honours them only where the authoring marker is exact, matching run(), which
+# never touches them in an adopter tree. gen_manifest.cross_check_exclusions exempts only scoped entries that are
+# also on AUTHORING_ONLY_REL, so an EXACT [[exclusion]] literal for one of these copies is refused as
+# swallowing a gensrc target. The same binding rules as AUTHORING_ONLY_REL apply: a tuple of str literals bound
+# once by one plain top-level assignment.
+AUTHORING_SCOPED_REL = (".aiqt/LICENSE", ".aiqt/NOTICE", "plugin/aiqt-guardrails-hooks/LICENSE",
+                        "plugin/aiqt-guardrails-hooks/NOTICE")
 
 # The event whitelist, in the fixed render order (doc-confirmed event names, 2026-08-17; SessionStart
 # and TeammateIdle re-confirmed against the hooks reference 2026-08-29). PostToolUseFailure, the tool
@@ -202,6 +228,18 @@ GENSRC_OUTPUTS = (
      "regenerate": "python3 tools/gen_hooks.py"},
     {"target": ".claude/settings.json", "kind": "file",
      "sources": (".aiqt/core/hooks/manifest.toml",),
+     "regenerate": "python3 tools/gen_hooks.py"},
+    {"target": "plugin/aiqt-guardrails-hooks/LICENSE", "kind": "file",
+     "sources": ("LICENSE",),
+     "regenerate": "python3 tools/gen_hooks.py"},
+    {"target": "plugin/aiqt-guardrails-hooks/NOTICE", "kind": "file",
+     "sources": ("NOTICE",),
+     "regenerate": "python3 tools/gen_hooks.py"},
+    {"target": ".aiqt/LICENSE", "kind": "file",
+     "sources": ("LICENSE",),
+     "regenerate": "python3 tools/gen_hooks.py"},
+    {"target": ".aiqt/NOTICE", "kind": "file",
+     "sources": ("NOTICE",),
      "regenerate": "python3 tools/gen_hooks.py"},
 )
 
@@ -722,6 +760,33 @@ def authoring_tree(root):
     return True
 
 
+def licence_copies(root):
+    """The licence copies for the authoring tree at root: {rel: bytes}, each LICENCE_FILES member read as
+    bytes from the repository root and keyed under every LICENCE_HOMES directory. Raises ValueError on a
+    source that is absent or is not a regular file (lstat first, so a symlink is never followed and a FIFO
+    never blocks; the open is O_NOFOLLOW and re-checked with fstat), and OSError on an unreadable one; the
+    caller maps both to exit 2."""
+    out = {}
+    for name in LICENCE_FILES:
+        path = root / name
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            raise ValueError("{}: the licence source is absent; the vendored copies cannot be "
+                             "generated (cannot evaluate)".format(name)) from None
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("{}: the licence source must be a regular file (a symlink is not "
+                             "followed)".format(name))
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with open(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise ValueError("{}: the licence source must be a regular file".format(name))
+            data = handle.read()
+        for home in LICENCE_HOMES:
+            out[home + "/" + name] = data
+    return out
+
+
 def build_desired(root, src_dir):
     """The desired generated surface for an install rooted at root: {rel: content}. Raises ValueError
     or OSError on any malformed or unreadable input (the caller maps both to exit 2). Parameterized
@@ -760,7 +825,9 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
     registering project_ids is reconciled too, outside build_desired() so conformance.py C5 never requires
     it of an adopter. In any other tree it is not in the desired set, so it is never written or compared,
     and it is never pruned: .claude/ is not a reserved subtree. The self-test's synthetic manifests carry
-    no project control, so its plugin-surface cases pass project_ids=()."""
+    no project control, so its plugin-surface cases pass project_ids=(). In the authoring tree the licence
+    copies (licence_copies) are reconciled too, whatever project_ids holds, compared and written as bytes; in
+    any other tree they are never written, compared or deleted."""
     src_dir = root / ".aiqt" / "core" / "hooks"
     desired = {}
     try:
@@ -777,9 +844,11 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
             return 2
         if dir_present(src_dir, root=root):
             desired = build_desired(root, src_dir)
-            if project_ids and authoring_tree(root):
-                _plugin, hooks = load_manifest(src_dir / "manifest.toml")
-                desired[PROJECT_SETTINGS_REL] = render_project_settings(hooks, project_ids)
+            if authoring_tree(root):
+                if project_ids:
+                    _plugin, hooks = load_manifest(src_dir / "manifest.toml")
+                    desired[PROJECT_SETTINGS_REL] = render_project_settings(hooks, project_ids)
+                desired.update(licence_copies(root))
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))
         return 2
@@ -813,12 +882,22 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
                 return 2
         for rel, content in sorted(desired.items()):
             target = root / rel
-            current = target.read_text(encoding="utf-8") if _exists(target) else None
+            # A bytes value (a licence copy) is compared and written as bytes, so the copy is byte for byte.
+            raw = isinstance(content, bytes)
+            if not _exists(target):
+                current = None
+            elif raw:
+                current = target.read_bytes()
+            else:
+                current = target.read_text(encoding="utf-8")
             if current != content:
                 drift.append(rel)
                 if not check:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(content, encoding="utf-8")
+                    if raw:
+                        target.write_bytes(content)
+                    else:
+                        target.write_text(content, encoding="utf-8")
         # Orphan scan, scoped to the RESERVED plugin hooks/ subtree (100% generated) plus the one
         # managed .claude-plugin/plugin.json; nothing else is ever walked, written, or deleted.
         if probed[hooks_dir]:
@@ -989,7 +1068,12 @@ def main():
 #      refused just below it and generate just above it, so the rule cannot narrow to the onFailure
 #      predicate or to the first hook; with the switch false or absent the below, at and above values
 #      still generate and render the default timeout.
-#  36. hook coverage: the project settings render and the plugin hooks.json render (synthetic and this
+#  36. the licence copies: an authoring tree generates LICENSE and NOTICE under the plugin root and under .aiqt/
+#      byte-identical to the root sources (a CRLF, non-ASCII NOTICE fixture included) and --check is clean; each
+#      copy missing, differing by one byte, or with its line ends flipped fails --check (exit 1) and a write
+#      run restores it; a root source that is absent or a symlink fails closed (exit 2); build_desired() never
+#      carries them; and an adopter-shaped tree (no marker) never creates, overwrites or deletes them.
+#  37. hook coverage: the project settings render and the plugin hooks.json render (synthetic and this
 #      repository's manifest, switch off and on) each round-trip through registered_handlers and cover their
 #      controls; a handler under a script that is not aiqt_hooks.py, a settings string that is not the
 #      anchored isolated launcher, one carrying any other shell text (a list operator, comment, pipe,
@@ -1104,8 +1188,17 @@ def _padded_marker(size):
     return _MARKER_TEXT + "#" + "x" * (size - len(_MARKER_TEXT) - 2) + "\n"
 
 
+#   The root licence sources an authoring tree copies (case 36). The NOTICE fixture carries CRLF line ends and a
+# non-ASCII character, so a copy that decoded, normalized or re-encoded the bytes would differ.
+_LICENCE_FIXTURES = {"LICENSE": b"Self-test licence text\nsecond line\n",
+                     "NOTICE": b"Self-test NOTICE\r\nTrademark\xe2\x84\xa2 line\r\n"}
+
+
 def _write_marker(base, text=_MARKER_TEXT):
     (base / ".aiqt" / "authoring.toml").write_text(text, encoding="utf-8")
+    # An authoring tree renders the licence copies from the root sources, so every marker fixture carries them.
+    for name, data in _LICENCE_FIXTURES.items():
+        (base / name).write_bytes(data)
 
 
 def _build_project_tree(base, authoring=True):
@@ -4134,7 +4227,94 @@ def self_test_main(_nested=False):
                 ("second-above", "second", 11, 0, ())):
             fit_case(label, switch_on, timeout, want, needles=needles, shape=shape)
 
-        # 36. hook coverage, the parser tools/orch_doctor.py --hook-coverage reads through (T1 to T3 of
+        # 36. The licence copies. The four paths are spelled literally (never built from LICENCE_HOMES), so a
+        #     dropped home or a renamed file fails here.
+        copy_rels = ("plugin/aiqt-guardrails-hooks/LICENSE", "plugin/aiqt-guardrails-hooks/NOTICE",
+                     ".aiqt/LICENSE", ".aiqt/NOTICE")
+        # The authoring-scoped roster (gen_gensrc scopes these registry entries "authoring") names exactly the
+        # copies run() generates only in the authoring tree, each a declared GENSRC_OUTPUTS file, and none is on
+        # the never-ship AUTHORING_ONLY_REL roster (the copies ship).
+        declared_files = {d["target"] for d in GENSRC_OUTPUTS if d["kind"] == "file"}
+        if (sorted(AUTHORING_SCOPED_REL) != sorted(copy_rels)
+                or sorted(AUTHORING_SCOPED_REL) != sorted("{}/{}".format(home, name) for home in LICENCE_HOMES
+                                                          for name in LICENCE_FILES)
+                or not set(AUTHORING_SCOPED_REL) <= declared_files
+                or set(AUTHORING_SCOPED_REL) & set(AUTHORING_ONLY_REL)):
+            failures.append("licence copies: AUTHORING_SCOPED_REL must name exactly the four declared copies, "
+                            "off AUTHORING_ONLY_REL, got {!r}".format(AUTHORING_SCOPED_REL))
+        lic = tmp / "licence-copies"
+        lic.mkdir()
+        _build_project_tree(lic)
+        if run_project(lic, check=False) != 0 or run_project(lic, check=True) != 0:
+            failures.append("licence copies: an authoring tree expected a clean generate and a clean --check")
+        for rel in copy_rels:
+            source = _LICENCE_FIXTURES[rel.rsplit("/", 1)[1]]
+            copy = lic / rel
+            try:
+                if copy.read_bytes() != source:
+                    failures.append("licence copies: {} must be byte-identical to the root source".format(rel))
+            except OSError as exc:
+                failures.append("licence copies: {} was not generated ({})".format(rel, exc))
+                continue
+            # The line-end flip (CRLF to LF, or LF to CRLF) is invisible to a text-mode comparison, which reads
+            # both as LF, so it proves the comparison is on bytes.
+            flipped = (source.replace(b"\r\n", b"\n") if b"\r\n" in source
+                       else source.replace(b"\n", b"\r\n"))
+            for label, mutate in (("missing", None), ("one byte different", source + b"x"),
+                                  ("with its line ends flipped", flipped)):
+                if mutate is None:
+                    copy.unlink()
+                else:
+                    copy.write_bytes(mutate)
+                if run_project(lic, check=True) != 1:
+                    failures.append("licence copies: {} {} expected --check exit 1".format(rel, label))
+                if (run_project(lic, check=False) != 0 or run_project(lic, check=True) != 0
+                        or copy.read_bytes() != source):
+                    failures.append("licence copies: a write run after {} {} expected the copy restored "
+                                    "byte for byte".format(rel, label))
+        try:
+            if any(rel in build_desired(lic, lic / ".aiqt" / "core" / "hooks") for rel in copy_rels):
+                failures.append("build_desired() must not carry the licence copies (adopter C5)")
+        except (ValueError, OSError) as exc:
+            failures.append("licence copies: build_desired expected to succeed: {}".format(exc))
+        for name in ("LICENSE", "NOTICE"):
+            for shape in ("absent", "a symlink"):
+                bad = tmp / "licence-{}-{}".format(name, shape.replace(" ", "-"))
+                bad.mkdir()
+                _build_project_tree(bad)
+                (bad / name).unlink()
+                if shape == "a symlink":
+                    (bad / "elsewhere").write_bytes(_LICENCE_FIXTURES[name])
+                    try:
+                        (bad / name).symlink_to("elsewhere")
+                    except OSError as exc:
+                        failures.append("NOT RUN: a root {} that is a symlink: the fixture could not be planted "
+                                        "({}); coverage that did not run fails the self-test".format(name, exc))
+                        continue
+                for check in (True, False):
+                    if run_project(bad, check=check) != 2:
+                        failures.append("a root {} that is {} expected exit 2 (check={})".format(name, shape, check))
+        lic_adopter = tmp / "licence-adopter"
+        lic_adopter.mkdir()
+        _build_project_tree(lic_adopter, authoring=False)
+        for name, data in _LICENCE_FIXTURES.items():
+            (lic_adopter / name).write_bytes(data)
+        planted = {rel: b"adopter-held copy\n" for rel in copy_rels[:2]}
+        for rel, data in planted.items():
+            (lic_adopter / rel).parent.mkdir(parents=True, exist_ok=True)
+            (lic_adopter / rel).write_bytes(data)
+        for check in (False, True):
+            if run_project(lic_adopter, check=check) != 0:
+                failures.append("licence copies: an adopter tree expected exit 0 (check={})".format(check))
+        for rel in copy_rels:
+            try:
+                held = (lic_adopter / rel).read_bytes()
+            except FileNotFoundError:
+                held = None
+            if held != planted.get(rel):
+                failures.append("licence copies: an adopter run must never create, overwrite or delete {}".format(rel))
+
+        # 37. hook coverage, the parser tools/orch_doctor.py --hook-coverage reads through (T1 to T3 of
         #     SEED-SESSION-HOOK-COVERAGE).
         cov_tree = tmp / "hook-coverage"
         _build_project_tree(cov_tree)
@@ -4426,6 +4606,10 @@ def self_test_main(_nested=False):
           "minimum (just below, at and just above the boundary, on a PreToolUse and a Stop hook and "
           "under a moved margin), a warn hook, a bake-stage hook and a second hook each refused at 9 "
           "and generating at 11, while with it off or absent 9, 10 and 11 still render the default; "
+          "in the authoring tree the root LICENSE and NOTICE are copied byte for byte under the plugin "
+          "root and .aiqt/, each copy missing, one byte different or with its line ends flipped fails "
+          "the check and is restored by a write run, an absent or symlinked root source fails closed, "
+          "build_desired() never carries them, and an adopter-shaped tree never gets, loses or changes them; "
           "the hook-coverage parser reads both renders back as covering their controls (every manifest id "
           "for hooks.json), never counts a handler under a script not named aiqt_hooks.py, an unanchored "
           "settings string, a settings string carrying other shell text, an option-shaped path or a path "

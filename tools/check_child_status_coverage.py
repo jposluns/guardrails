@@ -12,7 +12,7 @@ with exit 2). This gate holds where it runs:
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
      tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py,
-     tools/check_verifier_delivery.py, tools/render_og_cards.py, tools/orch_doctor.py and
+     tools/check_verifier_delivery.py, tools/render_og_cards.py, tools/orch_doctor.py, tools/check_links.py and
      opf/tools/check_opf_selftest_execution.py), in opf/tools/_opf_declaration.py and tools/check_opf_declaration.py
      (the constant and both functions) and in the hooks dispatcher and its generated plugin copy (the constant
      and the probe) are each bound exactly once at module scope, by one top-level definition (an undecorated one
@@ -240,6 +240,7 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"),
               ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"),
               ("tools/render_og_cards.py", "render_og_cards.py"), ("tools/orch_doctor.py", "orch_doctor.py"),
+              ("tools/check_links.py", "check_links.py"),
               ("opf/tools/check_opf_selftest_execution.py", "check_opf_selftest_execution.py"))
 # The CLI copy whose __main__ body is the one call _entry() (it raises its own exit rather than calling sys.exit):
 # its guard is the first statement of its one top-level _entry(), exactly ENTRY_GUARD.
