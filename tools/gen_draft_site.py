@@ -1886,8 +1886,13 @@ _FOOTER_SOURCES = ("VERSION", "changelog.toml")
 # whose functions load and render them. The self-test holds this tuple to _mappings_inputs, which derives the
 # same set from this file's own text (the functions _MAPPINGS_RENDERER calls and the modules, folders and
 # files they use, through module-level constants, imports inside them and ROOT.joinpath too), so an entry
-# dropped here, or one gained that no renderer reads, turns the self-test red, and a renderer read the
-# derivation cannot evaluate turns it red as well.
+# dropped here, or one gained that no renderer reads, turns the self-test red. The derivation is static and
+# not complete: it refuses (turns the self-test red on) the read forms its docstring lists, ROOT taken any
+# way but as a path base or an argument to a tools/ module, a ROOT default argument, open, getattr, os,
+# Path and the other names on _WALK_REFUSED_NAMES among them, and it does not see what a tools/ module a
+# renderer calls reads or imports in turn, code reached through an object's attribute rather than by name,
+# a module-level name bound inside a function, or a file API reached another way (its docstring's blind
+# spots). A renderer change of those kinds needs this tuple checked by hand.
 _MAPPINGS_RENDERER = "_c_mappings"
 _MAPPINGS_SOURCES = (".aiqt/standards/", ".aiqt/core/rules/", "tools/gen_mappings.py", "tools/gen_rules.py",
                      "tools/_standards.py", "tools/gen_agents.py")
@@ -2033,46 +2038,125 @@ def _root_parts(node, used):
     return parts + [part.value for part in extra]
 
 
+def _module_statements(body):
+    """Every statement of a module body, the bodies of its module-level if, try, with, for, while and match
+    statements included (a definition, assignment or import there binds a module-level name too), but not
+    the bodies of functions and classes."""
+    import ast
+    for node in body:
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            value = getattr(node, field, None)
+            if isinstance(value, list):
+                yield from _module_statements(value)
+        for nested in getattr(node, "handlers", ()) or ():
+            yield from _module_statements(nested.body)
+        for nested in getattr(node, "cases", ()) or ():
+            yield from _module_statements(nested.body)
+
+
+# Names whose use in a walked part makes _mappings_inputs refuse (cannot evaluate): each reaches a file or a
+# module some way the derivation does not follow (a path from __file__, a literal or relative path, a
+# computed import, a computed attribute, or this module's namespace by name).
+_WALK_REFUSED_NAMES = frozenset({
+    "__file__", "open", "__import__", "importlib", "getattr", "setattr", "globals", "vars", "locals",
+    "exec", "eval", "compile", "builtins", "__builtins__", "sys", "os", "io", "glob", "shutil", "pathlib",
+    "Path", "tomllib", "tempfile", "subprocess"})
+# The attributes a walked part may take of a ROOT path (other than joinpath, which extends it): each reads
+# the path itself or the entries of the folder it names, never a path the derivation does not see.
+_ROOT_PATH_READS = frozenset({"iterdir", "read_text", "read_bytes", "open", "is_file", "is_dir", "exists"})
+
+
 def _mappings_inputs(source, root=ROOT):
     """The inputs a mappings component renders from, derived from `source` (this file's text) alone. From
     the function _MAPPINGS_RENDERER, every module-level function, class and assigned name it names is
     walked, directly or through another (a module-level constant's value is walked as the function's code
-    is). The inputs are "tools/<module>.py" for each module in root's tools/ folder that a walked part
+    is; a name bound inside a module-level if, try, with, for, while or match statement is module-level
+    too). The inputs are "tools/<module>.py" for each module in root's tools/ folder that a walked part
     imports, or whose module-level import binds a name a walked part uses, and each path a walked part
-    builds on ROOT from string constants (ROOT / "<a>" / "<b>", ROOT.joinpath("<a>", "<b>") or both): "<a>/<b>"
-    when that path is a file under root and "<a>/<b>/" when it is a folder. ValueError, as cannot evaluate,
-    when `source` defines no _MAPPINGS_RENDERER, or a walked part builds a ROOT path from a part that is not
-    a string constant, names a path that is missing under root or leaves it ("", "." or ".." as a part),
-    or uses ROOT through any attribute other than joinpath (ROOT.iterdir() and the like). ROOT passed whole
-    as an argument is no input here: the callee's module is one."""
+    builds on ROOT from string constants (ROOT / "<a>" / "<b>", ROOT.joinpath("<a>", "<b>") or both):
+    "<a>/<b>" when that path is a file under root and "<a>/<b>/" when it is a folder.
+
+    ValueError, as cannot evaluate, when `source` defines no _MAPPINGS_RENDERER; when the module, or a walked
+    part, has a relative import, a star import, or an import of tools or tools.<name>; or when a walked part
+    builds a ROOT path from a part that is not a string constant, names a path that is missing under root
+    or leaves it ("", "." or ".." as a part), takes an attribute of ROOT or of a ROOT path other than
+    joinpath and _ROOT_PATH_READS (ROOT.iterdir(), ROOT.parent, (ROOT / "<a>").glob(...)), is a function
+    whose default arguments use ROOT, uses ROOT any other way than as the base of such a path or as an
+    argument of a call into a module of root's tools/ folder (an alias r = ROOT, str(ROOT),
+    os.path.join(ROOT, ...)), or uses a name on _WALK_REFUSED_NAMES (open, getattr, __file__, os, Path and
+    the others there).
+
+    Blind spots, which no row here turns red: what a tools/ module reads, and the modules it imports in
+    turn, when the walked part calls it (ROOT handed to it whole included; the module is an input, its own
+    reads are not derived); a module-level name bound other than by a module-level statement (a global
+    statement in a function, setattr on the module, an assignment through sys.modules) or a name a walked
+    part reaches through an object's attribute rather than by name (a method of a class instance, a
+    callable stored in a container): the code behind it is not walked; a module-level name bound twice is
+    walked in every binding, so one a renderer never reaches can still be refused or derived; and a read
+    through a file API that is not on _WALK_REFUSED_NAMES (codecs.open, linecache, zipfile and the like
+    from another module import) or that a walked part reaches as an attribute of a module it may use
+    (gen_rules.Path(".aiqt/core/hooks").iterdir(), gen_mappings.os.listdir(...)), whatever path it names."""
     import ast
     tree = ast.parse(source)
-    defined = {}
-    for node in tree.body:
+    defined, imported = {}, {}
+    for node in _module_statements(tree.body):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             defined.setdefault(node.name, []).append(node)
-        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value is not None:
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for target in targets:
-                for name in ast.walk(target):
-                    if isinstance(name, ast.Name) and name.id != "ROOT":
-                        defined.setdefault(name.id, []).append(node.value)
-    if not any(isinstance(node, ast.FunctionDef) for node in defined.get(_MAPPINGS_RENDERER, ())):
-        raise ValueError("cannot evaluate: no module-level function {}".format(_MAPPINGS_RENDERER))
-    imported = {}
-    for node in tree.body:
+            continue
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+            targets = [(target, node.value) for target in
+                       (node.targets if isinstance(node, ast.Assign) else [node.target])]
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            targets = [(node.target, node.iter)]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            targets = [(item.optional_vars, item.context_expr) for item in node.items if item.optional_vars]
+        else:
+            targets = []
+        if not isinstance(node, (ast.If, ast.Try, ast.TryStar, ast.While, ast.Match, ast.Import, ast.ImportFrom)):
+            targets += [(named.target, named.value) for named in ast.walk(node) if isinstance(named, ast.NamedExpr)]
+        for target, value in targets:
+            for name in ast.walk(target):
+                if isinstance(name, ast.Name) and name.id != "ROOT":
+                    defined.setdefault(name.id, []).append(value)
         if isinstance(node, ast.Import):
             for alias in node.names:
-                imported[alias.asname or alias.name] = alias.name
+                imported[alias.asname or alias.name.partition(".")[0]] = alias.name
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             for alias in node.names:
                 imported[alias.asname or alias.name] = node.module
+
+    def refuse_import(node):
+        if isinstance(node, ast.ImportFrom) and (node.level or not node.module or node.module == "tools"
+                                                 or node.module.startswith("tools.")
+                                                 or any(alias.name == "*" for alias in node.names)):
+            raise ValueError("cannot evaluate a relative, star or tools-qualified import (line {})"
+                             .format(node.lineno))
+        if isinstance(node, ast.Import) and any(alias.name == "tools" or alias.name.startswith("tools.")
+                                                for alias in node.names):
+            raise ValueError("cannot evaluate a tools-qualified import (line {})".format(node.lineno))
+
+    for node in _module_statements(tree.body):
+        refuse_import(node)
+    if not any(isinstance(node, ast.FunctionDef) for node in defined.get(_MAPPINGS_RENDERER, ())):
+        raise ValueError("cannot evaluate: no module-level function {}".format(_MAPPINGS_RENDERER))
     walked, pending, inputs = set(), [_MAPPINGS_RENDERER], set()
 
-    def add_module(module):
+    def tools_module(module):
         rel = "tools/{}.py".format(module.replace(".", "/"))
-        if (Path(root) / rel).is_file():
+        return rel if (Path(root) / rel).is_file() else None
+
+    def add_module(module):
+        rel = tools_module(module)
+        if rel:
             inputs.add(rel)
+
+    def calls_tools_module(func):
+        while isinstance(func, ast.Attribute):
+            func = func.value
+        return isinstance(func, ast.Name) and func.id in imported and tools_module(imported[func.id]) is not None
 
     while pending:
         name = pending.pop()
@@ -2080,24 +2164,44 @@ def _mappings_inputs(source, root=ROOT):
             continue
         walked.add(name)
         nodes = [node for top in defined[name] for node in ast.walk(top)]
-        used, paths = set(), []
+        used, paths, chains = set(), [], set()
         for node in nodes:
             parts = _root_parts(node, used)
+            if parts is not None:
+                chains.add(id(node))
             if parts:
                 paths.append((node, parts))
+        handed = {id(arg) for node in nodes if isinstance(node, ast.Call) and calls_tools_module(node.func)
+                  for arg in list(node.args) + [keyword.value for keyword in node.keywords]}
         for node in nodes:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) and any(
+                    isinstance(inner, ast.Name) and inner.id == "ROOT"
+                    for default in node.args.defaults + [d for d in node.args.kw_defaults if d is not None]
+                    for inner in ast.walk(default)):
+                raise ValueError("cannot evaluate a function whose default arguments use ROOT (line {})"
+                                 .format(node.lineno))
+        for node in nodes:
+            refuse_import(node)
             if isinstance(node, ast.Name) and node.id in defined:
                 pending.append(node.id)
+            if isinstance(node, ast.Name) and node.id in _WALK_REFUSED_NAMES:
+                raise ValueError("cannot evaluate {} in a renderer (line {})".format(node.id, node.lineno))
             if isinstance(node, ast.Name) and node.id in imported:
                 add_module(imported[node.id])
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     add_module(alias.name)
-            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            elif isinstance(node, ast.ImportFrom):
                 add_module(node.module)
-            elif isinstance(node, ast.Attribute) and id(node.value) not in used \
-                    and isinstance(node.value, ast.Name) and node.value.id == "ROOT" and node.attr != "joinpath":
-                raise ValueError("cannot evaluate ROOT.{} (line {})".format(node.attr, node.lineno))
+            elif isinstance(node, ast.Attribute) and id(node.value) in chains and id(node.value) not in used \
+                    and node.attr != "joinpath" and (node.attr not in _ROOT_PATH_READS
+                                                     or isinstance(node.value, ast.Name)):
+                raise ValueError("cannot evaluate {}.{} (line {})".format(
+                    "ROOT" if isinstance(node.value, ast.Name) else "a ROOT path", node.attr, node.lineno))
+            elif isinstance(node, ast.Name) and node.id == "ROOT" and id(node) not in used \
+                    and id(node) not in handed and isinstance(node.ctx, ast.Load):
+                raise ValueError("cannot evaluate ROOT used other than as the base of a path or as an argument "
+                                 "to a tools/ module (line {})".format(node.lineno))
         for node, parts in paths:
             if id(node) in used:
                 continue
@@ -3489,20 +3593,72 @@ def _self_test():
     for name, body in (("non-constant-part", 'ROOT / ".aiqt" / _MAPPINGS_RENDERER'),
                        ("joinpath-non-constant", 'ROOT.joinpath(".aiqt", _MAPPINGS_RENDERER)'),
                        ("root-attribute", "ROOT.iterdir()"),
-                       ("leaves-root", 'ROOT / ".." / "outside"'),
                        ("missing-path", 'ROOT / ".aiqt" / "no-such-folder"')):
         got = _mappings_sources_findings(reading(body), derived)
         expect("gensrc/mappings-sources-cannot-evaluate-{}-red".format(name),
                own.count(anchor) == 1 and len(got) == 1
                and got[0].startswith("_MAPPINGS_SOURCES cannot be checked: cannot evaluate") and "(line " in got[0],
                got)
-    unused = ('\n\ndef _unread_forms():\n    import gen_hooks\n    ROOT.joinpath(".aiqt").iterdir()\n'
-              '    ROOT.iterdir()\n    return ROOT / ".aiqt" / _MAPPINGS_RENDERER, gen_hooks\n')
+    # A part leaving root is refused by its own check, not as a missing path: .aiqt/../.aiqt exists.
+    got = _mappings_sources_findings(reading('ROOT / ".aiqt" / ".." / ".aiqt"'), derived)
+    expect("gensrc/mappings-sources-cannot-evaluate-leaves-root-red",
+           own.count(anchor) == 1 and (ROOT / ".aiqt" / ".." / ".aiqt").is_dir() and len(got) == 1
+           and got[0].startswith("_MAPPINGS_SOURCES cannot be checked: cannot evaluate the ROOT path [")
+           and "(line " in got[0], got)
+    # ROOT reached any other way than as a path base or an argument to a tools/ module, and the names that
+    # reach a file or a module another way, are refused: a local alias of ROOT, a ROOT default argument (on
+    # the renderer, or on a function of this file it calls, as hook_count and verb_status have), ROOT handed
+    # to os.path.join or Path, getattr(ROOT, ...), a module-level alias of ROOT, open, __file__, __import__,
+    # importlib, a ROOT path's glob, and relative, star and tools-qualified imports. A module-level if or
+    # try body is walked as module level is. ROOT handed whole to a tools/ module call stays clean.
+    rooted = '(root / ".aiqt" / "core" / "hooks").iterdir()'
+    for name, text in (
+            ("local-alias", reading('r = ROOT; (r / ".aiqt" / "core" / "hooks").iterdir()')),
+            ("root-default", own.replace(anchor, "\ndef _mappings_data(root=ROOT):\n    " + rooted + "\n")
+             if own.count(anchor) == 1 else ""),
+            ("calls-hook-count", reading("hook_count()")),
+            ("calls-verb-status", reading("verb_status()")),
+            ("os-path-join", reading('os.listdir(os.path.join(ROOT, ".aiqt", "core", "hooks"))')),
+            ("path-of-root", reading('Path(ROOT, ".aiqt", "core", "hooks").iterdir()')),
+            ("getattr-joinpath", reading('getattr(ROOT, "joinpath")(".aiqt", "core", "hooks").iterdir()')),
+            ("module-alias", reading('(_R / ".aiqt" / "core" / "hooks").iterdir()', "_R = ROOT\n\n\n")),
+            ("open-literal", reading('open(".aiqt/core/hooks/manifest.toml")')),
+            ("file-dunder", reading('(Path(__file__).parents[1] / ".aiqt").iterdir()')),
+            ("dunder-import", reading('__import__("gen_hooks")')),
+            ("importlib", reading('importlib.import_module("gen_hooks")')),
+            ("root-path-glob", reading('(ROOT / ".aiqt" / "standards").glob("../core/hooks/*")')),
+            ("relative-import", reading("main", "from .gen_hooks import main\n\n\n")),
+            ("star-import", reading("pass", "from gen_hooks import *\n\n\n")),
+            ("tools-import", reading("from tools import gen_hooks"))):
+        got = _mappings_sources_findings(text, derived)
+        expect("gensrc/mappings-sources-refused-{}-red".format(name),
+               own.count(anchor) == 1 and len(got) == 1
+               and got[0].startswith("_MAPPINGS_SOURCES cannot be checked: cannot evaluate") and "(line " in got[0],
+               got)
+    for name, text, want in (
+            ("module-if-import", reading("gen_hooks.main", "if True:\n    import gen_hooks\n\n\n"),
+             "tools/gen_hooks.py"),
+            ("module-try-def", reading("_helper()", 'try:\n    def _helper():\n        return ROOT / ".aiqt" / '
+                                                    '"core" / "hooks"\nexcept ImportError:\n    pass\n\n\n'),
+             hooks)):
+        got = _mappings_sources_findings(text, derived)
+        expect("gensrc/mappings-sources-{}-red".format(name),
+               got == ["_MAPPINGS_SOURCES lacks {}, which the mappings renderers read".format(want)], got)
+    got = [_mappings_sources_findings(reading(body), derived)
+           for body in ("gen_rules.load_corpus(ROOT)", 'load_manifests(ROOT / ".aiqt" / "standards", root=ROOT)')]
+    expect("gensrc/mappings-sources-root-into-tools-module-clean", own.count(anchor) == 1 and got == [[], []],
+           got)
+    unused = ('\n\ndef _unread_forms(root=ROOT):\n    import gen_hooks\n    ROOT.joinpath(".aiqt").iterdir()\n'
+              '    ROOT.iterdir()\n    r = ROOT\n    hook_count()\n    os.path.join(ROOT, "x")\n'
+              '    getattr(ROOT, "joinpath")("x")\n    open("x")\n'
+              '    return ROOT / ".aiqt" / _MAPPINGS_RENDERER, gen_hooks, r, root\n')
     got = [_mappings_sources_findings(text, derived) for text in (
         reading("pass", '_EXTRA_DIR = ROOT / ".aiqt" / "core" / "hooks"\n\n\n'),
-        reading('pass  # ROOT / ".aiqt" / "core" / "hooks"; import gen_hooks'),
+        reading("pass", "_R = ROOT\n\n\n"),
+        reading("pass", "if True:\n    import gen_hooks\n\n\n"),
+        reading('pass  # ROOT / ".aiqt" / "core" / "hooks"; import gen_hooks; r = ROOT; open("x")'),
         reading("pass", extra=unused))]
-    expect("gensrc/mappings-sources-unread-forms-clean", own.count(anchor) == 1 and got == [[], [], []], got)
+    expect("gensrc/mappings-sources-unread-forms-clean", own.count(anchor) == 1 and got == [[]] * 5, got)
     # The carriers come from decoded values: in a synthetic data folder, a TOML comment naming both tokens
     # (a.toml) and a literal string spelling \u0024 (c.toml) carry neither token, while a basic string spelling
     # each token as the escape \u0024 (b.toml) and a plain token in a body value (d.toml) carry it.
