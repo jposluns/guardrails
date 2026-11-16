@@ -1,0 +1,45 @@
+{
+  "format-version": 1,
+  "note": "The reviewed program inventory tools/check_coreutils_environment.py resolves and probes in each execution environment below. It starts from the preview self-test dependencies and the ancillary execution dependencies a static review of the tests identified; it has not been reconciled against an execution inventory derived by a lint, so it is not a claim that the tests reach no other program. A GNU implementation is what the CI runners are expected to carry.",
+  "expected-ci-implementation": "GNU",
+  "environments": [
+    {
+      "id": "runner-path",
+      "path-source": "runner",
+      "description": "The PATH the gate itself inherits from the runner that launched it (tools/run_all_checks.sh locally, the Quality workflow step in CI)."
+    },
+    {
+      "id": "removal-oracle",
+      "path": "/usr/bin:/bin",
+      "description": "The fixed PATH under which the removal differential self-test of .preview/record-remove-check.py runs its Bash cases."
+    }
+  ],
+  "programs": [
+    {"name": "cp", "family": "coreutils", "role": "preview-dependency"},
+    {"name": "mv", "family": "coreutils", "role": "preview-dependency"},
+    {"name": "install", "family": "coreutils", "role": "preview-dependency"},
+    {"name": "tee", "family": "coreutils", "role": "preview-dependency"},
+    {"name": "truncate", "family": "coreutils", "role": "preview-dependency"},
+    {"name": "rm", "family": "coreutils", "role": "preview-dependency"},
+    {"name": "cat", "family": "coreutils", "role": "preview-dependency"},
+    {"name": "dd", "family": "coreutils", "role": "preview-dependency"},
+    {"name": "ln", "family": "coreutils", "role": "preview-dependency"},
+    {"name": "unlink", "family": "coreutils", "role": "preview-dependency"},
+    {"name": "shred", "family": "coreutils", "role": "preview-dependency"},
+    {"name": "env", "family": "coreutils", "role": "preview-dependency"},
+    {"name": "date", "family": "coreutils", "role": "preview-dependency"},
+    {"name": "wc", "family": "coreutils", "role": "preview-dependency"},
+    {"name": "ls", "family": "coreutils", "role": "preview-dependency"},
+    {"name": "sleep", "family": "coreutils", "role": "ancillary"},
+    {"name": "timeout", "family": "coreutils", "role": "ancillary"},
+    {"name": "nice", "family": "coreutils", "role": "ancillary"},
+    {"name": "echo", "family": "coreutils", "role": "ancillary"},
+    {"name": "touch", "family": "coreutils", "role": "ancillary"},
+    {"name": "dirname", "family": "coreutils", "role": "ancillary"},
+    {"name": "mkdir", "family": "coreutils", "role": "ancillary"},
+    {"name": "rmdir", "family": "coreutils", "role": "ancillary"},
+    {"name": "mktemp", "family": "coreutils", "role": "ancillary"},
+    {"name": "cmp", "family": "diffutils", "role": "ancillary"},
+    {"name": "chmod", "family": "coreutils", "role": "ancillary"}
+  ]
+}
