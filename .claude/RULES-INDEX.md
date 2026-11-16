@@ -34,7 +34,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 - [A consumer follows its producer](rules/aiqt/10-INTEG-consumer-follows-its-producer.md)
 - [Bind to the explicit target, not the ambient context](rules/aiqt/10-INTEG-explicit-binding-over-ambient-context.md)
 - [Gate discipline](rules/aiqt/10-INTEG-gate-discipline.md)
-- [A generated artefact is changed only through its source; repeated descriptions share one source](rules/aiqt/10-INTEG-generated-artefact-source-only.md)
+- [A generated artefact is changed only through its source; case-dependent behaviour in maintained places has one canonical source](rules/aiqt/10-INTEG-generated-artefact-source-only.md)
 - [Verify licence compatibility before introducing third-party material](rules/aiqt/10-INTEG-licence-compatibility.md)
 - [No concealed failure](rules/aiqt/10-INTEG-no-concealed-failure.md)
 - [Preserve uncommitted work](rules/aiqt/10-INTEG-preserve-uncommitted-work.md)

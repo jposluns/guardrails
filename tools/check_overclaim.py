@@ -3304,9 +3304,10 @@ def _page_bound_source_self_test():
                 failures.append("COMPLETENESS(forward): a broken real Rules row must fail the title check (FIX D)")
         # (n3e) A PARTIAL row may carry a description (the part of the rule no linked control checks), which
         # render_md places at the END of its How cell after PARTIAL_GAP_LEAD. The forward leg must locate it
-        # there, and must not accept it on a row that is neither pending nor partial, without the lead, or
-        # with no mechanism list before the lead. MUTATION: a location check that accepts a description only
-        # on a Pending row fails the first loop below.
+        # there, and must not accept it on a row that is neither pending nor partial, without the lead, with
+        # no mechanism list before the lead, or with more text after it in the cell. MUTATION: a location
+        # check that accepts a description only on a Pending row fails the first loop below; one that matches
+        # the description as a substring of the cell, not at its end, fails the trailing-text case.
         ptree = gen_enforcement_register._build(tmp / "partial-desc")
         rmp = ptree / gen_enforcement_register.ROADMAP_REL
         p_anchor = 'corpus-id = "rulebb"\nstatus = "partial"\nmechanisms = ["gate:gate-alpha"]'
@@ -3335,9 +3336,11 @@ def _page_bound_source_self_test():
                 "| `rulebb` | {} |".format(p_label), 1)
             no_lead = p_md.replace(p_mech + p_gap, p_mech + "; " + p_cell(pgap), 1)
             lead_only = p_md.replace(p_mech + p_gap, p_gap, 1)
+            trailing = p_md.replace(p_mech + p_gap, p_mech + p_gap + " zztrailing", 1)
             for name, mutated in (("a row neither pending nor partial", not_partial),
                                   ("a partial How cell without the lead", no_lead),
-                                  ("a partial How cell with no mechanism before the lead", lead_only)):
+                                  ("a partial How cell with no mechanism before the lead", lead_only),
+                                  ("a partial How cell with more text after it", trailing)):
                 if mutated == p_md:
                     failures.append("COMPLETENESS(forward): self-test setup: {} was not built".format(name))
                 elif _md_field_rendered(mutated, "description", "rulebb", pgap)[0]:
