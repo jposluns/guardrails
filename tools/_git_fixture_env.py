@@ -68,6 +68,15 @@ _MAINTENANCE_PIN_VARS = ("GIT_CONFIG_COUNT",) + tuple(
     for kind in ("KEY", "VALUE"))
 
 
+# The pins every file:// FIXTURE clone passes ahead of its clone subcommand. A file:// clone runs
+# index-pack, which fsyncs the received pack by default (core.fsync covers packs); on a busy shared
+# filesystem that fsync can block in the kernel for seconds after the whole pack has arrived, which
+# is enough to cross a fixture's timeout. A throwaway fixture needs no durability. The pins are
+# command scope, so nothing is written to the new repository's config. A plain local-path clone
+# copies or hardlinks the objects and makes no fsync call, so it needs no pin.
+FILE_CLONE_PINS = ("-c", "core.fsync=none")
+
+
 def _pin_no_auto_maintenance(env):
     """Apply the _NO_AUTO_MAINTENANCE pins to env in place (see the constant's rationale)."""
     env["GIT_CONFIG_COUNT"] = str(len(_NO_AUTO_MAINTENANCE))

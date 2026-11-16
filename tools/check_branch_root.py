@@ -1321,9 +1321,12 @@ def _non_utf8_dir(parent):
 
 def _shallow_clone(parent, source, dest):
     """The V11 fixture: a depth-1 file:// clone of source at dest (a plain local-path clone ignores
-    --depth). Raises OSError, SubprocessError or CannotEvaluate where a shallow clone cannot be built."""
-    _fixture_git(parent, "clone", "--depth", "1", "-q", "file://{}".format(source), str(dest),
-                 "-b", "protected")
+    --depth), run with the shared file:// fixture clone pins (no pack fsync). Raises OSError,
+    SubprocessError or CannotEvaluate where a shallow clone cannot be built."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import FILE_CLONE_PINS
+    _fixture_git(parent, *FILE_CLONE_PINS, "clone", "--depth", "1", "-q", "file://{}".format(source),
+                 str(dest), "-b", "protected")
     if not _is_shallow(dest):
         raise CannotEvaluate("the depth-1 file:// clone is not shallow")
     return dest

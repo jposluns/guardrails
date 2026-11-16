@@ -3129,6 +3129,15 @@ def _st_git_env(base):
     return env
 
 
+# The pins every file:// FIXTURE clone passes ahead of its clone subcommand (here and in
+# check_opf_init). A file:// clone runs index-pack, which fsyncs the received pack by default
+# (core.fsync covers packs); on a busy shared filesystem that fsync can block in the kernel for
+# seconds after the whole pack has arrived. A throwaway fixture needs no durability. The pins are
+# command scope, so nothing is written to the new repository's config. A plain local-path clone
+# copies or hardlinks the objects and makes no fsync call, so it needs no pin.
+_FILE_CLONE_PINS = ("-c", "core.fsync=none")
+
+
 def _git(args, cwd, env, allow_fail=False, input_bytes=None):
     import subprocess
     # F-367: no DETACHED auto-gc/auto-maintenance may outlive a fixture commit and churn .git
@@ -4482,7 +4491,7 @@ def _ancestry_tests(base, env, ok):
     # parent link that reaches it; removing the grafts entry finds the store again.
     repo, evidence, root = deleted_store("shallow-source")
     shallow = os.path.join(d, "shallow")
-    _git(["clone", "-q", "--depth", "1", "file://" + repo, shallow], d, env)
+    _git([*_FILE_CLONE_PINS, "clone", "-q", "--depth", "1", "file://" + repo, shallow], d, env)
     before = _tree_snapshot(shallow)
     res = run(shallow)
     refused("ANC-shallow-cannot-evaluate", res, CANNOT_EVALUATE, ("SHALLOW",),
@@ -4674,7 +4683,7 @@ def _b6_tests(base, env, ok, refuses):
         _git(["add", "-A"], r10, env)
         _git(["commit", "-q", "-m", "c{}".format(n)], r10, env)
     shallow = os.path.join(base, "r10-shallow")
-    _git(["clone", "-q", "--depth", "1", "file://" + r10, shallow], base, env)
+    _git([*_FILE_CLONE_PINS, "clone", "-q", "--depth", "1", "file://" + r10, shallow], base, env)
     h10 = _head(shallow, env)
     refuses("B10-shallow-refuses", lambda: read_ancestral_counter_seed(
         shallow, pinned_head=h10, evidence_commit=h10a, prefix="", object_format="sha1"))

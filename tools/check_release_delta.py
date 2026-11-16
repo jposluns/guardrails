@@ -8638,7 +8638,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                 subprocess.run(["git", "-C", str(psrc6), "config", "uploadpack.allowfilter",
                                 "true"], capture_output=True, env=senv6)
                 pro6 = tmp / "r6-promisor"
-                cl6 = subprocess.run(["git", "clone", "-q", "--no-checkout",
+                from _git_fixture_env import FILE_CLONE_PINS
+                cl6 = subprocess.run(["git", *FILE_CLONE_PINS, "clone", "-q", "--no-checkout",
                                       "--filter=blob:none", "file://" + str(psrc6), str(pro6)],
                                      capture_output=True, env=senv6)
                 if cl6.returncode != 0:

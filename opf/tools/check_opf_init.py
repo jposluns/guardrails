@@ -1272,6 +1272,9 @@ def _suite_isolated(invoke):
 
         failures = []
         checked = []
+        # Every file:// fixture clone below, and the submodule add that clones, passes the shared
+        # file:// fixture clone pins (no pack fsync; see _opf_init_operation._FILE_CLONE_PINS).
+        clone_pins = _opf_init_operation._FILE_CLONE_PINS
 
         def check(label, condition):
             checked.append(label)
@@ -2367,7 +2370,7 @@ def _suite_isolated(invoke):
                 # DISCRIMINATOR: rc 0 (the truncation hides the store from an ungated scan)
                 # against a scan without the shallow gate.
                 shallow_prior = base / "ancestry-shallow"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone",
                                 "--depth", "1",
                                 "file://" + str(ancestry), str(shallow_prior)])
                 rc, output = run(shallow_prior)
@@ -6943,7 +6946,7 @@ def _suite_isolated(invoke):
                 src_url = "file://" + str(promisor_src)
 
                 missing_blob = base / "d2b-missing-blob"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--filter=blob:none",
                                 "--no-checkout", src_url, str(missing_blob)])
                 git_call(missing_blob, ["read-tree", "HEAD"])
                 git_call(missing_blob, ["update-index", "--skip-worktree", ".gitignore"])
@@ -6963,7 +6966,7 @@ def _suite_isolated(invoke):
                                          "commit", "-m", "seed"])
                 git_call(unrelated_src, ["config", "uploadpack.allowFilter", "true"])
                 materialized = base / "d2b-materialized"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--filter=blob:none",
                                 "file://" + str(unrelated_src), str(materialized)])
                 rc, output = run(materialized)
                 check("partial-clone materialized .gitignore init proceeds",
@@ -6973,7 +6976,7 @@ def _suite_isolated(invoke):
                 # it from the index exactly as git add, so a store it ignores is still refused as git-ignored --
                 # the available-blob parity the round-6 check preserves.
                 avail_blob = base / "d2b-available-blob"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", src_url, str(avail_blob)])
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", src_url, str(avail_blob)])
                 git_call(avail_blob, ["update-index", "--skip-worktree", ".gitignore"])
                 (avail_blob / ".gitignore").unlink()
                 ab_before = _snapshot(avail_blob)
@@ -6991,7 +6994,7 @@ def _suite_isolated(invoke):
                 # the symlink as not-materialized and REFUSES. DISCRIMINATOR: init returns rc 0 (creates a
                 # store git add would skip) against the is_file() version.
                 symlink_blob = base / "d2b-symlink-gitignore"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--filter=blob:none",
                                 "--no-checkout", src_url, str(symlink_blob)])
                 git_call(symlink_blob, ["read-tree", "HEAD"])
                 git_call(symlink_blob, ["update-index", "--skip-worktree", ".gitignore"])
@@ -7009,7 +7012,7 @@ def _suite_isolated(invoke):
                 # entry with an absent blob (over-refusal); init must now PROCEED. DISCRIMINATOR: rc 2 against
                 # the mode-only version.
                 nonswt = base / "d2b-nonskipworktree"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--filter=blob:none",
                                 "--no-checkout", src_url, str(nonswt)])
                 git_call(nonswt, ["read-tree", "HEAD"])
                 rc, output = run(nonswt)
@@ -7022,7 +7025,7 @@ def _suite_isolated(invoke):
                 # no-follow classification treats a directory as not-a-fallback and PROCEEDS. DISCRIMINATOR:
                 # rc 2 against the mode-only version.
                 dir_at_path = base / "d2b-dir-at-gitignore"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--filter=blob:none",
                                 "--no-checkout", src_url, str(dir_at_path)])
                 git_call(dir_at_path, ["read-tree", "HEAD"])
                 git_call(dir_at_path, ["update-index", "--skip-worktree", ".gitignore"])
@@ -7037,7 +7040,7 @@ def _suite_isolated(invoke):
                 # keyed on mode alone and refused (over-refusal); init must now PROCEED. DISCRIMINATOR: rc 2
                 # against the stage-blind version.
                 unmerged = base / "d2b-unmerged-gitignore"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--filter=blob:none",
                                 "--no-checkout", src_url, str(unmerged)])
                 git_call(unmerged, ["read-tree", "HEAD"])
                 orig_blob = git_call(
@@ -7064,7 +7067,7 @@ def _suite_isolated(invoke):
                 git_call(bracket_src, ["config", "uploadpack.allowFilter", "true"])
                 git_call(bracket_src, ["config", "uploadpack.allowAnySHA1InWant", "true"])
                 bracket = base / "d2b-bracket"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--filter=blob:none",
                                 "--no-checkout", "file://" + str(bracket_src), str(bracket)])
                 git_call(bracket, ["read-tree", "HEAD"])
                 git_call(bracket, ["--literal-pathspecs", "update-index", "--skip-worktree",
@@ -7091,7 +7094,7 @@ def _suite_isolated(invoke):
                 git_call(colon_src, ["config", "uploadpack.allowFilter", "true"])
                 git_call(colon_src, ["config", "uploadpack.allowAnySHA1InWant", "true"])
                 colon = base / "d2b-colon"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--filter=blob:none",
                                 "--no-checkout", "file://" + str(colon_src), str(colon)])
                 git_call(colon, ["read-tree", "HEAD"])
                 git_call(colon, ["--literal-pathspecs", "update-index", "--skip-worktree",
@@ -7112,7 +7115,7 @@ def _suite_isolated(invoke):
                 # a store git add would skip) against the exempt-all-directories version. (The readable
                 # directory -> PROCEED direction is the "directory at .gitignore path" fixture above.)
                 unread_dir = base / "d2b-unreadable-dir"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--filter=blob:none",
                                 "--no-checkout", src_url, str(unread_dir)])
                 git_call(unread_dir, ["read-tree", "HEAD"])
                 git_call(unread_dir, ["update-index", "--skip-worktree", ".gitignore"])
@@ -7144,7 +7147,7 @@ def _suite_isolated(invoke):
                 git_call(symmode_src, ["config", "uploadpack.allowFilter", "true"])
                 git_call(symmode_src, ["config", "uploadpack.allowAnySHA1InWant", "true"])
                 symmode = base / "d2b-symlink-mode"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--filter=blob:none",
                                 "--no-checkout", "file://" + str(symmode_src), str(symmode)])
                 git_call(symmode, ["read-tree", "HEAD"])
                 git_call(symmode, ["update-index", "--skip-worktree", ".gitignore"])
@@ -7170,7 +7173,7 @@ def _suite_isolated(invoke):
                 git_call(descendant_src, ["config", "uploadpack.allowFilter", "true"])
                 git_call(descendant_src, ["config", "uploadpack.allowAnySHA1InWant", "true"])
                 descendant = base / "d2b-descendant"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--filter=blob:none",
                                 "--no-checkout", "file://" + str(descendant_src), str(descendant)])
                 git_call(descendant, ["read-tree", "HEAD"])
                 git_call(descendant, ["--literal-pathspecs", "update-index", "--skip-worktree",
@@ -7190,7 +7193,7 @@ def _suite_isolated(invoke):
                 # pass, rc 0, a store git add would skip); the mode-blind check refuses on the unavailable OID
                 # regardless of mode. DISCRIMINATOR: rc 0 against the mode-allowlist version.
                 gitlink = base / "d2b-gitlink-blob"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--filter=blob:none",
                                 "--no-checkout", src_url, str(gitlink)])
                 git_call(gitlink, ["read-tree", "HEAD"])
                 gitlink_blob = git_call(
@@ -7212,7 +7215,7 @@ def _suite_isolated(invoke):
                 # refusal is gated by the worktree open FAILING, not by the gitlink mode, so a valid submodule
                 # is not blanket-refused.
                 gitlink_dir = base / "d2b-gitlink-dir"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--filter=blob:none",
                                 "--no-checkout", src_url, str(gitlink_dir)])
                 git_call(gitlink_dir, ["read-tree", "HEAD"])
                 git_call(gitlink_dir, ["rm", "--cached", "-q", ".gitignore"])
@@ -7241,12 +7244,13 @@ def _suite_isolated(invoke):
                 git_call(r9_submod_src, ["-c", "user.email=t@t", "-c", "user.name=t",
                                          "commit", "-m", "subseed"])
                 r9_super_src = make_git("d2b-r9-super-src")
-                git_call(r9_super_src, ["-c", "protocol.file.allow=always", "submodule", "add",
+                git_call(r9_super_src, ["-c", "protocol.file.allow=always", *clone_pins,
+                                        "submodule", "add",
                                         "file://" + str(r9_submod_src), ".gitignore"])
                 git_call(r9_super_src, ["-c", "user.email=t@t", "-c", "user.name=t",
                                         "commit", "-m", "add sub as .gitignore"])
                 r9_full = base / "d2b-r9-fullclone-omitted"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone",
                                 "file://" + str(r9_super_src), str(r9_full)])
                 # A FULL clone has no promisor remote; sparse-checkout omits the .gitignore submodule so its
                 # worktree path is absent and skip-worktree is set, leaving the absent commit OID as what the
@@ -7265,7 +7269,7 @@ def _suite_isolated(invoke):
                 # lazy-fetch and stages the store (do_read_blob rejects the non-blob commit); the partial-clone
                 # gate returns [] and init PROCEEDS. DISCRIMINATOR: rc 2 against the ungated round-9 HEAD.
                 r9_rec = base / "d2b-r9-recursive-chmod000"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--recurse-submodules",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--recurse-submodules",
                                 "file://" + str(r9_super_src), str(r9_rec)])
                 git_call(r9_rec, ["update-index", "--skip-worktree", ".gitignore"])
                 r9_rec_gi = r9_rec / ".gitignore"
@@ -7289,7 +7293,7 @@ def _suite_isolated(invoke):
                     """A blobless partial clone (absent skip-worktree .gitignore blob) with ALL promisor
                     config stripped, so each scenario sets exactly the registration keys under test."""
                     dest = base / name
-                    git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                    git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--filter=blob:none",
                                     "--no-checkout", src_url, str(dest)])
                     git_call(dest, ["read-tree", "HEAD"])
                     git_call(dest, ["update-index", "--skip-worktree", ".gitignore"])
@@ -7477,7 +7481,7 @@ def _suite_isolated(invoke):
                 git_call(lazy_src, ["config", "uploadpack.allowFilter", "true"])
                 git_call(lazy_src, ["config", "uploadpack.allowAnySHA1InWant", "true"])
                 lazy_clone = base / "lazyfetch-clone"
-                git_call(base, ["-c", "protocol.file.allow=always", "clone", "--filter=blob:none",
+                git_call(base, ["-c", "protocol.file.allow=always", *clone_pins, "clone", "--filter=blob:none",
                                 "--no-checkout", "file://" + str(lazy_src), str(lazy_clone)])
                 lazy_marker = base / "lazyfetch-marker"
                 lazy_hook = base / "lazyfetch-ssh.sh"

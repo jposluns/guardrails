@@ -81,7 +81,7 @@ from _gen_common import repo_root  # noqa: E402
 
 sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
 import aiqt_hooks  # noqa: E402
-from _git_fixture_env import scrub_git_environment  # noqa: E402
+from _git_fixture_env import FILE_CLONE_PINS, scrub_git_environment  # noqa: E402
 import _selftest_exit_report  # noqa: E402
 
 FAILURES = []
@@ -646,7 +646,7 @@ def _rdp_cases(tmp):
         ("side.txt",), mg.CHANGED)], ["allow", "deny"])
 
     shallow = base / "shallow"
-    _rdp_git(base, "clone", "-q", "--depth", "1", "file://" + str(f.root), str(shallow))
+    _rdp_git(base, *FILE_CLONE_PINS, "clone", "-q", "--depth", "1", "file://" + str(f.root), str(shallow))
     shallow_result = f.dispatch(f.good(extra=["Review-repo: " + str(shallow)]))
     shallow_reason = shallow_result[1]["hookSpecificOutput"]["permissionDecisionReason"]
     check("rdp/shallow-missing-parent-unverifiable",

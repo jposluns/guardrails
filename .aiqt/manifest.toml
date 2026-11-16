@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "7700ce786362e1fa783036a2867cb8dda08563a3e7f00a92f1d8c152e35502b7"
+tree-sha256 = "7a2c39d40ec40c3720ebb0bac91763ea348397785573b9bdb41b24444fa392b6"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -3197,8 +3197,8 @@ sha256 = "04db95a8471c0792ee73a3731eed9a28e4516155fe74b3290b262145a2a5a8db"
 
 [[sources]]
 path = "opf/tools/_opf_init_operation.py"
-bytes = 348285
-sha256 = "5ee95c590db376906c321e0d9e2cdf2bd1ea9f83832a50ef274e3c84b818dfe8"
+bytes = 348922
+sha256 = "bfd16e05334c6f18d98b2094beaa7df5706eb909ce222756bf3884025f7e65b7"
 
 [[sources]]
 path = "opf/tools/_opf_init_p0.py"
@@ -3457,8 +3457,8 @@ sha256 = "b0fb31bb7eb31e616abd93e7cd531a1a77ab6e135d226caa6f18808df46b9faa"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"
-bytes = 481822
-sha256 = "2be7bd6f3d7861c5e9a89a3b0853afc7433e78aa39e940a45db0b782c05cac69"
+bytes = 482374
+sha256 = "33626409e03912cdea03b91811d9982a60b541b3555ebfc90b56d9a6473db8f3"
 
 [[sources]]
 path = "opf/tools/check_opf_init_contract.py"
@@ -4107,8 +4107,8 @@ sha256 = "f2fce877697cd18092c161418214980cb151d262daa3fb31a0b00e9bf26888cd"
 
 [[sources]]
 path = "tools/_git_fixture_env.py"
-bytes = 10632
-sha256 = "f96440610c978d5138acf597d202323a5c661f90816452c03a38b3e3bf660978"
+bytes = 11247
+sha256 = "f721f706291f6ea0f487862759e88e137d3d5149c762d5e927c187a493727fc8"
 
 [[sources]]
 path = "tools/_input_declarations.py"
@@ -4187,8 +4187,8 @@ sha256 = "e79aff5679466a9ea6b5e8022e93158cf8e3979b8cc1e7b00a6942e0bca86703"
 
 [[sources]]
 path = "tools/check_branch_root.py"
-bytes = 92920
-sha256 = "9ec3224a7e8f517b357ab6738f82a4ce41a9bca6fcba66c3194b3a9157ff9ce0"
+bytes = 93116
+sha256 = "1a07dfe3de9d24ca231519a5a12e4edc2484d948024822ff796f1aee732fd1b4"
 
 [[sources]]
 path = "tools/check_brief_capability.py"
@@ -4407,8 +4407,8 @@ sha256 = "8018c683be72410d249b6d4005d6aa2c27d4094d874788f5c683addc8dc3e507"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 585055
-sha256 = "be620c7108e6d70b5750dbc0c430adb62ea7a4f4d1c617c1197040afa3529765"
+bytes = 585134
+sha256 = "048ad2cbd83a920c32e4c01d0af31168a99d57ecfcd493549f3a3002b3a75219"
 
 [[sources]]
 path = "tools/check_relied_exit_pipes.py"
@@ -4712,8 +4712,8 @@ sha256 = "59f6155486925ab9adea0da0203964283937c0dc7543bcfba335d4ac0820279e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 2393032
-sha256 = "13276d362f29a540288b9b01c19a3533866c4bc9ef1fa52656ecd1d7a77d156b"
+bytes = 2394680
+sha256 = "e06e21796c7353f0c0cb60c5e214fd66a85f1abd89dac5dc1e5850ca9ed623c7"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
@@ -4757,8 +4757,8 @@ sha256 = "5db515bd671b5573e258cb3548903af302b6ac98b00f7a5ef1287cfbadf88304"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 1260287
-sha256 = "7b2d4a50fee5ced8d13a6807b9fd0f3260b776f218bf21d121427cba73f2816b"
+bytes = 1260322
+sha256 = "652e4204e16f6421d06310e8743a5f0def24b1f0a3ea7692b4de5a529053b51c"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"
