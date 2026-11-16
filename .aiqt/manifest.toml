@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "fdae5eba92bd3408277efde028592507639c4ddec19023819f2c6802cb282380"
+tree-sha256 = "f28c326d9d6251a064e7c3e65a1b5ed6bcf122543b82d6ef92a069d202d17e8c"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4202,8 +4202,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 228794
-sha256 = "c515076bcad7f0482d0ab044410595957f043623bb8ed1248e4209f27b3008b3"
+bytes = 228867
+sha256 = "262a57a174545e5287793b9a085cde69f1fe5e5657cd091384f5a06a76cadcbb"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4222,8 +4222,8 @@ sha256 = "df621f8ed34ccddb5f6958f29a66896de9876e71a21083d6b5dd0143ff0dec3b"
 
 [[sources]]
 path = "tools/check_commit_claims.py"
-bytes = 44325
-sha256 = "eca913f309cab02c386b15c1f822645eeb976a0d7b5131cad1277dd666920cc4"
+bytes = 63404
+sha256 = "a3fde6eb432bf3437a79ab3d2a3d09954d0e0630265d68e32c78ffd50ba1650f"
 
 [[sources]]
 path = "tools/check_crosswalk.py"

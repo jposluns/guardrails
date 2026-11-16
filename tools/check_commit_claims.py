@@ -19,7 +19,12 @@ GITHUB_EVENT_PATH names; push, before..after (an all-zero after, a branch deleti
 all-zero before, a branch creation, is cannot-evaluate, because the complete range cannot be established);
 workflow_dispatch or schedule, HEAD alone; any other event is cannot-evaluate. With GITHUB_EVENT_NAME unset
 or empty, HEAD alone. Every revision field of the event must be a canonical 40-hex object id, and every git
-call is bound to this repository (git -C ROOT) with every ambient GIT_-prefixed variable dropped.
+call is bound to this repository (git -C ROOT) with every ambient GIT_-prefixed variable dropped. A range
+that names no commit (BASE..HEAD with HEAD equal to BASE or behind it, a swapped --range included) is
+cannot-evaluate, not a pass; a branch-deletion push alone names no commit and passes with 0 commits read. A
+shallow repository is cannot-evaluate: a commit at the shallow boundary lists no parent, so it would be read
+as a root commit against the empty tree. A first parent whose object is missing fails the diff, which is
+cannot-evaluate too.
 
 CLAIMS. The message is read one sentence at a time. A sentence is a claim only when it names a release file as
 its subject or object: .aiqt/manifest.toml, .aiqt/release or a path under it, root.txt, announce-snippet.txt,
@@ -50,28 +55,51 @@ followed by by, from, through, via, during, at, on, under, unless, until, if, wh
 (it describes a tool or a process) unless that word is followed by this commit, this change, this branch, this
 patch or here, or, for by, by a generator (gen_manifest, tools/gen_manifest.py, the generator or generators).
 "to regenerate" is an instruction or a purpose, not a claim. The adjective form (the regenerated manifest) is
-not read.
+not read. A sentence that names another commit (the previous, prior, preceding, earlier, last, parent, base,
+older, next, following or later commit, change, member or patch, or "commit" followed by an abbreviated or
+full object id) and not this one (this commit, this change, this patch, this branch, this one, here) is not
+read: it reports what that commit did, as a fix-up commit's "the previous commit changed X without
+regenerating the manifest" does. In the passive forms the release file must be the subject, not a noun inside
+a prepositional phrase of it: "the lists in .aiqt/release/first-pin-demonstration.toml are unchanged" names the
+lists (a release file named after in, inside, within, under, of, from, at, into, on, for, to, by, beside,
+near or across, a determiner between them allowed, is not the subject). A REGENERATED sentence that also says
+the output came out identical (byte-identical, byte for byte, identical, came out the same or unchanged, with
+or showing no diff or change) is not read: regenerating to the same bytes changes no release file.
 
 AGGREGATES. A commit with more than one parent, or whose subject starts with "Merge train " followed by a train
 name and a colon (a merge train squash, whose body is every member's message), carries claims about changes
 other than its whole diff, so only the REGENERATED direction is checked on it: a member that regenerated the
 release files leaves them changed in the aggregate, while a member's true NOT-REGENERATED sentence says nothing
-about the others.
+about the others. A train squash is made when a train lands, so it is never inside a pull request's range: on
+a pull_request event the train subject is not honoured, and a member commit whose subject imitates it is read
+in both directions; a multi-parent commit is an aggregate on every event.
 
-ALLOW MARKER. A line of the message that reads exactly "Release-claim-allow: " followed by a non-empty reason
-lets that commit pass; its findings print as ALLOWED with the reason. The marker line is not read as a claim.
-The marker with no reason is not honoured and is named on a NOTE line.
+ALLOW MARKER. A line of the message outside a fenced block that reads exactly "Release-claim-allow: " followed
+by a reason holding a word of two or more letters lets that commit pass; its findings print as ALLOWED with the
+reason. The marker line is not read as a claim. A marker with no reason, or a reason with no such word (".",
+"-"), is not honoured and is named on a NOTE line; a marker inside a fenced block is quoted text and is neither
+honoured nor named.
+
+CHILD STATUS. The entry line runs the inline copy of the canonical child-status guard
+(opf/tools/_child_status.py) before main(): with SIGCHLD ignored a failing git would read as exit 0 and a
+contradiction could pass, so the gate refuses to run and exits 2 by name.
 
 Exit: 0 no contradiction (or every one allowed); 1 a contradiction; 2 cannot evaluate (a git call that fails or
-times out, a revision that does not resolve to a commit, a malformed or missing event, an unsupported event, a
-bad argument).
+times out, a revision that does not resolve to a commit, a range that names no commit, a shallow repository, a
+malformed or missing event, an unsupported event, a bad argument, the child-status refusal).
 
 RESIDUE. The read is lexical and narrow by design. A claim phrased outside the shapes above (a paraphrase such
 as "no generated output moves", a claim spread over two sentences, a pronoun standing for the release files
 across a sentence, a claim inside a hedged sentence or a quotation) is not read, and a sentence the shapes do
 read can still state a process rather than this commit. A merge train squash is checked in the REGENERATED
-direction only. The commit message is not checked before the commit exists: this gate reads committed history
-(a pull request's range in CI, HEAD locally), not a commit-msg hook.
+direction only. The other-commit, prepositional-subject and identical-output narrowings can hide a real claim
+phrased around them ("unlike the previous commit, the release root is not regenerated", "the manifest is
+regenerated and the docs are identical"). Outside a pull_request event (a push, --range, HEAD alone) a member
+commit whose subject imitates a train squash is still read in the REGENERATED direction only; such a member
+reaches main through a train pull request, whose run reads it in both directions. One allow marker covers its
+whole commit, a train squash's every member included. Grafts (info/grafts) and replace refs are not checked:
+git reads the parents they substitute. The commit message is not checked before the commit exists: this gate
+reads committed history (a pull request's range in CI, HEAD locally), not a commit-msg hook.
 """
 import sys
 
@@ -139,6 +167,49 @@ def names_release_file(text):
         if match.group("bare") is None or _SEAMS["bare_qualifier"](text, match.start()):
             return True
     return False
+
+
+_PREPOSITIONS = frozenset(("in", "inside", "within", "under", "of", "from", "at", "into", "on", "for", "to", "by",
+                           "beside", "near", "across"))
+_DETERMINERS = frozenset(("the", "a", "an", "its", "their", "this", "that", "these", "those"))
+_PHRASE_WORD_RE = re.compile(r"[\w./-]+|,")
+
+
+def names_release_subject(span):
+    """True when a passive verb's subject span names a release file other than inside a prepositional phrase
+    (module docstring, NARROWING)."""
+    if not _SEAMS["names"](span):
+        return False
+    for match in _ATOM_RE.finditer(span):
+        if match.group("bare") is not None and not _SEAMS["bare_qualifier"](span, match.start()):
+            continue
+        words = _PHRASE_WORD_RE.findall(span[:match.start()].lower())
+        while words and words[-1] in _DETERMINERS:
+            words.pop()
+        if not (words and words[-1] in _PREPOSITIONS):
+            return True
+    return False
+
+
+_OTHER_COMMIT_RE = re.compile(
+    r"\b(?:previous|prior|preceding|earlier|last|parent|base|older|next|following|later)\s+"
+    r"(?:commits?|changes?|members?|patch(?:es)?)\b|\bcommit\s+[0-9a-f]{7,40}\b", re.I)
+_SELF_REF_RE = re.compile(r"\bthis\s+(?:commit|change|patch|branch|one)\b|\bhere\b", re.I)
+
+
+def about_other_commit(sentence):
+    """True when the sentence names another commit and not this one (module docstring, NARROWING)."""
+    return _OTHER_COMMIT_RE.search(sentence) is not None and _SELF_REF_RE.search(sentence) is None
+
+
+_NO_DIFF_RE = re.compile(
+    r"\b(?:byte[\s-]+identical|byte[\s-]+for[\s-]+byte|identical|came\s+out\s+(?:the\s+same|unchanged)|"
+    r"(?:with|showing|shows?|showed)\s+no\s+(?:diff|changes?))\b", re.I)
+
+
+def says_no_diff(sentence):
+    """True when the sentence says the regenerated output came out identical (module docstring, NARROWING)."""
+    return _NO_DIFF_RE.search(sentence) is not None
 
 
 _QUOTE_RES = (
@@ -292,7 +363,7 @@ def _passive_claims(sentence, pattern, skip_negated):
         if skip_negated and _SEAMS["neg_before"](sentence[:match.start()]):
             continue
         span = _SEAMS["span_before"](sentence, match.start())
-        if span is not None and _SEAMS["names"](span) and not _SEAMS["process"](sentence, match.end()):
+        if span is not None and _SEAMS["subject"](span) and not _SEAMS["process"](sentence, match.end()):
             return True
     return False
 
@@ -339,13 +410,22 @@ def _neg_before(head):
     return _NEG_BEFORE_RE.search(head) is not None
 
 
+_ALLOW_REASON_RE = re.compile(r"[A-Za-z]{2,}")
+
+
 def allow_reason(message):
-    """(reason or None, bare marker seen): the allow marker's reason when one line carries it."""
-    bare = False
+    """(reason or None, bare marker seen): the allow marker's reason when one line outside a fenced block
+    carries it with a reason holding a word of two or more letters (module docstring, ALLOW MARKER)."""
+    bare, fenced = False, False
     for line in message.splitlines():
+        if line.strip().startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
         if line.startswith(ALLOW_PREFIX):
             reason = line[len(ALLOW_PREFIX):].strip()
-            if line[len(ALLOW_PREFIX):len(ALLOW_PREFIX) + 1] == " " and reason:
+            if line[len(ALLOW_PREFIX):len(ALLOW_PREFIX) + 1] == " " and _ALLOW_REASON_RE.search(reason):
                 return reason, bare
             bare = True
     return None, bare
@@ -356,12 +436,12 @@ def judge(message, changes_release, aggregate):
     changes a release file; aggregate is True for a merge or a merge train squash (module docstring)."""
     findings = []
     for sentence in sentences(message):
-        if _SEAMS["hedged"](sentence):
+        if _SEAMS["hedged"](sentence) or _SEAMS["other_commit"](sentence):
             continue
         if changes_release and not (aggregate and _SEAMS["aggregate_skip"]()) and _SEAMS["neg"](sentence):
             findings.append(("says the release files are not regenerated, but the commit changes them",
                              sentence))
-        elif not changes_release and _SEAMS["pos"](sentence):
+        elif not changes_release and not _SEAMS["no_diff"](sentence) and _SEAMS["pos"](sentence):
             findings.append(("says the release files are regenerated, but the commit changes none of them",
                              sentence))
     return findings
@@ -384,6 +464,9 @@ _SEAMS = {
     "strip_quotes": strip_quotes,
     "hedged": hedged,
     "names": names_release_file,
+    "subject": names_release_subject,
+    "other_commit": about_other_commit,
+    "no_diff": says_no_diff,
     "bare_qualifier": _bare_manifest_ok,
     "span_before": _span_before,
     "process": describes_process,
@@ -428,9 +511,21 @@ def resolve_commit(root, rev):
 
 
 def commits_in(root, base, head):
-    """The commit ids in base..head, oldest first."""
+    """The commit ids in base..head, oldest first; CannotEvaluate when the range names no commit."""
     out = _git(root, "rev-list", "--reverse", "{}..{}".format(base, head))
-    return [line for line in out.split("\n") if line]
+    oids = [line for line in out.split("\n") if line]
+    if not oids:
+        raise CannotEvaluate("{}..{} names no commit (head equals base or is behind it), so nothing was "
+                             "read".format(base[:12], head[:12]))
+    return oids
+
+
+def require_full_history(root):
+    """CannotEvaluate in a shallow repository: a commit at the shallow boundary lists no parent and would be
+    read as a root commit against the empty tree."""
+    if _git(root, "rev-parse", "--is-shallow-repository").strip() != "false":
+        raise CannotEvaluate("shallow repository: a commit at the shallow boundary would be read as a root "
+                             "commit; fetch the full history (git fetch --unshallow)")
 
 
 def commit_record(root, oid):
@@ -454,13 +549,16 @@ def changes_release_files(root, oid, parents):
     return any(path == RELEASE_MANIFEST or path.startswith(RELEASE_DIR) for path in paths)
 
 
-def check_commits(root, oids):
-    """Judge each commit; print the result and return the exit status."""
+def check_commits(root, oids, train_subjects=True):
+    """Judge each commit; print the result and return the exit status. train_subjects is False on a
+    pull_request event, where a train squash subject is not honoured (module docstring, AGGREGATES)."""
     refused, allowed, notes = [], [], []
+    if oids:
+        require_full_history(root)
     for oid in oids:
         parents, message = commit_record(root, oid)
         subject = message.split("\n", 1)[0]
-        aggregate = len(parents) > 1 or _TRAIN_SUBJECT_RE.match(subject) is not None
+        aggregate = len(parents) > 1 or (train_subjects and _TRAIN_SUBJECT_RE.match(subject) is not None)
         findings = judge(message, changes_release_files(root, oid, parents), aggregate)
         reason, bare = _SEAMS["allow"](message)
         if bare and reason is None:
@@ -507,10 +605,12 @@ def _event_sha(event, *path):
 
 
 def event_range(root, environ):
-    """The commit ids the environment names (module docstring, COMMITS)."""
+    """(the commit ids the environment names, whether a train squash subject is honoured) (module docstring,
+    COMMITS and AGGREGATES)."""
     name = environ.get("GITHUB_EVENT_NAME", "")
+    train_subjects = name != "pull_request"
     if name in ("", "workflow_dispatch", "schedule"):
-        return [resolve_commit(root, "HEAD")]
+        return [resolve_commit(root, "HEAD")], train_subjects
     if name not in ("pull_request", "push"):
         raise CannotEvaluate("cannot establish the commits for event kind {!r}".format(name))
     path = environ.get("GITHUB_EVENT_PATH", "")
@@ -526,26 +626,28 @@ def event_range(root, environ):
     else:
         base, head = _event_sha(event, "before"), _event_sha(event, "after")
         if head == _ZERO_SHA:
-            return []
+            return [], train_subjects
         if base == _ZERO_SHA:
             raise CannotEvaluate("branch-creation push (all-zero before): the complete range cannot be "
                                  "established")
-    return commits_in(root, resolve_commit(root, base), resolve_commit(root, head))
+    return commits_in(root, resolve_commit(root, base), resolve_commit(root, head)), train_subjects
 
 
-def main(argv, root=ROOT, environ=None):
+def main(argv=None, root=ROOT, environ=None):
+    argv = sys.argv[1:] if argv is None else argv
     environ = os.environ if environ is None else environ
     try:
         if argv == ["--self-test"]:
             return self_test()
+        train_subjects = True
         if len(argv) == 3 and argv[0] == "--range":
             oids = commits_in(root, resolve_commit(root, argv[1]), resolve_commit(root, argv[2]))
         elif not argv:
-            oids = event_range(root, environ)
+            oids, train_subjects = event_range(root, environ)
         else:
             print("usage: check_commit_claims.py [--self-test | --range BASE HEAD]", file=sys.stderr)
             return 2
-        return check_commits(root, oids)
+        return check_commits(root, oids, train_subjects)
     except CannotEvaluate as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -622,7 +724,50 @@ _MESSAGE_ROWS = (
      "proposal", True, False, 0, "allow"),
     ("allow/no-reason", "Edit.\n\nThe release files are not regenerated.\nRelease-claim-allow:", True, False, 1,
      "neg"),
+    # Fix-up and unchanged-lists messages from member commits on train branches (768da756d, ec3e75495,
+    # 66eb3a82b), each honest about its own commit, and their twins that stay claims.
+    ("neg/other-commit-without", "Regenerate the manifest for the delimiter checks' loop change\n\nThe previous "
+     "commit changed tools/selftest_orch_hooks.py without regenerating .aiqt/manifest.toml and the release root "
+     "and announce snippet.", True, False, 0, "other_commit"),
+    ("neg/other-commit-clause", "Regenerate the release manifest for the marketplace install gating\n\nThe "
+     "previous commit changed tracked sources without regenerating the pack manifest, release root and announce "
+     "snippet; this commit is the output of tools/gen_manifest.py, and gen_manifest --check now passes.", True,
+     False, 0, "other_commit"),
+    ("neg/other-commit-passive", "Fix.\n\nIn the previous commit the release manifest was not regenerated.", True,
+     False, 0, "other_commit"),
+    ("neg/other-commit-by-id", "Fix.\n\nIn commit 768da756d the release manifest was not regenerated.", True,
+     False, 0, "other_commit"),
+    ("neg/other-commit-twin-self", "Fix.\n\nThis commit does not regenerate the manifest, unlike the previous "
+     "commit.", True, False, 1, "neg"),
+    ("neg/release-path-as-modifier", "rules: x\n\nRegenerate the generated surfaces; the "
+     "delivered-prefix-obligations\nand floor-profile-obligations lists in "
+     ".aiqt/release/first-pin-demonstration.toml\nare unchanged, with only agents-sha256 moving with the "
+     "regenerated AGENTS.md.", True, False, 0, "subject"),
+    ("neg/release-path-as-subject", "Edit.\n\n.aiqt/release/root.txt is unchanged.", True, False, 1, "neg"),
+    ("neg/release-noun-as-subject", "Edit.\n\nThe release manifest lists are unchanged.", True, False, 1, "neg"),
+    ("neg/incident-wording", "Remove x\n\nRegenerated with gen_hooks, gen_enforceability,\n"
+     "gen_enforcement_register, gen_reference_facts and gen_draft_site. The\nrelease manifest is not regenerated "
+     "in this change.", True, False, 1, "neg"),
+    ("pos/no-diff-honest", "Edit.\n\nThe release manifest was regenerated and came out byte-identical.", False,
+     False, 0, "no_diff"),
+    ("pos/no-diff-twin", "Edit.\n\nThe release manifest was regenerated and the docs moved.", False, False, 1,
+     "pos"),
+    ("pos/span-cap", "Edit.\n\nThe release manifest note in the long paragraph about one two three four five six "
+     "seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen docs is regenerated.", False, False, 0,
+     "span_before"),
+    ("pos/span-cap-twin", "Edit.\n\nThe release manifest note in the paragraph is regenerated.", False, False, 1,
+     "pos"),
+    ("pos/clause-break-glued-semicolon", "Edit.\n\nThe release manifest row moves;the docs are regenerated.",
+     False, False, 0, "span_before"),
+    ("pos/single-quoted", "Edit.\n\nThe step 'regenerate the manifest' was dropped.", False, False, 0,
+     "strip_quotes"),
 )
+
+# Every conditional, modal, reporting and residual word the hedge reads, each in a sentence that is a claim
+# without it (module docstring, NARROWING); kept apart from _HEDGE_RE so a word dropped there turns a row red.
+_HEDGE_WORDS = ("if", "when", "whenever", "unless", "whether", "once", "until", "would", "could", "might",
+                "should", "says", "said", "claims", "claimed", "claiming", "states", "stated", "wrote", "writes",
+                "message", "residual", "residuals", "residue", "for example", "such as", "not checked", "e.g.,")
 
 
 def _expect(failures, condition, message):
@@ -634,6 +779,11 @@ def _message_rows(failures):
     for row_id, message, changes, aggregate, want, _seam in _MESSAGE_ROWS:
         got = len(refused_findings(message, changes, aggregate))
         _expect(failures, got == want, "{}: want {} finding(s), got {}".format(row_id, want, got))
+    control = "Edit.\n\nThe gate the release manifest is not regenerated."
+    _expect(failures, len(judge(control, True, False)) == 1, "hedge/control: the unhedged sentence is no claim")
+    for word in _HEDGE_WORDS:
+        message = "Edit.\n\nThe gate {} the release manifest is not regenerated.".format(word)
+        _expect(failures, not judge(message, True, False), "hedge/{}: the hedged sentence was read".format(word))
 
 
 # Each seam's removed form: the behaviour the gate has when that check is taken out.
@@ -642,6 +792,9 @@ _REMOVED = {
     "strip_quotes": lambda text: text,
     "hedged": lambda sentence: False,
     "names": lambda text: False,
+    "subject": lambda span: _SEAMS["names"](span),
+    "other_commit": lambda sentence: False,
+    "no_diff": lambda sentence: False,
     "bare_qualifier": lambda text, start: True,
     "span_before": lambda sentence, end: sentence[:end],
     "process": lambda sentence, end: False,
@@ -687,12 +840,22 @@ def _allow_rows(failures):
     for row_id, text in (("allow/no-reason", "x\n\nRelease-claim-allow:\n"),
                          ("allow/blank-reason", "x\n\nRelease-claim-allow:   \n"),
                          ("allow/indented", "x\n\n  Release-claim-allow: reason\n"),
-                         ("allow/glued", "x\n\nRelease-claim-allow:reason\n")):
+                         ("allow/glued", "x\n\nRelease-claim-allow:reason\n"),
+                         ("allow/reason-dot", "x\n\nRelease-claim-allow: .\n"),
+                         ("allow/reason-one-letter", "x\n\nRelease-claim-allow: x -\n"),
+                         ("allow/fenced", "x\n\n```\nRelease-claim-allow: quoted example\n```\n"),
+                         ("allow/fenced-indented-fence", "x\n\n  ```text\nRelease-claim-allow: quoted example\n"
+                                                         "  ```\n")):
         reason, _bare = allow_reason(text)
         _expect(failures, reason is None, "{}: a marker that is not honoured gave {!r}".format(row_id, reason))
     _expect(failures, allow_reason("x\n\nRelease-claim-allow:\n")[1], "allow/no-reason: bare marker not seen")
+    _expect(failures, allow_reason("x\n\nRelease-claim-allow: .\n")[1], "allow/reason-dot: bare marker not seen")
+    _expect(failures, allow_reason("x\n\n```\nRelease-claim-allow: q\n```\nRelease-claim-allow: after it\n")[0]
+            == "after it", "allow/after-fence: the marker after a closed fence is not honoured")
     marked = "x\n\nThe release files are not regenerated.\nRelease-claim-allow: quoted from a proposal\n"
     _expect(failures, len(judge(marked, True, False)) == 1, "allow/marker-line-is-not-the-claim")
+    claim_in_marker = "x\n\nRelease-claim-allow: the release manifest is regenerated.\n"
+    _expect(failures, not judge(claim_in_marker, False, False), "allow/marker-line-not-read")
 
 
 def _git_rows(failures):
@@ -765,6 +928,24 @@ def _git_rows(failures):
                           "Edit\n\nThe manifest is not changed.\n\nRelease-claim-allow:")
             expect_run("git/bare-marker-refused", ["--range", allowed, bare], root, 1, "is not honoured")
             expect_run("git/range-oldest-first", ["--range", base, bare], root, 1, "FAIL: 3 commit message")
+            _rc, text = run(["--range", base, bare], root)
+            text = text[text.find("FAIL:"):]
+            order = [text.find("commit " + oid[:12]) for oid in (lie, stale, bare)]
+            _expect(failures, -1 not in order and order == sorted(order),
+                    "git/range-order: findings not printed oldest first: {}".format(order))
+            expect_run("git/empty-range-fails-closed", ["--range", bare, base], root, 2, "names no commit")
+            expect_run("git/same-commit-range-fails-closed", ["--range", bare, bare], root, 2, "names no commit")
+            # Every ambient GIT_ variable is dropped: a GIT_DIR naming no repository changes nothing.
+            saved_git_dir = os.environ.get("GIT_DIR")
+            os.environ["GIT_DIR"] = os.path.join(scratch, "no-such-repository")
+            try:
+                expect_run("git/ambient-git-dir-dropped", ["--range", base, lie], root, 1,
+                           "are not regenerated, but the commit changes them")
+            finally:
+                if saved_git_dir is None:
+                    os.environ.pop("GIT_DIR", None)
+                else:
+                    os.environ["GIT_DIR"] = saved_git_dir
             expect_run("git/head-alone", [], root, 1, "commit " + bare[:12])
             expect_run("git/dispatch-head-alone", [], root, 1, "commit " + bare[:12],
                        {"GITHUB_EVENT_NAME": "schedule"})
@@ -810,6 +991,52 @@ def _git_rows(failures):
             member = commit(root, {".aiqt/manifest.toml": "f\n"},
                             "Merge trains: a\n\nThe release root is not regenerated.")
             expect_run("git/train-subject-exact", ["--range", train, member], root, 1, "commit " + member[:12])
+            # A merge is judged against its first parent: the side branch's release change is in that diff, so
+            # its REGENERATED sentence is true; against the side parent it would read as false.
+            git(root, "checkout", "-q", "-b", "side2", member)
+            side2 = commit(root, {".aiqt/release/root.txt": "s2\n"}, "side2")
+            git(root, "checkout", "-q", "-")
+            mainline = commit(root, {"README.md": "m\n"}, "mainline")
+            git(root, "merge", "-q", "--no-ff", "-m", "Merge side2\n\nThe release root is regenerated.", side2)
+            merge2 = git(root, "rev-parse", "HEAD")
+            expect_run("git/merge-first-parent", ["--range", mainline, merge2], root, 0, "PASS: 2 commit(s) read")
+            # A member commit that imitates a train squash subject is read in both directions on a pull request.
+            spoof = commit(root, {".aiqt/manifest.toml": "g\n"},
+                           "Merge train t3: member\n\nThe release root is not regenerated.")
+            write(scratch, "event.json", json.dumps({"pull_request": {"base": {"sha": merge2},
+                                                                      "head": {"sha": spoof}}}))
+            expect_run("git/pull-request-train-subject-read", [], root, 1, "commit " + spoof[:12],
+                       {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_EVENT_PATH": event})
+            write(scratch, "event.json", json.dumps({"before": merge2, "after": spoof}))
+            expect_run("git/push-train-subject-honoured", [], root, 0, "PASS: 1 commit(s) read",
+                       {"GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_PATH": event})
+            fenced = commit(root, {".aiqt/manifest.toml": "h\n"},
+                            "Edit\n\nThe manifest is not changed.\n\n```\nRelease-claim-allow: fenced example\n```")
+            expect_run("git/fenced-marker-not-honoured", ["--range", spoof, fenced], root, 1,
+                       "commit " + fenced[:12])
+            # A shallow boundary lists no parent: the gate refuses to read it as a root commit.
+            shallow = os.path.join(scratch, "shallow")
+            shutil.copytree(root, shallow)
+            git(shallow, "checkout", "-q", "--detach", honest)
+            write(shallow, ".git/shallow", honest + "\n")
+            expect_run("git/shallow-fails-closed", [], shallow, 2, "shallow repository")
+            expect_run("git/shallow-range-fails-closed", ["--range", lie, honest], shallow, 2, "shallow repository")
+            os.remove(os.path.join(shallow, ".git", "shallow"))
+            expect_run("git/shallow-twin-full-history", [], shallow, 0, "PASS: 1 commit(s) read")
+            # A first parent whose object is missing fails the diff.
+            lost = os.path.join(scratch, "lost")
+            os.makedirs(lost)
+            git(lost, "init", "-q")
+            gone = commit(lost, {".aiqt/manifest.toml": "a\n"}, "base")
+            commit(lost, {"README.md": "x\n"}, "Edit\n\nThe release files are not regenerated.")
+            os.remove(os.path.join(lost, ".git", "objects", gone[:2], gone[2:]))
+            expect_run("git/missing-parent-fails-closed", [], lost, 2, "; fail-closed")
+            # A revision must resolve to a 40-hex object id: a SHA-256 repository's ids are refused.
+            wide = os.path.join(scratch, "wide")
+            os.makedirs(wide)
+            git(wide, "init", "-q", "--object-format=sha256")
+            commit(wide, {"README.md": "x\n"}, "init")
+            expect_run("git/sha256-ids-refused", [], wide, 2, "does not resolve to a commit")
             rootless = os.path.join(scratch, "solo")
             os.makedirs(rootless)
             git(rootless, "init", "-q")
@@ -834,10 +1061,66 @@ def self_test():
         print("SELF-TEST FAILED: {} row(s)".format(len(failures)))
         return 1
     print("SELF-TEST PASS: check_commit_claims.py: {} message rows, each named check removed turns its rows "
-          "red, the allow marker rows, and the git fixture rows (ranges, events, merges, a train squash, a "
-          "root commit and the fail-closed paths)".format(len(_MESSAGE_ROWS)))
+          "red, the hedge-word rows, the allow marker rows, and the git fixture rows (ranges, events, merges, a "
+          "train squash, a root commit, a shallow boundary, a missing parent and the fail-closed "
+          "paths)".format(len(_MESSAGE_ROWS)))
     return 0
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This gate reads every verdict from a git
+# child's exit status, so under an ignored SIGCHLD a failing git would read as a success and a contradiction
+# could pass; the guard runs at the entry line, before main() dispatches the gate or its self-test.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(_child_status_refusal_exit("check_commit_claims.py") or main())
