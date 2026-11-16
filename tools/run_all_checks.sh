@@ -361,7 +361,8 @@ run_gate "internal-names-selftest"  python3 -I -B tools/check_selftest_execution
 run_gate "internal-names"           python3 -I -B tools/check_internal_names.py
 # Review and work labels on the lines this branch adds, judged against its merge base with the branch
 # origin/HEAD names, used only when that is origin/main or the remote's default branch; any other
-# origin/HEAD (a feature branch, the candidate itself) or none is cannot-evaluate (pass --protected).
+# origin/HEAD or none is cannot-evaluate, and so is a merge base that is the candidate commit itself
+# (origin/HEAD naming the candidate or a branch ahead of it, or HEAD at or behind it): pass --protected.
 run_gate "review-labels-selftest"   python3 -I -B tools/check_selftest_execution.py --suite review-labels-selftest
 run_gate "review-labels"            python3 -I -B tools/check_review_labels.py
 

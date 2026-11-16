@@ -46,10 +46,11 @@ id = "review-tag"
 description = "a parenthesised or bracketed review or QA cycle tag"
 regex = '[(\[](?:r|[Qq][Aa])[0-9]+[a-z]?:?[ \t]+(?!(?:and|or|not|in|is|if|else|for)\b)[A-Za-z]'
 
+# The word may follow an underscore and be joined to its number by one (a snake_case name).
 [[shape]]
 id = "round-number"
 description = "a numbered round (a retry round and a count of rounds are not one)"
-regex = '(?<!retry )\bround[ \t-]?#?[0-9]+\b(?!\s+of\b)'
+regex = '(?<!retry )(?<![A-Za-z0-9])round[ \t_-]?#?[0-9]+\b(?!\s+of\b)'
 ignore-case = true
 
 [[shape]]

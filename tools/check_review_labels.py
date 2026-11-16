@@ -12,16 +12,22 @@ change or the base declares binary, with -diff, binary or a binary diff driver, 
 context lines, no external diff driver and no textconv. The candidate is the working tree (every tracked
 file, staged or not) unless --head names a commit, in which case it is that commit's tree. A line that
 already sits on the merge base, a line the change deletes, and a file the change only renames are not
-judged. An added line whose bytes are exactly those of a line the same diff deletes, in any file, is a
+judged. An added line whose bytes are exactly those of a line the same diff deletes, in any file but an
+excluded one (whose deleted lines credit nothing), is a
 moved or reordered line and is not charged either: each deleted line credits one identical added line,
 so a line copied more times than it is deleted is charged for each extra copy, and an edited label line
 (any byte changed, its indentation included) is charged. Every other added line is searched for each
 label shape in .aiqt/review-labels.toml (a tracked TOML file: a test name numbered after a review cycle,
 a parenthesised or bracketed review or QA cycle tag, a numbered round, the words review and round side
 by side, a numbered finding and a tracker backlog id by default, each one Python regular expression),
-both as written and after NFKC normalization with format characters (a zero-width space, say) removed,
-so a fullwidth digit, a no-break space or a zero-width space does not hide a label. A line carrying the
-file's allow-marker is a deliberate quotation and is exempt; the marker exempts that one line only.
+both as written and folded: compatibility-normalized with format characters (a zero-width space, say)
+and combining marks removed, a closed table of Cyrillic and Greek look-alike letters (CONFUSABLES) read
+as the Latin letters they imitate and any other script's decimal digit read as its ASCII digit, so a
+fullwidth digit, a no-break space, a zero-width space, a combining accent, a Cyrillic o or an
+Arabic-Indic digit does not hide a label; a line holding a NUL byte (a UTF-16 text file, say) is also
+read with its NUL bytes removed. A line carrying the file's allow-marker as a word of its own is a
+deliberate quotation and is exempt; the marker exempts that one line only, and inside a longer word it
+exempts nothing.
 
 EXCLUDED PATHS. The configuration's exclude-paths list names the only files whose added lines are not
 judged, each a reviewed exception justified beside it in that file: the sibling gate
@@ -43,10 +49,15 @@ candidate itself is never judged against; else, only when GITHUB_ACTIONS is "tru
 origin/GITHUB_REF_NAME (a push or manual run, where the candidate usually IS that branch, so nothing is
 added and the run passes: there the pull request run is the effective gate). No other fallback exists.
 A remote whose own HEAD names a feature branch (a clone of a linked worktree, say) makes that branch the
-default, which this derivation cannot tell from a real default; pass --protected there.
+default, which this derivation cannot tell from a real default; when the merge base with the branch
+origin/HEAD names is the candidate commit itself, none of its committed lines would be judged, so that
+is cannot-evaluate (pass --protected there). This also refuses a checkout whose HEAD sits at or behind
+the protected branch through origin/HEAD (a local main at origin/main), uncommitted edits included:
+pass --protected to judge such edits.
 
 FAIL CLOSED (exit 2, never a pass): no protected branch can be derived, an origin/HEAD that is neither
-origin/main nor the remote's default branch, a ref or revision that does not resolve to a commit, a
+origin/main nor the remote's default branch, an origin/HEAD whose merge base is the candidate commit, a
+remote HEAD naming no branch or several, a ref or revision that does not resolve to a commit, a
 shallow repository (its merge base can be wrong), no common ancestor, more than one merge base (a
 criss-cross history), git that cannot run or exits nonzero (an unreadable tracked file makes git diff
 fail), a diff line the parser does not recognise, a hunk whose line counts do not add up or a binary
@@ -57,14 +68,17 @@ shape.
 
 DISCLOSED LIMITS. A genuine binary file (one whose changed lines hold a NUL byte: an image, a font or a
 zip archive) is read as raw lines like any other and counted in the summary, so a label stored in it
-uncompressed is caught, but compressed or encoded content is not readable and a shape that happens to
-appear in its bytes is a false positive; the excluded paths above are not judged at all; a moved line
-is credited by exact bytes, so deleting a label line anywhere lets the same line be added once anywhere
-else; an untracked file is not judged; a label outside the configured shapes is not matched, among them
-a look-alike letter from another script (a Cyrillic o), punctuation the shapes do not allow, a
-parenthesised tag with nothing after its number or with a comma after it, a lower-case backlog id and
-a label split, encoded or wrapped across lines; prose that matches a shape without being a label is a
-false positive that the allow-marker or a rewording settles (a numbered game or protocol round, a retry
+uncompressed is caught, but compressed or encoded content (UTF-16 aside) is not readable and a shape
+that happens to appear in its bytes is a false positive; the excluded paths above are not judged at
+all; a moved line is credited by exact bytes, so deleting a label line from any judged file lets the
+same line be added once anywhere else; an untracked file is not judged; a label outside the configured
+shapes is not matched, among them a look-alike letter outside the CONFUSABLES table, punctuation the
+shapes do not allow, a parenthesised tag with nothing after its number or with a comma after it, a
+lower-case backlog id, a number written as a word, a cycle tag written after the word review (an
+upper-case R and a number, which is this pack's rule-number spelling) and a label split, encoded or
+wrapped across lines; prose that matches a shape without being a label is a
+false positive that the allow-marker or a rewording settles (a numbered game or protocol round, its
+snake_case name joined to the number by an underscore, prose in another script that folds onto a shape, a retry
 round written with two spaces, the word finding before a count of matches, a test named after a cycle
 for a reason of its own, and a tag-like aside of a lower-case r or QA, a number and a word); the
 configuration is trusted
@@ -109,6 +123,8 @@ REF_NAME_VAR = "GITHUB_REF_NAME"
 ACTIONS_VAR = "GITHUB_ACTIONS"
 ORIGIN_HEAD = "refs/remotes/origin/HEAD"
 ORIGIN_PREFIX = "refs/remotes/origin/"
+# The source name a protected branch derived from origin/HEAD carries.
+ORIGIN_HEAD_SOURCE = "origin/HEAD"
 # The one origin/HEAD target accepted without asking the remote for its default branch.
 DEFAULT_TRACKING = ORIGIN_PREFIX + "main"
 REMOTE = "origin"
@@ -130,6 +146,23 @@ CONFIG_KEYS = frozenset(("format-version", "allow-marker", "exclude-paths", "sha
 SHAPE_KEYS = frozenset(("id", "description", "regex", "ignore-case"))
 SHAPE_ID_RE = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", re.ASCII)
 MARKER_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]{2,63}", re.ASCII)
+# The look-alike letters the folded view replaces by the Latin letter they imitate: a closed table of
+# Cyrillic and Greek letters (by code point, so this source stays ASCII), not the whole Unicode
+# confusables list.
+CONFUSABLES = str.maketrans({chr(code): latin for code, latin in (
+    # Cyrillic lower case: a, e, o, p, c, y, x, i, j, s, d, q, w, k.
+    (0x0430, "a"), (0x0435, "e"), (0x043E, "o"), (0x0440, "p"), (0x0441, "c"), (0x0443, "y"),
+    (0x0445, "x"), (0x0456, "i"), (0x0458, "j"), (0x0455, "s"), (0x0501, "d"), (0x051B, "q"),
+    (0x051D, "w"), (0x043A, "k"),
+    # Cyrillic upper case: A, B, E, K, M, H, O, P, C, T, X, I, J, S.
+    (0x0410, "A"), (0x0412, "B"), (0x0415, "E"), (0x041A, "K"), (0x041C, "M"), (0x041D, "H"),
+    (0x041E, "O"), (0x0420, "P"), (0x0421, "C"), (0x0422, "T"), (0x0425, "X"), (0x0406, "I"),
+    (0x0408, "J"), (0x0405, "S"),
+    # Greek lower case: o, i, k, v, p and upper case A, B, E, Z, H, I, K, M, N, O, P, T, Y, X.
+    (0x03BF, "o"), (0x03B9, "i"), (0x03BA, "k"), (0x03BD, "v"), (0x03C1, "p"),
+    (0x0391, "A"), (0x0392, "B"), (0x0395, "E"), (0x0396, "Z"), (0x0397, "H"), (0x0399, "I"),
+    (0x039A, "K"), (0x039C, "M"), (0x039D, "N"), (0x039F, "O"), (0x03A1, "P"), (0x03A4, "T"),
+    (0x03A5, "Y"), (0x03A7, "X"))})
 _C_ESCAPES = {ord("a"): 7, ord("b"): 8, ord("t"): 9, ord("n"): 10, ord("v"): 11, ord("f"): 12,
               ord("r"): 13, ord('"'): 34, ord("\\"): 92}
 
@@ -318,7 +351,7 @@ def protected_ref(root, explicit, environ):
                     "origin/HEAD names {!r}, neither {!r} nor the remote's default branch {!r}; pass "
                     "--protected REF, or reset it with git remote set-head origin --auto".format(
                         target, DEFAULT_TRACKING, default))
-        return target, "origin/HEAD"
+        return target, ORIGIN_HEAD_SOURCE
     if proc.returncode != 1:
         raise CannotEvaluate("origin/HEAD cannot be read: git exited {} ({})".format(
             proc.returncode, _stderr(proc)))
@@ -372,6 +405,17 @@ def merge_base(root, protected_sha, head_sha):
     return _one_base(bases, head_sha)
 
 
+def _require_candidate_ahead(source, base, head_sha):
+    """CannotEvaluate when the protected branch came from origin/HEAD and the merge base is the
+    candidate commit itself: origin/HEAD then names the candidate or a branch ahead of it (a clone of a
+    linked worktree whose remote HEAD is the feature branch, say), so none of the candidate's own
+    committed lines would be judged."""
+    if source == ORIGIN_HEAD_SOURCE and base == head_sha:
+        raise CannotEvaluate(
+            "the merge base with the branch origin/HEAD names is the candidate commit {} itself, so none "
+            "of its committed lines would be judged; pass --protected REF".format(head_sha[:12]))
+
+
 def _require_diff_ok(proc):
     if proc.returncode != 0:
         raise CannotEvaluate("git diff exited {} ({})".format(proc.returncode, _stderr(proc)))
@@ -411,8 +455,9 @@ def _unquote(raw):
     return bytes(out)
 
 
-def _new_path(raw):
-    """The display path of a +++ header's target (None for /dev/null)."""
+def _new_path(raw, prefix=b"b/"):
+    """The display path of a +++ header's target, or with prefix a/ of a --- header's source (None for
+    /dev/null)."""
     # git ends a header path holding a space with one tab, quoted or not; a tab inside a path is
     # always quoted, so the tab after the last byte is the terminator alone.
     if raw.endswith(b"\t"):
@@ -421,14 +466,15 @@ def _new_path(raw):
         return None
     if raw.startswith(b'"'):
         raw = _unquote(raw)
-    if not raw.startswith(b"b/"):
-        raise CannotEvaluate("diff target {!r} lacks the b/ prefix".format(raw))
+    if not raw.startswith(prefix):
+        raise CannotEvaluate("diff path {!r} lacks the {} prefix".format(raw, prefix.decode("ascii")))
     return raw[2:].decode("utf-8", "backslashreplace")
 
 
 def added_lines(diff):
     """Diff(added, deleted, nul_paths): every judged hunk line of `diff` as Added(path, number, text,
-    kind, raw), a Counter of the exact bytes of every deleted line (the moved-line credit), and the
+    kind, raw), a Counter of (source path, exact bytes) of every deleted line (the moved-line credit,
+    the path so that an excluded file's deleted lines credit nothing), and the
     paths whose changed lines hold a NUL byte (a genuine binary read as lines). CannotEvaluate on an
     unrecognised line, a binary notice or a hunk whose line counts do not add up."""
     lines = diff.split(b"\n")
@@ -443,7 +489,7 @@ def added_lines(diff):
                 number, new_no, new_left = new_no, new_no + 1, new_left - 1
             elif sigil == b"-" and old_left:
                 number, old_no, old_left = old_no, old_no + 1, old_left - 1
-                deleted[raw[1:]] += 1
+                deleted[(old_path, raw[1:])] += 1
             elif sigil == b" " and old_left and new_left:
                 number, old_no, new_no = new_no, old_no + 1, new_no + 1
                 old_left, new_left = old_left - 1, new_left - 1
@@ -463,7 +509,7 @@ def added_lines(diff):
             path = old_path = None
             continue
         if raw.startswith(b"--- "):
-            old_path = raw[4:].decode("utf-8", "backslashreplace")
+            old_path = _new_path(raw[4:], b"a/")
             continue
         if raw.startswith(b"+++ "):
             path = _new_path(raw[4:])
@@ -490,11 +536,22 @@ def added_lines(diff):
 
 # --- judging -----------------------------------------------------------------------------------------
 def _allowed(text, marker):
-    return marker in text
+    """Whether the line carries the allow-marker as a word of its own, not inside a longer word."""
+    return re.search(r"(?<![A-Za-z0-9_-])" + re.escape(marker) + r"(?![A-Za-z0-9_-])", text) is not None
 
 
 def _excluded(path, excluded):
     return path in excluded
+
+
+def _credits(deleted, excluded):
+    """The moved-line credits: a Counter of the exact bytes of every deleted line outside the excluded
+    files, so a line deleted from an excluded file cannot credit the same line added elsewhere."""
+    credits = Counter()
+    for (path, raw), count in deleted.items():
+        if not _excluded(path, excluded):
+            credits[raw] += count
+    return credits
 
 
 def credit_moves(added, deleted):
@@ -511,10 +568,25 @@ def credit_moves(added, deleted):
 
 
 def _views(text):
-    """The text as written and, when it differs, its NFKC form with format characters (category Cf: a
-    zero-width space or joiner, a byte-order mark) removed, so such characters do not hide a label."""
-    folded = "".join(ch for ch in unicodedata.normalize("NFKC", text) if unicodedata.category(ch) != "Cf")
+    """The text as written and, when it differs, its folded form: compatibility-decomposed (NFKD) with
+    format characters (category Cf: a zero-width space or joiner, a byte-order mark) and combining marks
+    (category Mn) removed, recomposed (NFKC), each CONFUSABLES letter replaced by the Latin letter it
+    imitates and each other decimal digit by its ASCII digit, so such characters do not hide a label."""
+    stripped = "".join(ch for ch in unicodedata.normalize("NFKD", text)
+                       if unicodedata.category(ch) not in ("Cf", "Mn"))
+    folded = "".join(str(unicodedata.decimal(ch)) if not ch.isascii() and unicodedata.decimal(ch, None)
+                     is not None else ch
+                     for ch in unicodedata.normalize("NFKC", stripped).translate(CONFUSABLES))
     return (text,) if folded == text else (text, folded)
+
+
+def _line_views(line):
+    """The views of an added line: its text's views and, for a line holding a NUL byte (a UTF-16 text
+    file, say), also the views of its bytes with every NUL removed."""
+    views = _views(line.text)
+    if b"\x00" in line.raw:
+        views += _views(line.raw.replace(b"\x00", b"").decode("utf-8", "replace"))
+    return views
 
 
 def judge(added, config):
@@ -522,7 +594,7 @@ def judge(added, config):
     for line in added:
         if _allowed(line.text, config.marker):
             continue
-        views = _views(line.text)
+        views = _line_views(line)
         for shape in config.shapes:
             if any(shape.pattern.search(view) for view in views):
                 findings.append(Finding(line.path, line.number, shape.id, shape.description, line.text))
@@ -539,10 +611,11 @@ def evaluate(root, protected=None, head=None, environ=None):
     protected_sha = _resolve_commit(root, ref, "protected branch")
     head_sha = _resolve_commit(root, "HEAD" if head is None else head, "candidate")
     base = merge_base(root, protected_sha, head_sha)
+    _require_candidate_ahead(source, base, head_sha)
     diff = added_lines(read_diff(root, base, None if head is None else head_sha))
     judged = [line for line in diff.added if not _excluded(line.path, config.excluded)]
     skipped = len(diff.added) - len(judged)
-    judged, moved = credit_moves(judged, diff.deleted)
+    judged, moved = credit_moves(judged, _credits(diff.deleted, config.excluded))
     summary = "{} added line(s) in {} file(s) judged against merge base {} of {} (from {}){}{}{}{}".format(
         len(judged), len({line.path for line in judged}), base[:12], ref, source,
         "" if head is None else ", candidate {}".format(head_sha[:12]),
@@ -757,7 +830,8 @@ def _self_test():
           "and the Actions ref name; excluded files are not judged and every other file is; a moved or "
           "reordered line is not charged while an edited line and an extra copy are; a text file "
           "declared binary, a genuine binary and look-alike characters are read; textconv, an external "
-          "diff, a submodule log and a GIT_DIR redirect are held off; the configuration size bound "
+          "diff, a submodule log, a GIT_DIR redirect and a replace ref are held off; git output off its "
+          "shape and an origin/HEAD at the candidate are refused; the configuration size bound "
           "holds under, at and over; bad arguments exit 2 without a scan)".format(len(EXECUTED)))
     return 0
 
@@ -878,6 +952,8 @@ def _rows(tmp):
     _move_rows(tmp, labels)
     _text_rows(tmp, labels)
     _hardening_rows(tmp, labels)
+    _replace_ref_rows(tmp, labels)
+    _git_output_rows()
     _bound_and_cli_rows()
 
 
@@ -1108,9 +1184,17 @@ def _derivation_rows(tmp, labels):
     _fx_git(repo, "symbolic-ref", ORIGIN_HEAD, ORIGIN_PREFIX + "feature")
     code, out = _gate(repo, protected=None)
     check("fail-closed/origin-head-feature-branch", code == 2 and "neither" in out, out)
+    # With the remote's own HEAD on that branch the derivation accepts it, and the merge base is then the
+    # candidate itself: refused, since none of its committed lines would be judged.
     with _patched(remote_default_branch=lambda root: "feature"):
         code, out = _gate(repo, protected=None)
+    check("fail-closed/origin-head-names-candidate", code == 2 and "is the candidate commit" in out, out)
+    with _patched(remote_default_branch=lambda root: "feature",
+                  _require_candidate_ahead=lambda source, base, head_sha: None):
+        code, out = _gate(repo, protected=None)
     check("flip/origin-head-feature-branch-accepted", code == 0 and "0 added line(s)" in out, out)
+    code, out = _gate(repo, protected=_fx_git(repo, "rev-parse", "work"))
+    check("pass/explicit-protected-at-candidate", code == 0 and "0 added line(s)" in out, out)
     _fx_git(remote, "symbolic-ref", "HEAD", "refs/heads/trunk")
     _fx_git(repo, "update-ref", ORIGIN_PREFIX + "trunk", base_sha)
     _fx_git(repo, "symbolic-ref", ORIGIN_HEAD, ORIGIN_PREFIX + "trunk")
@@ -1215,6 +1299,27 @@ def _move_rows(tmp, labels):
         code, out = _gate(repo)
     check("flip/copies-credited-as-a-set", code == 0, out)
 
+    # A label line deleted from an excluded file credits nothing: the same line added elsewhere is charged.
+    excluded = sorted(_REAL_LOAD_CONFIG(ROOT / CONFIG_RELPATH).excluded)[0]
+    _fx_git(repo, "checkout", "-q", "-b", "excluded-credit", "main")
+    _write(repo, excluded, "placeholder = 1\n{}\n".format(labels["review-cycle-words"]))
+    protected = _commit_all(repo, "a label line in an excluded file")
+    _write(repo, excluded, "placeholder = 1\n")
+    _write(repo, "taken.py", labels["review-cycle-words"] + "\n")
+    _commit_all(repo, "the line deleted there and added in another file")
+    code, out = _gate(repo, protected=protected)
+    check("refuse/excluded-file-deletion-credits-nothing",
+          code == 1 and "  taken.py:1: review-cycle-words" in out and "moved line" not in out, out)
+
+    def all_credits(deleted, excluded):
+        credits = Counter()
+        for (_path, raw), count in deleted.items():
+            credits[raw] += count
+        return credits
+    with _patched(_credits=all_credits):
+        code, out = _gate(repo, protected=protected)
+    check("flip/excluded-file-deletion-credited", code == 0 and "1 moved line(s) not charged" in out, out)
+
 
 def _text_rows(tmp, labels):
     """A text file declared binary and a genuine binary are read as lines; a binary notice is refused;
@@ -1262,7 +1367,14 @@ def _text_rows(tmp, labels):
         ("refuse/round-tab-number", "# fixed in " + rd + "\t5", "round-number"),
         ("refuse/fullwidth-digit", "# fixed in " + rd + " \N{FULLWIDTH DIGIT FIVE}", "round-number"),
         ("refuse/no-break-space", "# fixed in " + rd + " 5", "round-number"),
-        ("refuse/zero-width-space", "# tracked as " + "FI" + "X-​12", "backlog-id"))
+        ("refuse/zero-width-space", "# tracked as " + "FI" + "X-​12", "backlog-id"),
+        ("refuse/cyrillic-o", "# fixed in r\N{CYRILLIC SMALL LETTER O}und 5", "round-number"),
+        ("refuse/greek-omicron", "# fixed in r\N{GREEK SMALL LETTER OMICRON}und 5", "round-number"),
+        ("refuse/cyrillic-capital-i", "# tracked as F\N{CYRILLIC CAPITAL LETTER BYELORUSSIAN-UKRAINIAN I}"
+         + "X-12", "backlog-id"),
+        ("refuse/combining-mark", "# fixed in ro\N{COMBINING ACUTE ACCENT}und 5", "round-number"),
+        ("refuse/arabic-indic-digit", "# fixed in " + rd + " \N{ARABIC-INDIC DIGIT FIVE}", "round-number"),
+        ("refuse/snake-case-number", "x_" + rd + "_5 = 1", "round-number"))
     _write(repo, "variants.py", "".join(text + "\n" for _, text, _ in variants))
     _commit_all(repo, "label variants")
     code, out = _gate(repo)
@@ -1273,7 +1385,13 @@ def _text_rows(tmp, labels):
                                       ("refuse/round-tab-number", 5, "round-number"),
                                       ("refuse/fullwidth-digit", 6, "round-number"),
                                       ("refuse/no-break-space", 7, "round-number"),
-                                      ("refuse/zero-width-space", 8, "backlog-id")):
+                                      ("refuse/zero-width-space", 8, "backlog-id"),
+                                      ("refuse/cyrillic-o", 9, "round-number"),
+                                      ("refuse/greek-omicron", 10, "round-number"),
+                                      ("refuse/cyrillic-capital-i", 11, "backlog-id"),
+                                      ("refuse/combining-mark", 12, "round-number"),
+                                      ("refuse/arabic-indic-digit", 13, "round-number"),
+                                      ("refuse/snake-case-number", 14, "round-number")):
         check(check_id, code == 1 and "  variants.py:{}: {} (".format(index, shape_id) in out, out)
     narrow = {
         "review-test-name": (r"\btest_r" + r"[0-9]+[a-z]?_", 0),
@@ -1283,11 +1401,31 @@ def _text_rows(tmp, labels):
     with _patched(load_config=_with_patterns(narrow)):
         code, out = _gate(repo)
     check("flip/variants-missed-by-narrow-shapes", not any(
-        "  variants.py:{}: ".format(index) in out for index in range(1, 6)), out)
+        "  variants.py:{}: ".format(index) in out for index in (1, 2, 3, 4, 5, 14)), out)
     with _patched(_views=lambda text: (text,)):
         code, out = _gate(repo)
     check("flip/look-alikes-missed-without-folding", not any(
-        "  variants.py:{}: ".format(index) in out for index in range(6, 9)), out)
+        "  variants.py:{}: ".format(index) in out for index in range(6, 14)), out)
+
+    # A UTF-16 text file (every other byte a NUL) is also read with its NUL bytes removed, and the
+    # allow-marker exempts a line only as a word of its own.
+    repo = _base_repo(tmp, "encodings")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    with open(Path(repo) / "wide.txt", "wb") as handle:
+        handle.write(("clean line\n" + labels["round-number"] + "\n").encode("utf-16"))
+    _write(repo, "marked.py", labels["round-number"] + "  # x" + _REAL_LOAD_CONFIG(
+        ROOT / CONFIG_RELPATH).marker + "ed\n")
+    _commit_all(repo, "a UTF-16 label and a marker inside a longer word")
+    code, out = _gate(repo)
+    check("refuse/utf16-file-read-without-nul", code == 1 and "  wide.txt:2: round-number" in out
+          and out.count("  wide.txt:") == 1, out)
+    check("refuse/marker-inside-longer-word", code == 1 and "  marked.py:1: round-number" in out, out)
+    with _patched(_line_views=lambda line: _views(line.text)):
+        code, out = _gate(repo)
+    check("flip/utf16-label-missed-with-nul", "wide.txt" not in out, out)
+    with _patched(_allowed=lambda text, marker: marker in text):
+        code, out = _gate(repo)
+    check("flip/marker-inside-longer-word-exempts", "marked.py" not in out, out)
 
 
 def _with_patterns(patterns):
@@ -1344,6 +1482,94 @@ def _hardening_rows(tmp, labels):
             os.environ["GIT_DIR"] = saved
 
 
+def _replace_ref_rows(tmp, labels):
+    """A replace ref (git replace --graft) that would make the candidate an ancestor of the protected
+    branch is ignored, so the merge base stays the real one and the label line is judged."""
+    repo = _base_repo(tmp, "replace")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "labelled.py", labels["backlog-id"] + "\n")
+    candidate = _commit_all(repo, "a label")
+    _fx_git(repo, "checkout", "-q", "main")
+    _write(repo, "clean.py", "value = 1\n")
+    tip = _commit_all(repo, "a clean change on main")
+    _fx_git(repo, "replace", "--graft", tip, candidate)
+    _fx_git(repo, "checkout", "-q", "work")
+    code, out = _gate(repo, head="HEAD")
+    check("refuse/replace-ref-ignored", code == 1 and "  labelled.py:1: backlog-id" in out, out)
+    honoured = _git_env
+
+    def env_with_replace_refs():
+        env = honoured()
+        env.pop("GIT_NO_REPLACE_OBJECTS", None)
+        return env
+    with _patched(_git_env=env_with_replace_refs):
+        code, out = _gate(repo, head="HEAD")
+    check("flip/replace-ref-moves-merge-base", code == 0 and "labelled.py" not in out, out)
+
+
+def _fake_git(returncode, stdout, calls=None):
+    """A _git replacement returning one fixed result, recording each argument list in `calls`."""
+    def fake(root, *args):
+        if calls is not None:
+            calls.append(args)
+        return subprocess.CompletedProcess(args, returncode, stdout, b"fixture stderr")
+    return fake
+
+
+def _refused(function, *args):
+    """'refused' when function(*args) raises CannotEvaluate, else 'accepted' or the other error's name."""
+    try:
+        function(*args)
+    except CannotEvaluate:
+        return "refused"
+    except Exception as exc:
+        return "error " + type(exc).__name__
+    return "accepted"
+
+
+def _git_output_rows():
+    """Git output off the expected shape is refused: the remote's HEAD naming no branch, several, a
+    non-branch ref or an empty branch name; a merge-base exit 1 that still printed a base; a revision
+    that resolved to several lines; an origin/HEAD read that git could not complete; and a hunk adding
+    lines to /dev/null. The diff is read with core.quotePath pinned on."""
+    got = []
+    for stdout in (b"", b"ref: refs/heads/a\tHEAD\nref: refs/heads/b\tHEAD\n", b"ref: refs/tags/v1\tHEAD\n",
+                   b"ref: refs/heads/\tHEAD\n"):
+        with _patched(_git=_fake_git(0, stdout)):
+            got.append(_refused(remote_default_branch, "."))
+    check("fail-closed/remote-head-shape", got == ["refused"] * 4, got)
+    with _patched(_git=_fake_git(0, b"ref: refs/heads/trunk\tHEAD\n0123abcd\tHEAD\n")):
+        name = remote_default_branch(".")
+    check("pass/remote-head-one-branch", name == "trunk", name)
+
+    with _patched(_git=_fake_git(1, b"0123abcd\n")):
+        got = _refused(merge_base, ".", "a", "b")
+    check("fail-closed/merge-base-exit-1-with-base", got == "refused", got)
+
+    with _patched(_git_lines=lambda root, what, *args: ["0123abcd", "4567ef01"]):
+        got = _refused(_resolve_commit, ".", "main", "protected branch")
+    check("fail-closed/revision-resolves-to-several", got == "refused", got)
+
+    with _patched(_git=_fake_git(128, b"")):
+        try:
+            protected_ref(".", None, {ACTIONS_VAR: "true", REF_NAME_VAR: "main"})
+            got = "accepted"
+        except CannotEvaluate as exc:
+            got = "refused" if "origin/HEAD cannot be read" in str(exc) else str(exc)
+    check("fail-closed/origin-head-read-error", got == "refused", got)
+
+    no_target = b"diff --git a/x b/x\n--- a/x\n+++ /dev/null\n@@ -0,0 +1 @@\n+z\n"
+    got = _refused(added_lines, no_target)
+    check("fail-closed/hunk-without-target", got == "refused", got)
+
+    calls = []
+    with _patched(_git=_fake_git(0, b"", calls)):
+        read_diff(".", "0123abcd", None)
+    args = list(calls[0]) if calls else []
+    check("pin/diff-quote-path-on", any(args[index:index + 2] == ["-c", "core.quotePath=true"]
+                                        for index in range(len(args))), args)
+
+
 def _bound_and_cli_rows():
     # The configuration size bound at its ends: one byte under, exactly at, and one byte over.
     good = _config_text().encode("utf-8")
@@ -1391,13 +1617,8 @@ def _lenient_options(argv):
 
 def _main_exit(argv):
     """main()'s exit code for the argument list argv, its output captured."""
-    saved = sys.argv
-    sys.argv = [saved[0]] + list(argv)
-    try:
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            return main()
-    finally:
-        sys.argv = saved
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        return main(list(argv))
 
 
 def _parse_options(argv):
@@ -1416,8 +1637,14 @@ def _parse_options(argv):
     return options
 
 
-def main():
-    argv = sys.argv[1:]
+def main(argv=None):
+    if argv is None:
+        # The process entry: the command line, ended through the execution-report finalizer when the
+        # self-test armed it.
+        _code = main(sys.argv[1:])
+        _finalizer = sys.modules.get("_selftest_exit_report")
+        (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)
+    argv = list(argv)
     # The execution gate appends `--execution-report ABS_PATH` to the self-test launch; accepted only in
     # that trailing two-token form, with an absolute path, alone or after --self-test.
     report_path = None
@@ -1438,7 +1665,60 @@ def main():
     return run(ROOT, options.get("--protected"), options.get("--head"))
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This gate starts git and reads its exit
+# status (subprocess), so under an ignored SIGCHLD a failing git would read as a pass; the guard runs at
+# the entry line, before main() dispatches.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    _code = main()
-    _finalizer = sys.modules.get("_selftest_exit_report")
-    (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)
+    sys.exit(_child_status_refusal_exit("check_review_labels.py") or main())
