@@ -2254,7 +2254,8 @@ def _self_test():
                       "pytest; echo PASS >> r; ;;"):
                 self.assertAllow(c)
 
-        # the round-1 review items: each passes only with its fix present
+        # regression tests for runner options, errexit option values, tee to stdout, builtin echo, parameter
+        # expansion and extra argv: each passes only with its guard present
         def test_qa_runner_options(self):
             for c in ("make -j test; echo PASS >> r", "make -j 4 -C sub test; echo PASS >> r",
                       "make --jobs check; echo PASS >> r", "npm --prefix web test; echo PASS >> r",
@@ -2299,8 +2300,9 @@ def _self_test():
                 self.assertEqual((p.returncode, p.stdout, p.stderr), (0, b"", b""), extra)
             self.assertEqual(main([]), 0)
 
-        # the round-2 review items: each passes only with its fix present
-        def test_r2_printf_precision_and_assembly(self):
+        # regression tests for printf precision and assembly, printf cost, clustered options, nested parameter
+        # expansion, descriptor moves and builtin forms: each passes only with its guard present
+        def test_printf_precision_and_assembly(self):
             for c in ("pytest; printf '%10.10s\\n' PASS >> r", "pytest; printf '%.4s\\n' PASSED >> r",
                       "pytest; printf '%s%s\\n' PA SS >> r", "pytest; printf '%c%c%c%c' P A S S >> r",
                       "pytest; printf '%3s%s' PA SS >> r", "pytest; printf '%s\\n' x PASS >> r",
@@ -2313,7 +2315,7 @@ def _self_test():
                       "pytest; printf -vx PASS >> r"):
                 self.assertAllow(c)
 
-        def test_r2_printf_cost(self):
+        def test_printf_cost(self):
             for make in (lambda k: "pytest; printf '%" + "0" * k + "s' PASS >> r",
                          lambda k: "pytest; printf '%" + "0" * k + "d %s' 1 PASS >> r",
                          lambda k: "pytest; printf '" + "%s" * k + "' PASS >> r",
@@ -2327,7 +2329,7 @@ def _self_test():
                 self.assertNotIn("re", fn.__code__.co_names, fn.__name__)
                 self.assertFalse([n for n in fn.__code__.co_names if n.endswith("_RE")], fn.__name__)
 
-        def test_r2_clustered_options(self):
+        def test_clustered_options(self):
             for c in ("make -sC test build; echo PASS >> r", "make -Ctest build; echo PASS >> r",
                       "make -kf test build; echo PASS >> r", "pnpm -sC test install; echo PASS >> r",
                       "cargo -Ztest build; echo PASS >> r", "go -C test build; echo PASS >> r",
@@ -2340,13 +2342,13 @@ def _self_test():
                       "timeout -vk 5 60 pytest; echo PASS >> r", "timeout -s9 60 pytest; echo PASS >> r"):
                 self.assertDeny(c)
 
-        def test_r2_nested_parameter_expansion(self):
+        def test_nested_parameter_expansion(self):
             for c in ('RESULT=failed; pytest; echo "${RESULT:-${LABEL:-test}: PASS}" >> r',
                       'pytest; echo "${A:-{PASS}}" >> r', 'pytest; echo "${A:-x PASS" >> r'):
                 self.assertAllow(c)
             self.assertDeny('pytest; echo "${A:-${B}} PASS" >> r')
 
-        def test_r2_descriptor_moves_and_input_duplication(self):
+        def test_descriptor_moves_and_input_duplication(self):
             for c in ("pytest; echo PASS 3>>r 1>&3-", "pytest; cat 3<<<PASS 0<&3 >> r",
                       "pytest; cat 3<<<PASS 0<&3- >> r", "pytest; echo PASS | tee 3<&0 r"):
                 self.assertDeny(c)
@@ -2354,15 +2356,16 @@ def _self_test():
                       "pytest; cat 3<<<PASS 0<&3 < /dev/null >> r"):
                 self.assertAllow(c)
 
-        def test_r2_builtin_forms(self):
+        def test_builtin_forms(self):
             for c in ("pytest; builtin -- echo PASS >> r", "pytest; >r builtin echo PASS",
                       "pytest; 2>/dev/null builtin printf PASS >> r", "pytest; \"builtin\" echo PASS >> r"):
                 self.assertDeny(c)
             for c in ("pytest; builtin -- grep PASS >> r", "pytest; timeout 1 builtin echo PASS >> r"):
                 self.assertAllow(c)  # timeout runs a program, and builtin is none: nothing is written
 
-        # the round-3 review items: each passes only with its fix present
-        def test_r3_printf_reuse_cost(self):
+        # regression tests for printf reuse cost, signed dynamic width and precision, a literal brace in an
+        # expansion and %b escapes: each passes only with its guard present
+        def test_printf_reuse_cost(self):
             for make in (lambda k: "pytest; printf '%" + "0" * k + "s ' " + "x " * (k // 8) + "PASS >> r",
                          lambda k: "pytest; printf '" + "y" * k + "%s' " + "x " * (k // 8) + "PASS >> r",
                          lambda k: "pytest; printf '%*s %.*s ' " + "-3 x 2 y " * (k // 16) + "8 PASS 9 z >> r",
@@ -2380,7 +2383,7 @@ def _self_test():
             for fn in (_printf_parse, _printf_text, _blank_escapes, _int_arg, _spec_number):
                 self.assertFalse([n for n in fn.__code__.co_names if n == "re" or n.endswith("_RE")], fn.__name__)
 
-        def test_r3_signed_dynamic_width_and_precision(self):
+        def test_signed_dynamic_width_and_precision(self):
             for c in ("pytest; printf '%*s%s\\n' -8 PASS unit >> r", "pytest; printf '%-*s%s\\n' 8 PASS unit >> r",
                       "pytest; printf '%s%*s' PASS +8 unit >> r", "pytest; printf '%.*s\\n' -1 PASS >> r",
                       "pytest; printf '%.*s' +4 PASS >> r"):
@@ -2389,7 +2392,7 @@ def _self_test():
                       "pytest; printf '%*s%s' x PA SS2 >> r"):
                 self.assertAllow(c)
 
-        def test_r3_literal_brace_in_expansion(self):
+        def test_literal_brace_in_expansion(self):
             for c in ('X=x; pytest; echo "${X:-{} PASS}" >> r', 'pytest; echo "${A:-{a} PASS}" >> r',
                       'pytest; echo "${A:-${B:-{}} PASS}x" >> r', 'pytest; echo "${A:-${B:-{x}}: PASS}" >> r',
                       'pytest; echo "${A#{}: PASS}" >> r', 'pytest; echo "result ${A:-{ } PASS}" >> r'):
@@ -2399,7 +2402,7 @@ def _self_test():
                       "pytest; echo \"${A:-'}' PASS}\" >> r"):
                 self.assertAllow(c)
 
-        def test_r3_percent_b_escapes(self):
+        def test_percent_b_escapes(self):
             for c in ("pytest; printf '%b' '\\nPASS' >> r", "pytest; printf '%b\\n' 'x\\tPASS' >> r",
                       "pytest; printf 'x\\nPASS' >> r"):
                 self.assertDeny(c)
@@ -2407,33 +2410,35 @@ def _self_test():
                       "pytest; printf '%b' 'x\\x50ASS' >> r"):
                 self.assertAllow(c)
 
-        # the round-4 review items: each passes only with its fix present
-        def test_r4_backslash_before_brace_closes(self):
+        # regression tests for a backslash before a closing brace, star-number forms and an incomplete printf
+        # spec: each passes only with its guard present
+        def test_backslash_before_brace_closes(self):
             # bash writes `x PASS` (an escaped backslash, then the closing brace): the brace must close here, so
             # an escaped brace (`\\}`), which looks the same once read, closes too, a disclosed false deny
             for c in ('X=x; pytest; echo "${X:-\\\\} PASS" >> r', 'pytest; echo "${A:-\\} PASS}" >> r'):
                 self.assertDeny(c)
 
-        def test_r4_star_number_forms(self):
+        def test_star_number_forms(self):
             for c in ("pytest; printf '%s%*s' PASS \"'A\" unit >> r", "pytest; printf '%s%*s' PASS ' 8' unit >> r",
                       "pytest; printf '%s%.*s' PASS \" 0\" x >> r"):
                 self.assertDeny(c)
             for c in ("pytest; printf '%s%*s' PASS ' -8' unit >> r", "pytest; printf '%s%*s' PASS \"'\" unit >> r"):
                 self.assertAllow(c)  # a negative width pads after the text; a lone quote reads 0
 
-        def test_r4_incomplete_spec_stops_output(self):
+        def test_incomplete_spec_stops_output(self):
             for c in ("pytest; printf '%s%-5' PA SS >> r", "pytest; printf 'x%s%.' PA SS >> r"):
                 self.assertAllow(c)  # bash writes PA (or xPA) and stops: no replay pass writes SS
             for c in ("pytest; printf 'PASS %-5' >> r", "pytest; printf '%s %-5' PASS >> r",
                       "pytest; printf '%s%s x' PA SS >> r"):
                 self.assertDeny(c)
 
-        # the round-5 review items: each passes only with its fix present
-        def test_r5_escaped_quote_opens_no_span(self):
+        # regression tests for an escaped quote inside an expansion and star numbers read as bash reads them:
+        # each passes only with its guard present; the last test pins two disclosed misses
+        def test_escaped_quote_opens_no_span(self):
             self.assertDeny("X=x; pytest; echo \"${X:-\\'} PASS '\" >> r")  # bash writes x PASS '
             self.assertDeny('X=x; pytest; echo "${X:-\\\\} PASS" >> r')  # an escaped backslash, then the brace
 
-        def test_r5_star_numbers_as_bash_reads_them(self):
+        def test_star_numbers_as_bash_reads_them(self):
             for c in ("pytest; printf '%.*s' ' 010' '123 PASSxy PASS' >> r",
                       "pytest; printf '%s%*s' PASS 0x8 unit >> r", "pytest; printf '%s%*s' PASS 8x unit >> r",
                       "pytest; printf '%s%*s' PASS ' +010' unit >> r"):
@@ -2445,7 +2450,7 @@ def _self_test():
             self.assertEqual([_int_arg(v) for v in ("010", " -0x1F", "'A", "", "+", "9" * 12, "0x", "08", "7z")],
                              [8, -31, 65, 0, 0, _BIG, 0, 0, 7])
 
-        def test_r5_disclosed_misses_after_hidden_escapes(self):
+        def test_disclosed_misses_after_hidden_escapes(self):
             # RESIDUAL COVERAGE names these: bash writes PASS in each, but the escape that ends the expansion is gone
             # once the lexer has read the word, so the claim reads as inside it. Pinned so a change is noticed.
             self.assertAllow('X=x; pytest; echo "${X:-\\${} PASS}" >> r')
@@ -2509,7 +2514,7 @@ def _self_test():
             self.assertEqual(_strip_source(want), want)  # idempotent
             compile(_strip_source(sample), "sample", "exec")
 
-        def test_r4_02_strip_keeps_meaning(self):
+        def test_strip_keeps_meaning(self):
             import ast
 
             def code(src):  # the executable AST: every def's and class's docstring removed
