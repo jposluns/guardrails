@@ -32,13 +32,34 @@ typed), so such content is refused rather than shipped with a token that was mea
 files under assets/baseline/ are a pinned copy, not generated here (tools/check_baseline_pin.py).
 
 Writing: each changed page is written to a temporary file beside its target (.<name>.<pid>.tmp, opened
-exclusively, so a file already at that name is neither overwritten nor removed; the run then tries
-.<name>.<pid>.<n>.tmp for n from 1, up to TEMP_TRIES names in all, and refuses with exit 2 only when
-every one is taken) and then moved over the target with os.replace. A write that fails leaves the
-target's previous bytes and removes only the temporary file this run created. Because os.replace renames over the target rather than writing into it,
-a read-only target (mode 0444) is now replaced and keeps its mode, where the earlier in-place write
-failed on it; this is deliberate. A temporary file left in a page folder (a run killed between its write
-and its replace) is reported as stray output by --check and by a normal run.
+exclusively, so a file or directory already at that name is neither overwritten nor removed, and is
+reported as stray output; the run then tries .<name>.<pid>.<n>.tmp for n from 1, up to TEMP_TRIES names
+in all, and refuses with exit 2 only when every one is taken) and then moved over the target with
+os.replace. The bytes are written, the mode set (fchmod) and the data synced (fsync) through the handle
+the run opened, which stays open until the run is done with the name, so its device and inode cannot be
+reused meanwhile. Just before os.replace the run compares the device and inode at the temporary name with
+the ones it recorded on opening: a file another process renamed there is not published (exit 2, the
+target keeps its previous bytes, the other file is kept). Just after os.replace it compares the target
+the same way, and exits 2 with an error naming the page when they differ. After the replace the run no
+longer touches the temporary name. A write that fails leaves the target's previous bytes and removes the
+file at the temporary name only while it is still the one this run created (same device and inode), so a
+file another process renamed there before that check is kept. Residuals (POSIX renames and unlinks by
+name, with no compare-and-swap on identity): a file renamed over the temporary name between the
+pre-replace check and os.replace is published as the page; the post-replace check reports it (exit 2),
+but the target's previous bytes are not restored (its message says so only when the page existed before
+the run). A target replaced after the post-replace check is not seen by this run (a later --check reports
+drift). On the failure path, a file renamed over the temporary name between the identity check and the
+unlink is removed without a message. A directory at the temporary name during the cleanup is kept and
+named as a directory in the same words whether it arrived before the identity check or after it (then
+the unlink fails on it, and the message adds the unlink's error). An identity check that fails (an
+error other than the name being absent) is reported as a failed check, and nothing is removed. The
+cleanup's messages give the temporary name relative to the root, as they give the page; the write error
+gives the error's own text, which for a failed open carries its absolute path and for a failed
+pre-replace check the bare temporary name. Because os.replace renames
+over the target rather than writing into it, a read-only target (mode 0444) is now replaced and keeps its
+mode, where the earlier in-place write failed on it; this is deliberate. A temporary file left in a page
+folder (a run killed between its write and its replace) is reported as stray output by --check and by a
+normal run.
 
 Content model: each page is 1 TOML data file under its site's data directory (site/draft-src/ for aiqt.ai,
 opf/site/draft-src/ for opfiles.ai), discovered by listing that directory, so a page lands or changes as
@@ -470,15 +491,18 @@ def _inline(site, value):
     token rendered as the reference CLI status note (status_note) and the $HOOK_COUNT token rendered as
     the Claude Code hook count (hook_count) of the site's "tree" (the tree build() is given; ROOT when the site
     names none). A value that still carries a $BASE/ token once expanded (such as $BASE$BASE//x) is refused
-    here, so the refusal names an inline HTML value as its source."""
+    here, so the refusal names an inline HTML value as its source; it also names the page being rendered and
+    the data file (with the component or page key) the value came from, given by the site's "inline_at"
+    pair (render_page and _body_html set it), when the site carries one."""
     if "$OPF_STATUS" in value:
         value = value.replace("$OPF_STATUS", status_note())
     if "$HOOK_COUNT" in value:
         value = value.replace("$HOOK_COUNT", str(hook_count(site.get("tree", ROOT))))
     expanded = value.replace("$BASE/", site["base"])
     if "$BASE/" in expanded:
-        raise RefusedPage("unexpanded $BASE/ token left in an inline HTML value once expanded: {!r}".format(
-            value))
+        located = "{} (from {}): ".format(*site["inline_at"]) if "inline_at" in site else ""
+        raise RefusedPage("{}unexpanded $BASE/ token left in an inline HTML value once expanded: {!r}".format(
+            located, value))
     return expanded
 
 
@@ -1396,18 +1420,25 @@ def _rail_html(site, page):
             '<ol>{}</ol></nav>').format(logo, links)
 
 
+def _located(site, where):
+    """The site with its "inline_at" pair (see _inline) naming `where` as the data source, when it has one."""
+    return dict(site, inline_at=(site["inline_at"][0], where)) if "inline_at" in site else site
+
+
 def _body_html(site, page):
     where = page["where"]
     rendered = []
     for position, component in enumerate(page["body"], 1):
         comp_where = "{}.body[{}]".format(where, position)
-        rendered.append((component["component"], COMPONENTS[component["component"]](site, component, comp_where)))
+        rendered.append((component["component"], COMPONENTS[component["component"]](
+            _located(site, comp_where), component, comp_where)))
     if page["kind"] == "landing":
         return '<div class="wrap">{}</div>'.format("\n".join(html for _name, html in rendered))
     parts = ['<p class="lbl first">{}</p>'.format(_t(page["label"])),
-             "<h1>{}</h1>".format(_inline(site, page["heading"])), _rail_html(site, page)]
+             "<h1>{}</h1>".format(_inline(_located(site, where + " heading"), page["heading"])),
+             _rail_html(site, page)]
     if page["meta"]:
-        parts.append('<p class="meta">{}</p>'.format(_inline(site, page["meta"])))
+        parts.append('<p class="meta">{}</p>'.format(_inline(_located(site, where + " meta"), page["meta"])))
     tail = []
     for name, html in rendered:
         if name == "about":
@@ -1536,9 +1567,11 @@ class _PlainText(HTMLParser):
 def _description(site, page):
     """The page's description, or else its meta, as plain text (its inline markup reduced to the text,
     character references decoded, whitespace runs folded to 1 space), or "" for a page with neither."""
-    source = page.get("description") or page["meta"]
+    key = "description" if page.get("description") else "meta"
+    source = page.get(key)
     if not source:
         return ""
+    site = _located(site, "{} {}".format(page["where"], key))
     reader = _PlainText()
     reader.feed(_inline(site, source))
     reader.close()
@@ -1547,6 +1580,8 @@ def _description(site, page):
 
 def render_page(site, pages, page):
     rel, title = page["rel"], page["title"]
+    # An inline HTML value refused while this page renders names this page and its data file (_inline).
+    site = dict(site, inline_at=("{}/{}".format(site["root"], rel), page["where"]))
     head = ['<meta charset="utf-8">', '<meta name="viewport" content="width=device-width, initial-scale=1">']
     if site["base"] == DRAFT_BASE or (site["base"] == "/" and rel.startswith(DRAFT_DIR)):
         head.append('<meta name="robots" content="noindex, nofollow">')
@@ -1842,7 +1877,8 @@ def _temp_names(path):
 def stray_outputs(tree, sites=SITES, targets=None):
     """Every .html file (the extension in any case), and every leftover temporary file (TEMP_NAME_RE), in a
     folder that holds a generated page of a site (the folder of a target) that the targets (GENSRC_OUTPUTS
-    by default) do not list, apart from a kept live path's own file. Only those
+    by default) do not list, apart from a kept live path's own file. A directory at a temporary name is
+    stray output too, as a file there is (run() skips either name). Only those
     folders are listed, not their subfolders, so the asset folder and a promoted root's other folders (its
     downloads, its draft placeholder) are not read; a page in a folder holding no generated page is not
     found here."""
@@ -1858,7 +1894,8 @@ def stray_outputs(tree, sites=SITES, targets=None):
         for folder in sorted({target.rsplit("/", 1)[0] for target in targets if target.startswith(prefix)}):
             try:
                 with os.scandir(Path(tree) / folder) as entries:
-                    names = sorted(entry.name for entry in entries if not entry.is_dir(follow_symlinks=False))
+                    names = sorted(entry.name for entry in entries if not entry.is_dir(follow_symlinks=False)
+                                   or TEMP_NAME_RE.fullmatch(entry.name))
             except FileNotFoundError:
                 continue
             for name in names:
@@ -1921,10 +1958,27 @@ def run(root, check, outputs=None):
         # The page is written to a temporary file beside it and replaces the target only once its bytes are
         # all written, so a write that fails leaves the target's previous bytes in place (exit 2) and the
         # temporary file is removed. Pages replaced before the failing one stay replaced. Each temporary name
-        # is opened exclusively: a name another file already holds is skipped, and that file is neither
-        # written nor removed (a stray-output report names it); the write is refused only when every name
-        # _temp_names gives is taken.
+        # is opened exclusively: a name another entry (a file, a directory or a symbolic link) already holds
+        # is skipped, and that entry is neither written nor removed (a stray-output report names it); the
+        # write is refused only when every name _temp_names gives is taken. The bytes, the mode (fchmod) and
+        # the sync (fsync) go through the handle this run opened, never through the name, and the handle
+        # stays open until the run is done with the name, so the device and inode recorded on opening
+        # (made) cannot be reused by another file meanwhile. Just before os.replace the file at the
+        # temporary name must still be that one (otherwise exit 2: nothing is published and the other file
+        # is kept); just after it the target must be that one (otherwise exit 2, naming the page). Once
+        # os.replace has moved the temporary file, its name is no longer this run's (temp is set aside), and
+        # on the failure path the file at the name is removed only while it is still the one this run
+        # created. Residuals, as POSIX renames and unlinks by name with no compare-and-swap on identity
+        # (unlinkat and renameat take a name too): a rename over the temporary name between the
+        # pre-replace check and os.replace publishes the other file (the post-replace check reports it,
+        # exit 2, but the previous bytes are not restored; the message says so only for a page that
+        # existed); a target replaced after the post-replace check is not seen by this run (a later --check
+        # reports drift); and on the failure path a rename over the name between the identity check and
+        # the unlink removes the other file without a message (a directory put there is kept, as the unlink
+        # fails on it, and reported as a directory in the words used for one there before the check).
         temp = None
+        made = None
+        handle = None
         try:
             os.makedirs(path.parent, exist_ok=True)
             names = _temp_names(path)
@@ -1934,26 +1988,84 @@ def run(root, check, outputs=None):
                 except FileExistsError:
                     continue
                 temp = candidate
-                with handle:
-                    handle.write(data)
                 break
             else:
                 raise OSError("every temporary name beside it is taken ({} to {})".format(
                     names[0].name, names[-1].name))
+            opened = os.fstat(handle.fileno())
+            made = (opened.st_dev, opened.st_ino)
+            handle.write(data)
+            handle.flush()
             if current is not None:
-                os.chmod(temp, stat.S_IMODE(os.lstat(path).st_mode))
+                os.fchmod(handle.fileno(), stat.S_IMODE(os.lstat(path).st_mode))
+            os.fsync(handle.fileno())
+            now = os.lstat(temp)
+            if (now.st_dev, now.st_ino) != made:
+                raise OSError("{} is no longer the temporary file this run created; not published".format(
+                    temp.name))
             os.replace(temp, path)
+            temp = None
+            now = os.lstat(path)
+            if (now.st_dev, now.st_ino) != made:
+                # A new page had no previous bytes, so its message does not mention restoring them.
+                lost = "; the previous bytes are not restored" if current is not None else ""
+                print("error: {}: the file now at the page is not the one this run wrote (another process "
+                      "renamed a file over the temporary name or the page during the replace){}; "
+                      "fail-closed".format(rel, lost), file=sys.stderr)
+                return 2
+            handle.close()
         except OSError as exc:
             print("error: cannot write {} ({}); fail-closed".format(rel, exc), file=sys.stderr)
             return 2
         finally:
             if temp is not None:
+                # The temporary name in messages is relative to root, as rel and the stray report are.
+                shown = (Path(rel).parent / temp.name).as_posix()
+                # A directory at the name is never this run's temporary file. It is kept and named in these
+                # words whether it was there at the identity check or came after it (the unlink then fails
+                # on it, and that error is added).
+                as_directory = ("error: kept {}: a directory now holds the temporary name, not the file this "
+                                "run created".format(shown))
                 try:
-                    os.unlink(temp)
+                    now = os.lstat(temp)
                 except FileNotFoundError:
-                    pass
+                    now = None
                 except OSError as exc:
-                    print("error: cannot remove the temporary file {} ({})".format(temp, exc), file=sys.stderr)
+                    # The identity check itself failed: nothing is removed, and what holds the name is unknown,
+                    # so the message reports the failed check rather than a failed removal.
+                    now = None
+                    print("error: cannot check whether {} is still the temporary file this run created ({}); "
+                          "not removed".format(shown, exc.strerror or exc), file=sys.stderr)
+                if now is None:
+                    pass
+                elif made is None or (now.st_dev, now.st_ino) != made:
+                    if stat.S_ISDIR(now.st_mode):
+                        print(as_directory, file=sys.stderr)
+                    else:
+                        print("error: kept {}: it is no longer the temporary file this run created".format(shown),
+                              file=sys.stderr)
+                else:
+                    try:
+                        os.unlink(temp)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as exc:
+                        # A directory another process put at the name after the identity check: the unlink
+                        # fails on it and it is kept. lstat, so a symbolic link to a directory is not one.
+                        try:
+                            held = stat.S_ISDIR(os.lstat(temp).st_mode)
+                        except OSError:
+                            held = False
+                        if held:
+                            print("{} ({})".format(as_directory, exc.strerror or exc), file=sys.stderr)
+                        else:
+                            print("error: cannot remove the temporary file {} ({})".format(
+                                shown, exc.strerror or exc), file=sys.stderr)
+            if handle is not None:
+                try:
+                    handle.close()
+                except OSError as exc:
+                    print("error: cannot close the temporary file of {} ({})".format(rel, exc), file=sys.stderr)
         print("wrote {}".format(rel))
     try:
         stray = stray_outputs(root)
@@ -3010,6 +3122,13 @@ def _self_test():
         expect("stray/promoted-name-only-containing-temp-name-passes",
                "site/install/.index.html.4242.tmp.bak" not in got and "site/install/index.html.4242.tmp" not in got,
                got)
+        # A directory at a temporary name is stray output too, as a file there is; a directory of another
+        # name (a page folder's own subfolder) is not.
+        for rel in ("site/install/.index.html.4243.tmp", "site/install/.cache"):
+            os.makedirs(Path(tmp) / rel)
+        got = stray_outputs(tmp, promoted_sites_, promoted_targets)
+        expect("stray/promoted-temp-name-directory-flagged", "site/install/.index.html.4243.tmp" in got, got)
+        expect("stray/promoted-other-directory-passes", "site/install/.cache" not in got, got)
     expect("stray/tree-clean", stray_outputs(ROOT) == [], stray_outputs(ROOT))
 
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-selftest-") as tmp:
@@ -3488,6 +3607,46 @@ def _self_test():
     expect("refuse/base-token-left-in-inline-value",
            "unexpanded $BASE/ token left in an inline HTML value once expanded: '<a href=\"$BASE$BASE//x\">x</a>'"
            in message and "not an inline HTML value" not in message, message)
+    # The refusal names the page it would write and the data file (with the component, or the page key)
+    # the value came from, as the page-level refusals do.
+    inline_left_heading = model('path = "index.html"\ntitle = "T"\nkind = "document"\nlabel = "Draft"\n'
+                                'heading = "$BASE$BASE//h"\n[[body]]\ncomponent = "prose"\nhtml = "<p>P</p>"\n')
+    inline_left_meta = model('path = "index.html"\ntitle = "T"\nkind = "document"\nlabel = "Draft"\n'
+                             'heading = "H"\nmeta = "$BASE$BASE//m"\n[[body]]\ncomponent = "prose"\n'
+                             'html = "<p>P</p>"\n')
+    inline_left_description = model('path = "index.html"\ntitle = "T"\nkind = "document"\nlabel = "Draft"\n'
+                                    'heading = "H"\ndescription = "$BASE$BASE//d"\n[[body]]\n'
+                                    'component = "prose"\nhtml = "<p>P</p>"\n')
+    inline_meta_ok = model('path = "index.html"\ntitle = "T"\nkind = "document"\nlabel = "Draft"\n'
+                           'heading = "H"\nmeta = "<a href=\\"$BASE/m/\\">m</a>"\n[[body]]\n'
+                           'component = "prose"\nhtml = "<p>P</p>"\n')
+    for name, left_page, want in (
+            ("refuse/base-token-left-in-inline-value-names-page-and-component", inline_left,
+             "site/draft/index.html (from fixture.toml.body[1]): unexpanded $BASE/ token left"),
+            ("refuse/base-token-left-in-heading-names-page-and-file", inline_left_heading,
+             "site/draft/index.html (from fixture.toml heading): unexpanded $BASE/ token left"),
+            ("refuse/base-token-left-in-meta-names-page-and-file", inline_left_meta,
+             "site/draft/index.html (from fixture.toml meta): unexpanded $BASE/ token left"),
+            ("refuse/base-token-left-in-description-names-page-and-file", inline_left_description,
+             "site/draft/index.html (from fixture.toml description): unexpanded $BASE/ token left")):
+        message = refused(name, render_page, site, [left_page], left_page)
+        expect(name, message.startswith(want), message)
+    # Through render_page a meta value is first expanded by _description (the row above), so the meta
+    # paragraph _body_html renders is checked directly, with the page and data file render_page gives it;
+    # its twin is the same call with a meta that expands, rendered as the meta paragraph.
+    body_site = dict(site, inline_at=("{}/{}".format(site["root"], inline_left_meta["rel"]),
+                                      inline_left_meta["where"]))
+    message = refused("refuse/base-token-left-in-body-meta-names-page-and-file", _body_html, body_site,
+                      inline_left_meta)
+    expect("refuse/base-token-left-in-body-meta-names-page-and-file",
+           message.startswith("site/draft/index.html (from fixture.toml meta): unexpanded $BASE/ token left"),
+           message)
+    try:
+        body_meta_html = _body_html(body_site, inline_meta_ok)
+    except RefusedPage as exc:
+        body_meta_html = "refused: {}".format(exc)
+    expect("base/body-meta-token-expanded", '<p class="meta"><a href="/draft/m/">m</a></p>' in body_meta_html,
+           body_meta_html[-400:])
     inline_base = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "<a href=\\"$BASE/install/\\">x</a>"\n')
     try:
         inline_html = render_page(site, [inline_base], inline_base)
@@ -3500,15 +3659,47 @@ def _self_test():
     # previous bytes in place and removes the temporary file; without the injection the same run replaces
     # the bytes and leaves no temporary file.
     builtin_open = open
+    builtin_replace = os.replace
+    builtin_fchmod = os.fchmod
+    builtin_lstat = os.lstat
+    builtin_unlink = os.unlink
 
-    def run_injected(fail, squatters=0):
+    def run_injected(fail, squatters=0, squat_dir=False, race=None, streams=None, new_page=False, handles=None,
+                     previous=b"previous bytes\n"):
+        """Run run() on 1 page in a fresh tree and return (exit, target bytes, folder listing, the bytes at
+        each watched temporary name: None when absent, "directory" for a directory, "symbolic link" for
+        one). `squatters` files (or,
+        with `squat_dir`, 1 directory) take the first temporary names before the run. `race` drives another
+        process's step deterministically: "after-replace" creates a file at the temporary name right after
+        os.replace has moved it; "rename-then-chmod-fails" renames another file over the temporary file and
+        then fails the fchmod; "chmod-fails" fails the fchmod alone; "rename-before-check" renames another
+        file over the temporary file once it is written, when run() reads the target's mode (before the
+        pre-replace identity check); "rename-in-replace" renames another file over the temporary file inside
+        os.replace, just before the rename (after that check: the residual window the post-replace check
+        reports); "dir-in-cleanup" fails the fchmod and, once the cleanup has read the temporary name's
+        device and inode, puts a directory there in place of the file (the residual window before the
+        unlink); "unlink-fails" fails the fchmod and then the cleanup's unlink of the temporary file;
+        "dir-before-check" puts a directory at the temporary name in place of the file and then fails the
+        fchmod (before the cleanup's identity check); "lstat-fails-in-cleanup" fails the fchmod and then
+        the cleanup's identity check (its lstat of the temporary name); "symlink-dir-in-cleanup" fails the
+        fchmod and, once the cleanup has read the temporary name's device and inode, puts a symbolic link
+        to a directory there in place of the file and fails the unlink.
+        `streams` (a dict) receives the run's "out" and "err" text. With `new_page` the page does
+        not exist before the run; otherwise it holds `previous`. `handles` (a dict) receives, under "open", whether every temporary-file
+        handle the run opened was still open at each step that uses the temporary name or checks the page
+        (the target's mode read, the pre-replace check, os.replace, the post-replace check), and under
+        "closed-after", whether each was closed once run() returned."""
         with tempfile.TemporaryDirectory(prefix="gen-draft-site-write-") as tmp:
             folder = Path(tmp) / "site"
             os.makedirs(folder)
-            with builtin_open(folder / "index.html", "wb") as handle:
-                handle.write(b"previous bytes\n")
-            squats = _temp_names(folder / "index.html")[:squatters]
-            for squat in squats:
+            if not new_page:
+                with builtin_open(folder / "index.html", "wb") as handle:
+                    handle.write(previous)
+            names = _temp_names(folder / "index.html")
+            watched = names[:max(squatters, 1 if squat_dir or race else 0)]
+            if squat_dir:
+                os.mkdir(names[0])
+            for squat in names[:squatters]:
                 with builtin_open(squat, "xb") as handle:
                     handle.write(b"someone else's\n")
 
@@ -3523,26 +3714,113 @@ def _self_test():
                     self.handle.close()
                     return False
 
+                def fileno(self):
+                    return self.handle.fileno()
+
                 def write(self, data):
                     self.handle.write(data[:3])
                     raise OSError("injected write failure")
 
+                def flush(self):
+                    self.handle.flush()
+
+                def close(self):
+                    self.handle.close()
+
+            opened = []
+
             def opener(path, mode="r", *args, **kwargs):
                 handle = builtin_open(path, mode, *args, **kwargs)
+                if Path(path).parent == folder and "x" in mode:
+                    opened.append(handle)
                 if fail and Path(path).parent == folder and ("w" in mode or "x" in mode):
                     return FailingWrite(handle)
                 return handle
+
+            still_open = []
+
+            def note_open():
+                still_open.append(bool(opened) and not any(handle.closed for handle in opened))
+
+            raced = []
+            chmod_failed = []
+
+            def rename_other_over(name):
+                other = Path(tmp) / "other"
+                with builtin_open(other, "xb") as handle:
+                    handle.write(b"someone else's\n")
+                builtin_replace(other, name)
+                raced.append(name)
+
+            def replacer(src, dst, *args, **kwargs):
+                if Path(src).parent == folder:
+                    note_open()
+                if race == "rename-in-replace" and Path(src).parent == folder and not raced:
+                    rename_other_over(src)
+                builtin_replace(src, dst, *args, **kwargs)
+                if race == "after-replace" and Path(src).parent == folder:
+                    with builtin_open(src, "xb") as handle:
+                        handle.write(b"someone else's\n")
+
+            def fchmoder(fd, mode):
+                if race in ("rename-then-chmod-fails", "chmod-fails", "dir-in-cleanup", "unlink-fails",
+                            "dir-before-check", "lstat-fails-in-cleanup", "symlink-dir-in-cleanup"):
+                    if race == "rename-then-chmod-fails":
+                        rename_other_over(names[0])
+                    if race == "dir-before-check":
+                        builtin_unlink(names[0])
+                        os.mkdir(names[0])
+                        raced.append(names[0])
+                    chmod_failed.append(True)
+                    raise OSError("injected chmod failure")
+                return builtin_fchmod(fd, mode)
+
+            def lstater(path, *args, **kwargs):
+                if Path(path).parent == folder and opened:
+                    note_open()
+                if race == "lstat-fails-in-cleanup" and chmod_failed and Path(path) == names[0]:
+                    raise OSError(13, "injected lstat failure")
+                result = builtin_lstat(path, *args, **kwargs)
+                if race == "rename-before-check" and not raced and Path(path) == folder / "index.html" \
+                        and os.path.lexists(names[0]):
+                    rename_other_over(names[0])
+                if race == "dir-in-cleanup" and chmod_failed and not raced and Path(path) == names[0]:
+                    builtin_unlink(names[0])
+                    os.mkdir(names[0])
+                    raced.append(names[0])
+                if race == "symlink-dir-in-cleanup" and chmod_failed and not raced and Path(path) == names[0]:
+                    os.mkdir(Path(tmp) / "elsewhere")
+                    builtin_unlink(names[0])
+                    os.symlink(Path(tmp) / "elsewhere", names[0])
+                    raced.append(names[0])
+                return result
+
+            def unlinker(path, *args, **kwargs):
+                if race in ("unlink-fails", "symlink-dir-in-cleanup") and Path(path) == names[0]:
+                    raise OSError(13, "injected unlink failure")
+                return builtin_unlink(path, *args, **kwargs)
+            out, err = io.StringIO(), io.StringIO()
             try:
-                with mock.patch("builtins.open", opener), contextlib.redirect_stdout(io.StringIO()), \
-                        contextlib.redirect_stderr(io.StringIO()):
+                with mock.patch("builtins.open", opener), mock.patch("os.replace", replacer), \
+                        mock.patch("os.fchmod", fchmoder), mock.patch("os.lstat", lstater), \
+                        mock.patch("os.unlink", unlinker), \
+                        contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     code = run(tmp, check=False, outputs={"site/index.html": "<p>fresh</p>\n"})
             except OSError as exc:
                 code = "raised: {}".format(exc)
+            if streams is not None:
+                streams.update(out=out.getvalue(), err=err.getvalue())
+            if handles is not None:
+                handles.update({"open": still_open, "closed-after": [handle.closed for handle in opened]})
             with builtin_open(folder / "index.html", "rb") as handle:
                 data = handle.read()
             squatted = []
-            for squat in squats:
-                if os.path.lexists(squat):
+            for squat in watched:
+                if os.path.isdir(squat) and not os.path.islink(squat):
+                    squatted.append("directory")
+                elif os.path.islink(squat):
+                    squatted.append("symbolic link")
+                elif os.path.lexists(squat):
                     with builtin_open(squat, "rb") as handle:
                         squatted.append(handle.read())
                 else:
@@ -3559,19 +3837,201 @@ def _self_test():
     # removed. The run writes through the next free name instead (.<name>.<pid>.1.tmp, not left behind),
     # replaces the target, and reports the other file as stray output (exit 1). Its twin is
     # write/success-replaces-bytes-without-temp above, the same run with that name free (exit 0).
-    got = run_injected(False, squatters=1)
+    first_temp = ".index.html.{}.tmp".format(os.getpid())
+    one_taken = {}
+    got = run_injected(False, squatters=1, streams=one_taken)
     expect("write/existing-temp-file-survives-and-next-name-used",
-           got == (1, b"<p>fresh</p>\n", [".index.html.{}.tmp".format(os.getpid()), "index.html"],
-                   [b"someone else's\n"]), got)
+           got == (1, b"<p>fresh</p>\n", [first_temp, "index.html"], [b"someone else's\n"]), got)
+    # Its stderr is empty: a free name remains, so the every-name-taken message below is not given.
+    expect("write/one-temp-name-taken-no-error-message", one_taken.get("err") == "", one_taken)
     # Only when every temporary name is taken does the write refuse (exit 2), leaving the target's previous
-    # bytes and every other file as it was.
-    got = run_injected(False, squatters=TEMP_TRIES)
+    # bytes and every other file as it was, and its message names the first and last name it tried.
+    all_taken = {}
+    got = run_injected(False, squatters=TEMP_TRIES, streams=all_taken)
     expect("write/every-temp-name-taken-survives-and-refuses",
            got == (2, b"previous bytes\n",
-                   sorted([".index.html.{}.tmp".format(os.getpid())]
+                   sorted([first_temp]
                           + [".index.html.{}.{}.tmp".format(os.getpid(), n) for n in range(1, TEMP_TRIES)]
                           + ["index.html"]),
                    [b"someone else's\n"] * TEMP_TRIES), got)
+    expect("write/every-temp-name-taken-message",
+           all_taken.get("err") == "error: cannot write site/index.html (every temporary name beside it is taken "
+           "({} to .index.html.{}.{}.tmp)); fail-closed\n".format(first_temp, os.getpid(), TEMP_TRIES - 1)
+           and all_taken.get("out") == "", all_taken)
+    # A directory at the first temporary name is skipped like a file there (the next name is used, the
+    # directory is kept) and is reported as stray output (exit 1), as a file there is
+    # (write/existing-temp-file-survives-and-next-name-used above, its twin).
+    dir_taken = {}
+    got = run_injected(False, squat_dir=True, streams=dir_taken)
+    expect("write/existing-temp-directory-survives-and-reported-as-stray",
+           got == (1, b"<p>fresh</p>\n", [first_temp, "index.html"], ["directory"])
+           and "stray: site/{} ".format(first_temp) in dir_taken.get("out", ""), (got, dir_taken))
+    # Once os.replace has moved the temporary file over the target, its name is no longer this run's: a
+    # file another process creates there right after the replace is kept (and reported as stray, exit 1),
+    # not removed. Its twin is write/success-replaces-bytes-without-temp above (no such file: exit 0, no
+    # temporary file left). The run says nothing about that file on stderr (it set the name aside), so the
+    # stray report is its only mention.
+    after_replace = {}
+    got = run_injected(False, race="after-replace", streams=after_replace)
+    expect("write/file-created-at-temp-name-after-replace-survives",
+           got == (1, b"<p>fresh</p>\n", [first_temp, "index.html"], [b"someone else's\n"]), got)
+    expect("write/file-created-at-temp-name-after-replace-no-error-message",
+           after_replace.get("err") == "" and "stray: site/{} ".format(first_temp) in after_replace.get("out", ""),
+           after_replace)
+    # A file another process renames over the temporary file once it is written, before os.replace, is not
+    # published: the identity check before the replace sees another device and inode, the run exits 2
+    # naming the page, the target keeps its previous bytes and the other file is kept. Its twin is
+    # write/success-replaces-bytes-without-temp above (no rename: exit 0, the fresh bytes published).
+    before_check = {}
+    got = run_injected(False, race="rename-before-check", streams=before_check)
+    expect("write/file-renamed-over-temp-before-replace-not-published",
+           got == (2, b"previous bytes\n", [first_temp, "index.html"], [b"someone else's\n"])
+           and before_check.get("err", "").startswith(
+               "error: cannot write site/index.html ({} is no longer the temporary file this run created; "
+               "not published); fail-closed\n".format(first_temp))
+           and "wrote" not in before_check.get("out", ""), (got, before_check))
+    # Residual: a rename over the temporary name between that check and os.replace publishes the other
+    # file (POSIX has no rename on condition of identity); the identity check after the replace reports it
+    # (exit 2, naming the page) rather than the run claiming the page was written. Its twin is the same
+    # success-path twin above.
+    in_replace = {}
+    got = run_injected(False, race="rename-in-replace", streams=in_replace)
+    expect("write/file-renamed-over-temp-during-replace-reported",
+           got == (2, b"someone else's\n", ["index.html"], [None])
+           and in_replace.get("err", "").startswith(
+               "error: site/index.html: the file now at the page is not the one this run wrote")
+           and "wrote" not in in_replace.get("out", ""), (got, in_replace))
+    # On the failure path only the file this run created (the same device and inode) is removed: a file
+    # another process renamed over the temporary file before the fchmod failed is kept. Its twin is the
+    # same fchmod failure with no rename, where the run's own temporary file is removed.
+    swapped = {}
+    got = run_injected(False, race="rename-then-chmod-fails", streams=swapped)
+    expect("write/file-renamed-over-temp-before-failure-survives",
+           got == (2, b"previous bytes\n", [first_temp, "index.html"], [b"someone else's\n"])
+           and "it is no longer the temporary file this run created" in swapped.get("err", ""), (got, swapped))
+    got = run_injected(False, race="chmod-fails")
+    expect("write/chmod-failure-removes-own-temp",
+           got == (2, b"previous bytes\n", ["index.html"], [None]), got)
+    # The message about a kept file gives the temporary name relative to the root, as the page beside it
+    # and the stray report give theirs, never as an absolute path.
+    expect("write/kept-temp-message-names-it-relative-to-root",
+           swapped.get("err") == "error: cannot write site/index.html (injected chmod failure); fail-closed\n"
+           "error: kept site/{}: it is no longer the temporary file this run created\n".format(first_temp),
+           swapped)
+    # The same relative form when the run's own temporary file cannot be removed (the file is left).
+    unlink_failed = {}
+    got = run_injected(False, race="unlink-fails", streams=unlink_failed)
+    expect("write/temp-removal-failure-message-names-it-relative-to-root",
+           got == (2, b"previous bytes\n", [first_temp, "index.html"], [b"<p>fresh</p>\n"])
+           and unlink_failed.get("err") == "error: cannot write site/index.html (injected chmod failure); "
+           "fail-closed\nerror: cannot remove the temporary file site/{} (injected unlink failure)\n".format(
+               first_temp), (got, unlink_failed))
+    # A directory another process puts at the temporary name after the cleanup's identity check is not
+    # this run's temporary file: the unlink fails on it, it is kept, and the message names it as a
+    # directory rather than as the temporary file. Its twin is write/chmod-failure-removes-own-temp above
+    # (no directory: the run's own file is removed, no message about it).
+    dir_cleanup = {}
+    got = run_injected(False, race="dir-in-cleanup", streams=dir_cleanup)
+    dir_lines = dir_cleanup.get("err", "").splitlines()
+    expect("write/directory-at-temp-name-in-cleanup-kept-and-named-as-directory",
+           got == (2, b"previous bytes\n", [first_temp, "index.html"], ["directory"])
+           and len(dir_lines) == 2
+           and dir_lines[0] == "error: cannot write site/index.html (injected chmod failure); fail-closed"
+           and dir_lines[1].startswith("error: kept site/{}: a directory now holds the temporary name, not "
+                                       "the file this run created (".format(first_temp))
+           and "temporary file" not in dir_lines[1], (got, dir_cleanup))
+    # The post-replace error says the previous bytes are not restored only for a page that had them: a
+    # new page's message (the same race inside os.replace) does not. Their twin is
+    # write/file-renamed-over-temp-during-replace-reported above, for a page that existed.
+    expect("write/existing-page-renamed-over-during-replace-says-previous-bytes-lost",
+           in_replace.get("err") == "error: site/index.html: the file now at the page is not the one this run "
+           "wrote (another process renamed a file over the temporary name or the page during the replace); "
+           "the previous bytes are not restored; fail-closed\n", in_replace)
+    new_in_replace = {}
+    got = run_injected(False, race="rename-in-replace", streams=new_in_replace, new_page=True)
+    expect("write/new-page-renamed-over-during-replace-no-previous-bytes-claim",
+           got == (2, b"someone else's\n", ["index.html"], [None])
+           and new_in_replace.get("err") == "error: site/index.html: the file now at the page is not the one "
+           "this run wrote (another process renamed a file over the temporary name or the page during the "
+           "replace); fail-closed\n"
+           and "wrote" not in new_in_replace.get("out", ""), (got, new_in_replace))
+    # The handle run() opened on the temporary file stays open at every step that uses the temporary name
+    # or checks the page (the target's mode read, the pre-replace check, os.replace and the post-replace
+    # check), so the device and inode recorded on opening cannot be reused meanwhile, and it is closed
+    # once run() returns. Its twin is the failure path (the mode read and the cleanup's identity check).
+    held = {}
+    got = run_injected(False, handles=held)
+    expect("write/temp-handle-open-until-done-with-name",
+           got == (0, b"<p>fresh</p>\n", ["index.html"], []) and held.get("open") == [True] * 4
+           and held.get("closed-after") == [True], (got, held))
+    held_failing = {}
+    got = run_injected(False, race="chmod-fails", handles=held_failing)
+    expect("write/temp-handle-open-until-cleanup-done",
+           got == (2, b"previous bytes\n", ["index.html"], [None]) and held_failing.get("open") == [True] * 2
+           and held_failing.get("closed-after") == [True], (got, held_failing))
+    # The same for a new page, which has no mode to read: the handle stays open at the pre-replace check,
+    # os.replace and the post-replace check. Its twin is write/temp-handle-open-until-done-with-name above
+    # (an existing page, where the mode read comes first).
+    held_new = {}
+    got = run_injected(False, new_page=True, handles=held_new)
+    expect("write/temp-handle-open-until-done-with-name-new-page",
+           got == (0, b"<p>fresh</p>\n", ["index.html"], []) and held_new.get("open") == [True] * 3
+           and held_new.get("closed-after") == [True], (got, held_new))
+    # An existing page that is empty had previous bytes (none of them): the post-replace error still says
+    # they are not restored, as for any page that existed. Its twins are the existing-page and new-page
+    # rows above.
+    empty_in_replace = {}
+    got = run_injected(False, race="rename-in-replace", streams=empty_in_replace, previous=b"")
+    expect("write/empty-page-renamed-over-during-replace-says-previous-bytes-lost",
+           got == (2, b"someone else's\n", ["index.html"], [None])
+           and empty_in_replace.get("err") == "error: site/index.html: the file now at the page is not the one "
+           "this run wrote (another process renamed a file over the temporary name or the page during the "
+           "replace); the previous bytes are not restored; fail-closed\n", (got, empty_in_replace))
+    # The directory message gives the unlink's error text (its strerror), not the error with its absolute
+    # path. The text expected is the one this platform gives for unlinking a directory.
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-unlink-dir-") as tmp:
+        os.mkdir(Path(tmp) / "directory")
+        try:
+            builtin_unlink(Path(tmp) / "directory")
+            unlink_dir_error = None
+        except OSError as exc:
+            unlink_dir_error = exc.strerror
+    as_directory = ("error: kept site/{}: a directory now holds the temporary name, not the file this run "
+                    "created".format(first_temp))
+    expect("write/directory-at-temp-name-in-cleanup-message-gives-strerror-only",
+           unlink_dir_error is not None
+           and dir_lines[1:] == ["{} ({})".format(as_directory, unlink_dir_error)], (dir_lines, unlink_dir_error))
+    # A directory at the temporary name before the cleanup's identity check is kept and named in the same
+    # words as one put there after it (the row above, which adds the unlink's error). Its twin is
+    # write/kept-temp-message-names-it-relative-to-root above: a file renamed there in the same window
+    # keeps the words for a file that is no longer this run's.
+    dir_before = {}
+    got = run_injected(False, race="dir-before-check", streams=dir_before)
+    expect("write/directory-at-temp-name-before-identity-check-named-as-directory",
+           got == (2, b"previous bytes\n", [first_temp, "index.html"], ["directory"])
+           and dir_before.get("err") == "error: cannot write site/index.html (injected chmod failure); "
+           "fail-closed\n{}\n".format(as_directory), (got, dir_before))
+    # A symbolic link to a directory put at the name after the identity check is not a directory there
+    # (the cleanup reads it with lstat): when its unlink fails, the message is the failed removal, not the
+    # directory one. Its twin is write/directory-at-temp-name-in-cleanup-kept-and-named-as-directory above.
+    link_dir = {}
+    got = run_injected(False, race="symlink-dir-in-cleanup", streams=link_dir)
+    expect("write/symlink-to-directory-at-temp-name-not-named-as-directory",
+           got == (2, b"previous bytes\n", [first_temp, "index.html"], ["symbolic link"])
+           and link_dir.get("err") == "error: cannot write site/index.html (injected chmod failure); "
+           "fail-closed\nerror: cannot remove the temporary file site/{} (injected unlink failure)\n".format(
+               first_temp), (got, link_dir))
+    # A cleanup identity check that fails (its lstat raises an error other than the name being absent)
+    # is reported as a failed check, not as a failed removal: nothing is removed and the file is left.
+    # Its twins are write/chmod-failure-removes-own-temp (the check passes, the file is removed) and
+    # write/temp-removal-failure-message-names-it-relative-to-root (the check passes, the unlink fails).
+    check_failed = {}
+    got = run_injected(False, race="lstat-fails-in-cleanup", streams=check_failed)
+    expect("write/identity-check-failure-in-cleanup-reported-as-failed-check",
+           got == (2, b"previous bytes\n", [first_temp, "index.html"], [b"<p>fresh</p>\n"])
+           and check_failed.get("err") == "error: cannot write site/index.html (injected chmod failure); "
+           "fail-closed\nerror: cannot check whether site/{} is still the temporary file this run created "
+           "(injected lstat failure); not removed\n".format(first_temp), (got, check_failed))
     # --check reports a temporary page file left in a page folder (a run killed between its write and its
     # replace) as stray output (exit 1); the same tree without it is clean (exit 0).
     fresh_pages = {"site/index.html": "<p>fresh</p>\n"}
@@ -3610,10 +4070,19 @@ def _self_test():
           "accepts empty, a duplicate shell, component or inline id refused, 1 element repeating its id "
           "attribute and bare or empty id attributes refused with their own messages, only an element's first "
           "id compared across elements, a $BASE/ token outside an inline HTML value refused, an inline HTML "
-          "value left with a $BASE/ token refused as one, a failed page write leaving the previous bytes and no "
-          "temporary file, a file already at the temporary name kept while the next name is used, every "
-          "temporary name taken refused, and a leftover temporary page file, only by its whole name, reported "
-          "as stray)")
+          "value left with a $BASE/ token refused as one naming its page and data file, a failed page write "
+          "leaving the previous bytes and no temporary file, a file or directory already at the temporary "
+          "name kept and reported as stray while the next name is used, every temporary name taken refused "
+          "with its message, a file another process puts at the temporary name after the replace or renames "
+          "over it before a failure kept, a file renamed over it before the replace not published and one "
+          "renamed over it during the replace reported (the previous bytes named only for a page that "
+          "existed, an empty one included), a directory put there before or during the cleanup kept and "
+          "named as a directory in the same words (a symbolic link to one is not), a failed cleanup "
+          "identity check reported as such, the temporary name given relative to the root, the "
+          "temporary-file handle open until the run is done with the name (a new page too), and a "
+          "leftover temporary page file or directory, "
+          "only by its whole "
+          "name, reported as stray)")
     return 0
 
 

@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "6d83cece88ae09a85c4e25daa1f882ca39371ba439ed62ffc30e40afcd8d92ee"
+tree-sha256 = "bf7c8d67358ba34562efe053297e0a41cdb32c3d6171125b8707d09a06e1a465"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4547,8 +4547,8 @@ sha256 = "e732c5633f7a18889d9f71af931cd2eb0131c2b51e53e81087316d976923752c"
 
 [[sources]]
 path = "tools/gen_draft_site.py"
-bytes = 221567
-sha256 = "56e46a714376bfe6d1cfe490fd133af4d4e6ba25360925af4110e0cc122dd10a"
+bytes = 255716
+sha256 = "0538f01e53bce693dc827a4078afd4f56a02d0eec19494c612d378138a69bc65"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
