@@ -108,8 +108,12 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        path may be a file the brief asks the worker to create, so P3 prints an ADVISORY line
                        and never refuses. With --tree (see P6), each relative path the brief names, one whose
                        `..` climbs out of the tree included, is also looked up in the staged tree, pin or no
-                       pin, as written and not folded, like P6 (os.lstat of the path as written after its parent
-                       directory's real path is placed, so file/../x is ENOTDIR there), unless it is the exact
+                       pin, as written and not folded, like P6 (walked component by component from the tree's
+                       root as the worker's read resolves it: a `..` that climbs above the root resolves outside
+                       whatever follows it, even a path that comes back in by the tree's own name; a component
+                       that is not a directory with more of the path after it is ENOTDIR, so file/../x is
+                       ENOTDIR there; a link is followed by its relative target, and an absolute target
+                       resolves outside; the last component is os.lstat'ed, not followed), unless it is the exact
                        spelling of a declared input (P6 judges that spelling; another spelling of the same path
                        is looked up on its own), and one missing there, resolving outside it or that cannot be
                        looked up there (another stat error: EACCES, ELOOP, ENAMETOOLONG) is ADVISORY too, never
@@ -2526,7 +2530,8 @@ def rule_p3(names, row, repo, tree=None):
     not exist at that revision in `repo`; it may be a file the brief asks the worker to create, so it never
     refuses. With a staged tree (`tree`, the real path staged_tree returned), each relative path the brief
     names, one whose `..` climbs out of the tree included, is also looked up in the tree as written, not folded
-    (tree_prose_state: file/../x is ENOTDIR there, as the worker's read would be, while the pinned-revision lookup
+    (tree_prose_state walks it component by component as the worker's read would: a climb above the root
+    resolves outside whatever follows it, and file/../x is ENOTDIR there, while the pinned-revision lookup
     folds it), pin or no pin, unless it is the exact spelling of a declared input (P6 judges that spelling; another
     spelling of the same path is looked up on its own), and one missing there, resolving outside it or that
     cannot be looked up there is ADVISORY too, never CannotEvaluate. A pin label with no valid pin (bad_pins), pin lines
@@ -3204,13 +3209,9 @@ def staged_tree(tree):
     return root
 
 
-# the most symbolic links tree_links follows for one declared input, as Linux's own path lookup (MAXSYMLINKS)
+# the most symbolic links tree_links follows for one declared input, and tree_prose_state for one prose path,
+# as Linux's own path lookup (MAXSYMLINKS)
 TREE_LINK_LIMIT = 40
-
-
-def in_tree(path, root):
-    """Whether a real path is the staged tree's root or lies under it."""
-    return path == root or path.startswith(root.rstrip("/") + "/")
 
 
 def workdir_remainder(path, workdir):
@@ -3318,15 +3319,48 @@ def tree_probe(root, inside, line, path):
 
 def tree_prose_state(root, path):
     """None when the relative prose `path`, as written (never normalised, like P6), is present in the staged
-    tree `root` (os.lstat, the last component not followed, so file/../x is ENOTDIR as the worker's read would
-    be), else what P3 prints of it: missing (ENOENT, ENOTDIR), resolving outside the tree
-    (its parent directory's real path is not under `root`), or not looked up for another stat error (EACCES,
-    ELOOP, ENAMETOOLONG and the like), which stays ADVISORY because a prose path is never a declared input."""
+    tree `root`, else what P3 prints of it: missing (ENOENT, ENOTDIR), resolving outside the tree, or not looked
+    up for another stat error (EACCES, ELOOP, ENAMETOOLONG and the like), which stays ADVISORY because a prose
+    path is never a declared input. The path is walked component by component from the root, as the worker's
+    read resolves it in the tree at another place: the walk keeps the components it has entered below the root,
+    each a real directory; an empty or `.` component is skipped; `..` leaves the last entered directory, and a
+    `..` with none left climbs above the root, which resolves outside whatever follows it (even a path that comes
+    back in by the tree's own name); a component that is not a directory with more of the path after it is
+    ENOTDIR (file/../x, file/. and fifo/x, as the worker's read gives); a symbolic link before the last
+    component, or the last one under a trailing slash, is replaced by its relative target (more than
+    TREE_LINK_LIMIT links is ELOOP), and an absolute target resolves outside, since it names the tree's current
+    place or another one, not where the worker reads the tree; the last component is os.lstat'ed, not followed.
+    A path the walk finds present is then os.lstat'ed whole as written, so a lookup error of the whole path
+    (ENAMETOOLONG) is still reported."""
     joined = os.path.join(root, path)
+    pending, entered, followed = [part for part in path.split("/") if part], [], 0
+    follow_last = path.endswith("/")
     try:
-        parent = os.path.realpath(os.path.dirname(joined))
-        if not in_tree(parent, root):
-            return "resolves outside"
+        while pending:
+            part = pending.pop(0)
+            if part == ".":
+                continue
+            if part == "..":
+                if not entered:
+                    return "resolves outside"
+                entered.pop()
+                continue
+            info = os.lstat(root.rstrip("/") + "/" + "/".join(entered + [part]))
+            last = not pending
+            if stat.S_ISLNK(info.st_mode) and (follow_last or not last):
+                followed += 1
+                if followed > TREE_LINK_LIMIT:
+                    raise OSError(errno.ELOOP, os.strerror(errno.ELOOP))
+                target = os.readlink(root.rstrip("/") + "/" + "/".join(entered + [part]))
+                if target.startswith("/"):
+                    return "resolves outside"
+                pending[:0] = [step for step in target.split("/") if step]
+                continue
+            if last and not follow_last:
+                break
+            if not stat.S_ISDIR(info.st_mode):
+                raise OSError(errno.ENOTDIR, os.strerror(errno.ENOTDIR))
+            entered.append(part)
         os.lstat(joined)
     except OSError as exc:
         if exc.errno in MISSING_ERRNOS:
@@ -8674,8 +8708,8 @@ def self_test(report_path=None):
                 return "CannotEvaluate"
             return [message for rule, _, _, message, _ in findings if rule == "P3"]
 
-        # a prose path whose parent resolves outside the tree (an escaping link, a sibling-prefix link) is
-        # ADVISORY and says so; a prose path under an in-tree link is quiet
+        # a prose path that reaches a link leaving the tree (an absolute target, a sibling-prefix link) resolves
+        # outside it: ADVISORY, and says so; a prose path under an in-tree link is quiet
         check("preflight/p3-tree-prose-resolves-outside-advisory", [
             [message.startswith("path resolves outside the staged tree") for message in staged_messages(
                 text, tree)] for text, tree in (("Read x/a.md first.\n", linked), ("Read sib/a.md first.\n", full),
@@ -8710,6 +8744,47 @@ def self_test(report_path=None):
                 "Read plans/../../outside/in.md first.\n", "Read ../outside/in.md first.\n",
                 "Read ./plans/.. first.\n", "Read plans/../notes.md first.\n")],
             [((0, [("P3", "ADVISORY")], True), [True])] * 2 + [(tree_quiet, [])] * 2)
+        # the walk reports a climb above the root whatever follows it: a last `..` (directly, or through a link
+        # to `..`) that escapes after its parent is placed in the tree resolves outside, with no trailing slash
+        # needed (its twins, a climb back to the root, are in p3-tree-prose-walk-inside-quiet)
+        check("preflight/p3-tree-prose-last-climb-resolves-outside", [
+            (staged(text, full), [message.startswith("path resolves outside the staged tree") for message in
+                                  staged_messages(text, full)]) for text in (
+                "Read ./plans/../.. first.\n", "Read ./plans/root/.. first.\n")],
+            [((0, [("P3", "ADVISORY")], True), [True])] * 2)
+        # a prose path that leaves the tree and comes back in by the tree's own name (written with `..` or through
+        # a relative link), or through a link whose absolute target names the tree's current place, lands in the
+        # tree today but not where the worker reads it: it resolves outside, as P6 judges the same links
+        check("preflight/p3-tree-prose-climb-back-in-resolves-outside", [
+            (staged(text, full), [message.startswith("path resolves outside the staged tree") for message in
+                                  staged_messages(text, full)]) for text in (
+                "Read ../{}/notes.md first.\n".format(full.name),
+                "Read plans/../../{}/notes.md first.\n".format(full.name), "Read climbdir/a.md first.\n",
+                "Read adir/a.md first.\n")],
+            [((0, [("P3", "ADVISORY")], True), [True])] * 4)
+        # a component that is not a directory with more of the path after it is ENOTDIR for the worker's read,
+        # whatever climbs after it: a regular file, a link to one, and a FIFO
+        check("preflight/p3-tree-prose-not-directory-enotdir", [
+            (staged(text, full), [message.startswith("path does not exist in the staged tree") for message in
+                                  staged_messages(text, full)]) for text in (
+                "Read notes.md/../../{}/in.md first.\n".format(outside.name),
+                "Read plans/plan.md/../../../{}/in.md first.\n".format(outside.name),
+                "Read rlink/../../{}/in.md first.\n".format(outside.name),
+                "Read fifo/../../{}/in.md first.\n".format(outside.name))],
+            [((0, [("P3", "ADVISORY")], True), [True])] * 4)
+        # their twins: a directory, or a link to one, before the same climb still resolves outside
+        check("preflight/p3-tree-prose-directory-climb-resolves-outside", [
+            (staged(text, full), [message.startswith("path resolves outside the staged tree") for message in
+                                  staged_messages(text, full)]) for text in (
+                "Read inputs/../../{}/in.md first.\n".format(outside.name),
+                "Read rdir/../../{}/in.md first.\n".format(outside.name))],
+            [((0, [("P3", "ADVISORY")], True), [True])] * 2)
+        # and a walk that stays in the tree is quiet: a link to `..` from a subdirectory climbs back to the root
+        # (with a trailing slash, `.` or a name after it), a link to a directory then `..`, and a last component
+        # that is a link to an absolute target, which the os.lstat of the last component does not follow
+        check("preflight/p3-tree-prose-walk-inside-quiet", [staged(text, full) for text in (
+            "Read ./plans/root/ first.\n", "Read ./plans/root/. first.\n", "Read plans/root/notes.md first.\n",
+            "Read rdir/../plans/plan.md first.\n", "Read ./plans/home first.\n")], [tree_quiet] * 5)
         # a prose path that cannot be looked up in the tree for a reason other than ENOENT or ENOTDIR (a
         # symbolic link loop, a name too long, and where this uid honours mode 000 a directory it cannot
         # search) stays ADVISORY, never exit 2: a prose path is never a declared input
