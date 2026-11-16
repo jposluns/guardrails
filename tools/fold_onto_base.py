@@ -1757,8 +1757,14 @@ def _h32(temp):
     reject = stub("h32-reject", "echo \"error: unknown option '$last'\" >&2; exit 129")
     other = stub("h32-other", "echo sha3; exit 0")
     root, _base, _head = _feature(temp, "h32-live")
-    answers = [subprocess.run([path, "-C", str(root), "rev-parse", "--show-object-format"], capture_output=True,
-                              timeout=TIMEOUT, env=_git_env()) for path in (echo, reject, other, real)]
+    # Literal argv heads, so the maintenance pin scan can tell what each launch runs: the stubs run
+    # under /bin/sh (their own interpreter) and, for this argv, answer without running git; the real
+    # git twin is the git on PATH, the one shutil.which found for the stubs to hand off to.
+    answers = [subprocess.run(["/bin/sh", path, "-C", str(root), "rev-parse", "--show-object-format"],
+                              capture_output=True, timeout=TIMEOUT, env=_git_env())
+               for path in (echo, reject, other)]
+    answers.append(subprocess.run(["git", "-C", str(root), "rev-parse", "--show-object-format"],
+                                  capture_output=True, timeout=TIMEOUT, env=_git_env()))
     check("fold/h32-twin-stubs-answer-as-described", [
         (proc.returncode, proc.stdout.strip()) for proc in answers] == [
         (0, b"--show-object-format"), (129, b""), (0, b"sha3"), (0, b"sha1")], answers)

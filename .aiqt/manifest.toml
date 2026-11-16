@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "e15ef4f57aaa02ece7f37401918a088c1e2f489cab6eadb74aef3c720a5cb865"
+tree-sha256 = "362724cc3de585b46b561f905b564df735f26babe93a51d71d08fd1e15348af0"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4487,8 +4487,8 @@ sha256 = "230d565106563d57e02769f666f1a62ae9ae3c858a4025419c5b53fc9dbedbde"
 
 [[sources]]
 path = "tools/fold_onto_base.py"
-bytes = 140925
-sha256 = "6ae8af285b7686e0058ccac3b8b84c2293740b7c7fcb84fc34db93e8fa26155d"
+bytes = 141424
+sha256 = "29da2d398e2008b03c35e092846f9264a1520137a3a0d8705db950c5cd0970a5"
 
 [[sources]]
 path = "tools/gen_adapters.py"
