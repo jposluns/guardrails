@@ -328,20 +328,50 @@ workflow it calls is read only as a workflow file directly under
 credentials; an INPUT_PERSIST-CREDENTIALS value set through env:; and any
 other route by which a step obtains the job token (an action input that
 defaults to it among them).
+COREUTILS IMAGE. tools/check_coreutils_environment.py reports the coreutils
+of the image its own job runs on, while the removal differential it guards
+(.preview/record-remove-check.py, run by the Hooks preview self-test) runs in
+another job, so its report holds for that suite only while both jobs run on
+one image. quality.yml is read through read_runner_text and parsed whole by
+_WorkflowReader (the CHECKOUT CREDENTIALS subset). A job is marked when a
+step's run: text names tools/check_coreutils_environment.py or
+tools/check_hooks_preview.py (COREUTILS_IMAGE_MARKERS). The rules are
+COREUTILS_IMAGE_RULES: job-set (the marked jobs are exactly
+COREUTILS_IMAGE_JOBS, generated and selftest-execution, so moving either
+suite to another job, or a named job dropping both, is a finding),
+pinned-image (each of those jobs has a runs-on that is one string naming a
+versioned image, ubuntu-N.N; ubuntu-latest, an expression, a list or no
+runs-on is a finding, since each can move without a reviewed change) and
+same-image (they all carry the same runs-on string). Each is a
+coreutils-image finding (exit 1); a workflow that cannot be read or parsed,
+one with no jobs: mapping, and a runs-on or jobs key spelled in another
+letter case are cannot-evaluate (exit 2, fail-closed). The self-test removes
+each rule from the running module and shows every case of it red without
+it, and runs main([]) with the leg pointed at a scratch workflow. Not
+checked: what the pinned image carries (the coreutils-environment gate
+checks that live, in CI mode, in selftest-execution); whether both jobs run
+in the same workflow run (selftest-execution carries the heavy-job if: and
+generated does not, so on an ordinary pull request the preview self-test
+runs and the coreutils gate does not); suites in other workflow files; a
+GNU-dependent suite reached by a run: that names neither marker. When
+ubuntu-24.04 is retired, see the retirement note in the docstring of
+tools/check_coreutils_environment.py and in CLAUDE.md.
 
-Exit convention (the higher of the parity leg's and the checkout-credentials
-leg's exit):
+Exit convention (the higher of the parity leg's, the checkout-credentials
+leg's and the coreutils-image leg's exit):
   0  extraction succeeded, every difference has an active exception, no exception is
-     stale or reversed, every mandatory member is present on both sides, and every
-     checkout step sets persist-credentials: false
+     stale or reversed, every mandatory member is present on both sides, every
+     checkout step sets persist-credentials: false, and the jobs that run the
+     coreutils-environment gate or the Hooks preview self-test are exactly
+     COREUTILS_IMAGE_JOBS on one pinned image
   1  an evaluated parity finding, stale or reversed exception, missing mandatory
-     member, required-status, trigger, relocation, lane or checkout-credentials
-     finding
+     member, required-status, trigger, relocation, lane, checkout-credentials or
+     coreutils-image finding
   2  cannot-evaluate, including an unreadable input, malformed control input, empty
      extraction, unsupported shell or YAML shape, unresolved command value, hidden
-     action, circular runner invocation, shadow-scan discrepancy, or a workflow
+     action, circular runner invocation, shadow-scan discrepancy, a workflow
      directory or file the checkout-credentials rule cannot list, read, parse or
-     judge
+     judge, or a quality.yml the coreutils-image rule cannot read, parse or judge
 
 DISCLOSED RESIDUAL. This is token-level set parity only. It does not compare
 environment values, operating systems, tool versions, execution order, multiplicity,
@@ -5033,6 +5063,166 @@ def render_checkout(report):
             "PASS: {} actions/checkout step(s) in {} workflow file(s) each "
             "set persist-credentials: false.".format(
                 report.steps, report.files))
+    return "\n".join(lines)
+
+
+# COREUTILS IMAGE (module docstring). The coreutils-environment gate reports
+# the coreutils of the image its own job runs on, and the Hooks preview
+# self-test asserts GNU behaviour of real coreutils programs in another job,
+# so the report holds for the suites only while those jobs share one image.
+# COREUTILS_IMAGE_JOBS is the reviewed job set: exactly the jobs of
+# quality.yml with a step whose run: text names one of
+# COREUTILS_IMAGE_MARKERS. The rules: job-set (the marked jobs are exactly
+# that set), pinned-image (each one's runs-on is one string naming a
+# versioned ubuntu image, never ubuntu-latest or an expression), same-image
+# (every one of them carries the same runs-on string) and fail-closed (a
+# workflow that cannot be read, parsed or judged is cannot-evaluate, never
+# skipped). The self-test removes each rule from the running module and
+# shows every case of that rule red without it.
+COREUTILS_IMAGE_PATH = CI_PATH
+COREUTILS_IMAGE_SOURCE = CI_SOURCE
+COREUTILS_IMAGE_MARKERS = ("tools/check_coreutils_environment.py",
+                           "tools/check_hooks_preview.py")
+COREUTILS_IMAGE_JOBS = ("generated", "selftest-execution")
+COREUTILS_IMAGE_RE = re.compile(r"ubuntu-[0-9]+\.[0-9]+", re.ASCII)
+COREUTILS_IMAGE_RULES = frozenset(
+    {"job-set", "pinned-image", "same-image", "fail-closed"})
+CoreutilsImageReport = namedtuple(
+    "CoreutilsImageReport", "code jobs images findings diagnostics")
+
+
+def _coreutils_marked_jobs(jobs):
+    """{job id: set of markers} for every job of the parsed jobs: mapping
+    with a step whose run: text names a COREUTILS_IMAGE_MARKERS entry."""
+    marked = {}
+    for job_id, job in jobs.items():
+        steps = job.get("steps") if isinstance(job, dict) else None
+        for step in steps if isinstance(steps, list) else ():
+            run = step.get("run") if isinstance(step, dict) else None
+            if not isinstance(run, str):
+                continue
+            for marker in COREUTILS_IMAGE_MARKERS:
+                if marker in run:
+                    marked.setdefault(job_id, set()).add(marker)
+    return marked
+
+
+def coreutils_image(path=None, reader=None):
+    """Judge the runs-on values of the jobs that run the coreutils-environment
+    gate or the Hooks preview self-test in quality.yml (module docstring,
+    COREUTILS IMAGE) and return a CoreutilsImageReport."""
+    path = COREUTILS_IMAGE_PATH if path is None else path
+    source = COREUTILS_IMAGE_SOURCE
+    fail_closed = "fail-closed" in COREUTILS_IMAGE_RULES
+    text, diagnostic = read_runner_text(path, source, reader=reader)
+    jobs = None
+    if diagnostic is None:
+        try:
+            tree = _WorkflowReader(text).parse()
+            jobs = _exact_key(tree, "jobs", 0)
+            if not isinstance(jobs, dict) or not jobs:
+                diagnostic = _diagnostic(
+                    source, 0, "workflow-shape",
+                    "no jobs: mapping holding at least one job")
+            else:
+                marked = _coreutils_marked_jobs(jobs)
+                judged = sorted(set(COREUTILS_IMAGE_JOBS) | set(marked))
+                values = {}
+                for job_id in judged:
+                    job = jobs.get(job_id)
+                    if isinstance(job, dict):
+                        values[job_id] = (
+                            _exact_key(job, "runs-on", jobs.key_lines[job_id]),
+                            job.key_lines.get(
+                                "runs-on", jobs.key_lines[job_id]))
+        except WorkflowShapeError as exc:
+            diagnostic = _diagnostic(
+                source, exc.line, "workflow-shape", exc.message)
+        except RecursionError:
+            diagnostic = _diagnostic(
+                source, 0, "workflow-shape",
+                "nesting deeper than this reader can follow")
+    if diagnostic is not None:
+        diagnostics = (diagnostic,) if fail_closed else ()
+        return CoreutilsImageReport(
+            2 if fail_closed else 0, (), (), (), diagnostics)
+    findings = []
+    if "job-set" in COREUTILS_IMAGE_RULES:
+        for job_id in judged:
+            if job_id not in COREUTILS_IMAGE_JOBS:
+                findings.append(Finding(
+                    "coreutils-image-job-set",
+                    "{}:{}".format(source, jobs.key_lines[job_id]),
+                    "job {} runs {}, but COREUTILS_IMAGE_JOBS does not "
+                    "name it, so nothing holds it to the coreutils "
+                    "gate's image".format(
+                        job_id, ", ".join(sorted(marked[job_id])))))
+            elif job_id not in jobs:
+                findings.append(Finding(
+                    "coreutils-image-job-set", source,
+                    "COREUTILS_IMAGE_JOBS names job {}, which this "
+                    "workflow does not have".format(job_id)))
+            elif job_id not in marked:
+                findings.append(Finding(
+                    "coreutils-image-job-set",
+                    "{}:{}".format(source, jobs.key_lines[job_id]),
+                    "COREUTILS_IMAGE_JOBS names job {}, which runs none "
+                    "of {}".format(job_id, ", ".join(COREUTILS_IMAGE_MARKERS))))
+    if "pinned-image" in COREUTILS_IMAGE_RULES:
+        for job_id, (value, line) in sorted(values.items()):
+            if not (isinstance(value, str)
+                    and COREUTILS_IMAGE_RE.fullmatch(value)):
+                findings.append(Finding(
+                    "coreutils-image-pinned",
+                    "{}:{}".format(source, line),
+                    "job {} runs on {}, not one pinned ubuntu-N.N image "
+                    "(ubuntu-latest and expressions move without a "
+                    "reviewed change)".format(
+                        job_id, "no runs-on" if value is _ABSENT
+                        else repr(value))))
+    images = sorted({value for value, _line in values.values()
+                     if isinstance(value, str)})
+    if "same-image" in COREUTILS_IMAGE_RULES and len(images) > 1:
+        findings.append(Finding(
+            "coreutils-image-same", source,
+            "the jobs do not share one runs-on value: {}".format(
+                ", ".join("{} on {!r}".format(job_id, value)
+                          for job_id, (value, _line) in sorted(values.items())
+                          if isinstance(value, str)))))
+    return CoreutilsImageReport(
+        1 if findings else 0, tuple(sorted(values)), tuple(images),
+        tuple(findings), ())
+
+
+def render_coreutils_image(report):
+    """Render the coreutils-image report deterministically."""
+    lines = ["COREUTILS IMAGE:"]
+    for diagnostic in report.diagnostics:
+        if diagnostic.line:
+            location = "{}:{}".format(diagnostic.source, diagnostic.line)
+        else:
+            location = diagnostic.source
+        lines.append("  {} [{}] {}".format(
+            location, diagnostic.code, diagnostic.message))
+    for finding in report.findings:
+        lines.append("  {} {}: {}".format(
+            finding.kind, finding.identity, finding.message))
+    if report.code == 2:
+        lines.append(
+            "CANNOT EVALUATE: the coreutils image pairing was not "
+            "determined.")
+    elif report.code == 1:
+        lines.append(
+            "FAIL: {} finding(s): the coreutils-environment gate and the "
+            "suites it reports on are not held to one pinned "
+            "image.".format(len(report.findings)))
+    else:
+        lines.append(
+            "PASS: the {} job(s) that run the coreutils-environment gate or "
+            "the Hooks preview self-test ({}) share one pinned runs-on "
+            "value, {}.".format(
+                len(report.jobs), ", ".join(report.jobs),
+                ", ".join(report.images)))
     return "\n".join(lines)
 
 
@@ -10599,6 +10789,155 @@ def self_test():
                 failures.append("46 {} mutant ({}): CDPATH run gave {}, "
                                 "expected {}".format(relative, label, got, cdpath_want))
 
+    # 47 COREUTILS IMAGE: each case is a scratch quality.yml judged by
+    # coreutils_image; a case naming a rule must be red with it and green on
+    # a mutant without it (COREUTILS_IMAGE_RULES minus that rule), so each
+    # rule is shown needed. The live workflow must pass, holding exactly
+    # COREUTILS_IMAGE_JOBS, and main([]) must carry the leg's exit.
+    preview_run = ("      - run: python3 -I -B tools/check_hooks_preview.py "
+                   "--self-test\n")
+    gate_run = ("      - run: python3 -I -B "
+                "tools/check_coreutils_environment.py\n")
+    other_run = "      - run: python3 -I -B tools/check_no_dashes.py\n"
+
+    def image_workflow(generated="ubuntu-24.04", selftest="ubuntu-24.04",
+                       generated_steps=preview_run, extra="",
+                       generated_job=True):
+        text = "name: F\non: push\njobs:\n"
+        if generated_job:
+            text += "  generated:\n"
+            if generated is not None:
+                text += "    runs-on: {}\n".format(generated)
+            text += "    steps:\n" + generated_steps
+        text += ("  selftest-execution:\n    runs-on: {}\n    steps:\n"
+                 "{}".format(selftest, gate_run)) + extra
+        return text.encode("ascii")
+
+    image_cases = (
+        ("both jobs on one pinned image pass", image_workflow(), 0,
+         "share one pinned runs-on value, ubuntu-24.04", None),
+        ("the preview job back on ubuntu-latest fails",
+         image_workflow(generated="ubuntu-latest"), 1,
+         "do not share one runs-on value", None),
+        ("both jobs on ubuntu-latest fail (one value, not pinned)",
+         image_workflow(generated="ubuntu-latest", selftest="ubuntu-latest"),
+         1, "job generated runs on 'ubuntu-latest', not one pinned",
+         "pinned-image"),
+        ("both jobs on a matrix expression fail",
+         image_workflow(generated="${{ matrix.os }}",
+                        selftest="${{ matrix.os }}"), 1,
+         "not one pinned ubuntu-N.N image", "pinned-image"),
+        ("a job with no runs-on fails", image_workflow(generated=None), 1,
+         "job generated runs on no runs-on", "pinned-image"),
+        ("a runs-on list fails",
+         image_workflow(generated="[ubuntu-24.04]"), 1,
+         "job generated runs on ['ubuntu-24.04']", "pinned-image"),
+        ("two different pinned images fail",
+         image_workflow(generated="ubuntu-22.04"), 1,
+         "generated on 'ubuntu-22.04', selftest-execution on "
+         "'ubuntu-24.04'", "same-image"),
+        ("the preview self-test moved to an unnamed job fails",
+         image_workflow(generated_steps=other_run, extra=(
+             "  registry:\n    runs-on: ubuntu-24.04\n    steps:\n"
+             + preview_run)), 1,
+         "job registry runs tools/check_hooks_preview.py, but "
+         "COREUTILS_IMAGE_JOBS does not name it", "job-set"),
+        ("a named job that no longer runs either suite fails",
+         image_workflow(generated_steps=other_run), 1,
+         "names job generated, which runs none of", "job-set"),
+        ("a named job the workflow lacks fails",
+         image_workflow(generated_job=False, extra=(
+             "  other:\n    runs-on: ubuntu-24.04\n    steps:\n"
+             + other_run)), 1,
+         "names job generated, which this workflow does not have",
+         "job-set"),
+        ("an unnamed job on ubuntu-latest running the gate fails",
+         image_workflow(extra=(
+             "  site:\n    runs-on: ubuntu-latest\n    steps:\n"
+             + gate_run)), 1,
+         "job site runs tools/check_coreutils_environment.py", None),
+        ("a tab is cannot-evaluate",
+         image_workflow().replace(b"    steps:", b"\tsteps:", 1), 2,
+         "a tab is outside the supported YAML subset", "fail-closed"),
+        ("a workflow with no jobs is cannot-evaluate",
+         b"name: F\non: push\n", 2, "no jobs: mapping", "fail-closed"),
+        ("a runs-on key in another letter case is cannot-evaluate",
+         image_workflow().replace(b"    runs-on: ubuntu-24.04\n",
+                                  b"    Runs-on: ubuntu-24.04\n", 1), 2,
+         "in another letter case", "fail-closed"),
+        ("an unreadable workflow is cannot-evaluate", None, 2,
+         "cannot read", "fail-closed"),
+    )
+    image_rules_shown = set()
+    with tempfile.TemporaryDirectory(prefix="ci-parity-image-") as tmp:
+        for number, (label, data, want, fragment, rule) in enumerate(
+                image_cases):
+            count += 1
+            path = Path(tmp) / "case{}.yml".format(number)
+            if data is not None:
+                path.write_bytes(data)
+            report = coreutils_image(path)
+            rendered = render_coreutils_image(report)
+            if report.code != want or fragment not in rendered:
+                failures.append(
+                    "47 coreutils image {}: code {}, expected {} with "
+                    "{!r}\n{}".format(label, report.code, want, fragment,
+                                      rendered))
+            if rule is None:
+                continue
+            image_rules_shown.add(rule)
+            with patch.object(sys.modules[__name__], "COREUTILS_IMAGE_RULES",
+                              COREUTILS_IMAGE_RULES - {rule}):
+                mutant = coreutils_image(path)
+            if mutant.code != 0:
+                failures.append(
+                    "47 coreutils image {}: not red on a mutant without the "
+                    "{} rule (the mutant exits {}, not 0)\n{}".format(
+                        label, rule, mutant.code,
+                        render_coreutils_image(mutant)))
+        if image_rules_shown != COREUTILS_IMAGE_RULES:
+            failures.append(
+                "47 coreutils image: a rule with no case shown red without "
+                "it: {}".format(sorted(COREUTILS_IMAGE_RULES
+                                       - image_rules_shown)))
+        count += 1
+        live = coreutils_image()
+        if live.code != 0 or live.jobs != tuple(sorted(COREUTILS_IMAGE_JOBS)):
+            failures.append(
+                "47 coreutils image: the live workflow gives code {} over "
+                "jobs {}, expected 0 over {}\n{}".format(
+                    live.code, live.jobs, sorted(COREUTILS_IMAGE_JOBS),
+                    render_coreutils_image(live)))
+        finding_path = Path(tmp) / "finding.yml"
+        finding_path.write_bytes(image_workflow(generated="ubuntu-latest"))
+        for label, path, want, fragment in (
+                ("a coreutils image finding", finding_path, 1,
+                 "do not share one runs-on value"),
+                ("an unreadable workflow", Path(tmp) / "absent.yml", 2,
+                 "the coreutils image pairing was not determined")):
+            count += 1
+            with patch.object(sys.modules[__name__], "COREUTILS_IMAGE_PATH",
+                              path):
+                code, output = run_main()
+            if code != want or fragment not in output:
+                failures.append(
+                    "47 main wiring: {} returns exit {} from main([]), "
+                    "expected {} with {!r} in the output".format(
+                        label, code, want, fragment))
+        count += 1
+        green = CoreutilsImageReport(0, (), (), (), ())
+        with patch.object(sys.modules[__name__], "COREUTILS_IMAGE_PATH",
+                          finding_path), \
+                patch.object(sys.modules[__name__], "coreutils_image",
+                             lambda *args, **kwargs: green):
+            code, output = run_main()
+        if code != 0:
+            failures.append(
+                "47 main wiring: with the coreutils image leg stubbed green, "
+                "main([]) returns exit {}, not the other legs' 0, so the "
+                "vectors above do not isolate the coreutils image "
+                "leg".format(code))
+
     if failures:
         print("SELF-TEST FAIL:")
         for failure in failures:
@@ -10636,8 +10975,10 @@ def main(argv=None):
     print(render(report))
     checkout = checkout_credentials(WORKFLOWS_PATH)
     print(render_checkout(checkout))
+    image = coreutils_image()
+    print(render_coreutils_image(image))
     # The higher exit wins: cannot-evaluate (2) over a finding (1) over a pass.
-    return max(report.code, checkout.code)
+    return max(report.code, checkout.code, image.code)
 
 
 if __name__ == "__main__":

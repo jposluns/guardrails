@@ -18,10 +18,25 @@ Why CI requires GNU. The removal differential self-test of .preview/record-remov
 under the fixed PATH /usr/bin:/bin and asserts whether real rm, cp, mv, truncate, tee, dd, ln, unlink and shred
 destroy a file, and its rm model follows GNU rm option parsing (a long option by unambiguous prefix, an option
 after an operand, an option rm rejects); other preview self-tests record option arities observed per
-implementation. So a uutils program is refused in CI mode, never accepted: the GitHub-hosted ubuntu-latest
-image moved to one whose coreutils are uutils (CI run 43825233435 named uutils 0.10.0 on both PATH values),
-and the Quality workflow pins ubuntu-24.04 for the job that runs this gate and for the job that runs the
-preview self-tests instead. A PATH edit in the step could not reach the fixed /usr/bin:/bin.
+implementation. So a uutils program is refused in CI mode, never accepted: on the GitHub-hosted ubuntu-latest
+image, CI run 43825233435 reported 44 of the 52 program-environment rows (26 inventoried programs, each on the
+runner's PATH and on /usr/bin:/bin) as uutils 0.10.0, and the Quality workflow pins ubuntu-24.04 for the job
+that runs this gate (selftest-execution) and for the job that runs the preview self-tests (generated) instead.
+A PATH edit in the step could not reach the fixed /usr/bin:/bin. tools/check_ci_parity.py (COREUTILS IMAGE)
+fails unless the jobs whose steps run this gate or tools/check_hooks_preview.py are exactly those two and share
+one pinned runs-on value, so neither can drift to another image alone.
+
+Image retirement. Those two jobs pin ubuntu-24.04 for its GNU coreutils, not for the host patch that the 45
+host jobs pin it for (tools/check_python_host_pin.py), so a host patch built for a newer image does not move
+them. When GitHub retires ubuntu-24.04, generated and selftest-execution can no longer run on it, and Quality
+gates, which needs both, cannot pass. Moving one of them alone, or either to ubuntu-latest, fails
+tools/check_ci_parity.py (COREUTILS IMAGE); moving both together to a newer pinned image passes that check,
+and then this gate's live step fails (exit 1) in selftest-execution if that image's coreutils are not GNU, as
+on the ubuntu-latest image of CI run 43825233435. The change needed is a reviewed decision, not a label edit:
+either make GNU coreutils and diffutils the programs both the step's PATH and /usr/bin:/bin select in both
+jobs, or show the preview self-tests pass under the other implementation and change the removal differential
+and this gate's CI requirement to accept it, naming the programs; then change both runs-on lines,
+COREUTILS_IMAGE_JOBS if the job set changes, this note and CLAUDE.md together, in one change.
 
 Environments. The inventory declares each one: the runner's own PATH (this process's PATH, the one the
 launching runner passed on), and fixed PATH values such as the /usr/bin:/bin PATH under which the removal
@@ -594,6 +609,10 @@ MUTANTS = (
      "    differs = [row for row in rows if row.outcome != OK or row.implementation not in "
      "(expected, \"uutils\")]\n",
      "uutils-multicall"),
+    ("probe-selected-path",
+     "    failure, returncode, output, reason = probe(selected, path_value, timeout, limit)\n",
+     "    failure, returncode, output, reason = probe(target, path_value, timeout, limit)\n",
+     "uutils-multicall"),
     ("ci-variable",
      "    ci = ci or environ.get(CI_VARIABLE) == CI_VALUE\n",
      "    ci = ci\n",
@@ -718,16 +737,31 @@ def _fixtures(base):
     linked.mkdir()
     os.symlink(os.path.join(dirs["real"], "gnu-cp"), str(linked / "cp"))
     dirs["linked"] = str(linked)
-    # The layout CI run 43825233435 met: one uutils multicall file, its banner naming the program it was run as,
-    # with install, tee and truncate as symbolic links to it; and GNU install, tee and truncate to put first.
+    # Two uutils multicall layouts, each banner naming the program it was run as (the CI run's own layout was not
+    # recorded): one file named coreutils with install, tee and truncate as symbolic links to it, so the resolved
+    # target is that one file; and, as on a host with uutils 0.10.0 where /usr/bin/install is a symbolic link to
+    # ../lib/cargo/bin/coreutils/install, one of many hard links of one file, symbolic links to per-program hard
+    # links of one file, so the resolved target names the program, not coreutils. Then GNU install, tee and
+    # truncate to put first.
+    uutils_banner = "#!/bin/sh\n" + stamp + "printf '%s (uutils coreutils) 0.10.0\\n' \"${0##*/}\"\n"
     multicall = Path(base) / "uutils-multicall"
     multicall.mkdir()
-    (multicall / "coreutils").write_text("#!/bin/sh\n" + stamp
-                                         + "printf '%s (uutils coreutils) 0.10.0\\n' \"${0##*/}\"\n")
+    (multicall / "coreutils").write_text(uutils_banner)
     (multicall / "coreutils").chmod(0o755)
     for name in ("install", "tee", "truncate"):
         os.symlink("coreutils", str(multicall / name))
     dirs["uutils-multicall"] = str(multicall)
+    hardlinked = Path(base) / "uutils-hardlinked"
+    (hardlinked / "bin").mkdir(parents=True)
+    (hardlinked / "lib").mkdir()
+    (hardlinked / "lib" / "install").write_text(uutils_banner)
+    (hardlinked / "lib" / "install").chmod(0o755)
+    for name in ("install", "tee", "truncate"):
+        if name != "install":
+            os.link(str(hardlinked / "lib" / "install"), str(hardlinked / "lib" / name))
+        os.symlink(os.path.join("..", "lib", name), str(hardlinked / "bin" / name))
+    dirs["uutils-hardlinked"] = str(hardlinked / "bin")
+    dirs["uutils-hardlinked-lib"] = str(hardlinked / "lib")
     make("gnu-first", "gnu", ("install", "tee", "truncate"))
     empty = Path(base) / "nothing"
     empty.mkdir()
@@ -859,9 +893,11 @@ def _vectors(m, dirs, log):
          if not BARE_RE.fullmatch(dirs["gnu"]) else "environment runner: PATH=" + dirs["gnu"],
          "environment fixed: PATH=" + (dirs["uutils"] if BARE_RE.fullmatch(dirs["uutils"])
                                         else json.dumps(dirs["uutils"]))))
-    # uutils coreutils as CI run 43825233435 met it (a multicall file reached through symbolic links, on the
-    # runner's PATH and on the removal oracle's fixed PATH): a recognised implementation, read per program and
-    # environment, that warns locally and is refused in CI mode, every row named in the FAIL line.
+    # uutils coreutils on the runner's PATH and on the removal oracle's fixed PATH, as CI run 43825233435
+    # reported it (here a multicall file reached through symbolic links): a recognised implementation, read per
+    # program and environment, that warns locally and is refused in CI mode, every row named in the FAIL line.
+    # Each program is probed by the path its PATH selects, never by the resolved target, whose banner here names
+    # coreutils, not the program.
     names = [program[0] for program in MULTICALL]
     environment_ids = ("runner-path", "removal-oracle")
     multicall = dirs["uutils-multicall"]
@@ -880,6 +916,18 @@ def _vectors(m, dirs, log):
           for env_id in environment_ids for name in names],
          1, "differs", "FAIL: CI mode requires GNU for every program, and 6 program(s) are not identified as "
          "GNU: " + uu_named))
+    # The hard-linked layout: each symbolic link resolves to its own program's hard link, which the report names
+    # as the target, and the rows are refused in CI mode as the multicall ones are.
+    hard_envs = tuple((env_id, dirs["uutils-hardlinked"]) for env_id in environment_ids)
+    hard_ci = m.evaluate(MULTICALL, hard_envs, "GNU", True)
+    out["uutils-hardlinked"] = (
+        (hard_ci[0], hard_ci[3], rows_of(hard_ci), [(row.path, row.target) for row in hard_ci[2]],
+         hard_ci[1][-1]),
+        (1, "differs", [(name, "OK", "uutils", "0.10.0") for _env_id in environment_ids for name in names],
+         [(os.path.join(dirs["uutils-hardlinked"], name),
+           os.path.realpath(os.path.join(dirs["uutils-hardlinked-lib"], name)))
+          for _env_id in environment_ids for name in names],
+         "FAIL: CI mode requires GNU for every program, and 6 program(s) are not identified as GNU: " + uu_named))
     # GNU first on both PATH values passes CI mode; GNU first on the runner's PATH alone does not, since the
     # removal oracle's fixed PATH still selects uutils (why a step PATH edit is no fix for CI).
     gnu_first = os.pathsep.join((dirs["gnu-first"], multicall))

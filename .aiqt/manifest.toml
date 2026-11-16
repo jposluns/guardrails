@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "9b27d47eeb115e0a471bfa42d76b75e79f1f4b60c411ef2e5047713d65dc5f6f"
+tree-sha256 = "477761b555d2904e82d2715c11d52bfaf620a291bab12bb93b86e74332653c5f"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -837,8 +837,8 @@ sha256 = "622683b912a6c2720502d096f737f59326fa2b6319776dfdaf029cdd2243d1b7"
 
 [[sources]]
 path = ".aiqt/coreutils-tests.json"
-bytes = 3058
-sha256 = "555fdb01ca45f0578791ad1bbfb93706800dd1a846379fbb6200c21a5cc78b1a"
+bytes = 3099
+sha256 = "2937819b959a1d39bbdfca494a10d8c122f884bb4803ca535baa43b6e3561789"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
@@ -4212,8 +4212,8 @@ sha256 = "5f19442f5069f2642b867b53e13e0e1986b3d4b4f96aab13864b52b60bf472df"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 505315
-sha256 = "9aff72bd5a3ffc928844c9f4dceed7aabd6ea4f267210f3bc2d896d9ca08566a"
+bytes = 523313
+sha256 = "a5001ec9dae6712c47b99a6e16930bc8f4ec04594d5c091fb32818efec5ff926"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
@@ -4227,8 +4227,8 @@ sha256 = "df621f8ed34ccddb5f6958f29a66896de9876e71a21083d6b5dd0143ff0dec3b"
 
 [[sources]]
 path = "tools/check_coreutils_environment.py"
-bytes = 67104
-sha256 = "303d893f95dd54a5e55b67a7eb651d553d42bf3bc79051a45bf2588d34a5ba52"
+bytes = 70881
+sha256 = "6728dbea1b171e3ac98ddd934978407d008d7a1d44b97eb097db1809c7d41e12"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
@@ -4377,8 +4377,8 @@ sha256 = "c29c5c46ae4e36e5c7e13dc3ebaf86e8d11de2de97515416c6cd54b26b3709db"
 
 [[sources]]
 path = "tools/check_python_host_pin.py"
-bytes = 276879
-sha256 = "1cb6ca0480141454d93355b7003b10a862addb2076c8af112143ac680d675f94"
+bytes = 277251
+sha256 = "ca35d62405635a38b3ce9661fb847212b18cbdb211a7b0f6b93dcef2174e2985"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"

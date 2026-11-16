@@ -1022,6 +1022,8 @@ jobs:
   # Pinned to ubuntu-24.04, as the selftest-execution job is: the Hooks preview self-test below runs the
   # preview hooks' differential checks against real coreutils programs, and the coreutils-environment gate
   # in that job reports the coreutils this image carries only while both jobs run on the same image.
+  # tools/check_ci_parity.py (COREUTILS IMAGE) holds both runs-on lines to one pinned image; on retirement
+  # of ubuntu-24.04 see the note in tools/check_coreutils_environment.py and CLAUDE.md.
   generated:
     name: Generated surfaces
     runs-on: ubuntu-24.04
@@ -1199,7 +1201,8 @@ jobs:
 
   # Pinned to ubuntu-24.04, as the generated job is: this job runs the coreutils-environment gate, which in CI
   # requires GNU coreutils on the step's PATH and on /usr/bin:/bin, and the ubuntu-latest image moved to one
-  # whose coreutils are uutils (CI run 43825233435). See the comment on the coreutils steps below.
+  # where CI run 43825233435 reported most inventoried programs as uutils. See the comment on the coreutils
+  # steps below; tools/check_ci_parity.py (COREUTILS IMAGE) holds this job and generated to one pinned image.
   selftest-execution:
     name: Execution-reconciled self-tests
     if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
