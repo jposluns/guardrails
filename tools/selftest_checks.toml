@@ -5208,7 +5208,7 @@ expected-check-ids = [
 ]
 
 [[suite]]
-# The branch fold helper (tools/fold_onto_base.py): vectors H1 to H29 and Q10 in temporary
+# The branch fold helper (tools/fold_onto_base.py): vectors H1 to H30 and Q10 in temporary
 # repositories, then each listed mutant run against its own vector in a private sink. The helper
 # accepts --execution-report only after --self-test, so the row forwards it.
 id = "fold-onto-base-selftest"
@@ -5283,10 +5283,20 @@ expected-check-ids = [
   "fold/h27-replace-graft-ignored",
   "fold/h28-plain-remote-head-on-local-trunk-refused",
   "fold/h28-plain-full-remote-head-on-local-trunk-refused",
+  "fold/h28-symbolic-to-plain-remote-head-on-local-trunk-refused",
+  "fold/h28-twin-local-copy-of-branch-named-head-refused",
+  "fold/h28-remote-head-and-branch-readings-ambiguous-refused",
+  "fold/h28-unconfigured-remote-head-ambiguous-refused",
   "fold/h28-twin-remote-tracking-name-folds",
+  "fold/h28-remote-tracking-branch-named-head-folds",
   "fold/h29-branch-named-commit-id-cannot-evaluate",
   "fold/h29-branch-named-upper-commit-id-cannot-evaluate",
   "fold/h29-twin-full-ref-name-folds",
+  "fold/h29-sha1-repo-64-hex-branch-name-folds",
+  "fold/h30-sha256-branch-named-commit-id-cannot-evaluate",
+  "fold/h30-sha256-branch-named-upper-commit-id-cannot-evaluate",
+  "fold/h30-twin-sha256-full-ref-name-folds",
+  "fold/h30-sha256-repo-40-hex-branch-name-folds",
   "cli/usage-and-unresolvable-exit-2",
   "cli/closed-git-subcommands",
   "cli/execution-report-alone-usage",
@@ -5324,6 +5334,11 @@ expected-check-ids = [
   "mutant/execution-report-relative-accepted",
   "mutant/plain-remote-head-mapped",
   "mutant/commit-id-branch-accepted",
+  "mutant/chained-remote-head-mapped",
+  "mutant/remote-head-told-by-shape",
+  "mutant/remote-head-ambiguity-ignored",
+  "mutant/commit-id-length-sha1-only",
+  "mutant/commit-id-length-ignores-object-format",
 ]
 
 [[suite]]

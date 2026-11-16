@@ -13,8 +13,11 @@ because N's tree equals H's tree, the checkout stays consistent after the update
 
 Refused (exit 1) unless: HEAD is symbolic to a branch other than main, master, the protected ref
 itself or the local copy of the protected line (for --protected origin/trunk, the local trunk); the
---protected name is not ambiguous and does not resolve to a remote HEAD that is not a symbolic ref (such
-a refs/remotes/<remote>/HEAD names no branch, so its local copy cannot be told); the index and
+--protected name is not ambiguous and does not resolve to a remote-tracking ref whose last part is HEAD
+unless the remote configuration tells it to be a branch: refs/remotes/<remote>/HEAD of a configured
+remote that is not a symbolic ref names no branch, so its local copy cannot be told, and a name the
+configured remotes make both a remote's HEAD and a branch ending in /HEAD (or neither) is ambiguous;
+the index and
 worktree carry no tracked change; no merge, rebase, cherry-pick, revert, bisect or sequencer state is
 present; the branch and the protected ref have exactly one merge base B, B is not H, and B equals
 --expect-base when that is given; and B..H holds no merge commit. A compare-and-swap that loses (the
@@ -26,9 +29,11 @@ a remote name whose HEAD is symbolic, or a tag): a revision expression (origin/t
 origin/trunk^{commit}), a commit id or any other spelling that names no ref is cannot-evaluate (exit 2),
 because the local copy of the protected line and an ambiguous name can be checked only for a ref. A
 dangling or looping symbolic ref is listed by no ref query, so it names no ref too. Also
-cannot-evaluate: a name spelled as a full commit id (40 or 64 hex digits, either case) even when a
-branch of that name exists, because git rev-parse reads that spelling as the commit, not the branch
-(pass refs/heads/<name> then); and a name that git resolves to a ref other than the one it matches
+cannot-evaluate: a name spelled as a full commit id of the repository's object format (git rev-parse
+--show-object-format: 40 hex digits for sha1, 64 for sha256, either case) even when a branch of that
+name exists, because git rev-parse reads that spelling as an object id, not the branch (pass
+refs/heads/<name> then; a hex name of the other length git reads as the branch, and so does this
+helper); and a name that git resolves to a ref other than the one it matches
 (a root ref such as ORIG_HEAD beside refs/heads/ORIG_HEAD).
 
   fold_onto_base.py --protected REF --message-file ABS_PATH [--expect-base FULL_SHA] [--root DIR]
@@ -45,9 +50,13 @@ core.warnAmbiguousRefs=true in option position. The printed undo command quotes 
 POSIX shell, starts with env -u for each repository-selecting variable (UNDO_UNSET: GIT_DIR,
 GIT_WORK_TREE, GIT_COMMON_DIR and the rest), so an ambient one in the shell it is pasted into cannot
 redirect it to another repository, and binds the repository with git -C. env -u is not POSIX (POSIX
-specifies only env -i); GNU, BSD and BusyBox env provide it. The undo runs the user's own git with the
-user's configuration (the system, global and repository configuration, and any GIT_CONFIG_PARAMETERS
-or GIT_CONFIG_COUNT in that shell, which it does not unset): the pins above do not apply to it.
+specifies only env -i), so the undo needs an env that accepts -u; which env implementations do is not
+tested here. env and git are the bare names, found on that shell's PATH, so the undo runs the user's
+own git, not the git this helper resolved. It unsets only the UNDO_UNSET variables: every other GIT_
+variable in that shell applies, including those that choose the configuration (GIT_CONFIG_NOSYSTEM,
+GIT_CONFIG_SYSTEM, GIT_CONFIG_GLOBAL, GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT), so the undo reads
+whatever configuration that shell selects (by default the system, global and repository
+configuration): the pins above do not apply to it.
 
 Not neutralized, and disclosed: a decoy git that is already first on PATH when this module loads is the
 git it resolves; the signing configuration (commit.gpgSign, gpg.program, user.signingKey) is honoured
@@ -94,6 +103,8 @@ TIMEOUT = 30
 MESSAGE_MAX_BYTES = 65536
 PROTECTED_BRANCHES = ("refs/heads/main", "refs/heads/master")
 RECOVERY_PREFIX = "refs/aiqt-fold/"
+# The hex digits of a full object id per object format (git rev-parse --show-object-format).
+OBJECT_ID_HEX_DIGITS = {"sha1": 40, "sha256": 64}
 # A path that cannot exist: a child of the null device, which is not a directory, so an open of it
 # fails with ENOTDIR, which git reads as "absent" without a warning. GIT_GRAFT_FILE and core.hooksPath
 # name it, so no graft file is read and no hook reached through core.hooksPath runs (hooks defined in
@@ -244,10 +255,23 @@ def _dwim_candidates(name):
             "refs/remotes/" + name + "/HEAD"]
 
 
-def _object_id_spelling(name):
-    """True when name is spelled as a full object id (40 or 64 hex digits, either case). git rev-parse
-    reads such a spelling as that object even when a ref of the same name exists."""
-    return len(name) in (40, 64) and all(char in "0123456789abcdefABCDEF" for char in name)
+def _object_format(root):
+    """(object format, hex digits of a full object id) of the repository, from git rev-parse
+    --show-object-format: ("sha1", 40) or ("sha256", 64). Any other answer is cannot-evaluate."""
+    probe = _git(root, "rev-parse", "--show-object-format")
+    name = os.fsdecode(probe.stdout.strip()) if probe.returncode == 0 else ""
+    if name not in OBJECT_ID_HEX_DIGITS:
+        raise CannotEvaluate("git rev-parse --show-object-format named no known object format ({!r}; {})".format(
+            name, _diag(probe)))
+    return name, OBJECT_ID_HEX_DIGITS[name]
+
+
+def _object_id_spelling(name, width):
+    """True when name is spelled as a full object id of the repository's object format: exactly width
+    hex digits (40 for sha1, 64 for sha256), either case. git rev-parse reads such a spelling as an
+    object id even when a ref of the same name exists; a hex name of any other length it reads as the
+    ref."""
+    return len(name) == width and all(char in "0123456789abcdefABCDEF" for char in name)
 
 
 def _protected_ref(root, protected):
@@ -275,10 +299,12 @@ def _protected_ref(root, protected):
         raise CannotEvaluate("--protected {!r} names no ref; pass the protected line's ref name (for "
                              "example origin/main or refs/remotes/origin/main), not a revision "
                              "expression or a commit id".format(protected))
-    if _object_id_spelling(protected):
-        raise CannotEvaluate("--protected {!r} is spelled as a full commit id: git rev-parse reads it as "
-                             "that commit, not as the ref {}; pass the full ref name {} instead".format(
-                                 protected, matches[0], matches[0]))
+    object_format, width = _object_format(root)
+    if _object_id_spelling(protected, width):
+        raise CannotEvaluate("--protected {!r} is spelled as a full commit id of this repository's object "
+                             "format ({}, {} hex digits): git rev-parse reads it as an object id, not as "
+                             "the ref {}; pass the full ref name {} instead".format(
+                                 protected, object_format, width, matches[0], matches[0]))
     probe = _git(root, "rev-parse", "--symbolic-full-name", protected)
     full = os.fsdecode(probe.stdout.strip()) if probe.returncode == 0 else ""
     if full != matches[0]:
@@ -290,17 +316,67 @@ def _protected_ref(root, protected):
     return full
 
 
+def _configured_remotes(root):
+    """The remote names the configuration defines: the <name> of every remote.<name>.<key> key (git
+    counts a remote as configured when any such key is set; a remote name may hold a dot or a slash, a
+    key name holds no dot). A remote defined only by a legacy file under the git directory (remotes/ or
+    branches/) is not read, so it counts as not configured."""
+    probe = _git(root, "config", "--null", "--name-only", "--get-regexp", r"^remote\.")
+    if probe.returncode == 1 and not probe.stdout:
+        return set()
+    if probe.returncode != 0:
+        raise CannotEvaluate("git config --get-regexp remote. failed ({})".format(_diag(probe)))
+    names = set()
+    for key in probe.stdout.split(b"\0"):
+        inner = os.fsdecode(key)[len("remote."):]
+        if "." in inner:
+            names.add(inner[:inner.rindex(".")])
+    return names
+
+
+def _remote_head(root, protected_ref):
+    """Refused unless a remote-tracking ref whose last part is HEAD is told, by the remote configuration,
+    to be a remote-tracking branch. refs/remotes/<rest>/HEAD reads two ways: the HEAD of the remote
+    <rest>, or a branch whose name ends in /HEAD (git check-ref-format --branch accepts feature/HEAD) of
+    a remote whose name is a leading part of <rest>. A configured remote decides each reading. Only the
+    HEAD reading: a remote's HEAD that is not a symbolic ref (a symbolic one never reaches here,
+    _protected_ref returns the ref it names); it names no branch, so the local copy cannot be told.
+    Both readings, or neither (no configured remote decides it): the name is ambiguous. Only the branch
+    reading: no refusal, the name is a remote-tracking branch."""
+    rest = protected_ref[len("refs/remotes/"):]
+    remotes = _configured_remotes(root)
+    head_of = rest[:-len("/HEAD")]
+    head_reading = head_of in remotes
+    branch_readings = sorted(remote for remote in remotes
+                             if rest.startswith(remote + "/") and rest[len(remote) + 1:] != "HEAD")
+    if head_reading and not branch_readings:
+        raise Refused("--protected resolves to {}, the HEAD of the configured remote {!r}, which is not a "
+                      "symbolic ref, so it names no branch and the protected line's local copy cannot be "
+                      "told; pass the remote-tracking branch (for example refs/remotes/{}/main)".format(
+                          protected_ref, head_of, head_of))
+    if head_reading:
+        raise Refused("--protected resolves to {}, which is ambiguous: the remote configuration makes it "
+                      "both the HEAD of remote {!r} and {}, so the protected line's local copy cannot be "
+                      "told; rename the branch or the remote".format(protected_ref, head_of, " and ".join(
+                          "the branch {!r} of remote {!r}".format(rest[len(remote) + 1:], remote)
+                          for remote in branch_readings)))
+    if not branch_readings:
+        raise Refused("--protected resolves to {}, which is ambiguous: a name ending in /HEAD is a remote's "
+                      "HEAD or a remote-tracking branch whose name ends in /HEAD, and no configured remote "
+                      "({!r} or a leading part of it) tells which, so the protected line's local copy "
+                      "cannot be told; pass a remote-tracking branch of a configured remote".format(
+                          protected_ref, head_of))
+
+
 def _local_copies(root, protected_ref):
     """The local branch names that are a copy of the protected line: the protected ref itself when it is
     a local branch; for a remote-tracking ref refs/remotes/<remote>/<name>, refs/heads/<name> for every
-    way of splitting a remote name off the front (a remote name may hold a slash). A remote's symbolic
-    HEAD never reaches here: _protected_ref returns the ref it names. A remote HEAD that is not a
-    symbolic ref (refs/remotes/<remote>/HEAD made a plain ref) names no branch, so its local copy cannot
-    be told: it is refused rather than mapped to a local branch named HEAD."""
+    way of splitting a remote name off the front (a remote name may hold a slash). A remote-tracking ref
+    whose last part is HEAD passes _remote_head first: a remote HEAD that is not a symbolic ref, or a
+    name the remote configuration cannot tell apart, is refused rather than mapped to a local branch
+    named HEAD."""
     if protected_ref.startswith("refs/remotes/") and protected_ref.endswith("/HEAD"):
-        raise Refused("--protected resolves to {}, a remote HEAD that is not a symbolic ref, so the protected "
-                      "line and its local copy cannot be told; pass the remote-tracking branch (for example "
-                      "refs/remotes/origin/main)".format(protected_ref))
+        _remote_head(root, protected_ref)
     if protected_ref.startswith("refs/heads/"):
         return {protected_ref}
     if not protected_ref.startswith("refs/remotes/"):
@@ -619,11 +695,11 @@ def _fixture_git(root, *args, data=None, text=True):
     return out.decode("utf-8", "surrogateescape").strip() if text else out
 
 
-def _repo(temp, name):
+def _repo(temp, name, object_format="sha1"):
     """A repository on branch main with one seed commit and a local identity, signing off."""
     root = Path(temp) / name
     root.mkdir()
-    _fixture_git(root, "init", "-q", "-b", "main")
+    _fixture_git(root, "init", "-q", "-b", "main", "--object-format=" + object_format)
     for key, value in (("user.name", "Fold Self Test"), ("user.email", "fold@example.invalid"),
                        ("commit.gpgsign", "false")):
         _fixture_git(root, "config", key, value)
@@ -650,9 +726,9 @@ def _rev(root, rev):
     return _fixture_git(root, "rev-parse", "--verify", "-q", rev)
 
 
-def _feature(temp, name):
+def _feature(temp, name, object_format="sha1"):
     """main at B (seed plus one), feature with two commits over B, checked out. Returns (root, B, H)."""
-    root = _repo(temp, name)
+    root = _repo(temp, name, object_format)
     base = _commit(root, "main1.txt", "main one\n")
     _fixture_git(root, "switch", "-q", "-c", "feature")
     _commit(root, "f1.txt", "feature one\n")
@@ -974,7 +1050,8 @@ def _seams():
             "_fold_parent": _fold_parent, "_fold_tree": _fold_tree, "_git_env": _git_env,
             "_local_copies": _local_copies, "_merge_count": _merge_count,
             "_object_id_spelling": _object_id_spelling, "_protected_ref": _protected_ref,
-            "_recovery": _recovery, "_signing": _signing, "_single_base": _single_base,
+            "_recovery": _recovery, "_remote_head": _remote_head, "_signing": _signing,
+            "_single_base": _single_base,
             "_split_report": _split_report, "_stamp": _stamp, "_swap": _swap, "_undo_command": _undo_command,
             "_verify": _verify}
 
@@ -1383,8 +1460,13 @@ def _h28(temp):
     """A remote HEAD that is a plain ref, not a symbolic one (refs/remotes/origin/HEAD at origin/trunk's
     commit), names no branch: on the checked-out local trunk, --protected origin and the full
     refs/remotes/origin/HEAD are refused, trunk is unchanged and no recovery ref is made (an earlier
-    version mapped the plain HEAD to a local branch named HEAD and folded trunk). The twin: a work
-    branch in the same clone folds with the remote-tracking name origin/trunk."""
+    version mapped the plain HEAD to a local branch named HEAD and folded trunk); so is origin's HEAD
+    made symbolic to the plain HEAD of the configured remote up. A name ending in /HEAD is told by
+    the remote configuration: refs/remotes/origin/feature/HEAD, the branch feature/HEAD of the
+    configured remote origin, folds a work branch (an earlier version refused it as a remote HEAD) and
+    its local copy feature/HEAD is refused as such; with a remote origin/feature configured too, the
+    name is both readings, and refs/remotes/gone/HEAD of no configured remote is neither: each is
+    refused as ambiguous. The twin: a work branch folds with the remote-tracking name origin/trunk."""
     clone, head = _trunk_clone(temp, "h28")
     tip = _rev(clone, "origin/trunk")
     _fixture_git(clone, "update-ref", "--no-deref", "refs/remotes/origin/HEAD", tip)
@@ -1395,19 +1477,57 @@ def _h28(temp):
         code, _out, err = _fold_cli(clone, temp, label, protected=protected)
         check(name, plain and code == 1 and "not a symbolic ref" in err
               and _rev(clone, "refs/heads/trunk") == head and _no_recovery_refs(clone), (code, err))
+    # origin's HEAD is symbolic, but to the plain HEAD of the configured remote up, so it resolves
+    # to refs/remotes/up/HEAD, which names no branch either.
+    _fixture_git(clone, "config", "remote.up.url", "file://{}".format(Path(temp) / "h28-src"))
+    _fixture_git(clone, "update-ref", "refs/remotes/up/HEAD", tip)
+    _fixture_git(clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/up/HEAD")
+    code, _out, err = _fold_cli(clone, temp, "h28-c1", protected="origin")
+    check("fold/h28-symbolic-to-plain-remote-head-on-local-trunk-refused", code == 1
+          and "refs/remotes/up/HEAD" in err and "not a symbolic ref" in err
+          and _rev(clone, "refs/heads/trunk") == head and _no_recovery_refs(clone), (code, err))
+    # refs/remotes/origin/feature/HEAD is the branch feature/HEAD of the configured remote origin (git
+    # check-ref-format --branch accepts that name); origin/feature is no configured remote.
+    _fixture_git(clone, "update-ref", "refs/remotes/origin/feature/HEAD", tip)
+    _fixture_git(clone, "switch", "-q", "-c", "feature/HEAD", tip)
+    _commit(clone, "l1.txt", "l1\n")
+    local = _commit(clone, "l2.txt", "l2\n")
+    code, _out, err = _fold_cli(clone, temp, "h28-local", protected="origin/feature/HEAD")
+    check("fold/h28-twin-local-copy-of-branch-named-head-refused", code == 1
+          and "is the local copy of the protected line refs/remotes/origin/feature/HEAD" in err
+          and _rev(clone, "refs/heads/feature/HEAD") == local and _no_recovery_refs(clone), (code, err))
     _fixture_git(clone, "switch", "-q", "-c", "work", tip)
     _commit(clone, "w1.txt", "w1\n")
-    _commit(clone, "w2.txt", "w2\n")
+    work = _commit(clone, "w2.txt", "w2\n")
+    _fixture_git(clone, "config", "remote.origin/feature.url", "file://{}".format(Path(temp) / "h28-src"))
+    code, _out, err = _fold_cli(clone, temp, "h28-both", protected="origin/feature/HEAD")
+    check("fold/h28-remote-head-and-branch-readings-ambiguous-refused", code == 1 and "ambiguous" in err
+          and "'origin/feature'" in err and "'feature/HEAD'" in err
+          and _rev(clone, "refs/heads/work") == work and _no_recovery_refs(clone), (code, err))
+    _fixture_git(clone, "config", "--unset", "remote.origin/feature.url")
+    _fixture_git(clone, "update-ref", "refs/remotes/gone/HEAD", tip)
+    code, _out, err = _fold_cli(clone, temp, "h28-gone", protected="gone")
+    check("fold/h28-unconfigured-remote-head-ambiguous-refused", code == 1 and "ambiguous" in err
+          and "no configured remote" in err
+          and _rev(clone, "refs/heads/work") == work and _no_recovery_refs(clone), (code, err))
     code, _out, err = _fold_cli(clone, temp, "h28-work", protected="origin/trunk")
     check("fold/h28-twin-remote-tracking-name-folds", code == 0
           and _parents(clone, _rev(clone, "refs/heads/work")) == [tip], (code, err))
+    _fixture_git(clone, "switch", "-q", "-c", "work-head", tip)
+    _commit(clone, "d1.txt", "d1\n")
+    _commit(clone, "d2.txt", "d2\n")
+    code, _out, err = _fold_cli(clone, temp, "h28-d1", protected="origin/feature/HEAD")
+    check("fold/h28-remote-tracking-branch-named-head-folds", code == 0
+          and _parents(clone, _rev(clone, "refs/heads/work-head")) == [tip], (code, err))
 
 
 def _h29(temp):
     """A branch named as the full id of another commit (refs/heads/<seed id> at B): git rev-parse reads
     that spelling as the seed commit, so --protected spelled that way, in lower or upper case, is
     cannot-evaluate and nothing changes (an earlier version took the branch and folded onto B while git
-    would have used the seed). The twin: the full ref name refs/heads/<seed id> folds onto B."""
+    would have used the seed). The twin: the full ref name refs/heads/<seed id> folds onto B. A branch of
+    64 hex digits, no full object id in a SHA-1 repository, is read as the branch by git and folds onto
+    B (an earlier version refused it)."""
     for name, upper, label in (("fold/h29-branch-named-commit-id-cannot-evaluate", False, "h29-0"),
                                ("fold/h29-branch-named-upper-commit-id-cannot-evaluate", True, "h29-1")):
         root, base, head = _feature(temp, label)
@@ -1420,6 +1540,45 @@ def _h29(temp):
               and _rev(root, "refs/heads/feature") == head and _no_recovery_refs(root), (code, err))
     code, _out, err = _fold_cli(root, temp, "h29-full", protected="refs/heads/" + spelling)
     check("fold/h29-twin-full-ref-name-folds", code == 0
+          and _parents(root, _rev(root, "refs/heads/feature")) == [base], (code, err))
+    # 64 hex digits are no full object id in a SHA-1 repository, so git reads the name as the
+    # branch, and so must the helper (an earlier version refused every 40 or 64 hex name).
+    root, base, head = _feature(temp, "h29-64")
+    seed = _rev(root, base + "^")
+    spelling = seed + seed[:24]
+    _fixture_git(root, "update-ref", "refs/heads/" + spelling, base)
+    live = _rev(root, spelling + "^{commit}") == base
+    code, _out, err = _fold_cli(root, temp, "h29-64", protected=spelling)
+    check("fold/h29-sha1-repo-64-hex-branch-name-folds", live and code == 0
+          and _parents(root, _rev(root, "refs/heads/feature")) == [base], (code, err))
+
+
+def _h30(temp):
+    """The commit-id spelling follows the repository's object format. In a SHA-256 repository a branch
+    named as the 64-hex id of another commit (refs/heads/<seed id> at B) is cannot-evaluate in lower or
+    upper case, because git reads that spelling as the seed commit; a branch of 40 hex digits is no full
+    object id there, git reads it as the branch, and it folds onto B (an earlier
+    version refused it). The twin: the full ref name refs/heads/<seed id> folds onto B."""
+    for name, upper, label in (
+            ("fold/h30-sha256-branch-named-commit-id-cannot-evaluate", False, "h30-0"),
+            ("fold/h30-sha256-branch-named-upper-commit-id-cannot-evaluate", True, "h30-1")):
+        root, base, head = _feature(temp, label, "sha256")
+        seed = _rev(root, base + "^")
+        spelling = seed.upper() if upper else seed
+        _fixture_git(root, "update-ref", "refs/heads/" + spelling, base)
+        live = len(seed) == 64 and _rev(root, spelling + "^{commit}") == seed
+        code, _out, err = _fold_cli(root, temp, label, protected=spelling)
+        check(name, live and code == 2 and "full commit id" in err and "sha256, 64 hex digits" in err
+              and _rev(root, "refs/heads/feature") == head and _no_recovery_refs(root), (code, err))
+    code, _out, err = _fold_cli(root, temp, "h30-full", protected="refs/heads/" + spelling)
+    check("fold/h30-twin-sha256-full-ref-name-folds", code == 0
+          and _parents(root, _rev(root, "refs/heads/feature")) == [base], (code, err))
+    root, base, head = _feature(temp, "h30-40", "sha256")
+    spelling = _rev(root, base + "^")[:40]
+    _fixture_git(root, "update-ref", "refs/heads/" + spelling, base)
+    live = _rev(root, spelling + "^{commit}") == base
+    code, _out, err = _fold_cli(root, temp, "h30-40", protected=spelling)
+    check("fold/h30-sha256-repo-40-hex-branch-name-folds", live and code == 0
           and _parents(root, _rev(root, "refs/heads/feature")) == [base], (code, err))
 
 
@@ -1470,7 +1629,7 @@ def _usage(temp):
 
 
 VECTORS = (_h1, _h2, _h3, _h4, _h5, _h6, _h7, _h8, _h9, _h10, _h11, _h12, _h13, _h15, _h16, _q10, _h17,
-           _h18, _h19, _h20, _h21, _h22, _h23, _h24, _h25, _h26, _h27, _h28, _h29, _usage)
+           _h18, _h19, _h20, _h21, _h22, _h23, _h24, _h25, _h26, _h27, _h28, _h29, _h30, _usage)
 
 
 def _with_home(body):
@@ -1594,8 +1753,33 @@ def _mutants():
         parts = protected_ref[len("refs/remotes/"):].split("/")
         return {"refs/heads/" + "/".join(parts[index:]) for index in range(1, len(parts))}
 
-    def no_object_id_spelling(_name):
+    def no_object_id_spelling(_name, _width):
         return False
+
+    def sha1_length_only(name, _width):
+        # Only 40 hex digits count, whatever the object format.
+        return len(name) == 40 and all(char in "0123456789abcdefABCDEF" for char in name)
+
+    def any_hash_length(name, _width):
+        # The earlier shape: 40 or 64 hex digits count, whatever the object format.
+        return len(name) in (40, 64) and all(char in "0123456789abcdefABCDEF" for char in name)
+
+    def remote_head_by_shape(_root, protected_ref):
+        # The earlier shape: every remote-tracking ref ending in /HEAD is taken for a plain remote HEAD.
+        if protected_ref.startswith("refs/remotes/") and protected_ref.endswith("/HEAD"):
+            raise Refused("--protected resolves to {}, a remote HEAD that is not a symbolic ref".format(
+                protected_ref))
+        return plain_remote_head_mapped(_root, protected_ref)
+
+    checked_remote_head = _remote_head
+
+    def remote_head_ambiguity_ignored(root, protected_ref):
+        # Only the remote-HEAD reading is refused; a name of both readings or neither passes.
+        try:
+            checked_remote_head(root, protected_ref)
+        except Refused as exc:
+            if "ambiguous" not in str(exc):
+                raise
 
     def ambiguity_ignored(root, protected):
         # The pinned behaviour: no ambiguity check, so git's own short-name order picks silently.
@@ -1678,7 +1862,17 @@ def _mutants():
             ("mutant/plain-remote-head-mapped", {"_local_copies": plain_remote_head_mapped}, _h28,
              "fold/h28-plain-remote-head-on-local-trunk-refused"),
             ("mutant/commit-id-branch-accepted", {"_object_id_spelling": no_object_id_spelling}, _h29,
-             "fold/h29-branch-named-commit-id-cannot-evaluate")):
+             "fold/h29-branch-named-commit-id-cannot-evaluate"),
+            ("mutant/chained-remote-head-mapped", {"_local_copies": plain_remote_head_mapped}, _h28,
+             "fold/h28-symbolic-to-plain-remote-head-on-local-trunk-refused"),
+            ("mutant/remote-head-told-by-shape", {"_local_copies": remote_head_by_shape}, _h28,
+             "fold/h28-remote-tracking-branch-named-head-folds"),
+            ("mutant/remote-head-ambiguity-ignored", {"_remote_head": remote_head_ambiguity_ignored}, _h28,
+             "fold/h28-remote-head-and-branch-readings-ambiguous-refused"),
+            ("mutant/commit-id-length-sha1-only", {"_object_id_spelling": sha1_length_only}, _h30,
+             "fold/h30-sha256-branch-named-commit-id-cannot-evaluate"),
+            ("mutant/commit-id-length-ignores-object-format", {"_object_id_spelling": any_hash_length}, _h29,
+             "fold/h29-sha1-repo-64-hex-branch-name-folds")):
         failures = _mutated(replacements, vector)
         check(name, any(entry.startswith(red + ":") for entry in failures),
               "the mutant left {} green ({})".format(red, failures))
@@ -1696,7 +1890,7 @@ def self_test():
         for failure in FAILURES:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: fold_onto_base {} checks (H1 to H29 and Q10 in temporary repositories: a valid "
+    print("SELF-TEST PASS: fold_onto_base {} checks (H1 to H30 and Q10 in temporary repositories: a valid "
           "fold with a create-only recovery ref; a protected tip moved from a sibling worktree folds onto the "
           "merge base and passes the branch-root gate, while a fold onto the tip is REVERTS there; "
           "--expect-base narrows only; dirty, staged, criss-cross, detached, protected-branch, merge-in-range, "
@@ -1710,8 +1904,11 @@ def self_test():
           "ambiguous --protected name are refused; a --protected revision expression or commit id is "
           "cannot-evaluate; the undo command restores the intended branch under an ambient GIT_DIR "
           "naming another clone; a forged commit-graph and a replace ref cannot move the base; a remote "
-          "HEAD that is a plain ref is refused; a --protected name spelled as a full commit id is "
-          "cannot-evaluate beside a branch of that name; "
+          "HEAD that is a plain ref, directly or through a symbolic HEAD, is refused, a remote-tracking "
+          "branch ending in /HEAD folds, and a name the remote configuration cannot tell apart is refused "
+          "as ambiguous; a --protected name spelled as a full commit id of the repository's object format "
+          "(SHA-1 or SHA-256) is cannot-evaluate beside a branch of that name, and a hex name of the other "
+          "length folds; "
           "--execution-report needs --self-test and an absolute path; --help explains the options, exits, "
           "rewrite and residue; each listed mutant turns its vector red)".format(len(EXECUTED)))
     return 0
@@ -1733,13 +1930,17 @@ exit codes:
      and an undo command quoted for a POSIX shell (env -u GIT_DIR -u GIT_WORK_TREE ... git -C
      <repository> update-ref <branch> H N): it unsets each repository-selecting variable, so an
      ambient GIT_DIR or GIT_WORK_TREE in the shell cannot redirect it. env -u is not POSIX (POSIX
-     specifies only env -i); GNU, BSD and BusyBox env provide it. The undo runs your own git with
-     your configuration (system, global and the repository's, and any GIT_CONFIG_PARAMETERS or
-     GIT_CONFIG_COUNT in the shell, which it does not unset); the hardening below does not apply to it.
+     specifies only env -i), so the undo needs an env that accepts -u (which implementations do is
+     not tested here). env and git are found on that shell's PATH, so it runs your own git; it
+     unsets no other GIT_ variable, so the configuration that shell selects applies (by default
+     system, global and the repository's; GIT_CONFIG_NOSYSTEM, GIT_CONFIG_SYSTEM, GIT_CONFIG_GLOBAL,
+     GIT_CONFIG_PARAMETERS and GIT_CONFIG_COUNT are not unset); the hardening below does not apply to it.
   1  refused, nothing was changed: HEAD detached or on main, master, the protected ref or its
      local copy (for --protected origin/trunk, the local trunk); an ambiguous --protected name; a
-     --protected name that resolves to a remote HEAD that is not a symbolic ref (it names no branch,
-     so its local copy cannot be told); tracked changes in the index or worktree; a merge, rebase,
+     --protected name that resolves to the HEAD of a configured remote that is not a symbolic ref (it
+     names no branch, so its local copy cannot be told); a --protected name that resolves to a
+     remote-tracking ref ending in /HEAD that the configured remotes make both a remote's HEAD and a
+     branch, or neither (ambiguous); tracked changes in the index or worktree; a merge, rebase,
      cherry-pick, revert, bisect or sequencer in
      progress; no merge base, several merge bases, nothing to fold, a merge commit in B..H, or a base
      other than --expect-base. A lost compare-and-swap (the branch moved after it was read) is also
@@ -1747,8 +1948,9 @@ exit codes:
      reflog and the unreferenced folded commit behind (documented, intended residue).
   2  usage error or cannot evaluate: a bad option or message file; a --protected value that names no
      ref (a revision expression such as origin/trunk~0, a commit id, or a dangling or looping symbolic
-     ref), that is spelled as a full commit id even where a branch has that name (git reads it as the
-     commit; pass refs/heads/<name>), or that git resolves to a ref other than the one it matches (a
+     ref), that is spelled as a full commit id of the repository's object format (40 hex digits for
+     sha1, 64 for sha256) even where a branch has that name (git reads it as an object id; pass
+     refs/heads/<name>), or that git resolves to a ref other than the one it matches (a
      root ref such as ORIG_HEAD beside refs/heads/ORIG_HEAD); a shallow repository; a git failure;
      or a failed commit signature that the signing configuration asks for. A recovery ref
      that cannot be created (exit 2, after the folded commit was written, before the branch moves)
@@ -1805,11 +2007,13 @@ def main(argv=None):
     parser.add_argument("--protected", metavar="REF", help=(
         "the protected line the branch was cut from, for example origin/main or refs/remotes/origin/main "
         "(required). It must name a ref: a revision expression (origin/main~0, origin/main^{commit}) or "
-        "a commit id is cannot-evaluate (exit 2), and so is a name spelled as a full commit id even when "
-        "a branch has that name. A name that matches more than one ref (a tag main beside the branch "
-        "main, a local branch origin/main beside the remote-tracking one) is refused; pass the full ref "
-        "name then. A remote HEAD that is not a symbolic ref is refused; pass the remote-tracking "
-        "branch."))
+        "a commit id is cannot-evaluate (exit 2), and so is a name spelled as a full commit id of the "
+        "repository's object format (40 hex digits for sha1, 64 for sha256) even when a branch has that "
+        "name. A name that matches more than one ref (a tag main beside the branch main, a local branch "
+        "origin/main beside the remote-tracking one) is refused; pass the full ref name then. The HEAD of "
+        "a configured remote that is not a symbolic ref is refused; pass the remote-tracking branch. A "
+        "remote-tracking ref ending in /HEAD that the configured remotes make both a remote's HEAD and a "
+        "branch, or neither, is refused as ambiguous."))
     parser.add_argument("--message-file", metavar="ABS_PATH", help=(
         "an absolute path to a regular file holding the folded commit's message: nonempty UTF-8, no NUL "
         "byte, at most {} bytes, not a symbolic link (required).".format(MESSAGE_MAX_BYTES)))
