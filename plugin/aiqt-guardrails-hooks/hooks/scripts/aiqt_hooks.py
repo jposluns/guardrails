@@ -9942,11 +9942,13 @@ _CLEAN_ARG_OPTS = frozenset(("-e", "--exclude"))
 
 def _clean_is_dry_run(pre):
     """True when a git clean option region (already split before any '--') is a genuine DRY RUN
-    (-n/--dry-run) that removes nothing. ULTRA-CONSERVATIVE about the arg-consuming '-e'/'--exclude': when
-    one is present the guard CANNOT reliably tell a real '-n' flag from an exclude PATTERN token that merely
+    (-n/--dry-run) that removes nothing, read lexically. CONSERVATIVE about the arg-consuming '-e'/
+    '--exclude': this lexical reading CANNOT tell a real '-n' flag from an exclude PATTERN token that merely
     looks like '-n' (git clean -f -e '*.keep' -n, or the adversarial git clean -f -e -n where '-n' is the
-    pattern), so it does NOT trust '-n' at all and returns False, routing the clean to its unconditional ASK.
-    A '-n'/'--dry-run' with no arg-consuming option present still reports a dry run and allows."""
+    pattern), so it does NOT trust '-n' beside one and returns False. _discard_role then asks the full option
+    reader (_clean_parse_options), which consumes each exclude value as git does, so a dry run carrying an
+    exclude still reads as a dry run there, and a '-n' that is an exclude value does not. A '-n'/'--dry-run'
+    with no arg-consuming option present reports a dry run here."""
     for t in pre:
         if t in _CLEAN_ARG_OPTS or t.startswith("--exclude="):
             return False  # a separate/inline arg-consuming exclude: do not trust '-n'
@@ -9967,10 +9969,15 @@ def _clean_is_dry_run(pre):
 # untracked files are ignored under the repository's standard ignore sources (.gitignore files,
 # info/exclude and core.excludesFile) read with no command-level override (git ls-files --others --ignored
 # --exclude-standard --directory with the same pathspecs). The clean is DENIED when any entry it would
-# remove is, holds or lies inside an ignored entry, when it would remove a nested repository (whose
-# ignored files neither listing shows), and when either listing cannot be taken or read (fail closed), as
-# is a clean whose options cannot be read with certainty or whose repository view or ignore sources the
-# probe cannot reproduce. The flag letters below are git clean's: -d, -f (counted), -i, -n, -q, -x, -X,
+# remove is, holds or lies inside an ignored entry, when it is doubly forced (-ff) and a directory it would
+# remove holds a nested repository at any depth (whose ignored files neither listing shows; a bounded walk,
+# _clean_nested_repo, that denies when it cannot finish), and when either listing cannot be taken or read
+# (fail closed), as is a clean whose options cannot be read with certainty or whose repository view or
+# ignore sources the probe cannot reproduce (_clean_command_view names the global options and leading
+# assignments that make it so; every other one keeps the listing verdict). On a split-index repository the
+# listings read a private copy of the git dir's index files outside it (_clean_private_gitdir), so they
+# write nothing under it. A clean whose listings show it removes no ignored file and no nested repository
+# keeps the outcome it had before these listings existed. The flag letters below are git clean's: -d, -f (counted), -i, -n, -q, -x, -X,
 # and -e, which takes the rest of its cluster or the next token as its value; its long options, each also
 # accepted as a unique abbreviation, are --force, --dry-run, --quiet, --interactive and --exclude (value
 # '=VAL' or the next token), with the --no- forms of the first four. -x and -X have no long form.
@@ -9991,13 +9998,13 @@ _CLEAN_C_ESCAPES = {ord("a"): 7, ord("b"): 8, ord("f"): 12, ord("n"): 10, ord("r
 def _clean_parse_options(args):
     """Read a git clean argument list as git does, for the ignored-file probe. None when a token cannot be
     read with certainty (an unknown or ambiguous option, a value given to a flag, an exclude with no value),
-    else (force, d, x, big_x, excludes, pathspecs): force counts -f/--force (--no-force resets it), excludes
-    holds each -e/--exclude value in order, and pathspecs holds each bare operand, then each token after the
-    option boundary. -n, -q and -i and their long and negated forms are read and dropped: the probe sets its
-    own dry run, -q would silence its listing, and without -i it lists everything an interactive clean could
-    select."""
+    else (force, d, x, big_x, excludes, pathspecs, dry_run): force counts -f/--force (--no-force resets it),
+    excludes holds each -e/--exclude value in order, pathspecs holds each bare operand, then each token after
+    the option boundary, and dry_run is the last of -n/--dry-run (on) and --no-dry-run (off), as git's option
+    parser leaves it. -q and -i and their long and negated forms are read and dropped: -q would silence the
+    listing, and without -i it lists everything an interactive clean could select."""
     pre, post, _had_sep = _split_pre_post(args)
-    force, d, x, big_x = 0, False, False, False
+    force, d, x, big_x, dry_run = 0, False, False, False, False
     excludes, paths = [], []
     i = 0
     while i < len(pre):
@@ -10022,6 +10029,8 @@ def _clean_parse_options(args):
                 force += 1
             elif opt == "no-force":
                 force = 0
+            elif opt in ("dry-run", "no-dry-run"):
+                dry_run = opt == "dry-run"
             continue
         if tok.startswith("-") and len(tok) > 1:
             body = tok[1:]
@@ -10041,19 +10050,22 @@ def _clean_parse_options(args):
                 d = d or ch == "d"
                 x = x or ch == "x"
                 big_x = big_x or ch == "X"
+                dry_run = dry_run or ch == "n"
             continue
         paths.append(tok)
-    return force, d, x, big_x, excludes, paths + post
+    return force, d, x, big_x, excludes, paths + post, dry_run
 
 
-def _clean_probe_listing(repo, argv, deadline):
-    """The stdout (bytes) of the read-only 'git <argv>' run in repo, or None when it cannot be launched,
-    exits nonzero, or does not finish by `deadline` (a time.monotonic value). It runs under the scrubbed git
-    environment of the clean-tree probe (_isolate_git_env, GIT_OPTIONAL_LOCKS=0) with the C locale, so a
-    dry run's 'Would remove' lines are untranslated, with no stdin, and with core.fsmonitor and hooks off
-    (core.hooksPath=/dev/null), so the probe runs no configured monitor or hook program; core.quotePath is
-    off so only a name holding a control byte, a double quote or a backslash is C-quoted. None of these
-    settings is an ignore source, so the listing reads the same ignore rules the command does."""
+def _clean_probe_listing(repo, argv, deadline, env_extra=None, global_opts=()):
+    """The stdout (bytes) of the read-only 'git <global_opts> <argv>' run in repo, or None when it cannot be
+    launched, exits nonzero, or does not finish by `deadline` (a time.monotonic value). It runs under the
+    scrubbed git environment of the clean-tree probe (_isolate_git_env, GIT_OPTIONAL_LOCKS=0) with the C
+    locale, so a dry run's 'Would remove' lines are untranslated, with no stdin, and with core.fsmonitor and
+    hooks off (core.hooksPath=/dev/null), so the probe runs no configured monitor or hook program;
+    core.quotePath is off so only a name holding a control byte, a double quote or a backslash is C-quoted.
+    None of these settings is an ignore source, so the listing reads the same ignore rules the command does.
+    `env_extra` is set after the scrub (the private git dir of _clean_private_gitdir), and `global_opts` are
+    the command's own pathspec-reading global options (_CLEAN_PATHSPEC_GLOBALS)."""
     left = deadline - time.monotonic()
     if left <= 0:
         return None
@@ -10062,15 +10074,90 @@ def _clean_probe_listing(repo, argv, deadline):
         env["GIT_OPTIONAL_LOCKS"] = "0"
         env["LC_ALL"] = "C"
         env.pop("LANGUAGE", None)
+        env.update(env_extra or {})
         result = subprocess.run(
             ["git", "-C", repo, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-             "-c", "core.quotePath=false"] + argv,
+             "-c", "core.quotePath=false"] + list(global_opts) + argv,
             capture_output=True, timeout=left, env=env, stdin=subprocess.DEVNULL)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return None
     return result.stdout
+
+
+def _clean_private_gitdir(repo, deadline):
+    """(env_extra, tmpdir) under which the listings of a clean in repo write nothing under its git dir, or
+    None when that cannot be set up (the caller fails closed). git refreshes the modification time of the
+    shared index each time it reads a split index (core.splitIndex; read_index_from in read-cache.c), so on
+    a git dir holding any sharedindex.* file the listings run against a private copy outside it: a
+    temporary directory (tempfile.mkdtemp) holding copies of HEAD, index, every sharedindex.* and
+    config.worktree, plus a 'commondir' file naming the real common dir, the layout git reads for a linked
+    worktree (gitrepository-layout(5)). Objects, refs, config and info/exclude are read from that common
+    dir, so the copy reads the same tracked set and ignore rules; GIT_WORK_TREE names the same toplevel,
+    so the pathspecs and the prefix of repo are unchanged. Any other git dir needs no copy: ({}, None)."""
+    out = _clean_probe_listing(repo, ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir",
+                                      "--show-toplevel"], deadline)
+    if out is None:
+        return None
+    lines = out.split(b"\n")
+    if len(lines) != 4 or lines[3] or not all(os.path.isabs(p) for p in lines[:3]):
+        return None
+    gd, common, top = lines[:3]
+    try:
+        names = os.listdir(gd)
+    except OSError:
+        return None
+    if not any(n.startswith(b"sharedindex.") for n in names):
+        return {}, None
+    tmp = None
+    try:
+        tmp = tempfile.mkdtemp(prefix="aiqt-clean-")
+        tmp_b = os.fsencode(tmp)
+        for n in names:
+            if n in (b"HEAD", b"index", b"config.worktree") or n.startswith(b"sharedindex."):
+                src = os.path.join(gd, n)
+                if os.path.isfile(src):
+                    shutil.copyfile(src, os.path.join(tmp_b, n))
+        with open(os.path.join(tmp_b, b"commondir"), "wb") as fh:
+            fh.write(common + b"\n")
+    except (OSError, ValueError, shutil.Error):
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+        return None
+    return {"GIT_DIR": tmp, "GIT_WORK_TREE": os.fsdecode(top)}, tmp
+
+
+# The most entries the nested-repository walk of one clean reads before it gives up (and denies).
+_CLEAN_NESTED_WALK_LIMIT = 20000
+
+
+def _clean_nested_repo(top, deadline):
+    """True when the directory top (bytes) a doubly forced clean would remove holds a nested repository at
+    any depth (an entry named .git, a directory or a gitfile, in top or in any directory below it), False
+    when a full walk finds none, and None when the walk cannot finish: an entry cannot be read, more than
+    _CLEAN_NESTED_WALK_LIMIT entries are met, or `deadline` passes. Symbolic links are not followed (git
+    clean removes a link, never its target). git clean -ff removes such a repository with its ignored and
+    untracked files, which neither listing shows, so the caller denies on True and on None."""
+    stack = [top]
+    seen = 0
+    while stack:
+        if time.monotonic() > deadline:
+            return None
+        here = stack.pop()
+        try:
+            with os.scandir(here) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > _CLEAN_NESTED_WALK_LIMIT:
+                        return None
+                    if entry.name == b".git":
+                        return True
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+        except OSError:
+            return None
+    return False
 
 
 def _clean_unquote(name):
@@ -10120,22 +10207,48 @@ def _clean_hits_ignored(entry, ignored, ignored_sorted):
     return False
 
 
-def _clean_ignored_refusal(args, repo, cannot=None):
-    """None when this non-dry-run git clean, with or without -x or -X, provably removes no IGNORED file,
-    else a clause saying why that cannot be shown (see the block comment above _CLEAN_SHORT_FLAGS). `repo`
-    is the directory both listings read; `cannot`, when set, says why no read-only listing can reproduce
-    what the command would see (a repository view or ignore source the command itself can change)."""
+def _clean_entries_text(entries):
+    """'N entr(y|ies): 'a', 'b', 'c'(, and more)' for the entries a clean deny names."""
+    shown = ", ".join(repr(e.decode("utf-8", "backslashreplace")) for e in entries[:3])
+    return "{} entr{}: {}{}".format(len(entries), "y" if len(entries) == 1 else "ies", shown,
+                                    ", and more" if len(entries) > 3 else "")
+
+
+def _clean_ignored_refusal(args, repo, cannot=None, global_opts=()):
+    """None when this non-dry-run git clean, with or without -x or -X, provably removes no IGNORED file and
+    no nested repository, else a clause saying why that cannot be shown (see the block comment above
+    _CLEAN_SHORT_FLAGS). `repo` is the directory both listings read (the directory git runs the command in,
+    as the caller resolved it); `cannot`, when set, says why no read-only listing can reproduce what the
+    command would see (a repository view or ignore source the command itself can change); `global_opts` are
+    the command's own pathspec-reading global options, handed to both listings."""
     parsed = _clean_parse_options(args)
     if parsed is None:
         return "its options cannot be read with certainty, so which files it would remove cannot be shown"
-    force, d, x, big_x, excludes, paths = parsed
+    force, d, x, big_x, excludes, paths, _dry = parsed
     if cannot is not None or repo is None:
-        return "{}, so no read-only listing can show which files it would remove".format(
+        return "{}, and no read-only listing taken now can show which files it would remove".format(
             cannot or "the directory it runs in cannot be established")
     deadline = time.monotonic() + _CLEAN_PROBE_SECONDS
+    private = _clean_private_gitdir(repo, deadline)
+    if private is None:
+        return ("the read-only listings could not be set up to read its repository without writing under its "
+                "git dir (git rev-parse failed or did not finish within {:g} seconds, or the private copy of a "
+                "split index could not be made)".format(_CLEAN_PROBE_SECONDS))
+    env_extra, tmp = private
+    try:
+        return _clean_listings_refusal(repo, force, d, x, big_x, excludes, paths, deadline, env_extra,
+                                       global_opts)
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _clean_listings_refusal(repo, force, d, x, big_x, excludes, paths, deadline, env_extra, global_opts):
+    """The listing half of _clean_ignored_refusal: None or the clause saying why the clean is denied."""
     opts = (["-f"] * force + (["-d"] if d else []) + (["-x"] if x else []) + (["-X"] if big_x else [])
             + ["--exclude=" + e for e in excludes])
-    listed = _clean_probe_listing(repo, ["clean", "--dry-run"] + opts + ["--"] + paths, deadline)
+    listed = _clean_probe_listing(repo, ["clean", "--dry-run"] + opts + ["--"] + paths, deadline, env_extra,
+                                  global_opts)
     if listed is None:
         return ("its read-only dry run (git clean -n with the same options and pathspecs) failed, exited "
                 "nonzero or did not finish within {:g} seconds".format(_CLEAN_PROBE_SECONDS))
@@ -10152,67 +10265,195 @@ def _clean_ignored_refusal(args, repo, cannot=None):
         return None
     ignored_out = _clean_probe_listing(
         repo, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--"] + paths,
-        deadline)
+        deadline, env_extra, global_opts)
     if ignored_out is None:
         return ("the read-only listing of its ignored files (git ls-files --others --ignored "
                 "--exclude-standard with the same pathspecs) failed, exited nonzero or did not finish within "
                 "{:g} seconds".format(_CLEAN_PROBE_SECONDS))
     ignored = frozenset(p for p in ignored_out.split(b"\0") if p)
     ignored_sorted = sorted(ignored)
-    repo_b = os.fsencode(repo)
-    gone = [e for e in removed if _clean_hits_ignored(e, ignored, ignored_sorted)
-            or (force > 1 and e.endswith(b"/") and os.path.lexists(os.path.join(repo_b, e, b".git")))]
-    if not gone:
-        return None
-    shown = ", ".join(repr(e.decode("utf-8", "backslashreplace")) for e in gone[:3])
-    return ("its read-only listings show it would remove ignored content, or a nested repository whose "
-            "ignored files no listing shows ({} entr{}: {}{})".format(
-                len(gone), "y" if len(gone) == 1 else "ies", shown, ", and more" if len(gone) > 3 else ""))
+    gone = [e for e in removed if _clean_hits_ignored(e, ignored, ignored_sorted)]
+    if gone:
+        return "its read-only listings show it would remove ignored content ({})".format(
+            _clean_entries_text(gone))
+    if force > 1:
+        repo_b = os.fsencode(repo)
+        nested, unwalked = [], []
+        for e in removed:
+            if e.endswith(b"/"):
+                found = _clean_nested_repo(os.path.join(repo_b, e), deadline)
+                if found is None:
+                    unwalked.append(e)
+                    break
+                if found:
+                    nested.append(e)
+        if unwalked:
+            return ("it is doubly forced (-ff), which removes a nested repository with its ignored files, and "
+                    "the walk for one below the directory it would remove ({}) met an unreadable entry, more "
+                    "than {} entries or the {:g}-second bound".format(
+                        _clean_entries_text(unwalked), _CLEAN_NESTED_WALK_LIMIT, _CLEAN_PROBE_SECONDS))
+        if nested:
+            return ("it is doubly forced (-ff) and would remove a directory holding a nested repository, whose "
+                    "ignored files neither listing shows ({})".format(_clean_entries_text(nested)))
+    return None
 
 
 def _clean_ignored_deny(why, alts):
-    """The prsunc deny for a git clean that can remove ignored files (_clean_ignored_refusal)."""
+    """The prsunc deny for a git clean that can remove ignored files or a nested repository
+    (_clean_ignored_refusal); `why` is the refusal clause."""
     return _deny(
         "AIQT rule prsunc (preserve-uncommitted-work): this git clean may remove IGNORED files (through -x, "
-        "-X, an -e/--exclude pattern that un-ignores them, or ignore rules the command itself changes), and "
-        "the recovery snapshot never holds an ignored file (it is built with git add --all, which skips "
-        "them); {}, so the discard may be unrecoverable; denied rather than run. To proceed, list what it "
-        "would remove with 'git clean -n' and the same options and pathspecs, move or commit what must be "
-        "kept, and run the clean alone, without -x, -X, a negated exclude or a config or environment "
-        "override. {}".format(why, alts),
-        "AIQT guardrail: denied a git clean that may remove ignored files no recovery snapshot holds (rule "
-        "prsunc); list them with git clean -n and the same options, keep what matters, then run it alone.")
+        "-X, an -e/--exclude pattern that un-ignores them, or ignore rules the command itself changes) or a "
+        "nested repository, and the recovery snapshot holds neither (it is built with git add --all, which "
+        "skips ignored files and never takes in the files of a nested repository). It is denied rather "
+        "than run because {}. To proceed, list what it would remove with 'git clean -n' and the same options "
+        "and pathspecs, move or commit what must be kept, and run the clean alone, without -x, -X, a negated "
+        "exclude, a second -f or a config or environment override. {}".format(why, alts),
+        "AIQT guardrail: denied a git clean that may remove ignored files or a nested repository no recovery "
+        "snapshot holds (rule prsunc); list them with git clean -n and the same options, keep what matters, "
+        "then run it alone.")
 
 
-def _clean_probe_target(tokens, cwd):
-    """(directory, None) when the read-only listings of this pristine git clean, run in that directory, read
-    the repository, ignore rules and configuration the command itself would, else (None, why). Only a
-    leading removed-override assignment (it redirects nothing) and '-C <dir>' global options are followed:
-    an ambient non-cosmetic GIT_* variable, any other leading assignment (HOME, XDG_CONFIG_HOME or a GIT_*
-    variable can remove or replace an ignore source, and the probe does not model the others) and any other
-    global option (-c or --config-env core.excludesFile=..., --git-dir, --work-tree) can make the command
-    see another tree or other ignore rules than the probe."""
-    if _ambient_repo_view_override():
-        return None, "a non-cosmetic ambient GIT_* variable shapes the repository view it acts on"
+# WHAT A PRISTINE git clean's OWN GLOBAL OPTIONS AND LEADING ASSIGNMENTS DO TO ITS LISTINGS. Each is read
+# from git(1), git-config(1), gitignore(5) and git-clean(1); only those that can change the ignore sources,
+# the matching of ignore patterns or the worktree and repository the listings read deny the clean:
+#   - a configuration variable set by -c <name>=<value> or --config-env=<name>=<envvar> whose name is
+#     core.excludesFile (an ignore source, gitignore(5)), core.ignoreCase (case-insensitive matching of
+#     ignore patterns), core.worktree or core.bare (the worktree git acts on), or include.path or
+#     includeIf.<condition>.path (they load a file that may set any of these). Section and variable names
+#     are case-insensitive in git, so the name is compared lowercased; any other name (x.y=z) passes.
+#   - a leading HOME or XDG_CONFIG_HOME (they place the global configuration file and the default
+#     excludes file $XDG_CONFIG_HOME/git/ignore), PATH (it can select another git, with another system
+#     configuration), an LD_* or DYLD_* loader variable, or any GIT_* variable other than GIT_DIR,
+#     GIT_WORK_TREE and the cosmetic ones (_COSMETIC_GIT_VARS): GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM,
+#     GIT_CONFIG_NOSYSTEM, GIT_CONFIG_COUNT/KEY/VALUE, GIT_CONFIG_PARAMETERS, GIT_INDEX_FILE, GIT_COMMON_DIR
+#     and the rest can each change the configuration, the tracked set or the info/exclude file read.
+#   - --git-dir, --work-tree, --bare, GIT_DIR or GIT_WORK_TREE, unless git, asked read-only
+#     (_segment_git_target), resolves exactly the git dir and toplevel a plain git run from the directory
+#     the command runs in discovers (_discovered_git_target): a worktree rooted elsewhere reads other
+#     .gitignore files and another tracked set. git_discard's existing redirect resolution decides these
+#     commands first (_redirect_snapshot_plan and the --git-dir and --work-tree denies), so this check sees
+#     only what that resolution confirmed.
+# The pathspec options (--literal-pathspecs, --glob-pathspecs, --noglob-pathspecs, --icase-pathspecs)
+# change only which paths the clean's pathspecs match, so both listings are taken with them. -p,
+# --paginate, -P, --no-pager, --no-replace-objects, --no-lazy-fetch, --no-advice, --no-optional-locks,
+# --namespace, --attr-source, --shallow-file, --exec-path and --super-prefix touch no ignore source and no
+# worktree, and the print-and-exit options run no clean. Any other option is one git(1) does not document:
+# when git itself rejects it as an unknown option the command runs nothing, and otherwise the clean denies.
+_CLEAN_IGNORE_CONFIG_KEYS = frozenset(("core.excludesfile", "core.ignorecase", "core.worktree", "core.bare"))
+_CLEAN_PATHSPEC_GLOBALS = frozenset(("--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
+                                     "--icase-pathspecs"))
+_CLEAN_INERT_GLOBALS = frozenset((
+    "-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--no-lazy-fetch", "--no-advice",
+    "--no-optional-locks", "--namespace", "--attr-source", "--shallow-file", "--exec-path", "--super-prefix",
+    "--version", "-v", "--help", "-h", "--html-path", "--man-path", "--info-path"))
+_CLEAN_IGNORE_ENV_NAMES = frozenset(("HOME", "XDG_CONFIG_HOME", "PATH"))
+
+
+def _clean_config_name_bad(name):
+    """True when the git configuration variable `name` (from -c or --config-env) can change an ignore
+    source, the matching of ignore patterns or the worktree (see the block comment above)."""
+    low = name.lower()
+    return low in _CLEAN_IGNORE_CONFIG_KEYS or low == "include.path" or (
+        low.startswith("includeif.") and low.endswith(".path"))
+
+
+def _git_rejects_global_option(option, deadline):
+    """True when git itself refuses `option` as an unknown global option (it prints 'unknown option: ' and
+    exits 129 before running any subcommand), read with 'git <option> version' under the probe's scrubbed
+    environment; False when git accepts it or the answer cannot be read."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return False
+    try:
+        env = _isolate_git_env(dict(os.environ))
+        env["LC_ALL"] = "C"
+        env.pop("LANGUAGE", None)
+        result = subprocess.run(["git", option, "version"], capture_output=True, timeout=left, env=env,
+                                stdin=subprocess.DEVNULL)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 129 and result.stderr.startswith(b"unknown option: ")
+
+
+def _clean_command_view(tokens, cwd):
+    """How the read-only listings of the pristine git clean `tokens` reproduce what it would see:
+    ('probe', directory, global_opts) when listings run in that directory with those pathspec options read
+    what the command reads; ('cannot', why, None) when a leading assignment or global option can change its
+    ignore sources or its worktree (see the block comment above); ('inert', why, None) when git rejects one
+    of its global options outright, so the command runs nothing. The caller has already applied the existing
+    redirect resolution and its denies; an ambient GIT_* override is the caller's own 'cannot'."""
     cw = _command_word_index(tokens)
     for tok in tokens[:cw]:
-        if not _REMOVED_DISCARD_PREFIX_RE.fullmatch(tok):
-            return None, ("its leading assignment {!r} can change the repository or the ignore rules it acts "
-                          "on (HOME, XDG_CONFIG_HOME and any GIT_* variable can remove an ignore "
-                          "source)".format(tok.split("=", 1)[0]))
+        if _REMOVED_DISCARD_PREFIX_RE.fullmatch(tok) or _GIT_TARGET_ASSIGN_RE.match(tok):
+            continue
+        name = tok.split("=", 1)[0].rstrip("+")
+        if (name in _CLEAN_IGNORE_ENV_NAMES or name.startswith(("LD_", "DYLD_"))
+                or (name.startswith("GIT_") and name not in _COSMETIC_GIT_VARS)):
+            return ("cannot", "its leading assignment {!r} can change the configuration, the ignore sources "
+                              "or the repository it reads".format(name), None)
+    global_opts = []
+    deadline = time.monotonic() + _CLEAN_PROBE_SECONDS
     i = cw + 1
-    while i < len(tokens) and tokens[i].startswith("-"):
-        if tokens[i] != "-C" or i + 1 >= len(tokens):
-            return None, ("the git global option {!r} can change the repository or the ignore rules it acts "
-                          "on".format(tokens[i]))
-        i += 2
-    repo = _segment_repo_dir(tokens, cwd)
-    if repo == "opaque":
-        return None, "its -C target cannot be resolved"
-    target = repo if isinstance(repo, str) else cwd
-    if target is None:
-        return None, "no session working directory is available"
-    return target, None
+    n = len(tokens)
+    while i < n and tokens[i].startswith("-"):
+        tok = tokens[i]
+        opt, eq, val = tok.partition("=")
+        if "=" not in tok and tok in _GIT_ARG_OPTS:
+            val = tokens[i + 1] if i + 1 < n else ""
+            i += 2
+        else:
+            i += 1
+        if opt == "-c" and not eq:
+            if _clean_config_name_bad(val.split("=", 1)[0]):
+                return ("cannot", "its git global option '-c {}' sets a configuration variable that can "
+                                  "change its ignore sources or its worktree".format(val.split("=", 1)[0]), None)
+        elif opt == "--config-env":
+            if _clean_config_name_bad(val.rpartition("=")[0] if "=" in val else val):
+                return ("cannot", "its git global option '--config-env {}' sets a configuration variable that "
+                                  "can change its ignore sources or its worktree".format(val), None)
+        elif opt in ("-C", "--git-dir", "--work-tree", "--bare"):
+            continue
+        elif opt in _CLEAN_PATHSPEC_GLOBALS and not eq:
+            global_opts.append(opt)
+        elif opt in _CLEAN_INERT_GLOBALS or opt == "--list-cmds":
+            continue
+        elif _git_rejects_global_option(tok, deadline):
+            return ("inert", "git rejects its global option {!r} as unknown, so it runs nothing".format(tok),
+                    None)
+        else:
+            return ("cannot", "its git global option {!r} is not one this guard reads".format(tok), None)
+    c_dir = _segment_c_dir(tokens, cwd)
+    if c_dir is None:
+        return ("cannot", "the directory it runs in cannot be established (no session working directory, "
+                          "or a -C with no value)", None)
+    if _segment_has_path_redirect(tokens):
+        tgt = _segment_git_target(tokens, cwd)
+        own = _discovered_git_target(c_dir)
+        if tgt is None or own is None or tgt != own:
+            return ("cannot", "its --git-dir, --work-tree, --bare, GIT_DIR or GIT_WORK_TREE redirect makes git "
+                              "act on {}, not on the git dir and toplevel a plain git run from {} finds".format(
+                                  "a git dir and worktree git could not report read-only" if tgt is None
+                                  else "the git dir {} with the worktree {}".format(tgt[0], tgt[1]), c_dir),
+                    None)
+    return ("probe", c_dir, tuple(global_opts))
+
+
+def _clean_pristine_refusal(tokens, args, cwd, ambient_override):
+    """_clean_ignored_refusal for the pristine single git clean `tokens` (subcommand arguments `args`), run
+    in the directory _clean_command_view resolves from the session directory `cwd`; None when git rejects
+    one of its global options (it runs nothing) or the listings show it removes no ignored file and no
+    nested repository. A non-cosmetic ambient GIT_* variable shapes the view the command acts on but is
+    scrubbed from the listings, so it leaves them unable to show what the clean would remove."""
+    if ambient_override:
+        return _clean_ignored_refusal(
+            args, None, "a non-cosmetic ambient GIT_* variable shapes the repository view it acts on")
+    state, value, global_opts = _clean_command_view(tokens, cwd)
+    if state == "inert":
+        return None
+    if state == "cannot":
+        return _clean_ignored_refusal(args, None, value)
+    return _clean_ignored_refusal(args, value, None, global_opts)
 
 
 # git branch long options that CONSUME the following token as a REQUIRED separated value, so that value is
@@ -10275,10 +10516,12 @@ def _branch_parse_options(pre):
 def _discard_role(sub, args):
     """Classify a git segment's subcommand into (role, kind); see the block comment above. clean, stash,
     and branch do not use the tracked-tree probe: a real 'git clean' removes UNTRACKED files (a different,
-    unrecoverable asset the tracked-change probe does not see), so ANY non-dry-run clean ASKS
-    unconditionally (this also closes the clean.requireForce / -q / -i / clustered-flag edges, since the
-    guard no longer tries to model whether the clean would fire); stash drop/clear ASK, and a force branch
-    delete/move/copy/reset ASKS (an unforced create/list/-d keeps its allow)."""
+    unrecoverable asset the tracked-change probe does not see), so ANY non-dry-run clean gets the 'ask'
+    role (this also closes the clean.requireForce / -q / -i / clustered-flag edges, since the role does not
+    model whether the clean would fire); git_discard then judges it by its read-only listings
+    (_clean_ignored_refusal) and, when they pass, by the recovery snapshot. A dry run (-n/--dry-run, read
+    lexically or, beside an exclude, by _clean_parse_options) removes nothing and allows. stash drop/clear
+    ASK, and a force branch delete/move/copy/reset ASKS (an unforced create/list/-d keeps its allow)."""
     if sub == "checkout":
         return _checkout_role(args)
     if sub == "switch":
@@ -10298,6 +10541,9 @@ def _discard_role(sub, args):
         pre, _post, _had_sep = _split_pre_post(args)
         if _clean_is_dry_run(pre):
             return ("allow", None)  # a dry run removes nothing
+        parsed = _clean_parse_options(args)
+        if parsed is not None and parsed[6]:
+            return ("allow", None)  # read as git reads it (exclude values consumed), a dry run: removes nothing
         return ("ask", "git clean (removes untracked files, which cannot be recovered)")
     if sub == "stash":
         first = next((a for a in args if not a.startswith("-")), None)
@@ -13156,19 +13402,13 @@ def git_discard(data):
             return _deny(st_reason.format(st_bad, alts), st_banner)
 
     # Every non-dry-run clean, with or without -x or -X, is denied unless its read-only listings show it
-    # removes no ignored file (_clean_ignored_refusal), decided here before any snapshot and before both
-    # the redirect branch and the plain path: the clean-tree probe never lists an ignored file (so an
-    # ignored-only tree reads as provably clean) and the recovery snapshot never holds one, so neither the
-    # provably-clean allow nor a snapshot-then-allow could recover what such a clean removes. A -c or
-    # --config-env option, or a leading HOME, XDG_CONFIG_HOME or GIT_* assignment, can change the ignore
-    # sources the command reads, so _clean_probe_target refuses each.
-    if sub == "clean" and role != "allow":
-        cx_cwd = data.get("cwd")
-        cx_dir, cx_cannot = _clean_probe_target(pristine, cx_cwd if isinstance(cx_cwd, str) and cx_cwd
-                                                else None)
-        cx_why = _clean_ignored_refusal(args, cx_dir, cx_cannot)
-        if cx_why is not None:
-            return _clean_ignored_deny(cx_why, alts)
+    # removes no ignored file and no nested repository (_clean_pristine_refusal), decided before any
+    # snapshot on both the redirect branch and the plain path below, AFTER the existing resolution of the
+    # command's global options and leading assignments on that branch: the clean-tree probe never lists an
+    # ignored file (so an ignored-only tree reads as provably clean) and the recovery snapshot never holds
+    # one, so neither the provably-clean allow nor a snapshot-then-allow could recover what such a clean
+    # removes. Only an option or assignment that can change the ignore sources or the worktree the listings
+    # read denies (_clean_command_view); the listings run in the directory that resolution confirmed.
 
     # FAIL-SAFE (structural completion): the command's repository view cannot be proven to be the
     # session cwd when EITHER cause is present. (1) A NON-COSMETIC ambient GIT_* var: the probe scrubs it,
@@ -13413,6 +13653,12 @@ def git_discard(data):
                 .format(kind or "a git work-losing verb", alts),
                 "AIQT guardrail: denied a view-overridden git discard with no session directory to snapshot "
                 "(rule prsunc); run it from the target repo, or commit or stash first.")
+        # A non-dry-run clean is judged by its read-only listings here, after the redirect resolution and
+        # its denies above and before any snapshot below (see the comment above the FAIL-SAFE branch).
+        if sub == "clean" and role != "allow":
+            cx_why = _clean_pristine_refusal(pristine, args, cwd_base, ambient_override)
+            if cx_why is not None:
+                return _clean_ignored_deny(cx_why, alts)
         # The floor base (pre_base, set only beside a redirect git resolved to another repository) is probed
         # and snapshotted first, exactly as the base itself was before git was asked, and the repository git
         # resolved is probed and snapshotted next. A successful floor snapshot is named in the outcome below,
@@ -13501,6 +13747,12 @@ def git_discard(data):
     base = cwd if isinstance(cwd, str) and cwd else None
     resolvable = base is not None and _segment_dir_simple(pristine)
     snapshottable = sub in _SNAPSHOTTABLE_VERBS
+    # A non-dry-run clean on this plain path is judged by its read-only listings before any snapshot (see
+    # the comment above the FAIL-SAFE branch).
+    if sub == "clean" and role != "allow":
+        cx_why = _clean_pristine_refusal(pristine, args, base, False)
+        if cx_why is not None:
+            return _clean_ignored_deny(cx_why, alts)
 
     # THE RECOVERY LAYER. For a subcommand a discard could use to destroy worktree or untracked content
     # (checkout/switch/restore/reset/rm/clean), when the worktree is resolvable and the tree is NOT provably
