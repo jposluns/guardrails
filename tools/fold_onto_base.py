@@ -903,10 +903,27 @@ def _q10(temp):
           and _fixture_git(root, "for-each-ref", "refs/aiqt-fold/") == "", (code, err))
 
 
+def _seams():
+    """The module globals a vector or a mutant may replace, by name, each read through its bare name. A
+    closed table: a name outside it is a KeyError before anything is replaced."""
+    return {"HARDENING": HARDENING, "_GIT": _GIT, "_check_expect": _check_expect,
+            "_check_swapped": _check_swapped, "_commit_tree": _commit_tree, "_dirty": _dirty,
+            "_fold_parent": _fold_parent, "_fold_tree": _fold_tree, "_git_env": _git_env,
+            "_local_copies": _local_copies, "_merge_count": _merge_count, "_protected_ref": _protected_ref,
+            "_recovery": _recovery, "_signing": _signing, "_single_base": _single_base, "_stamp": _stamp,
+            "_swap": _swap, "_undo_command": _undo_command, "_verify": _verify}
+
+
+def _saved_seams(replacements):
+    """The current values of the seams replacements names, read before any is replaced."""
+    current = _seams()
+    return {name: current[name] for name in replacements}
+
+
 @contextlib.contextmanager
 def _patched(**replacements):
     """Module globals replaced for the body of a with block (a vector's seam), then restored."""
-    saved = {name: globals()[name] for name in replacements}
+    saved = _saved_seams(replacements)
     globals().update(replacements)
     try:
         yield
@@ -1186,7 +1203,7 @@ def _with_home(body):
 def _mutated(replacements, vector):
     """Failures of one vector run with module globals replaced, in a private sink."""
     global _SINK
-    saved = {name: globals()[name] for name in replacements}
+    saved = _saved_seams(replacements)
     saved_sink = _SINK
     _SINK = [[], []]
     globals().update(replacements)
