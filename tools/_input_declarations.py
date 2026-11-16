@@ -94,10 +94,11 @@ a fullwidth or confusable-spelt label that renders as INPUT:, because the worker
 in each. After the label comes one path, taken from the rendered text: one word, one code span (the quoted
 form for a path with spaces or markup characters), or one span in double quotes, then only whitespace on
 that rendered line (input_shape judges the path: absolute, no `..` component, no control character and no
-character of INPUT_SHAPE_CHARACTERS). Inline HTML in the label or the path, a word after the path, an
-unclosed quote and a failed shape are a malformed declaration (bad), never ignored. Emphasis inside an
-unquoted path is applied like any other emphasis (the reader sees the applied form); quote such a path in a
-code span, where its literal characters are then judged by shape.
+character of INPUT_SHAPE_CHARACTERS; read(text, relative=True), which only the brief lint's staged-tree
+mode passes, also accepts a relative path under the same refusals). Inline HTML in the label or the path,
+a word after the path, an unclosed quote and a failed shape are a malformed declaration (bad), never
+ignored. Emphasis inside an unquoted path is applied like any other emphasis (the reader sees the applied
+form); quote such a path in a code span, where its literal characters are then judged by shape.
 
 LOOK-ALIKES. A rendered paragraph line (wherever the paragraph sits), a heading, or a table cell whose
 folded text begins, past leading whitespace, dashes (category Pd) and bare markup marks (LEAD_MARKS), with
@@ -578,9 +579,12 @@ def _line_scan(line, strip_tags=False):
     return NEAR_INPUT_RE.match(folded, _lead_skip(folded)) is not None
 
 
-def input_shape(path):
+def input_shape(path, relative=False):
     """(path, None) when a declared input names one absolute path, else (None, reason): no path, a
-    character of INPUT_SHAPE_CHARACTERS, a control character, a relative path, or a `..` component."""
+    character of INPUT_SHAPE_CHARACTERS, a control character, a relative path, or a `..` component.
+    With relative=True (the brief lint's staged-tree mode, which judges the path against a tree it was
+    given, and nothing else) a relative path is accepted under the same refusals; the default, which
+    check_verifier_delivery's C1 relies on, stays absolute only."""
     if not path:
         return None, "an INPUT line with no path; write one absolute path after INPUT:"
     if any(character in INPUT_SHAPE_CHARACTERS for character in path):
@@ -589,7 +593,7 @@ def input_shape(path):
                           path, " ".join(sorted(INPUT_SHAPE_CHARACTERS))))
     if any(unicodedata.category(character) == "Cc" for character in path):
         return None, "the declared input {!r} holds a control character".format(path)
-    if not path.startswith("/"):
+    if not path.startswith("/") and not relative:
         return None, "the declared input {} is not an absolute path".format(path)
     if ".." in path.split("/"):
         return None, "the declared input {} holds a `..` component; write the path itself".format(path)
@@ -601,10 +605,10 @@ HTML_IN_INPUT_REASON = ("the declared input holds inline HTML (a <name> placehol
                         "span")
 
 
-def _declaration_tail(characters):
+def _declaration_tail(characters, relative=False):
     """(path, None) or (None, reason) for the rendered characters after the label: one word, one code
     span, or one double-quoted span, then only whitespace. `characters` is [(character, kind)] with kind
-    "text", "code" or "html"."""
+    "text", "code" or "html"; `relative` is passed to input_shape."""
     position = 0
     while position < len(characters) and characters[position][1] == "text" \
             and characters[position][0].isspace():
@@ -637,13 +641,14 @@ def _declaration_tail(characters):
     if any(not character.isspace() for character, _ in tail):
         return None, ("a word follows the declared input {} (quote a path that holds a space in a code "
                       "span or double quotes, and write nothing after it)".format(path))
-    return input_shape(path)
+    return input_shape(path, relative)
 
 
-def _scan_segment(kind, characters):
+def _scan_segment(kind, characters, relative=False):
     """None, ("input", path) or ("bad", reason) for one rendered line of a unit. `characters` is
     [(character, kind)] with kind "text", "code" or "html"; html characters are invisible to a reader and
-    take no part in the fold, but one in or before the label, or in the path, is bad."""
+    take no part in the fold, but one in or before the label, or in the path, is bad. `relative` is
+    passed to input_shape."""
     folded = []   # (folded character, index into `characters`, kind) for text and code characters
     html_positions = []
     for index, (character, piece_kind) in enumerate(characters):
@@ -662,7 +667,7 @@ def _scan_segment(kind, characters):
             and all(entry[2] == "text" for entry in folded[:label_length]):
         label_end = folded[label_length - 1][1]
         if not any(position <= label_end for position in html_positions):
-            path, reason = _declaration_tail(characters[label_end + 1:])
+            path, reason = _declaration_tail(characters[label_end + 1:], relative)
             return ("bad", reason) if reason is not None else ("input", path)
     start = _lead_skip(folded_text)
     near = NEAR_INPUT_RE.match(folded_text, start)
@@ -1111,11 +1116,12 @@ def forbidden(text):
     return None
 
 
-def read(text):
+def read(text, relative=False):
     """(inputs, bad): [(line number, path)] for the declarations of the parsed document, in order, and
     [(line number, reason)] for every malformed declaration or look-alike. Inside code nothing is read.
     The caller refuses forbidden() first, so `text` ends its lines with LF alone here. DeclarationError
-    when the vendored parser cannot read the text."""
+    when the vendored parser cannot read the text. relative=True accepts a relative declared path
+    (input_shape); only a caller that judges paths against a staged tree passes it."""
     if text.isascii() and "nput" not in text.lower() and RENDERING_MARK_RE.search(text) is None:
         # nothing in it can spell the token INPUT, even folded, and no character reference, markup,
         # escape or inline HTML can make the rendered text differ from this source text
@@ -1133,7 +1139,7 @@ def read(text):
                     bad.append(((line or 1) + offset, LOOK_ALIKE_REASON))
             continue
         for offset, characters in enumerate(_segments(element)):
-            found = _scan_segment(kind, characters)
+            found = _scan_segment(kind, characters, relative)
             if found is None:
                 continue
             at = (line or 1) + offset

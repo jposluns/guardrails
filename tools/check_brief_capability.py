@@ -11,11 +11,12 @@ and for every family, a path outside a declared workdir when the family's row sa
 (P2), or a pinned revision that a git command line of the listed subcommands (P5: clone, checkout, switch,
 reset, fetch, pull, worktree add, merge, rebase, restore --source, archive) reaches through a ref that can move with
 no later cure, or through a dispatch ref that resolves to another commit (P5), or an input the brief declares on an
-INPUT: line that does not exist on the host the lint runs on (P6), or a git command line whose subcommand is commit
-or push when the family's row says git-write = "no" (W1). The signal is structural, not certain: the lint fails
-closed, so some text a human would pass refuses (see RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
-its hits are printed so a human sees them, and it never refuses. For a family that can execute (`yes` or
-`read-only-sandbox`) no execution rule applies; the PREFLIGHT rules and GIT WRITE (W1) below apply to every family.
+INPUT: line that does not exist on the host the lint runs on, or with --tree in the staged tree (P6), or a git
+command line whose subcommand is commit or push when the family's row says git-write = "no" (W1). The signal
+is structural, not certain: the lint fails closed, so some text a human would pass refuses (see RESIDUALS).
+Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY: its hits are printed so a
+human sees them, and it never refuses. For a family that can execute (`yes` or `read-only-sandbox`) no
+execution rule applies; the PREFLIGHT rules and GIT WRITE (W1) below apply to every family.
 
 PREFLIGHT (the input paths a brief names; read over the whole brief, line by line, before scope is applied):
 
@@ -102,7 +103,10 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        repository the lint is pointed at (--repo, default this repository), read with
                        `git cat-file -e <commit>:<path>` from the object store, never the working tree. The
                        path may be a file the brief asks the worker to create, so P3 prints an ADVISORY line
-                       and never refuses. A pin that does not resolve to one commit (unknown, ambiguous), a git
+                       and never refuses. With --tree (see P6), each such path that is not a declared input is
+                       also looked up in the staged tree, pin or no pin (os.lstat after its parent directory's
+                       real path is placed), and one missing there or resolving outside it is ADVISORY too;
+                       another stat error there is CANNOT_EVALUATE (exit 2). A pin that does not resolve to one commit (unknown, ambiguous), a git
                        that cannot be launched or times out, or a pin with no repository to read is
                        CANNOT_EVALUATE (exit 2), never a pass, whether or not the brief names a relative path.
                        The git reads are hermetic against system, global, XDG and environment-injected git
@@ -251,11 +255,24 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        directory (a FIFO, a socket, a device) and a path os.access(R_OK) refuses for the lint's
                        uid are CANNOT_EVALUATE (exit 2); os.access opens no descriptor, so a FIFO or a device is
                        never opened. A path of only / is absolute with no `..` component, so INPUT: / declares
-                       the root directory and passes where the root is readable. A declaration P6 cannot check
-                       is CANNOT_EVALUATE (exit 2): no path (a bare
-                       INPUT:, an empty quoted path), a path holding a placeholder, variable, home, glob or
-                       brace character (< > $ ~ * ? [ ] { }) or a control character,
-                       a relative path, a `..` component, a quote that does not close on the line, a word
+                       the root directory and passes where the root is readable. STAGED TREE (--tree ABS_DIR,
+                       passed through run, evaluate and preflight to P6 and P3): the tree must be an absolute
+                       path whose real path is a directory the lint's uid may list and search, else the brief
+                       is CANNOT_EVALUATE (exit 2) before any rule runs. A relative declared input (accepted
+                       only in this mode, under the shape refusals below) and an absolute one that is the
+                       brief's one declared workdir or lies under it (read lexically, the workdir's part
+                       mapped onto the tree) are judged in the tree, not on the host: the real path of the
+                       tree joined with the input must stay in the tree (a symbolic link that escapes it is
+                       CANNOT_EVALUATE), a trailing slash is kept, and that path is then judged as above, so
+                       one missing there (ENOENT, ENOTDIR) is HARD and the message names the tree, and a FIFO
+                       or device, an unreadable path and any other stat error are CANNOT_EVALUATE. An absolute
+                       input outside the workdir, or in a brief with no workdir declaration, keeps the host
+                       check. An absolute input in a brief whose workdir declarations name two directories or
+                       cannot be read is CANNOT_EVALUATE in this mode, whatever the family's row says. A
+                       declaration P6 cannot check is CANNOT_EVALUATE (exit 2): no path (a bare INPUT:, an
+                       empty quoted path), a path holding a placeholder, variable, home, glob or brace
+                       character (< > $ ~ * ? [ ] { }) or a control character, a relative path without
+                       --tree, a `..` component, a quote that does not close on the line, a word
                        after the path (an unquoted space), or inline HTML in the path (a <scratch>
                        placeholder, which a reader hides). A
                        LOOK-ALIKE input label is never ignored: a rendered paragraph line (wherever the
@@ -322,18 +339,23 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
 sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
-there. P6 checks only the paths a brief declares on INPUT: lines, only on the host the lint runs on and only at
-lint time: a declared input present there can be missing where the worker runs, unreadable by the worker's uid,
-sandbox or mount, or removed or replaced after the lint runs; os.access answers for the lint's own real uid and
-groups, not the worker's, so a lint run as root passes a mode-000 file; a directory is checked for read
-permission, not for search permission; a symbolic link is followed and its target judged; a required input the
-brief names only in prose, in code (not checked by design), or not at all, is not checked; and a
-verifier that skips a declared input without
-saying so is not caught here (check_verifier_delivery reads a clean verdict whose UNVERIFIABLE answer names a
-declared input, or a parent directory of one, as no vote, and no more). P2 does not follow symbolic links, so a path under the workdir lexically
-can lead outside it; the preflight does
-not know which relative paths are inputs and which are files the brief asks the worker to create, so a path
-missing at a pin is ADVISORY (P3); P2 judges only the slashes above (a path split by a line break, a relative
+there. P6 checks only the paths a brief declares on INPUT: lines, only on the host the lint runs on (or, with
+--tree, in the staged tree it is given) and only at lint time: a declared input present there can be missing
+where the worker runs, unreadable by the worker's uid, sandbox or mount, or removed or replaced after the lint
+runs; a staged tree in particular can change between the lint and the worker's read unless the sender lints an
+immutable tree and binds its digest, and whether a tree is the one the worker will see, or its digest, is not
+checked here; the tree mode maps only the brief's one declared workdir, read lexically, so an input under
+another directory the worker sees as the tree (an unnamed mount, a second checkout) keeps the host check;
+os.access answers for the lint's own real uid and groups, not the worker's, so a lint run as root passes a
+mode-000 file; a directory is checked for read permission, not for search permission; a symbolic link is
+followed and its target judged (in the tree, only while it stays in the tree); a required input the
+brief names only in prose, in code (not checked by design), or not at all, is not checked (with --tree a
+relative prose path missing from the tree is only ADVISORY, P3); and a verifier that skips a declared input
+without saying so is not caught here (check_verifier_delivery reads a clean verdict whose UNVERIFIABLE answer
+names a declared input, or a parent directory of one, as no vote, and no more). P2 does not follow symbolic
+links, so a path under the workdir lexically can lead outside it; the preflight does not know which relative
+paths are inputs and which are files the brief asks the worker to create, so a path missing at a pin, or from a
+staged tree, is ADVISORY (P3); P2 judges only the slashes above (a path split by a line break, a relative
 path, a path in an http:// or https:// word, and a path spelt with look-alike slashes are not judged, and an
 unquoted path with a space is read as separate words, so /w/repo x/y is /w/repo and the relative word x/y); a
 prohibition is read lexically, so every word after the first negation word on its line is never judged by P2;
@@ -602,8 +624,11 @@ outside the numbered items (S3) and is not dropped with its item; a family addre
 ("Claude: run ...") is linted as if addressed to the linted family; and an operative marker for another family
 hides that family's text up to the next marker or address, so an instruction for the linted family placed there
 without an address is hidden. The lint reads only the bytes it is given: run it on the final per-family bytes that
-are sent, since a brief composed after the lint runs is not covered. Run alone, it is advisory; it blocks
-only where the sender refuses to send on exit 1 or 2.
+are sent, since a brief composed after the lint runs is not covered. With --tree, P6 answers for the tree it
+is given at lint time only: a relative input or one under the declared workdir that is present there can still
+be missing where the worker runs if the sender stages another tree, or changes this one after the lint, and a
+path named only in prose stays ADVISORY. Run alone, it is advisory; it blocks only where the sender refuses to
+send on exit 1 or 2.
 
 TIME. Linearity rests on two kinds of evidence, not on a proof: a regex audit and measured shapes. No regular
 expression reads a run of arguments, options or markup: such runs are walked token by token in Python.
@@ -666,7 +691,7 @@ measured only to a 60-second timeout.
 
 Usage:
   check_brief_capability.py                (no brief: validate the shipped capability table, exit 0 or 2)
-  check_brief_capability.py --family NAME [--unscoped] [--table PATH] [--repo PATH] BRIEF
+  check_brief_capability.py --family NAME [--unscoped] [--table PATH] [--repo PATH] [--tree ABS_DIR] BRIEF
   check_brief_capability.py --self-test
   check_brief_capability.py --execution-report ABS_PATH   (the self-test, as the execution gate runs it)
 """
@@ -2117,9 +2142,10 @@ class PreflightText:
     the token) is bad; and whether a
     hand-back file is named (the words hand-back file or path and an absolute path on one line). `raw` is the
     brief's text before decode_brief removes format characters, which the P5 cure reads (cure_lines); None stands
-    for `text` itself."""
+    for `text` itself. `relative` is True only in the staged-tree mode (--tree, staged_tree), where a relative
+    declared input is read as a path in the tree instead of a malformed declaration."""
 
-    def __init__(self, text, raw=None):
+    def __init__(self, text, raw=None, relative=False):
         self.text = text
         self.raw = text if raw is None else raw
         self.names_workdir = bool(WORKDIR_WORD_RE.search(text))
@@ -2133,7 +2159,8 @@ class PreflightText:
         # read from the raw text by the shared parser so P6 and C1 cannot disagree; a raw text that
         # parser cannot read is CannotEvaluate, never an empty reading
         try:
-            self.inputs, self.bad_inputs = read_inputs(self.raw)
+            self.inputs, self.bad_inputs = read_inputs(self.raw, relative=True) if relative else read_inputs(
+                self.raw)
         except _input_declarations.DeclarationError as exc:
             raise CannotEvaluate("brief: {}".format(exc))
         self.handback_named = False
@@ -2469,27 +2496,37 @@ def pin_conflict_message(conflict):
                 min(line, other), max(line, other), pin, line, label, value, other))
 
 
-def rule_p3(names, row, repo):
+def rule_p3(names, row, repo, tree=None):
     """P3 ADVISORY: the brief pins a revision and a repository-relative path it names (repository_path) does
     not exist at that revision in `repo`; it may be a file the brief asks the worker to create, so it never
-    refuses. A pin label with no valid pin (bad_pins), pin lines that disagree (brief_pin_conflict,
-    reviewed_head_conflict, near_pin_conflict for a look-alike pin line: the message names both lines,
-    pin_conflict_message), a pin that does not resolve, or no repository to read is CannotEvaluate, whether or not
-    the brief names a relative path."""
+    refuses. With a staged tree (`tree`, the real path staged_tree returned), each such path that is not a
+    declared input (P6 judges those) is also looked up in the tree (tree_prose_state), pin or no pin, and one
+    missing there or resolving outside it is ADVISORY too. A pin label with no valid pin (bad_pins), pin lines
+    that disagree (brief_pin_conflict, reviewed_head_conflict, near_pin_conflict for a look-alike pin line: the
+    message names both lines, pin_conflict_message), a pin that does not resolve, or no repository to read is
+    CannotEvaluate, whether or not the brief names a relative path."""
     if names.bad_pins:
         raise CannotEvaluate("line {}: a REVIEWED HEAD or BRIEF-PIN line with no pin of 7 to 40 or 64 hex "
                              "digits".format(names.bad_pins[0]))
     conflict = brief_pin_conflict(names) or reviewed_head_conflict(names) or near_pin_conflict(names)
     if conflict is not None:
         raise CannotEvaluate(pin_conflict_message(conflict))
-    if not names.pins:
-        return []
-    if repo is None:
-        raise CannotEvaluate("the brief pins a revision but no repository was given to read it from")
-    commits = [(rev, resolve_revision(repo, rev)) for _, rev in names.pins]
     paths = [(line, repository_path(path)) for line, path in names.relative]
     paths = _first_seen([(line, path) for line, path in paths if path is not None])
     findings = []
+    if tree is not None:
+        declared = set(repository_path(path) for _, path in names.inputs if not path.startswith("/"))
+        for line, path in paths:
+            state = None if path in declared else tree_prose_state(tree, path)
+            if state is not None:
+                findings.append(("P3", "ADVISORY", line, "path {} the staged tree {}: if it is an input, the "
+                                 "worker cannot read it there; if the brief asks the worker to create it, nothing "
+                                 "is wrong".format(state, tree), _excerpt(path)))
+    if not names.pins:
+        return findings
+    if repo is None:
+        raise CannotEvaluate("the brief pins a revision but no repository was given to read it from")
+    commits = [(rev, resolve_revision(repo, rev)) for _, rev in names.pins]
     for rev, commit in commits:
         for line, path in paths:
             if not exists_at_revision(repo, commit, path):
@@ -3117,11 +3154,93 @@ def input_state(path):
     return None, None
 
 
-def rule_p6(names, row, repo):
+def staged_tree(tree):
+    """The real path of the staged tree given with --tree: `tree` must be absolute and resolve
+    (os.path.realpath) to a directory the lint's uid may list and search (os.access R_OK and X_OK). A
+    relative, missing or unreadable tree, a stat error, and one that is not a directory are CannotEvaluate."""
+    tree = os.fspath(tree)
+    if not tree.startswith("/"):
+        raise CannotEvaluate("--tree {} is not an absolute path".format(tree))
+    try:
+        root = os.path.realpath(tree)
+        info = os.stat(root)
+    except (OSError, ValueError) as exc:
+        raise CannotEvaluate("the staged tree {} cannot be read: {}".format(tree, exc))
+    if not stat.S_ISDIR(info.st_mode):
+        raise CannotEvaluate("the staged tree {} is not a directory".format(tree))
+    if not os.access(root, os.R_OK | os.X_OK):
+        raise CannotEvaluate("the staged tree {} cannot be listed and searched by the lint's uid".format(tree))
+    return root
+
+
+def in_tree(path, root):
+    """Whether a real path is the staged tree's root or lies under it."""
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def tree_relative(path, names):
+    """The tree-relative form of a declared input in the staged-tree mode, or None when P6 judges it on the
+    host: a relative path as written, and an absolute path that is the brief's one declared workdir or lies under
+    it (under_workdir, read lexically) with the workdir's part removed. An absolute input in a brief whose
+    workdir declarations name more than one directory, or one that cannot be read (names.unclear), cannot be
+    placed: CannotEvaluate."""
+    if not path.startswith("/"):
+        return path
+    if names.unclear:
+        line, reason = names.unclear[0]
+        raise CannotEvaluate("line {}: {}; the staged tree cannot be mapped".format(line, reason))
+    workdirs = sorted(set(normalise(workdir) for workdir in names.workdirs))
+    if len(workdirs) > 1:
+        raise CannotEvaluate("the brief declares {} different workdirs ({}), so the staged tree cannot be mapped; "
+                             "declare exactly one".format(len(workdirs), ", ".join(workdirs)))
+    if not workdirs or not under_workdir(path, workdirs):
+        return None
+    return normalise(path)[len(workdirs[0].rstrip("/")):].lstrip("/") or "."
+
+
+def tree_probe(root, inside, line, path):
+    """The real path in the staged tree `root` that P6 stats for the tree-relative `inside` (a trailing slash
+    on the declared `path` kept, so a file named as a directory is ENOTDIR). A path that resolves outside the
+    tree (a symbolic link that escapes it) is CannotEvaluate."""
+    try:
+        resolved = os.path.realpath(os.path.join(root, inside))
+    except (OSError, ValueError) as exc:
+        raise CannotEvaluate("line {}: the declared input {} cannot be placed in the staged tree {}: {}".format(
+            line, path, root, exc))
+    if not in_tree(resolved, root):
+        raise CannotEvaluate("line {}: the declared input {} resolves outside the staged tree {} (to {})".format(
+            line, path, root, resolved))
+    return resolved + "/" if path.endswith("/") and resolved != "/" else resolved
+
+
+def tree_prose_state(root, path):
+    """None when the repository-relative prose `path` is present in the staged tree `root` (os.lstat, the last
+    component not followed), else what P3 prints of it: missing (ENOENT, ENOTDIR) or resolving outside the tree
+    (its parent directory's real path is not under `root`). Any other stat error is CannotEvaluate."""
+    joined = os.path.join(root, path)
+    try:
+        parent = os.path.realpath(os.path.dirname(joined))
+        if not in_tree(parent, root):
+            return "resolves outside"
+        os.lstat(os.path.join(parent, os.path.basename(joined)))
+    except OSError as exc:
+        if exc.errno in MISSING_ERRNOS:
+            return "does not exist in"
+        raise CannotEvaluate("the path {} cannot be looked up in the staged tree {}: {}".format(path, root, exc))
+    except ValueError as exc:
+        raise CannotEvaluate("the path {} cannot be looked up in the staged tree {}: {}".format(path, root, exc))
+    return None
+
+
+def rule_p6(names, row, repo, tree=None):
     """P6 HARD, for every family: a declared input (a declaring paragraph line of the parsed CommonMark
     document, read by the shared parser)
     that does not exist on the host
     the lint runs on (input_state gives an errno of MISSING_ERRNOS: ENOENT, or ENOTDIR for a path under a file).
+    With a staged tree (`tree`, the real path staged_tree returned) a relative input, and an absolute one under
+    the declared workdir (tree_relative), is judged in the tree instead (tree_probe, then input_state): one
+    missing there is HARD and the message names the tree, and one that resolves outside it is CannotEvaluate;
+    an absolute input outside the workdir is still judged on the host.
     A malformed declaration or a look-alike label (bad_inputs), any other stat error, another
     file type and a path input_readable refuses leave the input unconfirmed: CannotEvaluate, never a pass. Paths in
     prose and in code (a fenced or indented block, a code span) are not judged."""
@@ -3130,13 +3249,17 @@ def rule_p6(names, row, repo):
         raise CannotEvaluate("line {}: {}".format(line, reason))
     findings = []
     for line, path in _first_seen(names.inputs):
-        code, reason = input_state(path)
+        inside = None if tree is None else tree_relative(path, names)
+        if inside is None and not path.startswith("/"):
+            raise CannotEvaluate("line {}: the declared input {} is not an absolute path".format(line, path))
+        where = "on this host" if inside is None else "in the staged tree {}".format(tree)
+        code, reason = input_state(path if inside is None else tree_probe(tree, inside, line, path))
         if code in MISSING_ERRNOS:
-            findings.append(("P6", "HARD", line, "declared input does not exist on this host ({}), so the worker "
-                             "cannot read it; provide it or correct the INPUT line".format(reason), _excerpt(path)))
+            findings.append(("P6", "HARD", line, "declared input does not exist {} ({}), so the worker cannot "
+                             "read it; provide it or correct the INPUT line".format(where, reason), _excerpt(path)))
         elif reason is not None:
-            raise CannotEvaluate("line {}: the declared input {} cannot be confirmed readable: {}".format(
-                line, path, reason))
+            raise CannotEvaluate("line {}: the declared input {} cannot be confirmed readable {}: {}".format(
+                line, path, where, reason))
     return findings
 
 
@@ -3500,12 +3623,15 @@ def rule_w1(text, row, family, families, scoped=True):
     return findings
 
 
-def preflight(text, row, repo, raw):
+def preflight(text, row, repo, raw, tree=None):
     """The preflight findings (P1 to P7) for a brief's text and its family's row; they apply to every family. `raw`
-    is the text before decode_brief removed format characters, which the P5 cure and the P7 declarations read."""
-    names = PreflightText(text, raw)
-    return rule_p1(names, row, repo) + rule_p2(names, row, repo) + rule_p3(names, row, repo) + rule_p4(
-        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo) + rule_p7(names, row, repo)
+    is the text before decode_brief removed format characters, which the P5 cure and the P7 declarations read.
+    `tree` is the staged tree given with --tree, or None; it is checked (staged_tree) before any rule runs, and
+    its real path is passed to P3 and P6."""
+    root = None if tree is None else staged_tree(tree)
+    names = PreflightText(text, raw, relative=root is not None)
+    return rule_p1(names, row, repo) + rule_p2(names, row, repo) + rule_p3(names, row, repo, root) + rule_p4(
+        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo, root) + rule_p7(names, row, repo)
 
 
 def can_execute(row):
@@ -3513,16 +3639,16 @@ def can_execute(row):
     return row["execute"] != "no"
 
 
-def evaluate(data, family, table, scoped=True, repo=None):
+def evaluate(data, family, table, scoped=True, repo=None, tree=None):
     """(exit code, findings) for a brief's bytes addressed to `family`, or CannotEvaluate. Findings are
     (rule, severity, line, message, excerpt), in brief order. `repo` is the repository a pinned revision is
-    read from (P3)."""
+    read from (P3); `tree` is the staged tree the declared inputs are judged in (--tree, P6 and P3), or None."""
     if family not in table:
         raise CannotEvaluate("family {!r} is not in the capability table (known: {})".format(
             family, ", ".join(sorted(table))))
     text = decode_brief(data)
     # the preflight and W1 apply to every family, so they run before the return for a family that can execute
-    early = preflight(text, table[family], repo, data.decode("utf-8")) + rule_w1(
+    early = preflight(text, table[family], repo, data.decode("utf-8"), tree) + rule_w1(
         text, table[family], family, set(table), scoped)
     if can_execute(table[family]):
         early.sort(key=lambda finding: finding[2])
@@ -3580,10 +3706,10 @@ GIT_WRITE_HINT = ("; the family's row says git-write = \"no\": drop the git comm
                   "(Do not run `git push`.), or send it to a family that can write")
 
 
-def run(brief_path, family, table_path, scoped=True, repo=None):
+def run(brief_path, family, table_path, scoped=True, repo=None, tree=None):
     try:
         table = load_table(table_path)
-        code, findings = evaluate(_read_regular(brief_path, "brief"), family, table, scoped, repo)
+        code, findings = evaluate(_read_regular(brief_path, "brief"), family, table, scoped, repo, tree)
     except CannotEvaluate as exc:
         print("CANNOT_EVALUATE: {}".format(exc))
         return EXIT_CANNOT_EVALUATE
@@ -3609,8 +3735,9 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
                   CURE_EXAMPLE.format("<pin>"), ", and name paths under the declared workdir" if "P2" in hard else "",
                   missing_input, CURE_SHAPE))
     elif code == EXIT_REFUSE and set(hard) == {"P6"}:
-        print("REFUSE: family {}: the brief declares an input that does not exist on this host ({} hard hit(s): "
-              "P6 x{}){}".format(family, len(hard), len(hard), INPUT_HINT))
+        print("REFUSE: family {}: the brief declares an input that does not exist {} ({} hard hit(s): "
+              "P6 x{}){}".format(family, "on this host" if tree is None else "on this host or in the staged tree",
+                                 len(hard), len(hard), INPUT_HINT))
     elif code == EXIT_REFUSE and set(hard) == {"P7"}:
         print("REFUSE: family {}: the brief accepts a residual whose anchor does not hold at the pinned "
               "revision ({} hard hit(s): P7 x{}); correct each ACCEPTED-RESIDUAL line ({}), or re-pin the "
@@ -3632,10 +3759,12 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
     return code
 
 
-USAGE = ("usage: check_brief_capability.py --family NAME [--unscoped] [--table PATH] [--repo PATH] BRIEF\n"
+USAGE = ("usage: check_brief_capability.py --family NAME [--unscoped] [--table PATH] [--repo PATH] [--tree ABS_DIR]"
+         " BRIEF\n"
          "       check_brief_capability.py --self-test | --execution-report ABS_PATH\n"
          "The pin reads (P3) honour no system or global safe.directory entry: a --repo owned by another user exits 2\n"
-         "(dubious ownership); run the check as the repository owner, or point --repo at a checkout you own.")
+         "(dubious ownership); run the check as the repository owner, or point --repo at a checkout you own.\n"
+         "--tree judges relative INPUT paths, and those under the declared workdir, in the staged tree (P6, P3).")
 
 
 def check_table(path):
@@ -3656,7 +3785,7 @@ def main(argv):
         return self_test()
     if len(argv) == 2 and argv[0] == "--execution-report" and os.path.isabs(argv[1]):
         return self_test(argv[1])
-    family, table_path, scoped, paths, repo = None, None, True, [], None
+    family, table_path, scoped, paths, repo, tree = None, None, True, [], None, None
     args = list(argv)
     while args:
         arg = args.pop(0)
@@ -3666,6 +3795,8 @@ def main(argv):
             table_path = Path(args.pop(0))
         elif arg == "--repo" and args and repo is None:
             repo = Path(args.pop(0))
+        elif arg == "--tree" and args and tree is None:
+            tree = args.pop(0)
         elif arg == "--unscoped":
             scoped = False
         elif arg.startswith("-"):
@@ -3677,7 +3808,7 @@ def main(argv):
         print("CANNOT_EVALUATE: wrong arguments\n" + USAGE, file=sys.stderr)
         return EXIT_CANNOT_EVALUATE
     return run(paths[0], family, ROOT / TABLE_REL if table_path is None else table_path, scoped,
-               ROOT if repo is None else repo)
+               ROOT if repo is None else repo, tree)
 
 
 # SELF-TEST: production code ends here. Every fixture below is synthetic (no real brief text, path, or
@@ -3756,12 +3887,12 @@ def _git_outcome(fn, *args):
         return "CannotEvaluate"
 
 
-def _outcome(text, family="gamma", scoped=True, repo=None):
+def _outcome(text, family="gamma", scoped=True, repo=None, tree=None):
     """(exit code, sorted distinct (rule, severity)) for a synthetic brief, or "CannotEvaluate"."""
     table = parse_table(TABLE_FIXTURE.encode("utf-8"))
     try:
         code, findings = evaluate(text.encode("utf-8") if isinstance(text, str) else text, family, table,
-                                  scoped, repo)
+                                  scoped, repo, tree)
     except CannotEvaluate:
         return "CannotEvaluate"
     return code, sorted(set((rule, severity) for rule, severity, _, _, _ in findings))
@@ -8213,6 +8344,130 @@ def self_test(report_path=None):
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
+    # ---------- P6 and P3 with a staged tree (--tree): each fixture tree is a fresh directory ----------
+    # {H} is a declared workdir that does not exist on the host and {O} a directory outside every tree;
+    # the empty tree holds nothing, the full tree holds every input, and the linked tree holds links that
+    # escape it and a regular file where a directory is declared
+    staged_base = _p6_input_root()
+    empty, full, linked = staged_base / "tree-empty", staged_base / "tree-full", staged_base / "tree-linked"
+    outside, host_workdir = staged_base / "outside", staged_base / "host-absent" / "repo"
+    locked_tree = staged_base / "tree-locked"
+    try:
+        for directory in (empty, full / "plans", full / "inputs", full / "x", linked, outside / "inputs",
+                          locked_tree):
+            os.makedirs(directory)
+        for name in (full / "plans" / "plan.md", full / "notes.md", outside / "in.md", linked / "inputs"):
+            with open(name, "w", encoding="utf-8") as handle:
+                handle.write("input\n")
+        os.symlink(outside / "inputs", linked / "x")
+        os.symlink(outside / "in.md", linked / "f.md")
+        os.mkfifo(full / "fifo")
+        os.chmod(locked_tree, 0)
+
+        def staged(text, tree, family="alpha"):
+            """(exit code, sorted (rule, severity), whether every P3 and P6 message names the tree's real
+            path) for a brief linted against `tree`, or "CannotEvaluate"."""
+            table = parse_table(TABLE_FIXTURE.encode("utf-8"))
+            text = text.replace("{H}", str(host_workdir)).replace("{O}", str(outside))
+            try:
+                code, findings = evaluate(text.encode("utf-8"), family, table, True, None, str(tree))
+            except CannotEvaluate:
+                return "CannotEvaluate"
+            named = all(os.path.realpath(tree) in message for rule, _, _, message, _ in findings
+                        if rule in ("P3", "P6"))
+            return code, sorted(set((rule, severity) for rule, severity, _, _, _ in findings)), named
+
+        tree_missing, tree_quiet = (1, [("P6", "HARD")], True), (0, [], True)
+        # a relative INPUT is judged in the tree: missing there is HARD and names the tree (exit 2 today)
+        check("preflight/p6-tree-relative-missing-hard", [staged(text, empty) for text in (
+            "INPUT: plans/plan.md\n", "INPUT: `plans/plan.md`\n", "INPUT: ./plans/plan.md\n",
+            "- INPUT: plans/plan.md\n")] + [staged("INPUT: plans/plan.md/x\n", full),
+                                            staged("INPUT: plans/plan.md\n", empty, "gamma")],
+              [tree_missing] * 6)
+        check("preflight/p6-tree-relative-present-quiet", [staged(text, full) for text in (
+            "INPUT: plans/plan.md\n", "INPUT: `plans/plan.md`\n", "INPUT: ./plans/plan.md\n",
+            "- INPUT: plans/plan.md\n", "INPUT: .\n")] + [staged("INPUT: plans/plan.md\n", full, "gamma")],
+              [tree_quiet] * 6)
+        # a declared directory: absent, or a regular file where the trailing slash asks for a directory
+        check("preflight/p6-tree-dir-missing-hard", [staged("INPUT: inputs/\n", empty),
+                                                     staged("INPUT: inputs\n", empty),
+                                                     staged("INPUT: inputs/\n", linked)], [tree_missing] * 3)
+        check("preflight/p6-tree-dir-present-quiet", [staged("INPUT: inputs/\n", full),
+                                                      staged("INPUT: inputs\n", full)], [tree_quiet] * 2)
+        # an absolute input under the declared workdir is mapped into the tree; {H} is absent on the host,
+        # so today's host check reports it missing for the wrong cause, and its present twin exits 1 today
+        check("preflight/p6-tree-workdir-mapped-missing-hard", [staged(text, empty) for text in (
+            "Workdir: {H}\nINPUT: {H}/inputs\n", "Workdir: {H}\nINPUT: {H}/plans/plan.md\n",
+            "Workdir: {H}/\nINPUT: {H}/inputs/\n")], [tree_missing] * 3)
+        check("preflight/p6-tree-workdir-mapped-present-quiet", [staged(text, full) for text in (
+            "Workdir: {H}\nINPUT: {H}/inputs\n", "Workdir: {H}\nINPUT: {H}/plans/plan.md\n",
+            "Workdir: {H}/\nINPUT: {H}/inputs/\n", "Workdir: {H}\nINPUT: {H}\n")], [tree_quiet] * 4)
+        # a link that resolves outside the tree cannot be judged in it, relative or mapped; a regular
+        # directory or file at the same name in the tree passes
+        check("preflight/p6-tree-symlink-escape-cannot-evaluate", [staged(text, linked) for text in (
+            "INPUT: x\n", "INPUT: x/\n", "INPUT: f.md\n", "Workdir: {H}\nINPUT: {H}/x\n")], ["CannotEvaluate"] * 4)
+        check("preflight/p6-tree-in-tree-directory-quiet", [staged(text, full) for text in (
+            "INPUT: x\n", "INPUT: x/\n", "INPUT: notes.md\n", "Workdir: {H}\nINPUT: {H}/x\n")], [tree_quiet] * 4)
+        # an absolute input outside the declared workdir, or in a brief with no workdir, keeps the host
+        # check, and its message names the host, not the tree
+        check("preflight/p6-tree-outside-workdir-host-check", [staged(text, empty) for text in (
+            "Workdir: {H}\nINPUT: {O}/in.md\n", "INPUT: {O}/inputs\n", "Workdir: {H}\nINPUT: {O}/missing.md\n",
+            "INPUT: {O}/missing.md\n")], [tree_quiet, tree_quiet, (1, [("P6", "HARD")], False),
+                                          (1, [("P6", "HARD")], False)])
+        # the tree itself: missing, a regular file, a relative path, or (where this uid honours mode 000)
+        # one it cannot list, is exit 2 before any rule runs; the full tree on a plain brief passes
+        tree_enforced = not os.access(locked_tree, os.R_OK | os.X_OK)
+        refused_trees = [staged_base / "tree-absent", full / "notes.md", Path("tree-full")] + (
+            [locked_tree] if tree_enforced else [])
+        check("preflight/p6-tree-root-cannot-evaluate",
+              [staged("Plain prose.\n", tree) for tree in refused_trees] + [staged("Plain prose.\n", full)],
+              ["CannotEvaluate"] * len(refused_trees) + [tree_quiet])
+        if not tree_enforced:
+            print("NOTE: preflight/p6-tree-root-cannot-evaluate ran without its mode-000 tree: this uid lists it")
+        check("preflight/p6-tree-not-file-or-directory-cannot-evaluate",
+              [staged("INPUT: fifo\n", full), staged("Workdir: {H}\nINPUT: {H}/fifo\n", full)],
+              ["CannotEvaluate"] * 2)
+        # an absolute input the tree mode would map needs one readable workdir declaration
+        check("preflight/p6-tree-workdir-unclear-cannot-evaluate", [staged(text, full) for text in (
+            "Workdir: {H}\nWorkdir: {O}\nINPUT: {H}/inputs\n", "Workdir: x y\nINPUT: {H}/inputs\n")],
+              ["CannotEvaluate"] * 2)
+        # regression rows: with no tree a relative INPUT stays exit 2, and a prose-only path missing from
+        # the tree stays ADVISORY (P3), never HARD; its present twin is quiet
+        check("preflight/p6-relative-no-tree-cannot-evaluate",
+              [_outcome("INPUT: plans/plan.md\n", "alpha"), _outcome("INPUT: inputs/\n", "gamma"),
+               _outcome("INPUT: plans/plan.md\n", "alpha", True, None, None)], ["CannotEvaluate"] * 3)
+        check("preflight/p3-tree-prose-advisory", [staged(text, empty) for text in (
+            "Read notes.md/../plans/plan.md and summarise it.\n", "Write your notes to plans/new.md.\n",
+            "Read ./plans/plan.md first.\n")], [(0, [("P3", "ADVISORY")], True)] * 3)
+        check("preflight/p3-tree-prose-present-quiet", [staged(text, full) for text in (
+            "Read notes.md/../plans/plan.md and summarise it.\n", "Read ./plans/plan.md first.\n")],
+              [tree_quiet] * 2)
+        # the shared reading's relative mode is explicit: the default still refuses a relative path, as
+        # check_verifier_delivery's C1 relies on, and `..` is refused in both modes
+        check("preflight/p6-tree-shape-default-absolute", (
+            _input_declarations.input_shape("plans/plan.md")[0],
+            _input_declarations.input_shape("plans/plan.md", relative=True),
+            _input_declarations.input_shape("a/../plan.md", relative=True)[0],
+            _input_declarations.read("INPUT: plans/plan.md\n")[0],
+            _input_declarations.read("INPUT: plans/plan.md\n", relative=True)),
+            (None, ("plans/plan.md", None), None, [], ([(1, "plans/plan.md")], [])))
+        # the command line: --tree is passed through run to the rules, and the REFUSE line names the tree
+        tree_brief, tree_table = staged_base / "brief.md", staged_base / "table.toml"
+        with open(tree_brief, "w", encoding="utf-8") as handle:
+            handle.write("INPUT: plans/plan.md\n")
+        with open(tree_table, "w", encoding="utf-8") as handle:
+            handle.write(TABLE_FIXTURE)
+        tree_printed, tree_lead = io.StringIO(), ["--family", "alpha", "--table", str(tree_table)]
+        with contextlib.redirect_stdout(tree_printed), contextlib.redirect_stderr(io.StringIO()):
+            tree_codes = [main(tree_lead + ["--tree", str(tree), str(tree_brief)]) for tree in (empty, full)]
+            tree_codes.append(main(tree_lead + [str(tree_brief)]))
+            tree_codes.append(main(tree_lead + ["--tree", str(full), "--tree", str(full), str(tree_brief)]))
+        check("preflight/p6-tree-refuse-line", (tree_codes, "in the staged tree" in tree_printed.getvalue()),
+              ([EXIT_REFUSE, EXIT_OK, EXIT_CANNOT_EVALUATE, EXIT_CANNOT_EVALUATE], True))
+    finally:
+        if os.path.lexists(locked_tree):
+            os.chmod(locked_tree, 0o700)
+        shutil.rmtree(staged_base, ignore_errors=True)
     # ---------- P7: accepted residuals at the pin ----------
     p7_base = Path(tempfile.mkdtemp(prefix="aiqt-brief-p7-"))
     try:
