@@ -24,7 +24,9 @@ name the characters in its own source without flagging itself; it writes them on
   check_no_dashes.py                     scan the repository under its policy
   check_no_dashes.py --self-test         fixture trees for the scan and the policy validator
   check_no_dashes.py --default-parity    this repository only: DEFAULT_POLICY equals .aiqt/char-policy.json
-  check_no_dashes.py --staged-scan ROOT  the staged changes of the git working tree whose top level is ROOT
+  check_no_dashes.py --staged-scan ROOT [--index FILE]
+                                         the staged changes of the git working tree whose top level is ROOT,
+                                         read from the index FILE when given
 
 --staged-scan is the mode a commit-time runner calls. It reads the policy from the index (stage 0 of
 .aiqt/char-policy.json; absent there, DEFAULT_POLICY), lists the staged changes against HEAD (against the empty
@@ -32,16 +34,26 @@ tree on an unborn branch) with renames detected, and reads the staged blob of ea
 or renamed regular file whose new path the policy scopes (scoped_rel, the same matcher as the preview hook's
 _in_scope, which agrees with scope_paths). It counts every occurrence of each policy character, per path and
 per character and never netted across either, and reports only what a staged blob adds over its HEAD version
-(for a rename, the old path's blob; for a new file or one that was not a regular file, nothing). A staged
-deletion is never scanned; a staged symbolic link or submodule in scope is named on a NOTE line and not
-scanned. Every git call is bound to ROOT (git -C ROOT, confirmed to be the working tree's top level) and runs
-with every ambient GIT_-prefixed variable dropped, as tools/check_portability.py runs its own git reads, so a
-GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or GIT_CONFIG_* in the caller's environment cannot redirect it. Two
-consequences are disclosed: under git commit -a or git commit PATH, whose pre-commit hook reads a temporary
-index named only by GIT_INDEX_FILE, this mode reads the repository's own index instead; and the git binary is
-resolved through PATH. Exit: 0 nothing added; 1 something added; 2 cannot evaluate (ROOT not the top level of
-a git working tree, a git call that fails, an unmerged entry, an index policy that is malformed or not a
-regular file, a scoped staged blob or its HEAD version that is not valid UTF-8, each named on stderr).
+(for a rename whose old path the policy also scopes, the old path's blob; for a rename from a path the policy
+does not scope, a new file, or one that was not a regular file, nothing, so every character such a file holds
+counts). A staged deletion is never scanned; a staged symbolic link or submodule in scope is named on a NOTE
+line and not scanned. Every git call is bound to ROOT (git -C ROOT, confirmed to be the working tree's top
+level) and runs with every ambient GIT_-prefixed variable dropped, as tools/check_portability.py runs its own
+git reads, so a GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or GIT_CONFIG_* in the caller's environment cannot
+redirect it. The index read is the repository's own unless --index FILE names another: FILE (taken from the
+current directory when relative) must be a regular file, not a symbolic link, whose real path lies inside the
+git directory of ROOT's working tree (git rev-parse --absolute-git-dir), or the run exits 2; the git calls that
+read the index are then given GIT_INDEX_FILE set to that real path. A pre-commit hook must pass --index
+"$GIT_INDEX_FILE": under git commit -a or git commit PATH, git hands the hook a temporary index named only by
+GIT_INDEX_FILE, and without --index this mode reads the repository's own index instead, so it can pass a commit
+that adds a dash and refuse one that does not. The git binary is resolved through PATH. One residual is
+disclosed: a scoped tree entry that is a symbolic link to a directory inside the repository, which scope_paths
+walks, is invisible here, because a staged change under the link's target is matched by its real path, which the
+entry does not scope, and the link itself, whose path is the tree entry, is no path below it, so it is neither
+scanned nor named on a NOTE line; the full scan stays authoritative for such a tree. Exit: 0 nothing added; 1
+something added; 2 cannot evaluate (ROOT not the top level of a git working tree, an --index FILE refused as
+above, a git call that fails, an unmerged entry, an index policy that is malformed or not a regular file, a
+scoped staged blob or its HEAD version that is not valid UTF-8, each named on stderr).
 
 Exit: 0 clean; 1 a finding; 2 cannot evaluate (an unreadable tree, a scoped tree that is there but is not a
 directory or a symlink to a directory inside the repository, a scoped file that is not valid UTF-8, a malformed
@@ -434,14 +446,17 @@ def _staged_shown(rel):
                    else ch for ch in rel)
 
 
-def _staged_git(root, *args, stdin=b""):
+def _staged_git(root, *args, stdin=b"", index=None):
     """Run git bound to root (git -C root) with every ambient GIT_-prefixed variable dropped, the posture
     tools/check_portability.py takes for its own git reads, so GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE or a
-    GIT_CONFIG_* variable cannot point the read at another repository, index or configuration. The three
+    GIT_CONFIG_* variable cannot point the read at another repository, index or configuration. index, when not
+    None, is the real path _staged_index returned, set as GIT_INDEX_FILE for this call only. The three
     `-c` pairs in option position switch off automatic gc and maintenance (tools/_git_fixture_env.py
     _NO_AUTO_MAINTENANCE), so no git call here can leave a detached repack behind. Returns the completed process
     (bytes); raises StagedScanError when git cannot be launched or does not finish."""
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    if index is not None:
+        env["GIT_INDEX_FILE"] = index
     try:
         return subprocess.run(["git", "-C", str(root), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
                                "-c", "maintenance.auto=false", *args], input=stdin, capture_output=True, env=env,
@@ -450,9 +465,9 @@ def _staged_git(root, *args, stdin=b""):
         raise StagedScanError(f"git {args[0]} could not run ({exc})") from None
 
 
-def _staged_git_ok(root, *args, stdin=b""):
+def _staged_git_ok(root, *args, stdin=b"", index=None):
     """_staged_git's stdout; StagedScanError, with git's own message, on a non-zero exit."""
-    done = _staged_git(root, *args, stdin=stdin)
+    done = _staged_git(root, *args, stdin=stdin, index=index)
     if done.returncode != 0:
         detail = done.stderr.decode("utf-8", "replace").strip()[:300]
         raise StagedScanError(f"git {args[0]} exited {done.returncode} ({_staged_shown(detail)})")
@@ -469,6 +484,27 @@ def _staged_root(root):
     if not same:
         raise StagedScanError(f"{root} is not the top level of a git working tree (git names "
                               f"{_staged_shown(top)!r})")
+
+
+def _staged_index(root, index):
+    """The real path of the index file --index names, after checking that it is a regular file, not a symbolic
+    link, whose real path lies inside the git directory of the working tree at root (git rev-parse
+    --absolute-git-dir); StagedScanError otherwise. A relative index is taken from the current directory."""
+    if index == "":
+        raise StagedScanError("--index names no file")
+    shown = _staged_shown(index)
+    gitdir = _staged_git_ok(root, "rev-parse", "--absolute-git-dir").decode("utf-8", "surrogateescape").rstrip("\n")
+    try:
+        mode = os.lstat(index).st_mode
+        real = os.path.realpath(index, strict=True)
+        real_gitdir = os.path.realpath(gitdir, strict=True)
+    except OSError as exc:
+        raise StagedScanError(f"--index {shown!r} cannot be examined ({_staged_shown(str(exc))})") from None
+    if not stat.S_ISREG(mode):
+        raise StagedScanError(f"--index {shown!r} is not a regular file (a symbolic link or another kind)")
+    if real == real_gitdir or os.path.commonpath([real, real_gitdir]) != real_gitdir:
+        raise StagedScanError(f"--index {shown!r} is not inside the git directory {_staged_shown(real_gitdir)!r}")
+    return real
 
 
 def _staged_base(root):
@@ -511,11 +547,11 @@ def _staged_blobs(root, oids):
     return blobs
 
 
-def _staged_policy(root):
-    """The policy in the index: stage 0 of POLICY_PATH parsed and validated, or DEFAULT_POLICY when the index
-    does not hold it. PolicyError when it is not a regular file or is malformed; StagedScanError when it is
-    unmerged or cannot be read."""
-    listed = _staged_git_ok(root, "ls-files", "--stage", "-z", "--", ":(literal)" + POLICY_PATH)
+def _staged_policy(root, index=None):
+    """The policy in the index (index, when not None, as _staged_git takes it): stage 0 of POLICY_PATH parsed
+    and validated, or DEFAULT_POLICY when the index does not hold it. PolicyError when it is not a regular file
+    or is malformed; StagedScanError when it is unmerged or cannot be read."""
+    listed = _staged_git_ok(root, "ls-files", "--stage", "-z", "--", ":(literal)" + POLICY_PATH, index=index)
     entries = []
     for record in listed.split(b"\0"):
         if not record:
@@ -537,39 +573,43 @@ def _staged_policy(root):
     return parse_policy(_staged_blobs(root, [oid])[oid])
 
 
-def _staged_changes(root, base):
-    """The staged changes against base, in git's order, as (status letter, old mode, new mode, old object id,
-    new object id, new path); a rename's old blob is its baseline. StagedScanError on an unmerged entry or
-    output this parser does not know."""
-    raw = _staged_git_ok(root, "diff-index", "--cached", "--raw", "-z", "-M", "--no-abbrev", base, "--")
+def _staged_changes(root, base, index=None):
+    """The staged changes against base in the index (index, when not None, as _staged_git takes it), in git's
+    order, as (status letter, old mode, new mode, old object id, new object id, old path, new path); the old path
+    is the new one except for a rename or copy. StagedScanError on an unmerged entry or output this parser does
+    not know."""
+    raw = _staged_git_ok(root, "diff-index", "--cached", "--raw", "-z", "-M", "--no-abbrev", base, "--",
+                         index=index)
     fields = raw.split(b"\0")
     if fields and fields[-1] == b"":
         fields.pop()
-    changes, index = [], 0
-    while index < len(fields):
-        head = fields[index]
+    changes, at = [], 0
+    while at < len(fields):
+        head = fields[at]
         meta = head[1:].decode("ascii", "replace").split(" ") if head.startswith(b":") else []
         if len(meta) != 5 or meta[4][:1] not in ("A", "C", "D", "M", "R", "T", "U"):
             raise StagedScanError(f"unexpected git diff-index output {head[:120]!r}")
         old_mode, new_mode, old_oid, new_oid, status = meta
         width = 2 if status[0] in ("R", "C") else 1
-        if index + 1 + width > len(fields):
+        if at + 1 + width > len(fields):
             raise StagedScanError("git diff-index output is truncated")
-        path = fields[index + width].decode("utf-8", "surrogateescape")
-        index += 1 + width
+        old_path = fields[at + 1].decode("utf-8", "surrogateescape")
+        path = fields[at + width].decode("utf-8", "surrogateescape")
+        at += 1 + width
         if status[0] == "U":
             raise StagedScanError(f"{_staged_shown(path)} is unmerged in the index")
-        changes.append((status[0], old_mode, new_mode, old_oid, new_oid, path))
+        changes.append((status[0], old_mode, new_mode, old_oid, new_oid, old_path, path))
     return changes
 
 
-def staged_scan(root):
-    """Scan the staged changes of the git working tree whose top level is root (see the module docstring);
-    print the result and return the exit status."""
+def staged_scan(root, index=None):
+    """Scan the staged changes of the git working tree whose top level is root, in the index file index names
+    when it is not None (--index; see the module docstring); print the result and return the exit status."""
     root = Path(root)
     try:
         _staged_root(root)
-        policy = _staged_policy(root)
+        index = None if index is None else _staged_index(root, index)
+        policy = _staged_policy(root, index)
     except PolicyError as exc:
         print(f"error: the character policy {POLICY_PATH} in the index cannot be used ({exc}); fail-closed",
               file=sys.stderr)
@@ -580,13 +620,18 @@ def staged_scan(root):
     chars = list(policy["chars"].items())
     try:
         scoped, notes = [], []
-        for status, old_mode, new_mode, old_oid, new_oid, path in _staged_changes(root, _staged_base(root)):
+        for status, old_mode, new_mode, old_oid, new_oid, old_path, path in _staged_changes(
+                root, _staged_base(root), index):
             if status == "D" or not scoped_rel(path.split("/"), policy):
                 continue
             if new_mode not in _STAGED_REGULAR_MODES:
                 notes.append(path)
                 continue
-            scoped.append((path, new_oid, old_oid if status != "A" and old_mode in _STAGED_REGULAR_MODES else None))
+            # The old blob is the baseline only when it was a regular file the policy scopes: a rename from a path
+            # out of scope brings every character it holds into scope, so it is compared with nothing.
+            baseline = (status != "A" and old_mode in _STAGED_REGULAR_MODES
+                        and (old_path == path or scoped_rel(old_path.split("/"), policy)))
+            scoped.append((path, new_oid, old_oid if baseline else None))
         blobs = _staged_blobs(root, [oid for _path, new_oid, old_oid in scoped for oid in (new_oid, old_oid)
                                      if oid is not None])
     except StagedScanError as exc:
@@ -630,11 +675,13 @@ def staged_scan(root):
 
 
 def _staged_vectors(failures, expect, tree, policy, scratch):
-    """The --staged-scan self-test vectors (G19 to G32), each on throwaway git repositories. The whole block runs
+    """The --staged-scan self-test vectors (G19 to G37), each on throwaway git repositories. The whole block runs
     inside _git_fixture_env.fixture_git_lifecycle, so neither the fixture git calls nor the scan under test can
     read or change the caller's repository, index or git configuration, and the caller's environment is put
     back afterwards. Each vector that fails without the staged scan (or without the one behaviour it names) is
     paired with a twin that passes either way, so the pair proves the difference."""
+    import shlex
+
     from _git_fixture_env import fixture_git_lifecycle, git_fixture_env
 
     em, en, quote = "—", "–", "“"
@@ -802,8 +849,121 @@ def _staged_vectors(failures, expect, tree, policy, scratch):
             staged("G32A staged symbolic link", linked, 0, "NOTE: d/l.md is staged as a symbolic link")
             staged("G32B regular file of that name", repo({"README.md": "x\n"}, {"d/l.md": f"x{em}.txt"}), 1,
                    "d/l.md: em dash x1 added")
+            # G33 a rename's old blob is its baseline only when the policy scopes its old path: a rename from
+            # out-of-scope tools/x.py, or from a skipped node_modules directory, brings every dash it holds into
+            # scope; the twin, the same content renamed within scope, adds nothing.
+            for label, old, new, want, needle in (
+                    ("G33A rename from out of scope into scope", "tools/x.py", "d/x.md", 1,
+                     "d/x.md: em dash x3 added (HEAD 0, staged 3)"),
+                    ("G33B rename from a skipped directory into scope", "node_modules/x.md", "x.md", 1,
+                     "x.md: em dash x3 added (HEAD 0, staged 3)"),
+                    ("G33C rename within scope", "d/a.md", "d/x.md", 0, pass_line)):
+                moved = repo({old: filler + f"{em}{em}{em}\n"})
+                os.makedirs(os.path.dirname(os.path.join(moved, *new.split("/"))), exist_ok=True)
+                git(moved, "mv", old, new)
+                staged(label, moved, want, needle)
+            # G34 a type change from a symbolic link to a regular file has no baseline: the link's target text is
+            # not compared, so a dash the new file shares with it counts; the twin without a dash adds nothing.
+            for label, text, want, needle in (
+                    ("G34A symbolic link replaced by a regular file holding its dashed target text", f"x{em}.txt", 1,
+                     "d/l.md: em dash x1 added (HEAD 0, staged 1)"),
+                    ("G34B symbolic link replaced by a regular file without a dash", "x.txt", 0, pass_line)):
+                retyped = repo({"README.md": "x\n"})
+                os.makedirs(os.path.join(retyped, "d"))
+                os.symlink(f"x{em}.txt", os.path.join(retyped, "d", "l.md"))
+                git(retyped, "add", "--", "d/l.md")
+                git(retyped, "commit", "-q", "-m", "link")
+                os.remove(os.path.join(retyped, "d", "l.md"))
+                write(retyped, "d/l.md", text)
+                git(retyped, "add", "--", "d/l.md")
+                staged(label, retyped, want, needle)
+            # G35 --index names the index to read: an alternate index inside the git directory holding a dash is read
+            # though the repository's own index is clean, and the twin, --index naming that own index, passes. An
+            # index outside the git directory, a symbolic link inside it, a missing file, the git directory itself
+            # and an empty name are each exit 2.
+            alternate = repo({"d/a.md": "x\n"})
+            own_index, alt_index = (os.path.join(alternate, ".git", name) for name in ("index", "alt-index"))
+            with open(own_index, "rb") as handle:
+                index_bytes = handle.read()
+            write(alternate, ".git/alt-index", index_bytes)
+            write(alternate, "d/a.md", f"x{em}\n")
+            done = subprocess.run(["git", "-C", alternate, "add", "--", "d/a.md"], capture_output=True,
+                                  env=git_fixture_env(GIT_INDEX_FILE=alt_index, **identity), timeout=120)
+            if done.returncode != 0:
+                raise RuntimeError(f"fixture git add to an alternate index exited {done.returncode}")
+            outside_dir = tree({})
+            write(outside_dir, "index", index_bytes)
+            outside = os.path.join(outside_dir, "index")
+            os.symlink(outside, os.path.join(alternate, ".git", "link-index"))
+
+            def indexed(index):
+                return lambda root: staged_scan(root, index)
+
+            expect("G35A --index an alternate index holding a dash", alternate, 1, "d/a.md: em dash x1 added",
+                   check=indexed(alt_index))
+            expect("G35B --index the repository's own clean index", alternate, 0, pass_line, check=indexed(own_index))
+            for label, index, needle in (
+                    ("G35C --index outside the git directory", outside, "is not inside the git directory"),
+                    ("G35D --index a symbolic link inside the git directory",
+                     os.path.join(alternate, ".git", "link-index"), "is not a regular file"),
+                    ("G35E --index a missing file", os.path.join(alternate, ".git", "absent"), "cannot be examined"),
+                    ("G35F --index the git directory itself", os.path.join(alternate, ".git"), "is not a regular file"),
+                    ("G35G --index empty", "", "--index names no file")):
+                expect(label, alternate, 2, needle, check=indexed(index))
+            # G36 a real pre-commit hook passing --index "$GIT_INDEX_FILE", run by git itself: under git commit, git
+            # commit -a and git commit -- PATH it refuses a commit that adds a dash, naming it, and makes the same
+            # commit without the dash; and it does not refuse git commit -- PATH of a clean file for a dashed file
+            # staged beside it but left out of that commit.
+            hook_text = ('#!/bin/sh\nexec %s -I -B %s --staged-scan . --index "$GIT_INDEX_FILE"\n'
+                         % (shlex.quote(sys.executable), shlex.quote(os.path.abspath(__file__))))
+
+            def hooked():
+                root = repo({"d/a.md": "x\n", "d/b.md": "y\n"})
+                write(root, ".git/hooks/pre-commit", hook_text)
+                os.chmod(os.path.join(root, ".git", "hooks", "pre-commit"), 0o700)
+                return root
+
+            def commit(label, root, args, refused, needle):
+                before = git(root, "rev-parse", "HEAD")
+                done = subprocess.run(["git", "-C", root, "commit", "-q", "-m", "c", *args], capture_output=True,
+                                      env=git_fixture_env(**identity), timeout=300)
+                moved = git(root, "rev-parse", "HEAD") != before
+                said = (done.stdout + done.stderr).decode("utf-8", "replace")
+                if moved is refused or (done.returncode != 0) is not refused or needle not in said:
+                    failures.append(f"{label}: want the commit {'refused' if refused else 'made'} and {needle!r}, "
+                                    f"got exit {done.returncode}, HEAD {'moved' if moved else 'unchanged'}: "
+                                    f"{said.strip()[:200]!r}")
+
+            for form, args in (("git commit", ()), ("git commit -a", ("-a",)),
+                               ("git commit -- PATH", ("--", "d/a.md"))):
+                for dashed in (True, False):
+                    root = hooked()
+                    write(root, "d/a.md", f"x{em}\n" if dashed else "x2\n")
+                    if not args:
+                        git(root, "add", "--", "d/a.md")
+                    commit(f"G36{'A' if dashed else 'B'} hook, {form}, {'a dash' if dashed else 'no dash'}", root,
+                           args, dashed, "d/a.md: em dash x1 added" if dashed else pass_line)
+            partial = hooked()
+            write(partial, "d/b.md", f"y{em}\n")
+            git(partial, "add", "--", "d/b.md")
+            write(partial, "d/a.md", "x2\n")
+            commit("G36C hook, git commit -- PATH of a clean file, a dashed file staged but left out", partial,
+                   ("--", "d/a.md"), False, pass_line)
+            # G37 the disclosed residual, pinned so the docstring stays true: under a policy whose tree entry t is a
+            # symbolic link to shared/d, a dash staged in shared/d/a.md is not seen by the staged scan (exit 0),
+            # though the full scan of the same tree, which walks t, finds it (exit 1).
+            residual = repo({".aiqt/char-policy.json": json.dumps(policy(
+                chars={em: "em dash"}, scope=[{"tree": "t", "suffixes": [".md"]}])) + "\n", "shared/d/a.md": "x\n"})
+            os.symlink(os.path.join("shared", "d"), os.path.join(residual, "t"))
+            git(residual, "add", "--", "t")
+            git(residual, "commit", "-q", "-m", "link")
+            write(residual, "shared/d/a.md", f"x{em}\n")
+            git(residual, "add", "--", "shared/d/a.md")
+            staged("G37A staged dash under a scoped tree reached through a directory symlink", residual, 0,
+                   'PASS: the staged changes add no em dash to the files the "fixture" character policy scopes')
+            expect("G37B the full scan of that tree", residual, 1, "t/a.md:1:2: em dash")
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-            failures.append(f"G19 to G32 staged-scan fixtures could not be built ({exc})")
+            failures.append(f"G19 to G37 staged-scan fixtures could not be built ({exc})")
 
 
 def _self_test():
@@ -1060,10 +1220,14 @@ def _self_test():
             finally:
                 os.chmod(os.path.join(hidden, "d"), 0o700)
         # G13 arguments: an unknown argument is exit 2 with the usage line, never a scan.
-        # T13: --staged-scan takes exactly one ROOT; none, or a second argument, is the same usage error.
+        # T13: --staged-scan takes exactly one ROOT, then optionally --index FILE; none, a second argument, --index
+        # without FILE or with a further argument, or another option in its place, is the same usage error.
         for argv in (["check_no_dashes.py", "--bogus"], ["check_no_dashes.py", "--self-test", "x"],
                      ["check_no_dashes.py", "--default-parity", "x"], ["check_no_dashes.py", "--staged-scan"],
-                     ["check_no_dashes.py", "--staged-scan", scratch, "x"]):
+                     ["check_no_dashes.py", "--staged-scan", scratch, "x"],
+                     ["check_no_dashes.py", "--staged-scan", scratch, "--index"],
+                     ["check_no_dashes.py", "--staged-scan", scratch, "--bogus", "x"],
+                     ["check_no_dashes.py", "--staged-scan", scratch, "--index", "x", "y"]):
             out, err = io.StringIO(), io.StringIO()
             with redirect_stdout(out), redirect_stderr(err):
                 rc = main(argv)
@@ -1167,8 +1331,11 @@ def main(argv):
         return default_parity(Path(__file__).resolve().parents[1])
     if len(argv) == 3 and argv[1] == "--staged-scan":
         return staged_scan(argv[2])
+    if len(argv) == 5 and argv[1] == "--staged-scan" and argv[3] == "--index":
+        return staged_scan(argv[2], argv[4])
     if argv[1:]:
-        print("usage: check_no_dashes.py [--self-test | --default-parity | --staged-scan ROOT]", file=sys.stderr)
+        print("usage: check_no_dashes.py [--self-test | --default-parity | --staged-scan ROOT [--index FILE]]",
+              file=sys.stderr)
         return 2
     return run(Path(__file__).resolve().parents[1])
 
