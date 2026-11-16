@@ -1884,8 +1884,10 @@ _MAPPINGS_ROW = "gensrc/mappings-pages-declare-renderer-sources"
 _FOOTER_SOURCES = ("VERSION", "changelog.toml")
 # The inputs a mappings component renders from: the 2 data folders _mappings_data reads and the 4 modules
 # whose functions load and render them. The self-test holds this tuple to _mappings_inputs, which derives the
-# same set from this file's own text (the functions _MAPPINGS_RENDERER calls and the modules and folders they
-# use), so an entry dropped here, or one gained that no renderer reads, turns the self-test red.
+# same set from this file's own text (the functions _MAPPINGS_RENDERER calls and the modules, folders and
+# files they use, through module-level constants, imports inside them and ROOT.joinpath too), so an entry
+# dropped here, or one gained that no renderer reads, turns the self-test red, and a renderer read the
+# derivation cannot evaluate turns it red as well.
 _MAPPINGS_RENDERER = "_c_mappings"
 _MAPPINGS_SOURCES = (".aiqt/standards/", ".aiqt/core/rules/", "tools/gen_mappings.py", "tools/gen_rules.py",
                      "tools/_standards.py", "tools/gen_agents.py")
@@ -2006,17 +2008,57 @@ def _data_carriers(sites=SITES, root=ROOT):
     return {row: frozenset(targets) for row, targets in found.items()}
 
 
+def _root_parts(node, used):
+    """The path parts of `node` when it is a path built on ROOT: ROOT itself, X / "<part>" or
+    X.joinpath("<part>", ...) over such an X. None when `node` is no such path. ValueError (cannot evaluate)
+    when a part is not a string constant. Each node consumed as the base of a longer path is added to
+    `used`."""
+    import ast
+    if isinstance(node, ast.Name) and node.id == "ROOT":
+        return []
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        base, extra = node.left, [node.right]
+    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "joinpath":
+        base, extra = node.func.value, list(node.args)
+    else:
+        return None
+    parts = _root_parts(base, used)
+    if parts is None:
+        return None
+    used.add(id(base))
+    if isinstance(node, ast.Call) and node.keywords \
+            or not all(isinstance(part, ast.Constant) and isinstance(part.value, str) for part in extra):
+        raise ValueError("cannot evaluate a ROOT path whose parts are not all string constants (line {})"
+                         .format(node.lineno))
+    return parts + [part.value for part in extra]
+
+
 def _mappings_inputs(source, root=ROOT):
     """The inputs a mappings component renders from, derived from `source` (this file's text) alone. From
-    the function _MAPPINGS_RENDERER, every module-level function it names is walked, directly or through
-    another; the inputs are "tools/<module>.py" for each module-level import of a module in root's tools/
-    folder whose bound name a walked function uses, and "<a>/<b>/" for each ROOT / "<a>" / "<b>" path (string
-    parts only) a walked function builds. ValueError when `source` defines no _MAPPINGS_RENDERER."""
+    the function _MAPPINGS_RENDERER, every module-level function, class and assigned name it names is
+    walked, directly or through another (a module-level constant's value is walked as the function's code
+    is). The inputs are "tools/<module>.py" for each module in root's tools/ folder that a walked part
+    imports, or whose module-level import binds a name a walked part uses, and each path a walked part
+    builds on ROOT from string constants (ROOT / "<a>" / "<b>", ROOT.joinpath("<a>", "<b>") or both): "<a>/<b>"
+    when that path is a file under root and "<a>/<b>/" when it is a folder. ValueError, as cannot evaluate,
+    when `source` defines no _MAPPINGS_RENDERER, or a walked part builds a ROOT path from a part that is not
+    a string constant, names a path that is missing under root or leaves it ("", "." or ".." as a part),
+    or uses ROOT through any attribute other than joinpath (ROOT.iterdir() and the like). ROOT passed whole
+    as an argument is no input here: the callee's module is one."""
     import ast
     tree = ast.parse(source)
-    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
-    if _MAPPINGS_RENDERER not in functions:
-        raise ValueError("no module-level function {}".format(_MAPPINGS_RENDERER))
+    defined = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defined.setdefault(node.name, []).append(node)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                for name in ast.walk(target):
+                    if isinstance(name, ast.Name) and name.id != "ROOT":
+                        defined.setdefault(name.id, []).append(node.value)
+    if not any(isinstance(node, ast.FunctionDef) for node in defined.get(_MAPPINGS_RENDERER, ())):
+        raise ValueError("cannot evaluate: no module-level function {}".format(_MAPPINGS_RENDERER))
     imported = {}
     for node in tree.body:
         if isinstance(node, ast.Import):
@@ -2026,36 +2068,62 @@ def _mappings_inputs(source, root=ROOT):
             for alias in node.names:
                 imported[alias.asname or alias.name] = node.module
     walked, pending, inputs = set(), [_MAPPINGS_RENDERER], set()
+
+    def add_module(module):
+        rel = "tools/{}.py".format(module.replace(".", "/"))
+        if (Path(root) / rel).is_file():
+            inputs.add(rel)
+
     while pending:
         name = pending.pop()
         if name in walked:
             continue
         walked.add(name)
-        nodes = list(ast.walk(functions[name]))
-        lefts = {id(node.left) for node in nodes if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)}
+        nodes = [node for top in defined[name] for node in ast.walk(top)]
+        used, paths = set(), []
         for node in nodes:
-            if isinstance(node, ast.Name) and node.id in functions:
+            parts = _root_parts(node, used)
+            if parts:
+                paths.append((node, parts))
+        for node in nodes:
+            if isinstance(node, ast.Name) and node.id in defined:
                 pending.append(node.id)
-            elif isinstance(node, ast.Name) and node.id in imported:
-                rel = "tools/{}.py".format(imported[node.id].replace(".", "/"))
-                if (Path(root) / rel).is_file():
-                    inputs.add(rel)
-            elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and id(node) not in lefts:
-                parts, base = [], node
-                while isinstance(base, ast.BinOp) and isinstance(base.op, ast.Div) \
-                        and isinstance(base.right, ast.Constant) and isinstance(base.right.value, str):
-                    parts.insert(0, base.right.value)
-                    base = base.left
-                if isinstance(base, ast.Name) and base.id == "ROOT" and parts:
-                    inputs.add("/".join(parts) + "/")
+            if isinstance(node, ast.Name) and node.id in imported:
+                add_module(imported[node.id])
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    add_module(alias.name)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                add_module(node.module)
+            elif isinstance(node, ast.Attribute) and id(node.value) not in used \
+                    and isinstance(node.value, ast.Name) and node.value.id == "ROOT" and node.attr != "joinpath":
+                raise ValueError("cannot evaluate ROOT.{} (line {})".format(node.attr, node.lineno))
+        for node, parts in paths:
+            if id(node) in used:
+                continue
+            pieces = [piece for part in parts for piece in part.split("/")]
+            if any(piece in ("", ".", "..") for piece in pieces):
+                raise ValueError("cannot evaluate the ROOT path {!r} (line {})".format(parts, node.lineno))
+            rel = "/".join(pieces)
+            if (Path(root) / rel).is_file():
+                inputs.add(rel)
+            elif (Path(root) / rel).is_dir():
+                inputs.add(rel + "/")
+            else:
+                raise ValueError("cannot evaluate the ROOT path {}, which is missing under root, as a file or "
+                                 "a folder (line {})".format(rel, node.lineno))
     return inputs
 
 
 def _mappings_sources_findings(source, declared, root=ROOT):
     """Findings for `declared` (a _MAPPINGS_SOURCES tuple) against _mappings_inputs(source): each derived
     input it lacks, and each entry it names that no walked renderer reads. Empty when the 2 sets are equal
-    (order and a repeated entry do not matter)."""
-    derived = _mappings_inputs(source, root)
+    (order and a repeated entry do not matter). When _mappings_inputs cannot evaluate `source`, that is the
+    one finding, so a read the derivation cannot follow fails closed."""
+    try:
+        derived = _mappings_inputs(source, root)
+    except ValueError as exc:
+        return ["_MAPPINGS_SOURCES cannot be checked: {}".format(exc)]
     return (["_MAPPINGS_SOURCES lacks {}, which the mappings renderers read".format(rel)
              for rel in sorted(derived - set(declared))]
             + ["_MAPPINGS_SOURCES names {}, which no mappings renderer reads".format(rel)
@@ -2080,12 +2148,13 @@ def _register_findings(entries, outputs, footer, note, others, carriers):
     carry the text is a finding too. `carriers` is _data_carriers() of the live data: a page entry among
     its _HOOKS_ROW pages must declare HOOKS_SOURCE, and one among its _MAPPINGS_ROW pages every source of
     _MAPPINGS_SOURCES; a page entry outside those pages declaring any of them is a finding too. A page entry
-    whose target is not among `outputs` is a finding of its own row. Each STATUS_LINES file must have exactly 1 entry, of kind "block", naming this generator and
-    STATUS_SOURCE among its sources, apart from a file on _STATUS_LINES_UNREGISTERED, which must have
-    none. `others` is [(stem, declaration)] for every other generator of the registry (_other_declarations);
-    a STATUS_LINES file named by an entry there, by its exact target or by an ancestor tree target, is a
-    finding, and so is one under an ancestor tree target of `entries`, because each such entry would claim
-    the whole file where this generator owns only its status line, or claim a file kept off the register."""
+    whose target is not among `outputs` is a finding of its own row. Each STATUS_LINES file must have
+    exactly 1 entry, of kind "block", naming this generator and STATUS_SOURCE among its sources, apart from
+    a file on _STATUS_LINES_UNREGISTERED, which must have none. `others` is [(stem, declaration)] for every
+    other generator of the registry (_other_declarations); a STATUS_LINES file named by an entry there, by
+    its exact target or by an ancestor tree target, is a finding, and so is one under an ancestor tree
+    target of `entries`, because each such entry would claim the whole file where this generator owns only
+    its status line, or claim a file kept off the register."""
     rows = {_FOOTER_ROW: [], _NOTE_ROW: [], _LINES_ROW: [], _BUILT_ROW: [], _HOOKS_ROW: [], _MAPPINGS_ROW: []}
     for entry in entries:
         if entry["kind"] != "file":
@@ -3371,7 +3440,10 @@ def _self_test():
     # the derived set (not on the tuple, so they neither shrink with it nor turn red beside it): its reverse
     # order and a repeated entry are clean, and each derived input dropped, an input gained that no renderer
     # reads, or a renderer reading another folder is a finding.
-    derived = tuple(sorted(_mappings_inputs(own)))
+    try:
+        derived = tuple(sorted(_mappings_inputs(own)))
+    except ValueError:
+        derived = ()
     expect("gensrc/mappings-sources-derived", not _mappings_sources_findings(own, _MAPPINGS_SOURCES)
            and any(rel.endswith("/") for rel in derived) and any(rel.endswith(".py") for rel in derived),
            (_mappings_sources_findings(own, _MAPPINGS_SOURCES), derived))
@@ -3385,10 +3457,52 @@ def _self_test():
     start = own.index("\ndef _mappings_data():")
     end = own.index("\n\n\n", start)
     loader = own[start:end]
-    got = _mappings_sources_findings(own[:start] + loader.replace('"rules")', '"rules-moved")') + own[end:],
+    got = _mappings_sources_findings(own[:start] + loader.replace('"rules")', '"hooks")') + own[end:],
                                      derived) if loader.count('"rules")') == 1 else []
     expect("gensrc/mappings-sources-renderer-reads-another-folder-red",
-           len(got) == 2 and ".aiqt/core/rules-moved/" in got[0], got)
+           len(got) == 2 and ".aiqt/core/hooks/" in got[0] and ".aiqt/core/rules/" in got[1], got)
+    # Each form a renderer could read a new input by, added to _mappings_data, is derived: a path in a
+    # module-level constant, an import inside the function (plain or from), ROOT.joinpath, and a file read
+    # (derived as the file, never as a folder, so declaring the file is clean). A ROOT path the derivation
+    # cannot evaluate is a finding of its own: a part that is not a string constant, ROOT used through an
+    # attribute other than joinpath, a part leaving root, a path missing under root. The same forms in a
+    # constant no renderer names, a comment, or a function no renderer calls are clean.
+    anchor = "\ndef _mappings_data():\n"
+
+    def reading(body, module="", extra=""):
+        return (own.replace(anchor, "\n" + module + "def _mappings_data():\n    " + body + "\n") + extra
+                if own.count(anchor) == 1 else "")
+
+    hooks = ".aiqt/core/hooks/"
+    for name, text, want in (
+            ("constant-path", reading("_EXTRA_DIR.iterdir()",
+                                      '_EXTRA_DIR = ROOT / ".aiqt" / "core" / "hooks"\n\n\n'), hooks),
+            ("function-import", reading("import gen_hooks"), "tools/gen_hooks.py"),
+            ("function-from-import", reading("from gen_hooks import main"), "tools/gen_hooks.py"),
+            ("joinpath", reading('ROOT.joinpath(".aiqt", "core", "hooks").iterdir()'), hooks),
+            ("file-read", reading('(ROOT / "VERSION").read_text()'), "VERSION")):
+        got = _mappings_sources_findings(text, derived)
+        expect("gensrc/mappings-sources-{}-red".format(name),
+               got == ["_MAPPINGS_SOURCES lacks {}, which the mappings renderers read".format(want)], got)
+    got = _mappings_sources_findings(reading('(ROOT / "VERSION").read_text()'), derived + ("VERSION",))
+    expect("gensrc/mappings-sources-file-read-declared-clean", own.count(anchor) == 1 and not got, got)
+    for name, body in (("non-constant-part", 'ROOT / ".aiqt" / _MAPPINGS_RENDERER'),
+                       ("joinpath-non-constant", 'ROOT.joinpath(".aiqt", _MAPPINGS_RENDERER)'),
+                       ("root-attribute", "ROOT.iterdir()"),
+                       ("leaves-root", 'ROOT / ".." / "outside"'),
+                       ("missing-path", 'ROOT / ".aiqt" / "no-such-folder"')):
+        got = _mappings_sources_findings(reading(body), derived)
+        expect("gensrc/mappings-sources-cannot-evaluate-{}-red".format(name),
+               own.count(anchor) == 1 and len(got) == 1
+               and got[0].startswith("_MAPPINGS_SOURCES cannot be checked: cannot evaluate") and "(line " in got[0],
+               got)
+    unused = ('\n\ndef _unread_forms():\n    import gen_hooks\n    ROOT.joinpath(".aiqt").iterdir()\n'
+              '    ROOT.iterdir()\n    return ROOT / ".aiqt" / _MAPPINGS_RENDERER, gen_hooks\n')
+    got = [_mappings_sources_findings(text, derived) for text in (
+        reading("pass", '_EXTRA_DIR = ROOT / ".aiqt" / "core" / "hooks"\n\n\n'),
+        reading('pass  # ROOT / ".aiqt" / "core" / "hooks"; import gen_hooks'),
+        reading("pass", extra=unused))]
+    expect("gensrc/mappings-sources-unread-forms-clean", own.count(anchor) == 1 and got == [[], [], []], got)
     # The carriers come from decoded values: in a synthetic data folder, a TOML comment naming both tokens
     # (a.toml) and a literal string spelling \u0024 (c.toml) carry neither token, while a basic string spelling
     # each token as the escape \u0024 (b.toml) and a plain token in a body value (d.toml) carry it.
