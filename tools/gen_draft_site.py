@@ -44,10 +44,11 @@ lead, prose, pullquote, record item, srcview item); clause title; section, famil
 family verified, intro, after and steps; entry heading, claim, limitation and evidence; table and register
 head cells and row cells; steps and list items; figure caption; srcview gen and heading; code and srcview
 note. Code text, code file labels, srcview labels and figure node text are escaped as before. Inline markup
-may use only the elements of tools/_site_markup.py ELEMENTS (no svg or math, no raw-text element) and no
-markup declaration or processing instruction other than an ordinary comment; anything else is refused with
-the element and the page named. Every rendered page then passes the link guard (_LinkGuard), which refuses
-raw markup that breaks the link rules or an element outside the same allowlist.
+may use only the elements of tools/_site_markup.py INLINE_ELEMENTS (the names the data files use; no svg or
+math, no raw-text element), no markup construct html.parser and a browser can end at different places (only
+ordinary comments), and must end at a token boundary; anything else is refused with the page named. Every
+rendered page then passes the link guard (_LinkGuard), which refuses raw markup that breaks the link rules,
+an element outside the page allowlist or such a construct.
 """
 import sys
 
@@ -469,16 +470,17 @@ def _any_link(site, href, text, where):
     return '<a href="{}">{}</a>'.format(_attr(_internal_href(site, href, where)), text)
 
 
-def _inline(site, value):
+def _inline(site, value, cell=False):
     """An inline HTML value with the $BASE/ token rendered as the site's base path, the $OPF_STATUS
     token rendered as the reference CLI status note (status_note) and the $HOOK_COUNT token rendered as
     the Claude Code hook count (hook_count) of the site's "tree" (the tree build() is given; ROOT when the site
-    names none), and the https scheme of each link attribute written in lower case (_inline_https, D15)."""
+    names none), and the https scheme of each link attribute written in lower case (_inline_https, D15).
+    `cell` true is a table's raw cell (a whole td element), which may also use td."""
     if "$OPF_STATUS" in value:
         value = value.replace("$OPF_STATUS", status_note())
     if "$HOOK_COUNT" in value:
         value = value.replace("$HOOK_COUNT", str(hook_count(site.get("tree", ROOT))))
-    return _inline_https(value.replace("$BASE/", site["base"]))
+    return _inline_https(value.replace("$BASE/", site["base"]), cell)
 
 
 # The Claude Code hook count the pages state: the [[hook]] entries of the hooks manifest whose platform is
@@ -820,7 +822,7 @@ def _table_html(site, spec, where):
             if cell.startswith("<td"):
                 if not cell.endswith("</td>"):
                     raise RefusedPage("{}: row {}: a raw cell must be a whole td element".format(where, number))
-                cells.append(_inline(site, cell))
+                cells.append(_inline(site, cell, cell=True))
             else:
                 cells.append("<td>{}</td>".format(_inline(site, cell)))
         body.append("<tr>{}</tr>".format("".join(cells)))
@@ -1425,10 +1427,13 @@ def _body_html(site, page):
 # or one of its kept live paths, with no backslash, whitespace or control character, no protocol-relative
 # "//" start and no "." or ".." segment, raw or percent-encoded (%2e, either case); and every a or area whose href is https carries
 # target="_blank", rel with noopener and noreferrer, and the "(opens in a new tab)" hint in its text or
-# aria-label. A "<![" anywhere on the page is a finding (see _MARKUP_DECLARATION_SPLIT), attribute names
+# aria-label. Each markup construct html.parser and a browser can end at different places is a finding
+# wherever it sits on the page (_site_markup.split_constructs: any "<!" but an ordinary comment and
+# "<!doctype html>", any "<?", any "</" not followed by an ASCII letter), attribute names
 # are folded to lower case in ASCII only, as a browser folds them, and every element is held to the
 # template's element allowlist in its context (_site_markup: no math, no raw-text element outside the head,
-# and inside svg only the shell's own svg elements), the definition tools/check_site.py's Page also reads.
+# the head ended by text as in a browser, and inside svg only the shell's own svg elements), the definition
+# tools/check_site.py's Page also reads.
 # Residual: the guard judges the markup as
 # Python's html.parser tokenizes it, so a malformed construct a browser repairs differently is outside it;
 # it reads no stylesheet (inline styles are refused separately) and treats a URL-shaped value in any
@@ -1442,15 +1447,14 @@ LINK_URL_ATTRS = frozenset((
     "lowsrc", "dynsrc"))
 NEWTAB_HINT = "(opens in a new tab)"
 _URL_BAD_CHAR_RE = re.compile(r"[\x00-\x20\x7f\\]")
-# The markup declaration html.parser and a browser read differently. html.parser (3.14) reads "<![CDATA[" as
-# a CDATA section that ends at "]]>"; a browser, in HTML content, reads "<![" as a bogus comment that ends at
-# the first ">", so markup after that ">" is live in the browser and hidden from html.parser (inside svg or
-# math a browser does read a CDATA section). Inline markup holding it is refused (_inline_https), and the link
-# guard reports it wherever it appears on a page (also where both read it as text, such as inside an
-# attribute value), rather than relying on html.parser's private CDATA switch (_set_support_cdata). Every
-# other markup declaration ("<!--", "<!doctype", any other "<!" and "<?") ends, as html.parser reads it,
-# where the WHATWG tokenizer ends it; that rests on reading both, not on a browser run.
-_MARKUP_DECLARATION_SPLIT = "<!["
+# The markup constructs html.parser and a browser can end at different places (_site_markup.split_constructs).
+# html.parser (3.14) reads "<![CDATA[" as a CDATA section that ends at "]]>" where a browser, in HTML content,
+# ends "<![" at the first ">"; it opens a comment at "<!-->" and "<!--->" and keeps it open to the next "-->"
+# where a browser ends each at once as an empty comment. Markup after such a construct is live in a browser and
+# hidden from html.parser. Rather than list the differences one at a time, a page may hold only the constructs
+# both read alike: ordinary comments and "<!doctype html>". Inline markup holding any other is refused
+# (_inline_https), and the link guard and refusals_for report each one wherever it appears on a page (also
+# where both read it as text, such as inside an attribute value).
 _ASCII_LOWER = {code: code + 32 for code in range(ord("A"), ord("Z") + 1)}
 
 
@@ -1505,17 +1509,18 @@ def _start_tag_values(parser, tag, attrs):
 class _InlineLinkValues(HTMLParser):
     """The (start, end) offset in `source` of each link attribute value (LINK_URL_ATTRS) written in a start
     tag of `source`, as html.parser tokenizes it (the tokenizer the link guard uses), and each start tag whose
-    values cannot be placed in the source exactly (`unplaced`)."""
+    values cannot be placed in the source exactly (`unplaced`). `cell` true reads a table's raw cell."""
 
-    def __init__(self, source):
+    def __init__(self, source, cell=False):
         super().__init__(convert_charrefs=True)
         self.source = source
         # getpos() counts lines at each LF only, as html.parser's updatepos does.
         self._line_starts = [0] + [index + 1 for index, char in enumerate(source) if char == "\n"]
         self.values = []
         self.unplaced = []
-        # Each tag outside the inline element allowlist (_site_markup.ELEMENTS), as its finding.
-        self.rule = _site_markup.ElementRule(page=False)
+        # Each tag outside the inline element allowlist (_site_markup.INLINE_ELEMENTS, or CELL_ELEMENTS for a
+        # table's raw cell), as its finding.
+        self.rule = _site_markup.ElementRule(page=False, cell=cell)
         self.outside = []
 
     def handle_endtag(self, tag):
@@ -1542,7 +1547,7 @@ class _InlineLinkValues(HTMLParser):
                 self.values.append((offset + span[0], offset + span[1]))
 
 
-def _inline_https(value):
+def _inline_https(value, cell=False):
     """Inline markup with the https scheme of each link attribute value written in lower case (decision D15):
     a value that starts with "https://" in any ASCII letter case ("HTTPS://", "hTtPs://") has those 8
     characters written as "https://", and every other character of the markup stays as written. The values
@@ -1552,22 +1557,28 @@ def _inline_https(value):
     accepts only a literal lower-case "https://"). An attribute is a link attribute by its name folded in
     ASCII only, as a browser reads it (_ascii_lower). InlineMarkupRefused (a RefusedPage; render_page names the
     page) when the markup holds a markup declaration or processing instruction other than an ordinary comment
-    (_site_markup.comment_problem; "<![" among them), when it uses an element outside the inline element
-    allowlist (_site_markup.ELEMENTS: no svg or math, no raw-text element, so html.parser and a browser read
-    the same elements here), and when a start tag's values cannot be placed in the markup exactly. Each
+    (_site_markup.split_constructs; "<![" and "<!-->" among them), when it uses an element outside the inline
+    element allowlist (_site_markup.INLINE_ELEMENTS, and td as well in a table's raw cell, `cell` true; no svg
+    or math, no raw-text element, so html.parser and a browser read the same elements here), when it ends inside a construct html.parser still holds back (an
+    unterminated start tag, say, which would run on into the template's markup; _site_markup.unfinished),
+    and when a start tag's values cannot be placed in the markup exactly. Each
     fragment is read alone: a comment opened by an earlier fragment of the same page is not known here, so an
     https scheme written as a link attribute value inside it in a later fragment is written in lower case
     although the page reads it as a comment. That changes only the letter case of those 8 characters; the
     link guard reads the whole page and reads those bytes as a comment too, so no link escapes it this way."""
-    declaration = _site_markup.comment_problem(value)
-    if declaration is not None:
+    constructs = _site_markup.split_constructs(value)
+    if constructs:
         raise InlineMarkupRefused("inline markup holds a markup declaration or processing instruction other "
-                                  "than an ordinary comment at offset {}".format(declaration))
-    reader = _InlineLinkValues(value)
+                                  "than an ordinary comment at offset {}: {!r}".format(*constructs[0]))
+    reader = _InlineLinkValues(value, cell)
     reader.feed(value)
+    rest = _site_markup.unfinished(reader)
     reader.close()
     if reader.outside:
         raise InlineMarkupRefused("inline markup uses {}".format(reader.outside[0]))
+    if rest is not None:
+        raise InlineMarkupRefused("inline markup ends inside an unfinished construct {!r}, which would run on "
+                                  "into the template's markup".format(rest[:40]))
     if reader.unplaced:
         raise InlineMarkupRefused("inline markup start tag {!r} cannot be read exactly".format(reader.unplaced[0]))
     parts, done = [], 0
@@ -1662,6 +1673,7 @@ class _LinkGuard(HTMLParser):
                 self.found.append("external link {!r} without the new-tab hint".format(first["href"]))
 
     def handle_data(self, data):
+        self.rule.text(data)
         if self._anchor is not None:
             self._anchor[1].append(data)
 
@@ -1679,12 +1691,12 @@ def _link_findings(site, html, scripts=(), scheme_src=None):
     """Every link-rule finding on a built page (see the link guard comment above). `scripts` is the list of
     script src values the shell wrote; each allows 1 script element with exactly that src and defer.
     `scheme_src` is the head's scheme script src; it allows 1 script element with exactly
-    data-cfasync="false" then that src, and nothing else. Each "<![" on the page is a finding first: markup
-    after it can be live in a browser yet hidden from html.parser (_MARKUP_DECLARATION_SPLIT)."""
+    data-cfasync="false" then that src, and nothing else. Each markup construct html.parser and a browser can
+    end at different places is a finding first: markup after it can be live in a browser yet hidden from
+    html.parser (_site_markup.split_constructs)."""
     guard = _LinkGuard(site, scripts, scheme_src)
-    guard.found.extend("{!r} at offset {}, a markup declaration html.parser and a browser read differently"
-                       .format(_MARKUP_DECLARATION_SPLIT, match.start())
-                       for match in re.finditer(re.escape(_MARKUP_DECLARATION_SPLIT), html))
+    guard.found.extend(_site_markup.construct_finding(offset, construct)
+                       for offset, construct in _site_markup.split_constructs(html, page=True))
     guard.feed(html)
     guard.close()
     if guard._anchor is not None:
@@ -1761,7 +1773,8 @@ def render_page(site, pages, page):
         "</body>",
         "</html>",
     ]) + "\n"
-    refusals = refusals_for(html) + _link_findings(site, html, scripts, scheme_src)
+    # A construct both refusals_for and the link guard report is named once.
+    refusals = list(dict.fromkeys(refusals_for(html) + _link_findings(site, html, scripts, scheme_src)))
     if refusals:
         raise RefusedPage("{}/{}: {}".format(site["root"], rel, "; ".join(refusals)))
     return html
@@ -1803,8 +1816,11 @@ class _Refusals(HTMLParser):
 
 
 def refusals_for(html):
-    """Every template code-style refusal a page triggers (specification sections 5 and 12)."""
-    found = []
+    """Every template code-style refusal a page triggers (specification sections 5 and 12). Each markup
+    construct html.parser and a browser can end at different places (_site_markup.split_constructs) comes
+    first: an inline script or handler after it would be live in a browser yet never reach the reader here."""
+    found = [_site_markup.construct_finding(offset, construct)
+             for offset, construct in _site_markup.split_constructs(html, page=True)]
     if any(dash in html for dash in DASHES):
         found.append("en or em dash")
     parser = _Refusals()
@@ -2598,10 +2614,14 @@ def _self_test():
             ("links/inline-quoted-gt-before-href-twin-unchanged",
              '<a title="a>b" href="https://example.com/v"' + newtab_tail,
              '<a title="a>b" href="https://example.com/v"' + newtab_tail),
-            ("links/inline-quoted-gt-before-src-lowercased", '<img alt="a>b" src="HTTPS://example.com/i.png">',
-             '<img alt="a>b" src="https://example.com/i.png">'),
-            ("links/inline-quoted-gt-before-src-twin-unchanged", '<img alt="a>b" src="https://example.com/i.png">',
-             '<img alt="a>b" src="https://example.com/i.png">'),
+            # A src on a span: inline markup may not use img (INLINE_ELEMENTS), and the rule reads a link
+            # attribute by its name on any element.
+            ("links/inline-quoted-gt-before-src-lowercased",
+             '<span title="a>b" src="HTTPS://example.com/i.png">t</span>',
+             '<span title="a>b" src="https://example.com/i.png">t</span>'),
+            ("links/inline-quoted-gt-before-src-twin-unchanged",
+             '<span title="a>b" src="https://example.com/i.png">t</span>',
+             '<span title="a>b" src="https://example.com/i.png">t</span>'),
             ("links/inline-href-path-holding-href-scheme-unchanged",
              '<a href="https://example.com/href=HTTPS://Other/Path"' + newtab_tail,
              '<a href="https://example.com/href=HTTPS://Other/Path"' + newtab_tail),
@@ -2611,10 +2631,10 @@ def _self_test():
             ("links/inline-href-plain-path-twin-unchanged", '<a href="https://example.com/Other/Path"' + newtab_tail,
              '<a href="https://example.com/Other/Path"' + newtab_tail),
             ("links/inline-src-path-holding-href-scheme-unchanged",
-             '<img src="https://example.com/a/href=HTTPS://b.png" alt="">',
-             '<img src="https://example.com/a/href=HTTPS://b.png" alt="">'),
-            ("links/inline-src-plain-path-twin-unchanged", '<img src="https://example.com/a/b.png" alt="">',
-             '<img src="https://example.com/a/b.png" alt="">'),
+             '<span src="https://example.com/a/href=HTTPS://b.png" title="">t</span>',
+             '<span src="https://example.com/a/href=HTTPS://b.png" title="">t</span>'),
+            ("links/inline-src-plain-path-twin-unchanged", '<span src="https://example.com/a/b.png" title="">t</span>',
+             '<span src="https://example.com/a/b.png" title="">t</span>'),
             ("links/inline-title-holding-href-scheme-unchanged",
              '<a title="see href=HTTPS://x" href="https://example.com/v"' + newtab_tail,
              '<a title="see href=HTTPS://x" href="https://example.com/v"' + newtab_tail),
@@ -2627,8 +2647,9 @@ def _self_test():
              "<a href=HTTPS://example.com/v" + newtab_tail, "<a href=https://example.com/v" + newtab_tail),
             ("links/inline-single-quoted-upper-case-https-anchor-lowercased",
              "<a href='HTTPS://example.com/v'" + newtab_tail, "<a href='https://example.com/v'" + newtab_tail),
-            ("links/inline-unquoted-mixed-case-https-img-lowercased", "<IMG SRC=HtTpS://example.com/i.png alt=''>",
-             "<IMG SRC=https://example.com/i.png alt=''>"),
+            ("links/inline-unquoted-mixed-case-https-src-lowercased",
+             "<SPAN SRC=HtTpS://example.com/i.png title=''>t</SPAN>",
+             "<SPAN SRC=https://example.com/i.png title=''>t</SPAN>"),
             # A CR is not a line end to getpos: a tag on the line after a CR is still placed exactly.
             ("links/inline-carriage-return-before-tag-lowercased",
              '<p>a\\rb\\n<a href="HTTPS://example.com/v"' + newtab_tail + "</p>",
@@ -2677,7 +2698,7 @@ def _self_test():
     for vector, anchor in cdata_vectors[1:]:
         name = "refuse/inline-escaped-cdata-text-" + vector
         expect(name, "nor an https URL" in refused(name, inline_page, escaped.format(anchor)))
-    declaration = "'<![' at offset 3, a markup declaration html.parser and a browser read differently"
+    declaration = _site_markup.construct_finding(3, "<![CDATA[")
     for vector, anchor in cdata_vectors:
         got = _link_findings(site, "<p><![CDATA[ x > " + anchor + " ]]></p>")
         expect("links/guard-cdata-" + vector + "-refused", got == [declaration], got)
@@ -2756,9 +2777,77 @@ def _self_test():
                     "<p><!-- a note --> " + upper_anchor + "</p>")
     expect("links/inline-ordinary-comment-accepted",
            '<!-- a note --> <a href="https://example.com/v"' + newtab_tail in twin, twin)
-    # The allowlist covers every element the data files' inline values and the generator's templates use: each
-    # inline value of the declared build (recorded at _inline_https) and each built page holds no element
-    # outside it, so generation still succeeds (the declared build above rendered every page).
+    # An abrupt comment ("<!-->", "<!--->") on a whole page: a browser ends it at once, html.parser keeps it open
+    # to the next "-->", so the anchor and the script between are live in a browser and hidden from the guard
+    # and refusals_for. Both report the construct; with an ordinary comment instead, both read what follows.
+    for name, opener in (("links/guard-abrupt-comment-hidden-anchor-refused", "<!-->"),
+                         ("links/guard-abrupt-dash-comment-hidden-anchor-refused", "<!--->")):
+        html = '<p>x</p>' + opener + '<a href="http://example.com/v">v</a>-->'
+        got = _link_findings(site, html)
+        expect(name, got == [_site_markup.construct_finding(8, html[8:17])], got)
+    got = _link_findings(site, '<p>x</p><!-- x --><a href="http://example.com/v">v</a>')
+    expect("links/guard-ordinary-comment-http-anchor-read",
+           got == ["href 'http://example.com/v' on <a> is neither under /draft/ nor an https URL"], got)
+    for name, opener in (("refuse/abrupt-comment-hidden-script", "<!-->"),
+                         ("refuse/abrupt-dash-comment-hidden-script", "<!--->")):
+        html = '<p>x</p>' + opener + '<script>alert(1)</script><img src="x" onerror="alert(1)">-->'
+        got = refusals_for(html)
+        expect(name, got == [_site_markup.construct_finding(8, html[8:17])], got)
+    got = refusals_for('<p>x</p><!-- x --><script>alert(1)</script><img src="x" onerror="alert(1)">')
+    expect("refuse/ordinary-comment-script-read",
+           "inline <script> element" in got and "onerror attribute on <img>" in got, got)
+    # Text other than whitespace ends an implied head, as in a browser (html5lib places such a title in the
+    # body), so the guard judges a head element after it on the page; whitespace and a title's own text do not.
+    for name, html, want in (
+            ("links/guard-title-after-text-in-implied-head-refused",
+             "<html>text<title>t</title><body><p>x</p></body></html>", "<title> on the page"),
+            ("links/guard-link-after-character-reference-text-refused",
+             '<meta charset="utf-8">&amp;<link rel="icon" href="/draft/i.svg"><p>y</p>', "<link> on the page")):
+        got = _link_findings(site, html)
+        expect(name, outside.format(want) in got, got)
+    for name, html in (("links/guard-whitespace-in-implied-head-passes",
+                        "<html> \n\t<title>t</title><body><p>x</p></body></html>"),
+                       ("links/guard-title-text-keeps-head-open-passes",
+                        '<html><title>a b</title><meta charset="utf-8"><body><p>x</p></body></html>')):
+        got = _link_findings(site, html)
+        expect(name, got == [], got)
+    # A non-ASCII element name is a finding: html.parser folds "linK" (KELVIN SIGN) to "link" with
+    # str.lower, a browser does not. The guard reports it in the head, and inline markup refuses it by that
+    # rule (not merely as an element outside INLINE_ELEMENTS). The ASCII twins pass.
+    got = _link_findings(site, '<head><linK rel="icon" href="/draft/i.svg"></head><p>x</p>')
+    expect("links/guard-non-ascii-element-name-refused",
+           got == ["<link> inside <head> has a non-ASCII element name 'linK'"], got)
+    got = _link_findings(site, '<head><link rel="icon" href="/draft/i.svg"></head><p>x</p>')
+    expect("links/guard-ascii-element-name-twin-passes", got == [], got)
+    message, prefix = inline_refusal("<p><bK>t</bK></p>")
+    expect("refuse/inline-non-ascii-element-name", prefix is not None and message.startswith(
+        prefix + "inline markup uses <bk> has a non-ASCII element name 'bK'"), message)
+    # Inline markup may use only the names the data files use (INLINE_ELEMENTS): an element the page body may
+    # carry but no inline value uses (a section, an img) is refused, and td only outside a table's raw cell
+    # (component/table above renders the raw cell twin).
+    for name, html, first in (("refuse/inline-section-outside-inline-allowlist", "<p>a</p><section>s</section>",
+                               "section"),
+                              ("refuse/inline-img-outside-inline-allowlist", '<p><img src="$BASE/i.png" alt=""></p>',
+                               "img"),
+                              ("refuse/inline-td-outside-raw-cell", "<p><td>x</td></p>", "td")):
+        message, prefix = inline_refusal(html)
+        expect(name, prefix is not None and message.startswith(
+            prefix + "inline markup uses " + outside.format("<{}>".format(first))), message)
+    # An inline value must end at a token boundary: a start or end tag it leaves open runs on into the
+    # template's markup on the page (its attribute value swallows "</div></div></main>..."). The refusal names
+    # the page; the terminated twin is accepted.
+    for name, html in (("refuse/inline-unterminated-start-tag", '<p><span title="x'),
+                       ("refuse/inline-unterminated-unquoted-start-tag", "<p>a <span title=x"),
+                       ("refuse/inline-unterminated-end-tag", "<p>a</p></p")):
+        message, prefix = inline_refusal(html)
+        expect(name, prefix is not None and message.startswith(
+            prefix + "inline markup ends inside an unfinished construct "), message)
+    twin = accepted("links/inline-terminated-start-tag-accepted", inline_page, '<p><span title="x">t</span></p>')
+    expect("links/inline-terminated-start-tag-accepted", '<p><span title="x">t</span></p>' in twin, twin)
+    # The allowlist is exactly what generation uses: the inline values of the declared build (recorded at
+    # _inline_https) use exactly INLINE_ELEMENTS, and the built pages' elements are within ELEMENTS and use every
+    # name of it but small, which only the plan component's template writes. Generation still succeeds (the
+    # declared build above rendered every page).
     inline_values = []
 
     def recording(reader, data):
@@ -2785,15 +2874,22 @@ def _self_test():
         names.close()
         names.reset()
     expect("elements/data-file-inline-values-within-allowlist",
-           recorded == live_outputs and len(inline_values) > 0 and names.names <= _site_markup.ELEMENTS
-           and {"a", "p", "span", "strong", "code"} <= names.names, sorted(names.names - _site_markup.ELEMENTS))
+           recorded == live_outputs and len(inline_values) > 0 and names.names == _site_markup.INLINE_ELEMENTS,
+           (sorted(names.names - _site_markup.INLINE_ELEMENTS), sorted(_site_markup.INLINE_ELEMENTS - names.names)))
     built_problems = []
+    page_names = _Names()
     for built in list(live_outputs.values()) + list(outputs.values()):
         rule_reader = _LinkGuard(site, ())
         rule_reader.feed(built)
         rule_reader.close()
         built_problems.extend(f for f in rule_reader.found if "element allowlist" in f or "non-ASCII element" in f)
+        page_names.feed(built)
+        page_names.close()
+        page_names.reset()
     expect("elements/built-pages-within-allowlist", built_problems == [], built_problems)
+    expect("elements/page-allowlist-used-by-built-pages",
+           _site_markup.ELEMENTS - page_names.names == {"small"} and "<small>" in plan,
+           sorted(_site_markup.ELEMENTS - page_names.names))
     # A name a browser does not fold to a link attribute (KELVIN SIGN) is not checked as one; the ASCII twin is.
     got = _link_findings(site, '<span xlinK:href="HTTP://example.com/x">t</span>')
     expect("links/guard-non-ascii-attribute-name-not-a-link-attribute", got == [], got)

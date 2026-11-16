@@ -142,12 +142,13 @@ INTERACTIVE = {"a", "button"}
 # The Apple touch icon link every live page carries. A generated template page (built under the site
 # template's own rules) is not held to the live pages' head; _template_pages says which pages those are.
 TOUCH_ICON_REL = "apple-touch-icon"
-# The markup declaration html.parser and a browser read differently: html.parser (3.14) reads "<![CDATA[" as
-# a CDATA section that ends at "]]>", a browser in HTML content reads "<![" as a bogus comment that ends at
-# the first ">", so a link after that ">" is live in a browser yet never reaches handle_starttag here. Each
-# "<![" in the text a Page is fed is a structural finding wherever it sits, rather than relying on
-# html.parser's private CDATA switch (_set_support_cdata).
-MARKUP_DECLARATION_SPLIT = "<!["
+# The markup constructs html.parser and a browser can end at different places (_site_markup.split_constructs,
+# the definition tools/gen_draft_site.py also reads): html.parser (3.14) reads "<![CDATA[" as a CDATA section
+# that ends at "]]>" where a browser in HTML content ends "<![" at the first ">", and it keeps a comment opened
+# at "<!-->" or "<!--->" open to the next "-->" where a browser ends each at once, so a link after such a
+# construct is live in a browser yet never reaches handle_starttag here. Each one in the text a Page is fed (any
+# "<!" but an ordinary comment and "<!doctype html>", any "<?", any "</" not followed by an ASCII letter) is a
+# structural finding wherever it sits, on every page, live or generated.
 
 
 class Page(HTMLParser):
@@ -162,7 +163,7 @@ class Page(HTMLParser):
         super().__init__(convert_charrefs=True)
         self._elements = _site_markup.ElementRule(page=True) if template else None
         self._self_closing = False
-        self._fed = []        # every text fed, for the MARKUP_DECLARATION_SPLIT scan in finalize
+        self._fed = []        # every text fed, for the split_constructs scan in finalize
         self.links = []       # (value, line)
         self.ids = set()
         self.id_list = []     # (value, line) for duplicate detection
@@ -290,12 +291,10 @@ class Page(HTMLParser):
 
     def finalize(self):
         source = "".join(self._fed)
-        start = source.find(MARKUP_DECLARATION_SPLIT)
-        while start >= 0:
+        for start, construct in _site_markup.split_constructs(source, page=True):
             # A line ends at LF only, as getpos counts lines.
-            self.tag_findings.append((source.count("\n", 0, start) + 1, "{!r}: a markup declaration html.parser "
-                                      "and a browser read differently".format(MARKUP_DECLARATION_SPLIT)))
-            start = source.find(MARKUP_DECLARATION_SPLIT, start + 1)
+            self.tag_findings.append((source.count("\n", 0, start) + 1,
+                                      _site_markup.construct_finding(start, construct)))
         for tag, line in self.stack:
             if tag not in OPTIONAL_END_TAGS:
                 self.tag_findings.append(
@@ -303,6 +302,8 @@ class Page(HTMLParser):
         self.stack = []
 
     def handle_data(self, data):
+        if self._elements is not None:
+            self._elements.text(data)
         if self._in_title:
             self.title_text += data
 
@@ -1381,15 +1382,33 @@ def _card_self_test(quiet):
         (root / "index.html").write_text(template, encoding="utf-8")
         check("card/scan-reports-missing-card", quiet(_scan_root, base, "site", targets) == 1, None)
         check("card/live-page-not-held", quiet(_scan_root, base, "site", frozenset()) == 0, None)
+        # The scan holds each generated template page on disk to the element allowlist (_scan_root passes
+        # `template` from _template_pages), and a live page not: the same carded page with a textarea fails
+        # as a target and passes as a live page; with a paragraph instead it passes as a target.
+        carded = template + head.replace('<meta property="twitter:', '<meta name="twitter:')
+        (root / "index.html").write_text(carded + "<p><textarea>x</textarea></p>", encoding="utf-8")
+        check("page/scan-template-page-outside-element-allowlist-fails",
+              quiet(_scan_root, base, "site", targets) == 1, None)
+        check("page/scan-live-page-outside-element-allowlist-passes",
+              quiet(_scan_root, base, "site", frozenset()) == 0, None)
+        (root / "index.html").write_text(carded + "<p>x</p>", encoding="utf-8")
+        check("page/scan-template-page-within-element-allowlist-passes",
+              quiet(_scan_root, base, "site", targets) == 0, None)
 
 
 def _markup_declaration_self_test(quiet):
-    """The "<![" rule of Page: html.parser reads "<![CDATA[" up to "]]>" while a browser ends "<![" at the
-    first ">", so a link after it is live in a browser but never read here; each "<![" is a finding, with its
-    line. The same text escaped ("&lt;![") and a comment are no finding, and the link after them is read."""
+    """The construct rule of Page (_site_markup.split_constructs): html.parser reads "<![CDATA[" up to "]]>"
+    while a browser ends "<![" at the first ">", and it keeps a comment opened at "<!-->" or "<!--->" open to
+    the next "-->" while a browser ends each at once, so a link after either is live in a browser but never
+    read here; each such construct is a finding, with its line, on a live page and a generated one. The same
+    text escaped ("&lt;![") and an ordinary comment are no finding, and the link after them is read."""
     import tempfile
-    message = "{!r}: a markup declaration html.parser and a browser read differently".format(
-        MARKUP_DECLARATION_SPLIT)
+
+    def message(text):
+        """The finding for the first "<![" of `text`, in the wording _site_markup gives every construct."""
+        start = text.find("<![")
+        return _site_markup.construct_finding(start, text[start:start + 9])
+
     tail = ' target="_blank" rel="noopener noreferrer">v</a>'
     upper_https = '<a href="HTTPS://example.test/v"' + tail
 
@@ -1406,15 +1425,34 @@ def _markup_declaration_self_test(quiet):
              "http://example.test/v", '<a href="http://example.test/v">v</a>'),
             ("page/cdata-off-site-path-fails", "page/escaped-cdata-text-off-site-path-passes",
              "/elsewhere/", '<a href="/elsewhere/">v</a>')):
-        page = read("<title>t</title>\n<p><![CDATA[ x > {} ]]></p>".format(anchor))
-        check(name, page.tag_findings == [(2, message)], (page.tag_findings, page.links))
+        text = "<title>t</title>\n<p><![CDATA[ x > {} ]]></p>".format(anchor)
+        page = read(text)
+        check(name, page.tag_findings == [(2, message(text))], (page.tag_findings, page.links))
         page = read("<title>t</title>\n<p>&lt;![CDATA[ x &gt; {} ]]&gt;</p>".format(anchor))
         check(twin, page.tag_findings == [] and page.links == [(href, 2)], (page.tag_findings, page.links))
-    page = read('<p><![CDATA[ <a href="/elsewhere/">v</a></p>')
-    check("page/unterminated-cdata-fails", page.tag_findings == [(1, message)], (page.tag_findings, page.links))
+    text = '<p><![CDATA[ <a href="/elsewhere/">v</a></p>'
+    page = read(text)
+    check("page/unterminated-cdata-fails", page.tag_findings == [(1, message(text))],
+          (page.tag_findings, page.links))
     page = read('<p><!-- x > --> <a href="/elsewhere/">v</a></p>')
     check("page/comment-before-anchor-passes", page.tag_findings == [] and page.links == [("/elsewhere/", 1)],
           (page.tag_findings, page.links))
+    # An abrupt comment ("<!-->", "<!--->") ends at once in a browser; html.parser keeps it open to the next
+    # "-->", hiding the anchor and the script between. Each is a finding on a live page and on a generated
+    # template page; the ordinary comment twin is none, and the anchor after it is read.
+    hidden = '<a href="HTTP://example.test/v">v</a><script>alert(1)</script>-->'
+    for name, opener in (("page/abrupt-comment-hidden-anchor-fails", "<!-->"),
+                         ("page/abrupt-dash-comment-hidden-anchor-fails", "<!--->")):
+        text = "<title>t</title>\n<p>x</p>{}{}".format(opener, hidden)
+        want = (2, _site_markup.construct_finding(text.find(opener), text[text.find(opener):][:9]))
+        live, generated = read(text), Page(template=True)
+        generated.feed(text)
+        generated.finalize()
+        check(name, want in live.tag_findings and want in generated.tag_findings and live.links == [],
+              (live.tag_findings, generated.tag_findings, live.links))
+    page = read('<title>t</title>\n<p>x</p><!-- x --><a href="HTTP://example.test/v">v</a>')
+    check("page/ordinary-comment-anchor-read-passes",
+          page.tag_findings == [] and page.links == [("HTTP://example.test/v", 2)], (page.tag_findings, page.links))
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
         root = base / "site"
@@ -1427,6 +1465,10 @@ def _markup_declaration_self_test(quiet):
         (root / "index.html").write_text(head + "<p>&lt;![CDATA[ x &gt; {} ]]&gt;</p>".format(upper_https),
                                          encoding="utf-8")
         check("page/scan-passes-escaped-cdata-text", quiet(_scan_root, base, "site", frozenset()) == 0, None)
+        (root / "index.html").write_text(head + "<p>x</p><!-->" + hidden, encoding="utf-8")
+        check("page/scan-reports-abrupt-comment", quiet(_scan_root, base, "site", frozenset()) == 1, None)
+        (root / "index.html").write_text(head + "<p>x</p><!-- x -->" + upper_https, encoding="utf-8")
+        check("page/scan-passes-ordinary-comment", quiet(_scan_root, base, "site", frozenset()) == 0, None)
 
 
 def _element_allowlist_self_test():
@@ -1486,6 +1528,38 @@ def _element_allowlist_self_test():
     page = read(shell.format("<p>x</p><title>u</title>"))
     check("page/title-in-body-fails", (2, outside.format("<title> on the page")) in page.tag_findings,
           page.tag_findings)
+    # Text other than whitespace ends an implied head, as in a browser (html5lib places such a title in the
+    # body), so a head element after it is judged on the page; whitespace and a title's own text do not.
+    for name, text, want in (
+            ("page/title-after-text-in-implied-head-fails",
+             "<html>text<title>t</title><body><p>x</p></body></html>", "<title> on the page"),
+            ("page/title-after-character-reference-text-fails",
+             "<html>&amp;<title>t</title><body><p>x</p></body></html>", "<title> on the page"),
+            ("page/link-after-text-in-implied-head-fails",
+             '<meta charset="utf-8">x<link rel="icon" href="/i.svg"><p>y</p>', "<link> on the page")):
+        page = read(text)
+        check(name, (1, outside.format(want)) in page.tag_findings, page.tag_findings)
+    for name, text in (("page/whitespace-in-implied-head-passes",
+                        "<html> \n\t<title>t</title><body><p>x</p></body></html>"),
+                       ("page/title-text-keeps-head-open-passes",
+                        '<html><title>a b</title><meta charset="utf-8"><body><p>x</p></body></html>')):
+        page = read(text)
+        check(name, page.tag_findings == [], page.tag_findings)
+    # A non-ASCII element name is a finding: html.parser folds "linK" (KELVIN SIGN) to "link" with
+    # str.lower, a browser does not. The ASCII twin is a head element and passes.
+    head_shell = '<!doctype html><html lang="en"><head><title>t</title>{}</head>\n<body><p>x</p></body></html>'
+    page = read(head_shell.format('<linK rel="icon" href="/i.svg">'))
+    check("page/non-ascii-element-name-fails",
+          (1, "<link> inside <head> has a non-ASCII element name 'linK'") in page.tag_findings, page.tag_findings)
+    page = read(head_shell.format('<link rel="icon" href="/i.svg">'))
+    check("page/ascii-element-name-twin-passes", page.tag_findings == [], page.tag_findings)
+    # A self-closed tag is judged too: a browser ignores the "/" of "<textarea/>" and opens the raw-text
+    # element. A self-closed allowed element passes.
+    page = read(shell.format("<p><textarea/>x</p>"))
+    check("page/self-closed-raw-text-element-fails",
+          (2, outside.format("<textarea> on the page")) in page.tag_findings, page.tag_findings)
+    page = read(shell.format('<p><img src="/i.png" alt=""/></p>'))
+    check("page/self-closed-allowed-element-passes", page.tag_findings == [], page.tag_findings)
     # Every generated template page in the tree is within the allowlist.
     root = Path(__file__).resolve().parents[1]
     problems, pages = [], 0
