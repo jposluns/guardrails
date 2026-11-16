@@ -364,19 +364,28 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        fences, web addresses, pin lines and the declaration itself alike) into words at every
                        character that is not an ASCII letter or digit, so `a..b`, `^{commit}`, `~N` and a URL's
                        path segments part words, and judges each word that is a commit id as a pin is written
-                       (hex_ref, any case). A word in the declared set (pin_matches: it or a declared value is
-                       a prefix of the other, in any case) passes; any other is probed once per distinct word
-                       with the same git rev-parse of <word>^{commit}: one that names a commit there is HARD
-                       (exit 1), the message naming the word, the commit and the declared set, and one that
-                       names no commit (absent, an ambiguous prefix, a blob or a tree, which git answers alike;
-                       measured with git 2.53.0) is quiet. With no declaration the rule is quiet. Two
+                       (hex_ref, any case), and the <hex> of a word g<hex> right after a hyphen, which git
+                       reads as that commit (git describe output: v1.2-3-g<hex>). A word in the declared set
+                       (pin_matches: it or a declared value is a prefix of the other, in any case) passes;
+                       any other is probed once per distinct word with git --no-lazy-fetch rev-parse of
+                       <word>^{commit} (hermetic, replace objects disabled, never fetching a missing object):
+                       one that names a commit there is HARD (exit 1), the message naming the word, the commit
+                       and the declared set, and one git answers cleanly names no commit (exit 1 and nothing
+                       printed for an absent object, or exit 1 and git's one expected-commit-type line, read
+                       under LC_ALL=C, for a blob or a tree; measured with git 2.53.0) is quiet; an ambiguous
+                       prefix is quiet only where git prints nothing for it (not measured for a 7-hex prefix;
+                       any text is CANNOT_EVALUATE). With no declaration the rule is quiet. Two
                        declaration lines, a column-zero label without its colon or with a glued suffix, a
                        declaration with no value, a value that is not such a commit id (a branch name such as
                        main) or does not resolve to one commit (unknown, ambiguous), a declaration with no
                        repository to read, a repository git refuses for its ownership, a git that cannot be
-                       launched or times out, and more than P9_MAX_WORDS distinct undeclared hex words are
-                       CANNOT_EVALUATE (exit 2), never a pass. The label anywhere else (indented, mid-line)
-                       declares nothing and is not read.
+                       launched or times out, a probe that fails in any other way (a corrupt or unreadable
+                       object, text on stderr, another exit, output that is no commit id; a git older than
+                       2.44 refuses --no-lazy-fetch), a word that names no commit present in a partial clone
+                       (its config holds extensions.partialClone or a remote.<name>.promisor entry, so the
+                       promisor remote may hold it), and more than P9_MAX_WORDS distinct undeclared hex words
+                       are CANNOT_EVALUATE (exit 2), never a pass. The label anywhere else (indented,
+                       mid-line) declares nothing and is not read.
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
 sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
@@ -458,12 +467,18 @@ is read as two lines; a tag force-moved after the lint runs is not seen; a dispa
 helps only where the sender refuses to send on exit 1 or 2. P9 is opt-in, so a brief with no BRIEF-REVISIONS line
 is not judged; the declaration is written by the same author or generator as the rest of the brief, so a stale
 value carried into BRIEF-REVISIONS (or into a pin line) passes, and so does every word that shares a prefix with a
-declared value; a stale commit absent from --repo (not fetched there) is quiet, and so is an ambiguous prefix, which
-git answers like an absent one; a word of 6 hex digits or fewer, of 41 to 63, or of 65 or more is not judged; a
+declared value; a stale commit absent from --repo (not fetched there) is quiet, and so is an ambiguous prefix where
+git answers it like an absent one, printing nothing; a word of 6 hex digits or fewer, of 41 to 63, or of 65 or more is not judged; a
 branch or tag named with hex digits alone resolves to its commit, so naming it undeclared refuses (the P5 residual's
 mirror image); a look-alike or fullwidth digit, a commit id split across a line break, and a commit named through a
-ref (main~1, HEAD^) are not read; round ids, item counts and other prose are outside it; and the lint reads one brief
-and never the previous round's.
+ref (main~1, HEAD^) are not read; nor are a commit id written 0x<hex>, one split by emphasis (**abcd**ef01234),
+one split by a format character inside code (decode_brief allows one there, and P9 reads the raw text), or a
+describe name with an upper-case G, which git does not read as one; in a partial clone every undeclared hex word
+that names no commit present there, a nonce or a digest included, exits 2 (lint from a full clone), and a
+remote.<name>.promisor entry set to false still counts; a probe that exits 1 with any text on stderr exits 2,
+even where git only warned; the BRIEF-PIN and REVIEWED HEAD values are still resolved by P3 with git's default
+lazy fetch, so in a partial clone that read can fetch; round ids, item counts and other prose are outside it; and
+the lint reads one brief and never the previous round's.
 
 GIT WRITE (beside the preflight, for every family, before the execution rules' early return for a family that can
 execute):
@@ -631,7 +646,8 @@ Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one su
                            declared input that exists but cannot be confirmed readable (P6); a malformed
                            ACCEPTED-RESIDUAL declaration or pinned content that cannot be read (P7); two
                            BRIEF-REVISIONS lines, a malformed one, a value that is not a commit id or does not
-                           resolve, a declaration with no repository, or too many hex words to probe (P9); the
+                           resolve, a declaration with no repository, a hex word git cannot read or a partial
+                           clone lacks, or too many hex words to probe (P9); the
                            family is not in the table; the
                            table is missing, unreadable, or malformed (format-version must be the
                            integer 1); or the arguments are wrong (a repeated --family or --table
@@ -3718,6 +3734,86 @@ P9_MAX_WORDS = 256
 # a word of the raw text: a run of ASCII letters and digits, so `a..b`, `^{commit}`, `~N`, a URL's path
 # segments, code-span backticks and every other character split words
 HEX_WORD_RE = re.compile(r"[0-9A-Za-z]++")
+# what a P9 git read raises when git cannot be launched or times out; each is CannotEvaluate
+GIT_RUN_ERRORS = (OSError, subprocess.SubprocessError)
+# the global options of P9's object probes: never fetch a missing object from a promisor remote (git 2.44 or
+# later; an older git refuses the option, which is CannotEvaluate)
+P9_NO_FETCH_OPTIONS = ("--no-lazy-fetch",)
+# the repository config keys (git's own regular expression, matched against the lower-cased key) that make a
+# repository a partial clone, one whose promisor remote may hold objects it lacks
+PROMISOR_CONFIG_KEYS = r"^(extensions\.partialclone|remote\..*\.promisor)$"
+
+
+def _rev_parse_local(repo, rev):
+    """_rev_parse with P9_NO_FETCH_OPTIONS: git rev-parse of `rev` as a commit in `repo` that never fetches a
+    missing object from a promisor remote, so a P9 probe reads only the objects `repo` holds and never writes
+    into its object store. LC_ALL=C keeps git's messages untranslated, so _not_a_commit can read them."""
+    return subprocess.run(["git", "--no-replace-objects"] + list(P9_NO_FETCH_OPTIONS)
+                          + ["-C", str(repo), "rev-parse", "--verify", "--quiet", rev + "^{commit}"],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=dict(_no_replace_env(), LC_ALL="C"))
+
+
+def _promisor_probe(repo):
+    """git config --get-regexp of PROMISOR_CONFIG_KEYS in `repo` under _no_replace_env(), output captured."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "config", "--null", "--get-regexp",
+                           PROMISOR_CONFIG_KEYS],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_no_replace_env())
+
+
+def _p9_git(repo, what, read):
+    """The completed git read `read()` for P9, or CannotEvaluate naming `what` when git cannot be launched or
+    times out (GIT_RUN_ERRORS), or refuses the repository for its ownership."""
+    try:
+        probe = read()
+    except GIT_RUN_ERRORS as exc:
+        raise CannotEvaluate("{}: cannot run git in {}: {}".format(what, repo, exc))
+    if _ownership_refused(probe):
+        raise CannotEvaluate("{}: cannot read {}: {}".format(what, repo, OWNERSHIP_REMEDY))
+    return probe
+
+
+def _absent_answer(probe):
+    """Whether a git read answered cleanly that there is nothing to report: exit 1 with nothing printed on
+    either stream, as git rev-parse --verify --quiet answers for an absent object, and git config
+    --get-regexp for no matching key (measured with git 2.53.0). Any other failure (a corrupt or unreadable
+    object, text on stderr, another exit) is not this answer."""
+    return probe.returncode == 1 and not probe.stdout.strip() and not probe.stderr.strip()
+
+
+# git rev-parse's one line, under LC_ALL=C, for <rev>^{commit} where <rev> names an object of another type
+NOT_A_COMMIT_ERROR = "error: {}^{{commit}}: expected commit type, but the object dereferences to {} type"
+
+
+def _not_a_commit(probe, rev):
+    """Whether git answered cleanly that `rev` names a blob or a tree, not a commit: exit 1, nothing on stdout,
+    and exactly NOT_A_COMMIT_ERROR on stderr (measured with git 2.53.0; even --quiet prints it)."""
+    stderr = probe.stderr.decode("utf-8", "replace").strip()
+    return (probe.returncode == 1 and not probe.stdout.strip()
+            and stderr in [NOT_A_COMMIT_ERROR.format(rev, kind) for kind in ("blob", "tree")])
+
+
+def _full_commit(text):
+    """Whether git printed a full commit id: 40 or 64 hex digits."""
+    return len(text) in (40, 64) and hex_ref(text)
+
+
+def _probe_failure(what, repo, probe):
+    """The CannotEvaluate for a P9 git read that failed in a way that is not the clean answer."""
+    stderr = probe.stderr.decode("utf-8", "replace").strip()
+    return CannotEvaluate("{}: git failed in {} (exit {}){}".format(
+        what, repo, probe.returncode, ": " + _excerpt(stderr) if stderr else ", printing no commit id"))
+
+
+def partial_clone(repo):
+    """Whether `repo` is a partial clone (its config holds a PROMISOR_CONFIG_KEYS key, whatever its value), whose
+    promisor remote may hold an object `repo` lacks. git's clean no-match answer (_absent_answer) is False; a
+    read that fails any other way is CannotEvaluate."""
+    probe = _p9_git(repo, "partial clone check", lambda: _promisor_probe(repo))
+    if _absent_answer(probe):
+        return False
+    if probe.returncode == 0 and probe.stdout.strip():
+        return True
+    raise _probe_failure("partial clone check", repo, probe)
 
 
 def revision_value_ok(value):
@@ -3752,30 +3848,60 @@ def revision_declarations(raw):
     return declarations
 
 
+def _describe_hex(line, word):
+    """Whether the word `word` (a HEX_WORD_RE match in `line`) is the g<hex> tail of a git describe name
+    (v1.2-3-g<hex>): a lower-case g right after a hyphen, then a commit id as a pin is written, which git
+    rev-parse reads as the commit <hex> names."""
+    text = word.group(0)
+    return text.startswith("g") and line[word.start() - 1:word.start()] == "-" and hex_ref(text[1:])
+
+
 def hex_words(raw):
     """[(line, word)] for every word of the raw brief text (HEX_WORD_RE) that is a commit id as a pin is
-    written (hex_ref: 7 to 40 or 64 hex digits, any case), on every line: prose, code spans, fences, web
-    addresses, pin lines and the declaration itself alike."""
+    written (hex_ref: 7 to 40 or 64 hex digits, any case), and the <hex> of every describe tail g<hex>
+    (_describe_hex), on every line: prose, code spans, fences, web addresses, pin lines and the declaration
+    itself alike."""
     found = []
     for number, line in enumerate(raw.split("\n"), 1):
-        found.extend((number, word.group(0)) for word in HEX_WORD_RE.finditer(line) if hex_ref(word.group(0)))
+        for word in HEX_WORD_RE.finditer(line):
+            if hex_ref(word.group(0)):
+                found.append((number, word.group(0)))
+            elif _describe_hex(line, word):
+                found.append((number, word.group(0)[1:]))
     return found
 
 
-def revision_commit(repo, word):
-    """The full commit id a hex word names in `repo`, or None when it names none: git rev-parse (_rev_parse,
-    hermetic, replace objects disabled) answers alike, exit 1 and nothing printed, for an absent object, an
-    object that is not a commit (a blob or a tree) and an ambiguous prefix (measured with git 2.53.0). A
-    repository git refuses for its ownership, and a git that cannot be launched or times out, are
+def revision_commit(repo, word, promisor=False):
+    """The full commit id a hex word names in `repo`, or None when git answers cleanly that it names none:
+    git rev-parse (_rev_parse_local: hermetic, replace objects disabled, never fetching) answers exit 1 and
+    nothing printed (_absent_answer) for an absent object, and exit 1 with its one not-a-commit line
+    (_not_a_commit) for a blob or a tree (measured with git 2.53.0). In a partial clone (`promisor`) the
+    absent answer is CannotEvaluate, since the promisor remote may hold the object. A repository git
+    refuses for its ownership, a git that cannot be launched or times out, and every other failure (a
+    corrupt or unreadable object, other text on stderr, another exit, output that is no full commit id) are
     CannotEvaluate, never a quiet pass."""
-    try:
-        probe = _rev_parse(repo, word)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise CannotEvaluate("hex word {}: cannot run git in {}: {}".format(word, repo, exc))
-    if _ownership_refused(probe):
-        raise CannotEvaluate("hex word {}: cannot read {}: {}".format(word, repo, OWNERSHIP_REMEDY))
+    what = "hex word {}".format(word)
+    probe = _p9_git(repo, what, lambda: _rev_parse_local(repo, word))
+    if _not_a_commit(probe, word):
+        return None
+    if _absent_answer(probe):
+        if promisor:
+            raise CannotEvaluate("{} names no commit present in {}, a partial clone: its promisor remote may hold "
+                                 "one, and the lint never fetches; lint from a full clone".format(what, repo))
+        return None
     commit = probe.stdout.decode("ascii", "replace").strip()
-    return commit if probe.returncode == 0 and len(commit) in (40, 64) and hex_ref(commit) else None
+    if probe.returncode == 0 and _full_commit(commit):
+        return commit
+    raise _probe_failure(what, repo, probe)
+
+
+def declared_commit(repo, value, promisor):
+    """The commit a BRIEF-REVISIONS value names (revision_commit), or CannotEvaluate when it names none."""
+    commit = revision_commit(repo, value, promisor)
+    if commit is None:
+        raise CannotEvaluate("the {} value {} does not resolve to a commit in {}".format(REVISIONS_LABEL, value,
+                                                                                         repo))
+    return commit
 
 
 def rule_p9(names, row, repo):
@@ -3786,8 +3912,9 @@ def rule_p9(names, row, repo):
     name the same commit by their spelling (pin_matches: either a prefix of the other, in any case). A hex word
     that names no commit there (absent, ambiguous, a blob or a tree) is quiet. With no declaration the rule is
     quiet. More than P9_MAX_DECLARATIONS declaration lines, a malformed declaration, a value that is not a
-    commit id or does not resolve to a commit (resolve_revision), a declaration with no repository to read, and
-    more than P9_MAX_WORDS distinct undeclared hex words are CannotEvaluate, never a pass."""
+    commit id or does not resolve to a commit (declared_commit), a declaration with no repository to read, a
+    probe git fails, a word a partial clone (partial_clone) lacks, and more than P9_MAX_WORDS distinct
+    undeclared hex words are CannotEvaluate, never a pass. No P9 read fetches (P9_NO_FETCH_OPTIONS)."""
     declarations = revision_declarations(names.raw)
     if not declarations:
         return []
@@ -3798,16 +3925,17 @@ def rule_p9(names, row, repo):
     if repo is None:
         raise CannotEvaluate("the brief declares its revisions on a {} line but no repository was given to "
                              "resolve them in".format(REVISIONS_LABEL))
+    promisor = partial_clone(repo)
     values = [value for _, line_values in declarations for value in line_values]
     for value in values:
-        resolve_revision(repo, value)
+        declared_commit(repo, value, promisor)
     declared = [pin for _, pin in names.pins] + values
     undeclared = [(line, word) for line, word in hex_words(names.raw) if not pin_matches(word, declared)]
     distinct = list(dict.fromkeys(word.lower() for _, word in undeclared))
     if len(distinct) > P9_MAX_WORDS:
         raise CannotEvaluate("the brief names {} distinct hex words outside its declared revisions, more than "
                              "the {} the lint probes; name fewer".format(len(distinct), P9_MAX_WORDS))
-    commits = dict((word, revision_commit(repo, word)) for word in distinct)
+    commits = dict((word, revision_commit(repo, word, promisor)) for word in distinct)
     findings, seen = [], set()
     for line, word in undeclared:
         commit = commits[word.lower()]
@@ -9295,8 +9423,8 @@ def self_test(report_path=None):
         def p9(lines, declaration=p9_declared, repo=p7_repo, family="alpha"):
             return _outcome("BRIEF-PIN: {}\n".format(p9_a) + declaration + lines, family, True, repo)
 
-        def p9_case(lines, declaration=p9_declared):
-            return lambda: p9(lines, declaration)
+        def p9_case(lines, declaration=p9_declared, repo=p7_repo):
+            return lambda: p9(lines, declaration, repo)
 
         def p9_refusal(text, repo=p7_repo):
             """The CannotEvaluate text for a brief (alpha), or None when it evaluates."""
@@ -9358,14 +9486,14 @@ def self_test(report_path=None):
                "resolve them in", (0, [])])
         # git answers an ambiguous prefix under --quiet as it answers an absent one (exit 1, nothing printed;
         # measured with git 2.53.0 on a 4-digit blob prefix): a declared one is exit 2 and a word is quiet
-        genuine_rev_parse = _rev_parse
+        genuine_rev_parse = _rev_parse_local
 
         def ambiguous_rev_parse(repo, rev):
             if rev.lower().startswith(p9_c[:7]):
                 return subprocess.CompletedProcess([], 1, b"", b"")
             return genuine_rev_parse(repo, rev)
 
-        with _patched(_rev_parse=ambiguous_rev_parse):
+        with _patched(_rev_parse_local=ambiguous_rev_parse):
             p9_ambiguous = [p9("", "BRIEF-REVISIONS: {}\n".format(p9_c[:7])), p9("The base is {}.\n".format(
                 p9_c[:7]))]
         check("preflight/p9-ambiguous", p9_ambiguous, ["CannotEvaluate", (0, [])])
@@ -9401,6 +9529,147 @@ def self_test(report_path=None):
             refused = run(str(p9_brief), "alpha", p9_table, True, p7_repo)
         check("preflight/p9-refuse-line", (refused, "names a commit outside its declared revisions (1 hard hit(s): "
                                            "P9 x1)" + REVISIONS_HINT in printed.getvalue()), (1, True))
+        p9_hint_table = p7_base / "p9-hint-table.toml"
+
+        def p9_hint(family, lines, phrase, table_text=TABLE_FIXTURE):
+            """(exit code, whether the one REFUSE line is the branch `phrase` names, whether it carries
+            REVISIONS_HINT) for a brief that names C beside `lines`."""
+            with open(p9_brief, "w", encoding="utf-8") as handle:
+                handle.write("BRIEF-PIN: {}\n{}{}The base is {}.\n".format(p9_a, p9_declared, lines, p9_c))
+            with open(p9_hint_table, "w", encoding="utf-8") as handle:
+                handle.write(table_text)
+            shown = io.StringIO()
+            with contextlib.redirect_stdout(shown):
+                code = run(str(p9_brief), family, p9_hint_table, True, p7_repo)
+            refuse = [line for line in shown.getvalue().splitlines() if line.startswith("REFUSE:")]
+            return code, len(refuse) == 1 and phrase in refuse[0], len(refuse) == 1 and REVISIONS_HINT in refuse[0]
+
+        # every REFUSE branch that a P9 hit can join carries the hint: the S rules, W1, P5 and the default
+        check("preflight/p9-refuse-hint-every-branch",
+              [p9_hint("gamma", "1. Run `git log -1` in the clone.\n", "cannot execute and the brief carries"),
+               p9_hint("alpha", "Then run git commit -q -m done.\n", "commits or pushes",
+                       TABLE_FIXTURE.replace('git-write = "undeclared"', 'git-write = "no"', 1)),
+               p9_hint("alpha", "Clone with `git clone --branch main https://h.example/r.git w`.\n",
+                       "through a ref that can move"),
+               p9_hint("gamma", "Workdir: /w/repo\nRead /etc/passwd first.\n",
+                       "names an input the family cannot read")], [(1, True, True)] * 4)
+        # one finding per line and word, whatever its case; the same word on another line is another finding
+        p9_twice = "The base is {0}, again {0} and {1}.\n".format(p9_c, p9_c.upper())
+
+        def p9_count(lines):
+            found = evaluate("BRIEF-PIN: {}\n{}{}".format(p9_a, p9_declared, lines).encode("utf-8"), "alpha",
+                             parse_table(TABLE_FIXTURE.encode("utf-8")), True, p7_repo)[1]
+            return len([rule for rule, _, _, _, _ in found if rule == "P9"])
+
+        check("preflight/p9-one-finding-per-line-word", [p9_count(p9_twice), p9_count(p9_twice * 2)], [1, 2])
+        # a git describe name's g<hex> tail is read as its commit; an upper-case G or no hyphen is not that form
+        p9_describe = "Built from v1.2-3-g{}.\n"
+        check("preflight/p9-describe-name",
+              [p9(p9_describe.format(p9_c[:7])), p9(p9_describe.format(p9_b[:7])),
+               p9("Built from v1.2-3-G{}.\n".format(p9_c[:7])), p9("Built from v1.2-3g{}.\n".format(p9_c[:7]))],
+              [p9_hard, (0, []), (0, []), (0, [])])
+        # a probe git fails is CannotEvaluate, never quiet: a corrupt loose object of C (exit 128, text on stderr),
+        # while B (declared) and a nonce, which git answers cleanly in the same repository, stay quiet
+        p9_corrupt = p7_base / "p9-corrupt"
+        shutil.copytree(p7_repo, p9_corrupt, symlinks=True)
+        p9_loose = p9_corrupt / ".git" / "objects" / p9_c[:2] / p9_c[2:]
+        p9_loose_found = p9_loose.is_file()
+        if p9_loose_found:
+            os.chmod(p9_loose, 0o644)
+            p9_loose.write_bytes(b"not a zlib stream")
+        check("preflight/p9-unreadable-commit-cannot-evaluate",
+              [p9_loose_found, p9("The base is {}.\n".format(p9_c), repo=p9_corrupt),
+               p9("The base is {}.\n".format(p9_b), repo=p9_corrupt), p9(p9_nonce, repo=p9_corrupt)],
+              [True, "CannotEvaluate", (0, []), (0, [])])
+        genuine_local = _rev_parse_local
+
+        def p9_stub(returncode, stdout, stderr):
+            """A _rev_parse_local answering (returncode, stdout, stderr) for C, genuine for every other rev."""
+            def stub(repo, rev):
+                if rev.lower().startswith(p9_c[:7]):
+                    return subprocess.CompletedProcess([], returncode, stdout, stderr)
+                return genuine_local(repo, rev)
+            return stub
+
+        def p9_stubbed(stub):
+            def outcome():
+                with _patched(_rev_parse_local=stub):
+                    return p9("The base is {}.\n".format(p9_c))
+            return outcome
+
+        # an unreadable fan-out directory (exit 1 with text on stderr; measured with git 2.53.0), another exit,
+        # and output that is no commit id are CannotEvaluate; the clean answer (exit 1, nothing printed) is quiet
+        p9_denied = p9_stub(1, b"", "error: unable to open loose object {}: Permission denied\n".format(
+            p9_c).encode("ascii"))
+        p9_garbled = p9_stub(0, b"not a commit id\n", b"")
+        check("preflight/p9-read-error-cannot-evaluate",
+              [p9_stubbed(p9_denied)(), p9_stubbed(p9_garbled)(), p9_stubbed(p9_stub(128, b"", b"fatal: bad\n"))(),
+               p9_stubbed(p9_stub(1, b"", b""))()], ["CannotEvaluate"] * 3 + [(0, [])])
+        p9_owned = p9_stub(128, b"", ("fatal: detected dubious ownership in repository at '{0}'\nTo add an "
+                                      "exception for this directory, call:\n\n\tgit config --global --add "
+                                      "safe.directory {0}\n".format(p7_repo)).encode("utf-8"))
+
+        def p9_ownership_named():
+            with _patched(_rev_parse_local=p9_owned):
+                refusal = p9_refusal("BRIEF-PIN: {}\n{}The base is {}.\n".format(p9_a, p9_declared, p9_c))
+            return refusal is not None and OWNERSHIP_REMEDY in refusal
+
+        check("preflight/p9-ownership-cannot-evaluate", p9_ownership_named(), True)
+
+        def p9_raising(error):
+            """The outcome of naming C when its probe raises `error`, or the name of what escaped."""
+            def stub(repo, rev):
+                if rev.lower().startswith(p9_c[:7]):
+                    raise error
+                return genuine_local(repo, rev)
+
+            def outcome():
+                try:
+                    with _patched(_rev_parse_local=stub):
+                        return p9("The base is {}.\n".format(p9_c))
+                except (OSError, subprocess.SubprocessError) as escaped:
+                    return type(escaped).__name__
+            return outcome
+
+        p9_timeout = p9_raising(subprocess.TimeoutExpired(["git"], GIT_READ_TIMEOUT))
+        p9_no_git = p9_raising(FileNotFoundError(errno.ENOENT, "No such file or directory", "git"))
+        check("preflight/p9-launch-cannot-evaluate", [p9_timeout(), p9_no_git()], ["CannotEvaluate"] * 2)
+
+        def p9_config_answer(returncode, stdout, stderr):
+            with _patched(_promisor_probe=lambda repo: subprocess.CompletedProcess([], returncode, stdout, stderr)):
+                return p9("The base is {}.\n".format(p9_b))
+
+        # the partial clone check fails closed too: another exit, or exit 0 that lists no key
+        check("preflight/p9-partial-clone-check-cannot-evaluate",
+              [p9_config_answer(3, b"", b"error: bad config\n"), p9_config_answer(0, b"", b""),
+               p9_config_answer(1, b"", b"")], ["CannotEvaluate"] * 2 + [(0, [])])
+        # a partial clone of the fixture (blob:none from a file:// upstream), then D committed upstream only
+        p9_env = _git_fixture_env.git_fixture_env(
+            GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+            GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
+        p9_git = ["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
+        p9_up, p9_partial = p7_base / "p9-upstream", p7_base / "p9-partial"
+        for args in (["clone", "-q", "--no-hardlinks", str(p7_repo), str(p9_up)],
+                     ["-C", str(p9_up), "config", "uploadpack.allowFilter", "true"],
+                     ["clone", "-q", "--filter=blob:none", "file://" + str(p9_up), str(p9_partial)],
+                     ["-C", str(p9_up), "commit", "-q", "--allow-empty", "-m", "upstream only"]):
+            subprocess.run(p9_git + args, check=True, capture_output=True, timeout=60, env=p9_env)
+        p9_d = subprocess.run(p9_git + ["-C", str(p9_up), "rev-parse", "HEAD"], check=True, capture_output=True,
+                              timeout=60, env=p9_env).stdout.decode("ascii").strip()
+
+        def p9_holds(commit):
+            """Whether the partial clone holds `commit`, read without fetching."""
+            return subprocess.run(p9_git + ["--no-lazy-fetch", "-C", str(p9_partial), "cat-file", "-e", commit],
+                                  capture_output=True, timeout=60, env=p9_env).returncode == 0
+
+        # a word the partial clone lacks (D upstream, a nonce) is CannotEvaluate, its promisor remote may hold
+        # it; C, which it holds, is HARD and B (declared) is quiet; and the lint never fetched D
+        p9_held_before = p9_holds(p9_d)
+        check("preflight/p9-partial-clone-cannot-evaluate",
+              [p9("The base is {}.\n".format(word), repo=p9_partial) for word in (p9_d, "0123456789abcdef" * 2,
+                                                                                  p9_c, p9_b)],
+              ["CannotEvaluate", "CannotEvaluate", p9_hard, (0, [])])
+        check("preflight/p9-partial-clone-never-fetches", [p9_held_before, p9_holds(p9_d)], [False, False])
         # each guard patched out flips its fixture
         check("revert/p9-red", *flip([p9_case(p9_runs.format(p9_c[:7], p9_a[:7]))], [(0, [])], rule_p9=nothing))
         check("revert/p9-opt-in-red", *flip([p9_case(p9_runs.format(p9_c[:7], p9_a[:7]), "")], [p9_hard],
@@ -9417,9 +9686,27 @@ def self_test(report_path=None):
                                                revision_value_ok=lambda value: True))
         check("revert/p9-declared-resolve-red", *flip(
             [p9_case("", "BRIEF-REVISIONS: 0123456789abcdef0123456789abcdef01234567\n")], [(0, [])],
-            resolve_revision=lambda repo, rev: rev))
+            declared_commit=lambda repo, value, promisor: value))
         check("revert/p9-commit-split-red", *flip([p9_case(p9_nonce), p9_case(p9_blob), p9_case(p9_date)],
-                                                  [p9_hard] * 3, revision_commit=lambda repo, word: "0" * 40))
+                                                  [p9_hard] * 3,
+                                                  revision_commit=lambda repo, word, promisor=False: "0" * 40))
+        check("revert/p9-ownership-red", *flip([p9_ownership_named], [False], _ownership_refused=lambda probe: False))
+        check("revert/p9-launch-red", *flip([p9_timeout, p9_no_git], ["TimeoutExpired", "FileNotFoundError"],
+                                            GIT_RUN_ERRORS=()))
+        check("revert/p9-absent-answer-red", *flip(
+            [p9_case("The base is {}.\n".format(p9_c), repo=p9_corrupt), p9_stubbed(p9_denied)], [(0, [])] * 2,
+            _absent_answer=lambda probe: probe.returncode != 0))
+        check("revert/p9-full-commit-red", *flip([p9_stubbed(p9_garbled)], [p9_hard], _full_commit=lambda text: True))
+        # git prints its one expected-commit-type line for a blob, read as the clean not-a-commit answer
+        check("revert/p9-not-a-commit-red", *flip([p9_case(p9_blob), p9_case("Blob {}.\n".format(p9_blobs[0]))],
+                                                  ["CannotEvaluate"] * 2, _not_a_commit=lambda probe, rev: False))
+        check("revert/p9-describe-red", *flip([p9_case(p9_describe.format(p9_c[:7]))], [(0, [])],
+                                              _describe_hex=lambda line, word: False))
+        check("revert/p9-partial-clone-red", *flip([p9_case(p9_nonce, repo=p9_partial)], [(0, [])],
+                                                   partial_clone=lambda repo: False))
+        # after every other read of the partial clone, since the patched read fetches D into it
+        check("revert/p9-no-lazy-fetch-red", *flip([p9_case("The base is {}.\n".format(p9_d), repo=p9_partial)],
+                                                   [p9_hard], P9_NO_FETCH_OPTIONS=()))
         check("revert/p9-word-bound-red", *flip([p9_case(p9_words(P9_MAX_WORDS + 1))], [(0, [])],
                                                 P9_MAX_WORDS=P9_MAX_WORDS + 1))
         check("revert/p9-word-split-red", *flip(
@@ -9428,7 +9715,7 @@ def self_test(report_path=None):
             HEX_WORD_RE=re.compile(r"\S++")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 252)
+    check("revert/every-flip-ran", len(flipped), 260)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
