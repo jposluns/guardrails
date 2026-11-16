@@ -1705,7 +1705,7 @@ source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 13
 end-line = 14
 canonical-text = "An artefact is never installed, published, or promoted to a live or otherwise consumer-accessible\ndestination before the verification it must pass has passed."
-source-digest = "cc7308cf029b61f6901f0fc3416660cecb5c6a47a6fea30feaf9f8abbb2922a0"
+source-digest = "276e8a1256eebf65327bca74471116d9b85f05f250c6ff9da5198d01f960176e"
 layer = "core"
 
 [[clause]]
@@ -1715,7 +1715,7 @@ source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 14
 end-line = 16
 canonical-text = "It is placed first in a staging area that is\nnot that destination, verified there, and only then is that same verified artefact promoted to the live\ndestination, on a recorded pass."
-source-digest = "cc7308cf029b61f6901f0fc3416660cecb5c6a47a6fea30feaf9f8abbb2922a0"
+source-digest = "276e8a1256eebf65327bca74471116d9b85f05f250c6ff9da5198d01f960176e"
 layer = "core"
 
 [[clause]]
@@ -1725,7 +1725,7 @@ source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 14
 end-line = 16
 canonical-text = "It is placed first in a staging area that is\nnot that destination, verified there, and only then is that same verified artefact promoted to the live\ndestination, on a recorded pass."
-source-digest = "cc7308cf029b61f6901f0fc3416660cecb5c6a47a6fea30feaf9f8abbb2922a0"
+source-digest = "276e8a1256eebf65327bca74471116d9b85f05f250c6ff9da5198d01f960176e"
 layer = "core"
 
 [[clause]]
@@ -1735,7 +1735,7 @@ source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 14
 end-line = 16
 canonical-text = "It is placed first in a staging area that is\nnot that destination, verified there, and only then is that same verified artefact promoted to the live\ndestination, on a recorded pass."
-source-digest = "cc7308cf029b61f6901f0fc3416660cecb5c6a47a6fea30feaf9f8abbb2922a0"
+source-digest = "276e8a1256eebf65327bca74471116d9b85f05f250c6ff9da5198d01f960176e"
 layer = "core"
 
 [[clause]]
@@ -1745,7 +1745,7 @@ source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 14
 end-line = 16
 canonical-text = "It is placed first in a staging area that is\nnot that destination, verified there, and only then is that same verified artefact promoted to the live\ndestination, on a recorded pass."
-source-digest = "cc7308cf029b61f6901f0fc3416660cecb5c6a47a6fea30feaf9f8abbb2922a0"
+source-digest = "276e8a1256eebf65327bca74471116d9b85f05f250c6ff9da5198d01f960176e"
 layer = "core"
 
 [[clause]]
@@ -1755,7 +1755,7 @@ source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 20
 end-line = 24
 canonical-text = "In a change to a live system, one step or many, each tool's side effects are recorded\nfrom observing it first, either on a copy that shares no state with and cannot reach the live system, or\nas one canary step that other steps of the change follow, run only after the state it changes meets the\nbar the verified-restore-path rule (secrst) sets for a destructive operation, as if the step destroyed\nthat state;"
-source-digest = "cc7308cf029b61f6901f0fc3416660cecb5c6a47a6fea30feaf9f8abbb2922a0"
+source-digest = "276e8a1256eebf65327bca74471116d9b85f05f250c6ff9da5198d01f960176e"
 layer = "core"
 
 [[clause]]
@@ -1765,7 +1765,7 @@ source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 24
 end-line = 24
 canonical-text = "a change of a single step is observed first on that copy;"
-source-digest = "cc7308cf029b61f6901f0fc3416660cecb5c6a47a6fea30feaf9f8abbb2922a0"
+source-digest = "276e8a1256eebf65327bca74471116d9b85f05f250c6ff9da5198d01f960176e"
 layer = "core"
 
 [[clause]]
@@ -1775,7 +1775,7 @@ source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 24
 end-line = 25
 canonical-text = "any unrecorded effect, harmless or\nnot, halts the change;"
-source-digest = "cc7308cf029b61f6901f0fc3416660cecb5c6a47a6fea30feaf9f8abbb2922a0"
+source-digest = "276e8a1256eebf65327bca74471116d9b85f05f250c6ff9da5198d01f960176e"
 layer = "core"
 
 [[clause]]
@@ -1785,7 +1785,7 @@ source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 25
 end-line = 26
 canonical-text = "it resumes only once every tool's effects are re-observed in one of the same two\nways and recorded;"
-source-digest = "cc7308cf029b61f6901f0fc3416660cecb5c6a47a6fea30feaf9f8abbb2922a0"
+source-digest = "276e8a1256eebf65327bca74471116d9b85f05f250c6ff9da5198d01f960176e"
 layer = "core"
 
 [[clause]]
@@ -1795,7 +1795,17 @@ source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 26
 end-line = 26
 canonical-text = "no check the change must pass is relaxed."
-source-digest = "cc7308cf029b61f6901f0fc3416660cecb5c6a47a6fea30feaf9f8abbb2922a0"
+source-digest = "276e8a1256eebf65327bca74471116d9b85f05f250c6ff9da5198d01f960176e"
+layer = "core"
+
+[[clause]]
+clause-id = "stgprm.11"
+corpus-id = "stgprm"
+source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
+start-line = 28
+end-line = 28
+canonical-text = "Sending an artefact to recipients counts as promotion under this rule."
+source-digest = "276e8a1256eebf65327bca74471116d9b85f05f250c6ff9da5198d01f960176e"
 layer = "core"
 
 [[clause]]

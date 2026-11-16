@@ -24,3 +24,5 @@ bar the verified-restore-path rule (secrst) sets for a destructive operation, as
 that state; a change of a single step is observed first on that copy; any unrecorded effect, harmless or
 not, halts the change; it resumes only once every tool's effects are re-observed in one of the same two
 ways and recorded; no check the change must pass is relaxed.
+
+Sending an artefact to recipients counts as promotion under this rule.
