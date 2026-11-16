@@ -5,8 +5,7 @@ lands only with that id's coverage accounted for in the same change.
 A removed test case cannot fail, so a run of the suite after the removal is green whether or not the case
 still mattered. This gate reads the expected-check-ids lists of tools/selftest_checks.toml at the change's
 comparison base and at its head, and refuses (exit 1) a NET REMOVAL: a (suite id, check id) pair registered
-at the base and not at the head (an id moved to another suite counts as removed from its old suite; an id
-added anywhere is not read), unless the accounting record .aiqt/check-removals.toml at the head names that
+at the base and not at the head, unless the accounting record .aiqt/check-removals.toml at the head names that
 pair in one of the three states of the gate-discipline rule, in an entry this change wrote:
 
   schema = 1
@@ -16,11 +15,27 @@ pair in one of the three states of the gate-discipline rule, in an entry this ch
   state = "covered"            covered-by-suite and covered-by-id name a check id registered at the head
   state = "unreachable"        capability-removed (the change that removes what the case depends on) and
                                observed (the attempt that confirms the path is gone), each non-blank
-  state = "disclosed"          authorization (the maintainer's recorded authorization reference), non-blank
+  state = "disclosed"          authorization (the maintainer's recorded authorization reference), in the
+                               form D-<number> (<YYYY-MM-DD>): the decision number, 1 to 6 digits, one space,
+                               and the decision's calendar date in parentheses, for example D-417 (2026-10-04)
 
-An entry the base record already holds unchanged was not written by this change and accounts for nothing; a
-covered-by pair that is not registered at the head (removed in this change too, or never registered) covers
-nothing. Each of those is a finding (exit 1), and so is a removed pair with no entry.
+A MOVE is not a removal: a removed pair whose check id is newly registered at the head in another suite (a
+pair the base did not hold) is reported as moved and needs no entry; each new registration absorbs one
+removed pair, so an id removed from two suites and added to one is one move and one removal, and an id that
+the other suite already held at the base is not a move. A move needs no entry because the moved id stays
+registered, so tools/check_selftest_execution.py still requires its new suite to run it.
+
+An entry accounts for a removal only when it is FRESH: the base record holds no entry for the pair, or holds
+one whose fields differ from the head's after each value is whitespace-collapsed and case-folded, so a
+whitespace or letter-case edit of an old entry is not a new accounting. A covered-by pair that is not
+registered at the head (removed in this change too, or never registered) covers nothing, and a disclosed
+entry whose authorization is not in the form above discloses nothing. Each of those is a finding (exit 1),
+and so is a removed pair with no entry, or one whose entry is unchanged from the base.
+
+The record is judged on the HEAD side: the head record must be well-formed (below), while the base record is
+read only to tell a fresh entry from an old one. A base record that cannot be read (not UTF-8, not TOML, or
+not the shape above) holds no entry, so every head entry reads as fresh and a change that repairs a
+malformed record is not blocked by the record it repairs (an INFO line names this).
 
 THE BASE is the one tools/check_release_cut.py derives (its context(), imported, not copied): in a
 pull_request run (GITHUB_BASE_REF set) the merge HEAD's raw first parent, which must be the resolved
@@ -32,11 +47,13 @@ an unsupported event) is CANNOT_EVALUATE here too. The registry and the record a
 head commit trees through the same module's tree_blob (exact path components; a symlink, tree or gitlink
 in their place is refused), never from the index or the working tree.
 
-Exit 0: no net removal, or every removed pair accounted for (each accounted pair is printed).
-Exit 1: an unaccounted removed pair, a stale entry, or a covered-by pair that does not survive.
+Exit 0: no net removal, or every removed pair moved or accounted for (each such pair is printed).
+Exit 1: an unaccounted removed pair, a stale entry, a covered-by pair that does not survive, or a disclosed
+entry whose authorization is not in the stated form.
 Exit 2 (CANNOT_EVALUATE): the base cannot be derived or read, a git read fails, the registry is absent at
-the head while the base holds it (absent at both ends, nothing is removed), or the registry or the record is not UTF-8, not TOML, or not the shape above (an unknown key or
-state, a missing or blank field, a repeated pair, a format-version other than 1). Never a pass.
+the head while the base holds it (absent at both ends, nothing is removed), either registry or the head
+record is not UTF-8, not TOML, or not the shape above (an unknown key or state, a missing or blank field, a
+repeated pair, a format-version other than 1). Never a pass.
 
   check_selftest_removal.py [--root DIR] [--protected REF] [--base OID]
   check_selftest_removal.py --self-test [--execution-report ABS_PATH]
@@ -44,10 +61,15 @@ state, a missing or blank field, a repeated pair, a format-version other than 1)
 RESIDUALS: it reads registered ids, not test code, so a case kept in the registry while its body is
 weakened, a check whose assertion is emptied, and a test file outside the registry are not seen; an id
 renamed in the registry reads as a removal and an addition, so it needs an entry (covered by the new id);
-the record proves that an accounting was written, never that it is true (the covered-by case may not catch
-what the removed one did, and the authorization reference is not looked up); the comparison is of the two
-endpoints, so a removal and re-addition inside the range is not seen; and, like its base derivation, it
-trusts the git binary, the repository configuration and origin/HEAD.
+the record proves that an accounting was written in a checkable form, never that it is true: the covered-by
+pair is checked to be registered at the head, not to catch what the removed case did; the authorization's
+form is checked, but the decision it names is not looked up; and the unreachable fields are free text;
+freshness proves the entry was rewritten beyond whitespace and letter case, not that the rewrite is a new
+accounting (a reworded old entry reads as fresh; a disclosed entry, whose one field has a fixed form, must
+name another decision or date); a malformed base record makes every head entry read as fresh; a move is
+judged by the id alone, so a new case that reuses a removed id in another suite reads as a move; the
+comparison is of the two endpoints, so a removal and re-addition inside the range is not seen; and, like
+its base derivation, it trusts the git binary, the repository configuration and origin/HEAD.
 """
 import sys
 
@@ -64,6 +86,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import contextlib
+import datetime
 import io
 import os
 import shutil
@@ -84,6 +107,9 @@ STATES = {
     "disclosed": ("authorization",),
 }
 ENTRY_KEYS = frozenset(("suite", "id", "state")) | frozenset(key for keys in STATES.values() for key in keys)
+# the stated form of a disclosed entry's authorization reference
+AUTHORIZATION_FORM = "D-<number> (<YYYY-MM-DD>)"
+AUTHORIZATION_DIGITS = 6
 EXIT_OK, EXIT_REFUSE, EXIT_CANNOT_EVALUATE = 0, 1, 2
 
 
@@ -155,9 +181,33 @@ def load_record(raw, label):
     return entries
 
 
+def base_entries(raw):
+    """(entries, note) for the base record: its entries when it reads as a well-formed record, else ({}, the
+    reason). The record is judged on the head side, so a malformed base record never blocks the change; it only
+    leaves no entry to compare a head entry with."""
+    try:
+        return load_record(raw, "base"), None
+    except CannotEvaluate as exc:
+        return {}, str(exc)
+
+
 def net_removed(base_pairs, head_pairs):
     """The pairs registered at the base and not at the head."""
     return base_pairs - head_pairs
+
+
+def moved(removed, base_pairs, head_pairs):
+    """{removed pair: the suite its check id moved to}: a removed pair whose check id is newly registered (a pair
+    the base did not hold) in another suite at the head, each new registration absorbing one removed pair."""
+    added = {}
+    for suite, check_id in sorted(head_pairs - base_pairs):
+        added.setdefault(check_id, []).append(suite)
+    result = {}
+    for suite, check_id in sorted(removed):
+        targets = added.get(check_id)
+        if targets:
+            result[(suite, check_id)] = targets.pop(0)
+    return result
 
 
 def survives(entry, head_pairs):
@@ -165,31 +215,71 @@ def survives(entry, head_pairs):
     return (entry["covered-by-suite"], entry["covered-by-id"]) in head_pairs
 
 
+def authorized(value):
+    """Whether a disclosed entry's authorization is in AUTHORIZATION_FORM: D-, 1 to AUTHORIZATION_DIGITS ASCII
+    digits, one space, and a valid ISO calendar date in parentheses. Read by hand, with no pattern."""
+    number, space, date = value.partition(" ")
+    digits = number[2:]
+    if number[:2] != "D-" or not 0 < len(digits) <= AUTHORIZATION_DIGITS or not all(
+            "0" <= char <= "9" for char in digits) or space != " ":
+        return False
+    inner = date[1:-1]
+    if date[:1] != "(" or date[-1:] != ")" or len(inner) != 10 or inner[4] != "-" or inner[7] != "-" or not all(
+            "0" <= char <= "9" for char in inner[:4] + inner[5:7] + inner[8:]):
+        return False
+    try:
+        datetime.date(int(inner[:4]), int(inner[5:7]), int(inner[8:]))
+    except ValueError:
+        return False
+    return True
+
+
+def canonical(entry):
+    """An entry with each string value whitespace-collapsed and case-folded (None stays None), the form freshness
+    compares, so an edit of whitespace or letter case is not a new accounting."""
+    if entry is None:
+        return None
+    return {key: " ".join(value.split()).casefold() if isinstance(value, str) else value
+            for key, value in entry.items()}
+
+
 def fresh(entry, base_entry):
-    """Whether this change wrote the entry: the base record does not hold it unchanged."""
-    return entry != base_entry
+    """Whether this change wrote the entry: the base record holds no entry for the pair, or one that differs from
+    it beyond whitespace and letter case."""
+    return canonical(entry) != canonical(base_entry)
 
 
 def judge(base_registry, head_registry, base_record, head_record):
     """(code, lines) for the four blobs (bytes, or None when absent) of a base and a head; CannotEvaluate when
-    any cannot be read."""
+    either registry or the head record cannot be read (the base record is read by base_entries)."""
     base_pairs = set() if base_registry is None else load_registry(base_registry, "base")
     # absent at both ends, nothing was registered and nothing is removed; absent at the head only, the whole
     # registry went, which this gate cannot account for pair by pair
     head_pairs = set() if base_registry is None and head_registry is None else load_registry(head_registry, "head")
-    base_entries, head_entries = load_record(base_record, "base"), load_record(head_record, "head")
+    head_entries = load_record(head_record, "head")
+    old_entries, note = base_entries(base_record)
     findings, accounted = [], []
-    for suite, check_id in sorted(net_removed(base_pairs, head_pairs)):
+    if note is not None:
+        accounted.append("the base {} is not readable ({}), so every head entry reads as written by this "
+                         "change".format(RECORD, note))
+    removed = net_removed(base_pairs, head_pairs)
+    moves = moved(removed, base_pairs, head_pairs)
+    for suite, check_id in sorted(removed):
         where = "{!r} (suite {!r})".format(check_id, suite)
         entry = head_entries.get((suite, check_id))
-        if entry is None:
+        if (suite, check_id) in moves:
+            accounted.append("{} moved to suite {!r}, not removed".format(where, moves[(suite, check_id)]))
+        elif entry is None:
             findings.append("{} is removed from {} and {} names no accounting for it".format(where, REGISTRY, RECORD))
-        elif not fresh(entry, base_entries.get((suite, check_id))):
+        elif not fresh(entry, old_entries.get((suite, check_id))):
             findings.append("{} is removed, but its {} entry is unchanged from the base: record the accounting with "
                             "this change".format(where, RECORD))
         elif entry["state"] == "covered" and not survives(entry, head_pairs):
             findings.append("{} is marked covered by {!r} (suite {!r}), which is not registered at the head".format(
                 where, entry["covered-by-id"], entry["covered-by-suite"]))
+        elif entry["state"] == "disclosed" and not authorized(entry["authorization"]):
+            findings.append("{} is disclosed with authorization {!r}, which is not in the form {}".format(
+                where, entry["authorization"], AUTHORIZATION_FORM))
         else:
             accounted.append("{} removed, accounted as {}".format(where, entry["state"]))
     if findings:
@@ -271,8 +361,13 @@ BASE = _registry(("s", ("a", "b", "c")), ("t", ("x",)))
 COVERED = {"suite": "s", "id": "c", "state": "covered", "covered-by-suite": "s", "covered-by-id": "a"}
 UNREACHABLE = {"suite": "s", "id": "c", "state": "unreachable", "capability-removed": "change 1",
                "observed": "the path refuses"}
-DISCLOSED = {"suite": "s", "id": "c", "state": "disclosed", "authorization": "decision 7"}
+DISCLOSED = {"suite": "s", "id": "c", "state": "disclosed", "authorization": "D-7 (2026-11-01)"}
 WITHOUT_C = _registry(("s", ("a", "b")), ("t", ("x",)))
+MOVED_C = _registry(("s", ("a", "b")), ("t", ("x", "c")))
+# authorization references outside the stated form: free text, no date, a bad date, too many digits, lower case,
+# two spaces, no parentheses, a non-ASCII digit
+UNAUTHORIZED = ("decision 7", "x", "D-7", "D-7 (2026-13-01)", "D-1234567 (2026-11-01)", "d-7 (2026-11-01)",
+                "D-7  (2026-11-01)", "D-7 2026-11-01", "D-٧ (2026-11-01)", "D- (2026-11-01)")
 
 
 def _code(*blobs_):
@@ -280,6 +375,17 @@ def _code(*blobs_):
         return judge(*blobs_)[0]
     except CannotEvaluate:
         return EXIT_CANNOT_EVALUATE
+
+
+def _reason(*blobs_):
+    """The CannotEvaluate reason judge gives for the blobs, the exception type name of a crash, or None."""
+    try:
+        judge(*blobs_)
+    except CannotEvaluate as exc:
+        return str(exc)
+    except (AttributeError, TypeError, KeyError) as exc:
+        return type(exc).__name__
+    return None
 
 
 @contextlib.contextmanager
@@ -374,8 +480,28 @@ def self_test():
     check("pass/registry-absent-at-base", _code(None, BASE, None, None) == EXIT_OK)
     check("pass/registry-absent-at-both", _code(None, None, None, None) == EXIT_OK)
     check("refuse/unaccounted-removal", _code(BASE, WITHOUT_C, None, None) == EXIT_REFUSE)
-    check("refuse/moved-suite-counts", _code(BASE, _registry(("s", ("a", "b")), ("t", ("x", "c"))), None, None)
-          == EXIT_REFUSE)
+    check("pass/moved-between-suites", judge(BASE, MOVED_C, None, None) == (
+        EXIT_OK, ["INFO: 'c' (suite 's') moved to suite 't', not removed"]))
+    check("refuse/move-target-held-at-base", _code(_registry(("s", ("a", "b", "c")), ("t", ("x", "c"))), MOVED_C,
+                                                   None, None) == EXIT_REFUSE)
+    check("refuse/move-absorbs-one-removal", _code(_registry(("s", ("a", "c")), ("t", ("x",)), ("u", ("c",))),
+                                                   _registry(("s", ("a",)), ("t", ("x",)), ("v", ("c",))), None,
+                                                   None) == EXIT_REFUSE)
+    check("pass/authorization-form", [_code(BASE, WITHOUT_C, None, _record(dict(DISCLOSED, authorization=value)))
+                                      for value in ("D-417 (2026-10-04)", "D-123456 (2024-02-29)")]
+          == [EXIT_OK] * 2)
+    check("refuse/authorization-not-in-form", [_code(BASE, WITHOUT_C, None, _record(dict(
+        DISCLOSED, authorization=value))) for value in UNAUTHORIZED] == [EXIT_REFUSE] * len(UNAUTHORIZED))
+    check("refuse/entry-whitespace-or-case-only-change", [_code(BASE, WITHOUT_C, _record(DISCLOSED), _record(dict(
+        DISCLOSED, authorization=value))) for value in ("D-7 (2026-11-01) ", " D-7 (2026-11-01)")] + [_code(
+            BASE, WITHOUT_C, _record(UNREACHABLE), _record(dict(UNREACHABLE, observed="The path  refuses")))]
+          == [EXIT_REFUSE] * 3)
+    check("pass/base-record-malformed-head-fixed", [_code(BASE, WITHOUT_C, base, _record(DISCLOSED)) for base in (
+        b"schema = 3\n", b"schema = 1\n[[removal\n", b"\xff", b"schema = 1\nremoval = [1]\n")] == [EXIT_OK] * 4)
+    check("cannot/record-unknown-key-named", "unknown key" in (_reason(BASE, WITHOUT_C, None, _record(dict(
+        DISCLOSED, note="x"))) or ""))
+    check("cannot/record-entry-not-table", _reason(BASE, WITHOUT_C, None, b"schema = 1\nremoval = [1]\n")
+          == "head: a [[removal]] entry with an unknown key")
     check("pass/covered-by-survivor", _code(BASE, WITHOUT_C, None, _record(COVERED)) == EXIT_OK)
     check("refuse/covered-by-removed", _code(BASE, _registry(("s", ("b",)), ("t", ("x",))), None,
                                              _record(COVERED)) == EXIT_REFUSE)
@@ -390,7 +516,7 @@ def self_test():
     check("refuse/entry-unchanged-from-base", _code(BASE, WITHOUT_C, _record(DISCLOSED), _record(DISCLOSED))
           == EXIT_REFUSE)
     check("pass/entry-rewritten-in-change", _code(BASE, WITHOUT_C, _record(DISCLOSED), _record(dict(
-        DISCLOSED, authorization="decision 8"))) == EXIT_OK)
+        DISCLOSED, authorization="D-8 (2026-11-02)"))) == EXIT_OK)
     check("refuse/one-of-two-unaccounted", _code(BASE, _registry(("s", ("a",)), ("t", ("x",))), None,
                                                  _record(DISCLOSED)) == EXIT_REFUSE)
     for name, registry in (("cannot/registry-absent-at-head", None),
@@ -429,6 +555,20 @@ def self_test():
             {"suite": "s", "id": "c", "state": "waived"})) == EXIT_OK)
     with _patched(load_registry=lambda raw, label: set()):
         check("revert/registry-fail-closed-red", _code(BASE, None, None, None) == EXIT_OK)
+    with _patched(moved=lambda removed, base_pairs, head_pairs: {}):
+        check("revert/move-red", _code(BASE, MOVED_C, None, None) == EXIT_REFUSE)
+    with _patched(authorized=lambda value: True):
+        check("revert/authorization-form-red", _code(BASE, WITHOUT_C, None, _record(dict(
+            DISCLOSED, authorization="decision 7"))) == EXIT_OK)
+    with _patched(canonical=lambda entry: entry):
+        check("revert/canonical-fresh-red", _code(BASE, WITHOUT_C, _record(UNREACHABLE), _record(dict(
+            UNREACHABLE, observed="The path  refuses"))) == EXIT_OK)
+    with _patched(base_entries=lambda raw: (load_record(raw, "base"), None)):
+        check("revert/base-record-head-side-red", _code(BASE, WITHOUT_C, b"schema = 3\n", _record(DISCLOSED))
+              == EXIT_CANNOT_EVALUATE)
+    with _patched(ENTRY_KEYS=ENTRY_KEYS | {"note"}):
+        check("revert/unknown-key-red", "unknown key" not in (_reason(BASE, WITHOUT_C, None, _record(dict(
+            DISCLOSED, note="x"))) or "unknown key"))
     tmp = tempfile.mkdtemp(prefix="aiqt-selftest-removal-")
     try:
         _repo_cases(tmp)
@@ -444,12 +584,14 @@ def self_test():
         for failure in FAILURES:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: check_selftest_removal {} checks (no removal, an addition and a registry new at the "
-          "base pass; an unaccounted removal, a move between suites, a stale entry, an entry for another suite and "
-          "a covered-by pair that does not survive refuse; covered, unreachable and disclosed entries pass; a "
-          "registry or record that is absent at the head, not TOML, not UTF-8 or misshapen is cannot-evaluate; "
-          "the base is derived by check_release_cut.context() in a fixture repository, and an underivable base "
-          "is cannot-evaluate; each part patched out flips its fixture)".format(len(EXECUTED)))
+    print("SELF-TEST PASS: check_selftest_removal {} checks (no removal, an addition, a move between suites and a "
+          "registry new at the base pass; an unaccounted removal, a stale entry (whitespace or case edits "
+          "included), an entry for another suite, a covered-by pair that does not survive and an authorization "
+          "outside the stated form refuse; covered, unreachable and disclosed entries pass; a registry or head "
+          "record that is absent at the head, not TOML, not UTF-8 or misshapen is cannot-evaluate, and a "
+          "malformed base record does not block; the base is derived by check_release_cut.context() in a fixture "
+          "repository, and an underivable base is cannot-evaluate; each part patched out flips its "
+          "fixture)".format(len(EXECUTED)))
     return 0
 
 
