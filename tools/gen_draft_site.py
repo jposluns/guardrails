@@ -465,12 +465,12 @@ def _inline(site, value):
     """An inline HTML value with the $BASE/ token rendered as the site's base path, the $OPF_STATUS
     token rendered as the reference CLI status note (status_note) and the $HOOK_COUNT token rendered as
     the Claude Code hook count (hook_count) of the site's "tree" (the tree build() is given; ROOT when the site
-    names none)."""
+    names none), and the https scheme of each link attribute written in lower case (_inline_https, D15)."""
     if "$OPF_STATUS" in value:
         value = value.replace("$OPF_STATUS", status_note())
     if "$HOOK_COUNT" in value:
         value = value.replace("$HOOK_COUNT", str(hook_count(site.get("tree", ROOT))))
-    return value.replace("$BASE/", site["base"])
+    return _inline_https(value.replace("$BASE/", site["base"]))
 
 
 # The Claude Code hook count the pages state: the [[hook]] entries of the hooks manifest whose platform is
@@ -1429,6 +1429,22 @@ LINK_URL_ATTRS = frozenset((
     "lowsrc", "dynsrc"))
 NEWTAB_HINT = "(opens in a new tab)"
 _URL_BAD_CHAR_RE = re.compile(r"[\x00-\x20\x7f\\]")
+# An https scheme written in any ASCII letter case at the start of a link attribute's value inside a start
+# tag of inline page markup: the attribute name (any ASCII case, after a space, slash or quote), "=", an
+# optional quote, then the scheme. re.ASCII keeps the case-insensitive match to A to Z, so a non-ASCII
+# lookalike (U+017F for "s", U+212A for "k") never matches; "http://" and a one-slash "https:/" do not match.
+_INLINE_TAG_RE = re.compile(r"<[A-Za-z][^>]*>")
+_INLINE_HTTPS_RE = re.compile(
+    r"([\t\n\f\r /\"'](?:{})[\t\n\f\r ]*=[\t\n\f\r ]*[\"']?)https://".format(
+        "|".join(re.escape(name) for name in sorted(LINK_URL_ATTRS))), re.IGNORECASE | re.ASCII)
+
+
+def _inline_https(value):
+    """Inline markup with the https scheme of each link attribute value written in lower case (decision D15):
+    "HTTPS://" and "hTtPs://" become "https://", and nothing else changes. The rewrite reads the literal
+    markup: a scheme written with character references is left as written, and the link guard reads it as a
+    browser does (decoded, scheme in any ASCII case)."""
+    return _INLINE_TAG_RE.sub(lambda tag: _INLINE_HTTPS_RE.sub(r"\1https://", tag.group(0)), value)
 
 
 class _LinkGuard(HTMLParser):
@@ -1451,7 +1467,9 @@ class _LinkGuard(HTMLParser):
         if _URL_BAD_CHAR_RE.search(value) or value.startswith("//") \
                 or any(unquote(segment) in (".", "..") for segment in segments):
             return "{} {!r} on <{}> is not a plain URL".format(name, value, tag)
-        if value.startswith("https://") or value.startswith("#") or value.startswith(base) \
+        # The scheme is read as a browser reads it, in any ASCII letter case (_https, decision D15); the
+        # inline path (_inline) writes it in lower case before the page reaches this guard.
+        if _https(value).startswith("https://") or value.startswith("#") or value.startswith(base) \
                 or _kept_live(site, value):
             return None
         return "{} {!r} on <{}> is neither under {} nor an https URL".format(name, value, tag, base)
@@ -1475,7 +1493,8 @@ class _LinkGuard(HTMLParser):
                 problem = self._url_finding(name, tag, value)
                 if problem is not None:
                     self.found.append(problem)
-        if tag in ("a", "area") and isinstance(first.get("href"), str) and first["href"].startswith("https://"):
+        if tag in ("a", "area") and isinstance(first.get("href"), str) \
+                and _https(first["href"]).startswith("https://"):
             rel = (first.get("rel") or "").split()
             if first.get("target") != "_blank" or "noopener" not in rel or "noreferrer" not in rel:
                 self.found.append("external link {!r} without the new-tab attributes".format(first["href"]))
@@ -1869,6 +1888,15 @@ def _self_test():
             return str(exc)
         failures.append("{}: expected a refusal".format(name))
         return ""
+
+    def accepted(name, callable_, *args):
+        """callable_(*args), or "" with a failure named `name` when it raises RefusedPage, so a refusal where
+        output is expected fails that row and the rows after it still run."""
+        try:
+            return callable_(*args)
+        except RefusedPage as exc:
+            failures.append("{}: expected no refusal, got {}".format(name, exc))
+            return ""
 
     # The declared build is the promoted one (base "/", pages at each live root); most fixtures below are
     # the same pages built in their staged form (staged_sites), so the staging rules keep their cases.
@@ -2268,7 +2296,7 @@ def _self_test():
     # case, a one-slash scheme and a non-ASCII lookalike stay refused.
     for name, href in (("links/upper-case-https-download-lowercased", "HTTPS://example.com/x.zip"),
                        ("links/mixed-case-https-download-lowercased", "hTtPs://example.com/x.zip")):
-        cased = rendered('component = "download"\nlabel = "The skill"\nhref = "{}"\n'
+        cased = accepted(name, rendered, 'component = "download"\nlabel = "The skill"\nhref = "{}"\n'
                          'filename = "x.zip"\nsize = "zip, version 1"\nhtml = "D"\n'.format(href))
         expect(name, cased == download, cased)
     for name, href in (("refuse/upper-case-http-external-href", "HTTP://example.com/x"),
@@ -2283,6 +2311,42 @@ def _self_test():
     expect("links/lower-case-https-external-unchanged",
            _external("https://example.com/X", "L").startswith('<a href="https://example.com/X" '),
            _external("https://example.com/X", "L"))
+
+    # D15 on inline page markup: the inline path writes an https scheme given in any ASCII letter case in lower
+    # case, and the link guard reads the scheme in any ASCII case, so such an anchor is accepted (held to the
+    # new-tab rules of any https link) rather than refused; http, a one-slash scheme and a non-ASCII lookalike
+    # stay refused, by the guard and on a built page.
+    def inline_page(html):
+        """A document page whose one prose component holds `html`, rendered and checked by render_page."""
+        page_model = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "{}"\n'.format(html.replace('"', '\\"')))
+        return render_page(site, [page_model], page_model)
+
+    newtab_tail = ' target="_blank" rel="noopener noreferrer">v<span class="vh"> (opens in a new tab)</span></a>'
+    for name, href in (("links/guard-upper-case-https-anchor-passes", "HTTPS://example.com/v"),
+                       ("links/guard-mixed-case-https-anchor-passes", "hTtPs://example.com/v")):
+        text = '<a href="{}"'.format(href) + newtab_tail
+        expect(name, _link_findings(site, text) == [], (text, _link_findings(site, text)))
+    got = _link_findings(site, '<a href="HTTPS://example.com/v">v</a>')
+    expect("links/guard-upper-case-https-without-newtab-refused",
+           got == ["external link 'HTTPS://example.com/v' without the new-tab attributes",
+                   "external link 'HTTPS://example.com/v' without the new-tab hint"], got)
+    for name, href in (("links/guard-upper-case-http-anchor-refused", "HTTP://example.com/v"),
+                       ("links/guard-upper-case-https-one-slash-anchor-refused", "HTTPS:/example.com/v"),
+                       ("links/guard-non-ascii-https-lookalike-anchor-refused", "HTTP\u017f://example.com/v")):
+        got = _link_findings(site, '<a href="{}"'.format(href) + newtab_tail)
+        expect(name, got == ["href {!r} on <a> is neither under /draft/ nor an https URL".format(href)], got)
+    for name, text, want in (
+            ("links/inline-upper-case-https-anchor-lowercased", '<a href="HTTPS://example.com/v"' + newtab_tail,
+             '<a href="https://example.com/v"' + newtab_tail),
+            ("links/inline-mixed-case-https-anchor-lowercased",
+             "<A HREF='hTtPs://example.com/v'" + newtab_tail.replace("</a>", "</A>"),
+             "<A HREF='https://example.com/v'" + newtab_tail.replace("</a>", "</A>"))):
+        built = accepted(name, inline_page, text)
+        expect(name, want in built and "HTTPS:" not in built and "hTtPs:" not in built, built)
+    for name, href in (("refuse/inline-upper-case-http-anchor", "HTTP://example.com/v"),
+                       ("refuse/inline-upper-case-https-one-slash-anchor", "HTTPS:/example.com/v"),
+                       ("refuse/inline-non-ascii-https-lookalike-anchor", "HTTP\\u017f://example.com/v")):
+        expect(name, "nor an https URL" in refused(name, inline_page, '<a href="{}"'.format(href) + newtab_tail))
     expect("refuse/bad-code-variant", "variant" in refused(
         "refuse/bad-code-variant", rendered, 'component = "code"\nid = "x"\ntext = "t"\nvariant = "inline"\n'))
     expect("refuse/bad-id", "not a valid id" in refused(
@@ -2480,8 +2544,9 @@ def _self_test():
         "refuse/control-off-aiqt", _c_control, opf,
         {"component": "control", "document": "d", "source_text": "s", "source_href": "https://example.com/"},
         "fixture.body[1]"))
-    upper_control = _c_control(site, {"component": "control", "document": "d", "source_text": "s",
-                                      "source_href": "HTTPS://example.com/"}, "fixture.body[1]")
+    upper_control = accepted("links/upper-case-https-control-source-lowercased", _c_control, site,
+                             {"component": "control", "document": "d", "source_text": "s",
+                              "source_href": "HTTPS://example.com/"}, "fixture.body[1]")
     expect("links/upper-case-https-control-source-lowercased",
            '<a href="https://example.com/" target="_blank"' in upper_control and "HTTPS:" not in upper_control,
            upper_control)

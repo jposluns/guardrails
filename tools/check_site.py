@@ -487,7 +487,8 @@ NOT_FOUND_ATTRIBUTES = frozenset((
     "target", "text-anchor", "type", "viewbox", "width", "x", "y",
 ))
 NOT_FOUND_META_ATTRIBUTES = frozenset(("charset", "content", "name"))
-# The values, exactly as written, a meta attribute other than content may carry on a live 404 page: an
+# The values, exactly as written (charset aside: NOT_FOUND_META_CASELESS below), a meta attribute other than
+# content may carry on a live 404 page: an
 # allowed name with any other value (a referrer policy, another charset) is a finding. Taken from the live 404
 # pages before the template cutover (charset, and the viewport, description and robots names); content is
 # read by its name, so pinning the name fixes what content means (its url( check still applies).
@@ -495,6 +496,12 @@ NOT_FOUND_META_VALUES = {
     "charset": frozenset(("utf-8",)),
     "name": frozenset(("description", "robots", "viewport")),
 }
+# The meta attributes whose value is compared ASCII case-insensitively (A to Z read as a to z, any other
+# character as written): charset only, because HTML reads an encoding label case-insensitively, so "UTF-8"
+# names the same encoding as "utf-8". Every other pinned value (each name and property) is compared exactly
+# as written.
+NOT_FOUND_META_CASELESS = frozenset(("charset",))
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 NOT_FOUND_ONCLICK = frozenset(("toggleNav()", "toggleTheme()"))
 NOT_FOUND_PRESENTATION = {
     "fill": frozenset(("var(--accent)", "var(--accent-2)")),
@@ -525,11 +532,13 @@ NOT_FOUND_DRAFT_ATTRIBUTES = frozenset((
 ))
 # "property" is the og:description meta the generator writes from each page's description.
 NOT_FOUND_DRAFT_META_ATTRIBUTES = frozenset(("charset", "content", "name", "property"))
-# The meta values the generated 404 pages write (site/404.html and opf/site/404.html): the charset, the
-# viewport and description names, and the link-preview card names and properties (_social_metas).
+# The meta values the generated 404 pages write (site/404.html and opf/site/404.html, and in the staged form
+# site/draft/404.html and opf/site/draft/404.html): the charset, the viewport and description names, the
+# robots name (the noindex meta the generator writes on a page under the draft base or folder, so the staged
+# 404 pages carry it), and the link-preview card names and properties (_social_metas).
 NOT_FOUND_DRAFT_META_VALUES = {
     "charset": frozenset(("utf-8",)),
-    "name": frozenset(("description", "twitter:card", "twitter:image", "viewport")),
+    "name": frozenset(("description", "robots", "twitter:card", "twitter:image", "viewport")),
     "property": frozenset((
         "og:description", "og:image", "og:image:alt", "og:image:height", "og:image:width", "og:site_name",
         "og:title", "og:type", "og:url",
@@ -689,7 +698,8 @@ def not_found_structure_findings(label, text, draft=False):
     NOT_FOUND_DRAFT_* sets in place of the NOT_FOUND_* ones when `draft` is true, for a draft 404 page): an
     element or attribute name raw_tags finds that is not in NOT_FOUND_ELEMENTS or NOT_FOUND_ATTRIBUTES, a meta
     attribute outside NOT_FOUND_META_ATTRIBUTES, a meta attribute named in NOT_FOUND_META_VALUES whose value
-    as written (an empty value for a name written without "=") is not one listed there, an onclick or SVG presentation value the live 404 pages do
+    as written (an empty value for a name written without "="; ASCII letter case aside for an attribute in
+    NOT_FOUND_META_CASELESS, charset only) is not one listed there, an onclick or SVG presentation value the live 404 pages do
     not use, any value or script or style text that contains "url(" (any case, as written or with its
     character references decoded), a script without src whose body's sha256 is not pinned in
     NOT_FOUND_INLINE_SCRIPT_SHA256, a script with src whose body is not empty, and any script start tag at or
@@ -727,7 +737,8 @@ def not_found_structure_findings(label, text, draft=False):
                 out.append("{}:{}: attribute {} on <meta> is not one the {} 404 pages use on meta".format(
                     label, attr_line, name, kind))
             value = "" if value is None else value
-            if element == "meta" and name in meta_values and value not in meta_values[name]:
+            compared = value.translate(_ASCII_LOWER) if name in NOT_FOUND_META_CASELESS else value
+            if element == "meta" and name in meta_values and compared not in meta_values[name]:
                 out.append("{}:{}: {} value on <meta> is not one the {} 404 pages use -> {!r}".format(
                     label, attr_line, name, kind, value))
             if _URL_FUNCTION in value.lower() or _URL_FUNCTION in unescape(value).lower():
@@ -1449,18 +1460,28 @@ def _not_found_links_self_test():
         return [line for line in output.splitlines() if "on a 404 page must be root-absolute" in line]
 
     def unexpected(output, allowed=()):
-        """The findings in a scan's output (each message without its "path:line: " prefix) that are not in
-        `allowed`, then each message in `allowed` that is not among them."""
-        found = [line.strip().split(": ", 1)[-1] for line in output.splitlines()[1:]]
-        return [m for m in found if m not in allowed] + [m for m in allowed if m not in found]
+        """What a scan's output and `allowed` (each finding written in full, "path:line: message") disagree
+        on: each printed finding `allowed` does not list, each finding in `allowed` the output does not
+        print, and, when the counts differ, the scan's own count (the FAIL line counts every finding before
+        the printed list drops exact repeats) against len(allowed). So a finding on another line, or one
+        finding more or fewer, fails a passing case."""
+        lines = output.splitlines()
+        found = [line.strip() for line in lines[1:]]
+        out = [m for m in found if m not in allowed] + [m for m in allowed if m not in found]
+        want = "FAIL: {} site/ site-integrity issue(s)".format(len(allowed))
+        if allowed and (not lines or lines[0] != want):
+            out.append("count line {!r}, expected {!r}".format(lines[0] if lines else "", want))
+        return out
 
     def passes(got, allowed=()):
         return got[0] == (1 if allowed else 0) and not unexpected(got[1], allowed)
 
-    def live_allowlist(element, *attributes):
-        return (["element <{}> is not in the 404-page element allowlist".format(element)] +
-                ["attribute {} on <{}> is not in the 404-page attribute allowlist".format(a, element)
-                 for a in attributes])
+    def live_allowlist(element, *attributes, line=1, path="site/404.html"):
+        """The live structural allowlist findings for one `element` start tag on `line` of `path` that
+        carries `attributes` (each page() writes is one line)."""
+        return (["{}:{}: element <{}> is not in the 404-page element allowlist".format(path, line, element)] +
+                ["{}:{}: attribute {} on <{}> is not in the 404-page attribute allowlist".format(
+                    path, line, a, element) for a in attributes])
 
     icon ='<link rel="apple-touch-icon" href="/t.png">'
     with tempfile.TemporaryDirectory() as d:
@@ -1510,12 +1531,29 @@ def _not_found_links_self_test():
         (root / "index.html").write_text('<!doctype html><title>t</title>' + icon +
                                          '<a class="logo" href="./"><img src="/l.png" alt=""></a>', encoding="utf-8")
         got = scan(base)
-        check("404-links/root-absolute-and-fragment-links-pass", passes(got, live_allowlist("img", "alt")), got)
+        # The page has 2 img start tags (the content image and the logo), both on line 1.
+        check("404-links/root-absolute-and-fragment-links-pass", passes(got, live_allowlist("img", "alt") * 2), got)
         # The passing-case rule itself: a finding the case does not name fails it, allowlist finding or not.
         check("404-links/unexpected-allowlist-finding-fails-passing-case",
               not passes(got) and not passes(got, live_allowlist("img"))
               and not passes(got, live_allowlist("img", "alt") + live_allowlist("b")), got)
         (root / "404.html").unlink()
+        # The passing-case rule compares line numbers and counts: an allowed finding on another line than the
+        # case names, or a finding repeated more often than the case names it, fails the case, and each passes
+        # when the case names it exactly.
+        for name, body, allowed, want in (
+                ("404-links/allowlist-finding-on-other-line-fails-passing-case", '\n<img src="/i.png" alt="">',
+                 live_allowlist("img", "alt"), False),
+                ("404-links/allowlist-finding-on-named-line-passes", '\n<img src="/i.png" alt="">',
+                 live_allowlist("img", "alt", line=2), True),
+                ("404-links/repeated-allowlist-finding-fails-passing-case",
+                 '<img src="/i.png" alt=""><img src="/i.png" alt="">', live_allowlist("img", "alt"), False),
+                ("404-links/repeated-allowlist-finding-named-twice-passes",
+                 '<img src="/i.png" alt=""><img src="/i.png" alt="">', live_allowlist("img", "alt") * 2, True)):
+            (root / "404.html").write_text(page(icon, body), encoding="utf-8")
+            got = scan(base)
+            (root / "404.html").unlink()
+            check(name, passes(got, allowed) == want, got)
 
         (root / "sub" / "c.html").write_text(page(icon + '<link rel="stylesheet" href="s.css">',
                                                   '<img src="i.png" alt=""><nav><a href="b">B</a></nav>'),
@@ -1590,6 +1628,10 @@ def _not_found_links_self_test():
                  "href", "HTTP://aiqt.ai/b", 1),
                 ("404-links/upper-case-https-one-slash-href-fails", "404.html", icon,
                  '<a href="HTTPS:/aiqt.ai/b">B</a>', "href", "HTTPS:/aiqt.ai/b", 1),
+                # A non-ASCII lookalike of the scheme (HTTP then U+017F, which casefold() maps to "s") is
+                # refused, so the ASCII guard on the scheme is tested.
+                ("404-links/non-ascii-lookalike-https-href-fails", "404.html", icon,
+                 '<a href="HTTP\u017f://aiqt.ai/b">B</a>', "href", "HTTP\u017f://aiqt.ai/b", 1),
                 # A query-only or fragment-only load resolves against the request URL.
                 ("404-links/query-only-script-src-fails", "404.html", icon + '<script src="?x"></script>', "",
                  "src", "?x", 1),
@@ -1624,7 +1666,9 @@ def _not_found_links_self_test():
                 # Every meta name and value the live 404 pages used.
                 ("404-structure/live-meta-values-pass",
                  '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-                 '<meta name="description" content="D."><meta name="robots" content="noindex">' + icon, "", ())):
+                 '<meta name="description" content="D."><meta name="robots" content="noindex">' + icon, "", ()),
+                # The charset value is read in any ASCII letter case, as HTML reads an encoding label.
+                ("404-structure/meta-charset-upper-case-passes", '<meta charset="UTF-8">' + icon, "", ())):
             (root / "404.html").write_text(page(head, body), encoding="utf-8")
             got = scan(base)
             (root / "404.html").unlink()
@@ -1660,6 +1704,12 @@ def _not_found_links_self_test():
                  "charset value on <meta> is not one the live 404 pages use -> 'utf-7'"),
                 ("404-structure/meta-name-without-value-fails", page(icon + '<meta name content="x">', ""),
                  "name value on <meta> is not one the live 404 pages use -> ''"),
+                # Only charset is read without letter case: a name value in another case stays a finding, and
+                # a charset with a non-ASCII letter is not folded to an ASCII one.
+                ("404-structure/meta-name-upper-case-fails", page(icon + '<meta name="ROBOTS" content="noindex">', ""),
+                 "name value on <meta> is not one the live 404 pages use -> 'ROBOTS'"),
+                ("404-structure/meta-charset-non-ascii-letter-fails", page('<meta charset="ＵTF-8">' + icon, ""),
+                 "charset value on <meta> is not one the live 404 pages use -> 'ＵTF-8'"),
                 ("404-structure/style-attribute-url-fails", page(icon, '<div style="background:url(i.png)"></div>'),
                  "style value on a 404 page contains url("),
                 ("404-structure/entity-escaped-url-fails", page(icon, '<div class="u&#114;l&#40;i.png)"></div>'),
@@ -1718,6 +1768,27 @@ def _not_found_links_self_test():
                           for kind in ("name", "property") for value in sorted(NOT_FOUND_DRAFT_META_VALUES[kind]))
         got = not_found_structure_findings("404.html", '<meta charset="utf-8">' + written, draft=True)
         check("404-structure/draft-meta-values-pass", got == [], got)
+        got = not_found_structure_findings("404.html", '<meta charset="UTF-8">', draft=True)
+        check("404-structure/draft-meta-charset-upper-case-passes", got == [], got)
+        # The 404 pages the generator builds in the staged form (staged_sites: base /draft/, each page under its
+        # root's draft/ folder, with the robots noindex meta) pass the draft allowlist with no finding, and
+        # the same pages with the robots name changed to one the generator does not write draw exactly 1 meta
+        # finding each.
+        import gen_draft_site
+        staged_build = gen_draft_site.build(sites=gen_draft_site.staged_sites(), registered=False)
+        staged_404 = sorted((target, text) for target, text in staged_build.items()
+                            if target.endswith("/draft/" + NOT_FOUND_PAGE))
+        robots = '<meta name="robots" content="noindex, nofollow">'
+        got = [(target, robots in text, not_found_structure_findings(target, text, draft=True))
+               for target, text in staged_404]
+        check("404-structure/staged-generated-404-pages-pass",
+              [target for target, _text in staged_404] == ["opf/site/draft/404.html", "site/draft/404.html"]
+              and all(has_robots and found == [] for _target, has_robots, found in got), got)
+        got = [not_found_structure_findings(target, text.replace('name="robots"', 'name="googlebot"', 1),
+                                            draft=True) for target, text in staged_404]
+        check("404-structure/staged-generated-404-unpinned-robots-name-fails",
+              len(got) == 2 and all(len(found) == 1 and found[0].endswith(
+                  ": name value on <meta> is not one the draft 404 pages use -> 'googlebot'") for found in got), got)
 
         # A 404 page the parser rejects still gets both raw-markup rules (the parse failure is simulated: no
         # input tried makes this parser raise).
