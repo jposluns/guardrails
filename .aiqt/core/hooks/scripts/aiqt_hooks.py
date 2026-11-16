@@ -37905,10 +37905,11 @@ def clock_inject_failure(data):
 # Adopter settings, read from the hook process environment (for example the env block of the Claude Code
 # settings file): AIQT_CONSOLE_PREFIX_RE, a Python regular expression matched at the start of each text block
 # with leading whitespace removed (unset or empty: the mode is off and allows silently; one that matches empty
-# text is refused, since it would pass every block); and AIQT_CONSOLE_PREFIX_POSTURE, "warn" (the default) or
-# "deny". Any other posture value warns, and the note names the value it did not accept. The transcript must lie
-# in the platform transcript directory, projects/ under CLAUDE_CONFIG_DIR when that is set, or under ~/.claude
-# otherwise; a transcript_path anywhere else is not read.
+# text, or the start of every line of a fixed sample of unrelated text, is refused, since it would pass every
+# block); and AIQT_CONSOLE_PREFIX_POSTURE, "warn" (the default) or "deny". Any other posture value warns, and
+# the note names the value it did not accept. The transcript must lie in the platform transcript directory,
+# projects/ under CLAUDE_CONFIG_DIR when that is set, or under ~/.claude otherwise; a transcript_path anywhere
+# else is not read. That confinement is by path text (a hard link inside the directory is read).
 _CONSOLE_PREFIX_PATTERN_ENV = "AIQT_CONSOLE_PREFIX_RE"
 _CONSOLE_PREFIX_POSTURE_ENV = "AIQT_CONSOLE_PREFIX_POSTURE"
 _CONSOLE_PREFIX_CONFIG_ENV = "CLAUDE_CONFIG_DIR"
@@ -37961,12 +37962,34 @@ def _console_prefix_config(environ):
     if _console_prefix_matches_empty(pattern):
         return None, posture, ("{} matches empty text, so it would pass every block; the check cannot be "
                                "evaluated with it".format(_CONSOLE_PREFIX_PATTERN_ENV))
+    if _console_prefix_matches_arbitrary(pattern):
+        return None, posture, ("{} matches every one of {} unrelated sample lines, so it would pass any "
+                               "non-blank block; the check cannot be evaluated with it".format(
+                                   _CONSOLE_PREFIX_PATTERN_ENV, len(_CONSOLE_PREFIX_ARBITRARY_SAMPLES)))
     return pattern, posture, problem
 
 
 def _console_prefix_matches_empty(pattern):
     """True when the pattern matches at the start of empty text, so any block, stamped or not, would pass."""
     return pattern.match("") is not None
+
+
+# Sample lines with no prefix, each starting with a different kind of character (lower and upper case
+# letters, a digit, an underscore, punctuation and markup, a non-ASCII letter, a CJK character and an emoji),
+# each at least two characters long. A pattern that matches the start of every one of them, such as ".",
+# "\S", "(?=.)" or "..", would pass any non-blank block, so it is refused like a pattern that matches empty
+# text. This is a sample, not a proof: Python patterns (lookarounds, backreferences) cannot be decided in
+# general, so a pattern that passes a whole class of text without matching every sample (for example "\b" or
+# "\w", which pass every block that starts with a word character) is still accepted.
+_CONSOLE_PREFIX_ARBITRARY_SAMPLES = (
+    "working on it", "Done.", "0 files changed", "_x", "!x", "[x", "(x", "#x", "-x", "*x", "`x", "\"x",
+    "'x", ">x", "|x", "/x", "~x", "été", "中文", "\U0001f600x")
+
+
+def _console_prefix_matches_arbitrary(pattern):
+    """True when the pattern matches the start of every sample line in _CONSOLE_PREFIX_ARBITRARY_SAMPLES, so
+    it would pass any non-blank block, stamped or not."""
+    return all(pattern.match(sample) is not None for sample in _CONSOLE_PREFIX_ARBITRARY_SAMPLES)
 
 
 def _console_prefix_read_tail(path, limit):
@@ -38040,26 +38063,66 @@ def _console_prefix_content(record):
 
 
 def _console_prefix_is_boundary(record):
-    """True for a record that ends the span walking back: any user record, which is either a tool result
-    or a prompt (a human prompt begins the turn, so text before it belongs to an earlier turn)."""
+    """True for a record that ends the span walking back: any user record that is not passed over first,
+    which is either a tool result or a prompt (a human prompt begins the turn, so text before it belongs to
+    an earlier turn)."""
     return record.get("type") == "user"
 
 
+def _console_prefix_is_meta(record):
+    """True for a record the platform marks isMeta (injected context such as a command's output or a task
+    notification, not a prompt, a tool result or the model's own text): it neither ends the span nor counts,
+    the convention of the governance pack's turn-end reader (.preview/stamp-truth-stop.py)."""
+    return record.get("isMeta") is True
+
+
+def _console_prefix_is_api_error(record):
+    """True for a synthetic assistant record the platform writes for a failed API call (isApiErrorMessage,
+    "API Error: ..."): the model did not write it, so its text is not held to the prefix."""
+    return record.get("isApiErrorMessage") is True
+
+
+def _console_prefix_is_subagent_record(record):
+    """True for a sidechain (subagent) record. When the newest user or assistant record of the transcript is
+    one, the tool call being checked is a subagent's: the main agent's text is not the subagent's to fix, and
+    a subagent's text is returned to the main agent rather than shown in the console, so the call is not
+    checked."""
+    return record.get("isSidechain") is True
+
+
+def _console_prefix_boundary_checked(record):
+    """A boundary record must still carry readable content, so a record in another layout is noted as
+    unreadable rather than taken as the end of the span."""
+    _console_prefix_content(record)
+
+
+def _console_prefix_is_blank(text):
+    """True for a text block holding only whitespace: it carries no message, so it is not held to the
+    prefix."""
+    return not text.strip()
+
+
 def _console_prefix_span(lines):
-    """(texts, reached): the assistant text blocks written after the last boundary record, oldest first,
-    and whether the walk reached a boundary. Records of other types and sidechain records are passed over;
-    a line that is not a JSON object, or a user or assistant record with no readable content, raises
-    _ConsolePrefixUnreadable."""
+    """(texts, reached): the assistant text blocks written after the last boundary record, oldest first, and
+    whether the walk reached a boundary. When the newest user or assistant record is a sidechain record the
+    call is a subagent's: the walk stops there with no texts (nothing is checked). Records of other types,
+    sidechain and isMeta records, and API error records are passed over; a line that is not a JSON object, or
+    a user or assistant record with no readable content, raises _ConsolePrefixUnreadable."""
     texts = []
+    newest = True
     for line in reversed(lines):
         record = _console_prefix_record(line)
-        if record.get("isSidechain") is True:
+        if newest and record.get("type") in ("user", "assistant"):
+            newest = False
+            if _console_prefix_is_subagent_record(record):
+                return [], True
+        if record.get("isSidechain") is True or _console_prefix_is_meta(record):
             continue
         if _console_prefix_is_boundary(record):
-            _console_prefix_content(record)
+            _console_prefix_boundary_checked(record)
             texts.reverse()
             return texts, True
-        if record.get("type") != "assistant":
+        if record.get("type") != "assistant" or _console_prefix_is_api_error(record):
             continue
         content = _console_prefix_content(record)
         blocks = [content] if isinstance(content, str) else [
@@ -38067,7 +38130,7 @@ def _console_prefix_span(lines):
             if isinstance(block, dict) and block.get("type") == "text"]
         for text in blocks:
             _console_prefix_text_string(text)
-            if text.strip():
+            if not _console_prefix_is_blank(text):
                 texts.append(text)
     texts.reverse()
     return texts, False
@@ -38094,19 +38157,40 @@ def _console_prefix_transcript_root(environ):
             raise _ConsolePrefixUnreadable("the platform transcript directory cannot be established (no "
                                            "absolute {} or home directory)".format(_CONSOLE_PREFIX_CONFIG_ENV))
         base = os.path.join(home, ".claude")
-    return os.path.realpath(os.path.join(base, "projects"))
+    return _console_prefix_real_root(os.path.join(base, "projects"))
+
+
+def _console_prefix_real_root(path):
+    """The transcript directory with every symlink in it resolved, so a symlinked ~/.claude or
+    CLAUDE_CONFIG_DIR is compared in the same resolved form as the transcript's own directory."""
+    return os.path.realpath(path)
+
+
+def _console_prefix_names_file(name):
+    """True when the final component of transcript_path can name a file (not empty, '.' or '..')."""
+    return name not in ("", ".", "..")
+
+
+def _console_prefix_inside(root, candidate):
+    """True when candidate lies below root, compared by whole path components (a sibling such as
+    projects-evil/ is outside), and is not root itself."""
+    return os.path.commonpath([root, candidate]) == root and candidate != root
 
 
 def _console_prefix_confined(path, environ):
     """The transcript path to open: its directory resolved (every symlink and '..' in it), joined to its final
     component, which must lie inside the platform transcript directory; _ConsolePrefixUnreadable otherwise. The
-    final component is left unresolved, so the O_NOFOLLOW open still refuses a symlink there."""
+    final component is left unresolved, so the O_NOFOLLOW open still refuses a symlink there. RESIDUAL: the
+    confinement is by path text, resolved once before the open. A hard link inside the directory to a file
+    outside it is read, and a directory on the path swapped for a symlink between the resolution and the open
+    is followed (O_NOFOLLOW covers only the final component); both need write access to the user's transcript
+    directory."""
     root = _console_prefix_transcript_root(environ)
     head, name = os.path.split(path)
-    if name in ("", ".", ".."):
+    if not _console_prefix_names_file(name):
         raise _ConsolePrefixUnreadable("the payload's transcript_path does not name a file")
     candidate = os.path.join(os.path.realpath(head), name)
-    if os.path.commonpath([root, candidate]) != root or candidate == root:
+    if not _console_prefix_inside(root, candidate):
         raise _ConsolePrefixUnreadable("the payload's transcript_path lies outside the platform transcript "
                                        "directory, so it was not read")
     return candidate
@@ -38137,7 +38221,8 @@ def console_prefix_pretool(data):
     relative or outside the platform transcript directory, a transcript that cannot be opened, is a symlink
     or is not a regular file, a tail holding no complete record, a line that is not a JSON object (except an
     unfinished last line, which is set aside with a note so the complete records before it are judged), a
-    record with no readable content, and a pattern that does not compile, is too long or matches empty text
+    record with no readable content, and a pattern that does not compile, is too long, matches empty text or
+    matches every sample line of _CONSOLE_PREFIX_ARBITRARY_SAMPLES (".", "\\S" and "(?=.)" among them)
     each allow with a note saying the check did not run or could not be evaluated, under either posture;
     main() turns every error path and the deadline into a warning on exit 0 (NOTE_ONLY_PRETOOL_MODES). With
     the pattern set, a payload naming another event hard-blocks, the sibling convention for a miswired hook.
@@ -38151,10 +38236,16 @@ def console_prefix_pretool(data):
     result is written; once a tool result follows that text, the text lies before the boundary and is never
     checked. The transcript format (JSON lines whose user and assistant records carry message.content) is
     read as Claude Code writes it; another layout reads as unreadable and notes. Only text blocks count: text
-    inside a tool input, a thinking block, and a sidechain record are not checked. A span longer than the
-    read window is checked as far as the window reaches, and the note says so. The pattern runs on at most
-    _CONSOLE_PREFIX_MATCH_CHARS characters of each block; a pattern slow enough to pass the deadline ends in
-    main()'s warning, never a block."""
+    inside a tool input, a thinking block, a sidechain record, an isMeta record and a synthetic API error
+    record (isApiErrorMessage) are not checked, and an isMeta user record does not end the span. When the
+    newest user or assistant record is a sidechain record the call is taken as a subagent's and allowed
+    silently, unchecked; which transcript_path the platform gives a subagent's hook, and whether its records
+    sit in the main transcript, is not verified here. The pattern refusal for text-agnostic patterns is a
+    sample check, so a pattern that passes a whole class of text ("\\b", "\\w") is still accepted. The read
+    is confined to the transcript directory by path text (see _console_prefix_confined): a hard link there to
+    an outside file is read. A span longer than the read window is checked as far as the window reaches, and
+    the note says so. The pattern runs on at most _CONSOLE_PREFIX_MATCH_CHARS characters of each block; a
+    pattern slow enough to pass the deadline ends in main()'s warning, never a block."""
     pattern, posture, problem = _console_prefix_config(os.environ)
     if pattern is None and problem is None:
         return _allow()  # the adopter has not turned the check on: nothing is read and nothing blocks
