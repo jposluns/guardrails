@@ -563,6 +563,9 @@ that state; a change of a single step is observed first on that copy; any unreco
 not, halts the change; it resumes only once every tool's effects are re-observed in one of the same two
 ways and recorded; no check the change must pass is relaxed.
 
+Sending to recipients an artefact that has a verification it must pass, such as a generated notice or a
+release record, counts as promotion under this rule.
+
 ## A launched task stays observable
 
 A unit of work whose result or completion the caller depends on is launched so its outcome stays observable,
