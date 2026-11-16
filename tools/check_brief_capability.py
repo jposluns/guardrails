@@ -377,14 +377,16 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        under LC_ALL=C, for a blob or a tree; measured with git 2.53.0) is quiet; an ambiguous
                        prefix is quiet only where git prints nothing for it (measured with git 2.53.0 for a
                        7-hex prefix two commits share: exit 1, nothing printed; any text is CANNOT_EVALUATE).
-                       With no declaration the rule is quiet. Two
+                       A brief with no BRIEF-REVISIONS line is not checked by P9 at all, whatever commits it
+                       names, and this is a residual of the opt-in design (see RESIDUALS). Two
                        declaration lines, a column-zero label without its colon or with a glued suffix, a
                        declaration with no value, more than P9_MAX_REVISIONS distinct declared values (counted
                        before any value is resolved), a value that is not such a commit id (a branch name such
                        as main) or does not resolve to one commit (unknown, ambiguous), a declaration with no
                        repository to read, a repository git refuses for its ownership, a git that cannot be
                        launched or times out, a probe that fails in any other way (a corrupt or unreadable
-                       object, text on stderr, another exit, output that is no commit id; a git older than
+                       object, text on stderr whatever the exit, a full commit id with exit 0 included, another
+                       exit, output that is no commit id; a git older than
                        2.44 refuses --no-lazy-fetch), a word that names no commit present in a repository that
                        is not whole (object_store_gap): an object store git cannot read whole, since git skips a
                        pack it cannot open and answers an object held only there as absent, printing nothing
@@ -404,6 +406,11 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        cleanly, and more than P9_MAX_WORDS distinct undeclared hex words
                        are CANNOT_EVALUATE (exit 2), never a pass. The label anywhere else (indented,
                        mid-line) declares nothing and is not read.
+                       RESIDUAL: a brief names no repository the lint can read (a declared workdir is the
+                       worker's path and is never mapped to a checkout here), so the caller supplies --repo
+                       (main passes this repository when it is absent) and the git reads of P3, P5, P7 and P9
+                       resolve there unchecked against the brief, a mismatch made visible, not caught, by the
+                       `; repository: <path>` that ends every REFUSE and CANNOT_EVALUATE line of a brief run.
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
 sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
@@ -501,7 +508,7 @@ nonce or a digest included, exits 2 (repair it, or lint from a whole full clone)
 set to false still counts, and so do a pack written or removed while the lint runs (a concurrent fetch, repack or
 gc) and a stray file git counts as garbage; the pack files are read as the lint's own uid, so a lint run as root
 reads a mode-000 pack (git run the same way reads it too), and damage inside a readable pack is seen only where
-git prints it; a probe that exits 1 with any text on stderr exits 2,
+git prints it; a probe that exits 0 or 1 with any text on stderr exits 2,
 even where git only warned; the BRIEF-PIN and REVIEWED HEAD values are still resolved by P3 with git's default
 lazy fetch, so in a partial clone that read can fetch; round ids, item counts and other prose are outside it; and
 the lint reads one brief and never the previous round's.
@@ -683,6 +690,8 @@ Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one su
                            table is missing, unreadable, or malformed (format-version must be the
                            integer 1); or the arguments are wrong (a repeated --family or --table
                            included). A brief that cannot be evaluated is never OK.
+  Every REFUSE and CANNOT_EVALUATE line of a brief run ends with `; repository: <path>`, the repository the
+  git reads resolve in (--repo, else this repository; none when no repository was given).
 
 Run with no arguments, it lints no brief: it validates the shipped capability table only and exits 0
 when the table is valid, 2 when it is not.
@@ -4135,8 +4144,8 @@ def revision_commit(repo, word, gap=None):
     reason object_store_gap gives: a damaged or unreadable object store, a partial clone, a shallow clone) the
     absent answer is CannotEvaluate, since the object may exist where git cannot read it. A repository git
     refuses for its ownership, a git that cannot be launched or times out, and every other failure (a
-    corrupt or unreadable object, other text on stderr, another exit, output that is no full commit id) are
-    CannotEvaluate, never a quiet pass."""
+    corrupt or unreadable object, other text on stderr, even beside exit 0 and a full commit id, another exit,
+    output that is no full commit id) are CannotEvaluate, never a quiet pass."""
     what = "hex word {}".format(word)
     probe = _p9_git(repo, what, lambda: _rev_parse_local(repo, word))
     if _not_a_commit(probe, word):
@@ -4146,7 +4155,7 @@ def revision_commit(repo, word, gap=None):
             raise CannotEvaluate("{} names no commit present in {}, {}".format(what, repo, gap))
         return None
     commit = probe.stdout.decode("ascii", "replace").strip()
-    if probe.returncode == 0 and _full_commit(commit):
+    if probe.returncode == 0 and _full_commit(commit) and not probe.stderr.strip():
         return commit
     raise _probe_failure(what, repo, probe)
 
@@ -4397,11 +4406,14 @@ ANCHOR_HINT = "; correct each ACCEPTED-RESIDUAL line ({}), or re-pin the brief".
 
 
 def run(brief_path, family, table_path, scoped=True, repo=None, tree=None):
+    # every REFUSE and CANNOT_EVALUATE line names the repository the git reads resolve in: no brief names its
+    # repository, so a caller's --repo that does not match the brief is visible, not caught
+    repository = "; repository: {}".format("none" if repo is None else repo)
     try:
         table = load_table(table_path)
         code, findings = evaluate(_read_regular(brief_path, "brief"), family, table, scoped, repo, tree)
     except CannotEvaluate as exc:
-        print("CANNOT_EVALUATE: {}".format(exc))
+        print("CANNOT_EVALUATE: {}{}".format(exc, repository))
         return EXIT_CANNOT_EVALUATE
     for rule, severity, line, message, excerpt in findings:
         print("{}:{}: {} {}: {}: {}".format(brief_path, line, severity, rule, message, excerpt))
@@ -4415,40 +4427,40 @@ def run(brief_path, family, table_path, scoped=True, repo=None, tree=None):
               "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}{}{}{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
                   "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else "", missing_input, git_write,
-                  anchors, revisions))
+                  anchors, revisions) + repository)
     elif code == EXIT_REFUSE and "W1" in hard:
         print("REFUSE: family {}: the brief carries a git command line that commits or pushes ({} hard hit(s): {}){}"
               "{}{}{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r))
                                                            for r in sorted(set(hard))), git_write, missing_input,
-                              anchors, revisions))
+                              anchors, revisions) + repository)
     elif code == EXIT_REFUSE and "P5" in hard:
         print("REFUSE: family {}: the brief reaches a pinned revision through a ref that can move ({} hard hit(s): "
               "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}{}{}; "
               "{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
                   CURE_EXAMPLE.format("<pin>"), ", and name paths under the declared workdir" if "P2" in hard else "",
-                  missing_input, anchors, revisions, CURE_SHAPE))
+                  missing_input, anchors, revisions, CURE_SHAPE) + repository)
     elif code == EXIT_REFUSE and set(hard) == {"P9"}:
         print("REFUSE: family {}: the brief names a commit outside its declared revisions ({} hard hit(s): P9 x{})"
-              "{}".format(family, len(hard), len(hard), REVISIONS_HINT))
+              "{}".format(family, len(hard), len(hard), REVISIONS_HINT) + repository)
     elif code == EXIT_REFUSE and set(hard) == {"P6"}:
         print("REFUSE: family {}: the brief declares an input that does not exist {} ({} hard hit(s): "
               "P6 x{}){}".format(family, "on this host" if tree is None else "on this host or in the staged tree",
-                                 len(hard), len(hard), INPUT_HINT))
+                                 len(hard), len(hard), INPUT_HINT) + repository)
     elif code == EXIT_REFUSE and set(hard) == {"P7"}:
         print("REFUSE: family {}: the brief accepts a residual whose anchor does not hold at the pinned "
-              "revision ({} hard hit(s): P7 x{}){}".format(family, len(hard), len(hard), ANCHOR_HINT))
+              "revision ({} hard hit(s): P7 x{}){}".format(family, len(hard), len(hard), ANCHOR_HINT) + repository)
     elif code == EXIT_REFUSE and "P2" in hard:
         print("REFUSE: family {}: the brief names an input the family cannot read ({} hard hit(s): {}); name "
               "paths under the declared workdir, or state a path the worker must not use as a prohibition{}{}"
               "{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
-                          missing_input, anchors, revisions))
+                          missing_input, anchors, revisions) + repository)
     elif code == EXIT_REFUSE:
         # hits of more than one of P6, P7 and P9 and no other HARD rule: one summary with each rule's hint
         print("REFUSE: family {}: the brief carries hard hits of more than one preflight rule ({} hard hit(s): "
               "{}){}{}{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r))
                                                                for r in sorted(set(hard))),
-                                 missing_input, anchors, revisions))
+                                 missing_input, anchors, revisions) + repository)
     elif can_execute(table[family]):
         advisory = sum(1 for _, severity, _, _, _ in findings if severity == "ADVISORY")
         print("OK: family {} can execute ({}); the execution rules do not apply{}".format(
@@ -4466,6 +4478,9 @@ USAGE = ("usage: check_brief_capability.py --family NAME [--unscoped] [--table P
          "       check_brief_capability.py --self-test | --execution-report ABS_PATH\n"
          "The pin reads (P3) honour no system or global safe.directory entry: a --repo owned by another user exits 2\n"
          "(dubious ownership); run the check as the repository owner, or point --repo at a checkout you own.\n"
+         "A brief names no repository the lint can read, so the git reads (P3, P5, P7, P9) resolve in --repo\n"
+         "(default this repository) unchecked against the brief, a residual: every REFUSE and CANNOT_EVALUATE\n"
+         "line ends with '; repository: <path>' so a mismatch is visible.\n"
          "--tree judges relative INPUT paths, and those under the declared workdir, in the staged tree (P6, P3).")
 
 
@@ -9202,9 +9217,9 @@ def self_test(report_path=None):
             refuse_printed.append([text for text in printed.getvalue().splitlines() if text.startswith("REFUSE:")])
         check("preflight/p6-tree-refuse-line-wording", refuse_printed, [
             ["REFUSE: family alpha: the brief declares an input that does not exist on this host or in the "
-             "staged tree (1 hard hit(s): P6 x1)" + INPUT_HINT],
+             "staged tree (1 hard hit(s): P6 x1)" + INPUT_HINT + "; repository: {}".format(ROOT)],
             ["REFUSE: family alpha: the brief declares an input that does not exist on this host (1 hard hit(s): "
-             "P6 x1)" + INPUT_HINT]])
+             "P6 x1)" + INPUT_HINT + "; repository: {}".format(ROOT)]])
         # the stat in the tree follows the path as written: a regular file followed by a `.` component, or
         # a link whose target is one, is ENOTDIR (HARD), relative or mapped from the workdir, where a
         # normalised path would find the file and pass; the same forms over a directory pass
@@ -9856,6 +9871,33 @@ def self_test(report_path=None):
             refused = run(str(p9_brief), "alpha", p9_table, True, p7_repo)
         check("preflight/p9-refuse-line", (refused, "names a commit outside its declared revisions (1 hard hit(s): "
                                            "P9 x1)" + REVISIONS_HINT in printed.getvalue()), (1, True))
+        p9_named_brief = p7_base / "p9-repository-brief.md"
+
+        def p9_repository_named(text, repo_args):
+            """(exit, the repository each REFUSE or CANNOT_EVALUATE line names) for the brief `text`, run through
+            main with `repo_args`, or through run with no repository when `repo_args` is None."""
+            with open(p9_named_brief, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            shown = io.StringIO()
+            with contextlib.redirect_stdout(shown), contextlib.redirect_stderr(io.StringIO()):
+                if repo_args is None:
+                    code = run(str(p9_named_brief), "alpha", p9_table, True, None)
+                else:
+                    code = main(["--family", "alpha", "--table", str(p9_table)] + repo_args + [str(p9_named_brief)])
+            return code, [line.rpartition("; repository: ")[2] for line in shown.getvalue().splitlines()
+                          if line.startswith(("REFUSE:", "CANNOT_EVALUATE:"))]
+
+        # no brief names its repository, so every REFUSE and CANNOT_EVALUATE line names the one the git reads
+        # resolved in: --repo when given, else this repository, which lacks the fixture's commits (the brief
+        # checked against the wrong repository exits 2 naming it), and none when no repository was given
+        p9_refusing = "BRIEF-PIN: {}\n{}The base is {}.\n".format(p9_a, p9_declared, p9_c)
+        check("preflight/p9-repository-named",
+              [p9_repository_named(p9_refusing, ["--repo", str(p7_repo)]),
+               p9_repository_named("BRIEF-PIN: {}\nBRIEF-REVISIONS: {}\n".format(
+                   p9_a, "0123456789abcdef0123456789abcdef01234567"), ["--repo", str(p7_repo)]),
+               p9_repository_named(p9_refusing, []), p9_repository_named(p9_refusing, None)],
+              [(EXIT_REFUSE, [str(p7_repo)]), (EXIT_CANNOT_EVALUATE, [str(p7_repo)]),
+               (EXIT_CANNOT_EVALUATE, [str(ROOT)]), (EXIT_CANNOT_EVALUATE, ["none"])])
         p9_hint_table = p7_base / "p9-hint-table.toml"
 
         def p9_hint(family, lines, phrase, table_text=TABLE_FIXTURE):
@@ -9963,6 +10005,20 @@ def self_test(report_path=None):
         check("preflight/p9-read-error-cannot-evaluate",
               [p9_stubbed(p9_denied)(), p9_stubbed(p9_garbled)(), p9_stubbed(p9_stub(128, b"", b"fatal: bad\n"))(),
                p9_stubbed(p9_stub(1, b"", b""))()], ["CannotEvaluate"] * 3 + [(0, [])])
+        # exit 0 and a full commit id beside text on stderr (a synthetic warning) is CannotEvaluate, for a word
+        # and for a declared value alike; the same answer with nothing on stderr names C
+        p9_warned = p9_stub(0, (p9_c + "\n").encode("ascii"), b"warning: synthetic\n")
+        p9_silent = p9_stub(0, (p9_c + "\n").encode("ascii"), b"")
+
+        def p9_declared_stubbed(stub):
+            def outcome():
+                with _patched(_rev_parse_local=stub):
+                    return p9("", "BRIEF-REVISIONS: {}\n".format(p9_c))
+            return outcome
+
+        check("preflight/p9-success-stderr-cannot-evaluate",
+              [p9_stubbed(p9_warned)(), p9_declared_stubbed(p9_warned)(), p9_stubbed(p9_silent)(),
+               p9_declared_stubbed(p9_silent)()], ["CannotEvaluate"] * 2 + [p9_hard, (0, [])])
         p9_owned = p9_stub(128, b"", ("fatal: detected dubious ownership in repository at '{0}'\nTo add an "
                                       "exception for this directory, call:\n\n\tgit config --global --add "
                                       "safe.directory {0}\n".format(p7_repo)).encode("utf-8"))
@@ -10243,6 +10299,20 @@ def self_test(report_path=None):
             [p9_case("The base is {}.\n".format(p9_c), repo=p9_corrupt), p9_stubbed(p9_denied)], [(0, [])] * 2,
             _absent_answer=lambda probe: probe.returncode != 0))
         check("revert/p9-full-commit-red", *flip([p9_stubbed(p9_garbled)], [p9_hard], _full_commit=lambda text: True))
+        genuine_revision_commit = revision_commit
+
+        def p9_stderr_blind(repo, word, gap=None):
+            """revision_commit as the previous revision read it: exit 0 and a full commit id name the commit,
+            whatever git printed on stderr; every other answer is read as the genuine one reads it."""
+            probe = _p9_git(repo, "hex word {}".format(word), lambda: _rev_parse_local(repo, word))
+            commit = probe.stdout.decode("ascii", "replace").strip()
+            if probe.returncode == 0 and _full_commit(commit):
+                return commit
+            return genuine_revision_commit(repo, word, gap)
+
+        check("revert/p9-success-stderr-red", *flip(
+            [p9_stubbed(p9_warned), p9_declared_stubbed(p9_warned)], [p9_hard, (0, [])],
+            revision_commit=p9_stderr_blind))
         # git prints its one expected-commit-type line for a blob, read as the clean not-a-commit answer
         check("revert/p9-not-a-commit-red", *flip([p9_case(p9_blob), p9_case("Blob {}.\n".format(p9_blobs[0]))],
                                                   ["CannotEvaluate"] * 2, _not_a_commit=lambda probe, rev: False))
@@ -10311,8 +10381,8 @@ def self_test(report_path=None):
             HEX_WORD_RE=re.compile(r"\S++")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    # 269, or 268 where the uid reads a mode-000 file and revert/p9-pack-damage-red is recorded as skipped
-    check("revert/every-flip-ran", len(flipped), 269 if p9_locked else 268)
+    # 270, or 269 where the uid reads a mode-000 file and revert/p9-pack-damage-red is recorded as skipped
+    check("revert/every-flip-ran", len(flipped), 270 if p9_locked else 269)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
