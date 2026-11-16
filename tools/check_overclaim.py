@@ -119,8 +119,8 @@ clean; a pattern that flagged a legitimate line would be too broad):
     "confirms every target"). This closes the genericized categorical-overclaim class the universal-RESULT
     pattern above missed: that set omits the verbs reject/deny/confirm and the quantifier "each", so those
     genericized shapes passed. It rides the SITE surface set, so it polices the register page's own hand
-    prose (the generator's EXPLAINER, page lead copy, and class legend) and any roadmap `pending`
-    description rendered there, while the rule corpus and adapters legitimately carry all/every/each
+    prose (the generator's EXPLAINER, page lead copy, and class legend) and any roadmap `pending` or
+    `partial` description rendered there, while the rule corpus and adapters legitimately carry all/every/each
     governance language. It is a PLAIN categorical scan: there is no bound-allowance heuristic (the earlier
     natural-language clause-parser that tried to clear an "honestly bounded" categorical claim was removed,
     F-330/round-7, because it kept yielding false clears codex could exploit). A categorical shape is kept
@@ -1148,13 +1148,14 @@ _CSS_IMPORT_RE = re.compile(
 # --- source-side page-content leg (GER-1: single-sourced generator choke-point) ---------------------
 # The enforcement register renders many verbatim corpus/ledger strings (the rule title, the corpus id,
 # each mechanism reference id, the metadata the mechanism block shows verbatim (platform, default, entry
-# point INCLUDING a hook matcher, class), each ledger residue, and each pending rule description). Earlier
-# rounds exempted the residue blocks from the page scan (REFUTED as fragile) and then enumerated the
-# page-bound strings by a HAND-MAINTAINED list here (residue/id/description) that drifted from what the
-# generator emits: rounds 8 and 10 each found a new missed channel (the title and the hook matcher shipped
-# unscanned). The fix is a GENERATOR CHOKE-POINT: gen_enforcement_register.page_content_strings(root) is
-# the single authoritative set, sitting beside the render functions and the shared _MECH_FIELDS they both
-# iterate, and _page_bound_sources below simply CONSUMES it, so the checked set cannot fork from the page.
+# point INCLUDING a hook matcher, class), each ledger residue, and each pending or partial rule
+# description). Earlier rounds exempted the residue blocks from the page scan (REFUTED as fragile) and
+# then enumerated the page-bound strings by a HAND-MAINTAINED list here (residue/id/description) that
+# drifted from what the generator emits: rounds 8 and 10 each found a new missed channel (the title and
+# the hook matcher shipped unscanned). The fix is a GENERATOR CHOKE-POINT:
+# gen_enforcement_register.page_content_strings(root) is the single authoritative set, sitting beside the
+# render functions and the shared _MECH_FIELDS they both iterate, and _page_bound_sources below simply
+# CONSUMES it, so the checked set cannot fork from the page.
 # _scan_page_bound_sources runs ONE shared reject over every tuple: _first_invisible (a printable-ASCII
 # allowlist over the RAW bytes, before any collapse) plus the PLAIN marketing patterns over a collapsed
 # copy, so no page-bound channel can be missed and no invisible or non-ASCII laundering can reach the page
@@ -1172,7 +1173,7 @@ def _page_bound_sources(root):
     (residue/id/description) drifted from the generator (the rule TITLE and the hook MATCHER shipped
     unscanned). Covers the rule title, corpus id, mechanism reference id, the metadata fields the page
     emits verbatim (platform, default, entry point incl. the hook matcher, class), the ledger residue, and
-    each pending rule's roadmap description. gen_enforcement_register raises ValueError/OSError on a
+    each pending or partial rule's roadmap description. gen_enforcement_register raises ValueError/OSError on a
     malformed or unreadable input, which the caller maps to a fail-closed exit 2."""
     return gen_enforcement_register.page_content_strings(root)
 
@@ -1563,8 +1564,15 @@ def _md_field_rendered(md_text, channel, key, raw):
             return (False, "the Rules row for {}".format(key))
         if channel == "title":
             return (cells[0] == cell(raw), "the Rule cell of row {}".format(key))
-        return (cells[2] == "Pending" and cells[3] == cell(raw),
-                "the How cell of pending row {}".format(key))
+        # A pending row's How cell IS its description; a partial row's How cell is its mechanism list followed
+        # by PARTIAL_GAP_LEAD and its description (render_md). Any other status carries no description.
+        if cells[2] == gen_enforcement_register.LABEL_PENDING:
+            return (cells[3] == cell(raw), "the How cell of pending row {}".format(key))
+        if cells[2].endswith(gen_enforcement_register.PARTIAL_SUFFIX):
+            gap = cell(gen_enforcement_register.PARTIAL_GAP_LEAD + raw)
+            return (len(cells[3]) > len(gap) and cells[3].endswith(gap),
+                    "the end of the How cell of partial row {}".format(key))
+        return (False, "the How cell of a pending or partial row {}".format(key))
     scope = _md_mech_scope(md_text, key)
     if scope is None:
         return (False, "the mechanism block for {}".format(key))
@@ -1586,7 +1594,7 @@ def _first_invisible(text):
     explicit ASCII whitespace characters (space, tab, newline, carriage return), else None. This is a
     printable-ASCII allowlist over the RAW string, stricter than the earlier category denylist and than a
     Unicode letter/number/punctuation/symbol allowlist. A page-bound source string (a mechanism residue, a
-    reference id, a pending description) is house-authored technical English and is pure printable ASCII, so
+    reference id, a pending or partial description) is house-authored technical English and is pure printable ASCII, so
     only 0x21-0x7E plus the four ASCII whitespace bytes are permitted; every other codepoint, whatever its
     Unicode category, is rejected on the exact raw bytes the page ships. This closes, by construction, the
     whole laundering class in one predicate: an INVISIBLE character (a zero-width space U+200B, a combining
@@ -2356,9 +2364,10 @@ def main():
         findings = _collect(root, registry, binary_set)
         # Source-side cleanliness leg: the plain marketing scan plus the printable-plus-ASCII-whitespace
         # allowlist reject, over EVERY page-bound verbatim source string the register renders (each mechanism
-        # residue and reference id, and each pending description), so none can launder an overclaim onto the
-        # page. A rule source the body grammar refuses is a flagged finding (_page_bound_findings); any
-        # other bad input to build_ledger / load_roadmap raises -> fail-closed exit 2.
+        # residue and reference id, and each pending or partial description), so none can launder an
+        # overclaim onto the page. A rule source the body grammar refuses is a flagged finding
+        # (_page_bound_findings); any other bad input to build_ledger / load_roadmap raises -> fail-closed
+        # exit 2.
         findings += _page_bound_findings(root)
         # Static asset-closure leg: the register page's inline <style>/<script> bodies and the same-origin
         # CSS/JS it links, marketing-scanned (plus CSS content: string extraction), so marketing injected
@@ -3293,6 +3302,46 @@ def _page_bound_source_self_test():
             broken = md_text.replace("| {} |".format(title0), "| BROKENTITLE |", 1)
             if _md_field_rendered(broken, "title", cid0, title0)[0]:
                 failures.append("COMPLETENESS(forward): a broken real Rules row must fail the title check (FIX D)")
+        # (n3e) A PARTIAL row may carry a description (the part of the rule no linked control checks), which
+        # render_md places at the END of its How cell after PARTIAL_GAP_LEAD. The forward leg must locate it
+        # there, and must not accept it on a row that is neither pending nor partial, without the lead, or
+        # with no mechanism list before the lead. MUTATION: a location check that accepts a description only
+        # on a Pending row fails the first loop below.
+        ptree = gen_enforcement_register._build(tmp / "partial-desc")
+        rmp = ptree / gen_enforcement_register.ROADMAP_REL
+        p_anchor = 'corpus-id = "rulebb"\nstatus = "partial"\nmechanisms = ["gate:gate-alpha"]'
+        pgap = "A self-test part of rule bb | its gap that no linked control checks."
+        rtext = rmp.read_text(encoding="utf-8")
+        if p_anchor not in rtext:
+            failures.append("COMPLETENESS(forward): self-test setup: the fixture's partial rulebb row is missing")
+        else:
+            rmp.write_text(rtext.replace(p_anchor, p_anchor + '\ndescription = "' + pgap + '"', 1),
+                           encoding="utf-8")
+            p_md, _p_html = gen_enforcement_register.build_views(ptree)
+            p_sources = _page_bound_sources(ptree)
+            if ("description", "rulebb", pgap) not in p_sources:
+                failures.append("COMPLETENESS(forward): a partial row's description must be enumerated")
+            for channel, key, raw in p_sources:
+                rendered, loc = _md_field_rendered(p_md, channel, key, raw)
+                if not rendered:
+                    failures.append("COMPLETENESS(forward): partial-description fixture: {} source [{}] {!r} is "
+                                    "not rendered at {}".format(channel, key, raw, loc))
+            p_cell = gen_enforcement_register._md_cell
+            p_label = gen_enforcement_register.LABEL_GATE_A
+            p_gap = p_cell(gen_enforcement_register.PARTIAL_GAP_LEAD + pgap)
+            p_mech = "`gate:gate-alpha`, class a"
+            not_partial = p_md.replace(
+                "| `rulebb` | {}{} |".format(p_label, gen_enforcement_register.PARTIAL_SUFFIX),
+                "| `rulebb` | {} |".format(p_label), 1)
+            no_lead = p_md.replace(p_mech + p_gap, p_mech + "; " + p_cell(pgap), 1)
+            lead_only = p_md.replace(p_mech + p_gap, p_gap, 1)
+            for name, mutated in (("a row neither pending nor partial", not_partial),
+                                  ("a partial How cell without the lead", no_lead),
+                                  ("a partial How cell with no mechanism before the lead", lead_only)):
+                if mutated == p_md:
+                    failures.append("COMPLETENESS(forward): self-test setup: {} was not built".format(name))
+                elif _md_field_rendered(mutated, "description", "rulebb", pgap)[0]:
+                    failures.append("COMPLETENESS(forward): a description in {} must not satisfy it".format(name))
 
         # (n5a) FIX 5 BIDIRECTIONAL completeness. n3 above is the FORWARD leg (every enumerated string is
         # emitted). This is the REVERSE leg: a corpus/ledger source field added to the RENDER without adding

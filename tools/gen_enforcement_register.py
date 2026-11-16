@@ -6,10 +6,10 @@ ledger (.aiqt/enforceability.json, authored by tools/gen_enforceability.py). For
 rules it shows the shipped mechanical control(s) linked to it, or an explicit status that enforcement is
 not built yet (none), or that it is intended but not built (pending, with a one-line description of the
 intended build). The register never RE-AUTHORS linkage: which gates and hooks cite a rule lives once, in
-the ledger; the enforcement-roadmap TOML records only the human DECISION (status, pending intent, and the part of a
-partial rule no linked control checks) and
-restates each enforced rule's linkage so the roadmap is reviewable standalone, and the generator
-CROSS-VALIDATES that restatement against the ledger so the two can never fork.
+the ledger; the enforcement-roadmap TOML records only the human DECISION (status, pending intent, and a
+known part of a partial rule that no linked control checks) and restates each enforced rule's linkage so
+the roadmap is reviewable standalone, and the generator CROSS-VALIDATES that restatement against the
+ledger so the two can never fork.
 
 The register reads every DISPLAY fact from the ledger and the roadmap. Each mechanism's display name is
 its own namespaced ledger reference (gate:<id> / hook:<id>), rendered code-styled; there is no separately
@@ -28,14 +28,14 @@ shipped gate or hook cites the rule, and each mechanism carries its residual (wh
 the ledger. A linked mechanism may cover only part of a rule's violation surface. "partial" records the same
 linkage and states outright that the linked mechanisms are known to cover only part of the rule; each
 mechanism's residual names what that mechanism does not catch, which need not list every uncovered clause of
-every rule it is linked to, and a partial row may carry a roadmap description naming the part of the rule no
-linked control checks, shown after its mechanisms. A rule whose every linked mechanism is class c (partial by the class legend) must
-be "partial"; "enforced" there is refused as an overclaim (exit 2). So the views never show the word
-Enforced as a status: a linked rule displays as "Gate-linked (class a)" when at least one linked gate is
-class a, "Gate-linked (class c only)" when every linked gate is class c, "Hook-linked" when only hooks
-cite it (the ledger's own gate-linked / hook-linked precedence), and "Preview only" when every linked
-mechanism is a preview-channel hook (a standalone .preview/ file installed by hand, not in the plugin), each
-followed by ", partial" when the
+every rule it is linked to, and a partial row may carry a roadmap description naming a known part of the
+rule that no linked control checks (not necessarily every such part), shown after its mechanisms. A rule
+whose every linked mechanism is class c (partial by the class legend) must be "partial"; "enforced" there
+is refused as an overclaim (exit 2). So the views never show the word Enforced as a status: a linked rule
+displays as "Gate-linked (class a)" when at least one linked gate is class a, "Gate-linked (class c only)"
+when every linked gate is class c, "Hook-linked" when only hooks cite it (the ledger's own gate-linked /
+hook-linked precedence), and "Preview only" when every linked mechanism is a preview-channel hook (a
+standalone .preview/ file installed by hand, not in the plugin), each followed by ", partial" when the
 roadmap decision is "partial". "none" displays as "No control" and "pending" as "Pending"; both mean no
 shipped control cites the rule yet, and "pending" adds the intended-build description. The summary counts
 the same display labels, so it cannot disagree with the rows.
@@ -160,7 +160,8 @@ EXPLAINER = (
     "runs for it unless it is installed. A status ending in partial records the same linkage and states "
     "that the "
     "linked mechanisms are known to cover only part of the rule; their residuals name what they do not "
-    "cover, and the row may also name the part of the rule no linked control checks. No control means no shipped control cites the rule yet; pending means the "
+    "cover, and the row may also name a known part of the rule that no linked control checks, which need "
+    "not be every such part. No control means no shipped control cites the rule yet; pending means the "
     "same, and its description states the intended build. Each mechanism's class and residual describe the "
     "boundary of what it checks, and a linked mechanism may cover only part of a rule's violation surface. "
     "The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim "
@@ -172,9 +173,10 @@ EXPLAINER = (
 # no-control row says only that no shipped control cites the rule (not that one will be built).
 COLUMN_HEADING = "Linked controls or planned build"
 NO_CONTROL_TEXT = "No shipped control cites this rule."
-# The lead-in that joins a partial row's roadmap description (the part of the rule no linked control
-# checks) to its mechanism list in the same cell, single-sourced for both views.
-PARTIAL_GAP_LEAD = ". Not covered: "
+# The lead-in that joins a partial row's roadmap description (a known part of the rule that no linked
+# control checks, not necessarily every such part) to its mechanism list in the same cell, single-sourced
+# for both views. It says the named part is not a complete list, so the cell cannot read as one.
+PARTIAL_GAP_LEAD = ". Known not covered (not a complete list): "
 # The accessible name of the HTML rules table, emitted as a visually hidden caption (the site's vh class, as
 # on the evidence page) so a screen reader announces what the table holds. The Markdown view has no caption.
 TABLE_CAPTION = "Rule status and linked controls or planned build"
@@ -371,7 +373,7 @@ def load_roadmap(path, ledger_cids, linkage):
             if mechanisms != ledger_refs:
                 raise ValueError("{}: {} mechanisms {} do not match the ledger linkage {}".format(
                     where, status, mechanisms, ledger_refs))
-            # A partial row MAY carry a description naming the part of the rule no linked control checks
+            # A partial row MAY carry a description naming a known part of the rule no linked control checks
             # (the register shows it after the mechanisms); an enforced row claims no such gap, so a
             # description there is refused.
             if has_desc and status != "partial":
@@ -1348,7 +1350,7 @@ def self_test_main():
             if "<td>Gate-linked (class c only), partial</td>" not in chtml:
                 failures.append("class-c-only tree: the page must label a class c only rule as such")
 
-        # (a6) A partial row's description (the part of the rule no linked control checks) is shown after
+        # (a6) A partial row's description (a known part of the rule no linked control checks) is shown after
         # its mechanisms in both views, HTML-escaped on the page, and is enumerated for the overclaim scan.
         gap = "A self-test part of rule bb & its <gap> that no linked control checks."
         ptree = _build(tmp / "partial-desc")

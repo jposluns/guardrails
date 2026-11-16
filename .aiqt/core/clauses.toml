@@ -1355,7 +1355,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 12
 end-line = 13
 canonical-text = "A derived or generated artefact is never hand-edited; it changes only by changing its source and\nregenerating."
-source-digest = "f14772ddbe256baefb674fb2a6e358160816d8d834be3abc3b5a3d58b3ebba61"
+source-digest = "46e0b3edb6ae5ed2416c39edbd3e07ee92830c8a9bb7f70b726d51493f77fb07"
 layer = "core"
 
 [[clause]]
@@ -1365,7 +1365,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 12
 end-line = 13
 canonical-text = "A derived or generated artefact is never hand-edited; it changes only by changing its source and\nregenerating."
-source-digest = "f14772ddbe256baefb674fb2a6e358160816d8d834be3abc3b5a3d58b3ebba61"
+source-digest = "46e0b3edb6ae5ed2416c39edbd3e07ee92830c8a9bb7f70b726d51493f77fb07"
 layer = "core"
 
 [[clause]]
@@ -1375,7 +1375,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 12
 end-line = 13
 canonical-text = "A derived or generated artefact is never hand-edited; it changes only by changing its source and\nregenerating."
-source-digest = "f14772ddbe256baefb674fb2a6e358160816d8d834be3abc3b5a3d58b3ebba61"
+source-digest = "46e0b3edb6ae5ed2416c39edbd3e07ee92830c8a9bb7f70b726d51493f77fb07"
 layer = "core"
 
 [[clause]]
@@ -1385,7 +1385,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 13
 end-line = 13
 canonical-text = "Source and derivative land in the same change, so the two cannot drift apart."
-source-digest = "f14772ddbe256baefb674fb2a6e358160816d8d834be3abc3b5a3d58b3ebba61"
+source-digest = "46e0b3edb6ae5ed2416c39edbd3e07ee92830c8a9bb7f70b726d51493f77fb07"
 layer = "core"
 
 [[clause]]
@@ -1395,7 +1395,7 @@ source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 14
 end-line = 16
 canonical-text = "Deriving an artefact leaves its source originals byte-for-byte unchanged and writes separate outputs;\nin-place derivation uses copies in an area excluding the originals and refuses any path or alias\nwriting outside it or back to an original."
-source-digest = "f14772ddbe256baefb674fb2a6e358160816d8d834be3abc3b5a3d58b3ebba61"
+source-digest = "46e0b3edb6ae5ed2416c39edbd3e07ee92830c8a9bb7f70b726d51493f77fb07"
 layer = "core"
 
 [[clause]]
@@ -1403,29 +1403,29 @@ clause-id = "gensrc.6"
 corpus-id = "gensrc"
 source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
 start-line = 18
-end-line = 20
-canonical-text = "When case-dependent behaviour is described in more than one maintained place, keep its cases and\nqualifications in one canonical source; every other maintained description references that source\nor is generated from it, and a summary that points to the source restates no case."
-source-digest = "f14772ddbe256baefb674fb2a6e358160816d8d834be3abc3b5a3d58b3ebba61"
+end-line = 21
+canonical-text = "When case-dependent behaviour is described in more than one maintained place, keep its cases and\nqualifications in one canonical source; every other maintained description references that source,\nis generated from it or is a copy a gate checks against it, and a summary that points to the source\nrestates no case."
+source-digest = "46e0b3edb6ae5ed2416c39edbd3e07ee92830c8a9bb7f70b726d51493f77fb07"
 layer = "core"
 
 [[clause]]
 clause-id = "gensrc.7"
 corpus-id = "gensrc"
 source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
-start-line = 20
-end-line = 21
-canonical-text = "Where those cases\nare machine-checkable, use them as test inputs and expected outcomes against the implementation."
-source-digest = "f14772ddbe256baefb674fb2a6e358160816d8d834be3abc3b5a3d58b3ebba61"
+start-line = 21
+end-line = 22
+canonical-text = "Where those cases are machine-checkable, use them as test inputs and expected\noutcomes against the implementation."
+source-digest = "46e0b3edb6ae5ed2416c39edbd3e07ee92830c8a9bb7f70b726d51493f77fb07"
 layer = "core"
 
 [[clause]]
 clause-id = "gensrc.8"
 corpus-id = "gensrc"
 source-path = ".aiqt/core/rules/integ-generated-artefact-source-only.md"
-start-line = 22
-end-line = 23
+start-line = 23
+end-line = 24
 canonical-text = "A record of a past state, such as a commit message, a changelog entry or a review report, is not a\nmaintained description."
-source-digest = "f14772ddbe256baefb674fb2a6e358160816d8d834be3abc3b5a3d58b3ebba61"
+source-digest = "46e0b3edb6ae5ed2416c39edbd3e07ee92830c8a9bb7f70b726d51493f77fb07"
 layer = "core"
 
 [[clause]]
