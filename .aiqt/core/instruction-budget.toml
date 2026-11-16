@@ -119,7 +119,7 @@
 #                        2026-10-31 to raise the ratchet by exactly the measured delta, when that paragraph was
 #                        reworded so the receiving agent records the premise as fact only after corroborating
 #                        it, then drops the unverified mark and carries the source it checked (rows secagt.7
-#                        to secagt.9): measured PACK 136775 at 4c71fa67 -> 136911 (+136 units); rule files
+#                        to secagt.9): measured PACK 136775 after the first draft -> 136911 (+136 units); rule files
 #                        120152 -> 120288; managed block 360 and file headers 16263 unchanged. The ratchet
 #                        rises by the measured delta, 136787 + 136 = 136923, keeping the 12 units of headroom,
 #                        within the maintainer's authorization of 2026-11-08 for raises up to 148000.
@@ -127,7 +127,7 @@
 #                        2026-10-31 to raise the ratchet by exactly the measured delta, when that paragraph was
 #                        reworded again so the receiving agent corroborates the premise against a source able
 #                        to establish the fact for that time and carries the source it checked in place of any
-#                        mark (rows secagt.7 to secagt.9): measured PACK 136911 at e5ddc414 -> 136927 (+16
+#                        mark (rows secagt.7 to secagt.9): measured PACK 136911 after the second draft -> 136927 (+16
 #                        units); rule files 120288 -> 120304; managed block 360 and file headers 16263
 #                        unchanged. The ratchet rises by the measured delta, 136923 + 16 = 136939, keeping the
 #                        12 units of headroom, within the maintainer's authorization of 2026-11-08 for raises
