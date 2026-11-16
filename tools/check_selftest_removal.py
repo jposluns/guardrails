@@ -20,10 +20,15 @@ pair in one of the three states of the gate-discipline rule, in an entry this ch
                                and the decision's calendar date in parentheses, for example D-417 (2026-10-04)
 
 A MOVE is not a removal: a removed pair whose check id is newly registered at the head in another suite (a
-pair the base did not hold) is reported as moved and needs no entry; each new registration absorbs one
-removed pair, so an id removed from two suites and added to one is one move and one removal, and an id that
-the other suite already held at the base is not a move. A move needs no entry because the moved id stays
-registered, so tools/check_selftest_execution.py still requires its new suite to run it.
+pair the base did not hold) WITH THE SAME BODY is reported as moved and needs no entry. The body of a check
+id is the AST dump, without positions, of the innermost statement holding its direct check() call in the
+suite's registered runner (with the loop row that names the id, for an id a for loop binds); the old suite's
+runner is read at the base and the new suite's at the head, from the commit trees. A runner that is absent,
+not a plain relative path, unreadable, not UTF-8 or unparsable, and an id named by no call site or by more
+than one, give no body, so the pair counts as removed. Each new registration absorbs one removed pair, so an
+id removed from two suites and added to one is one move and one removal, and an id that the other suite
+already held at the base is not a move. A move needs no entry because the moved id stays registered with the
+case it named, so tools/check_selftest_execution.py still requires its new suite to run it.
 
 An entry accounts for a removal only when it is FRESH: the base record holds no entry for the pair, or holds
 one whose fields differ from the head's after each value is whitespace-collapsed and case-folded, so a
@@ -66,10 +71,11 @@ pair is checked to be registered at the head, not to catch what the removed case
 form is checked, but the decision it names is not looked up; and the unreachable fields are free text;
 freshness proves the entry was rewritten beyond whitespace and letter case, not that the rewrite is a new
 accounting (a reworded old entry reads as fresh; a disclosed entry, whose one field has a fixed form, must
-name another decision or date); a malformed base record makes every head entry read as fresh; a move is
-judged by the id alone, so a new case that reuses a removed id in another suite reads as a move; the
-comparison is of the two endpoints, so a removal and re-addition inside the range is not seen; and, like
-its base derivation, it trusts the git binary, the repository configuration and origin/HEAD.
+name another decision or date), and the form admits D-0 and a future date; a malformed base record makes
+every head entry read as fresh; a move is judged by the id and its check() statement only, so a moved case
+whose call is unchanged while the helpers or fixtures it calls changed reads as a move; the comparison is of
+the two endpoints, so a removal and re-addition inside the range is not seen; and, like its base
+derivation, it trusts the git binary, the repository configuration and origin/HEAD.
 """
 import sys
 
@@ -85,6 +91,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import ast
 import contextlib
 import datetime
 import io
@@ -196,18 +203,118 @@ def net_removed(base_pairs, head_pairs):
     return base_pairs - head_pairs
 
 
-def moved(removed, base_pairs, head_pairs):
+def moved(removed, base_pairs, head_pairs, same_body):
     """{removed pair: the suite its check id moved to}: a removed pair whose check id is newly registered (a pair
-    the base did not hold) in another suite at the head, each new registration absorbing one removed pair."""
+    the base did not hold) in another suite at the head, with the same body there (same_body(old suite, new
+    suite, check id)), each new registration absorbing one removed pair."""
     added = {}
     for suite, check_id in sorted(head_pairs - base_pairs):
         added.setdefault(check_id, []).append(suite)
     result = {}
     for suite, check_id in sorted(removed):
-        targets = added.get(check_id)
-        if targets:
-            result[(suite, check_id)] = targets.pop(0)
+        targets = added.get(check_id, [])
+        target = next((other for other in targets if same_body(suite, other, check_id)), None)
+        if target is not None:
+            targets.remove(target)
+            result[(suite, check_id)] = target
     return result
+
+
+def runners(raw):
+    """{suite id: runner path} for a registry's bytes that load_registry accepted ({} when absent); a runner that is
+    not a string is left out, so its suite has no body to compare."""
+    if raw is None:
+        return {}
+    return {row["id"]: row["runner"] for row in parse_toml(raw, "registry")["suite"]
+            if isinstance(row.get("runner"), str)}
+
+
+def _relative_path(path):
+    """Whether a runner path is a plain relative path of exact components (no empty, . or .. component)."""
+    return bool(path) and "\\" not in path and not any(part in ("", ".", "..") for part in path.split("/"))
+
+
+def _call_ids(arg, loops):
+    """[(check id, loop row or None)] that a check() call's first argument names: a string literal, or a name bound
+    by the innermost enclosing for over a literal tuple or list of rows holding a string literal at that name's
+    position; [] for anything else."""
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return [(arg.value, None)]
+    if not isinstance(arg, ast.Name):
+        return []
+    for loop in reversed(loops):
+        if isinstance(loop.target, ast.Name) and loop.target.id == arg.id:
+            return []
+        names = [elt.id if isinstance(elt, ast.Name) else None
+                 for elt in loop.target.elts] if isinstance(loop.target, ast.Tuple) else []
+        if arg.id not in names:
+            continue
+        position = names.index(arg.id)
+        if not isinstance(loop.iter, (ast.Tuple, ast.List)):
+            return []
+        found = []
+        for row in loop.iter.elts:
+            if (not isinstance(row, (ast.Tuple, ast.List)) or len(row.elts) != len(names)
+                    or not isinstance(row.elts[position], ast.Constant)
+                    or not isinstance(row.elts[position].value, str)):
+                return []
+            found.append((row.elts[position].value, row))
+        return found
+    return []
+
+
+def check_bodies(raw):
+    """{check id: body} for a runner's source bytes: the BODY of a check id is the AST dump (no positions) of the
+    innermost statement holding its direct check() call, with the loop row that names the id for a loop-bound id.
+    An id named by more than one call site maps to None (no single body); an absent, non-UTF-8 or unparsable
+    source holds no body."""
+    if raw is None:
+        return {}
+    try:
+        tree = ast.parse(raw.decode("utf-8"))
+    except (UnicodeDecodeError, SyntaxError, ValueError, RecursionError, MemoryError):
+        return {}
+    bodies = {}
+
+    def visit(node, statement, loops):
+        statement = node if isinstance(node, ast.stmt) else statement
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "check" and node.args:
+            for check_id, row in _call_ids(node.args[0], loops):
+                body = ast.dump(statement) + ("" if row is None else ast.dump(row))
+                bodies[check_id] = None if check_id in bodies else body
+        inner = loops + [node] if isinstance(node, ast.For) else loops
+        for child in ast.iter_child_nodes(node):
+            visit(child, statement, inner)
+
+    try:
+        visit(tree, None, [])
+    except (RecursionError, MemoryError):
+        return {}
+    return bodies
+
+
+def body_reader(base_registry, head_registry, base_read, head_read):
+    """same_body(old suite, new suite, check id) for moved(): whether the check id has one body in its old suite's
+    runner at the base and the same body in its new suite's runner at the head. A runner that is unregistered, not a
+    plain relative path, absent, unreadable or unparsable, or an id with no single body there, is not the same body,
+    so the pair counts as removed."""
+    old_runners, new_runners, cache = runners(base_registry), runners(head_registry), {}
+
+    def bodies(read, path):
+        if read is None or not isinstance(path, str) or not _relative_path(path):
+            return {}
+        if (read, path) not in cache:
+            try:
+                cache[(read, path)] = check_bodies(read(path))
+            except (cut.CannotEvaluate, OSError, ValueError):
+                cache[(read, path)] = {}
+        return cache[(read, path)]
+
+    def same_body(old_suite, new_suite, check_id):
+        old = bodies(base_read, old_runners.get(old_suite)).get(check_id)
+        return old is not None and old == bodies(head_read, new_runners.get(new_suite)).get(check_id)
+
+    return same_body
 
 
 def survives(entry, head_pairs):
@@ -249,9 +356,11 @@ def fresh(entry, base_entry):
     return canonical(entry) != canonical(base_entry)
 
 
-def judge(base_registry, head_registry, base_record, head_record):
+def judge(base_registry, head_registry, base_record, head_record, base_read=None, head_read=None):
     """(code, lines) for the four blobs (bytes, or None when absent) of a base and a head; CannotEvaluate when
-    either registry or the head record cannot be read (the base record is read by base_entries)."""
+    either registry or the head record cannot be read (the base record is read by base_entries). base_read and
+    head_read map a repository path to its bytes at the base and the head (None when absent); they read the runners
+    whose check() bodies a move compares, and without them no removal reads as a move."""
     base_pairs = set() if base_registry is None else load_registry(base_registry, "base")
     # absent at both ends, nothing was registered and nothing is removed; absent at the head only, the whole
     # registry went, which this gate cannot account for pair by pair
@@ -263,7 +372,7 @@ def judge(base_registry, head_registry, base_record, head_record):
         accounted.append("the base {} is not readable ({}), so every head entry reads as written by this "
                          "change".format(RECORD, note))
     removed = net_removed(base_pairs, head_pairs)
-    moves = moved(removed, base_pairs, head_pairs)
+    moves = moved(removed, base_pairs, head_pairs, body_reader(base_registry, head_registry, base_read, head_read))
     for suite, check_id in sorted(removed):
         where = "{!r} (suite {!r})".format(check_id, suite)
         entry = head_entries.get((suite, check_id))
@@ -302,7 +411,12 @@ def evaluate(root, protected=None, before=None):
         head_registry, head_record = blobs(root, binding["head_tree"])
     except (cut.CannotEvaluate, OSError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate("the base or the change cannot be read: {}".format(exc)) from None
-    code, lines = judge(base_registry, head_registry, base_record, head_record)
+
+    def reader(tree):
+        return None if tree is None else lambda path: cut.tree_blob(root, tree, path)
+
+    code, lines = judge(base_registry, head_registry, base_record, head_record, reader(binding["base_tree"]),
+                        reader(binding["head_tree"]))
     return code, lines, binding
 
 
@@ -364,6 +478,14 @@ UNREACHABLE = {"suite": "s", "id": "c", "state": "unreachable", "capability-remo
 DISCLOSED = {"suite": "s", "id": "c", "state": "disclosed", "authorization": "D-7 (2026-11-01)"}
 WITHOUT_C = _registry(("s", ("a", "b")), ("t", ("x",)))
 MOVED_C = _registry(("s", ("a", "b")), ("t", ("x", "c")))
+# the runner every _registry suite names, read at the base and the head: one check() call site per id
+X_RUNNER = b'check("a", 1)\ncheck("b", 1)\ncheck("c", main(["--bogus"]) == 2)\ncheck("x", 1)\n'
+SAME = {"tools/x.py": X_RUNNER}.get
+# the same calls with the body of c changed, reformatted only, named twice, or bound by a for loop's rows
+OTHER_C = {"tools/x.py": X_RUNNER.replace(b'main(["--bogus"]) == 2', b"True")}.get
+REFORMATTED_C = {"tools/x.py": X_RUNNER.replace(b'main(["--bogus"]) == 2', b'main( [ "--bogus" ] )==2')}.get
+TWICE_C = {"tools/x.py": X_RUNNER + b'check("c", 1)\n'}.get
+LOOP_C = b'for name, value in (("b", 1), ("c", 2)):\n    check(name, value == 2)\n'
 # authorization references outside the stated form: free text, no date, a bad date, too many digits, lower case,
 # two spaces, no parentheses, a non-ASCII digit
 UNAUTHORIZED = ("decision 7", "x", "D-7", "D-7 (2026-13-01)", "D-1234567 (2026-11-01)", "d-7 (2026-11-01)",
@@ -449,7 +571,7 @@ def _repo_cases(tmp):
     repo = Path(tmp) / "repo"
     os.makedirs(repo)
     _git(repo, env, "init", "-q", "-b", "main")
-    base = _commit(repo, env, {REGISTRY: BASE}, "base")
+    base = _commit(repo, env, {REGISTRY: BASE, "tools/x.py": X_RUNNER}, "base")
     _git(repo, env, "update-ref", "refs/remotes/origin/main", base)
     _git(repo, env, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
     _git(repo, env, "switch", "-q", "-c", "feature")
@@ -457,7 +579,12 @@ def _repo_cases(tmp):
     os.environ.clear()
     os.environ.update(env)
     try:
-        _commit(repo, env, {REGISTRY: WITHOUT_C}, "drop c")
+        # the runner bodies a move compares are read from the base and head commit trees
+        _commit(repo, env, {REGISTRY: MOVED_C}, "move c")
+        check("repo/move-same-body-passes", _run_quiet(repo) == EXIT_OK)
+        _commit(repo, env, {"tools/x.py": OTHER_C("tools/x.py")}, "move c and change its body")
+        check("repo/move-other-body-refused", _run_quiet(repo) == EXIT_REFUSE)
+        _commit(repo, env, {REGISTRY: WITHOUT_C, "tools/x.py": X_RUNNER}, "drop c")
         check("repo/unaccounted-removal-refused", _run_quiet(repo) == EXIT_REFUSE)
         _commit(repo, env, {RECORD: _record(COVERED)}, "account for c")
         check("repo/accounted-removal-passes", _run_quiet(repo) == EXIT_OK)
@@ -480,13 +607,26 @@ def self_test():
     check("pass/registry-absent-at-base", _code(None, BASE, None, None) == EXIT_OK)
     check("pass/registry-absent-at-both", _code(None, None, None, None) == EXIT_OK)
     check("refuse/unaccounted-removal", _code(BASE, WITHOUT_C, None, None) == EXIT_REFUSE)
-    check("pass/moved-between-suites", judge(BASE, MOVED_C, None, None) == (
+    check("pass/moved-between-suites", judge(BASE, MOVED_C, None, None, SAME, SAME) == (
         EXIT_OK, ["INFO: 'c' (suite 's') moved to suite 't', not removed"]))
     check("refuse/move-target-held-at-base", _code(_registry(("s", ("a", "b", "c")), ("t", ("x", "c"))), MOVED_C,
-                                                   None, None) == EXIT_REFUSE)
+                                                   None, None, SAME, SAME) == EXIT_REFUSE)
     check("refuse/move-absorbs-one-removal", _code(_registry(("s", ("a", "c")), ("t", ("x",)), ("u", ("c",))),
                                                    _registry(("s", ("a",)), ("t", ("x",)), ("v", ("c",))), None,
-                                                   None) == EXIT_REFUSE)
+                                                   None, SAME, SAME) == EXIT_REFUSE)
+    # a move counts only when the id has the same body in its new suite's runner, so a generic id reused by a new
+    # case in another suite is a removal
+    check("refuse/move-other-body", _code(BASE, MOVED_C, None, None, SAME, OTHER_C) == EXIT_REFUSE)
+    check("pass/move-same-body-reformatted", _code(BASE, MOVED_C, None, None, SAME, REFORMATTED_C) == EXIT_OK)
+    check("refuse/move-runner-absent", [_code(BASE, MOVED_C, None, None, SAME, {}.get), _code(
+        BASE, MOVED_C, None, None, {}.get, SAME)] == [EXIT_REFUSE] * 2)
+    check("refuse/move-without-runner-read", _code(BASE, MOVED_C, None, None) == EXIT_REFUSE)
+    check("refuse/move-call-site-ambiguous", [_code(BASE, MOVED_C, None, None, TWICE_C, TWICE_C), _code(
+        BASE, MOVED_C, None, None, SAME, {"tools/x.py": b"check(\n"}.get)] == [EXIT_REFUSE] * 2)
+    check("pass/move-loop-row", _code(BASE, MOVED_C, None, None, {"tools/x.py": LOOP_C}.get,
+                                      {"tools/x.py": LOOP_C}.get) == EXIT_OK)
+    check("refuse/move-loop-row-changed", _code(BASE, MOVED_C, None, None, {"tools/x.py": LOOP_C}.get, {
+        "tools/x.py": LOOP_C.replace(b'("c", 2)', b'("c", 3)')}.get) == EXIT_REFUSE)
     check("pass/authorization-form", [_code(BASE, WITHOUT_C, None, _record(dict(DISCLOSED, authorization=value)))
                                       for value in ("D-417 (2026-10-04)", "D-123456 (2024-02-29)")]
           == [EXIT_OK] * 2)
@@ -555,8 +695,10 @@ def self_test():
             {"suite": "s", "id": "c", "state": "waived"})) == EXIT_OK)
     with _patched(load_registry=lambda raw, label: set()):
         check("revert/registry-fail-closed-red", _code(BASE, None, None, None) == EXIT_OK)
-    with _patched(moved=lambda removed, base_pairs, head_pairs: {}):
-        check("revert/move-red", _code(BASE, MOVED_C, None, None) == EXIT_REFUSE)
+    with _patched(moved=lambda removed, base_pairs, head_pairs, same_body: {}):
+        check("revert/move-red", _code(BASE, MOVED_C, None, None, SAME, SAME) == EXIT_REFUSE)
+    with _patched(body_reader=lambda *readers: lambda old_suite, new_suite, check_id: True):
+        check("revert/move-body-red", _code(BASE, MOVED_C, None, None, SAME, OTHER_C) == EXIT_OK)
     with _patched(authorized=lambda value: True):
         check("revert/authorization-form-red", _code(BASE, WITHOUT_C, None, _record(dict(
             DISCLOSED, authorization="decision 7"))) == EXIT_OK)
@@ -584,8 +726,9 @@ def self_test():
         for failure in FAILURES:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: check_selftest_removal {} checks (no removal, an addition, a move between suites and a "
-          "registry new at the base pass; an unaccounted removal, a stale entry (whitespace or case edits "
+    print("SELF-TEST PASS: check_selftest_removal {} checks (no removal, an addition, a move between suites with "
+          "the same check() body and a registry new at the base pass; a move whose body changed or cannot be read, "
+          "an unaccounted removal, a stale entry (whitespace or case edits "
           "included), an entry for another suite, a covered-by pair that does not survive and an authorization "
           "outside the stated form refuse; covered, unreachable and disclosed entries pass; a registry or head "
           "record that is absent at the head, not TOML, not UTF-8 or misshapen is cannot-evaluate, and a "

@@ -514,38 +514,58 @@ CHECK REMOVAL (beside the preflight, for every family, before the execution rule
   T1 check removal     HARD. Replacing or removing a check is a reduction until its coverage is accounted for, so a
                        brief must not offer the removal of a test as a plain option. A TASK LINE is a line that opens at
                        column zero with TASK: (upper case, the colon directly after; no markup, no indent), outside a
-                       fenced code block (a fenced task line is an example, not the brief's ask). Its text after the
+                       fenced code block (a fenced task line is an example, not the brief's ask). For T1 a fence
+                       opens only at an indent of at most three spaces (four spaces open an indented code block, not a
+                       fence), and a fence that never closes and holds a column-zero TASK: line is CANNOT_EVALUATE
+                       (exit 2), so an unclosed fence never hides the task lines after it. Its text after the
                        label has each QUOTATION that holds whitespace (between straight or curly double quotes, or
                        backticks) read as one opaque word, so a quoted or cited removal is not read; a quoted single
                        word (`checks`) stays. The text is then split into words on whitespace, each word stripped of
-                       surrounding quotes, backticks, emphasis, brackets and punctuation and lower-cased; a word that
-                       ended in . ; ! or ? closes its sentence and its clause, and one that ended in , : or ) closes
-                       its clause. T1 fires only on an INSTRUCTION: a word that is a REMOVAL VERB (remove, removing,
-                       delete, deleting, drop or dropping; removed, removal and deletion are not read) that heads its
-                       clause, every word before it in the clause being a LEAD word (please, and, or, then, also,
-                       optionally, just, now, first, next, finally, so, either, instead, simply, you, we, may, can,
-                       could, should, must, might, need, needs, to, do, feel, free, or a prohibition word), and whose
-                       OBJECT, in the same clause, is test, tests, self-test, self-tests, selftest, selftests,
-                       assertion, assertions, assert, asserts, check, checks, case, cases, test-case, test-cases,
-                       testcase or testcases, either right after the verb or after at most three FILLER words (a, an,
-                       the, one, this, that, these, those, each, any, every, some, its, their, existing, failing,
-                       flaky, redundant, old, stale, obsolete, duplicate, registered, unit, regression, all, both,
-                       two, three, several, other, remaining, unused, broken, outdated, skipped, disabled, slow). A
+                       surrounding quotes, backticks, emphasis, brackets, an ellipsis and punctuation and lower-cased;
+                       a word that ended in . ; ! or ? closes its sentence and its clause, and one that ended in , :
+                       or ) closes its clause. T1 fires only on an INSTRUCTION OR OFFER: a word that is a REMOVAL VERB
+                       (remove, removing, delete, deleting, drop or dropping; removed, removal and deletion are not
+                       read) that heads its clause, every word before it in the clause being a LEAD word (please, and,
+                       or, then, but, also, optionally, just, now, first, next, finally, so, either, instead, simply,
+                       you, we, may, can, could, should, must, might, need, needs, to, do, feel, free, or a
+                       prohibition word) or a PERMISSION FRAME (it, it's, is, are, you're, we're, be and intensifiers
+                       such as perfectly, read only with a PERMISSION word among them: free, fine, ok, okay, allowed,
+                       acceptable, permitted, welcome, alright, optional, option, options; "TASK: you are free to
+                       remove the test", "TASK: it is fine to delete the check"); or a plain removal verb COORDINATED
+                       by and, or, then or but with an earlier part of its clause that reads as an imperative (its
+                       first word after lead words is no subject, determiner, subordinator or -ing removal verb, and
+                       none of its words is a prohibition, a removal verb after the first, or a subordinator or
+                       infinitive marker: that, which, who, whether, if, how, why, when, where, what, while, because,
+                       unless, until, since, to, once, as): "TASK: fix the parser and remove the flaky test", "TASK:
+                       keep or remove self-test rows". Its OBJECT, in the same clause, is test, tests, self-test,
+                       self-tests, selftest, selftests, assertion, assertions, assert, asserts, check, checks, case,
+                       cases, test-case, test-cases, testcase, testcases, gate, gates, hook, hooks, row or rows,
+                       either right after the verb or after at most three FILLER words (a, an, the, one, this, that,
+                       these, those, each, any, every, some, its, their, existing, failing, flaky, redundant, old,
+                       stale, obsolete, duplicate, registered, unit, regression, all, both, two, three, several, other,
+                       remaining, unused, broken, outdated, skipped, disabled, slow), the last of which may be one
+                       unlisted MODIFIER right before the object ("remove the duplicated check", "remove the PR's
+                       tests") unless it is a stop word (a preposition, conjunction, question or relative word,
+                       pronoun, linking verb, modal or negation: "delete what tests do not need" does not fire). A
                        run of object words is one object (self-test case); an object word followed by a noun it
                        modifies (mark, box, fixture, data, file, directory, dir, folder, helper, log, output,
-                       artifact, report, script, tool, image, account, each with its plural, environment, server,
-                       database) is not an object ("remove the check mark", "delete the test data file"). So "TASK:
-                       remove the flaky test", "TASK: fix it, or drop one self-test case", "TASK: you should delete
-                       the check" and "TASK: options: removing a check" fire, while a clause that describes, reviews
-                       or reports a removal ("TASK: verify the gate refuses removing a test", "TASK: review the change
-                       that proposes to remove a test", "TASK: confirm no change can drop a check") and a quotation
-                       ("TASK: \"remove the test\" is what the draft said") do not. Two further shapes do not fire: a
-                       PROHIBITION (never, not, no, don't, mustn't, shouldn't, cannot, can't or won't within the four
-                       words before the verb, in its clause: "TASK: never remove a test", "TASK: do not delete the
-                       check", "TASK: no need to remove the test") and a DESCRIPTION (an -ing verb whose object is
-                       followed directly by is, are, was, were or counts, or, when the object closes a clause, one of
-                       those words right after a later clause boundary in the same sentence: "TASK: removing a check
-                       is a reduction", "TASK: removing a check, as the draft did, is a reduction"). A hit refuses
+                       artifact, report, script, tool, image, account, manifest, each with its plural, environment,
+                       server, database) is not an object ("remove the check mark", "delete the test data file"). So
+                       "TASK: remove the flaky test", "TASK: fix it, or drop one self-test case", "TASK: you should
+                       delete the check" and "TASK: options: removing a check" fire, while a clause that describes,
+                       reviews or reports a removal ("TASK: verify the gate refuses removing a test", "TASK: review the
+                       change that proposes to remove a test", "TASK: review whether it is fine to remove the test",
+                       "TASK: confirm no change can drop a check") and a quotation ("TASK: \"remove the test\" is what
+                       the draft said") do not. Two further shapes do not fire: a PROHIBITION (never, not, no, don't,
+                       mustn't, shouldn't, cannot, can't or won't within the four words before the verb, in its
+                       clause: "TASK: never remove a test", "TASK: do not delete the check", "TASK: no need to remove
+                       the test", "TASK: you are not allowed to remove a test") and a DESCRIPTION (an -ing verb whose
+                       object is followed directly by is, are, was, were or counts, or, when the object closes a
+                       clause, one of those words right after a later clause boundary in the same sentence: "TASK:
+                       removing a check is a reduction", "TASK: removing a check, as the draft did, is a reduction"),
+                       except that a predicate granting a permission or naming an option (a permission word after only
+                       permission frame words: "TASK: removing the failing tests is fine", "TASK: dropping flaky
+                       checks is allowed", "TASK: removing the test is an option") is an offer and fires. A hit refuses
                        (exit 1) unless the brief carries BOTH cure lines, each at column zero, outside a fence, with
                        text after its colon: COVERAGE-ACCOUNTING: <how each removed case is covered by a named
                        surviving check, unreachable, or disclosed> and AUTHORIZATION: <the maintainer's recorded
@@ -557,14 +577,19 @@ CHECK REMOVAL (beside the preflight, for every family, before the execution rule
                        themselves); a removal asked anywhere but a column-zero TASK: line outside a fence (another
                        line, a numbered step, **TASK:** in emphasis, an indented TASK:), in other words (cut, strip,
                        prune, retire, disable, skip, comment out, replace, "get rid of"), after a word that is not a
-                       lead word ("it is flaky so remove the test"), with another verb between (rewrite or remove the
-                       test, remove or rewrite the test), with an unlisted word
-                       or more than three fillers before the object (remove the brittle test, delete the obsolete
-                       parser tests), of an unlisted object (a guard, a gate, a hook, a validator, "it"), or inside a
-                       quotation (including a quoted object: remove the "flaky test") is not read; an unlisted noun
-                       after the object leaves it an object (remove the test harness); and a prohibition or
-                       description is read lexically, so "TASK: not only remove the test but fix the parser" passes and
-                       "TASK: removing the check counted twice" refuses.
+                       lead word outside a coordination ("it is flaky so remove the test", "you may want to remove the
+                       test"), coordinated with a part that holds a subordinator or infinitive ("ask the worker to fix
+                       the parser and remove the test"), as an -ing verb coordinated with another verb ("keeping or
+                       dropping the test"), with another verb after it (remove or rewrite the test), with two unlisted
+                       words or more than three words before the object (remove the brittle old flaky test), with a
+                       permission phrased in other words ("up to you", "your call" alone, "nobody minds if"), of an
+                       unlisted object (a guard, a validator, "it"), or inside a quotation (including a quoted object:
+                       remove the "flaky test") is not read; an unlisted noun after the object leaves it an object
+                       (remove the test harness, remove the header row: a table row that is not a test fires); an
+                       unclosed fence with no TASK: line in it still hides the cure lines in it; and a prohibition,
+                       description, permission or coordination is read lexically, so "TASK: not only remove the test
+                       but fix the parser" passes, "TASK: removing the check counted twice" refuses, and "TASK: do not
+                       fix the parser and remove the test" passes.
 
 TEXT. A brief holding a line separator other than LF anywhere (a carriage return, bare or in CRLF, U+0085
 NEXT LINE, U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR), or a format character (Unicode category Cf: a
@@ -4041,31 +4066,67 @@ T1_FILLERS = frozenset(("a", "an", "the", "one", "this", "that", "these", "those
                         "duplicate", "registered", "unit", "regression", "all", "both", "two", "three", "several",
                         "other", "remaining", "unused", "broken", "outdated", "skipped", "disabled", "slow"))
 T1_FILLER_MAX = 3
-# the objects that make the request a removal of a test, case or check
+# whether one word that is not a filler may stand right before the object, as its modifier ("remove the duplicated
+# check", "remove the PR's tests"); it counts toward T1_FILLER_MAX and is never a T1_FILLER_STOPS word
+T1_MODIFIER_SLOT = True
+# the words that never fill the modifier slot: prepositions, conjunctions, question and relative words, pronouns,
+# linking verbs, modals and negations ("delete what tests do not need" is no removal of tests)
+T1_FILLER_STOPS = frozenset((
+    "and", "or", "but", "nor", "so", "then", "if", "when", "while", "because", "unless", "until", "since", "once",
+    "whether", "that", "which", "who", "whom", "whose", "where", "how", "why", "what", "whatever", "whichever",
+    "to", "from", "in", "into", "on", "onto", "of", "for", "with", "without", "at", "by", "about", "under", "over",
+    "after", "before", "than", "as", "via", "per", "inside", "within", "across", "through", "between", "it", "them",
+    "him", "me", "us", "you", "we", "they", "i", "nothing", "everything", "something", "anything", "none", "is",
+    "are", "was", "were", "be", "been", "being", "has", "have", "had", "does", "did", "do", "can", "could", "will",
+    "would", "should", "must", "may", "might", "not", "never", "no", "only", "just", "also"))
+# the objects that make the request a removal of a test, case, check, gate, hook or row
 T1_OBJECTS = frozenset(("test", "tests", "self-test", "self-tests", "selftest", "selftests", "assertion",
                         "assertions", "assert", "asserts", "check", "checks", "case", "cases", "test-case",
-                        "test-cases", "testcase", "testcases"))
+                        "test-cases", "testcase", "testcases", "gate", "gates", "hook", "hooks", "row", "rows"))
 # the objects named in the singular, which the finding gives an article ("asks to remove a test")
 T1_SINGULAR = frozenset(("test", "self-test", "selftest", "assertion", "assert", "check", "case", "test-case",
-                         "testcase"))
+                         "testcase", "gate", "hook", "row"))
 # the nouns that, right after an object word, make that word a modifier of another noun (the check mark, the
 # test data file, the test fixture directory), so the request is not a removal of a test or check
 T1_NOT_OBJECT_AFTER = frozenset(("mark", "marks", "box", "boxes", "fixture", "fixtures", "data", "file", "files",
                                  "directory", "directories", "dir", "folder", "folders", "helper", "helpers", "log",
                                  "logs", "output", "outputs", "artifact", "artifacts", "report", "reports",
                                  "script", "scripts", "tool", "tools", "image", "images", "account", "accounts",
-                                 "environment", "server", "database"))
+                                 "environment", "server", "database", "manifest", "manifests"))
 # a word that makes a gerund the subject of a description, not a request: right after the object, or right after
 # a clause boundary later in the same sentence when the object closes a clause
 T1_DESCRIBED = frozenset(("is", "are", "was", "were", "counts"))
+# the words that grant a permission or name an option: before the verb ("you are free to remove the test", "it is
+# fine to delete the check") they make the clause an offer, and after a description's linking word ("removing the
+# test is fine", "dropping checks is allowed", "removing the test is an option") they make it one too
+T1_PERMISSIONS = frozenset(("free", "fine", "ok", "okay", "allowed", "acceptable", "permitted", "welcome",
+                            "alright", "optional", "option", "options"))
+# the words a permission is framed with ("it is", "you are", "perfectly"); before the verb they are read only when a
+# T1_PERMISSIONS word is among them, and after a linking word they (and an article) may come before the permission
+T1_PERMISSION_FRAME = frozenset(("it", "it's", "is", "are", "you're", "we're", "be", "totally", "perfectly",
+                                 "entirely", "quite", "absolutely", "also", "still", "always", "a", "an", "one"))
+# the coordinators that join a removal to an earlier imperative clause ("fix the parser and remove the test",
+# "keep or remove the rows")
+T1_COORDINATORS = frozenset(("and", "or", "then", "but"))
+# the words that, anywhere in the earlier conjunct, make it no imperative the removal is coordinated with: a
+# subordinate or relative clause or an infinitive ("review the change that proposes to fix the parser and remove the
+# test"); and the words that do so as its first word, those and a subject ("the gate refuses it and drop the check")
+T1_SUBORDINATE = frozenset(("that", "which", "who", "whom", "whose", "whether", "if", "how", "why", "when", "where",
+                            "what", "while", "whereas", "because", "unless", "until", "since", "to", "once", "as"))
+T1_NOT_IMPERATIVE_HEAD = T1_SUBORDINATE | frozenset(("the", "a", "an", "this", "these", "those", "it", "its", "they",
+                                                     "he", "she", "i", "there", "each", "every", "some", "any", "all",
+                                                     "both", "no", "my", "our", "your", "their"))
 # the words that, in the clause before the verb (at most T1_PROHIBITION_REACH words), make it a prohibition
 T1_PROHIBITIONS = frozenset(("never", "not", "no", "don't", "mustn't", "shouldn't", "cannot", "can't", "won't"))
 T1_PROHIBITION_REACH = 4
 # the only words that may stand before the verb in its clause for the clause to be an INSTRUCTION (the verb heads
 # it, after connectives, modals and courtesy words); a prohibition word is one of them, so t1_prohibited decides
-T1_LEADS = frozenset(("please", "and", "or", "then", "also", "optionally", "just", "now", "first", "next",
+T1_LEADS = frozenset(("please", "and", "or", "then", "but", "also", "optionally", "just", "now", "first", "next",
                       "finally", "so", "either", "instead", "simply", "you", "we", "may", "can", "could", "should",
                       "must", "might", "need", "needs", "to", "do", "feel", "free")) | T1_PROHIBITIONS
+# the deepest indentation (in spaces, no tab) at which T1 reads a fence opening line: four spaces open an indented
+# code block, not a fence
+T1_FENCE_INDENT = 3
 # the plain form a gerund verb is named in by a finding
 T1_PLAIN = {"removing": "remove", "deleting": "delete", "dropping": "drop"}
 # the quotation marks whose span, when it holds whitespace, reads as one opaque word (opening: closing)
@@ -4078,19 +4139,33 @@ T1_SENTENCE, T1_CLAUSE = ".", ","
 def t1_lines(text):
     """[(line number, line)] for the lines of the brief outside fenced code blocks, the fence lines left out too: a
     task line or a cure line inside a fence is an example or a quotation, not the brief's own ask or cure. The
-    fence is read as parse_blocks reads it (FENCE_OPEN_RE, closed by _fence_closes)."""
-    found, opening = [], None
+    fence is read as parse_blocks reads it (FENCE_OPEN_RE, closed by _fence_closes), except that an opening line
+    indented by more than T1_FENCE_INDENT spaces, or by a tab, is an indented code block line, not a fence. A fence
+    that never closes and holds a column-zero TASK: line is CannotEvaluate (t1_unclosed): its task lines would
+    otherwise be hidden to the end of the brief."""
+    found, opening, hidden = [], None, []
     for number, line in enumerate(text.split("\n"), 1):
         if opening is not None:
             if _fence_closes(line, opening):
                 opening = None
+            else:
+                hidden.append(line)
             continue
         opened = FENCE_OPEN_RE.match(line)
-        if opened and not (opened.group(2)[0] == "`" and "`" in opened.group(3)):
-            opening = opened.group(2)
+        if opened and len(opened.group(1)) <= T1_FENCE_INDENT and "\t" not in opened.group(1) and not (
+                opened.group(2)[0] == "`" and "`" in opened.group(3)):
+            opening, hidden = opened.group(2), []
             continue
         found.append((number, line))
+    if opening is not None and t1_unclosed(hidden):
+        raise CannotEvaluate("T1: a fenced code block opened with {} never closes and holds a TASK: line, so the "
+                             "brief's task lines cannot be told from an example; close the fence".format(opening))
     return found
+
+
+def t1_unclosed(hidden):
+    """Whether the lines of a fence that never closes hold a column-zero TASK: line."""
+    return any(line.startswith(TASK_LABEL) for line in hidden)
 
 
 def t1_unquoted(line):
@@ -4120,7 +4195,7 @@ def t1_words(line):
     stripped, lower-cased, and the boundary that follows it: T1_SENTENCE when the chunk ended with . ; ! or ?,
     T1_CLAUSE when it ended with , : or ) or the next chunk opens with (, else False. Walked in Python, with no
     pattern, so the read is linear in the line."""
-    strip_chars, stops = "\"'`*_([{<>}])", ".;:,!?)"
+    strip_chars, stops = "\"'`*_([{<>}])…", ".;:,!?)"
     words = []
     for chunk in line.split():
         word = chunk.strip(strip_chars + stops).lower()
@@ -4139,14 +4214,47 @@ def t1_instruction(words, index):
     """Whether the verb at words[index] heads its clause: every word before it in the clause is a T1_LEADS word, so
     the clause instructs ("remove the test", "or optionally drop it", "you should delete the check"); a verb inside
     a clause that describes, reviews or reports a removal ("verify the gate refuses removing a test", "review the
-    change that proposes to remove a test") is not read."""
+    change that proposes to remove a test") is not read. Two more shapes instruct or offer: a PERMISSION frame before
+    the verb (T1_PERMISSION_FRAME words with at least one T1_PERMISSIONS word: "you are free to remove the test",
+    "it is fine to delete the check"), and a plain verb COORDINATED with an earlier imperative clause by a
+    T1_COORDINATORS word (t1_imperative_conjunct: "fix the parser and remove the test", "keep or remove the
+    rows")."""
+    framed = permitted = False
     for back in range(index - 1, -1, -1):
         word, boundary = words[back]
         if boundary:
-            return True
-        if word not in T1_LEADS:
-            return False
-    return True
+            break
+        if word in T1_COORDINATORS and back > 0 and not words[back - 1][1]:
+            # a coordinator with an earlier conjunct in the clause: the removal is an instruction only when that
+            # conjunct is one
+            return ((permitted or not framed) and words[index][0] not in T1_GERUNDS
+                    and t1_imperative_conjunct(words, back - 1))
+        if word in T1_LEADS or word in T1_PERMISSIONS:
+            permitted = permitted or word in T1_PERMISSIONS
+            continue
+        if word in T1_PERMISSION_FRAME:
+            framed = True
+            continue
+        return False
+    return permitted or not framed
+
+
+def t1_imperative_conjunct(words, end):
+    """Whether the clause part that ends at words[end] (right before a coordinator) reads as an imperative a
+    removal can be coordinated with: its first word after lead words is no gerund removal verb and no
+    T1_NOT_IMPERATIVE_HEAD word (a subject or a subordinator), none of its later words is a T1_SUBORDINATE or
+    T1_VERBS word (a removal verb there was judged on its own), and none of its words is a T1_PROHIBITIONS word (a
+    prohibition there may govern the coordinated verb too)."""
+    start = end
+    while start > 0 and not words[start - 1][1]:
+        start -= 1
+    if any(word in T1_PROHIBITIONS for word, _ in words[start:end + 1]):
+        return False
+    while start <= end and words[start][0] in T1_LEADS:
+        start += 1
+    if start > end or words[start][0] in T1_GERUNDS or words[start][0] in T1_NOT_IMPERATIVE_HEAD:
+        return False
+    return not any(word in T1_SUBORDINATE or word in T1_VERBS for word, _ in words[start + 1:end + 1])
 
 
 def t1_prohibited(words, index):
@@ -4162,14 +4270,21 @@ def t1_prohibited(words, index):
 
 def t1_object(words, index):
     """The index of the object a removal verb at words[index] takes (a T1_OBJECTS word after at most
-    T1_FILLER_MAX filler words, in the verb's clause), or None."""
+    T1_FILLER_MAX filler words, in the verb's clause), or None. With T1_MODIFIER_SLOT, the last of those words may be
+    one that is not a filler, the object's modifier ("remove the duplicated check"), unless it is a T1_FILLER_STOPS
+    or T1_VERBS word."""
     if words[index][1]:
         return None
     for ahead in range(index + 1, min(len(words), index + 2 + T1_FILLER_MAX)):
         word, boundary = words[ahead]
         if word in T1_OBJECTS:
             return t1_object_end(words, ahead)
-        if word not in T1_FILLERS or boundary:
+        if boundary:
+            return None
+        if word in T1_FILLERS:
+            continue
+        if not (T1_MODIFIER_SLOT and word not in T1_FILLER_STOPS and word not in T1_VERBS and ahead + 1 < len(words)
+                and words[ahead + 1][0] in T1_OBJECTS):
             return None
     return None
 
@@ -4191,17 +4306,32 @@ def t1_object_end(words, obj):
 def t1_described(words, verb, obj):
     """Whether a gerund verb and its object are the subject of a description: a T1_DESCRIBED word right after the
     object ("removing a check is a reduction"), or, when the object closes a clause, right after a clause boundary
-    later in the same sentence ("removing a check, as the draft did, is a reduction")."""
+    later in the same sentence ("removing a check, as the draft did, is a reduction"). A predicate that grants a
+    permission or names an option (t1_permission: "removing the failing tests is fine") is no description."""
     if words[verb][0] not in T1_GERUNDS:
         return False
     if not words[obj][1]:
-        return obj + 1 < len(words) and words[obj + 1][0] in T1_DESCRIBED
+        return obj + 1 < len(words) and words[obj + 1][0] in T1_DESCRIBED and not t1_permission(words, obj + 1)
     for after in range(obj + 1, len(words)):
         boundary = words[after - 1][1]
         if boundary == T1_SENTENCE:
             return False
         if boundary and words[after][0] in T1_DESCRIBED:
+            return not t1_permission(words, after)
+    return False
+
+
+def t1_permission(words, link):
+    """Whether the predicate after the linking word at words[link] grants a permission or names an option: a
+    T1_PERMISSIONS word after only T1_PERMISSION_FRAME words, in the linking word's clause ("is fine", "are
+    allowed", "is perfectly ok", "is an option"); "is not allowed" and "are never free" are not."""
+    for after in range(link + 1, len(words)):
+        if words[after - 1][1]:
+            return False
+        if words[after][0] in T1_PERMISSIONS:
             return True
+        if words[after][0] not in T1_PERMISSION_FRAME:
+            return False
     return False
 
 
@@ -4843,6 +4973,36 @@ T1_NOT_ASKED = ("TASK: verify the gate refuses removing a test without an accoun
                 "TASK: removing a check, as the draft did, is a reduction.\n",
                 "TASK: no need to remove the test.\n")
 T1_FENCED_TASK = "Example of a brief the lint refuses:\n\n```text\nTASK: remove the flaky test.\n```\n"
+# T1: task lines that offer or permit a removal (three lines quoted from real briefs, including the shape of the
+# brief that offered removing a self-test case as an option, then crafted and coordinated forms), each refused
+T1_OFFERS = ("TASK: Keep or remove self-test rows so every row still tests something.\n",
+             "TASK: (MINOR-3) remove the duplicated check.\n",
+             "TASK: …and remove the PR's tests and docs that expect the fence\n",
+             "TASK: fix the parser and remove the flaky test\n",
+             "TASK: keep or drop the flaky test, your call\n",
+             "TASK: rewrite nothing, but drop the failing checks\n",
+             "TASK: you are free to remove the flaky test\n",
+             "TASK: it is fine to delete the obsolete checks\n",
+             "TASK: rewrite or remove the test.\n",
+             "TASK: fix it and remove the test.\n")
+# T1: the quiet twins of those shapes: a reviewed, described or forbidden permission or coordination, a stop word
+# in the modifier slot, and the task line of the brief that asked for this rule
+T1_OFFER_TWINS = ("TASK: review whether it is fine to remove the flaky test.\n",
+                  "TASK: removing a check is not allowed.\n",
+                  "TASK: you are not allowed to remove a test.\n",
+                  "TASK: verify the gate refuses removing a test and dropping a check.\n",
+                  "TASK: review the change that proposes to fix the parser and remove the test.\n",
+                  "TASK: do not fix the parser and remove the test.\n",
+                  "TASK: the gate refuses it and drop the check.\n",
+                  "TASK: describe why removing the gate is fine.\n",
+                  "TASK: delete what tests do not need.\n",
+                  "TASK: delete the line the test reads.\n",
+                  "TASK: the task is to remove the test.\n",
+                  "TASK: fix BLOCKER-1: refuse a task line that offers or permits removing, deleting or dropping a "
+                  "check, test, gate, hook, case or row, in any grammatical form the review lists, while describing, "
+                  "quoting and reviewing a removal stay quiet.\n")
+T1_UNCLOSED_FENCE = "Notes:\n```\nTASK: remove the flaky test.\n"
+T1_INDENTED_FENCE = "    ```\nTASK: remove the flaky test.\n    ```\n"
 W1_PROHIBITED = ("Do not run `git push`.\n", "Never run git commit -a.\n")
 W1_PROHIBITED_VOIDED = "Do not run `git push`. Run it anyway.\n"
 # the same prohibitions alone in a fence, read as in prose; and a fence whose other sentence asks
@@ -7651,6 +7811,22 @@ def self_test(report_path=None):
           [evaluate(text.encode("utf-8"), "alpha", parse_table(TABLE_FIXTURE.encode("utf-8")))[1][0][3].split(
               " and the brief")[0] for text in ("TASK: options: removing a test\n", "TASK: drop the tests.\n")],
           ["task line asks to remove a test", "task line asks to drop tests"])
+    check("t1/offer-forms-refused", [_outcome(text, "alpha") for text in T1_OFFERS], [t1_refused] * len(T1_OFFERS))
+    check("t1/gate-hook-row-objects-refused",
+          [_outcome(text, "alpha") for text in ("TASK: remove the pre-commit hook.\n", "TASK: drop the removal gate.\n",
+                                                "TASK: delete the failing rows.\n")], [t1_refused] * 3)
+    check("t1/permission-as-description-refused",
+          [_outcome(text, "alpha") for text in ("TASK: removing the failing tests is fine.\n",
+                                                "TASK: dropping flaky checks is allowed if they block you.\n",
+                                                "TASK: removing the test is an option.\n")], [t1_refused] * 3)
+    check("t1/offer-twins-ok", [_outcome(text, "alpha") for text in T1_OFFER_TWINS],
+          [(0, [])] * len(T1_OFFER_TWINS))
+    check("t1/unclosed-fence-cannot-evaluate",
+          [_outcome(T1_UNCLOSED_FENCE, "alpha"), _outcome("TASK: fix it.\n```\nexample, never closed\n", "alpha"),
+           _outcome("Notes:\n```\nTASK: remove the flaky test.\n```\n", "alpha")], ["CannotEvaluate", (0, []), (0, [])])
+    check("t1/indented-fence-not-a-fence-refused",
+          [_outcome(T1_INDENTED_FENCE, "alpha"), _outcome("   ```\nTASK: remove the flaky test.\n```\n", "alpha")],
+          [t1_refused, (0, [])])
     t1_tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-t1-"))
     try:
         with open(t1_tmp / "brief.md", "w", encoding="utf-8") as handle:
@@ -9632,7 +9808,21 @@ def self_test(report_path=None):
                                        t1_lines=lambda text: list(enumerate(text.split("\n"), 1))))
     check("revert/t1-noun-modifier-red", *flip([code("TASK: remove the check mark.\n")], [1],
                                                T1_NOT_OBJECT_AFTER=frozenset()))
-    check("revert/every-flip-ran", len(flipped), 283)
+    check("revert/t1-coordination-red", *flip([code(T1_OFFERS[3]), code(T1_OFFERS[0])], [0, 0],
+                                              t1_imperative_conjunct=lambda words, end: False))
+    check("revert/t1-coordination-subordinate-red", *flip([code(T1_OFFER_TWINS[4])], [1],
+                                                          T1_SUBORDINATE=frozenset()))
+    check("revert/t1-permission-red", *flip([code(T1_OFFERS[6]), code("TASK: removing the failing tests is fine.\n")],
+                                            [0, 0], T1_PERMISSIONS=frozenset()))
+    check("revert/t1-permission-description-red", *flip([code("TASK: removing the failing tests is fine.\n")], [0],
+                                                         t1_permission=lambda words, link: False))
+    check("revert/t1-modifier-slot-red", *flip([code(T1_OFFERS[1])], [0], T1_MODIFIER_SLOT=False))
+    check("revert/t1-filler-stops-red", *flip([code("TASK: delete what tests do not need.\n")], [1],
+                                              T1_FILLER_STOPS=frozenset()))
+    check("revert/t1-unclosed-fence-red", *flip([lambda: _outcome(T1_UNCLOSED_FENCE, "alpha")], [(0, [])],
+                                                t1_unclosed=lambda hidden: False))
+    check("revert/t1-fence-indent-red", *flip([code(T1_INDENTED_FENCE)], [0], T1_FENCE_INDENT=8))
+    check("revert/every-flip-ran", len(flipped), 291)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))

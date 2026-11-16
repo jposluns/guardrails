@@ -1,0 +1,11 @@
+schema = 1
+
+# Accounting record read by tools/check_selftest_removal.py: one [[removal]] entry for each registered self-test
+# check id a change removes from tools/selftest_checks.toml, written in the change that removes it.
+
+[[removal]]
+suite = "selftest-removal-selftest"
+id = "refuse/moved-suite-counts"
+state = "unreachable"
+capability-removed = "commit bdb72195 (removal gate round 1): a check id newly registered in another suite with the same check() body is reported as moved, not removed, so the refusal of a move that this row asserted no longer exists"
+observed = "pass/moved-between-suites runs the same fixture (check id c moved from suite s to suite t) and asserts exit 0; refuse/move-target-held-at-base, refuse/move-absorbs-one-removal and refuse/move-other-body assert the refusals that remain"
