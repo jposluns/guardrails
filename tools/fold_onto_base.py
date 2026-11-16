@@ -13,16 +13,23 @@ because N's tree equals H's tree, the checkout stays consistent after the update
 
 Refused (exit 1) unless: HEAD is symbolic to a branch other than main, master, the protected ref
 itself or the local copy of the protected line (for --protected origin/trunk, the local trunk); the
---protected name is not ambiguous; the index and worktree carry no tracked change; no merge, rebase,
-cherry-pick, revert, bisect or sequencer state is present; the branch and the protected ref have
-exactly one merge base B, B is not H, and B equals --expect-base when that is given; and B..H holds no
-merge commit. A compare-and-swap that loses (the branch moved after it was read) is refused too,
-leaving the branch where the other writer put it. A shallow repository, a git failure, a failed commit
-signature that the signing configuration asks for, or a malformed argument is cannot-evaluate (exit 2).
+--protected name is not ambiguous and does not resolve to a remote HEAD that is not a symbolic ref (such
+a refs/remotes/<remote>/HEAD names no branch, so its local copy cannot be told); the index and
+worktree carry no tracked change; no merge, rebase, cherry-pick, revert, bisect or sequencer state is
+present; the branch and the protected ref have exactly one merge base B, B is not H, and B equals
+--expect-base when that is given; and B..H holds no merge commit. A compare-and-swap that loses (the
+branch moved after it was read) is refused too, leaving the branch where the other writer put it. A
+shallow repository, a git failure, a failed commit signature that the signing configuration asks for,
+or a malformed argument is cannot-evaluate (exit 2).
 --protected must name exactly one ref under git's short-name rules (a branch, a remote-tracking ref,
 a remote name whose HEAD is symbolic, or a tag): a revision expression (origin/trunk~0,
 origin/trunk^{commit}), a commit id or any other spelling that names no ref is cannot-evaluate (exit 2),
-because the local copy of the protected line and an ambiguous name can be checked only for a ref.
+because the local copy of the protected line and an ambiguous name can be checked only for a ref. A
+dangling or looping symbolic ref is listed by no ref query, so it names no ref too. Also
+cannot-evaluate: a name spelled as a full commit id (40 or 64 hex digits, either case) even when a
+branch of that name exists, because git rev-parse reads that spelling as the commit, not the branch
+(pass refs/heads/<name> then); and a name that git resolves to a ref other than the one it matches
+(a root ref such as ORIG_HEAD beside refs/heads/ORIG_HEAD).
 
   fold_onto_base.py --protected REF --message-file ABS_PATH [--expect-base FULL_SHA] [--root DIR]
   fold_onto_base.py --self-test
@@ -32,13 +39,15 @@ binds the repository with -C and runs with every ambient GIT_ variable removed (
 tools/check_branch_root.py: no system config, no lazy fetch, no prompt, no optional locks, no replace
 objects), with GIT_GRAFT_FILE naming a path that cannot exist (so an info/grafts file cannot change a
 parent or the merge base), and with core.fsmonitor=false, core.hooksPath set to that same nonexistent
-path (no hook runs, the reference-transaction hook included), core.commitGraph=false,
-protocol.allow=never and core.warnAmbiguousRefs=true in option position. The printed undo command
-quotes every argument for a POSIX shell, starts with env -u for each repository-selecting variable
-(UNDO_UNSET: GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR and the rest), so an ambient one in
-the shell it is pasted into cannot redirect it to another repository, and binds the repository with
-git -C. It runs the user's own git with the repository's configuration: the pins above do not apply to
-it.
+path (no hook reached through core.hooksPath runs, the reference-transaction hook included; hooks
+defined in configuration are untested, see below), core.commitGraph=false, protocol.allow=never and
+core.warnAmbiguousRefs=true in option position. The printed undo command quotes every argument for a
+POSIX shell, starts with env -u for each repository-selecting variable (UNDO_UNSET: GIT_DIR,
+GIT_WORK_TREE, GIT_COMMON_DIR and the rest), so an ambient one in the shell it is pasted into cannot
+redirect it to another repository, and binds the repository with git -C. env -u is not POSIX (POSIX
+specifies only env -i); GNU, BSD and BusyBox env provide it. The undo runs the user's own git with the
+user's configuration (the system, global and repository configuration, and any GIT_CONFIG_PARAMETERS
+or GIT_CONFIG_COUNT in that shell, which it does not unset): the pins above do not apply to it.
 
 Not neutralized, and disclosed: a decoy git that is already first on PATH when this module loads is the
 git it resolves; the signing configuration (commit.gpgSign, gpg.program, user.signingKey) is honoured
@@ -87,7 +96,8 @@ PROTECTED_BRANCHES = ("refs/heads/main", "refs/heads/master")
 RECOVERY_PREFIX = "refs/aiqt-fold/"
 # A path that cannot exist: a child of the null device, which is not a directory, so an open of it
 # fails with ENOTDIR, which git reads as "absent" without a warning. GIT_GRAFT_FILE and core.hooksPath
-# name it, so no graft file is read and no hook runs.
+# name it, so no graft file is read and no hook reached through core.hooksPath runs (hooks defined in
+# configuration, hook.<name>.*, are untested).
 NO_SUCH_PATH = os.path.join(os.devnull, "aiqt-fold-no-such-path")
 # The closed set of git subcommands this helper runs. push, fetch, pull, rebase, reset, checkout,
 # switch, merge, commit, add and write-tree are deliberately absent: the helper never moves anything
@@ -97,7 +107,8 @@ GIT_SUBCOMMANDS = frozenset((
     "update-ref", "check-ref-format", "config", "for-each-ref"))
 # Configuration pinned in option position on every git call, after the maintenance pins: no replace
 # refs (with GIT_NO_REPLACE_OBJECTS in _git_env; either alone disables them), no fsmonitor program, no
-# hook (core.hooksPath names a path that cannot exist), no commit-graph cache (it records parents, so
+# hook reached through core.hooksPath (it names a path that cannot exist; hooks defined in configuration
+# are untested), no commit-graph cache (it records parents, so
 # a forged graph could move the merge base; this pin is the only defence against that) and no
 # transport. core.warnAmbiguousRefs=true only makes git write a warning to its stderr, which _resolve
 # discards: it refuses nothing. The ambiguity refusal is _protected_ref's own check.
@@ -233,6 +244,12 @@ def _dwim_candidates(name):
             "refs/remotes/" + name + "/HEAD"]
 
 
+def _object_id_spelling(name):
+    """True when name is spelled as a full object id (40 or 64 hex digits, either case). git rev-parse
+    reads such a spelling as that object even when a ref of the same name exists."""
+    return len(name) in (40, 64) and all(char in "0123456789abcdefABCDEF" for char in name)
+
+
 def _protected_ref(root, protected):
     """The one full ref name --protected names. Refused (exit 1) when more than one ref matches the name
     under git's short-name rules (a tag main beside the branch main, a local branch origin/main beside
@@ -240,9 +257,11 @@ def _protected_ref(root, protected):
     Cannot-evaluate (exit 2) when no ref matches: a revision expression (origin/trunk~0,
     refs/remotes/origin/trunk^{commit}), a commit id, HEAD or @{u} names a commit, not a ref, so neither
     the local copy of the protected line nor an ambiguity could be checked; it is refused outright
-    rather than guessed from the refs that hold the same commit. Also cannot-evaluate when git resolves
-    the name to a ref other than the one match or the target of that match's symbolic ref (a root ref
-    such as ORIG_HEAD beside refs/heads/ORIG_HEAD)."""
+    rather than guessed from the refs that hold the same commit. Also cannot-evaluate when the name is
+    spelled as a full commit id although a ref of that name exists (git rev-parse reads the spelling as
+    the commit, not the ref, so the two would fold onto different bases), and when git resolves the name
+    to a ref other than the one match or the target of that match's symbolic ref (a root ref such as
+    ORIG_HEAD beside refs/heads/ORIG_HEAD)."""
     # fold() refuses a protected name that starts with '-', so it cannot be read as an option here.
     listed = _git(root, "for-each-ref", "--format=%(refname)", *_dwim_candidates(protected))
     if listed.returncode != 0:
@@ -256,6 +275,10 @@ def _protected_ref(root, protected):
         raise CannotEvaluate("--protected {!r} names no ref; pass the protected line's ref name (for "
                              "example origin/main or refs/remotes/origin/main), not a revision "
                              "expression or a commit id".format(protected))
+    if _object_id_spelling(protected):
+        raise CannotEvaluate("--protected {!r} is spelled as a full commit id: git rev-parse reads it as "
+                             "that commit, not as the ref {}; pass the full ref name {} instead".format(
+                                 protected, matches[0], matches[0]))
     probe = _git(root, "rev-parse", "--symbolic-full-name", protected)
     full = os.fsdecode(probe.stdout.strip()) if probe.returncode == 0 else ""
     if full != matches[0]:
@@ -271,7 +294,13 @@ def _local_copies(root, protected_ref):
     """The local branch names that are a copy of the protected line: the protected ref itself when it is
     a local branch; for a remote-tracking ref refs/remotes/<remote>/<name>, refs/heads/<name> for every
     way of splitting a remote name off the front (a remote name may hold a slash). A remote's symbolic
-    HEAD never reaches here: _protected_ref returns the ref it names."""
+    HEAD never reaches here: _protected_ref returns the ref it names. A remote HEAD that is not a
+    symbolic ref (refs/remotes/<remote>/HEAD made a plain ref) names no branch, so its local copy cannot
+    be told: it is refused rather than mapped to a local branch named HEAD."""
+    if protected_ref.startswith("refs/remotes/") and protected_ref.endswith("/HEAD"):
+        raise Refused("--protected resolves to {}, a remote HEAD that is not a symbolic ref, so the protected "
+                      "line and its local copy cannot be told; pass the remote-tracking branch (for example "
+                      "refs/remotes/origin/main)".format(protected_ref))
     if protected_ref.startswith("refs/heads/"):
         return {protected_ref}
     if not protected_ref.startswith("refs/remotes/"):
@@ -281,8 +310,9 @@ def _local_copies(root, protected_ref):
 
 
 def _signing(root):
-    """True when the repository's configuration asks for signed commits (commit.gpgSign). git
-    commit-tree, being plumbing, does not read that setting itself, so the helper passes -S for it."""
+    """True when the signing configuration asks for signed commits (commit.gpgSign, read from the
+    repository's and the user's global configuration; the system configuration is off). git commit-tree,
+    being plumbing, does not read that setting itself, so the helper passes -S for it."""
     probe = _git(root, "config", "--type=bool", "--get", "commit.gpgsign")
     if probe.returncode == 1 and not probe.stdout.strip():
         return False
@@ -413,15 +443,18 @@ def _read_message(path):
 
 
 def _commit_tree(root, tree, parent, message):
-    """N = commit-tree tree -p parent. The repository's signing configuration applies (_signing adds
-    -S, which signs with user.signingKey or the committer identity), and a configured signature that
-    fails makes commit-tree fail, which refuses the fold."""
+    """N = commit-tree tree -p parent. The signing configuration applies, from the repository's and the
+    user's global configuration (_signing adds -S, which signs with user.signingKey or the committer
+    identity), and a configured signature that fails makes commit-tree fail, which stops the fold
+    (cannot-evaluate). Any other commit-tree failure, such as a missing committer identity, stops it the
+    same way; the diagnostic is git's own."""
     sign = ("-S",) if _signing(root) else ()
     probe = _git(root, "commit-tree", *sign, tree, "-p", parent, data=message)
     sha = _oid(probe.stdout) if probe.returncode == 0 else None
     if sha is None:
-        raise CannotEvaluate("git commit-tree failed ({}); a commit signature the repository's "
-                             "configuration requires and that fails refuses the fold".format(_diag(probe)))
+        raise CannotEvaluate("git commit-tree failed ({}); nothing was moved. {}".format(
+            _diag(probe), "The signing configuration asks for a signature (commit.gpgSign), and a "
+            "failed signature is one cause." if sign else "No signature was asked for."))
     return sha
 
 
@@ -929,6 +962,7 @@ def _q10(temp):
     _fixture_git(root, "config", "gpg.program", str(Path(temp) / "no-such-signer"))
     code, _out, err = _fold_cli(root, temp, "q10")
     check("fold/q10-failed-signature-refused", code == 2 and _rev(root, "refs/heads/feature") == head
+          and "failed signature is one cause" in err
           and _fixture_git(root, "for-each-ref", "refs/aiqt-fold/") == "", (code, err))
 
 
@@ -938,7 +972,8 @@ def _seams():
     return {"HARDENING": HARDENING, "_GIT": _GIT, "_check_expect": _check_expect,
             "_check_swapped": _check_swapped, "_commit_tree": _commit_tree, "_dirty": _dirty,
             "_fold_parent": _fold_parent, "_fold_tree": _fold_tree, "_git_env": _git_env,
-            "_local_copies": _local_copies, "_merge_count": _merge_count, "_protected_ref": _protected_ref,
+            "_local_copies": _local_copies, "_merge_count": _merge_count,
+            "_object_id_spelling": _object_id_spelling, "_protected_ref": _protected_ref,
             "_recovery": _recovery, "_signing": _signing, "_single_base": _single_base,
             "_split_report": _split_report, "_stamp": _stamp, "_swap": _swap, "_undo_command": _undo_command,
             "_verify": _verify}
@@ -1257,7 +1292,7 @@ def _h25(temp):
         # The other clone holds H too (fetched through the recovery ref), so an undo redirected there
         # succeeds and moves its feature from N to H instead of failing on a missing object.
         _fixture_git(other, "fetch", "-q", "origin", "refs/aiqt-fold/*:refs/aiqt-fold/*")
-        before =_fixture_git(other, "for-each-ref", "--format=%(refname) %(objectname)")
+        before = _fixture_git(other, "for-each-ref", "--format=%(refname) %(objectname)")
         undo = None
         if code == 0 and len(lines) == 1:
             env = _fixture_env()
@@ -1344,6 +1379,50 @@ def _h27(temp):
           (code, err, _parents(root, new), base, moved))
 
 
+def _h28(temp):
+    """A remote HEAD that is a plain ref, not a symbolic one (refs/remotes/origin/HEAD at origin/trunk's
+    commit), names no branch: on the checked-out local trunk, --protected origin and the full
+    refs/remotes/origin/HEAD are refused, trunk is unchanged and no recovery ref is made (an earlier
+    version mapped the plain HEAD to a local branch named HEAD and folded trunk). The twin: a work
+    branch in the same clone folds with the remote-tracking name origin/trunk."""
+    clone, head = _trunk_clone(temp, "h28")
+    tip = _rev(clone, "origin/trunk")
+    _fixture_git(clone, "update-ref", "--no-deref", "refs/remotes/origin/HEAD", tip)
+    plain = _fixture_git(clone, "for-each-ref", "--format=%(symref)", "refs/remotes/origin/HEAD") == ""
+    for name, protected, label in (
+            ("fold/h28-plain-remote-head-on-local-trunk-refused", "origin", "h28-0"),
+            ("fold/h28-plain-full-remote-head-on-local-trunk-refused", "refs/remotes/origin/HEAD", "h28-1")):
+        code, _out, err = _fold_cli(clone, temp, label, protected=protected)
+        check(name, plain and code == 1 and "not a symbolic ref" in err
+              and _rev(clone, "refs/heads/trunk") == head and _no_recovery_refs(clone), (code, err))
+    _fixture_git(clone, "switch", "-q", "-c", "work", tip)
+    _commit(clone, "w1.txt", "w1\n")
+    _commit(clone, "w2.txt", "w2\n")
+    code, _out, err = _fold_cli(clone, temp, "h28-work", protected="origin/trunk")
+    check("fold/h28-twin-remote-tracking-name-folds", code == 0
+          and _parents(clone, _rev(clone, "refs/heads/work")) == [tip], (code, err))
+
+
+def _h29(temp):
+    """A branch named as the full id of another commit (refs/heads/<seed id> at B): git rev-parse reads
+    that spelling as the seed commit, so --protected spelled that way, in lower or upper case, is
+    cannot-evaluate and nothing changes (an earlier version took the branch and folded onto B while git
+    would have used the seed). The twin: the full ref name refs/heads/<seed id> folds onto B."""
+    for name, upper, label in (("fold/h29-branch-named-commit-id-cannot-evaluate", False, "h29-0"),
+                               ("fold/h29-branch-named-upper-commit-id-cannot-evaluate", True, "h29-1")):
+        root, base, head = _feature(temp, label)
+        seed = _rev(root, base + "^")
+        spelling = seed.upper() if upper else seed
+        _fixture_git(root, "update-ref", "refs/heads/" + spelling, base)
+        live = _rev(root, spelling + "^{commit}") == seed
+        code, _out, err = _fold_cli(root, temp, label, protected=spelling)
+        check(name, live and code == 2 and "full commit id" in err
+              and _rev(root, "refs/heads/feature") == head and _no_recovery_refs(root), (code, err))
+    code, _out, err = _fold_cli(root, temp, "h29-full", protected="refs/heads/" + spelling)
+    check("fold/h29-twin-full-ref-name-folds", code == 0
+          and _parents(root, _rev(root, "refs/heads/feature")) == [base], (code, err))
+
+
 def _usage(temp):
     root, _base, head = _feature(temp, "usage")
     results = [
@@ -1391,7 +1470,7 @@ def _usage(temp):
 
 
 VECTORS = (_h1, _h2, _h3, _h4, _h5, _h6, _h7, _h8, _h9, _h10, _h11, _h12, _h13, _h15, _h16, _q10, _h17,
-           _h18, _h19, _h20, _h21, _h22, _h23, _h24, _h25, _h26, _h27, _usage)
+           _h18, _h19, _h20, _h21, _h22, _h23, _h24, _h25, _h26, _h27, _h28, _h29, _usage)
 
 
 def _with_home(body):
@@ -1505,6 +1584,19 @@ def _mutants():
     def no_local_copies(_root, _protected_ref):
         return set()
 
+    def plain_remote_head_mapped(_root, protected_ref):
+        # The earlier shape: no remote-HEAD check, so a plain refs/remotes/origin/HEAD maps to a local
+        # branch named HEAD and the checked-out local copy is not recognised.
+        if protected_ref.startswith("refs/heads/"):
+            return {protected_ref}
+        if not protected_ref.startswith("refs/remotes/"):
+            return set()
+        parts = protected_ref[len("refs/remotes/"):].split("/")
+        return {"refs/heads/" + "/".join(parts[index:]) for index in range(1, len(parts))}
+
+    def no_object_id_spelling(_name):
+        return False
+
     def ambiguity_ignored(root, protected):
         # The pinned behaviour: no ambiguity check, so git's own short-name order picks silently.
         probe = _git(root, "rev-parse", "--symbolic-full-name", protected)
@@ -1582,7 +1674,11 @@ def _mutants():
             ("mutant/replace-refs-honoured", {"HARDENING": without("--no-replace-objects"),
                                               "_git_env": replace_env}, _h27, "fold/h27-replace-graft-ignored"),
             ("mutant/execution-report-relative-accepted", {"_split_report": report_any_path}, _usage,
-             "cli/execution-report-relative-path-usage")):
+             "cli/execution-report-relative-path-usage"),
+            ("mutant/plain-remote-head-mapped", {"_local_copies": plain_remote_head_mapped}, _h28,
+             "fold/h28-plain-remote-head-on-local-trunk-refused"),
+            ("mutant/commit-id-branch-accepted", {"_object_id_spelling": no_object_id_spelling}, _h29,
+             "fold/h29-branch-named-commit-id-cannot-evaluate")):
         failures = _mutated(replacements, vector)
         check(name, any(entry.startswith(red + ":") for entry in failures),
               "the mutant left {} green ({})".format(red, failures))
@@ -1600,7 +1696,7 @@ def self_test():
         for failure in FAILURES:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: fold_onto_base {} checks (H1 to H27 and Q10 in temporary repositories: a valid "
+    print("SELF-TEST PASS: fold_onto_base {} checks (H1 to H29 and Q10 in temporary repositories: a valid "
           "fold with a create-only recovery ref; a protected tip moved from a sibling worktree folds onto the "
           "merge base and passes the branch-root gate, while a fold onto the tip is REVERTS there; "
           "--expect-base narrows only; dirty, staged, criss-cross, detached, protected-branch, merge-in-range, "
@@ -1613,7 +1709,9 @@ def self_test():
           "re-read and the create-only recovery ref each fire; the local copy of the protected line and an "
           "ambiguous --protected name are refused; a --protected revision expression or commit id is "
           "cannot-evaluate; the undo command restores the intended branch under an ambient GIT_DIR "
-          "naming another clone; a forged commit-graph and a replace ref cannot move the base; "
+          "naming another clone; a forged commit-graph and a replace ref cannot move the base; a remote "
+          "HEAD that is a plain ref is refused; a --protected name spelled as a full commit id is "
+          "cannot-evaluate beside a branch of that name; "
           "--execution-report needs --self-test and an absolute path; --help explains the options, exits, "
           "rewrite and residue; each listed mutant turns its vector red)".format(len(EXECUTED)))
     return 0
@@ -1634,24 +1732,32 @@ exit codes:
   0  folded; the branch now holds N, and the output names H, the protected tip, B, N, the recovery ref
      and an undo command quoted for a POSIX shell (env -u GIT_DIR -u GIT_WORK_TREE ... git -C
      <repository> update-ref <branch> H N): it unsets each repository-selecting variable, so an
-     ambient GIT_DIR or GIT_WORK_TREE in the shell cannot redirect it. It runs your
-     own git with the repository's configuration; the hardening below does not apply to it.
+     ambient GIT_DIR or GIT_WORK_TREE in the shell cannot redirect it. env -u is not POSIX (POSIX
+     specifies only env -i); GNU, BSD and BusyBox env provide it. The undo runs your own git with
+     your configuration (system, global and the repository's, and any GIT_CONFIG_PARAMETERS or
+     GIT_CONFIG_COUNT in the shell, which it does not unset); the hardening below does not apply to it.
   1  refused, nothing was changed: HEAD detached or on main, master, the protected ref or its
-     local copy (for --protected origin/trunk, the local trunk); an ambiguous --protected name; tracked
-     changes in the index or worktree; a merge, rebase, cherry-pick, revert, bisect or sequencer in
+     local copy (for --protected origin/trunk, the local trunk); an ambiguous --protected name; a
+     --protected name that resolves to a remote HEAD that is not a symbolic ref (it names no branch,
+     so its local copy cannot be told); tracked changes in the index or worktree; a merge, rebase,
+     cherry-pick, revert, bisect or sequencer in
      progress; no merge base, several merge bases, nothing to fold, a merge commit in B..H, or a base
      other than --expect-base. A lost compare-and-swap (the branch moved after it was read) is also
      exit 1; it leaves the branch where the other writer put it, and leaves the recovery ref, its
      reflog and the unreferenced folded commit behind (documented, intended residue).
-  2  usage error or cannot evaluate: a bad option or message file, a --protected value that names no
-     ref (a revision expression such as origin/trunk~0, or a commit id), a shallow repository, a git
-     failure, or a failed commit signature that the signing configuration asks for. A recovery ref
+  2  usage error or cannot evaluate: a bad option or message file; a --protected value that names no
+     ref (a revision expression such as origin/trunk~0, a commit id, or a dangling or looping symbolic
+     ref), that is spelled as a full commit id even where a branch has that name (git reads it as the
+     commit; pass refs/heads/<name>), or that git resolves to a ref other than the one it matches (a
+     root ref such as ORIG_HEAD beside refs/heads/ORIG_HEAD); a shallow repository; a git failure;
+     or a failed commit signature that the signing configuration asks for. A recovery ref
      that cannot be created (exit 2, after the folded commit was written, before the branch moves)
      leaves the unreferenced folded commit behind (documented residue; nothing refers to it).
 
 hardening: every git call runs the git resolved to an absolute path when the helper starts, with every
 ambient GIT_ variable removed, no system configuration, replace refs and info/grafts disabled, no
-fsmonitor program, no hook, no commit-graph cache and no transport. Not neutralized: a decoy git
+fsmonitor program, no hook reached through core.hooksPath (hooks defined in configuration are
+untested, see below), no commit-graph cache and no transport. Not neutralized: a decoy git
 already first on PATH at start; the signing configuration (commit.gpgSign, gpg.program,
 user.signingKey; honoured on purpose), read from the repository's and the user's global configuration;
 a clean or process filter driver run by git status; index bits (assume-unchanged, skip-worktree) or
@@ -1699,9 +1805,11 @@ def main(argv=None):
     parser.add_argument("--protected", metavar="REF", help=(
         "the protected line the branch was cut from, for example origin/main or refs/remotes/origin/main "
         "(required). It must name a ref: a revision expression (origin/main~0, origin/main^{commit}) or "
-        "a commit id is cannot-evaluate (exit 2). A name that matches more than one ref (a tag main "
-        "beside the branch main, a local branch origin/main beside the remote-tracking one) is refused; "
-        "pass the full ref name then."))
+        "a commit id is cannot-evaluate (exit 2), and so is a name spelled as a full commit id even when "
+        "a branch has that name. A name that matches more than one ref (a tag main beside the branch "
+        "main, a local branch origin/main beside the remote-tracking one) is refused; pass the full ref "
+        "name then. A remote HEAD that is not a symbolic ref is refused; pass the remote-tracking "
+        "branch."))
     parser.add_argument("--message-file", metavar="ABS_PATH", help=(
         "an absolute path to a regular file holding the folded commit's message: nonempty UTF-8, no NUL "
         "byte, at most {} bytes, not a symbolic link (required).".format(MESSAGE_MAX_BYTES)))

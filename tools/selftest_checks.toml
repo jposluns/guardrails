@@ -5208,7 +5208,7 @@ expected-check-ids = [
 ]
 
 [[suite]]
-# The branch fold helper (tools/fold_onto_base.py): vectors H1 to H27 and Q10 in temporary
+# The branch fold helper (tools/fold_onto_base.py): vectors H1 to H29 and Q10 in temporary
 # repositories, then each listed mutant run against its own vector in a private sink. The helper
 # accepts --execution-report only after --self-test, so the row forwards it.
 id = "fold-onto-base-selftest"
@@ -5281,6 +5281,12 @@ expected-check-ids = [
   "fold/h26-forged-commit-graph-ignored",
   "fold/h27-twin-replace-graft-live",
   "fold/h27-replace-graft-ignored",
+  "fold/h28-plain-remote-head-on-local-trunk-refused",
+  "fold/h28-plain-full-remote-head-on-local-trunk-refused",
+  "fold/h28-twin-remote-tracking-name-folds",
+  "fold/h29-branch-named-commit-id-cannot-evaluate",
+  "fold/h29-branch-named-upper-commit-id-cannot-evaluate",
+  "fold/h29-twin-full-ref-name-folds",
   "cli/usage-and-unresolvable-exit-2",
   "cli/closed-git-subcommands",
   "cli/execution-report-alone-usage",
@@ -5316,6 +5322,8 @@ expected-check-ids = [
   "mutant/commit-graph-pin-dropped",
   "mutant/replace-refs-honoured",
   "mutant/execution-report-relative-accepted",
+  "mutant/plain-remote-head-mapped",
+  "mutant/commit-id-branch-accepted",
 ]
 
 [[suite]]
