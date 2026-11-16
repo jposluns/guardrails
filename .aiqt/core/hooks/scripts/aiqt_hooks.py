@@ -37705,19 +37705,26 @@ _FSW_WORDCH_RE = re.compile(r"[A-Za-z0-9]")
 _FSW_STAMP_RE = re.compile(_FSW_TIME_GRAMMAR + "(?:" + _FSW_ZONE_GRAMMAR + r")?(?![\d:])")
 # Two UTC time forms that cannot be a clock reading, flagged with no clock comparison. Both follow the stamp
 # grammar above: an optional date part (YYYY-MM-DD then T or a space), HH:MM, optional :SS and fraction, and
-# the Z alternative of the zone grammar, the one zone that names UTC by itself (a word zone such as AM is not
-# read, so a prose time stays out). (1) APPROX: such a token with about, around, approximately or circa (any
-# letter case, a whole word, then blanks) or a tilde right before it. (2) PLACEHOLDER: the same shape where a
-# digit slot holds x, X or ? (02:1xZ, 0x:xxZ, 2026-11-xxT00:33Z); a token with no such slot is an ordinary
-# stamp and is not read here. An exact-looking invented time is outside both forms.
-_FSW_NC_TIME = r"(?:[0-9]{4}-[0-9]{2}-[0-9]{2}[T ])?[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,9})?)?Z"
-_FSW_APPROX_RE = re.compile(r"(?:(?<![A-Za-z0-9])(?i:about|around|approximately|circa)[ \t]+|~[ \t]*)"
-                            + _FSW_NC_TIME + r"(?![A-Za-z0-9])")
+# a zone of the zone grammar that names UTC (_FSW_NC_UTC_ZONE: Z attached or after one space; a numeric
+# offset whose digits are all zero, +00, +0000, +00:00 or the same with -, attached or after one space; or,
+# after one space, UTC or GMT); _fsw_literal_us reads exactly these zones as UTC, which the fsw-nc-zone-derived
+# row of tools/selftest_aiqt_hooks.py holds. Another zone (an offset with a nonzero digit, a local abbreviation, a word such as AM) is not
+# read, so a prose time stays out. (1) APPROX: such a token with about, around, approximately or circa (any
+# letter case, a whole word: no letter, digit or underscore right before it; then blanks) or a tilde right
+# before it (a tilde right after a letter, digit or underscore is a range or a word, as in 00:00Z~00:33Z, and
+# opens no form). (2) PLACEHOLDER: the same shape where a digit slot, the fraction's included, holds x, X or ?
+# (02:1xZ, 0x:xx UTC, 2026-11-xxT00:33Z, 02:33:0x.5Z); a token with no such slot is an ordinary stamp and is
+# not read here. An exact-looking invented time is outside both forms.
+_FSW_NC_UTC_ZONE = r"(?:[ ]?Z|[ ]?[+-]00(?::?00)?(?!:?[0-9])|[ ](?:UTC|GMT))(?![A-Za-z0-9])"
+_FSW_NC_TIME = r"(?:[0-9]{4}-[0-9]{2}-[0-9]{2}[T ])?[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,9})?)?"
+_FSW_APPROX_RE = re.compile(r"(?<![A-Za-z0-9_])(?:(?i:about|around|approximately|circa)[ \t]+|~[ \t]*)"
+                            + _FSW_NC_TIME + _FSW_NC_UTC_ZONE)
 _FSW_NC_SLOT = "[0-9xX?]"
 _FSW_PLACEHOLDER_RE = re.compile(
-    r"(?<![0-9A-Za-z:?])(?:{d}{{4}}-{d}{{2}}-{d}{{2}}[T ])?{d}{{2}}:{d}{{2}}(?::{d}{{2}})?Z(?![A-Za-z0-9])".format(
-        d=_FSW_NC_SLOT))
+    r"(?<![0-9A-Za-z:?])(?:{d}{{4}}-{d}{{2}}-{d}{{2}}[T ])?{d}{{2}}:{d}{{2}}(?::{d}{{2}}(?:\.{d}{{1,9}})?)?".format(
+        d=_FSW_NC_SLOT) + _FSW_NC_UTC_ZONE)
 _FSW_PLACEHOLDER_CHARS = frozenset("xX?")
+_FSW_NC_ZONE_HINTS = ("Z", "UTC", "GMT", "00")  # every UTC zone above holds one of these
 
 
 class _FswNonClock(str):
@@ -37726,7 +37733,10 @@ class _FswNonClock(str):
 
 
 def _fsw_nonclock_tokens(line):
-    """[(start, token)] for every APPROX or PLACEHOLDER token on one line, in line order. Linear."""
+    """[(start, token)] for every APPROX or PLACEHOLDER token on one line, in line order. Linear. A line with
+    no `:` or no UTC zone hint (_FSW_NC_ZONE_HINTS) holds no such token and is not scanned."""
+    if ":" not in line or not any(h in line for h in _FSW_NC_ZONE_HINTS):
+        return []
     found = [(m.start(), m.group(0)) for m in _FSW_APPROX_RE.finditer(line)]
     found += [(m.start(), m.group(0)) for m in _FSW_PLACEHOLDER_RE.finditer(line)
               if not _FSW_PLACEHOLDER_CHARS.isdisjoint(m.group(0))]
@@ -37915,14 +37925,16 @@ def _fsw_in_spans(spans, pos):
     return k >= 0 and pos < spans[k][1]
 
 
-def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_exempt=None, spans=None):
+def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_exempt=None, spans=None,
+                        nc_spans=None, nc_quoted=False):
     """Future literals on one line not immediately preceded by a scheduling keyword. `in_subst(pos)` is true
     for a literal starting at absolute position base+pos that lies inside a date substitution; `cache` maps
     a literal to its converted value so a repeated literal is converted once; `extra_exempt(pos)`, when
     given, is an ADDITIONAL exemption for a literal starting at line position pos (the table-header rule);
     `spans`, when given, are the line's inline code spans, and a literal starting inside one is exempt. An
     APPROX or PLACEHOLDER token (_fsw_nonclock_tokens) on the line is returned too, as a _FswNonClock, with no
-    clock comparison and under the same exemptions."""
+    clock comparison and under the same exemptions; `nc_spans` (code spans) and `nc_quoted` (the whole line is
+    quoted text: a blockquote or fenced line) exempt such tokens only, as the Bash route reads them."""
     found, seen, sched = [], set(), None
     cache = {} if cache is None else cache
     for m in _FSW_STAMP_RE.finditer(line):
@@ -37940,8 +37952,9 @@ def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_e
         if not sched(m.start()) and not (extra_exempt is not None and extra_exempt(m.start())):
             seen.add(lit)
             found.append(lit)
-    for pos, tok in (_fsw_nonclock_tokens(line) if ("Z" in line and ":" in line) else ()):
-        if tok in seen or (in_subst is not None and in_subst(base + pos)) or (spans and _fsw_in_spans(spans, pos)):
+    for pos, tok in (() if nc_quoted else _fsw_nonclock_tokens(line)):
+        if tok in seen or (in_subst is not None and in_subst(base + pos)) or (spans and _fsw_in_spans(spans, pos)) \
+                or (nc_spans and _fsw_in_spans(nc_spans, pos)):
             continue
         if sched is None:
             sched = _fsw_sched_exempter(line)
@@ -40282,7 +40295,8 @@ def _fsw_bash_future(cmd, now_us, cwd=None):
     """Future observed-time literals that are DATA of a Bash command's store write (else []; see _analyze).
     `cwd` is the payload's working directory, against which relative write targets resolve. The analysis
     runs under BASH_WORK_BUDGET; a command that spends it is allowed (fail open)."""
-    if _FSW_STAMP_RE.search(cmd) is None and not any(_fsw_nonclock_tokens(line) for line in cmd.split("\n")):
+    if _FSW_STAMP_RE.search(cmd) is None and (not any(h in cmd for h in _FSW_NC_ZONE_HINTS)
+                                              or not any(_fsw_nonclock_tokens(line) for line in cmd.split("\n"))):
         return []  # no literal and no non-clock token: nothing to warn on, and the tokenizer need not run
     start = frozenset((os.path.normpath(cwd) if isinstance(cwd, str) and os.path.isabs(cwd) else None,))
     try:
@@ -40290,8 +40304,17 @@ def _fsw_bash_future(cmd, now_us, cwd=None):
         if not an.store:
             return []
         bad, seen, cache, base = [], set(), {}, 0
-        for line in cmd.split("\n"):
-            for lit in _fsw_future_on_line(line, now_us, base, lambda p: not an.counts(p), cache):
+        lines = cmd.split("\n")
+        # the Write and Edit quoted-text exemptions (a `>` line, a matched fence, an inline code span), read
+        # lexically on the command's lines, exempt an APPROX or PLACEHOLDER token only: in shell text a
+        # backtick or a leading `>` can be syntax (a substitution, a redirection), so a future literal keeps
+        # no such exemption here (the residue discloses both directions)
+        code = _fsw_code_lines(lines) if "```" in cmd or "~~~" in cmd else ()
+        for i, line in enumerate(lines):
+            quoted = i in code or line.lstrip().startswith(">")
+            nc_spans = _fsw_code_spans(line) if "`" in line else None
+            for lit in _fsw_future_on_line(line, now_us, base, lambda p: not an.counts(p), cache,
+                                           nc_spans=nc_spans, nc_quoted=quoted):
                 if lit not in seen:
                     seen.add(lit)
                     bad.append(lit)
@@ -40459,6 +40482,16 @@ def future_stamp_write(data):
     fence of the same character at least as long; an UNCLOSED fence is not code, so its lines are checked). A
     line's carry-over is keyed by its fence membership as well as its text, so an edit that moves an existing
     line out of a code block (by deleting a fence, say) checks it. A bare field on its own line stays checked.
+
+    Non-clock times (all routes; the forms, their zones and the tilde and word-start rules are stated at
+    _FSW_NC_UTC_ZONE). An approximate (about, around, approximately, circa, a tilde) or placeholder (x, X, or ?
+    in a digit slot, the fraction included) UTC time token warns with no clock comparison, under the same
+    exemptions as a future literal. Bash reads the quoted-text rules above (a `>` line, a matched fence, an
+    inline code span) on the command's own lines, lexically, for these tokens ONLY: a future literal in Bash
+    text keeps no such exemption, because a backtick or a leading `>` there can be shell syntax (a
+    substitution, a redirection), so a token in a backtick substitution or on a line starting with a `>`
+    redirection is exempt (a disclosed miss) and a blockquote written by one echo line warns. Double quotes are
+    not quotation (a JSON value warns).
 
     Edit and MultiEdit. Checked only under a store root. The COMPLETE resulting file is reconstructed by applying
     the edits in tool order to the existing file content (old_string replaced once, or everywhere with

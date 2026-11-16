@@ -15153,6 +15153,77 @@ def _test_clock_hooks(failures, tmp):
         fsw(label, "Write", {"file_path": st + "/state.md", "content": content}, "allow")
     fsw("(fsw-approx-elsewhere-silent) an approximate time written outside every store passes silently", "Write",
         {"file_path": ot + "/state.md", "content": "hb about 00:33Z"}, "allow")
+    # Every zone of the stamp grammar that names UTC opens both forms (a spaced Z, UTC, GMT, an all-zero
+    # offset); fractional seconds take placeholder slots too; a JSON value or a spaced tilde is not quotation.
+    for label, content in (
+            ("(fsw-approx-utc-word-warns) about before a time with a UTC zone word warns", "hb about 00:33 UTC"),
+            ("(fsw-approx-gmt-stamp-warns) about before a full stamp with a GMT zone word warns",
+             "about 2026-11-16T00:33 GMT"),
+            ("(fsw-approx-zero-offset-warns) about before a full stamp with a +00:00 offset warns",
+             "about 2026-11-16T00:33+00:00"),
+            ("(fsw-approx-spaced-z-warns) about before a time with a Z after one space warns", "hb about 00:33 Z"),
+            ("(fsw-placeholder-utc-warns) a placeholder in a full stamp with a UTC zone word warns",
+             "hb 2026-11-16T0x:33 UTC"),
+            ("(fsw-placeholder-fraction-warns) a placeholder in the fraction warns", "hb 02:33:00.xxZ"),
+            ("(fsw-placeholder-seconds-fraction-warns) a placeholder seconds digit before a fraction warns",
+             "hb 02:33:0x.5Z"),
+            ("(fsw-approx-json-value-warns) an approximate time in a double-quoted JSON value warns",
+             '{"hb": "about 00:33Z"}'),
+            ("(fsw-approx-spaced-tilde-warns) a tilde after a space before a time warns", "x ~00:33Z")):
+        fsw(label, "Write", {"file_path": st + "/state.md", "content": content}, "allow-note", prefix=nc)
+    for label, content in (
+            ("(fsw-approx-other-zone-silent) an approximate time with a zone that does not name UTC passes silently",
+             "about 00:33 PST, around 00:33+01:00, ~00:33 +0530, circa 00:33+0030, about 00:33 Zulu"),
+            ("(fsw-prose-time-zone-hints-silent) a prose time on a line holding zone words passes silently",
+             "about 10:30 am, around 09:45 PST; Z: UTC: GMT: 00"),
+            ("(fsw-placeholder-other-zone-silent) a placeholder time with a local zone passes silently", "hb 0x:33 PST"),
+            ("(fsw-exact-fraction-silent) an exact time with a fraction passes silently", "hb 02:33:00.5Z"),
+            ("(fsw-approx-underscore-silent) about glued to an identifier by an underscore passes silently",
+             "hb_about 00:33Z"),
+            ("(fsw-approx-glued-tilde-silent) a tilde range or a tilde glued to a word passes silently",
+             "window 00:00Z~00:33Z and x~00:33Z"),
+            ("(fsw-approx-blockquote-silent) an approximate time on a blockquote line passes silently",
+             "> about 00:33Z"),
+            ("(fsw-approx-fence-silent) an approximate time in a matched fence passes silently",
+             "```\nabout 00:33Z\n```\n")):
+        fsw(label, "Write", {"file_path": st + "/state.md", "content": content}, "allow")
+    # The Bash route reads the same quoted-text exemptions on the command's lines for these two forms.
+    for label, command, want in (
+            ("(fsw-approx-bash-code-span-silent) a Bash append of an approximate time in a code span passes silently",
+             "echo '`about 00:33Z`' >> {}/state.md", "allow"),
+            ("(fsw-approx-bash-fence-silent) a Bash here-document holding an approximate time in a fence passes "
+             "silently", "cat >> {}/state.md <<'EOF'\n```\nhb about 00:33Z\n```\nEOF", "allow"),
+            ("(fsw-placeholder-bash-blockquote-silent) a Bash here-document blockquote line with a placeholder "
+             "passes silently", "cat >> {}/state.md <<'EOF'\n> hb 0x:xxZ\nEOF", "allow"),
+            ("(fsw-approx-bash-unclosed-fence-warns) a Bash here-document with an unclosed fence warns",
+             "cat >> {}/state.md <<'EOF'\n```\nhb about 00:33Z\nEOF", "allow-note"),
+            ("(fsw-approx-bash-after-span-warns) a Bash approximate time after a closed code span warns",
+             "echo '`x` about 00:33Z' >> {}/state.md", "allow-note"),
+            ("(fsw-approx-bash-utc-warns) a Bash append of an approximate time with a UTC zone word warns",
+             "echo 'hb about 00:33 UTC' >> {}/state.md", "allow-note")):
+        fsw(label, "Bash", {"command": command.format(st)}, want, cwd="/", prefix=nc)
+    fsw("(fsw-bash-future-blockquote-warns) a Bash future literal on a blockquote line still warns", "Bash",
+        {"command": "cat >> {}/state.md <<'EOF'\n> hb {}\nEOF".format(st, future)}, "allow-note", cwd="/")
+    # The non-clock zone is the UTC subset of the stamp zone grammar: a zone opens the forms exactly when the
+    # stamp grammar matches it whole and _fsw_literal_us reads it as UTC (Z, UTC, GMT, an all-zero offset).
+    for zone in ("Z", " Z", "+00", "+0000", "+00:00", "-00", "-0000", "-00:00", " +00", " -00:00", " UTC", " GMT",
+                 "+01", "+0100", " +05:30", "+0030", "-00:30", " PST", " EST", " AM", " Zulu", "UTC", " UTCx"):
+        text = "2026-11-16T00:33" + zone
+        m = aiqt_hooks._FSW_STAMP_RE.fullmatch(text)
+        utc = m is not None and (m.group(8) is not None or m.group(10) in ("UTC", "GMT") or (
+            m.group(9) is not None and set(m.group(9)[1:].replace(":", "")) == {"0"}))
+        if utc and aiqt_hooks._fsw_literal_us(m) != aiqt_hooks._fsw_naive_us(2026, 11, 16, 0, 33, 0, 0):
+            failures.append("(fsw-nc-zone-utc-value) the stamp grammar read zone {!r} as UTC with another value"
+                            .format(zone))
+        for form in ("about " + text, "20x6" + text[4:]):  # an APPROX and a PLACEHOLDER token with this zone
+            tokens = [t for _p, t in aiqt_hooks._fsw_nonclock_tokens("hb " + form + " done")]
+            if bool(tokens) != utc or (utc and tokens != [form]):
+                failures.append("(fsw-nc-zone-derived) zone {!r} in {!r}: non-clock tokens {!r}, the stamp grammar "
+                                "reads it as UTC {}".format(zone, form, tokens, utc))
+        nc_zone = re.fullmatch(aiqt_hooks._FSW_NC_UTC_ZONE, zone) is not None
+        if nc_zone != utc:
+            failures.append("(fsw-nc-zone-pattern) zone {!r}: the non-clock zone accepts it {}, the stamp grammar "
+                            "reads it as UTC {}".format(zone, nc_zone, utc))
     fsw("(fsw-no-store-root-inert) with AIQT_STORE_ROOT unset the handler is inert", "Write",
         {"file_path": st + "/state.md", "content": "hb: " + future}, "allow", AIQT_STORE_ROOT=None)
     fsw("(fsw-empty-store-root-inert) with AIQT_STORE_ROOT empty the handler is inert", "Write",
