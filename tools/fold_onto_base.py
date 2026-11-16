@@ -16,8 +16,9 @@ itself or the local copy of the protected line (for --protected origin/trunk, th
 --protected name is not ambiguous and does not resolve to a remote-tracking ref whose last part is HEAD
 unless the remote configuration tells it to be a branch: refs/remotes/<remote>/HEAD of a configured
 remote that is not a symbolic ref names no branch, so its local copy cannot be told, and a name the
-configured remotes make both a remote's HEAD and a branch ending in /HEAD (or neither) is ambiguous;
-the index and
+configured remotes make both a remote's HEAD and a branch ending in /HEAD (or neither) is ambiguous
+(a configured remote: any remote.<name>.<key> key, or a legacy file remotes/<name> or
+branches/<name> in the git directory; refs/remotes/HEAD names no remote and is refused); the index and
 worktree carry no tracked change; no merge, rebase, cherry-pick, revert, bisect or sequencer state is
 present; the branch and the protected ref have exactly one merge base B, B is not H, and B equals
 --expect-base when that is given; and B..H holds no merge commit. A compare-and-swap that loses (the
@@ -30,7 +31,8 @@ origin/trunk^{commit}), a commit id or any other spelling that names no ref is c
 because the local copy of the protected line and an ambiguous name can be checked only for a ref. A
 dangling or looping symbolic ref is listed by no ref query, so it names no ref too. Also
 cannot-evaluate: a name spelled as a full commit id of the repository's object format (git rev-parse
---show-object-format: 40 hex digits for sha1, 64 for sha256, either case) even when a branch of that
+--show-object-format, or on a git without that option the length of HEAD's object id: 40 hex digits
+for sha1, 64 for sha256, either case) even when a branch of that
 name exists, because git rev-parse reads that spelling as an object id, not the branch (pass
 refs/heads/<name> then; a hex name of the other length git reads as the branch, and so does this
 helper); and a name that git resolves to a ref other than the one it matches
@@ -257,13 +259,26 @@ def _dwim_candidates(name):
 
 def _object_format(root):
     """(object format, hex digits of a full object id) of the repository, from git rev-parse
-    --show-object-format: ("sha1", 40) or ("sha256", 64). Any other answer is cannot-evaluate."""
+    --show-object-format: ("sha1", 40) or ("sha256", 64). A git without that option echoes it back
+    (rev-parse prints an option it does not know; read from git's source, not run here) or rejects it
+    with a failing exit; then the length of HEAD's object id tells the format (40 hex digits sha1, 64
+    sha256). Any other answer, such as a format name this helper does not know, or a HEAD that does not
+    resolve on the fallback, is cannot-evaluate."""
     probe = _git(root, "rev-parse", "--show-object-format")
-    name = os.fsdecode(probe.stdout.strip()) if probe.returncode == 0 else ""
-    if name not in OBJECT_ID_HEX_DIGITS:
-        raise CannotEvaluate("git rev-parse --show-object-format named no known object format ({!r}; {})".format(
-            name, _diag(probe)))
-    return name, OBJECT_ID_HEX_DIGITS[name]
+    name = os.fsdecode(probe.stdout.strip())
+    if probe.returncode == 0 and name in OBJECT_ID_HEX_DIGITS:
+        return name, OBJECT_ID_HEX_DIGITS[name]
+    if probe.returncode == 0 and name != "--show-object-format":
+        raise CannotEvaluate("git rev-parse --show-object-format named no known object format ({!r})".format(
+            name))
+    head = _git(root, "rev-parse", "--verify", "--quiet", "HEAD")
+    sha = _oid(head.stdout) if head.returncode == 0 else None
+    for known, width in OBJECT_ID_HEX_DIGITS.items():
+        if sha is not None and len(sha) == width:
+            return known, width
+    raise CannotEvaluate("git rev-parse --show-object-format gave no object format ({!r}; {}), and the "
+                         "object id of HEAD, which would tell it, cannot be read ({})".format(
+                             name, _diag(probe), _diag(head)))
 
 
 def _object_id_spelling(name, width):
@@ -319,8 +334,7 @@ def _protected_ref(root, protected):
 def _configured_remotes(root):
     """The remote names the configuration defines: the <name> of every remote.<name>.<key> key (git
     counts a remote as configured when any such key is set; a remote name may hold a dot or a slash, a
-    key name holds no dot). A remote defined only by a legacy file under the git directory (remotes/ or
-    branches/) is not read, so it counts as not configured."""
+    key name holds no dot). A remote defined only by a legacy file is read by _legacy_remotes."""
     probe = _git(root, "config", "--null", "--name-only", "--get-regexp", r"^remote\.")
     if probe.returncode == 1 and not probe.stdout:
         return set()
@@ -334,20 +348,57 @@ def _configured_remotes(root):
     return names
 
 
+def _legacy_remotes(root):
+    """The remote names defined by a legacy file under the git directory: the path, below remotes/ or
+    branches/ (git rev-parse --git-path), of every entry that is not a directory, so remotes/up and
+    branches/up both name the remote up, and remotes/origin/feature names origin/feature. git 2.53 reads
+    a legacy file only for a name without a slash (it did not read remotes/nest/ed in this change's
+    probe); _remote_head counts a name with a slash for the HEAD reading only, where it can add a
+    refusal but never permit a fold. A missing remotes/ or branches/, or one that is not a directory,
+    defines no remote; one that cannot be listed is cannot-evaluate."""
+    names = set()
+    for kind in ("remotes", "branches"):
+        probe = _git(root, "rev-parse", "--git-path", kind)
+        if probe.returncode != 0 or not probe.stdout.strip():
+            raise CannotEvaluate("git rev-parse --git-path {} failed ({})".format(kind, _diag(probe)))
+        top = Path(os.fsdecode(probe.stdout.strip()))
+        if not top.is_absolute():
+            top = Path(root) / top
+        if not top.is_dir():
+            continue
+
+        def unlisted(exc, kind=kind):
+            raise CannotEvaluate("the legacy remote directory {} cannot be listed ({})".format(kind, exc))
+
+        for current, _dirs, files in os.walk(top, onerror=unlisted):
+            for entry in files:
+                names.add(Path(current, entry).relative_to(top).as_posix())
+    return names
+
+
 def _remote_head(root, protected_ref):
     """Refused unless a remote-tracking ref whose last part is HEAD is told, by the remote configuration,
     to be a remote-tracking branch. refs/remotes/<rest>/HEAD reads two ways: the HEAD of the remote
     <rest>, or a branch whose name ends in /HEAD (git check-ref-format --branch accepts feature/HEAD) of
-    a remote whose name is a leading part of <rest>. A configured remote decides each reading. Only the
-    HEAD reading: a remote's HEAD that is not a symbolic ref (a symbolic one never reaches here,
-    _protected_ref returns the ref it names); it names no branch, so the local copy cannot be told.
-    Both readings, or neither (no configured remote decides it): the name is ambiguous. Only the branch
-    reading: no refusal, the name is a remote-tracking branch."""
+    a remote whose name is a leading part of <rest>. A configured remote decides each reading: one the
+    configuration defines (_configured_remotes) or a legacy file defines (_legacy_remotes; a legacy name
+    with a slash, which git does not read, counts for the HEAD reading only). Only the HEAD reading: a
+    remote's HEAD that is not a symbolic ref (a symbolic one never reaches here, _protected_ref returns
+    the ref it names); it names no branch, so the local copy cannot be told. Both readings, or neither
+    (no configured remote decides it): the name is ambiguous. Only the branch reading: no refusal, the
+    name is a remote-tracking branch. refs/remotes/HEAD has no remote name before HEAD, so it is
+    neither and is refused."""
     rest = protected_ref[len("refs/remotes/"):]
-    remotes = _configured_remotes(root)
+    if rest == "HEAD":
+        raise Refused("--protected resolves to {}, which lies directly under refs/remotes/: no remote name "
+                      "comes before HEAD, so it is neither a remote's HEAD nor a remote-tracking branch of a "
+                      "configured remote, and the protected line's local copy cannot be told; pass a "
+                      "remote-tracking branch of a configured remote".format(protected_ref))
+    configured = _configured_remotes(root)
+    legacy = _legacy_remotes(root)
     head_of = rest[:-len("/HEAD")]
-    head_reading = head_of in remotes
-    branch_readings = sorted(remote for remote in remotes
+    head_reading = head_of in configured or head_of in legacy
+    branch_readings = sorted(remote for remote in configured | {name for name in legacy if "/" not in name}
                              if rest.startswith(remote + "/") and rest[len(remote) + 1:] != "HEAD")
     if head_reading and not branch_readings:
         raise Refused("--protected resolves to {}, the HEAD of the configured remote {!r}, which is not a "
@@ -1048,7 +1099,8 @@ def _seams():
     return {"HARDENING": HARDENING, "_GIT": _GIT, "_check_expect": _check_expect,
             "_check_swapped": _check_swapped, "_commit_tree": _commit_tree, "_dirty": _dirty,
             "_fold_parent": _fold_parent, "_fold_tree": _fold_tree, "_git_env": _git_env,
-            "_local_copies": _local_copies, "_merge_count": _merge_count,
+            "_legacy_remotes": _legacy_remotes, "_local_copies": _local_copies, "_merge_count": _merge_count,
+            "_object_format": _object_format,
             "_object_id_spelling": _object_id_spelling, "_protected_ref": _protected_ref,
             "_recovery": _recovery, "_remote_head": _remote_head, "_signing": _signing,
             "_single_base": _single_base,
@@ -1582,6 +1634,118 @@ def _h30(temp):
           and _parents(root, _rev(root, "refs/heads/feature")) == [base], (code, err))
 
 
+def _h31(temp):
+    """A remote defined only by a legacy file under the git directory (remotes/<name> or
+    branches/<name>) counts as configured when a name ending in /HEAD is told apart (an earlier version
+    read only remote.<name>.<key>). With origin configured, the plain refs/remotes/origin/feature/HEAD
+    on the checked-out local trunk folds as origin's branch feature/HEAD (the twin, no legacy file);
+    with a legacy file remotes/origin/feature it is also that remote's HEAD and is refused as
+    ambiguous, trunk unchanged. In a repository whose only remote up is a legacy file,
+    refs/remotes/up/feature/HEAD folds a work branch, for remotes/up and for branches/up, and with
+    neither file it is refused as ambiguous (the twin); the plain refs/remotes/up/HEAD is refused as
+    the HEAD of the configured remote up. refs/remotes/HEAD is refused without naming an empty
+    remote."""
+    clone, _head = _trunk_clone(temp, "h31")
+    tip = _rev(clone, "origin/trunk")
+    _fixture_git(clone, "update-ref", "refs/remotes/origin/feature/HEAD", tip)
+    code, _out, err = _fold_cli(clone, temp, "h31-twin", protected="origin/feature/HEAD")
+    folded = _rev(clone, "refs/heads/trunk")
+    check("fold/h31-twin-without-legacy-file-branch-reading-folds", code == 0
+          and _parents(clone, folded) == [tip], (code, err))
+    git_dir = Path(_fixture_git(clone, "rev-parse", "--absolute-git-dir"))
+    (git_dir / "remotes" / "origin").mkdir(parents=True)
+    (git_dir / "remotes" / "origin" / "feature").write_text(
+        "URL: file://{}\n".format(Path(temp) / "h31-src"), encoding="utf-8")
+    recovery = _fixture_git(clone, "for-each-ref", "refs/aiqt-fold/")
+    code, _out, err = _fold_cli(clone, temp, "h31-nested", protected="origin/feature/HEAD")
+    check("fold/h31-legacy-file-remote-head-and-branch-ambiguous-refused", code == 1 and "ambiguous" in err
+          and "'origin/feature'" in err and "'feature/HEAD'" in err
+          and _rev(clone, "refs/heads/trunk") == folded
+          and _fixture_git(clone, "for-each-ref", "refs/aiqt-fold/") == recovery, (code, err))
+    root, base, head = _feature(temp, "h31-up")
+    git_dir = Path(_fixture_git(root, "rev-parse", "--absolute-git-dir"))
+    url = "file://{}\n".format(Path(temp) / "h31-up-src")
+    _fixture_git(root, "update-ref", "refs/remotes/up/feature/HEAD", base)
+    code, _out, err = _fold_cli(root, temp, "h31-none", protected="up/feature/HEAD")
+    check("fold/h31-twin-no-legacy-file-ambiguous-refused", code == 1 and "no configured remote" in err
+          and _rev(root, "refs/heads/feature") == head and _no_recovery_refs(root), (code, err))
+    for name, kind, content, label in (
+            ("fold/h31-legacy-remotes-file-branch-named-head-folds", "remotes", "URL: " + url, "h31-r"),
+            ("fold/h31-legacy-branches-file-branch-named-head-folds", "branches", url, "h31-b")):
+        (git_dir / kind).mkdir(exist_ok=True)
+        legacy = git_dir / kind / "up"
+        legacy.write_text(content, encoding="utf-8")
+        code, _out, err = _fold_cli(root, temp, label, protected="up/feature/HEAD")
+        check(name, code == 0 and _parents(root, _rev(root, "refs/heads/feature")) == [base], (code, err))
+        if kind == "remotes":
+            legacy.unlink()
+    _fixture_git(root, "update-ref", "refs/remotes/up/HEAD", base)
+    _fixture_git(root, "update-ref", "refs/remotes/HEAD", base)
+    work = _rev(root, "refs/heads/feature")
+    recovery = _fixture_git(root, "for-each-ref", "refs/aiqt-fold/")
+    code, _out, err = _fold_cli(root, temp, "h31-head", protected="up")
+    check("fold/h31-legacy-branches-file-plain-remote-head-refused", code == 1
+          and "the HEAD of the configured remote 'up'" in err and "not a symbolic ref" in err
+          and _rev(root, "refs/heads/feature") == work
+          and _fixture_git(root, "for-each-ref", "refs/aiqt-fold/") == recovery, (code, err))
+    code, _out, err = _fold_cli(root, temp, "h31-root", protected="refs/remotes/HEAD")
+    check("fold/h31-root-remotes-head-names-no-remote-refused", code == 1
+          and "directly under refs/remotes/" in err and "''" not in err
+          and _rev(root, "refs/heads/feature") == work
+          and _fixture_git(root, "for-each-ref", "refs/aiqt-fold/") == recovery, (code, err))
+
+
+def _h32(temp):
+    """A git without rev-parse --show-object-format, played by a /bin/sh stub put in _GIT that answers
+    only that one call and hands every other call to the real git: echoing the option back (what
+    rev-parse does with an option it does not know, read from git's source and not run here) or
+    rejecting it with exit 129. The fold then reads the object format from the length of HEAD's id and
+    folds in a SHA-1 and a SHA-256 repository (an earlier version made every fold cannot-evaluate), and
+    a --protected name spelled as a full commit id is still cannot-evaluate with the format named. The
+    twins: the stubs answer as described while the real git names sha1, and a stub that names a
+    format this helper does not know (sha3) is cannot-evaluate, not a fallback. Not exercised: a real
+    older git."""
+    real = shutil.which("git") or "git"
+
+    def stub(name, action):
+        return _script(Path(temp) / name, "for a in \"$@\"; do last=\"$a\"; done\n"
+                       "if [ \"$last\" = \"--show-object-format\" ]; then {}; fi\n"
+                       "exec '{}' \"$@\"\n".format(action, real))
+
+    echo = stub("h32-echo", "echo \"$last\"; exit 0")
+    reject = stub("h32-reject", "echo \"error: unknown option '$last'\" >&2; exit 129")
+    other = stub("h32-other", "echo sha3; exit 0")
+    root, _base, _head = _feature(temp, "h32-live")
+    answers = [subprocess.run([path, "-C", str(root), "rev-parse", "--show-object-format"], capture_output=True,
+                              timeout=TIMEOUT, env=_git_env()) for path in (echo, reject, other, real)]
+    check("fold/h32-twin-stubs-answer-as-described", [
+        (proc.returncode, proc.stdout.strip()) for proc in answers] == [
+        (0, b"--show-object-format"), (129, b""), (0, b"sha3"), (0, b"sha1")], answers)
+    for name, object_format, git, label in (
+            ("fold/h32-old-git-echoed-option-sha1-folds", "sha1", echo, "h32-0"),
+            ("fold/h32-old-git-echoed-option-sha256-folds", "sha256", echo, "h32-1"),
+            ("fold/h32-old-git-rejected-option-folds", "sha1", reject, "h32-2")):
+        root, base, _head = _feature(temp, label, object_format)
+        with _patched(_GIT=git):
+            code, _out, err = _fold_cli(root, temp, label)
+        check(name, code == 0 and _parents(root, _rev(root, "refs/heads/feature")) == [base], (code, err))
+    for name, object_format, digits, label in (
+            ("fold/h32-old-git-sha1-commit-id-cannot-evaluate", "sha1", "(sha1, 40 hex digits)", "h32-3"),
+            ("fold/h32-old-git-sha256-commit-id-cannot-evaluate", "sha256", "(sha256, 64 hex digits)", "h32-4")):
+        root, base, head = _feature(temp, label, object_format)
+        seed = _rev(root, base + "^")
+        _fixture_git(root, "update-ref", "refs/heads/" + seed, base)
+        with _patched(_GIT=echo):
+            code, _out, err = _fold_cli(root, temp, label, protected=seed)
+        check(name, code == 2 and "full commit id" in err and digits in err
+              and _rev(root, "refs/heads/feature") == head and _no_recovery_refs(root), (code, err))
+    root, _base, head = _feature(temp, "h32-5")
+    with _patched(_GIT=other):
+        code, _out, err = _fold_cli(root, temp, "h32-5")
+    check("fold/h32-twin-unknown-object-format-cannot-evaluate", code == 2 and "'sha3'" in err
+          and _rev(root, "refs/heads/feature") == head and _no_recovery_refs(root), (code, err))
+
+
 def _usage(temp):
     root, _base, head = _feature(temp, "usage")
     results = [
@@ -1629,7 +1793,8 @@ def _usage(temp):
 
 
 VECTORS = (_h1, _h2, _h3, _h4, _h5, _h6, _h7, _h8, _h9, _h10, _h11, _h12, _h13, _h15, _h16, _q10, _h17,
-           _h18, _h19, _h20, _h21, _h22, _h23, _h24, _h25, _h26, _h27, _h28, _h29, _h30, _usage)
+           _h18, _h19, _h20, _h21, _h22, _h23, _h24, _h25, _h26, _h27, _h28, _h29, _h30, _h31, _h32,
+           _usage)
 
 
 def _with_home(body):
@@ -1771,6 +1936,24 @@ def _mutants():
                 protected_ref))
         return plain_remote_head_mapped(_root, protected_ref)
 
+    def no_legacy_remotes(_root):
+        # The earlier shape: only remote.<name>.<key> keys define a remote.
+        return set()
+
+    def object_format_without_fallback(root):
+        # The earlier shape: an answer that names no known format is cannot-evaluate, whatever git it is.
+        probe = _git(root, "rev-parse", "--show-object-format")
+        name = os.fsdecode(probe.stdout.strip()) if probe.returncode == 0 else ""
+        if name not in OBJECT_ID_HEX_DIGITS:
+            raise CannotEvaluate("git rev-parse --show-object-format named no known object format")
+        return name, OBJECT_ID_HEX_DIGITS[name]
+
+    def object_format_from_head_only(root):
+        # Every repository's format from the length of HEAD's id, a format name git gives included.
+        probe = _git(root, "rev-parse", "--verify", "--quiet", "HEAD")
+        sha = _oid(probe.stdout) if probe.returncode == 0 else None
+        return ("sha256", 64) if sha is not None and len(sha) == 64 else ("sha1", 40)
+
     checked_remote_head = _remote_head
 
     def remote_head_ambiguity_ignored(root, protected_ref):
@@ -1872,7 +2055,15 @@ def _mutants():
             ("mutant/commit-id-length-sha1-only", {"_object_id_spelling": sha1_length_only}, _h30,
              "fold/h30-sha256-branch-named-commit-id-cannot-evaluate"),
             ("mutant/commit-id-length-ignores-object-format", {"_object_id_spelling": any_hash_length}, _h29,
-             "fold/h29-sha1-repo-64-hex-branch-name-folds")):
+             "fold/h29-sha1-repo-64-hex-branch-name-folds"),
+            ("mutant/legacy-remote-files-ignored", {"_legacy_remotes": no_legacy_remotes}, _h31,
+             "fold/h31-legacy-file-remote-head-and-branch-ambiguous-refused"),
+            ("mutant/legacy-remote-branch-reading-ignored", {"_legacy_remotes": no_legacy_remotes}, _h31,
+             "fold/h31-legacy-remotes-file-branch-named-head-folds"),
+            ("mutant/object-format-without-fallback", {"_object_format": object_format_without_fallback}, _h32,
+             "fold/h32-old-git-echoed-option-sha1-folds"),
+            ("mutant/object-format-fallback-for-any-answer", {"_object_format": object_format_from_head_only},
+             _h32, "fold/h32-twin-unknown-object-format-cannot-evaluate")):
         failures = _mutated(replacements, vector)
         check(name, any(entry.startswith(red + ":") for entry in failures),
               "the mutant left {} green ({})".format(red, failures))
@@ -1890,7 +2081,7 @@ def self_test():
         for failure in FAILURES:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: fold_onto_base {} checks (H1 to H30 and Q10 in temporary repositories: a valid "
+    print("SELF-TEST PASS: fold_onto_base {} checks (H1 to H32 and Q10 in temporary repositories: a valid "
           "fold with a create-only recovery ref; a protected tip moved from a sibling worktree folds onto the "
           "merge base and passes the branch-root gate, while a fold onto the tip is REVERTS there; "
           "--expect-base narrows only; dirty, staged, criss-cross, detached, protected-branch, merge-in-range, "
@@ -1908,7 +2099,9 @@ def self_test():
           "branch ending in /HEAD folds, and a name the remote configuration cannot tell apart is refused "
           "as ambiguous; a --protected name spelled as a full commit id of the repository's object format "
           "(SHA-1 or SHA-256) is cannot-evaluate beside a branch of that name, and a hex name of the other "
-          "length folds; "
+          "length folds; a remote defined only by a legacy remotes/ or branches/ file counts as "
+          "configured, and refs/remotes/HEAD is refused without naming an empty remote; with a git stub "
+          "that lacks rev-parse --show-object-format, the length of HEAD's id gives the object format; "
           "--execution-report needs --self-test and an absolute path; --help explains the options, exits, "
           "rewrite and residue; each listed mutant turns its vector red)".format(len(EXECUTED)))
     return 0
@@ -1940,7 +2133,9 @@ exit codes:
      --protected name that resolves to the HEAD of a configured remote that is not a symbolic ref (it
      names no branch, so its local copy cannot be told); a --protected name that resolves to a
      remote-tracking ref ending in /HEAD that the configured remotes make both a remote's HEAD and a
-     branch, or neither (ambiguous); tracked changes in the index or worktree; a merge, rebase,
+     branch, or neither (ambiguous; a configured remote is any remote.<name>.<key> key or a legacy
+     file remotes/<name> or branches/<name> in the git directory), or refs/remotes/HEAD, which names
+     no remote; tracked changes in the index or worktree; a merge, rebase,
      cherry-pick, revert, bisect or sequencer in
      progress; no merge base, several merge bases, nothing to fold, a merge commit in B..H, or a base
      other than --expect-base. A lost compare-and-swap (the branch moved after it was read) is also
@@ -1949,8 +2144,9 @@ exit codes:
   2  usage error or cannot evaluate: a bad option or message file; a --protected value that names no
      ref (a revision expression such as origin/trunk~0, a commit id, or a dangling or looping symbolic
      ref), that is spelled as a full commit id of the repository's object format (40 hex digits for
-     sha1, 64 for sha256) even where a branch has that name (git reads it as an object id; pass
-     refs/heads/<name>), or that git resolves to a ref other than the one it matches (a
+     sha1, 64 for sha256; from git rev-parse --show-object-format, or on a git without that option
+     from the length of HEAD's object id) even where a branch has that name (git reads it as an
+     object id; pass refs/heads/<name>), or that git resolves to a ref other than the one it matches (a
      root ref such as ORIG_HEAD beside refs/heads/ORIG_HEAD); a shallow repository; a git failure;
      or a failed commit signature that the signing configuration asks for. A recovery ref
      that cannot be created (exit 2, after the folded commit was written, before the branch moves)

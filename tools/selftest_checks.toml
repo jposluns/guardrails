@@ -5208,7 +5208,7 @@ expected-check-ids = [
 ]
 
 [[suite]]
-# The branch fold helper (tools/fold_onto_base.py): vectors H1 to H30 and Q10 in temporary
+# The branch fold helper (tools/fold_onto_base.py): vectors H1 to H32 and Q10 in temporary
 # repositories, then each listed mutant run against its own vector in a private sink. The helper
 # accepts --execution-report only after --self-test, so the row forwards it.
 id = "fold-onto-base-selftest"
@@ -5297,6 +5297,20 @@ expected-check-ids = [
   "fold/h30-sha256-branch-named-upper-commit-id-cannot-evaluate",
   "fold/h30-twin-sha256-full-ref-name-folds",
   "fold/h30-sha256-repo-40-hex-branch-name-folds",
+  "fold/h31-twin-without-legacy-file-branch-reading-folds",
+  "fold/h31-legacy-file-remote-head-and-branch-ambiguous-refused",
+  "fold/h31-twin-no-legacy-file-ambiguous-refused",
+  "fold/h31-legacy-remotes-file-branch-named-head-folds",
+  "fold/h31-legacy-branches-file-branch-named-head-folds",
+  "fold/h31-legacy-branches-file-plain-remote-head-refused",
+  "fold/h31-root-remotes-head-names-no-remote-refused",
+  "fold/h32-twin-stubs-answer-as-described",
+  "fold/h32-old-git-echoed-option-sha1-folds",
+  "fold/h32-old-git-echoed-option-sha256-folds",
+  "fold/h32-old-git-rejected-option-folds",
+  "fold/h32-old-git-sha1-commit-id-cannot-evaluate",
+  "fold/h32-old-git-sha256-commit-id-cannot-evaluate",
+  "fold/h32-twin-unknown-object-format-cannot-evaluate",
   "cli/usage-and-unresolvable-exit-2",
   "cli/closed-git-subcommands",
   "cli/execution-report-alone-usage",
@@ -5339,6 +5353,10 @@ expected-check-ids = [
   "mutant/remote-head-ambiguity-ignored",
   "mutant/commit-id-length-sha1-only",
   "mutant/commit-id-length-ignores-object-format",
+  "mutant/legacy-remote-files-ignored",
+  "mutant/legacy-remote-branch-reading-ignored",
+  "mutant/object-format-without-fallback",
+  "mutant/object-format-fallback-for-any-answer",
 ]
 
 [[suite]]
