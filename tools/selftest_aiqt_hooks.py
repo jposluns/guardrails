@@ -12549,6 +12549,19 @@ def _main_isolated(monitor):
                "git clean -f -e -n -x", "deny", cwd=cx)
         expect("(cx-tw5) twin: clean -n --no-dry-run -f -x (the last of the pair wins) denies",
                "git clean -n --no-dry-run -f -x", "deny", cwd=cx)
+        # An abbreviated --exclude (--e, --ex, --exc, --exclud) consumes the next token as its pattern, as git
+        # reads it, so a '-n' or '--dry-run' there is the pattern and the clean is a real -x clean.
+        expect("(cx-e1) clean -fdx --exc -n (the -n is the abbreviated exclude's value) denies",
+               "git clean -fdx --exc -n", "deny", cwd=cx)
+        expect("(cx-e5) clean -fx --ex --dry-run (the --dry-run is the exclude's value) denies",
+               "git clean -fx --ex --dry-run", "deny", cwd=cx)
+        expect("(cx-e13) clean -fdx --exc --dry-run denies", "git clean -fdx --exc --dry-run", "deny", cwd=cx)
+        expect("(cx-e4) twin: clean -fdx --exclude -n (the full spelling) denies", "git clean -fdx --exclude -n",
+               "deny", cwd=cx)
+        expect("(cx-e6) twin: clean -fdx --ex=-n (the inline value) denies", "git clean -fdx --ex=-n", "deny",
+               cwd=cx)
+        expect("(cx-e7) twin: dry run clean -fdx --exc x -n (the -n after the value) allows",
+               "git clean -fdx --exc x -n", "allow", cwd=cx)
         # Only a global option or leading assignment that can change the ignore sources or the worktree the
         # listings read denies; the rest keep the listing verdict.
         expect("(cx-g1) clean -fdx under --no-pager still denies on its listings",
@@ -12652,6 +12665,54 @@ def _main_isolated(monitor):
             failures.append("(cx-si2) the listings must write nothing under .git on a split-index repository: "
                             "changed {}".format(sorted(n for n in set(_cx_before) | set(_cx_after)
                                                        if _cx_before.get(n) != _cx_after.get(n))))
+        # Run from inside an untracked directory it would remove whole, git clean keeps that directory,
+        # prints 'Would refuse to remove current working directory' and removes all of its contents, listed
+        # as './x' (a directory with no trailing slash). The listings run in that directory (this suite's own
+        # working directory is elsewhere), read that line as removal of the whole directory and compare
+        # './s.local' with the ignored 's.local'.
+        cx_cwn = _init_repo(tmp / "cleanx-cwd-nested")
+        _init_repo(cx_cwn / "a" / "x" / "y" / "b")
+        (cx_cwn / "a" / "x" / "y" / "b" / "wip.txt").write_text("nested work\n", encoding="utf-8")
+        (cx_cwn / "a" / "top.txt").write_text("junk\n", encoding="utf-8")
+        expect("(cx-cw-n6) clean -ffd run from inside untracked a/ holding a/x/y/b/.git denies",
+               "git clean -ffd", "deny", cwd=str(cx_cwn / "a"))
+        # The same clean with the hook process itself started in a/ (the listings once ran in the hook's own
+        # working directory; started in a/, git printed the refuse line and './'-prefixed entries that neither
+        # the ignored match nor the nested-repository walk read).
+        _cx_here = os.getcwd()
+        os.chdir(str(cx_cwn / "a"))
+        try:
+            expect("(cx-cw-n6b) clean -ffd from inside a/ with the hook process also in a/ denies",
+                   "git clean -ffd", "deny", cwd=str(cx_cwn / "a"))
+        finally:
+            os.chdir(_cx_here)
+        expect("(cx-cw-n7) twin: clean -ffd x run from inside a/ denies", "git clean -ffd x", "deny",
+               cwd=str(cx_cwn / "a"))
+        expect("(cx-cw-n8) twin: clean -fd run from inside a/ (single -f keeps the nested repository) allows "
+               "with a note", "git clean -fd", "allow-note", cwd=str(cx_cwn / "a"))
+        if not (cx_cwn / "a" / "x" / "y" / "b" / "wip.txt").is_file():
+            failures.append("(cx-cw-n9) the nested repository's file must survive every listing above")
+        cx_cwi = _init_repo(tmp / "cleanx-cwd-ignored")
+        (cx_cwi / ".gitignore").write_text("*.local\n", encoding="utf-8")
+        _git(cx_cwi, "add", ".gitignore")
+        _git(cx_cwi, "commit", "-q", "-m", "ignore rule", env_identity=True)
+        (cx_cwi / "u").mkdir()
+        (cx_cwi / "u" / "a.txt").write_text("junk\n", encoding="utf-8")
+        (cx_cwi / "u" / "s.local").write_text("kept\n", encoding="utf-8")
+        expect("(cx-cw-c1) clean -fdx run from inside untracked u/ holding the ignored u/s.local denies",
+               "git clean -fdx", "deny", cwd=str(cx_cwi / "u"))
+        expect("(cx-cw-c3) twin: clean -fX run from inside u/ denies", "git clean -fX", "deny",
+               cwd=str(cx_cwi / "u"))
+        expect("(cx-cw-c4) twin: clean -fd run from inside u/ (the ignored file stays) allows with a note",
+               "git clean -fd", "allow-note", cwd=str(cx_cwi / "u"))
+        if not (cx_cwi / "u" / "s.local").is_file():
+            failures.append("(cx-cw-c5) the ignored file must survive every listing above")
+        cx_cwp = _init_repo(tmp / "cleanx-cwd-plain")
+        (cx_cwp / "u" / "d").mkdir(parents=True)
+        (cx_cwp / "u" / "a.txt").write_text("junk\n", encoding="utf-8")
+        (cx_cwp / "u" / "d" / "b.txt").write_text("junk\n", encoding="utf-8")
+        expect("(cx-cw-p1) twin: clean -ffd run from inside u/ holding no ignored file and no nested "
+               "repository allows with a note", "git clean -ffd", "allow-note", cwd=str(cx_cwp / "u"))
 
         # === round-19 Fix A: an UNPARSEABLE 'git branch' ASKS regardless of any delete flag ====
         # The raw fallback (a tokenizer ValueError) now treats ANY raw 'git' + 'branch' as lossy: it does NOT parse
@@ -13836,6 +13897,9 @@ def _main_isolated(monitor):
             (("clean", ["--exclude=x", "-n"]), "allow"),  # the inline exclude consumes nothing: '-n' is the dry run
             (("clean", ["-n", "-e", "x", "--no-dry-run"]), "ask"),  # the last of -n/--no-dry-run wins
             (("clean", ["-n"]), "allow"),                 # a plain dry run with no arg-consuming option allows
+            (("clean", ["-fdx", "--exc", "-n"]), "ask"),  # an abbreviated --exclude consumes '-n': no dry run
+            (("clean", ["-fdx", "--e", "--dry-run"]), "ask"),  # '--e' is --exclude, its value '--dry-run'
+            (("clean", ["-fdx", "--exc", "x", "-n"]), "allow"),  # twin: the '-n' after the value is the dry run
             (("stash", ["drop"]), "ask"),
             (("stash", ["pop"]), "allow"),
             (("stash", ["export", "--to-ref", "refs/heads/topic"]), "ask"),  # F-95: export overwrites a ref
