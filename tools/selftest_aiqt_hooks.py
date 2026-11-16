@@ -12452,6 +12452,64 @@ def _main_isolated(monitor):
         expect("(br-a) branch -D allows with a note", "git branch -D other", "allow-note", cwd=rp)
         expect("(br-b) branch -d allows (git refuses unmerged)", "git branch -d other", "allow", cwd=rp)
 
+        # === clean -x/-X: ignored files the recovery snapshot never holds ====================
+        # git add --all (the snapshot) skips ignored files and the clean-tree probe never lists them, so a
+        # tree whose only uncommitted content is an ignored file read as provably clean and a clean -x/-X
+        # there was silently allowed with no snapshot; on a dirty tree it was allowed after a snapshot that
+        # lacked the ignored file. Such a clean now DENIES unless a read-only dry run (git clean -n with the
+        # same options) shows it removes no ignored file; a clean without -x/-X keeps its outcome. The hook
+        # launches the real git (resolved through PATH under the suite's fixture pins) only for the read-only
+        # dry run, inside these throwaway repos: no credentials, no remote, nothing written.
+        cx_repo = _init_repo(tmp / "cleanx-ignored")
+        (cx_repo / ".gitignore").write_text("*.local\n", encoding="utf-8")
+        _git(cx_repo, "add", ".gitignore")
+        _git(cx_repo, "commit", "-q", "-m", "ignore rule", env_identity=True)
+        (cx_repo / "secrets.local").write_text("kept\n", encoding="utf-8")
+        cx = str(cx_repo)
+        expect("(cx-a) clean -fdx on an ignored-only tree denies", "git clean -fdx", "deny", cwd=cx)
+        expect("(cx-b) clean -fX on an ignored-only tree denies", "git clean -fX", "deny", cwd=cx)
+        expect("(cx-c) clean -f -x -d on an ignored-only tree denies", "git clean -f -x -d", "deny", cwd=cx)
+        expect("(cx-d) clean --force -x on an ignored-only tree denies", "git clean --force -x", "deny", cwd=cx)
+        expect("(cx-e) compound clean -f -x -d && true on an ignored-only tree denies",
+               "git clean -f -x -d && true", "deny", cwd=cx)
+        expect("(cx-f) clean -fdx behind -C on an ignored-only tree denies",
+               "git -C {} clean -fdx".format(cx), "deny", cwd=cx)
+        expect("(cx-g) twin: clean -fd on the same tree allows as before", "git clean -fd", "allow", cwd=cx)
+        expect("(cx-h) twin: dry run clean -n -x on the same tree allows as before", "git clean -n -x", "allow",
+               cwd=cx)
+        expect("(cx-i) twin: an exclude value spelled -x is not the flag, allows as before",
+               "git clean -f -e -x", "allow", cwd=cx)
+        expect("(cx-j) twin: clean -fdx whose exclude keeps the only ignored file allows (dry run shows none)",
+               "git clean -fdx -e secrets.local", "allow", cwd=cx)
+        if not (cx_repo / "secrets.local").is_file():
+            failures.append("(cx-k) the ignored file must survive every probe above (each probe is a dry run)")
+        # A probe that fails denies (fail closed): -x with -X makes git itself refuse the dry run, and a
+        # dry-run helper that reports failure (None, as on a timeout) denies too.
+        expect("(cx-l) clean -fxX, whose dry run git refuses, denies", "git clean -fxX", "deny", cwd=cx)
+        _cx_saved_dry_run = aiqt_hooks._clean_dry_run
+        aiqt_hooks._clean_dry_run = lambda *_a, **_k: None
+        try:
+            expect("(cx-m) clean -fdx whose dry run fails or times out denies", "git clean -fdx", "deny",
+                   cwd=str(_init_repo(tmp / "cleanx-probefail")))
+        finally:
+            aiqt_hooks._clean_dry_run = _cx_saved_dry_run
+        # A dirty tree: -x would remove the ignored file the snapshot lacks, so it denies (it was allowed
+        # with a note saying a snapshot was saved); the same clean without -x keeps its allow-note.
+        (cx_repo / "file.txt").write_text("committed line\nuncommitted fix\n", encoding="utf-8")
+        (cx_repo / "untracked.txt").write_text("junk\n", encoding="utf-8")
+        expect("(cx-n) clean -fdx on a dirty tree with an ignored file denies", "git clean -fdx", "deny", cwd=cx)
+        expect("(cx-o) compound clean -f -d -x && true on a dirty tree with an ignored file denies",
+               "git clean -f -d -x && true", "deny", cwd=cx)
+        expect("(cx-p) twin: clean -fd on the same dirty tree allows with a note as before", "git clean -fd",
+               "allow-note", cwd=cx)
+        # No ignored file in reach: -x removes nothing the plain clean would not, so today's outcome stands.
+        cx_plain = _init_repo(tmp / "cleanx-noignored")
+        (cx_plain / "untracked.txt").write_text("junk\n", encoding="utf-8")
+        expect("(cx-q) clean -fdx with no ignored file allows with a note as before", "git clean -fdx",
+               "allow-note", cwd=str(cx_plain))
+        expect("(cx-r) clean -fdx on a provably clean tree with no ignored file allows as before",
+               "git clean -fdx", "allow", cwd=str(_init_repo(tmp / "cleanx-clean")))
+
         # === round-19 Fix A: an UNPARSEABLE 'git branch' ASKS regardless of any delete flag ====
         # The raw fallback (a tokenizer ValueError) now treats ANY raw 'git' + 'branch' as lossy: it does NOT parse
         # branch flags, so an unparseable 'git branch -d -f topic <heredoc>' / '-df' / '--del --for' can no
