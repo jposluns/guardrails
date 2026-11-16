@@ -18,7 +18,9 @@ unless the remote configuration tells it to be a branch: refs/remotes/<remote>/H
 remote that is not a symbolic ref names no branch, so its local copy cannot be told, and a name the
 configured remotes make both a remote's HEAD and a branch ending in /HEAD (or neither) is ambiguous
 (a configured remote: any remote.<name>.<key> key, or a legacy file remotes/<name> or
-branches/<name> in the git directory; refs/remotes/HEAD names no remote and is refused); the index and
+branches/<name> in the git directory for a name without a slash, which is all git reads; such an entry
+that is neither a directory nor a regular file opening for reading, a dangling symbolic link
+included, is cannot-evaluate; refs/remotes/HEAD names no remote and is refused); the index and
 worktree carry no tracked change; no merge, rebase, cherry-pick, revert, bisect or sequencer state is
 present; the branch and the protected ref have exactly one merge base B, B is not H, and B equals
 --expect-base when that is given; and B..H holds no merge commit. A compare-and-swap that loses (the
@@ -334,7 +336,7 @@ def _protected_ref(root, protected):
 def _configured_remotes(root):
     """The remote names the configuration defines: the <name> of every remote.<name>.<key> key (git
     counts a remote as configured when any such key is set; a remote name may hold a dot or a slash, a
-    key name holds no dot). A remote defined only by a legacy file is read by _legacy_remotes."""
+    key name holds no dot). A remote defined only by a legacy file is read by _legacy_remote."""
     probe = _git(root, "config", "--null", "--name-only", "--get-regexp", r"^remote\.")
     if probe.returncode == 1 and not probe.stdout:
         return set()
@@ -348,15 +350,24 @@ def _configured_remotes(root):
     return names
 
 
-def _legacy_remotes(root):
-    """The remote names defined by a legacy file under the git directory: the path, below remotes/ or
-    branches/ (git rev-parse --git-path), of every entry that is not a directory, so remotes/up and
-    branches/up both name the remote up, and remotes/origin/feature names origin/feature. git 2.53 reads
-    a legacy file only for a name without a slash (it did not read remotes/nest/ed in this change's
-    probe); _remote_head counts a name with a slash for the HEAD reading only, where it can add a
-    refusal but never permit a fold. A missing remotes/ or branches/, or one that is not a directory,
-    defines no remote; one that cannot be listed is cannot-evaluate."""
-    names = set()
+def _legacy_remote(root, name):
+    """Whether a legacy file under the git directory defines the remote <name>: remotes/<name> or
+    branches/<name> (git rev-parse --git-path). git reads a legacy file only for a name without a slash:
+    for a file remotes/origin/feature, git 2.53 answered "No such remote 'origin/feature'" to git remote
+    get-url and read origin/feature as a repository path in git ls-remote (this change's probe), so a
+    name with a slash is never a legacy remote and neither adds a reading nor permits a fold. A missing
+    entry (or a remotes/ or branches/ that is not a directory) defines no remote, and so does a
+    directory: it holds the legacy files of names with a slash (remotes/origin for
+    remotes/origin/feature), and git can never read it as a remote (it warns "Is a directory" and
+    finds no remote). A regular file that opens for reading, directly or through a symbolic link,
+    defines it, empty or not. Any other entry is cannot-evaluate (exit 2), never a remote and never no
+    remote: a dangling or looping symbolic link, a FIFO, socket or device, or a file that cannot be
+    opened for reading. git warns on those, reads no remote or blocks on a FIFO, and another git or
+    user (or a target created later) may read it, so whether the entry names the remote cannot be
+    told. Both remotes/ and branches/ are checked, whichever git would read first."""
+    if not name or "/" in name or name in (".", ".."):
+        return False
+    found = False
     for kind in ("remotes", "branches"):
         probe = _git(root, "rev-parse", "--git-path", kind)
         if probe.returncode != 0 or not probe.stdout.strip():
@@ -364,16 +375,40 @@ def _legacy_remotes(root):
         top = Path(os.fsdecode(probe.stdout.strip()))
         if not top.is_absolute():
             top = Path(root) / top
-        if not top.is_dir():
+        entry = top / name
+        try:
+            os.lstat(entry)
+        except (FileNotFoundError, NotADirectoryError):
             continue
-
-        def unlisted(exc, kind=kind):
-            raise CannotEvaluate("the legacy remote directory {} cannot be listed ({})".format(kind, exc))
-
-        for current, _dirs, files in os.walk(top, onerror=unlisted):
-            for entry in files:
-                names.add(Path(current, entry).relative_to(top).as_posix())
-    return names
+        except OSError as exc:
+            raise CannotEvaluate("the legacy remote entry {} cannot be examined ({})".format(entry, exc))
+        try:
+            mode = os.stat(entry).st_mode
+        except OSError as exc:
+            raise CannotEvaluate("the legacy remote entry {} is a dangling or unresolvable symbolic link "
+                                 "({}), so whether it defines the remote {!r} cannot be told".format(
+                                     entry, exc, name))
+        if stat.S_ISDIR(mode):
+            # The directory that holds legacy files of names with a slash: never read as a remote.
+            continue
+        if not stat.S_ISREG(mode):
+            raise CannotEvaluate("the legacy remote entry {} is not a regular file, so whether it defines "
+                                 "the remote {!r} cannot be told".format(entry, name))
+        try:
+            # O_NONBLOCK: a FIFO swapped in after the stat above must not block the open.
+            handle = os.open(entry, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        except OSError as exc:
+            raise CannotEvaluate("the legacy remote file {} cannot be opened for reading ({}), so whether it "
+                                 "defines the remote {!r} cannot be told".format(entry, exc, name))
+        try:
+            mode = os.fstat(handle).st_mode
+        finally:
+            os.close(handle)
+        if not stat.S_ISREG(mode):
+            raise CannotEvaluate("the legacy remote entry {} is not a regular file, so whether it defines "
+                                 "the remote {!r} cannot be told".format(entry, name))
+        found = True
+    return found
 
 
 def _remote_head(root, protected_ref):
@@ -381,8 +416,9 @@ def _remote_head(root, protected_ref):
     to be a remote-tracking branch. refs/remotes/<rest>/HEAD reads two ways: the HEAD of the remote
     <rest>, or a branch whose name ends in /HEAD (git check-ref-format --branch accepts feature/HEAD) of
     a remote whose name is a leading part of <rest>. A configured remote decides each reading: one the
-    configuration defines (_configured_remotes) or a legacy file defines (_legacy_remotes; a legacy name
-    with a slash, which git does not read, counts for the HEAD reading only). Only the HEAD reading: a
+    configuration defines (_configured_remotes) or, when the configuration does not, a legacy file
+    defines (_legacy_remote; never for a name with a slash, which git does not read as a legacy remote,
+    and cannot-evaluate for an entry that is not a readable regular file). Only the HEAD reading: a
     remote's HEAD that is not a symbolic ref (a symbolic one never reaches here, _protected_ref returns
     the ref it names); it names no branch, so the local copy cannot be told. Both readings, or neither
     (no configured remote decides it): the name is ambiguous. Only the branch reading: no refusal, the
@@ -395,11 +431,16 @@ def _remote_head(root, protected_ref):
                       "configured remote, and the protected line's local copy cannot be told; pass a "
                       "remote-tracking branch of a configured remote".format(protected_ref))
     configured = _configured_remotes(root)
-    legacy = _legacy_remotes(root)
+
+    def known(remote):
+        return remote in configured or _legacy_remote(root, remote)
+
     head_of = rest[:-len("/HEAD")]
-    head_reading = head_of in configured or head_of in legacy
-    branch_readings = sorted(remote for remote in configured | {name for name in legacy if "/" not in name}
-                             if rest.startswith(remote + "/") and rest[len(remote) + 1:] != "HEAD")
+    parts = rest.split("/")
+    head_reading = known(head_of)
+    # Every leading part of <rest> that leaves a branch name other than the plain HEAD.
+    leading = ("/".join(parts[:count]) for count in range(1, len(parts) - 1))
+    branch_readings = sorted(remote for remote in leading if known(remote))
     if head_reading and not branch_readings:
         raise Refused("--protected resolves to {}, the HEAD of the configured remote {!r}, which is not a "
                       "symbolic ref, so it names no branch and the protected line's local copy cannot be "
@@ -1099,7 +1140,7 @@ def _seams():
     return {"HARDENING": HARDENING, "_GIT": _GIT, "_check_expect": _check_expect,
             "_check_swapped": _check_swapped, "_commit_tree": _commit_tree, "_dirty": _dirty,
             "_fold_parent": _fold_parent, "_fold_tree": _fold_tree, "_git_env": _git_env,
-            "_legacy_remotes": _legacy_remotes, "_local_copies": _local_copies, "_merge_count": _merge_count,
+            "_legacy_remote": _legacy_remote, "_local_copies": _local_copies, "_merge_count": _merge_count,
             "_object_format": _object_format,
             "_object_id_spelling": _object_id_spelling, "_protected_ref": _protected_ref,
             "_recovery": _recovery, "_remote_head": _remote_head, "_signing": _signing,
@@ -1639,8 +1680,9 @@ def _h31(temp):
     branches/<name>) counts as configured when a name ending in /HEAD is told apart (an earlier version
     read only remote.<name>.<key>). With origin configured, the plain refs/remotes/origin/feature/HEAD
     on the checked-out local trunk folds as origin's branch feature/HEAD (the twin, no legacy file);
-    with a legacy file remotes/origin/feature it is also that remote's HEAD and is refused as
-    ambiguous, trunk unchanged. In a repository whose only remote up is a legacy file,
+    with a legacy file remotes/origin/feature it still folds, because git reads no legacy file of a
+    name with a slash (an earlier version took it for that remote's HEAD and refused the name as
+    ambiguous). In a repository whose only remote up is a legacy file,
     refs/remotes/up/feature/HEAD folds a work branch, for remotes/up and for branches/up, and with
     neither file it is refused as ambiguous (the twin); the plain refs/remotes/up/HEAD is refused as
     the HEAD of the configured remote up. refs/remotes/HEAD is refused without naming an empty
@@ -1656,12 +1698,11 @@ def _h31(temp):
     (git_dir / "remotes" / "origin").mkdir(parents=True)
     (git_dir / "remotes" / "origin" / "feature").write_text(
         "URL: file://{}\n".format(Path(temp) / "h31-src"), encoding="utf-8")
-    recovery = _fixture_git(clone, "for-each-ref", "refs/aiqt-fold/")
+    folded = _commit(clone, "c.txt", "c\n")
     code, _out, err = _fold_cli(clone, temp, "h31-nested", protected="origin/feature/HEAD")
-    check("fold/h31-legacy-file-remote-head-and-branch-ambiguous-refused", code == 1 and "ambiguous" in err
-          and "'origin/feature'" in err and "'feature/HEAD'" in err
-          and _rev(clone, "refs/heads/trunk") == folded
-          and _fixture_git(clone, "for-each-ref", "refs/aiqt-fold/") == recovery, (code, err))
+    refolded = _rev(clone, "refs/heads/trunk")
+    check("fold/h31-legacy-file-with-slash-adds-no-remote-head-folds", code == 0 and refolded != folded
+          and _parents(clone, refolded) == [tip], (code, err))
     root, base, head = _feature(temp, "h31-up")
     git_dir = Path(_fixture_git(root, "rev-parse", "--absolute-git-dir"))
     url = "file://{}\n".format(Path(temp) / "h31-up-src")
@@ -1746,6 +1787,80 @@ def _h32(temp):
           and _rev(root, "refs/heads/feature") == head and _no_recovery_refs(root), (code, err))
 
 
+def _h33(temp):
+    """Legacy remote entries git cannot read, and legacy names with a slash. With
+    refs/remotes/up/feature/HEAD and a work branch checked out, and up defined by nothing else, an
+    entry remotes/up or branches/up that is a dangling symbolic link, a looping symbolic link, a FIFO
+    or a file that cannot be opened for reading is cannot-evaluate, the branch unchanged (an earlier
+    version counted every such entry as the remote up and folded). The twins: a symbolic link to a
+    readable regular file defines up and folds; a directory remotes/up defines no remote, so the name
+    is refused as ambiguous. A legacy file remotes/a/b defines no remote a/b (git reads no legacy file
+    of a name with a slash): with no other remote, refs/remotes/a/b/c/HEAD is refused as ambiguous and
+    never folds, and the plain refs/remotes/a/b/HEAD is refused without calling a/b a configured
+    remote. A legacy branches/up and a configured remote up/x make refs/remotes/up/x/HEAD both the
+    HEAD of up/x and up's branch x/HEAD: ambiguous."""
+    url = "file://{}\n".format(_repo(temp, "h33-src"))
+
+    def unreadable(path):
+        path.write_text(url, encoding="utf-8")
+        path.chmod(0)
+
+    def linked(path):
+        path.with_name("up-target").write_text("URL: " + url, encoding="utf-8")
+        path.symlink_to("up-target")
+
+    for name, kind, make, expected in (
+            ("fold/h33-legacy-dangling-symlink-cannot-evaluate", "remotes",
+             lambda path: path.symlink_to("no-such-target"), 2),
+            ("fold/h33-legacy-looping-symlink-cannot-evaluate", "branches",
+             lambda path: path.symlink_to(path.name), 2),
+            ("fold/h33-legacy-fifo-cannot-evaluate", "remotes", os.mkfifo, 2),
+            ("fold/h33-legacy-unreadable-file-cannot-evaluate", "branches", unreadable, 2),
+            ("fold/h33-twin-legacy-symlink-to-regular-file-folds", "remotes", linked, 0),
+            ("fold/h33-twin-legacy-directory-defines-no-remote-refused", "remotes", Path.mkdir, 1)):
+        label = name[len("fold/"):]
+        root, base, head = _feature(temp, label)
+        _fixture_git(root, "update-ref", "refs/remotes/up/feature/HEAD", base)
+        git_dir = Path(_fixture_git(root, "rev-parse", "--absolute-git-dir"))
+        (git_dir / kind).mkdir(exist_ok=True)
+        entry = git_dir / kind / "up"
+        make(entry)
+        # Run as a user who can read a mode 000 file (root), the unreadable row cannot hold; it fails.
+        blocked = name != "fold/h33-legacy-unreadable-file-cannot-evaluate" or not os.access(entry, os.R_OK)
+        code, _out, err = _fold_cli(root, temp, label, protected="up/feature/HEAD")
+        if expected == 0:
+            held = code == 0 and _parents(root, _rev(root, "refs/heads/feature")) == [base]
+        else:
+            held = (blocked and code == expected
+                    and ("legacy remote" in err if expected == 2 else "no configured remote" in err)
+                    and _rev(root, "refs/heads/feature") == head and _no_recovery_refs(root))
+        check(name, held, (blocked, code, err))
+    root, base, head = _feature(temp, "h33-slash")
+    _fixture_git(root, "update-ref", "refs/remotes/a/b/c/HEAD", base)
+    _fixture_git(root, "update-ref", "refs/remotes/a/b/HEAD", base)
+    git_dir = Path(_fixture_git(root, "rev-parse", "--absolute-git-dir"))
+    (git_dir / "remotes" / "a").mkdir(parents=True)
+    (git_dir / "remotes" / "a" / "b").write_text("URL: " + url, encoding="utf-8")
+    code, _out, err = _fold_cli(root, temp, "h33-slash", protected="a/b/c/HEAD")
+    check("fold/h33-legacy-slash-name-permits-no-fold-refused", code == 1 and "ambiguous" in err
+          and "no configured remote" in err
+          and _rev(root, "refs/heads/feature") == head and _no_recovery_refs(root), (code, err))
+    code, _out, err = _fold_cli(root, temp, "h33-slash-head", protected="a/b/HEAD")
+    check("fold/h33-legacy-slash-name-plain-head-not-called-configured-refused", code == 1
+          and "no configured remote ('a/b'" in err and "configured remote 'a/b'" not in err
+          and _rev(root, "refs/heads/feature") == head and _no_recovery_refs(root), (code, err))
+    root, base, head = _feature(temp, "h33-both")
+    _fixture_git(root, "config", "remote.up/x.url", url.strip())
+    _fixture_git(root, "update-ref", "refs/remotes/up/x/HEAD", base)
+    git_dir = Path(_fixture_git(root, "rev-parse", "--absolute-git-dir"))
+    (git_dir / "branches").mkdir(exist_ok=True)
+    (git_dir / "branches" / "up").write_text(url, encoding="utf-8")
+    code, _out, err = _fold_cli(root, temp, "h33-both", protected="up/x/HEAD")
+    check("fold/h33-legacy-branch-reading-and-configured-head-ambiguous-refused", code == 1
+          and "ambiguous" in err and "'up/x'" in err and "the branch 'x/HEAD' of remote 'up'" in err
+          and _rev(root, "refs/heads/feature") == head and _no_recovery_refs(root), (code, err))
+
+
 def _usage(temp):
     root, _base, head = _feature(temp, "usage")
     results = [
@@ -1794,7 +1909,7 @@ def _usage(temp):
 
 VECTORS = (_h1, _h2, _h3, _h4, _h5, _h6, _h7, _h8, _h9, _h10, _h11, _h12, _h13, _h15, _h16, _q10, _h17,
            _h18, _h19, _h20, _h21, _h22, _h23, _h24, _h25, _h26, _h27, _h28, _h29, _h30, _h31, _h32,
-           _usage)
+           _h33, _usage)
 
 
 def _with_home(body):
@@ -1936,9 +2051,27 @@ def _mutants():
                 protected_ref))
         return plain_remote_head_mapped(_root, protected_ref)
 
-    def no_legacy_remotes(_root):
+    def no_legacy_remotes(_root, _name):
         # The earlier shape: only remote.<name>.<key> keys define a remote.
-        return set()
+        return False
+
+    def legacy_entry(root, kind, name):
+        top = Path(os.fsdecode(_git(root, "rev-parse", "--git-path", kind).stdout.strip()))
+        return (top if top.is_absolute() else Path(root) / top) / name
+
+    def legacy_any_entry(root, name):
+        # The earlier shape for one name: any entry that is not a directory counts, read or not.
+        return "/" not in name and any(os.path.lexists(legacy_entry(root, kind, name))
+                                       and not legacy_entry(root, kind, name).is_dir()
+                                       for kind in ("remotes", "branches"))
+
+    checked_legacy_remote = _legacy_remote
+
+    def legacy_slash_names_read(root, name):
+        # A legacy file of a name with a slash read as that remote, which git does not do.
+        if "/" not in name:
+            return checked_legacy_remote(root, name)
+        return any(legacy_entry(root, kind, name).is_file() for kind in ("remotes", "branches"))
 
     def object_format_without_fallback(root):
         # The earlier shape: an answer that names no known format is cannot-evaluate, whatever git it is.
@@ -2056,10 +2189,14 @@ def _mutants():
              "fold/h30-sha256-branch-named-commit-id-cannot-evaluate"),
             ("mutant/commit-id-length-ignores-object-format", {"_object_id_spelling": any_hash_length}, _h29,
              "fold/h29-sha1-repo-64-hex-branch-name-folds"),
-            ("mutant/legacy-remote-files-ignored", {"_legacy_remotes": no_legacy_remotes}, _h31,
-             "fold/h31-legacy-file-remote-head-and-branch-ambiguous-refused"),
-            ("mutant/legacy-remote-branch-reading-ignored", {"_legacy_remotes": no_legacy_remotes}, _h31,
+            ("mutant/legacy-remote-files-ignored", {"_legacy_remote": no_legacy_remotes}, _h33,
+             "fold/h33-legacy-branch-reading-and-configured-head-ambiguous-refused"),
+            ("mutant/legacy-remote-branch-reading-ignored", {"_legacy_remote": no_legacy_remotes}, _h31,
              "fold/h31-legacy-remotes-file-branch-named-head-folds"),
+            ("mutant/legacy-unreadable-entry-counted", {"_legacy_remote": legacy_any_entry}, _h33,
+             "fold/h33-legacy-dangling-symlink-cannot-evaluate"),
+            ("mutant/legacy-slash-name-read", {"_legacy_remote": legacy_slash_names_read}, _h33,
+             "fold/h33-legacy-slash-name-permits-no-fold-refused"),
             ("mutant/object-format-without-fallback", {"_object_format": object_format_without_fallback}, _h32,
              "fold/h32-old-git-echoed-option-sha1-folds"),
             ("mutant/object-format-fallback-for-any-answer", {"_object_format": object_format_from_head_only},
@@ -2081,7 +2218,7 @@ def self_test():
         for failure in FAILURES:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: fold_onto_base {} checks (H1 to H32 and Q10 in temporary repositories: a valid "
+    print("SELF-TEST PASS: fold_onto_base {} checks (H1 to H33 and Q10 in temporary repositories: a valid "
           "fold with a create-only recovery ref; a protected tip moved from a sibling worktree folds onto the "
           "merge base and passes the branch-root gate, while a fold onto the tip is REVERTS there; "
           "--expect-base narrows only; dirty, staged, criss-cross, detached, protected-branch, merge-in-range, "
@@ -2100,7 +2237,9 @@ def self_test():
           "as ambiguous; a --protected name spelled as a full commit id of the repository's object format "
           "(SHA-1 or SHA-256) is cannot-evaluate beside a branch of that name, and a hex name of the other "
           "length folds; a remote defined only by a legacy remotes/ or branches/ file counts as "
-          "configured, and refs/remotes/HEAD is refused without naming an empty remote; with a git stub "
+          "configured, a legacy name with a slash defines no remote and never permits a fold, a legacy "
+          "entry that is not a readable regular file or a directory is cannot-evaluate, and "
+          "refs/remotes/HEAD is refused without naming an empty remote; with a git stub "
           "that lacks rev-parse --show-object-format, the length of HEAD's id gives the object format; "
           "--execution-report needs --self-test and an absolute path; --help explains the options, exits, "
           "rewrite and residue; each listed mutant turns its vector red)".format(len(EXECUTED)))
@@ -2134,7 +2273,8 @@ exit codes:
      names no branch, so its local copy cannot be told); a --protected name that resolves to a
      remote-tracking ref ending in /HEAD that the configured remotes make both a remote's HEAD and a
      branch, or neither (ambiguous; a configured remote is any remote.<name>.<key> key or a legacy
-     file remotes/<name> or branches/<name> in the git directory), or refs/remotes/HEAD, which names
+     file remotes/<name> or branches/<name> in the git directory for a name without a slash, the
+     only legacy name git reads), or refs/remotes/HEAD, which names
      no remote; tracked changes in the index or worktree; a merge, rebase,
      cherry-pick, revert, bisect or sequencer in
      progress; no merge base, several merge bases, nothing to fold, a merge commit in B..H, or a base
@@ -2147,7 +2287,10 @@ exit codes:
      sha1, 64 for sha256; from git rev-parse --show-object-format, or on a git without that option
      from the length of HEAD's object id) even where a branch has that name (git reads it as an
      object id; pass refs/heads/<name>), or that git resolves to a ref other than the one it matches (a
-     root ref such as ORIG_HEAD beside refs/heads/ORIG_HEAD); a shallow repository; a git failure;
+     root ref such as ORIG_HEAD beside refs/heads/ORIG_HEAD); a legacy remotes/<name> or
+     branches/<name> entry, consulted to tell a name ending in /HEAD, that is neither a directory
+     nor a regular file opening for reading (unreadable, a dangling or looping symbolic link, a FIFO); a
+     shallow repository; a git failure;
      or a failed commit signature that the signing configuration asks for. A recovery ref
      that cannot be created (exit 2, after the folded commit was written, before the branch moves)
      leaves the unreferenced folded commit behind (documented residue; nothing refers to it).
