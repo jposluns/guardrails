@@ -419,9 +419,11 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        CANNOT_EVALUATE), the mode one of branch, history or partial, a nonempty reason required
                        for history and partial and refused for branch. A line that opens, after markup
                        (indent, list, bullet, arrow or quote marker, a task box, an HTML tag, a one-letter item
-                       marker, emphasis, backticks, pipes), with a look-alike of the label (another case, BRIEF
-                       DIFF, BRIEF_DIFF, a Unicode dash, a colon look-alike, a Cyrillic or Greek look-alike
-                       letter) and a colon, `=` or a hex word is CANNOT_EVALUATE naming the label, never a silent
+                       marker not directly followed by another, so i.e. and e.g. are prose, emphasis, backticks,
+                       pipes), with a look-alike of the label (another case, BRIEF DIFF, BRIEF_DIFF, a Unicode
+                       dash, a colon look-alike, a Cyrillic or Greek look-alike letter), markup that closes around
+                       it (emphasis, backticks, a closing tag, a backslash, a closing bracket, a quote) and a
+                       colon, `=` or a hex word is CANNOT_EVALUATE naming the label, never a silent
                        non-declaration. The head must be the value of every BRIEF-PIN, REVIEWED HEAD and
                        look-alike pin line (Reviewed head, Brief-Pin; prefix either way, any case), and those lines
                        must agree. The base and head are read in --repo only as commit id prefixes (git rev-parse
@@ -443,7 +445,11 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        (exit 1); a branch-mode refusal says where the base lies (on the branch after the fork, on
                        the protected line, or on neither). Two declarations, a malformed or look-alike one, pin
                        lines that disagree, a head that is not the pin value, a base or head that is the prefix
-                       of no commit or of several, no repository, a repository git
+                       of no commit or of several, a ref named with the full id of the base, the head, the
+                       protected target, the merge base or any object a base or head value abbreviates (a tree
+                       or a blob included; git rev-parse --symbolic-full-name prints a ref for it, whatever
+                       core.warnAmbiguousRefs says; abnormal, since git does not normally create such a ref, so
+                       even a correct brief is refused there, fail closed), no repository, a repository git
                        refuses for its ownership, a store that is not whole, a grafts file, no --protected REF
                        or one that does not resolve, several merge bases
                        in branch or partial mode, and any git read that is not a clean answer are
@@ -4293,14 +4299,18 @@ P10_GIT_OPTIONS = ("-c", "core.commitGraph=false")
 # of characters that are not ASCII letters: spaces, digits, list, quote, bullet and arrow marks, emphasis, backticks,
 # table pipes, any non-ASCII letter or digit; a task box [x] or [ ]; an HTML tag such as <b> or <b class="k">; an item
 # marker of one letter, or a roman numeral of the ASCII i, v and x in either case (IGNORECASE off, so a dotless i run
-# is markup and is read once), ending in ) or . such as a), A. or ii)), with BRIEF and DIFF
-# in any case joined by a dash, an underscore, spaces or nothing, then a colon or `=` or a hex word. The markup class
+# is markup and is read once), ending in ) or . such as a), A. or ii), and not directly followed by another letter
+# and ) or ., so the prose abbreviations i.e. and e.g. are no item markers), with BRIEF and DIFF
+# in any case joined by a dash, an underscore, spaces or nothing, then markup that closes around the label (emphasis,
+# backticks, pipes, spaces, a closing HTML tag such as </b>, a backslash, a closing bracket, a straight or curly
+# quote), then a colon or `=` or a hex word. The markup class
 # is the 52 ASCII letters [^A-Za-z] read with IGNORECASE off ((?-i:...)), so the non-ASCII letters IGNORECASE folds
 # to an ASCII one (the dotless i, the dotted I) are markup too; it is not a Unicode \W, \d or \w class. It is read
 # after NFKC, the dash fold (as near_pin), P10_COLON_FORMS read as a colon and P10_LABEL_CONFUSABLES read as their
 # Latin letters, and is CannotEvaluate, never a silent non-declaration
 P10_LOOKALIKE_RE = re.compile(r"(?:\[[x ]\]|</?[a-z][a-z0-9]*+(?:\s[^<>]*+)?>|(?:[a-z]|(?-i:[ivxIVX]++))[.)]"
-                              r"|(?-i:[^A-Za-z]))*+(BRIEF[-_\s]*+DIFF)[`|*_\s]*+(?:[:=]|[0-9a-f]{7})", re.I)
+                              r"(?![a-z][.)])|(?-i:[^A-Za-z]))*+(BRIEF[-_\s]*+DIFF)"
+                              r"(?:[`|*_\s\\\]\"'‘’“”]|</[a-z][a-z0-9]*+\s*+>)*+(?:[:=]|[0-9a-f]{7})", re.I)
 # the colon look-alikes NFKC leaves as they are (modifier letter triangular colon, ratio, modifier letter colon)
 P10_COLON_FORMS = frozenset("˸∶꞉")
 # the Cyrillic, Greek and small-capital letters NFKC leaves as they are that look like a letter of BRIEF DIFF, read as
@@ -4442,18 +4452,20 @@ def _p10_ref_free(repo, name, what):
     """Refuse a full object id `name` that is also a ref name in `repo`. git rev-parse --verify --quiet
     --symbolic-full-name prints the ref a name spells by git's ref rules (refs/heads/<id>, refs/tags/<id>,
     refs/remotes/<id>, refs/remotes/<id>/HEAD and the rest) and nothing for an id no ref spells. git reads a full id
-    as the object even then, but warns that the name is ambiguous, so the id is not an object id alone: such a ref
-    is CannotEvaluate (fail closed, never read past), named in the message, whatever core.warnAmbiguousRefs says.
-    git's own ambiguity answer for the name (two refs spelled as it) is that refusal too; every other answer that
-    is not a clean nothing is CannotEvaluate as a git failure."""
+    as the object even then, but the name is ambiguous (git warns of it unless core.warnAmbiguousRefs is false), so
+    the id is not an object id alone: such a ref is CannotEvaluate (fail closed, never read past), named in the
+    message, whatever core.warnAmbiguousRefs says. That holds for the full id of any object the caller passes, a
+    tree or a blob _p10_commit_id lists included. git's own ambiguity answer for the name (two refs spelled as it)
+    is that refusal too; every other answer that is not a clean nothing is CannotEvaluate as a git failure."""
     probe = _p9_git(repo, what, lambda: _p10_read(
         repo, ["rev-parse", "--verify", "--quiet", "--symbolic-full-name", name]))
     printed = probe.stdout.decode("utf-8", "replace").split()
     ambiguous = "refname '{}' is ambiguous".format(name) in probe.stderr.decode("utf-8", "replace")
     if probe.returncode == 0 and (printed or ambiguous):
-        raise CannotEvaluate("{}: the commit id {} is also a ref name in {} ({}); git reads the full id as the commit "
-                             "but warns that the name is ambiguous, so the id is not read as an object id alone. "
-                             "git does not normally create such a ref; delete or rename it, then lint again".format(
+        raise CannotEvaluate("{}: the full object id {} is also a ref name in {} ({}); git reads the full id as the "
+                             "object, but the name is ambiguous (git warns of it unless core.warnAmbiguousRefs is "
+                             "false), so the id is not read as an object id alone. git does not normally create "
+                             "such a ref; delete or rename it, then lint again".format(
                                  what, name, repo, ", ".join(printed) if printed else "several refs"))
     if probe.returncode != 0 or probe.stderr.strip():
         raise _probe_failure(what, repo, probe)
@@ -4677,8 +4689,9 @@ def rule_p10(names, row, repo, require_diff=False, protected=None):
     P10_MAX_DECLARATIONS, pin lines that disagree, a head that is not the value of every BRIEF-PIN, REVIEWED HEAD
     and look-alike pin line (_p10_pins), no repository, an object store that is
     not whole (object_store_gap), a grafts file (_p10_grafts), no --protected ref or one that does not resolve,
-    a base or head that is the commit id prefix of no commit or of several (_p10_commit_id), a base, head, target or
-    merge base whose full id is also a ref name (_p10_ref_free), several merge bases in
+    a base or head that is the commit id prefix of no commit or of several (_p10_commit_id), a base, head, target,
+    merge base or other object a base or head value abbreviates (a tree or blob included) whose full id is also a
+    ref name (_p10_ref_free), several merge bases in
     branch or partial mode, and any git read that is not a clean answer are CannotEvaluate. Every ancestry read
     disables replace objects and the commit-graph and never fetches (_p10_read). A pass prints one INFO line
     with the target and merge base ids; a prose comparison that differs from the declared one is ADVISORY
@@ -11341,6 +11354,51 @@ def self_test(report_path=None):
         check("preflight/p10-lookalike-more-forms-cannot-evaluate",
               [p10(text) for text in p10_lookalikes_more] + [p10(p10_ok + text) for text in p10_lookalikes_more],
               ["CannotEvaluate"] * (2 * len(p10_lookalikes_more)))
+        # a look-alike label in markup that closes before the colon (a closing tag, a backslash, a closing bracket,
+        # a straight or curly quote) is CannotEvaluate alone and beside a declaration
+        p10_lookalikes_closed = [form.format(p10_m2, p10_x2) for form in (
+            "<b>BRIEF-DIFF</b>: {} {} branch\n", "<code>BRIEF-DIFF</code>: {} {} branch\n",
+            "**BRIEF-DIFF\\:** {} {} branch\n", "[BRIEF-DIFF]: {} {} branch\n",
+            "\"BRIEF-DIFF\": \"{} {} branch\"\n", "“BRIEF-DIFF”: {} {} branch\n")]
+        check("preflight/p10-lookalike-closed-markup-cannot-evaluate",
+              [p10(text) for text in p10_lookalikes_closed] + [p10(p10_ok + text) for text in p10_lookalikes_closed],
+              ["CannotEvaluate"] * (2 * len(p10_lookalikes_closed)))
+        # the prose abbreviations i.e. and e.g. before the label are no item markers: the line declares nothing, alone
+        # (quiet) and beside a declaration (a pass)
+        p10_prose_ie = [form.format(p10_f, p10_x2) for form in (
+            "i.e. BRIEF-DIFF: {} {} branch\n", "I.e., BRIEF-DIFF: {} {} branch\n")]
+        p10_prose_eg = [form.format(p10_f, p10_x2) for form in (
+            "e.g. BRIEF-DIFF: {} {} branch\n", "E.g., BRIEF-DIFF: {} {} branch\n")]
+        check("preflight/p10-prose-ie-not-item-marker",
+              [p10(text) for text in p10_prose_ie] + [p10(p10_ok + text) for text in p10_prose_ie],
+              [(0, [])] * len(p10_prose_ie) + [p10_pass] * len(p10_prose_ie))
+        check("preflight/p10-prose-eg-not-item-marker",
+              [p10(text) for text in p10_prose_eg] + [p10(p10_ok + text) for text in p10_prose_eg],
+              [(0, [])] * len(p10_prose_eg) + [p10_pass] * len(p10_prose_eg))
+        # a full-id --protected value that is also a ref name is refused before it resolves, naming the ref (the
+        # default symbolic --protected reaches only the check after it resolves); the clean fixture passes
+        def p10_protected_full_named():
+            refusal = p10_refusal(p10_ok, p10_named["target"], protected=p10_m2) or ""
+            return "is also a ref name" in refusal and "refs/remotes/{}/HEAD".format(p10_m2) in refusal
+
+        check("preflight/p10-protected-full-id-ref", [p10_protected_full_named(), p10(p10_ok, protected=p10_m2)],
+              [True, p10_pass])
+        # a ref-name read git cannot answer cleanly (a malformed repository config) is a git failure, not a ref
+        # name and not a clean nothing; the clean fixture answers nothing
+        p10_bad_config = p7_base / "p10-bad-config"
+        shutil.copytree(p10_repo, p10_bad_config, symlinks=True)
+        p10_config_file = p10_bad_config / ".git" / "config"
+        p10_config_file.write_text(p10_config_file.read_text(encoding="utf-8") + "[\n", encoding="utf-8")
+
+        def p10_ref_free_answer(repo):
+            try:
+                _p10_ref_free(repo, p10_x2, "head")
+            except CannotEvaluate as exc:
+                return "git failed in" in str(exc) and "is also a ref name" not in str(exc)
+            return None
+
+        check("preflight/p10-ref-free-git-failure",
+              [p10_ref_free_answer(p10_bad_config), p10_ref_free_answer(p10_repo)], [True, None])
         # a branch-mode refusal says where the base lies: on the branch after the fork (X1), before the fork on the
         # history the branch shares with the protected line (R), on the protected line after the fork (M2), or on
         # neither (O)
@@ -11482,6 +11540,20 @@ def self_test(report_path=None):
                                         r"(BRIEF[-_\s]*+DIFF)[`|*_\s]*+(?:[:=]|[0-9a-f]{7})", re.I),
             P10_LABEL_CONFUSABLES=dict((letter, latin) for letter, latin in P10_LABEL_CONFUSABLES.items()
                                        if letter not in "ʙʀɪᴇꜰᴅԁԀ")))
+        # with only emphasis, backticks, pipes and spaces allowed after the label, markup that closes before the
+        # colon hides it: each of those forms declares nothing and the brief passes
+        check("revert/p10-lookalike-closed-markup-red", *flip(
+            [p10_case(text) for text in p10_lookalikes_closed], [(0, [])] * len(p10_lookalikes_closed),
+            P10_LOOKALIKE_RE=re.compile(r"(?:\[[x ]\]|</?[a-z][a-z0-9]*+(?:\s[^<>]*+)?>|(?:[a-z]|(?-i:[ivxIVX]++))[.)]"
+                                        r"|(?-i:[^A-Za-z]))*+(BRIEF[-_\s]*+DIFF)[`|*_\s]*+(?:[:=]|[0-9a-f]{7})", re.I)))
+        # with an item marker allowed directly before another, i.e. and e.g. read as two item markers and the
+        # prose line is a look-alike, CannotEvaluate
+        check("revert/p10-prose-abbreviation-red", *flip(
+            [p10_case(text) for text in p10_prose_ie + p10_prose_eg],
+            ["CannotEvaluate"] * (len(p10_prose_ie) + len(p10_prose_eg)),
+            P10_LOOKALIKE_RE=re.compile(r"(?:\[[x ]\]|</?[a-z][a-z0-9]*+(?:\s[^<>]*+)?>|(?:[a-z]|(?-i:[ivxIVX]++))[.)]"
+                                        r"|(?-i:[^A-Za-z]))*+(BRIEF[-_\s]*+DIFF)"
+                                        r"(?:[`|*_\s\\\]\"'‘’“”]|</[a-z][a-z0-9]*+\s*+>)*+(?:[:=]|[0-9a-f]{7})", re.I)))
         check("revert/p10-prose-operands-red", *flip(
             [p10_case(p10_ok + line) for line in p10_operand_lines[1:3]], [p10_advised] * 2,
             _p10_operand=lambda word, code: True, P10_OPTION_OPERANDS=()))
@@ -11490,8 +11562,8 @@ def self_test(report_path=None):
             P10_RANGE_RE=re.compile(r"([0-9A-Za-z_/-]++)\.\.\.?+([0-9A-Za-z_/-]++)")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    # 293, or 292 where the uid reads a mode-000 file and revert/p9-pack-damage-red is recorded as skipped
-    check("revert/every-flip-ran", len(flipped), 293 if p9_locked else 292)
+    # 295, or 294 where the uid reads a mode-000 file and revert/p9-pack-damage-red is recorded as skipped
+    check("revert/every-flip-ran", len(flipped), 295 if p9_locked else 294)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -11574,7 +11646,8 @@ def self_test(report_path=None):
           "refs and a forged commit-graph, prints a differing prose comparison as ADVISORY, and exits 2 on a name, "
           "a malformed, look-alike or second declaration, a missing reason, a head that is not the value of every "
           "BRIEF-PIN, REVIEWED HEAD and look-alike pin line, a value that is the commit id prefix of no commit or "
-          "of several (a ref spelled as it never read), a commit id that is also a ref name, no repository, no or "
+          "of several (a ref spelled as it never read), a full id that is also a ref name (a full-id --protected "
+          "value included) or a ref-name read git cannot answer, no repository, no or "
           "an unresolved --protected ref, grafts, a shallow or partial clone, several merge bases, "
           "a git failure, and no declaration under --require-diff (P10), and "
           "each preflight rule and guard patched out flips its fixture; "
