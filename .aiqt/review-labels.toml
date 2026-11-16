@@ -1,0 +1,49 @@
+# Review and work label shapes that tools/check_review_labels.py refuses on added lines.
+#
+# Each [[shape]] is one Python regular expression, compiled with re.ASCII (and re.IGNORECASE when
+# ignore-case is true) and searched in every line added relative to the merge base with the
+# protected branch. A comment, docstring, test name or message says what the code guards and why,
+# never which review cycle, finding or tracker item asked for it. A line that has to quote such a
+# label on purpose carries the allow-marker below, which exempts that one line and no other.
+#
+# Keys: format-version (1), allow-marker (a word of letters, digits and hyphens), and one or more
+# [[shape]] tables with id (lower-case words joined by hyphens, unique), description, regex and an
+# optional ignore-case (a boolean, false when absent). Any other key, a regex that does not compile
+# and a regex that matches an empty line are refused, and the gate then cannot evaluate (exit 2).
+format-version = 1
+allow-marker = "review-label-allow"
+
+[[shape]]
+id = "review-test-name"
+description = "a test name numbered after a review cycle"
+regex = '\btest_r[0-9]+[a-z]?_'
+
+# The r is lower case only: an upper-case R and a digit in parentheses is a rule number in this pack's
+# prose ("(R1 execution verbs ...)"), not a review cycle.
+[[shape]]
+id = "review-tag"
+description = "a parenthesised review or QA cycle tag"
+regex = '\((?:r|[Qq][Aa])[0-9]+[a-z]?:?[ ]+(?!(?:and|or|not|in|is|if|else|for)\b)[A-Za-z]'
+
+[[shape]]
+id = "round-number"
+description = "a numbered round (a retry round and a count of rounds are not one)"
+regex = '(?<!retry )\bround[ -]?[0-9]+\b(?!\s+of\b)'
+ignore-case = true
+
+[[shape]]
+id = "review-cycle-words"
+description = "the words review and round side by side"
+regex = '\breview[ -]round\b'
+ignore-case = true
+
+[[shape]]
+id = "finding-number"
+description = "a numbered review finding"
+regex = '\bfinding[ -]?#?[0-9]+\b'
+ignore-case = true
+
+[[shape]]
+id = "backlog-id"
+description = "a tracker backlog id"
+regex = '\bFIX-[0-9]+(?:-R[0-9]+)?\b'

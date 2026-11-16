@@ -73,6 +73,10 @@ path = ".aiqt/license-qualification.toml"
 reason = "Repository-local licence-qualification gate configuration (the declared licence identity plus the class-3 exception list) read by tools/check_license_qualification.py; tracked, not shipped. Adopters own their configuration (an absent file applies no declaration and no exceptions), like .aiqt/newtab.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 
 [[exclusion]]
+path = ".aiqt/review-labels.toml"
+reason = "Repository-local configuration of the label shapes and the allow-marker read by tools/check_review_labels.py, which judges the lines a branch adds against its merge base; tracked, not shipped, like .aiqt/newtab.toml. The gate fails closed (exit 2) where the file is absent; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
+
+[[exclusion]]
 path = ".aiqt/opf-consumer-switch.toml"
 reason = "Repository-local switch list of this repository's own record readers under tools/, read by tools/check_record_readers.py; tracked, not shipped, like .aiqt/newtab.toml. An adopter has no such tools; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 

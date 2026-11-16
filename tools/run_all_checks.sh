@@ -359,6 +359,9 @@ run_gate "qa-adapter-selftest"      python3 -I -B tools/_qa_adapter.py --self-te
 run_gate "audit-reference-selftest" python3 -I -B tools/audit_reference.py --self-test
 run_gate "internal-names-selftest"  python3 -I -B tools/check_selftest_execution.py --suite internal-names-selftest
 run_gate "internal-names"           python3 -I -B tools/check_internal_names.py
+# Review and work labels on the lines this branch adds, judged against its merge base with origin/HEAD.
+run_gate "review-labels-selftest"   python3 -I -B tools/check_selftest_execution.py --suite review-labels-selftest
+run_gate "review-labels"            python3 -I -B tools/check_review_labels.py
 
 # ADVISORY QA digest, run under run_gate. It runs the reference audit and prints a compact digest that
 # distinguishes a required-unavailable surface from an optional-disabled one. audit_reference.py --digest
