@@ -37,6 +37,7 @@ from _standards import load_manifests, ManifestError, natkey  # noqa: E402
 
 ATTRIB_REL = Path(".aiqt") / "attribution.toml"
 WRAP = 98  # wrap prose paragraphs at this column for a readable plain-text NOTICE
+COPYRIGHT_LINE = "Copyright 2026 Jeff Posluns"  # owner copyright line (Apache 2.0 NOTICE convention)
 
 INTRO_TEMPLATE = (
     "This pack is published under the Apache License 2.0, except vendored third-party material which remains under its own terms (see below); see the LICENSE file. That licence "
@@ -149,7 +150,8 @@ def build(root):
             print("error: " + err + "; fail-closed (NOTICE not rendered)", file=sys.stderr)
         raise SystemExit(2)
 
-    lines = ["AIQT Guardrails™: third-party attribution NOTICE", ""]
+    # Apache NOTICE convention: the product name line, then the owner copyright line, at the top.
+    lines = ["AIQT Guardrails™: third-party attribution NOTICE", COPYRIGHT_LINE, ""]
     lines.append(_wrap(INTRO_TEMPLATE.format(kinds=kinds, complete_clause=complete_clause)))
     lines.append("")
     lines.append("=" * WRAP)
