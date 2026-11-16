@@ -2515,7 +2515,7 @@ source-path = ".aiqt/core/rules/quali-high-assurance-verification.md"
 start-line = 17
 end-line = 18
 canonical-text = "Every substantive change is verified before it integrates by an independent adversarial pass, briefed to\nrefute rather than confirm."
-source-digest = "1b72ca77e04852c30eeee81d583e4dd73255742cd257ec5997c9f935b75371c1"
+source-digest = "1b5d86ccb7c9f8cf3d965b2f8e34df43ff0b07180d8a6af8636ad92e9870e694"
 layer = "core"
 
 [[clause]]
@@ -2523,9 +2523,9 @@ clause-id = "hiasrv.2"
 corpus-id = "hiasrv"
 source-path = ".aiqt/core/rules/quali-high-assurance-verification.md"
 start-line = 20
-end-line = 22
-canonical-text = "A change to a document that a gate or tool pins (quotes, parses, or matches) is reviewed together with those\nconsumers, found by searching the tooling for the document and named in the review; a review of the document\nalone is incomplete."
-source-digest = "1b72ca77e04852c30eeee81d583e4dd73255742cd257ec5997c9f935b75371c1"
+end-line = 24
+canonical-text = "A substantive change to a document that a gate or tool relies on as input, by quoting or matching its text\nor parsing its structure (a mere mention of the document is not such reliance), is reviewed together with\neach such gate or tool: the review brief names each one, found by searching the tooling for the document's\npath and for the text the change alters, and states what that search could miss; a review of the document\nalone is incomplete."
+source-digest = "1b5d86ccb7c9f8cf3d965b2f8e34df43ff0b07180d8a6af8636ad92e9870e694"
 layer = "core"
 
 [[clause]]

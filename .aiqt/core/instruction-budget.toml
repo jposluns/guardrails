@@ -115,12 +115,21 @@
 #                        delta, 136304 + 327 = 136631, keeping the existing headroom of 12 units measured at
 #                        that base, within the maintainer's authorization of 2026-11-08 for raises up to
 #                        148000.
-#   ceiling             a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
+#                        Raised 136631 -> 136839 on 2026-11-16 under the maintainer's recorded decision of
+#                        2026-10-31 to raise the ratchet by exactly the measured delta, when hiasrv.2 was
+#                        narrowed to a substantive change to a document that a gate or tool relies on as input,
+#                        with the review brief naming each such gate or tool, found by searching the tooling for
+#                        the document's path and the altered text, and stating what that search could miss:
+#                        measured PACK 136619 at the base ca7461de -> 136827 (+208 units); rule files 119996 ->
+#                        120204; managed block 360 and file headers 16263 unchanged. The ratchet rises by the
+#                        measured delta, 136631 + 208 = 136839, keeping the existing headroom of 12 units,
+#                        within the maintainer's authorization of 2026-11-08 for raises up to 148000.
+#   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 136631
+ratchet = 136839
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
