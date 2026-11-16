@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "b16127b02db8f487165cecc0fb184cbb6462016e99fbae189e9adeda718b4a54"
+tree-sha256 = "80cafc0f1e1f2d238d9c585b8027ff64a8604460a05d8a555ec0dec64168d5ec"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4422,8 +4422,8 @@ sha256 = "03c7b9ba63f7f76b1dc8c471d051c9a212ca599abd3accfbe85f8abea0208918"
 
 [[sources]]
 path = "tools/check_site.py"
-bytes = 121725
-sha256 = "138998197bba0bfb9069dcee706b3a7cf54f50c1dd00f3202bedbd2b246c6ac9"
+bytes = 122296
+sha256 = "62f6365cfaaf1bbcfd3776d4ff3d1ee82109a46adc4d8f941f6c219e02e6cd24"
 
 [[sources]]
 path = "tools/check_site_versions.py"
@@ -4527,8 +4527,8 @@ sha256 = "e732c5633f7a18889d9f71af931cd2eb0131c2b51e53e81087316d976923752c"
 
 [[sources]]
 path = "tools/gen_draft_site.py"
-bytes = 207690
-sha256 = "0662675b3fe3c851abdb935e9647fdfd7c155cdb85b62099a5407f0ff5e2e2a7"
+bytes = 220686
+sha256 = "eb0310f7b285603d28fb34bb03ab83ffe4f504bddd74b1f3d2f403a9665b5428"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
@@ -4697,8 +4697,8 @@ sha256 = "85af66ecb238a3221b6e0b5834dbbc891a37487b1fa6a8d113e8ee6ce0f23a0d"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 243390
-sha256 = "605a8d8bb50e54bdbcd0d16b13fc83716fb3842363c0f9988d61eac33225fd53"
+bytes = 243457
+sha256 = "93f92fb6597e03d779c243e1f2990611eb23483cda05099fae9ec0a7b992b32f"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

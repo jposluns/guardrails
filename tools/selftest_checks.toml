@@ -5737,6 +5737,7 @@ expected-check-ids = [
   "404-links/allowlist-finding-on-named-line-passes",
   "404-links/repeated-allowlist-finding-fails-passing-case",
   "404-links/repeated-allowlist-finding-named-twice-passes",
+  "404-links/swapped-repeat-allowlist-finding-fails-passing-case",
   "404-links/relative-links-on-other-page-pass",
   "404-links/relative-touch-icon-reported-by-both-rules",
   "404-links/percent-encoded-slash-src-fails",

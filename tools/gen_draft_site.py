@@ -67,7 +67,7 @@ import shutil
 import stat
 import tempfile
 import tomllib
-from html.parser import HTMLParser
+from html.parser import HTMLParser, attrfind_tolerant, tagfind_tolerant
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -1412,9 +1412,10 @@ def _body_html(site, page):
 # exactly data-cfasync="false" then src, with the scheme src the shell chose, wherever on the page it
 # appears; the guard does not check that it sits in the head, which render_page's order provides and the
 # shell self-test asserts); every URL attribute
-# (LINK_URL_ATTRS) is an https URL, a #fragment, a path under the site's base or one of its kept live
-# paths, with no backslash, whitespace or control character, no protocol-relative "//" start and no "." or
-# ".." segment, raw or percent-encoded (%2e, either case); and every a or area whose href is https carries
+# (LINK_URL_ATTRS) is an https URL whose scheme is written as literal lower-case "https://" (decision D15;
+# not in another case and not through a character reference), a #fragment, a path under the site's base
+# or one of its kept live paths, with no backslash, whitespace or control character, no protocol-relative
+# "//" start and no "." or ".." segment, raw or percent-encoded (%2e, either case); and every a or area whose href is https carries
 # target="_blank", rel with noopener and noreferrer, and the "(opens in a new tab)" hint in its text or
 # aria-label. Residual: the guard judges the markup as Python's html.parser tokenizes it, so a malformed
 # construct a browser repairs differently is outside it; it reads no stylesheet (inline styles are refused
@@ -1429,22 +1430,92 @@ LINK_URL_ATTRS = frozenset((
     "lowsrc", "dynsrc"))
 NEWTAB_HINT = "(opens in a new tab)"
 _URL_BAD_CHAR_RE = re.compile(r"[\x00-\x20\x7f\\]")
-# An https scheme written in any ASCII letter case at the start of a link attribute's value inside a start
-# tag of inline page markup: the attribute name (any ASCII case, after a space, slash or quote), "=", an
-# optional quote, then the scheme. re.ASCII keeps the case-insensitive match to A to Z, so a non-ASCII
-# lookalike (U+017F for "s", U+212A for "k") never matches; "http://" and a one-slash "https:/" do not match.
-_INLINE_TAG_RE = re.compile(r"<[A-Za-z][^>]*>")
-_INLINE_HTTPS_RE = re.compile(
-    r"([\t\n\f\r /\"'](?:{})[\t\n\f\r ]*=[\t\n\f\r ]*[\"']?)https://".format(
-        "|".join(re.escape(name) for name in sorted(LINK_URL_ATTRS))), re.IGNORECASE | re.ASCII)
+def _start_tag_values(parser, tag, attrs):
+    """For the start tag `parser` (an html.parser.HTMLParser) has just handed to handle_starttag as `tag` and
+    `attrs`: the tag's source text (get_starttag_text) and, for each attribute in order, the (start, end)
+    span of its value as written in that text (inside its quotes, character references undecoded), or None
+    for an attribute with no value. The text is re-read with the tokenizer's own patterns (tagfind_tolerant,
+    attrfind_tolerant) the way parse_starttag reads it; ValueError when that re-reading does not give the same
+    tag, attribute names, value presence and (for a value with no "&") value, so a caller refuses the tag
+    rather than guess where a value sits."""
+    text = parser.get_starttag_text()
+    match = tagfind_tolerant.match(text, 1) if isinstance(text, str) and text.startswith("<") else None
+    if match is None or match.group(1).lower() != tag:
+        raise ValueError("start tag {!r} does not re-read as <{}>".format(text, tag))
+    spans, k = [], match.end()
+    while k < len(text):
+        found = attrfind_tolerant.match(text, k)
+        if not found:
+            break
+        if not found.group(2):
+            spans.append((found.group(1).lower(), None))
+        else:
+            start, end = found.span(3)
+            raw = found.group(3)
+            if raw[:1] == "'" == raw[-1:] or raw[:1] == '"' == raw[-1:]:
+                start, end = start + 1, end - 1
+            spans.append((found.group(1).lower(), (start, end)))
+        k = found.end()
+    if text[k:].strip() not in (">", "/>") or [name for name, _span in spans] != [name for name, _v in attrs]:
+        raise ValueError("start tag {!r} does not re-read to its attributes".format(text))
+    for (_name, span), (_n, value) in zip(spans, attrs):
+        if (span is None) != (value is None) or (
+                span is not None and "&" not in text[span[0]:span[1]] and text[span[0]:span[1]] != value):
+            raise ValueError("start tag {!r} does not re-read to its attribute values".format(text))
+    return text, [span for _name, span in spans]
+
+
+class _InlineLinkValues(HTMLParser):
+    """The (start, end) offset in `source` of each link attribute value (LINK_URL_ATTRS) written in a start
+    tag of `source`, as html.parser tokenizes it (the tokenizer the link guard uses), and each start tag whose
+    values cannot be placed in the source exactly (`unplaced`)."""
+
+    def __init__(self, source):
+        super().__init__(convert_charrefs=True)
+        self.source = source
+        # getpos() counts lines at each LF only, as html.parser's updatepos does.
+        self._line_starts = [0] + [index + 1 for index, char in enumerate(source) if char == "\n"]
+        self.values = []
+        self.unplaced = []
+
+    def handle_starttag(self, tag, attrs):
+        line, column = self.getpos()
+        offset = self._line_starts[line - 1] + column
+        try:
+            text, spans = _start_tag_values(self, tag, attrs)
+        except ValueError:
+            self.unplaced.append(self.get_starttag_text())
+            return
+        if self.source[offset:offset + len(text)] != text:
+            self.unplaced.append(text)
+            return
+        for (name, _value), span in zip(attrs, spans):
+            if name in LINK_URL_ATTRS and span is not None:
+                self.values.append((offset + span[0], offset + span[1]))
 
 
 def _inline_https(value):
     """Inline markup with the https scheme of each link attribute value written in lower case (decision D15):
-    "HTTPS://" and "hTtPs://" become "https://", and nothing else changes. The rewrite reads the literal
-    markup: a scheme written with character references is left as written, and the link guard reads it as a
-    browser does (decoded, scheme in any ASCII case)."""
-    return _INLINE_TAG_RE.sub(lambda tag: _INLINE_HTTPS_RE.sub(r"\1https://", tag.group(0)), value)
+    a value that starts with "https://" in any ASCII letter case ("HTTPS://", "hTtPs://") has those 8
+    characters written as "https://", and every other character of the markup stays as written. The values
+    are found by html.parser (_InlineLinkValues), so a quoted ">" or a scheme-shaped text inside another
+    attribute value or deeper in a URL is never mistaken for a value's start. A scheme written with a
+    character reference is not a literal scheme and is left as written; the link guard refuses it (it
+    accepts only a literal lower-case "https://"). RefusedPage when a start tag's values cannot be placed in
+    the markup exactly."""
+    reader = _InlineLinkValues(value)
+    reader.feed(value)
+    reader.close()
+    if reader.unplaced:
+        raise RefusedPage("inline markup start tag {!r} cannot be read exactly".format(reader.unplaced[0]))
+    parts, done = [], 0
+    for start, end in sorted(reader.values):
+        scheme = value[start:min(end, start + len(_HTTPS))]
+        if _https(scheme) == _HTTPS and scheme != _HTTPS:
+            parts.extend((value[done:start], _HTTPS))
+            done = start + len(_HTTPS)
+    parts.append(value[done:])
+    return "".join(parts)
 
 
 class _LinkGuard(HTMLParser):
@@ -1456,7 +1527,7 @@ class _LinkGuard(HTMLParser):
         self.found = []
         self._anchor = None
 
-    def _url_finding(self, name, tag, value):
+    def _url_finding(self, name, tag, value, written):
         site, base = self.site, self.site["base"]
         if value is None:
             return "{} attribute on <{}> has no value".format(name, tag)
@@ -1467,10 +1538,17 @@ class _LinkGuard(HTMLParser):
         if _URL_BAD_CHAR_RE.search(value) or value.startswith("//") \
                 or any(unquote(segment) in (".", "..") for segment in segments):
             return "{} {!r} on <{}> is not a plain URL".format(name, value, tag)
-        # The scheme is read as a browser reads it, in any ASCII letter case (_https, decision D15); the
-        # inline path (_inline) writes it in lower case before the page reaches this guard.
-        if _https(value).startswith("https://") or value.startswith("#") or value.startswith(base) \
-                or _kept_live(site, value):
+        # The scheme is read as a browser reads it, in any ASCII letter case (_https); decision D15 has every
+        # page write it as literal lower-case characters, so the value as written (`written`, character
+        # references undecoded; None when the start tag could not be re-read) must start with "https://".
+        # The inline path (_inline_https) and _external write it so; a scheme in another case, or written
+        # with a character reference ("&#72;TTPS://", "&#104;ttps://", "https&colon;//"), is refused here.
+        if _https(value).startswith("https://"):
+            if isinstance(written, str) and written.startswith(_HTTPS):
+                return None
+            return "{} {!r} on <{}> does not write its https scheme as literal lower-case https://".format(
+                name, value if written is None else written, tag)
+        if value.startswith("#") or value.startswith(base) or _kept_live(site, value):
             return None
         return "{} {!r} on <{}> is neither under {} nor an https URL".format(name, value, tag, base)
 
@@ -1478,6 +1556,13 @@ class _LinkGuard(HTMLParser):
         first = {}
         for name, value in attrs:
             first.setdefault(name, value)
+        # Each value as written in the start tag's source text, for the literal-scheme rule of _url_finding.
+        try:
+            text, spans = _start_tag_values(self, tag, attrs)
+            written = [None if span is None else text[span[0]:span[1]] for span in spans]
+        except ValueError:
+            self.found.append("<{}> start tag whose attribute values cannot be read exactly".format(tag))
+            written = [None] * len(attrs)
         if tag == "script" and len(attrs) == 2 and attrs[0][0] == "src" and attrs[1] == ("defer", None) \
                 and attrs[0][1] in self.scripts:
             self.scripts.remove(attrs[0][1])
@@ -1488,9 +1573,9 @@ class _LinkGuard(HTMLParser):
             self.found.append("<{}> element".format(tag))
         if tag == "meta" and "http-equiv" in first:
             self.found.append("<meta http-equiv> element")
-        for name, value in attrs:
+        for (name, value), as_written in zip(attrs, written):
             if name in LINK_URL_ATTRS:
-                problem = self._url_finding(name, tag, value)
+                problem = self._url_finding(name, tag, value, as_written)
                 if problem is not None:
                     self.found.append(problem)
         if tag in ("a", "area") and isinstance(first.get("href"), str) \
@@ -2312,24 +2397,127 @@ def _self_test():
            _external("https://example.com/X", "L").startswith('<a href="https://example.com/X" '),
            _external("https://example.com/X", "L"))
 
-    # D15 on inline page markup: the inline path writes an https scheme given in any ASCII letter case in lower
-    # case, and the link guard reads the scheme in any ASCII case, so such an anchor is accepted (held to the
-    # new-tab rules of any https link) rather than refused; http, a one-slash scheme and a non-ASCII lookalike
-    # stay refused, by the guard and on a built page.
+    # D15 on inline page markup: the inline path (_inline_https) writes an https scheme given in any ASCII
+    # letter case in lower case, so such an anchor is accepted (held to the new-tab rules of any https link);
+    # the link guard reads the finished page and accepts only a scheme written as literal lower-case
+    # "https://", so a scheme in another case or written with a character reference is refused; http, a
+    # one-slash scheme and a non-ASCII lookalike stay refused, by the guard and on a built page.
     def inline_page(html):
         """A document page whose one prose component holds `html`, rendered and checked by render_page."""
         page_model = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "{}"\n'.format(html.replace('"', '\\"')))
         return render_page(site, [page_model], page_model)
 
     newtab_tail = ' target="_blank" rel="noopener noreferrer">v<span class="vh"> (opens in a new tab)</span></a>'
-    for name, href in (("links/guard-upper-case-https-anchor-passes", "HTTPS://example.com/v"),
-                       ("links/guard-mixed-case-https-anchor-passes", "hTtPs://example.com/v")):
-        text = '<a href="{}"'.format(href) + newtab_tail
-        expect(name, _link_findings(site, text) == [], (text, _link_findings(site, text)))
+    literal = "{} {!r} on <{}> does not write its https scheme as literal lower-case https://"
+    for name, href in (("links/guard-upper-case-https-anchor-refused", "HTTPS://example.com/v"),
+                       ("links/guard-mixed-case-https-anchor-refused", "hTtPs://example.com/v"),
+                       ("links/guard-character-reference-upper-case-https-refused", "&#72;TTPS://example.com/v"),
+                       ("links/guard-character-reference-lower-case-https-refused", "&#104;ttps://example.com/v"),
+                       ("links/guard-character-reference-colon-https-refused", "https&colon;//example.com/v")):
+        got = _link_findings(site, '<a href="{}"'.format(href) + newtab_tail)
+        expect(name, got == [literal.format("href", href, "a")], got)
+    got = _link_findings(site, '<a href="https://example.com/v"' + newtab_tail)
+    expect("links/guard-literal-lower-case-https-anchor-passes", got == [], got)
     got = _link_findings(site, '<a href="HTTPS://example.com/v">v</a>')
     expect("links/guard-upper-case-https-without-newtab-refused",
-           got == ["external link 'HTTPS://example.com/v' without the new-tab attributes",
+           got == [literal.format("href", "HTTPS://example.com/v", "a"),
+                   "external link 'HTTPS://example.com/v' without the new-tab attributes",
                    "external link 'HTTPS://example.com/v' without the new-tab hint"], got)
+    # The guard and the inline rewrite place each value in the start tag's source text with html.parser's own
+    # patterns; a tag that does not re-read to the attributes the tokenizer gave is refused, not guessed at.
+    global _start_tag_values
+    saved_values = _start_tag_values
+
+    def unreadable(parser, tag, attrs):
+        raise ValueError("self-test: not re-read")
+
+    _start_tag_values = unreadable
+    try:
+        expect("refuse/inline-unplaced-start-tag", "cannot be read exactly" in refused(
+            "refuse/inline-unplaced-start-tag", _inline_https, '<a href="HTTPS://example.com/v">'))
+        got = _link_findings(site, '<a href="https://example.com/v"' + newtab_tail)
+        expect("links/guard-unplaced-start-tag-refused",
+               got == ["<a> start tag whose attribute values cannot be read exactly",
+                       literal.format("href", "https://example.com/v", "a"),
+                       "<span> start tag whose attribute values cannot be read exactly"], got)
+    finally:
+        _start_tag_values = saved_values
+
+    class _Retold:
+        def __init__(self, text):
+            self.text = text
+
+        def get_starttag_text(self):
+            return self.text
+
+    expect("links/start-tag-values-placed",
+           _start_tag_values(_Retold("<a title='a>b' HREF=x href=\"\">"), "a",
+                             [("title", "a>b"), ("href", "x"), ("href", "")])
+           == ("<a title='a>b' HREF=x href=\"\">", [(10, 13), (20, 21), (28, 28)]))
+    for name, text, attrs in (("links/start-tag-other-name-refused", '<a href="x">', [("src", "x")]),
+                              ("links/start-tag-other-value-refused", '<a href="x">', [("href", "y")]),
+                              ("links/start-tag-missing-value-refused", "<a href>", [("href", "x")]),
+                              ("links/start-tag-other-tag-refused", '<img src="x">', [("src", "x")])):
+        try:
+            _start_tag_values(_Retold(text), "a", attrs)
+            expect(name, False, text)
+        except ValueError:
+            pass
+    # Each value is placed by the tokenizer, so a quoted ">" before the link attribute, scheme-shaped text deeper
+    # in a URL or inside another attribute, and every quoting form are handled; each case has a twin that the
+    # rule leaves as written.
+    for name, text, want in (
+            ("links/inline-quoted-gt-before-href-lowercased",
+             '<a title="a>b" href="HTTPS://example.com/v"' + newtab_tail, '<a title="a>b" href="https://example.com/v"' + newtab_tail),
+            ("links/inline-quoted-gt-before-href-twin-unchanged",
+             '<a title="a>b" href="https://example.com/v"' + newtab_tail,
+             '<a title="a>b" href="https://example.com/v"' + newtab_tail),
+            ("links/inline-quoted-gt-before-src-lowercased", '<img alt="a>b" src="HTTPS://example.com/i.png">',
+             '<img alt="a>b" src="https://example.com/i.png">'),
+            ("links/inline-quoted-gt-before-src-twin-unchanged", '<img alt="a>b" src="https://example.com/i.png">',
+             '<img alt="a>b" src="https://example.com/i.png">'),
+            ("links/inline-href-path-holding-href-scheme-unchanged",
+             '<a href="https://example.com/href=HTTPS://Other/Path"' + newtab_tail,
+             '<a href="https://example.com/href=HTTPS://Other/Path"' + newtab_tail),
+            ("links/inline-href-path-holding-href-scheme-only-scheme-lowercased",
+             '<a href="HTTPS://example.com/href=HTTPS://Other/Path"' + newtab_tail,
+             '<a href="https://example.com/href=HTTPS://Other/Path"' + newtab_tail),
+            ("links/inline-href-plain-path-twin-unchanged", '<a href="https://example.com/Other/Path"' + newtab_tail,
+             '<a href="https://example.com/Other/Path"' + newtab_tail),
+            ("links/inline-src-path-holding-href-scheme-unchanged",
+             '<img src="https://example.com/a/href=HTTPS://b.png" alt="">',
+             '<img src="https://example.com/a/href=HTTPS://b.png" alt="">'),
+            ("links/inline-src-plain-path-twin-unchanged", '<img src="https://example.com/a/b.png" alt="">',
+             '<img src="https://example.com/a/b.png" alt="">'),
+            ("links/inline-title-holding-href-scheme-unchanged",
+             '<a title="see href=HTTPS://x" href="https://example.com/v"' + newtab_tail,
+             '<a title="see href=HTTPS://x" href="https://example.com/v"' + newtab_tail),
+            ("links/inline-single-quoted-title-holding-href-scheme-unchanged",
+             "<a title='see href=HTTPS://x' href='https://example.com/v'" + newtab_tail,
+             "<a title='see href=HTTPS://x' href='https://example.com/v'" + newtab_tail),
+            ("links/inline-plain-title-twin-unchanged", '<a title="see x" href="https://example.com/v"' + newtab_tail,
+             '<a title="see x" href="https://example.com/v"' + newtab_tail),
+            ("links/inline-unquoted-upper-case-https-anchor-lowercased",
+             "<a href=HTTPS://example.com/v" + newtab_tail, "<a href=https://example.com/v" + newtab_tail),
+            ("links/inline-single-quoted-upper-case-https-anchor-lowercased",
+             "<a href='HTTPS://example.com/v'" + newtab_tail, "<a href='https://example.com/v'" + newtab_tail),
+            ("links/inline-unquoted-mixed-case-https-img-lowercased", "<IMG SRC=HtTpS://example.com/i.png alt=''>",
+             "<IMG SRC=https://example.com/i.png alt=''>")):
+        built = accepted(name, inline_page, text)
+        expect(name, want in built, built)
+    # A scheme written with a character reference is not rewritten (it is not a literal scheme); the guard
+    # refuses it on the built page. The literal lower-case twin is accepted.
+    for name, href in (("refuse/inline-character-reference-upper-case-https-anchor", "&#72;TTPS://example.com/v"),
+                       ("refuse/inline-character-reference-hex-https-anchor", "&#x68;ttps://example.com/v"),
+                       ("refuse/inline-character-reference-lower-case-https-anchor", "&#104;ttps://example.com/v"),
+                       ("refuse/inline-character-reference-colon-https-anchor", "HTTPS&#58;//example.com/v"),
+                       ("refuse/inline-named-character-reference-colon-https-anchor", "https&colon;//example.com/v")):
+        expect(name, "literal lower-case https://" in refused(
+            name, inline_page, '<a href="{}"'.format(href) + newtab_tail))
+    twin = accepted("links/inline-literal-lower-case-https-anchor-passes", inline_page,
+                    '<a href="https://example.com/v"' + newtab_tail)
+    expect("links/inline-literal-lower-case-https-anchor-passes",
+           '<a href="https://example.com/v"' + newtab_tail in twin, twin)
     for name, href in (("links/guard-upper-case-http-anchor-refused", "HTTP://example.com/v"),
                        ("links/guard-upper-case-https-one-slash-anchor-refused", "HTTPS:/example.com/v"),
                        ("links/guard-non-ascii-https-lookalike-anchor-refused", "HTTP\u017f://example.com/v")):
@@ -2347,6 +2535,14 @@ def _self_test():
                        ("refuse/inline-upper-case-https-one-slash-anchor", "HTTPS:/example.com/v"),
                        ("refuse/inline-non-ascii-https-lookalike-anchor", "HTTP\\u017f://example.com/v")):
         expect(name, "nor an https URL" in refused(name, inline_page, '<a href="{}"'.format(href) + newtab_tail))
+    for name, text in (("refuse/inline-quoted-gt-before-http-anchor", '<a title="a>b" href="HTTP://example.com/v"'),
+                       ("refuse/inline-quoted-gt-before-one-slash-anchor",
+                        "<a title='a>b' href='HTTPS:/example.com/v'"),
+                       ("refuse/inline-unquoted-non-ascii-https-lookalike-anchor",
+                        "<a href=HTTP\\u017f://example.com/v"),
+                       ("refuse/inline-unquoted-full-width-https-lookalike-anchor",
+                        "<a href=\\uff28TTPS://example.com/v")):
+        expect(name, "nor an https URL" in refused(name, inline_page, text + newtab_tail))
     expect("refuse/bad-code-variant", "variant" in refused(
         "refuse/bad-code-variant", rendered, 'component = "code"\nid = "x"\ntext = "t"\nvariant = "inline"\n'))
     expect("refuse/bad-id", "not a valid id" in refused(

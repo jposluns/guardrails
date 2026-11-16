@@ -77,6 +77,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import collections
 import hashlib
 import os
 import re
@@ -1461,13 +1462,14 @@ def _not_found_links_self_test():
 
     def unexpected(output, allowed=()):
         """What a scan's output and `allowed` (each finding written in full, "path:line: message") disagree
-        on: each printed finding `allowed` does not list, each finding in `allowed` the output does not
-        print, and, when the counts differ, the scan's own count (the FAIL line counts every finding before
-        the printed list drops exact repeats) against len(allowed). So a finding on another line, or one
-        finding more or fewer, fails a passing case."""
+        on, counted as multisets (the scan prints every finding, repeats included): each printed finding
+        more often than `allowed` lists it, each finding in `allowed` more often than the output prints
+        it, and, when they differ, the scan's own FAIL count against len(allowed). So a finding on another
+        line, one finding more or fewer, or the same count made of other repeats, fails a passing case."""
         lines = output.splitlines()
-        found = [line.strip() for line in lines[1:]]
-        out = [m for m in found if m not in allowed] + [m for m in allowed if m not in found]
+        found = collections.Counter(line.strip() for line in lines[1:])
+        named = collections.Counter(allowed)
+        out = sorted((found - named).elements()) + sorted((named - found).elements())
         want = "FAIL: {} site/ site-integrity issue(s)".format(len(allowed))
         if allowed and (not lines or lines[0] != want):
             out.append("count line {!r}, expected {!r}".format(lines[0] if lines else "", want))
@@ -1549,7 +1551,11 @@ def _not_found_links_self_test():
                 ("404-links/repeated-allowlist-finding-fails-passing-case",
                  '<img src="/i.png" alt=""><img src="/i.png" alt="">', live_allowlist("img", "alt"), False),
                 ("404-links/repeated-allowlist-finding-named-twice-passes",
-                 '<img src="/i.png" alt=""><img src="/i.png" alt="">', live_allowlist("img", "alt") * 2, True)):
+                 '<img src="/i.png" alt=""><img src="/i.png" alt="">', live_allowlist("img", "alt") * 2, True),
+                # The same count made of other repeats: 2 element and 2 alt findings named as 1 and 3.
+                ("404-links/swapped-repeat-allowlist-finding-fails-passing-case",
+                 '<img src="/i.png" alt=""><img src="/i.png" alt="">',
+                 live_allowlist("img") + live_allowlist("img", "alt")[1:] * 3, False)):
             (root / "404.html").write_text(page(icon, body), encoding="utf-8")
             got = scan(base)
             (root / "404.html").unlink()
@@ -1932,7 +1938,8 @@ def _scan_root(root, subdir, targets=None):
     findings.extend(logo_findings([(str(rel), text) for _f, rel, text, _p in docs]))
     if findings:
         print("FAIL: {} {}/ site-integrity issue(s)".format(len(findings), subdir))
-        for finding in sorted(set(findings)):
+        # Every finding is printed, repeats included, so the listed lines are exactly the counted findings.
+        for finding in sorted(findings):
             print("  " + finding)
         return 1
     print("PASS: {}/ dashes, links, anchors, titles, unique ids, tag structure, touch icons and link-preview "
