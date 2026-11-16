@@ -2,6 +2,7 @@
 """Offline gate for the pinned copy of the shared site template (baseline package).
 
   check_baseline_pin.py              exit 0 clean, 1 finding, 2 cannot evaluate
+  check_baseline_pin.py --base REF   the same, plus the base-coupling leg against REF (see below)
   check_baseline_pin.py --self-test  assert every refusal and a pass over tempdir fixtures
   check_baseline_pin.py [--self-test] --execution-report ABS_PATH
 
@@ -37,6 +38,22 @@ not TOML, a missing [vendored."site-template"] table, a version there that is mi
 string, a homepage there that is missing, not a string or not ending that way, a pin whose version
 differs from the recorded version, and 2 pins that name different versions are cannot-evaluate (exit 2).
 The gate reads only the repository; it never touches the network.
+
+The base-coupling leg (only with --base REF): a pin in the tree cannot certify itself, since the change that
+edits a copied file can edit its digest row too. The anchor that change cannot rewrite is each registered pin
+as committed at the base, the commit `git merge-base HEAD REF` names. The leg reads each pin there (git
+ls-tree and cat-file, with replacement objects off and every GIT_ variable dropped but the config-isolation
+pins) and compares the parsed tables, not the text, so a comment edit or a reordering is ignored. A pin whose
+version differs from its base version has moved, so its rows may change (a NOTE says the hand comparison
+against the published SHA256SUMS is due). Under an unchanged version, every row in both tables, keyed by its
+path within the copy root or its build-tool path, must keep its base digest; a changed digest is a finding
+(exit 1). A removed row passes, and an added row passes with a NOTE. A pin absent at the base is compared,
+path by path, with each registered pin present at the base under the same version. The pin records no
+archive digest, so the version is the only pin key: a change that also moves the version passes. A REF that
+is empty, starts with "-" or holds ":", whitespace or a control character, a merge-base that cannot be
+resolved, a base pin that is not a regular file, and a base pin that is oversized or malformed are
+cannot-evaluate (exit 2), never a pass. Without --base the leg is not evaluated, and the run says so on a
+NOTE line; that keeps local runs git-free.
 """
 import sys
 
@@ -58,6 +75,7 @@ import io
 import os
 import re
 import stat
+import subprocess
 import tempfile
 import tomllib
 from pathlib import Path
@@ -90,6 +108,10 @@ ATTRIBUTION_REL = ".aiqt/attribution.toml"
 ATTRIBUTION_BLOCK = "site-template"
 ATTRIBUTION_WHERE = '{} [vendored."{}"]'.format(ATTRIBUTION_REL, ATTRIBUTION_BLOCK)
 MAX_ATTRIBUTION_BYTES = 1 << 20
+# The base-coupling leg: a bound on each git read, the shape of a commit id git prints, and the longest REF.
+GIT_TIMEOUT = 60
+COMMIT_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+MAX_BASE_REF = 256
 
 
 class CannotEvaluate(Exception):
@@ -398,8 +420,143 @@ def _check_tool(root, rel, digest, findings, errors):
         findings.append("{}: SHA-256 {} differs from the pinned {}".format(rel, got, digest))
 
 
-def run_gate(root, pins=PINS):
+def _git_env():
+    """The process environment with every GIT_-prefixed variable dropped and only the config-isolation pins
+    re-applied at the exact values the fixture scrub sets (the rule of git_authority_env() in
+    tools/check_mistakes_register.py), so no inherited variable can point a base read at another repository."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    if os.environ.get("GIT_CONFIG_NOSYSTEM") == "1":
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+    for pin in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+        if os.environ.get(pin) == os.devnull:
+            env[pin] = os.devnull
+    return env
+
+
+def _git_stdout(proc, what):
+    """A finished git read's standard output as bytes; CannotEvaluate on a nonzero exit."""
+    if proc.returncode != 0:
+        detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise CannotEvaluate("base: {} failed (exit {}{})".format(
+            what, proc.returncode, ": " + detail[-1] if detail else ""))
+    return proc.stdout
+
+
+def _base_commit(root, base):
+    """The commit `git merge-base HEAD base` names; CannotEvaluate when base is unsafe or does not resolve."""
+    if (not isinstance(base, str) or not base or len(base) > MAX_BASE_REF or base.startswith("-")
+            or ":" in base or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in base)):
+        raise CannotEvaluate("base: {!r} is not a usable REF (empty, over {} characters, starting with -, or "
+                             "holding :, whitespace or a control character)".format(base, MAX_BASE_REF))
+    try:
+        proc = subprocess.run(["git", "--no-replace-objects", "-C", str(root), "merge-base", "HEAD", base],
+                              capture_output=True, env=_git_env(), timeout=GIT_TIMEOUT, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CannotEvaluate("base: git merge-base HEAD {} could not run ({})".format(base, exc)) from None
+    text = _git_stdout(proc, "git merge-base HEAD " + base).decode("ascii", "replace")
+    commit = text[:-1] if text.endswith("\n") else text
+    if not COMMIT_RE.fullmatch(commit):
+        raise CannotEvaluate("base: git merge-base HEAD {} printed {!r}, not 1 commit id".format(base, text))
+    return commit
+
+
+def _base_pin(root, commit, pin_rel):
+    """The pin at pin_rel as committed at commit, parsed, or None when that commit holds no such path;
+    CannotEvaluate when the entry is not a regular file, or is unreadable, oversized or malformed."""
+    try:
+        proc = subprocess.run(["git", "--no-replace-objects", "-C", str(root), "ls-tree", "-l", "-z", commit,
+                               "--", pin_rel], capture_output=True, env=_git_env(), timeout=GIT_TIMEOUT, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CannotEvaluate("base: git ls-tree {} -- {} could not run ({})".format(commit, pin_rel, exc)) from None
+    listing = _git_stdout(proc, "git ls-tree {} -- {}".format(commit, pin_rel))
+    entries = [entry for entry in listing.split(b"\0") if entry]
+    if not entries:
+        return None
+    where = "{} at the base {}".format(pin_rel, commit)
+    head, tab, name = entries[0].partition(b"\t")
+    fields = head.split()
+    if len(entries) != 1 or not tab or name != pin_rel.encode("utf-8") or len(fields) != 4:
+        raise CannotEvaluate("{}: unexpected git ls-tree output {!r}".format(where, listing))
+    mode, kind, oid, size = fields
+    if mode not in (b"100644", b"100755") or kind != b"blob":
+        raise CannotEvaluate("{}: not a regular file (mode {})".format(where, mode.decode("ascii", "replace")))
+    if not size.isdigit() or int(size) > MAX_PIN_BYTES:
+        raise CannotEvaluate("{}: larger than {} bytes".format(where, MAX_PIN_BYTES))
+    try:
+        proc = subprocess.run(["git", "--no-replace-objects", "-C", str(root), "cat-file", "blob",
+                               oid.decode("ascii")],
+                              capture_output=True, env=_git_env(), timeout=GIT_TIMEOUT, check=False)
+    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
+        raise CannotEvaluate("{}: git cat-file could not run ({})".format(where, exc)) from None
+    return parse_pin(_git_stdout(proc, "git cat-file blob for " + where), where)
+
+
+def _rows(parsed):
+    """(version, {row key: sha256}) for a parsed pin: a copy-root file by its path within the copy root, a
+    build tool by its repository path (the two never collide: a copy-root path cannot start with ".")."""
+    version, roots, tools = parsed
+    rows = dict(tools)
+    for _copy_root, pinned in roots:
+        rows.update(pinned)
+    return version, rows
+
+
+def coupling_findings(root, base, pins=PINS):
+    """(findings, notes) of the base-coupling leg: every registered pin in the tree under root against the
+    same pin at `git merge-base HEAD base`; CannotEvaluate when the base or any pin cannot be read."""
+    commit = _base_commit(root, base)
+    based = {}
+    for pin_rel, _assigned in pins:
+        parsed = _base_pin(root, commit, pin_rel)
+        if parsed is not None:
+            based[pin_rel] = _rows(parsed)
+    findings, notes = [], []
+    for pin_rel, _assigned in pins:
+        pin_path = Path(root) / pin_rel
+        try:
+            if not stat.S_ISREG(os.lstat(pin_path).st_mode):
+                raise CannotEvaluate("{}: not a regular file".format(pin_rel))
+            version, rows = _rows(parse_pin(_read_pin_bytes(pin_path), pin_rel))
+        except OSError as exc:
+            raise CannotEvaluate("{}: unreadable ({})".format(pin_rel, exc)) from None
+        if pin_rel in based:
+            against = [(pin_rel, based[pin_rel])]
+        else:
+            against = [(other, based[other]) for other, _root in pins if other in based]
+            notes.append("{}: absent at the base {}; compared with {}".format(
+                pin_rel, commit, ", ".join(other for other, _rows_ in against) or "no registered pin there"))
+        for other, (base_version, base_rows) in against:
+            if base_version != version:
+                notes.append("{}: the pin moved from version {} ({} at the base {}) to {}; compare its rows by "
+                             "hand with the published SHA256SUMS".format(pin_rel, base_version, other, commit,
+                                                                          version))
+                continue
+            for key in sorted(set(rows) & set(base_rows)):
+                if rows[key] != base_rows[key]:
+                    findings.append("{}: the row for {} changed from {} ({} at the base {}) to {} under the "
+                                    "unchanged version {}; a row may change only when the pin moves to a new "
+                                    "baseline version".format(pin_rel, key, base_rows[key], other, commit,
+                                                              rows[key], version))
+            for key in sorted(set(rows) - set(base_rows)):
+                notes.append("{}: the row for {} was added under the unchanged version {} ({} at the base "
+                             "{} has none)".format(pin_rel, key, version, other, commit))
+    return findings, notes
+
+
+def run_gate(root, pins=PINS, base=None):
     findings, errors = scan(root, pins)
+    notes = []
+    if base is None:
+        notes.append("the base-coupling leg was not evaluated (no --base REF), so a digest row changed under "
+                     "an unchanged version is not refused by this run")
+    else:
+        try:
+            more, notes = coupling_findings(root, base, pins)
+            findings.extend(more)
+        except CannotEvaluate as exc:
+            errors.append(str(exc))
+    for line in notes:
+        print("NOTE: " + line)
     for line in errors:
         print("CANNOT EVALUATE: " + line, file=sys.stderr)
     for line in findings:
@@ -409,8 +566,10 @@ def run_gate(root, pins=PINS):
     if findings:
         return 1
     print("PASS: every file pinned in {} matches its SHA-256 under its registered copy root, with no stray "
-          "or linked entry, every pinned build tool is a regular file with its pinned SHA-256, and every pin names the site template version recorded in {}, whose homepage ends in that version's archive name".format(
-              ", ".join(pin_rel for pin_rel, _root in pins), ATTRIBUTION_WHERE))
+          "or linked entry, every pinned build tool is a regular file with its pinned SHA-256, and every pin names the site template version recorded in {}, whose homepage ends in that version's archive name{}".format(
+              ", ".join(pin_rel for pin_rel, _root in pins), ATTRIBUTION_WHERE,
+              "" if base is None else ", and no digest row changed from the base {} under an unchanged "
+              "version".format(base)))
     return 0
 
 
@@ -508,6 +667,129 @@ def _scan_case(files=None, pin=None, mutate=None, pins=FIXTURE_PINS, second=None
         if mutate is not None:
             mutate(Path(tmp))
         return scan(tmp, pins)
+
+
+def _tools_on_path():
+    """Make this directory importable (python3 -I does not put it on sys.path) for the fixture git helpers."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.append(here)
+
+
+def _commit_all(repo, message, init=False):
+    """Commit every file under repo in a fixture repository (created first when init), with the fixture git
+    environment: every caller GIT_ variable dropped, scratch HOME, no system or global config, no auto
+    maintenance."""
+    _tools_on_path()
+    from _git_fixture_env import git_fixture_env
+    if init:
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True,
+                       env=git_fixture_env(), timeout=GIT_TIMEOUT)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True,
+                   env=git_fixture_env(), timeout=GIT_TIMEOUT)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                    "-c", "commit.gpgSign=false", "commit", "-q", "--no-verify", "--allow-empty", "-m", message],
+                   check=True, capture_output=True, env=git_fixture_env(), timeout=GIT_TIMEOUT)
+    if init:
+        subprocess.run(["git", "-C", str(repo), "tag", "base"], check=True, capture_output=True,
+                       env=git_fixture_env(), timeout=GIT_TIMEOUT)
+
+
+def _coupling_gate(tmp, base, pins, reverted):
+    """(exit code, report text) of run_gate over tmp against base; reverted runs it with the coupling leg
+    replaced by one that finds nothing and reads nothing (the gate before this leg)."""
+    original = coupling_findings
+    if reverted:
+        globals()["coupling_findings"] = lambda _root, _base, _pins=PINS: ([], [])
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            code = run_gate(tmp, pins, base=base)
+    finally:
+        globals()["coupling_findings"] = original
+    return code, out.getvalue() + err.getvalue()
+
+
+def _coupling_case(base_kw, head_kw, base, pins):
+    """(code, report, reverted code, reverted report) of run_gate against base over a fixture repository: the
+    base commit (tag base) holds the fixture base_kw names; the head commit, when head_kw is given, applies its
+    change ("unlink" removes a copied file, "second" writes the second registered pair)."""
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+        _fixture(tmp, base_kw.get("files"), base_kw.get("pin"), tools=base_kw.get("tools"))
+        _commit_all(tmp, "base", init=True)
+        if head_kw is not None:
+            if "unlink" in head_kw:
+                os.unlink(Path(tmp) / FIXTURE_ROOT / head_kw["unlink"])
+            if "second" in head_kw:
+                _fixture(tmp, head_kw["second"][0], head_kw["second"][1], root=SECOND_ROOT,
+                         pin_rel=SECOND_PIN, attribution=False)
+            else:
+                _fixture(tmp, head_kw.get("files"), head_kw.get("pin"),
+                         attribution=head_kw.get("attribution"), tools=head_kw.get("tools"))
+            _commit_all(tmp, "head")
+        return _coupling_gate(tmp, base, pins, False) + _coupling_gate(tmp, base, pins, True)
+
+
+def _coupling_cases():
+    """The base-coupling leg over 2-commit fixture repositories: the base commit (tag base) holds the exact
+    fixture; the head commit applies the case's change, which always keeps the copy and its pin consistent,
+    so only the coupling leg can refuse it. A refusing case also runs with the leg reverted and must then
+    pass (its -flip row), so each refusal is shown to come from this leg. The process environment is scrubbed
+    first, so the leg's own git reads run with no caller, global or system git configuration."""
+    _tools_on_path()
+    from _git_fixture_env import scrub_git_environment
+    scrub_git_environment()
+    changed = dict(FIXTURE_FILES, **{"baseline.css": b"body{ }\n"})
+    added = dict(FIXTURE_FILES, **{"x.js": b"x\n"})
+    moved = "1.2.2"
+    other_tool = {TOOL_REL: b"import os\n"}
+    second = (SECOND_PIN, SECOND_ROOT)
+    # The controls: each passes with the leg in place.
+    for name, base_kw, head_kw, text in (
+            ("couple/no-change-passes", {}, None, "no digest row changed"),
+            ("couple/row-modified-version-moved-passes", {},
+             {"files": changed, "pin": _pin_text(changed, version=moved),
+              "attribution": _attribution_text(version=moved)},
+             "NOTE: {}: the pin moved from version {} ".format(PIN_REL, FIXTURE_VERSION)),
+            ("couple/comment-only-passes", {}, {"pin": "# a comment\n" + _pin_text(FIXTURE_FILES)},
+             "no digest row changed"),
+            ("couple/row-removed-passes", {"files": added, "pin": _pin_text(added)},
+             {"pin": _pin_text(FIXTURE_FILES), "unlink": "x.js"}, "no digest row changed"),
+            ("couple/row-added-same-version-notice", {}, {"files": added, "pin": _pin_text(added)},
+             "NOTE: {}: the row for x.js was added under the unchanged".format(PIN_REL))):
+        got, report, _reverted, _reverted_report = _coupling_case(base_kw, head_kw, "base", FIXTURE_PINS)
+        check(name, got == 0 and text in report, (got, report))
+    # The refusals: each fails (1) or is cannot-evaluate (2) with the leg, and passes with it reverted.
+    for name, flip, base_kw, head_kw, base, pins, code, text in (
+            ("couple/row-modified-same-version-refused", "couple/row-modified-same-version-refused-flip",
+             {}, {"files": changed, "pin": _pin_text(changed)}, "base", FIXTURE_PINS, 1,
+             "FAIL: {}: the row for baseline.css changed from ".format(PIN_REL)),
+            ("couple/tool-row-modified-same-version-refused", "couple/tool-row-modified-same-version-refused-flip",
+             {"pin": _pin_text(FIXTURE_FILES, tools=FIXTURE_TOOLS), "tools": FIXTURE_TOOLS},
+             {"pin": _pin_text(FIXTURE_FILES, tools=other_tool), "tools": other_tool}, "base", FIXTURE_PINS, 1,
+             "FAIL: {}: the row for {} changed from ".format(PIN_REL, TOOL_REL)),
+            ("couple/second-pin-absent-at-base-row-modified-refused",
+             "couple/second-pin-absent-at-base-row-modified-refused-flip",
+             {}, {"second": (changed, _pin_text(changed, root=SECOND_ROOT))}, "base", (FIXTURE_PINS[0], second), 1,
+             "FAIL: {}: the row for baseline.css changed from ".format(SECOND_PIN)),
+            ("couple/base-unresolvable-cannot-evaluate", "couple/base-unresolvable-cannot-evaluate-flip",
+             {}, None, "no-such-ref", FIXTURE_PINS, 2,
+             "CANNOT EVALUATE: base: git merge-base HEAD no-such-ref failed"),
+            ("couple/base-option-shaped-cannot-evaluate", "couple/base-option-shaped-cannot-evaluate-flip",
+             {}, None, "--output=x", FIXTURE_PINS, 2,
+             "CANNOT EVALUATE: base: '--output=x' is not a usable REF"),
+            ("couple/base-pin-malformed-cannot-evaluate", "couple/base-pin-malformed-cannot-evaluate-flip",
+             {"pin": _pin_text(FIXTURE_FILES) + "[files\n"}, {"pin": _pin_text(FIXTURE_FILES)}, "base",
+             FIXTURE_PINS, 2, "CANNOT EVALUATE: {} at the base ".format(PIN_REL))):
+        got, report, reverted, reverted_report = _coupling_case(base_kw, head_kw, base, pins)
+        check(name, got == code and text in report, (got, report))
+        check(flip, reverted == 0, (reverted, reverted_report))
+
+    # Without --base the leg is not evaluated, and the run says so; the exact fixture still passes.
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+        _fixture(tmp)
+        got, report = _coupling_gate(tmp, None, FIXTURE_PINS, reverted=False)
+    check("couple/no-base-not-evaluated", got == 0 and "NOTE: the base-coupling leg was not evaluated" in report,
+          (got, report))
 
 
 def _self_test():
@@ -920,6 +1202,8 @@ def _self_test():
     check("homepage/not-string-refused", findings == [] and len(errors) == 1
           and errors[0].startswith(ATTRIBUTION_REL + ":") and errors[0].endswith("but it is 1"), (findings, errors))
 
+    _coupling_cases()
+
     # The gate's own report lines go to a buffer: a self-test run writes nothing to its error stream.
     with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp, \
             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stream:
@@ -955,8 +1239,13 @@ def _self_test():
           "regular file, non-UTF-8, non-TOML, over its size bound, without the site template table or with "
           "a missing or misshapen version there are cannot-evaluate; a homepage ending in the recorded "
           "version's archive name passes, and one naming another version, another file name or a prefixed "
-          "name, missing or not a string is cannot-evaluate; the exit codes are 0, 1 and 2; the "
-          "live tree passes)".format(len(EXECUTED)))
+          "name, missing or not a string is cannot-evaluate; against a base commit, a digest row changed "
+          "under an unchanged version (a copied file, a build tool, or a pin absent at the base against "
+          "another pin there) fails and passes with the coupling leg reverted, while no change, a version "
+          "move, a comment edit, a removed row and an added row (with a notice) pass, and an unresolvable "
+          "or option-shaped base and a malformed base pin are cannot-evaluate and pass with the leg "
+          "reverted; without --base the leg is reported as not evaluated; the exit codes are 0, 1 and 2; "
+          "the live tree passes)".format(len(EXECUTED)))
     return 0
 
 
@@ -968,6 +1257,9 @@ def main():
     if len(argv) >= 2 and argv[-2] == "--execution-report" and os.path.isabs(argv[-1]) \
             and argv[:-2] in ([], ["--self-test"]):
         report_path, argv = argv[-1], ["--self-test"]
+    # The base-coupling leg: --base REF, alone (the REF itself is checked where it is used).
+    if len(argv) == 2 and argv[0] == "--base":
+        return run_gate(ROOT, base=argv[1])
     if argv not in ([], ["--self-test"]):
         print("error: unrecognized arguments {!r}; fail closed".format(argv), file=sys.stderr)
         return 2
