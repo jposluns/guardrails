@@ -3194,6 +3194,11 @@ def self_test(report_path=None):
         no_entry_bump = missing.replace('"2.1.287"', '"2.1.288"')
         check("shape/declared-exception-keeps-entry-rule-1",
               shape(base_shape, no_entry_bump, declare(base_shape, no_entry_bump)), (1, []))
+        # A declared raise whose candidate has two `#   ceiling` lines, or none, has no entry block: the
+        # declaration excuses every changed line, so the anchor-count finding alone keeps it red.
+        anchor_heads = [clean.replace(ceiling, ceiling + ceiling), clean.replace(ceiling, "")]
+        check("shape/declared-raise-anchor-count-1",
+              [shape(base_shape, head, declare(base_shape, head)) for head in anchor_heads], [(1, [])] * 2)
         # Several raises in one comparison (a push or a merge train carrying two): one entry per raise,
         # compared entry by entry, with continuation lines between them.
         two_raises = raised(base_shape, opened("2026-11-15") + entry_line("(rows a.1 to a.3).")
@@ -3285,6 +3290,11 @@ def self_test(report_path=None):
               shape(base_shape, missing, module=_mutant(
                   tmp, '    if not block:\n        return ["the raise',
                   '    if not block:\n        return [] and ["the raise'))[0], 0)
+        anchor_mutant = _mutant(tmp, '        if new > old:\n            findings.append("the raise {} -> {} has no',
+                                '        if False:\n            findings.append("the raise {} -> {} has no')
+        check("revert/shape-anchor-count-red",
+              [shape(base_shape, head, declare(base_shape, head), module=anchor_mutant)[0] for head in anchor_heads],
+              [0, 0])
         check("revert/shape-unreadable-base-red",
               shape(None, clean, module=_mutant(tmp, '_shape_text(base_raw, "the base "',
                                                 '_shape_text(base_raw or head_raw, "the base "'))[0], 0)
@@ -3360,9 +3370,12 @@ def self_test(report_path=None):
         git_env = release_cut.fixture_environment(tmp / "shape-git-home")
 
         def git_fixture(repo, *args):
+            # The three F-367 pins are spelled literally in option position, ahead of *args, so no fixture
+            # commit leaves auto-maintenance behind (git_env, from fixture_environment, carries none).
             result = subprocess.run(
                 ["git", "-C", str(repo), "-c", "core.hooksPath=" + str(tmp / "shape-no-hooks"),
-                 "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", *args],
+                 "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false",
+                 "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false", *args],
                 capture_output=True, env=git_env, timeout=60)
             if result.returncode != 0:
                 print("SELF-TEST HARNESS ERROR: fixture git {} failed: {}".format(
