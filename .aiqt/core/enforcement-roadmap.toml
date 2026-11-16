@@ -203,8 +203,10 @@ status = "enforced"
 mechanisms = ["gate:ci-parity", "gate:relied-exit-pipes", "hook:gate-weakening-guard"]
 
 [[rule]]
+# partial: no linked mechanism checks gensrc.6 to gensrc.8, the obligation to keep case-dependent
+# behaviour in one canonical source and to test the implementation against its checkable cases.
 corpus-id = "gensrc"
-status = "enforced"
+status = "partial"
 mechanisms = ["gate:adapters-drift", "gate:agents-drift", "gate:changelog-drift", "gate:char-policy-drift", "gate:claude-drift", "gate:crosswalk-schema-drift", "gate:cursor-drift", "gate:disclosure-drift", "gate:draft-site-drift", "gate:enforceability-drift", "gate:enforcement-register-drift", "gate:first-pin-demo-drift", "gate:gensrc-failclose", "gate:gensrc-registry-drift", "gate:hooks-drift", "gate:manifest-gen-drift", "gate:mappings-page-drift", "gate:notice-drift", "gate:reference-roster-drift", "gate:renderers-drift", "gate:roadmap-drift", "gate:rules-drift", "gate:secret-patterns-drift", "gate:skill-drift", "gate:worker-pack-drift", "hook:gensrc-edit-guard"]
 
 [[rule]]
