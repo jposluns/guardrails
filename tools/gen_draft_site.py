@@ -116,7 +116,8 @@ SCHEME_BUTTON = (
 # they read (_MAPPINGS_SOURCES). The self-test rows under "gensrc/" hold these sources to the built pages
 # (VERSION, changelog.toml and STATUS_SOURCE through the rendered text a page carries; HOOKS_SOURCE and
 # _MAPPINGS_SOURCES through the pages whose data carries the token or the mappings component, _data_carriers,
-# each set held to the pages whose bytes change with that input) and to STATUS_LINES. Not declared, a disclosed
+# each set held to the pages whose bytes change with that input, and _MAPPINGS_SOURCES itself to the inputs
+# _mappings_inputs derives from the renderers' code) and to STATUS_LINES. Not declared, a disclosed
 # residual: every page's navigation (_nav) shows a nav item only when a sibling page is built at that item's
 # path, so a page's bytes can change when a sibling data file under the same draft-src/ folder is added,
 # removed, or its path field changes. Directory sources here name content inputs (as .aiqt/standards/ does),
@@ -1872,7 +1873,8 @@ def run(root, check, outputs=None):
 
 
 # The register rows: the declared sources of each page entry hold to what its built page carries (or, for the
-# hook count and the mappings bodies, what its data carries), and each STATUS_LINES file has its own entry. Each row id is a key of the dict _register_findings returns.
+# hook count and the mappings bodies, what its data carries), and each STATUS_LINES file has its own entry.
+# Each row id is a key of the dict _register_findings returns.
 _FOOTER_ROW = "gensrc/footer-pages-declare-version-and-changelog"
 _NOTE_ROW = "gensrc/status-note-pages-declare-status-source"
 _LINES_ROW = "gensrc/status-lines-registered"
@@ -1881,7 +1883,10 @@ _HOOKS_ROW = "gensrc/hook-count-pages-declare-hooks-source"
 _MAPPINGS_ROW = "gensrc/mappings-pages-declare-renderer-sources"
 _FOOTER_SOURCES = ("VERSION", "changelog.toml")
 # The inputs a mappings component renders from: the 2 data folders _mappings_data reads and the 4 modules
-# whose functions load and render them.
+# whose functions load and render them. The self-test holds this tuple to _mappings_inputs, which derives the
+# same set from this file's own text (the functions _MAPPINGS_RENDERER calls and the modules and folders they
+# use), so an entry dropped here, or one gained that no renderer reads, turns the self-test red.
+_MAPPINGS_RENDERER = "_c_mappings"
 _MAPPINGS_SOURCES = (".aiqt/standards/", ".aiqt/core/rules/", "tools/gen_mappings.py", "tools/gen_rules.py",
                      "tools/_standards.py", "tools/gen_agents.py")
 # This generator's stem in the registry's discovery (tools/gen_gensrc.py discover_declarations).
@@ -1959,21 +1964,102 @@ def _naming_entries(entries, rel):
     return found
 
 
+def _page_strings(page):
+    """Every string value of a page model's data, as the TOML parse decoded it: the title, label, heading,
+    meta and description, and every string nested in the body components (arrays and tables included). A
+    TOML comment is not among them, and an escape such as \\u0024 is decoded."""
+    stack = [page[key] for key in ("title", "label", "heading", "meta", "description", "body")]
+    found = []
+    while stack:
+        value = stack.pop()
+        if isinstance(value, str):
+            found.append(value)
+        elif isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+    return found
+
+
 def _data_carriers(sites=SITES, root=ROOT):
-    """{row id: frozenset of page targets} for the register rows held from the data files rather than the
-    built text (a hook count renders as a bare number, a mappings body has no fixed marker): _HOOKS_ROW maps to
-    the pages whose data file text carries the $HOOK_COUNT token, and _MAPPINGS_ROW to the pages with a body
-    component "mappings"."""
-    hooks, mappings = set(), set()
+    """{row id: frozenset of page targets}, found from the page models _load_pages returns (its bounded read
+    and TOML parse; no data file is read again): _FOOTER_ROW maps to the pages with a body component
+    "control", _NOTE_ROW to the pages with a decoded value carrying the $OPF_STATUS token, _HOOKS_ROW to the
+    pages with a decoded value carrying the $HOOK_COUNT token, and _MAPPINGS_ROW to the pages with a body
+    component "mappings". The register rows hold the last 2 from these sets (a hook count renders as a bare
+    number, a mappings body has no fixed marker). A token is looked for in the decoded values, so a TOML
+    comment naming it is no carrier and an escaped spelling is one; a token in a value that renders as
+    escaped text rather than through _inline counts too, and the self-test's -found rows then turn red, so
+    the sets fail closed rather than miss a page."""
+    found = {_FOOTER_ROW: set(), _NOTE_ROW: set(), _HOOKS_ROW: set(), _MAPPINGS_ROW: set()}
     for site in sites:
         for page in _load_pages(Path(root) / site["src"], site["src"]):
             target = "{}/{}".format(site["root"], page["rel"])
-            if any(component["component"] == "mappings" for component in page["body"]):
-                mappings.add(target)
-            with open(Path(root) / page["where"], encoding="utf-8") as handle:
-                if "$HOOK_COUNT" in handle.read():
-                    hooks.add(target)
-    return {_HOOKS_ROW: frozenset(hooks), _MAPPINGS_ROW: frozenset(mappings)}
+            names = {component["component"] for component in page["body"]}
+            strings = _page_strings(page)
+            for row, carries in ((_FOOTER_ROW, "control" in names),
+                                 (_NOTE_ROW, any("$OPF_STATUS" in value for value in strings)),
+                                 (_HOOKS_ROW, any("$HOOK_COUNT" in value for value in strings)),
+                                 (_MAPPINGS_ROW, "mappings" in names)):
+                if carries:
+                    found[row].add(target)
+    return {row: frozenset(targets) for row, targets in found.items()}
+
+
+def _mappings_inputs(source, root=ROOT):
+    """The inputs a mappings component renders from, derived from `source` (this file's text) alone. From
+    the function _MAPPINGS_RENDERER, every module-level function it names is walked, directly or through
+    another; the inputs are "tools/<module>.py" for each module-level import of a module in root's tools/
+    folder whose bound name a walked function uses, and "<a>/<b>/" for each ROOT / "<a>" / "<b>" path (string
+    parts only) a walked function builds. ValueError when `source` defines no _MAPPINGS_RENDERER."""
+    import ast
+    tree = ast.parse(source)
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    if _MAPPINGS_RENDERER not in functions:
+        raise ValueError("no module-level function {}".format(_MAPPINGS_RENDERER))
+    imported = {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            for alias in node.names:
+                imported[alias.asname or alias.name] = node.module
+    walked, pending, inputs = set(), [_MAPPINGS_RENDERER], set()
+    while pending:
+        name = pending.pop()
+        if name in walked:
+            continue
+        walked.add(name)
+        nodes = list(ast.walk(functions[name]))
+        lefts = {id(node.left) for node in nodes if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)}
+        for node in nodes:
+            if isinstance(node, ast.Name) and node.id in functions:
+                pending.append(node.id)
+            elif isinstance(node, ast.Name) and node.id in imported:
+                rel = "tools/{}.py".format(imported[node.id].replace(".", "/"))
+                if (Path(root) / rel).is_file():
+                    inputs.add(rel)
+            elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and id(node) not in lefts:
+                parts, base = [], node
+                while isinstance(base, ast.BinOp) and isinstance(base.op, ast.Div) \
+                        and isinstance(base.right, ast.Constant) and isinstance(base.right.value, str):
+                    parts.insert(0, base.right.value)
+                    base = base.left
+                if isinstance(base, ast.Name) and base.id == "ROOT" and parts:
+                    inputs.add("/".join(parts) + "/")
+    return inputs
+
+
+def _mappings_sources_findings(source, declared, root=ROOT):
+    """Findings for `declared` (a _MAPPINGS_SOURCES tuple) against _mappings_inputs(source): each derived
+    input it lacks, and each entry it names that no walked renderer reads. Empty when the 2 sets are equal
+    (order and a repeated entry do not matter)."""
+    derived = _mappings_inputs(source, root)
+    return (["_MAPPINGS_SOURCES lacks {}, which the mappings renderers read".format(rel)
+             for rel in sorted(derived - set(declared))]
+            + ["_MAPPINGS_SOURCES names {}, which no mappings renderer reads".format(rel)
+               for rel in sorted(set(declared) - derived)])
 
 
 def _other_declarations(root=ROOT):
@@ -1994,8 +2080,7 @@ def _register_findings(entries, outputs, footer, note, others, carriers):
     carry the text is a finding too. `carriers` is _data_carriers() of the live data: a page entry among
     its _HOOKS_ROW pages must declare HOOKS_SOURCE, and one among its _MAPPINGS_ROW pages every source of
     _MAPPINGS_SOURCES; a page entry outside those pages declaring any of them is a finding too. A page entry
-    whose target is not among `outputs` is a finding of its
-    own row. Each STATUS_LINES file must have exactly 1 entry, of kind "block", naming this generator and
+    whose target is not among `outputs` is a finding of its own row. Each STATUS_LINES file must have exactly 1 entry, of kind "block", naming this generator and
     STATUS_SOURCE among its sources, apart from a file on _STATUS_LINES_UNREGISTERED, which must have
     none. `others` is [(stem, declaration)] for every other generator of the registry (_other_declarations);
     a STATUS_LINES file named by an entry there, by its exact target or by an ancestor tree target, is a
@@ -3232,18 +3317,11 @@ def _self_test():
                                  carriers)
         return sorted(key for key, found in got.items() if found)
 
-    # The pages that carry the control strip and the status note, found from the data files on their own (a
-    # body component "control"; the $OPF_STATUS token in the file's text), must be the pages whose built text
-    # carries the rendered strip and note, and neither set is empty, so the rows below are never vacuous.
-    control_pages, note_pages = set(), set()
-    for data_site in SITES:
-        for page in _load_pages(ROOT / data_site["src"], data_site["src"]):
-            target = "{}/{}".format(data_site["root"], page["rel"])
-            if any(component["component"] == "control" for component in page["body"]):
-                control_pages.add(target)
-            with open(ROOT / page["where"], encoding="utf-8") as handle:
-                if "$OPF_STATUS" in handle.read():
-                    note_pages.add(target)
+    # The pages that carry the control strip and the status note, found from the data files on their own
+    # (_data_carriers: a body component "control"; the $OPF_STATUS token in a decoded value), must be the
+    # pages whose built text carries the rendered strip and note, and neither set is empty, so the rows below
+    # are never vacuous.
+    control_pages, note_pages = carriers[_FOOTER_ROW], carriers[_NOTE_ROW]
     footer_carriers = {target for target, text in live_outputs.items() if footer in text}
     note_carriers = {target for target, text in live_outputs.items() if live_note in text}
     expect("gensrc/control-pages-found", control_pages and control_pages == footer_carriers,
@@ -3288,6 +3366,47 @@ def _self_test():
             if red_rows(dropped) != [row]:
                 missed.append((target, red_rows(dropped)))
         expect(name, pages and not missed, missed)
+    # _MAPPINGS_SOURCES holds to the inputs derived from this file's own text (_mappings_inputs), which name
+    # at least 1 folder and 1 module, so the pin is never vacuous. The rows after it hold the check itself on
+    # the derived set (not on the tuple, so they neither shrink with it nor turn red beside it): its reverse
+    # order and a repeated entry are clean, and each derived input dropped, an input gained that no renderer
+    # reads, or a renderer reading another folder is a finding.
+    derived = tuple(sorted(_mappings_inputs(own)))
+    expect("gensrc/mappings-sources-derived", not _mappings_sources_findings(own, _MAPPINGS_SOURCES)
+           and any(rel.endswith("/") for rel in derived) and any(rel.endswith(".py") for rel in derived),
+           (_mappings_sources_findings(own, _MAPPINGS_SOURCES), derived))
+    expect("gensrc/mappings-sources-order-and-repeat-clean", not _mappings_sources_findings(own, derived[::-1])
+           and not _mappings_sources_findings(own, derived + derived[:1]), derived)
+    for rel in derived:
+        got = _mappings_sources_findings(own, tuple(item for item in derived if item != rel))
+        expect("gensrc/mappings-sources-drop-{}-red".format(rel), len(got) == 1 and rel in got[0], got)
+    got = _mappings_sources_findings(own, derived + (HOOKS_SOURCE,))
+    expect("gensrc/mappings-sources-gain-red", len(got) == 1 and HOOKS_SOURCE in got[0], got)
+    start = own.index("\ndef _mappings_data():")
+    end = own.index("\n\n\n", start)
+    loader = own[start:end]
+    got = _mappings_sources_findings(own[:start] + loader.replace('"rules")', '"rules-moved")') + own[end:],
+                                     derived) if loader.count('"rules")') == 1 else []
+    expect("gensrc/mappings-sources-renderer-reads-another-folder-red",
+           len(got) == 2 and ".aiqt/core/rules-moved/" in got[0], got)
+    # The carriers come from decoded values: in a synthetic data folder, a TOML comment naming both tokens
+    # (a.toml) and a literal string spelling \u0024 (c.toml) carry neither token, while a basic string spelling
+    # each token as the escape \u0024 (b.toml) and a plain token in a body value (d.toml) carry it.
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-carriers-") as tmp:
+        os.makedirs(Path(tmp) / "draft-src")
+        head = 'path = "{}/index.html"\ntitle = "T"\nkind = "document"\nlabel = "L"\nheading = "H"\n'
+        for name, text in (
+                ("a", "# $HOOK_COUNT $OPF_STATUS\n[[body]]\ncomponent = \"prose\"\nhtml = \"<p>P</p>\"\n"),
+                ("b", "[[body]]\ncomponent = \"prose\"\nhtml = \"<p>\\u0024HOOK_COUNT \\u0024OPF_STATUS</p>\"\n"),
+                ("c", "[[body]]\ncomponent = \"prose\"\nhtml = '<p>\\u0024HOOK_COUNT \\u0024OPF_STATUS</p>'\n"),
+                ("d", "[[body]]\ncomponent = \"prose\"\nhtml = \"<p>$HOOK_COUNT</p>\"\n")):
+            with open(Path(tmp) / "draft-src" / (name + ".toml"), "w", encoding="utf-8") as handle:
+                handle.write(head.format(name) + text)
+        got = _data_carriers(({"src": "draft-src", "root": "x"},), tmp)
+    expect("gensrc/data-carriers-skip-comments-and-literals",
+           not {"x/a/index.html", "x/c/index.html"} & (got[_HOOKS_ROW] | got[_NOTE_ROW]), got)
+    expect("gensrc/data-carriers-decode-escapes",
+           got[_HOOKS_ROW] == {"x/b/index.html", "x/d/index.html"} and got[_NOTE_ROW] == {"x/b/index.html"}, got)
     # A block entry is never a page: page_targets() leaves it out, and the template pages the site gates read
     # (tools/_template_pages.py) are exactly the page targets, so a block entry neither becomes a template page
     # nor moves a site's template base.
@@ -3660,8 +3779,9 @@ def _self_test():
           "own, and its descriptor closed once), no draft-src data file of either site typing a number (digits or a number word) "
           "with at most 4 words before \"hooks\" once TOML escapes and HTML character references are "
           "decoded, --check exit codes and the register rows with their flips, each source dropped from "
-          "every control-strip, status-note, hook-count and mappings page entry, and status lines named by an exact or ancestor "
-          "tree target in any generator's declaration)")
+          "every control-strip, status-note, hook-count and mappings page entry, the carriers read from "
+          "decoded data values, _MAPPINGS_SOURCES held to the inputs derived from the mappings renderers, "
+          "and status lines named by an exact or ancestor tree target in any generator's declaration)")
     return 0
 
 
