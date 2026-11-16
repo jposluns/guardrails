@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "02697d4cd8e2674c00a29e539149912304bd6e111277f37774c0db46973bfd64"
+tree-sha256 = "a95851535409fc47d03aef79fbf2c6fff43cd11ad4171dcdf85711d7e1226f21"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -67,8 +67,8 @@ sha256 = "566cdd353538798199eff9aef9aadb403e31ba9dda366b41d8abcc1ee560761c"
 
 [[sources]]
 path = ".aiqt/core/enforcement-roadmap.toml"
-bytes = 12873
-sha256 = "e642a8108fa7ba13525e6a8baa3a570f817227e8ecf9f9445d868776420b8167"
+bytes = 13061
+sha256 = "fa5e31a41336ec8fc1fcb92d3b5b74f0faf5dba66f319234ce28778e858409ff"
 
 [[sources]]
 path = ".aiqt/core/gates/byte-canon.toml"
@@ -112,8 +112,8 @@ sha256 = "a774daf2e670595fbdb115b6bacd50181130e9b987615e21df8a8d7001af8c0f"
 
 [[sources]]
 path = ".aiqt/core/instruction-budget.toml"
-bytes = 12112
-sha256 = "1eda20f946ea940003d81157045912ef2fec84ab6edb1c5873889f23a7417ef0"
+bytes = 12095
+sha256 = "816ab129d19ffc3c16ab80435acd2b9dcc8a6bef284b4c5d37606155fa309cfe"
 
 [[sources]]
 path = ".aiqt/core/migration/crosswalk-schema.toml"
@@ -2402,8 +2402,8 @@ sha256 = "b845e896ec04415f73c65ed5c52ccd0e03db62bc889f8d9a1e5cc72c196117c4"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 672888
-sha256 = "959644441996796592a2ee58e41358177ed88188ddccfd0b16575f4ad32d61e1"
+bytes = 673182
+sha256 = "6ab1ba1c5bb86d80558b04262f0114801d8d3ff21fd515fb4b944bc15aa8922a"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3997,8 +3997,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 734467
-sha256 = "669b216eb119f32cc880290887523df0f25da74fbac9b46a62472d399ca6d5da"
+bytes = 734761
+sha256 = "a449b98c686088f6e5a20f92a44cf59629021a444f78f0720d97e9d082c913df"
 
 [[sources]]
 path = "site/evidence.html"
@@ -4557,8 +4557,8 @@ sha256 = "86d55d3f474a61803df772ded86a9f9d1ffe74bc9f83b2f36fb1a643bf706ab5"
 
 [[sources]]
 path = "tools/gen_enforcement_register.py"
-bytes = 96215
-sha256 = "8fc0abff09ff1af26ff63ea9887bbaf368506ceab801f3cd57a5aeeec5580968"
+bytes = 100529
+sha256 = "a8b535ba1229883de21d35f661ec76332bb3844682f9f1bd9de386a925765a0b"
 
 [[sources]]
 path = "tools/gen_first_pin_demo.py"

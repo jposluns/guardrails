@@ -110,9 +110,9 @@
 #                        2026-10-31 to raise the ratchet by exactly the measured delta, when
 #                        generated-artefact-source-only gained its paragraph on case-dependent behaviour
 #                        described in more than one maintained place (rows gensrc.6 to gensrc.8): measured
-#                        PACK 136292 at main 3fd91b38 -> 136809 (+517 units); rule files 119669 -> 120186;
-#                        managed block 360 and file headers 16263 unchanged. The ratchet rises by the measured
-#                        delta, 136304 + 517 = 136821, within the maintainer's authorization of 2026-11-08 for
+#                        PACK 136292 -> 136809 (+517 units); rule files 119669 -> 120186; managed block 360
+#                        and file headers 16263 unchanged. The ratchet rises by the measured delta,
+#                        136304 + 517 = 136821, within the maintainer's authorization of 2026-11-08 for
 #                        raises up to 148000.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->

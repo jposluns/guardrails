@@ -6,7 +6,8 @@ ledger (.aiqt/enforceability.json, authored by tools/gen_enforceability.py). For
 rules it shows the shipped mechanical control(s) linked to it, or an explicit status that enforcement is
 not built yet (none), or that it is intended but not built (pending, with a one-line description of the
 intended build). The register never RE-AUTHORS linkage: which gates and hooks cite a rule lives once, in
-the ledger; the enforcement-roadmap TOML records only the human DECISION (status and pending intent) and
+the ledger; the enforcement-roadmap TOML records only the human DECISION (status, pending intent, and the part of a
+partial rule no linked control checks) and
 restates each enforced rule's linkage so the roadmap is reviewable standalone, and the generator
 CROSS-VALIDATES that restatement against the ledger so the two can never fork.
 
@@ -27,7 +28,8 @@ shipped gate or hook cites the rule, and each mechanism carries its residual (wh
 the ledger. A linked mechanism may cover only part of a rule's violation surface. "partial" records the same
 linkage and states outright that the linked mechanisms are known to cover only part of the rule; each
 mechanism's residual names what that mechanism does not catch, which need not list every uncovered clause of
-every rule it is linked to. A rule whose every linked mechanism is class c (partial by the class legend) must
+every rule it is linked to, and a partial row may carry a roadmap description naming the part of the rule no
+linked control checks, shown after its mechanisms. A rule whose every linked mechanism is class c (partial by the class legend) must
 be "partial"; "enforced" there is refused as an overclaim (exit 2). So the views never show the word
 Enforced as a status: a linked rule displays as "Gate-linked (class a)" when at least one linked gate is
 class a, "Gate-linked (class c only)" when every linked gate is class c, "Hook-linked" when only hooks
@@ -158,7 +160,7 @@ EXPLAINER = (
     "runs for it unless it is installed. A status ending in partial records the same linkage and states "
     "that the "
     "linked mechanisms are known to cover only part of the rule; their residuals name what they do not "
-    "cover. No control means no shipped control cites the rule yet; pending means the "
+    "cover, and the row may also name the part of the rule no linked control checks. No control means no shipped control cites the rule yet; pending means the "
     "same, and its description states the intended build. Each mechanism's class and residual describe the "
     "boundary of what it checks, and a linked mechanism may cover only part of a rule's violation surface. "
     "The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim "
@@ -170,6 +172,9 @@ EXPLAINER = (
 # no-control row says only that no shipped control cites the rule (not that one will be built).
 COLUMN_HEADING = "Linked controls or planned build"
 NO_CONTROL_TEXT = "No shipped control cites this rule."
+# The lead-in that joins a partial row's roadmap description (the part of the rule no linked control
+# checks) to its mechanism list in the same cell, single-sourced for both views.
+PARTIAL_GAP_LEAD = ". Not covered: "
 # The accessible name of the HTML rules table, emitted as a visually hidden caption (the site's vh class, as
 # on the evidence page) so a screen reader announces what the table holds. The Markdown view has no caption.
 TABLE_CAPTION = "Rule status and linked controls or planned build"
@@ -366,7 +371,10 @@ def load_roadmap(path, ledger_cids, linkage):
             if mechanisms != ledger_refs:
                 raise ValueError("{}: {} mechanisms {} do not match the ledger linkage {}".format(
                     where, status, mechanisms, ledger_refs))
-            if has_desc:
+            # A partial row MAY carry a description naming the part of the rule no linked control checks
+            # (the register shows it after the mechanisms); an enforced row claims no such gap, so a
+            # description there is refused.
+            if has_desc and status != "partial":
                 raise ValueError("{}: an {} row must not carry a description".format(where, status))
         else:  # prose-only in the ledger: not built, so none or pending only
             if status in LINKED:
@@ -534,6 +542,8 @@ def render_md(rows, roadmap, controls, enforced_union):
         status = row["status"]
         if status in LINKED:
             how = _enforced_cell_md(row["mechanisms"], controls)
+            if row["description"]:
+                how += PARTIAL_GAP_LEAD + row["description"]
         elif status == "pending":
             how = row["description"]
         else:
@@ -591,6 +601,8 @@ def render_html(rows, roadmap, controls, enforced_union):
                              .format(anchor=_a("{}-{}".format(ctrl["kind"], ctrl["id"])),
                                      ref=_t(ref), sfx=_t(_how_suffix(ctrl)), cls=_t(ctrl["class"])))
             how = "; ".join(cells)
+            if row["description"]:
+                how += _t(PARTIAL_GAP_LEAD + row["description"])
         elif status == "pending":
             how = _t(row["description"])
         else:
@@ -827,7 +839,8 @@ def page_content_strings(root):
         mechanism block emits verbatim. "entry" is the entry point, which carries the hook matcher
         ("<event> on <matcher>") and the gate script path.
       - "residue"     each enforced mechanism's ledger residue (rendered verbatim in both views)
-      - "description" each pending rule's roadmap description (the How cell for a pending row)
+      - "description" each pending rule's roadmap description (the How cell for a pending row) and each
+        partial rule's description (shown after its mechanisms in the How cell)
     Every value is the RAW string (NOT whitespace-collapsed) so a downstream invisible/non-ASCII reject
     judges the exact bytes the page ships. Scoped to what the page RENDERS: only mechanisms that appear in
     an enforced row (enforced_union) contribute mechanism channels, exactly as render_md / render_html
@@ -848,7 +861,7 @@ def page_content_strings(root):
         out.append(("title", cid, title))
         out.append(("corpus-id", cid, cid))
         row = roadmap[cid]
-        if row["status"] == "pending" and row["description"]:
+        if row["status"] in ("pending", "partial") and row["description"]:
             out.append(("description", cid, row["description"]))
     for ref in sorted(enforced_union):
         ctrl = controls[ref]
@@ -1335,6 +1348,31 @@ def self_test_main():
             if "<td>Gate-linked (class c only), partial</td>" not in chtml:
                 failures.append("class-c-only tree: the page must label a class c only rule as such")
 
+        # (a6) A partial row's description (the part of the rule no linked control checks) is shown after
+        # its mechanisms in both views, HTML-escaped on the page, and is enumerated for the overclaim scan.
+        gap = "A self-test part of rule bb & its <gap> that no linked control checks."
+        ptree = _build(tmp / "partial-desc")
+        replace_in(ptree / ROADMAP, 'corpus-id = "rulebb"\nstatus = "partial"\nmechanisms = ["gate:gate-alpha"]',
+                   'corpus-id = "rulebb"\nstatus = "partial"\nmechanisms = ["gate:gate-alpha"]\n'
+                   'description = "' + gap + '"')
+        if run_quiet(ptree, check=False) != 0 or run_quiet(ptree, check=True) != 0:
+            failures.append("partial-desc tree: generation and a drift-clean regeneration expected exit 0")
+        else:
+            pmd = (ptree / MD_REL).read_text(encoding="utf-8")
+            phtml = (ptree / HTML_REL).read_text(encoding="utf-8")
+            if ("| `rulebb` | Gate-linked (class a), partial | `gate:gate-alpha`, class a" + PARTIAL_GAP_LEAD
+                    + gap + " |") not in pmd:
+                failures.append("partial-desc tree: the partial description must follow the mechanisms in "
+                                "ENFORCEMENT.md")
+            if ("<code>gate:gate-alpha</code></a>, class a" + _t(PARTIAL_GAP_LEAD + gap) + "</td>") not in phtml:
+                failures.append("partial-desc tree: the partial description must follow the mechanisms, "
+                                "escaped, on the generated page")
+            if ("description", "rulebb", gap) not in page_content_strings(ptree):
+                failures.append("partial-desc tree: the partial description must be enumerated for the "
+                                "overclaim scan")
+            if md.is_file() and PARTIAL_GAP_LEAD.strip(". ") in md.read_text(encoding="utf-8"):
+                failures.append("conformant tree: a partial row without a description must show no gap text")
+
         # (b) A drifted ENFORCEMENT.md fails --check (exit 1).
         if md.is_file():
             md.write_text(md.read_text(encoding="utf-8") + "\n", encoding="utf-8")
@@ -1430,6 +1468,21 @@ def self_test_main():
                                      'corpus-id = "ruledd"\nstatus = "none"\nmechanisms = []',
                                      'corpus-id = "ruledd"\nstatus = "none"\nmechanisms = []\n'
                                      'description = "should not be here"'))
+        # (j2) An enforced row carrying a description (only a partial row may name an uncovered part).
+        expect2("roadmap-enforced-desc",
+                lambda t: replace_in(t / ROADMAP,
+                                     'corpus-id = "ruleaa"\nstatus = "enforced"\n'
+                                     'mechanisms = ["gate:gate-alpha"]',
+                                     'corpus-id = "ruleaa"\nstatus = "enforced"\n'
+                                     'mechanisms = ["gate:gate-alpha"]\ndescription = "should not be here"'))
+        # (j3) A partial row's description carrying a NEWLINE (it renders into a table cell).
+        expect2("roadmap-partial-desc-newline",
+                lambda t: replace_in(t / ROADMAP,
+                                     'corpus-id = "rulebb"\nstatus = "partial"\n'
+                                     'mechanisms = ["gate:gate-alpha"]',
+                                     'corpus-id = "rulebb"\nstatus = "partial"\n'
+                                     'mechanisms = ["gate:gate-alpha"]\n'
+                                     'description = "First line.\\nSecond line."'))
         # (k) A pending row missing its description.
         expect2("roadmap-pending-nodesc",
                 lambda t: replace_in(t / ROADMAP,
@@ -1606,14 +1659,16 @@ def self_test_main():
           "gate-linked partial, hook-linked, no control, and pending all present and no rule labelled "
           "Enforced, a class c only gate link labelled as such (and as partial) in both views and the summary, "
           "stable anchors, the rules table's visually hidden caption, the composed page chrome, the class "
-          "legend, and each "
+          "legend, a partial row's description shown after its mechanisms in both views and enumerated for "
+          "the overclaim scan, and each "
           "mechanism's ledger residual rendered VERBATIM (a tag-shaped token survives as visible text, a "
           "three-backtick run is wrapped in a lengthened fence, and a MULTI-PARAGRAPH residue round-trips "
           "verbatim inside its own Markdown fence and its HTML blockquote); the display-fidelity assertion "
           "fails closed on a truncated residual block or a residue missing from the Markdown; a drifted "
           "Markdown target AND a hand edit to the generated page chrome each fail --check (exit 1); and an "
           "unknown roadmap top-level or row key, a missing or extra roadmap row, an enforced/partial/none/"
-          "mechanism mismatch against the ledger linkage, a none row with a description, a pending row missing its "
+          "mechanism mismatch against the ledger linkage, a none or enforced row with a description, a pending "
+          "row missing its "
           "description or carrying a mechanism or carrying only whitespace, a NEWLINE in a table-cell "
           "description, an unsupported lint: reference, a stale committed ledger, an en dash or a raw tab "
           "in a residue, a boolean roadmap version, a site shell missing its content token, and an "
