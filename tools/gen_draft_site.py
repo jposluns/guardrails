@@ -1429,7 +1429,9 @@ def _body_html(site, page):
 # target="_blank", rel with noopener and noreferrer, and the "(opens in a new tab)" hint in its text or
 # aria-label. Each markup construct html.parser and a browser can end at different places is a finding
 # wherever it sits on the page (_site_markup.split_constructs: any "<!" but an ordinary comment and
-# "<!doctype html>", any "<?", any "</" not followed by an ASCII letter), attribute names
+# "<!doctype html>", any "<?", any "</" not followed by an ASCII letter; an ordinary comment's text is
+# scanned too, so a "<!--" inside an attribute value cannot hide a later construct), a literal "<" or ">"
+# inside a start tag is a finding (an attribute value writes it as "&lt;" or "&gt;"), attribute names
 # are folded to lower case in ASCII only, as a browser folds them, and every element is held to the
 # template's element allowlist in its context (_site_markup: no math, no raw-text element outside the head,
 # the head ended by text as in a browser, and inside svg only the shell's own svg elements), the definition
@@ -1559,13 +1561,13 @@ def _inline_https(value, cell=False):
     page) when the markup holds a markup declaration or processing instruction other than an ordinary comment
     (_site_markup.split_constructs; "<![" and "<!-->" among them), when it uses an element outside the inline
     element allowlist (_site_markup.INLINE_ELEMENTS, and td as well in a table's raw cell, `cell` true; no svg
-    or math, no raw-text element, so html.parser and a browser read the same elements here), when it ends inside a construct html.parser still holds back (an
+    or math, no raw-text element, so html.parser and a browser read the same elements here), when a start tag
+    holds a literal "<" or ">" (an attribute value writes it as "&lt;" or "&gt;";
+    _site_markup.literal_in_start_tag), when it ends inside a construct html.parser still holds back (an
     unterminated start tag, say, which would run on into the template's markup; _site_markup.unfinished),
-    and when a start tag's values cannot be placed in the markup exactly. Each
-    fragment is read alone: a comment opened by an earlier fragment of the same page is not known here, so an
-    https scheme written as a link attribute value inside it in a later fragment is written in lower case
-    although the page reads it as a comment. That changes only the letter case of those 8 characters; the
-    link guard reads the whole page and reads those bytes as a comment too, so no link escapes it this way."""
+    and when a start tag's values cannot be placed in the markup exactly. Each fragment is read alone, and
+    a comment it opens must also close in it (split_constructs reports a "<!--" with no "-->" after it), so
+    no fragment is read inside a comment an earlier fragment of the page opened."""
     constructs = _site_markup.split_constructs(value)
     if constructs:
         raise InlineMarkupRefused("inline markup holds a markup declaration or processing instruction other "
@@ -2306,7 +2308,9 @@ def _self_test():
     expect("component/figures", figures == (
         '<div class="wide"><div class="figures"><div class="fig"><span class="num">17</span>'
         '<span class="cap">frameworks</span></div></div></div>'), figures)
-    table = rendered('component = "table"\ncaption = "C"\nsticky = true\nfixed = true\ncols = ["w26", "w17"]\n'
+    # The raw cell (a whole td element) is read with CELL_ELEMENTS; a refusal of it fails this row by name.
+    table = accepted("component/table", rendered,
+                     'component = "table"\ncaption = "C"\nsticky = true\nfixed = true\ncols = ["w26", "w17"]\n'
                      'head = ["A", "B"]\nrows = [["x", "<td class=\\"id\\"><code>y</code></td>"]]\n')
     expect("component/table", table == (
         '<div class="wide"><div class="tablewrap bounded" tabindex="0"><table class="sticky fixed">'
@@ -2605,23 +2609,25 @@ def _self_test():
         reader.feed(' <a href="HTTPS://example.com/v">')
         reader.close()
         expect(name, (reader.unplaced, reader.values) == want, (reader.unplaced, reader.values))
-    # Each value is placed by the tokenizer, so a quoted ">" before the link attribute, scheme-shaped text deeper
-    # in a URL or inside another attribute, and every quoting form are handled; each case has a twin that the
-    # rule leaves as written.
+    # Each value is placed by the tokenizer, so a ">" written as "&gt;" before the link attribute (a literal
+    # quoted ">" is refused, below; links/start-tag-values-placed places one), scheme-shaped text deeper in a
+    # URL or inside another attribute, and every quoting form are handled; each case has a twin that the rule
+    # leaves as written.
     for name, text, want in (
-            ("links/inline-quoted-gt-before-href-lowercased",
-             '<a title="a>b" href="HTTPS://example.com/v"' + newtab_tail, '<a title="a>b" href="https://example.com/v"' + newtab_tail),
-            ("links/inline-quoted-gt-before-href-twin-unchanged",
-             '<a title="a>b" href="https://example.com/v"' + newtab_tail,
-             '<a title="a>b" href="https://example.com/v"' + newtab_tail),
+            ("links/inline-escaped-gt-before-href-lowercased",
+             '<a title="a&gt;b" href="HTTPS://example.com/v"' + newtab_tail,
+             '<a title="a&gt;b" href="https://example.com/v"' + newtab_tail),
+            ("links/inline-escaped-gt-before-href-twin-unchanged",
+             '<a title="a&gt;b" href="https://example.com/v"' + newtab_tail,
+             '<a title="a&gt;b" href="https://example.com/v"' + newtab_tail),
             # A src on a span: inline markup may not use img (INLINE_ELEMENTS), and the rule reads a link
             # attribute by its name on any element.
-            ("links/inline-quoted-gt-before-src-lowercased",
-             '<span title="a>b" src="HTTPS://example.com/i.png">t</span>',
-             '<span title="a>b" src="https://example.com/i.png">t</span>'),
-            ("links/inline-quoted-gt-before-src-twin-unchanged",
-             '<span title="a>b" src="https://example.com/i.png">t</span>',
-             '<span title="a>b" src="https://example.com/i.png">t</span>'),
+            ("links/inline-escaped-gt-before-src-lowercased",
+             '<span title="a&gt;b" src="HTTPS://example.com/i.png">t</span>',
+             '<span title="a&gt;b" src="https://example.com/i.png">t</span>'),
+            ("links/inline-escaped-gt-before-src-twin-unchanged",
+             '<span title="a&gt;b" src="https://example.com/i.png">t</span>',
+             '<span title="a&gt;b" src="https://example.com/i.png">t</span>'),
             ("links/inline-href-path-holding-href-scheme-unchanged",
              '<a href="https://example.com/href=HTTPS://Other/Path"' + newtab_tail,
              '<a href="https://example.com/href=HTTPS://Other/Path"' + newtab_tail),
@@ -2796,6 +2802,62 @@ def _self_test():
     got = refusals_for('<p>x</p><!-- x --><script>alert(1)</script><img src="x" onerror="alert(1)">')
     expect("refuse/ordinary-comment-script-read",
            "inline <script> element" in got and "onerror attribute on <img>" in got, got)
+    # A "<!--" inside an attribute value is text to html.parser and a browser alike; a scan that skipped from it
+    # to the next "-->" hid a real "<!-->" or "<![CDATA[" between them, so the script and the http anchor after
+    # that construct were live in a browser yet hidden from html.parser and from every check. The scan judges
+    # every "<!" on its own: the inline rule refuses the hidden construct with the page named, and the guard and
+    # refusals_for report it. The twins write the attribute's "<!--" as "&lt;!--" beside an ordinary comment,
+    # and the anchor and the script after it are read.
+    payload = '<script>alert(1)</script><a href="http://example.com/v">v</a>'
+    for vector, html, hidden in (
+            ("attribute-comment-opener-abrupt-comment", '<p><span title="<!--"><!-->' + payload + "--></span></p>",
+             "<!-->"),
+            ("attribute-comment-opener-cdata",
+             '<p><span title="<!--"><![CDATA[ x > ' + payload + " ]]>--></span></p>", "<![CDATA["),
+            ("attribute-comment-opener-cdata-after-element",
+             '<span title="<!--">x</span><![CDATA[ x > ' + payload + " ]]> -->", "<![CDATA[")):
+        at = html.find(hidden)
+        want = _site_markup.construct_finding(at, html[at:at + 9])
+        name = "refuse/inline-{}-hidden-construct".format(vector)
+        message, prefix = inline_refusal(html)
+        expect(name, prefix is not None and message.startswith(
+            prefix + "inline markup holds a markup declaration or processing instruction other than an "
+            "ordinary comment at offset {}: {!r}".format(at, html[at:at + 9])), message)
+        got = _link_findings(site, html)
+        expect("links/guard-{}-hidden-construct-refused".format(vector), want in got, got)
+        got = refusals_for(html)
+        expect("refuse/{}-hidden-construct-reported".format(vector), want in got, got)
+    twin = accepted("links/inline-escaped-attribute-comment-opener-ordinary-comment-accepted", inline_page,
+                    '<p><span title="&lt;!--"><!-- note --> ' + upper_anchor + "</span></p>")
+    expect("links/inline-escaped-attribute-comment-opener-ordinary-comment-accepted",
+           '<span title="&lt;!--"><!-- note --> <a href="https://example.com/v"' + newtab_tail in twin, twin)
+    got = _link_findings(site, '<p><span title="&lt;!--"><!-- note -->' + payload + "</span></p>")
+    expect("links/guard-escaped-attribute-comment-opener-ordinary-comment-anchor-read",
+           "<script> element" in got
+           and "href 'http://example.com/v' on <a> is neither under /draft/ nor an https URL" in got
+           and not any("markup construct" in f or "literal" in f for f in got), got)
+    got = refusals_for('<p><span title="&lt;!--"><!-- note -->' + payload + "</span></p>")
+    expect("refuse/escaped-attribute-comment-opener-ordinary-comment-script-read",
+           "inline <script> element" in got and not any("markup construct" in f for f in got), got)
+    # The second, independent layer: inline markup and a generated page write "<" and ">" inside an attribute
+    # value as "&lt;" and "&gt;" (_site_markup.literal_in_start_tag), so attribute text never looks like markup
+    # to the lexical construct scan. A literal one is refused inline with the page named, and the guard reports
+    # it; the escaped twin is accepted and passes.
+    for vector, literal, entity in (("lt", "<", "&lt;"), ("gt", ">", "&gt;")):
+        html = '<p><span title="a{}b">t</span></p>'.format(literal)
+        finding = "<span>{{}} with a literal {!r} inside its start tag (an attribute value writes it as {})".format(
+            literal, entity)
+        name = "refuse/inline-attribute-literal-" + vector
+        message, prefix = inline_refusal(html)
+        expect(name, prefix is not None and message.startswith(
+            prefix + "inline markup uses " + finding.format("")), message)
+        got = _link_findings(site, html)
+        expect("links/guard-attribute-literal-{}-refused".format(vector),
+               got == [finding.format(" on the page")], got)
+    twin = accepted("links/inline-attribute-escaped-lt-accepted", inline_page, '<p><span title="a&lt;b">t</span></p>')
+    expect("links/inline-attribute-escaped-lt-accepted", '<span title="a&lt;b">t</span>' in twin, twin)
+    got = _link_findings(site, '<p><span title="a&lt;b">t</span></p>')
+    expect("links/guard-attribute-escaped-lt-passes", got == [], got)
     # Text other than whitespace ends an implied head, as in a browser (html5lib places such a title in the
     # body), so the guard judges a head element after it on the page; whitespace and a title's own text do not.
     for name, html, want in (
@@ -2913,9 +2975,10 @@ def _self_test():
                        ("refuse/inline-upper-case-https-one-slash-anchor", "HTTPS:/example.com/v"),
                        ("refuse/inline-non-ascii-https-lookalike-anchor", "HTTP\\u017f://example.com/v")):
         expect(name, "nor an https URL" in refused(name, inline_page, '<a href="{}"'.format(href) + newtab_tail))
-    for name, text in (("refuse/inline-quoted-gt-before-http-anchor", '<a title="a>b" href="HTTP://example.com/v"'),
-                       ("refuse/inline-quoted-gt-before-one-slash-anchor",
-                        "<a title='a>b' href='HTTPS:/example.com/v'"),
+    for name, text in (("refuse/inline-escaped-gt-before-http-anchor",
+                        '<a title="a&gt;b" href="HTTP://example.com/v"'),
+                       ("refuse/inline-escaped-gt-before-one-slash-anchor",
+                        "<a title='a&gt;b' href='HTTPS:/example.com/v'"),
                        ("refuse/inline-unquoted-non-ascii-https-lookalike-anchor",
                         "<a href=HTTP\\u017f://example.com/v"),
                        ("refuse/inline-unquoted-full-width-https-lookalike-anchor",

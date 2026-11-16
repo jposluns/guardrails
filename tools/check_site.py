@@ -148,7 +148,9 @@ TOUCH_ICON_REL = "apple-touch-icon"
 # at "<!-->" or "<!--->" open to the next "-->" where a browser ends each at once, so a link after such a
 # construct is live in a browser yet never reaches handle_starttag here. Each one in the text a Page is fed (any
 # "<!" but an ordinary comment and "<!doctype html>", any "<?", any "</" not followed by an ASCII letter) is a
-# structural finding wherever it sits, on every page, live or generated.
+# structural finding wherever it sits, on every page, live or generated; an ordinary comment's text is scanned
+# too, so a "<!--" inside an attribute value cannot hide a later construct. A generated page is also held to
+# write "<" and ">" inside an attribute value as "&lt;" and "&gt;" (_site_markup.literal_in_start_tag).
 
 
 class Page(HTMLParser):
@@ -156,8 +158,8 @@ class Page(HTMLParser):
     to the template's element allowlist in its context (_site_markup, the definition tools/gen_draft_site.py
     reads for its inline markup and its link guard): each element outside it is a structural finding with its
     line. That covers the subtree of svg and math too, which the structure check suspends, so a raw-text element
-    html.parser reads inside foreign content (where a browser keeps reading markup) is reported, not hidden. A
-    live page (not generated) is not held to it."""
+    html.parser reads inside foreign content (where a browser keeps reading markup) is reported, not hidden, and
+    so is a literal "<" or ">" inside a start tag. A live page (not generated) is not held to either."""
 
     def __init__(self, template=False):
         super().__init__(convert_charrefs=True)
@@ -1453,6 +1455,34 @@ def _markup_declaration_self_test(quiet):
     page = read('<title>t</title>\n<p>x</p><!-- x --><a href="HTTP://example.test/v">v</a>')
     check("page/ordinary-comment-anchor-read-passes",
           page.tag_findings == [] and page.links == [("HTTP://example.test/v", 2)], (page.tag_findings, page.links))
+    # A "<!--" inside an attribute value is text to html.parser and a browser alike; a scan that skipped from it
+    # to the next "-->" hid a real "<!-->" or "<![CDATA[" between them, and the script and anchor after it, live
+    # in a browser. The scan judges every "<!" on its own, so the hidden construct is a finding on a live page
+    # and on a generated one; the twin (the attribute's "<!--" written as "&lt;!--", an ordinary comment) is
+    # none, and the anchor after it is read.
+    payload = '<script>alert(1)</script><a href="http://example.test/v">v</a>'
+    for name, body, hidden in (
+            ("page/attribute-comment-opener-abrupt-comment-fails",
+             '<p><span title="<!--"><!-->' + payload + "--></span></p>", "<!-->"),
+            ("page/attribute-comment-opener-cdata-fails",
+             '<p><span title="<!--"><![CDATA[ x > ' + payload + " ]]>--></span></p>", "<![CDATA["),
+            ("page/attribute-comment-opener-cdata-after-element-fails",
+             '<span title="<!--">x</span><![CDATA[ x > ' + payload + " ]]> -->", "<![CDATA[")):
+        text = "<title>t</title>\n" + body
+        at = text.find(hidden)
+        want = (2, _site_markup.construct_finding(at, text[at:at + 9]))
+        live, generated = read(text), Page(template=True)
+        generated.feed(text)
+        generated.finalize()
+        check(name, want in live.tag_findings and want in generated.tag_findings,
+              (live.tag_findings, generated.tag_findings))
+    text = '<title>t</title>\n<p><span title="&lt;!--"><!-- note --><a href="HTTP://example.test/v">v</a></span></p>'
+    live, generated = read(text), Page(template=True)
+    generated.feed(text)
+    generated.finalize()
+    check("page/escaped-attribute-comment-opener-ordinary-comment-anchor-read-passes",
+          live.tag_findings == [] and generated.tag_findings == [] and live.links == [("HTTP://example.test/v", 2)],
+          (live.tag_findings, generated.tag_findings, live.links))
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
         root = base / "site"
@@ -1560,6 +1590,20 @@ def _element_allowlist_self_test():
           (2, outside.format("<textarea> on the page")) in page.tag_findings, page.tag_findings)
     page = read(shell.format('<p><img src="/i.png" alt=""/></p>'))
     check("page/self-closed-allowed-element-passes", page.tag_findings == [], page.tag_findings)
+    # A generated page writes "<" and ">" inside an attribute value as "&lt;" and "&gt;"
+    # (_site_markup.literal_in_start_tag), so attribute text never looks like markup to the lexical construct
+    # scan: a literal one is a finding there, with its line. The escaped twin passes, and a live page is not
+    # held to the rule.
+    for name, literal, entity in (("page/attribute-literal-lt-fails", "<", "&lt;"),
+                                  ("page/attribute-literal-gt-fails", ">", "&gt;")):
+        page = read(shell.format('<p><span title="a{}b">t</span></p>'.format(literal)))
+        want = ("<span> on the page with a literal {!r} inside its start tag "
+                "(an attribute value writes it as {})").format(literal, entity)
+        check(name, (2, want) in page.tag_findings, page.tag_findings)
+    page = read(shell.format('<p><span title="a&lt;b">t</span></p>'))
+    check("page/attribute-escaped-lt-passes", page.tag_findings == [], page.tag_findings)
+    page = read(shell.format('<p><span title="a<b">t</span></p>'), template=False)
+    check("page/live-page-not-held-to-attribute-literal", page.tag_findings == [], page.tag_findings)
     # Every generated template page in the tree is within the allowlist.
     root = Path(__file__).resolve().parents[1]
     problems, pages = [], 0

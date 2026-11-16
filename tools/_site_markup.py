@@ -13,7 +13,11 @@ time cannot be shown complete, so the pages are held to what both read alike ins
 - Markup constructs (split_constructs): the only markup declarations a page may hold are ordinary comments,
   which html.parser and a browser end at the same "-->", and, on a whole page, the "<!doctype html>"
   declaration. Every other "<!", every "<?" and every "</" not followed by an ASCII letter is refused, wherever
-  it sits (inside an attribute value or raw text too: fail closed).
+  it sits (inside an attribute value or raw text too: fail closed). An ordinary comment's text is scanned too,
+  so text earlier in the source (a "<!--" inside an attribute value, say) cannot hide a later construct.
+- Start tags (literal_in_start_tag, applied by ElementRule): inline markup and a whole generated page write a
+  "<" or ">" inside an attribute value as "&lt;" or "&gt;", never literally. This second, independent layer
+  keeps attribute text from looking like markup to the lexical construct scan at all.
 - Elements. INLINE_ELEMENTS is the closed set of HTML element names inline page markup may use: exactly the
   names the inline values of the draft-src data files use (a, b, code, em, li, p, span, strong, ul), and td as
   well only in a table component's raw cell (CELL_ELEMENTS; the template's whole-td cell form). ELEMENTS
@@ -73,12 +77,26 @@ def _raw_name(text):
     return match.group(1) if match else None
 
 
+def literal_in_start_tag(written):
+    """The first literal "<" or ">" in a start tag's source text `written` (get_starttag_text) between its
+    opening "<" and its closing ">" or "/>", or None (also when `written` is not a string). Such a character
+    can only sit in an attribute value (or a name), where it is text to html.parser and a browser alike but
+    text that split_constructs, being lexical, may read as markup; written as "&lt;" or "&gt;" it is the same
+    value and no such text."""
+    if not isinstance(written, str) or not written.startswith("<"):
+        return None
+    end = len(written) - (2 if written.endswith("/>") else 1 if written.endswith(">") else 0)
+    found = [at for at in (written.find("<", 1, end), written.find(">", 1, end)) if at >= 0]
+    return written[min(found)] if found else None
+
+
 class ElementRule:
     """Judges each tag of 1 inline value (page false) or 1 whole page (page true) against the allowlist, in
     document order. start() and end() return a finding (a string) for a tag outside the allowlist, else None;
     text() takes the page's character data, as html.parser hands it over. `written` is the tag's source text
     when the caller has it; a name that is not ASCII is a finding, since html.parser folds it with str.lower
-    and a browser does not. `cell` true (inline only) judges a table's raw cell against CELL_ELEMENTS."""
+    and a browser does not, and so is a literal "<" or ">" inside it (literal_in_start_tag) on an element
+    the allowlist accepts. `cell` true (inline only) judges a table's raw cell against CELL_ELEMENTS."""
 
     def __init__(self, page, cell=False):
         self.page = page
@@ -112,6 +130,10 @@ class ElementRule:
         if self.page and self.head and tag not in HEAD_ELEMENTS and tag not in ("html", "head"):
             self.head = False
         problem = self._judge("<{}>".format(tag), tag, written)
+        literal = literal_in_start_tag(written) if problem is None else None
+        if literal is not None:
+            problem = "<{}>{} with a literal {!r} inside its start tag (an attribute value writes it as {})".format(
+                tag, self._context()[1], literal, "&lt;" if literal == "<" else "&gt;")
         if self.page and not closed and tag == SVG_ROOT:
             self.svg += 1
         if self.page and self.head and not closed and tag in _HEAD_RAW_TEXT:
@@ -143,7 +165,14 @@ def split_constructs(source, page=False):
     (html.parser and a browser end such a comment at the same "-->"), except that on a whole page (`page`)
     "<!doctype html>" in any letter case is also read alike; every "<?" and every "</" not followed by an
     ASCII letter (a bogus comment to a browser) is such a construct. The scan is lexical, so such text inside
-    an attribute value or raw text is reported too (fail closed)."""
+    an attribute value or raw text is reported too (fail closed).
+
+    After an ordinary comment the scan goes on from just after its "<!--", not past its "-->": the scan does
+    not know where tags are, so a "<!--" it takes for a comment opener may be text inside an attribute value
+    ('<span title="<!--">'), which no tokenizer reads as a comment, and skipping to the next "-->" would hide
+    a real "<!-->" or "<![CDATA[" between them. Every "<!" and "<?" is judged on its own, so no construct can
+    be hidden by text earlier in the source; a construct inside a real comment's text is reported too (fail
+    closed)."""
     found, at = [], 0
     while True:
         match = _CONSTRUCT_RE.search(source, at)
@@ -159,7 +188,7 @@ def split_constructs(source, page=False):
             found.append((start, source[start:start + 9]))
             at = start + 2
             continue
-        at = end + 3
+        at = start + 4
 
 
 def construct_finding(offset, text):
