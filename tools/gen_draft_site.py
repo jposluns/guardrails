@@ -49,9 +49,13 @@ pre-replace check and os.replace is published as the page; the post-replace chec
 but the target's previous bytes are not restored (its message says so only when the page existed before
 the run). A target replaced after the post-replace check is not seen by this run (a later --check reports
 drift). On the failure path, a file renamed over the temporary name between the identity check and the
-unlink is removed without a message; a directory put there instead is kept, as the unlink fails on it,
-and its message names it as a directory. Messages give the temporary name relative to the root, as they
-give the page. Because os.replace renames
+unlink is removed without a message. A directory at the temporary name during the cleanup is kept and
+named as a directory in the same words whether it arrived before the identity check or after it (then
+the unlink fails on it, and the message adds the unlink's error). An identity check that fails (an
+error other than the name being absent) is reported as a failed check, and nothing is removed. The
+cleanup's messages give the temporary name relative to the root, as they give the page; the write error
+gives the error's own text, which for a failed open carries its absolute path and for a failed
+pre-replace check the bare temporary name. Because os.replace renames
 over the target rather than writing into it, a read-only target (mode 0444) is now replaced and keeps its
 mode, where the earlier in-place write failed on it; this is deliberate. A temporary file left in a page
 folder (a run killed between its write and its replace) is reported as stray output by --check and by a
@@ -1967,7 +1971,7 @@ def run(root, check, outputs=None):
         # existed); a target replaced after the post-replace check is not seen by this run (a later --check
         # reports drift); and on the failure path a rename over the name between the identity check and
         # the unlink removes the other file without a message (a directory put there is kept, as the unlink
-        # fails on it, and reported as a directory).
+        # fails on it, and reported as a directory in the words used for one there before the check).
         temp = None
         made = None
         handle = None
@@ -2013,28 +2017,46 @@ def run(root, check, outputs=None):
             if temp is not None:
                 # The temporary name in messages is relative to root, as rel and the stray report are.
                 shown = (Path(rel).parent / temp.name).as_posix()
+                # A directory at the name is never this run's temporary file. It is kept and named in these
+                # words whether it was there at the identity check or came after it (the unlink then fails
+                # on it, and that error is added).
+                as_directory = ("error: kept {}: a directory now holds the temporary name, not the file this "
+                                "run created".format(shown))
                 try:
                     now = os.lstat(temp)
-                    if made is not None and (now.st_dev, now.st_ino) == made:
-                        os.unlink(temp)
+                except FileNotFoundError:
+                    now = None
+                except OSError as exc:
+                    # The identity check itself failed: nothing is removed, and what holds the name is unknown,
+                    # so the message reports the failed check rather than a failed removal.
+                    now = None
+                    print("error: cannot check whether {} is still the temporary file this run created ({}); "
+                          "not removed".format(shown, exc.strerror or exc), file=sys.stderr)
+                if now is None:
+                    pass
+                elif made is None or (now.st_dev, now.st_ino) != made:
+                    if stat.S_ISDIR(now.st_mode):
+                        print(as_directory, file=sys.stderr)
                     else:
                         print("error: kept {}: it is no longer the temporary file this run created".format(shown),
                               file=sys.stderr)
-                except FileNotFoundError:
-                    pass
-                except OSError as exc:
-                    # A directory another process put at the name after the identity check is not this
-                    # run's temporary file: the unlink fails on it and it is kept, and the message says so.
+                else:
                     try:
-                        held = stat.S_ISDIR(os.lstat(temp).st_mode)
-                    except OSError:
-                        held = False
-                    if held:
-                        print("error: kept {}: a directory now holds the temporary name, not the file this run "
-                              "created ({})".format(shown, exc.strerror or exc), file=sys.stderr)
-                    else:
-                        print("error: cannot remove the temporary file {} ({})".format(shown, exc.strerror or exc),
-                              file=sys.stderr)
+                        os.unlink(temp)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as exc:
+                        # A directory another process put at the name after the identity check: the unlink
+                        # fails on it and it is kept. lstat, so a symbolic link to a directory is not one.
+                        try:
+                            held = stat.S_ISDIR(os.lstat(temp).st_mode)
+                        except OSError:
+                            held = False
+                        if held:
+                            print("{} ({})".format(as_directory, exc.strerror or exc), file=sys.stderr)
+                        else:
+                            print("error: cannot remove the temporary file {} ({})".format(
+                                shown, exc.strerror or exc), file=sys.stderr)
             if handle is not None:
                 try:
                     handle.close()
@@ -3629,9 +3651,11 @@ def _self_test():
     builtin_lstat = os.lstat
     builtin_unlink = os.unlink
 
-    def run_injected(fail, squatters=0, squat_dir=False, race=None, streams=None, new_page=False, handles=None):
+    def run_injected(fail, squatters=0, squat_dir=False, race=None, streams=None, new_page=False, handles=None,
+                     previous=b"previous bytes\n"):
         """Run run() on 1 page in a fresh tree and return (exit, target bytes, folder listing, the bytes at
-        each watched temporary name: None when absent, "directory" for a directory). `squatters` files (or,
+        each watched temporary name: None when absent, "directory" for a directory, "symbolic link" for
+        one). `squatters` files (or,
         with `squat_dir`, 1 directory) take the first temporary names before the run. `race` drives another
         process's step deterministically: "after-replace" creates a file at the temporary name right after
         os.replace has moved it; "rename-then-chmod-fails" renames another file over the temporary file and
@@ -3641,9 +3665,14 @@ def _self_test():
         os.replace, just before the rename (after that check: the residual window the post-replace check
         reports); "dir-in-cleanup" fails the fchmod and, once the cleanup has read the temporary name's
         device and inode, puts a directory there in place of the file (the residual window before the
-        unlink); "unlink-fails" fails the fchmod and then the cleanup's unlink of the temporary file.
+        unlink); "unlink-fails" fails the fchmod and then the cleanup's unlink of the temporary file;
+        "dir-before-check" puts a directory at the temporary name in place of the file and then fails the
+        fchmod (before the cleanup's identity check); "lstat-fails-in-cleanup" fails the fchmod and then
+        the cleanup's identity check (its lstat of the temporary name); "symlink-dir-in-cleanup" fails the
+        fchmod and, once the cleanup has read the temporary name's device and inode, puts a symbolic link
+        to a directory there in place of the file and fails the unlink.
         `streams` (a dict) receives the run's "out" and "err" text. With `new_page` the page does
-        not exist before the run. `handles` (a dict) receives, under "open", whether every temporary-file
+        not exist before the run; otherwise it holds `previous`. `handles` (a dict) receives, under "open", whether every temporary-file
         handle the run opened was still open at each step that uses the temporary name or checks the page
         (the target's mode read, the pre-replace check, os.replace, the post-replace check), and under
         "closed-after", whether each was closed once run() returned."""
@@ -3652,7 +3681,7 @@ def _self_test():
             os.makedirs(folder)
             if not new_page:
                 with builtin_open(folder / "index.html", "wb") as handle:
-                    handle.write(b"previous bytes\n")
+                    handle.write(previous)
             names = _temp_names(folder / "index.html")
             watched = names[:max(squatters, 1 if squat_dir or race else 0)]
             if squat_dir:
@@ -3721,9 +3750,14 @@ def _self_test():
                         handle.write(b"someone else's\n")
 
             def fchmoder(fd, mode):
-                if race in ("rename-then-chmod-fails", "chmod-fails", "dir-in-cleanup", "unlink-fails"):
+                if race in ("rename-then-chmod-fails", "chmod-fails", "dir-in-cleanup", "unlink-fails",
+                            "dir-before-check", "lstat-fails-in-cleanup", "symlink-dir-in-cleanup"):
                     if race == "rename-then-chmod-fails":
                         rename_other_over(names[0])
+                    if race == "dir-before-check":
+                        builtin_unlink(names[0])
+                        os.mkdir(names[0])
+                        raced.append(names[0])
                     chmod_failed.append(True)
                     raise OSError("injected chmod failure")
                 return builtin_fchmod(fd, mode)
@@ -3731,6 +3765,8 @@ def _self_test():
             def lstater(path, *args, **kwargs):
                 if Path(path).parent == folder and opened:
                     note_open()
+                if race == "lstat-fails-in-cleanup" and chmod_failed and Path(path) == names[0]:
+                    raise OSError(13, "injected lstat failure")
                 result = builtin_lstat(path, *args, **kwargs)
                 if race == "rename-before-check" and not raced and Path(path) == folder / "index.html" \
                         and os.path.lexists(names[0]):
@@ -3739,10 +3775,15 @@ def _self_test():
                     builtin_unlink(names[0])
                     os.mkdir(names[0])
                     raced.append(names[0])
+                if race == "symlink-dir-in-cleanup" and chmod_failed and not raced and Path(path) == names[0]:
+                    os.mkdir(Path(tmp) / "elsewhere")
+                    builtin_unlink(names[0])
+                    os.symlink(Path(tmp) / "elsewhere", names[0])
+                    raced.append(names[0])
                 return result
 
             def unlinker(path, *args, **kwargs):
-                if race == "unlink-fails" and Path(path) == names[0]:
+                if race in ("unlink-fails", "symlink-dir-in-cleanup") and Path(path) == names[0]:
                     raise OSError(13, "injected unlink failure")
                 return builtin_unlink(path, *args, **kwargs)
             out, err = io.StringIO(), io.StringIO()
@@ -3764,6 +3805,8 @@ def _self_test():
             for squat in watched:
                 if os.path.isdir(squat) and not os.path.islink(squat):
                     squatted.append("directory")
+                elif os.path.islink(squat):
+                    squatted.append("symbolic link")
                 elif os.path.lexists(squat):
                     with builtin_open(squat, "rb") as handle:
                         squatted.append(handle.read())
@@ -3913,6 +3956,69 @@ def _self_test():
     expect("write/temp-handle-open-until-cleanup-done",
            got == (2, b"previous bytes\n", ["index.html"], [None]) and held_failing.get("open") == [True] * 2
            and held_failing.get("closed-after") == [True], (got, held_failing))
+    # The same for a new page, which has no mode to read: the handle stays open at the pre-replace check,
+    # os.replace and the post-replace check. Its twin is write/temp-handle-open-until-done-with-name above
+    # (an existing page, where the mode read comes first).
+    held_new = {}
+    got = run_injected(False, new_page=True, handles=held_new)
+    expect("write/temp-handle-open-until-done-with-name-new-page",
+           got == (0, b"<p>fresh</p>\n", ["index.html"], []) and held_new.get("open") == [True] * 3
+           and held_new.get("closed-after") == [True], (got, held_new))
+    # An existing page that is empty had previous bytes (none of them): the post-replace error still says
+    # they are not restored, as for any page that existed. Its twins are the existing-page and new-page
+    # rows above.
+    empty_in_replace = {}
+    got = run_injected(False, race="rename-in-replace", streams=empty_in_replace, previous=b"")
+    expect("write/empty-page-renamed-over-during-replace-says-previous-bytes-lost",
+           got == (2, b"someone else's\n", ["index.html"], [None])
+           and empty_in_replace.get("err") == "error: site/index.html: the file now at the page is not the one "
+           "this run wrote (another process renamed a file over the temporary name or the page during the "
+           "replace); the previous bytes are not restored; fail-closed\n", (got, empty_in_replace))
+    # The directory message gives the unlink's error text (its strerror), not the error with its absolute
+    # path. The text expected is the one this platform gives for unlinking a directory.
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-unlink-dir-") as tmp:
+        os.mkdir(Path(tmp) / "directory")
+        try:
+            builtin_unlink(Path(tmp) / "directory")
+            unlink_dir_error = None
+        except OSError as exc:
+            unlink_dir_error = exc.strerror
+    as_directory = ("error: kept site/{}: a directory now holds the temporary name, not the file this run "
+                    "created".format(first_temp))
+    expect("write/directory-at-temp-name-in-cleanup-message-gives-strerror-only",
+           unlink_dir_error is not None
+           and dir_lines[1:] == ["{} ({})".format(as_directory, unlink_dir_error)], (dir_lines, unlink_dir_error))
+    # A directory at the temporary name before the cleanup's identity check is kept and named in the same
+    # words as one put there after it (the row above, which adds the unlink's error). Its twin is
+    # write/kept-temp-message-names-it-relative-to-root above: a file renamed there in the same window
+    # keeps the words for a file that is no longer this run's.
+    dir_before = {}
+    got = run_injected(False, race="dir-before-check", streams=dir_before)
+    expect("write/directory-at-temp-name-before-identity-check-named-as-directory",
+           got == (2, b"previous bytes\n", [first_temp, "index.html"], ["directory"])
+           and dir_before.get("err") == "error: cannot write site/index.html (injected chmod failure); "
+           "fail-closed\n{}\n".format(as_directory), (got, dir_before))
+    # A symbolic link to a directory put at the name after the identity check is not a directory there
+    # (the cleanup reads it with lstat): when its unlink fails, the message is the failed removal, not the
+    # directory one. Its twin is write/directory-at-temp-name-in-cleanup-kept-and-named-as-directory above.
+    link_dir = {}
+    got = run_injected(False, race="symlink-dir-in-cleanup", streams=link_dir)
+    expect("write/symlink-to-directory-at-temp-name-not-named-as-directory",
+           got == (2, b"previous bytes\n", [first_temp, "index.html"], ["symbolic link"])
+           and link_dir.get("err") == "error: cannot write site/index.html (injected chmod failure); "
+           "fail-closed\nerror: cannot remove the temporary file site/{} (injected unlink failure)\n".format(
+               first_temp), (got, link_dir))
+    # A cleanup identity check that fails (its lstat raises an error other than the name being absent)
+    # is reported as a failed check, not as a failed removal: nothing is removed and the file is left.
+    # Its twins are write/chmod-failure-removes-own-temp (the check passes, the file is removed) and
+    # write/temp-removal-failure-message-names-it-relative-to-root (the check passes, the unlink fails).
+    check_failed = {}
+    got = run_injected(False, race="lstat-fails-in-cleanup", streams=check_failed)
+    expect("write/identity-check-failure-in-cleanup-reported-as-failed-check",
+           got == (2, b"previous bytes\n", [first_temp, "index.html"], [b"<p>fresh</p>\n"])
+           and check_failed.get("err") == "error: cannot write site/index.html (injected chmod failure); "
+           "fail-closed\nerror: cannot check whether site/{} is still the temporary file this run created "
+           "(injected lstat failure); not removed\n".format(first_temp), (got, check_failed))
     # --check reports a temporary page file left in a page folder (a run killed between its write and its
     # replace) as stray output (exit 1); the same tree without it is clean (exit 0).
     fresh_pages = {"site/index.html": "<p>fresh</p>\n"}
@@ -3957,9 +4063,11 @@ def _self_test():
           "with its message, a file another process puts at the temporary name after the replace or renames "
           "over it before a failure kept, a file renamed over it before the replace not published and one "
           "renamed over it during the replace reported (the previous bytes named only for a page that "
-          "existed), a directory put there before the cleanup's unlink kept and named as a directory, "
-          "the temporary name given relative to the root, the temporary-file handle open until the run "
-          "is done with the name, and a leftover temporary page file or directory, "
+          "existed, an empty one included), a directory put there before or during the cleanup kept and "
+          "named as a directory in the same words (a symbolic link to one is not), a failed cleanup "
+          "identity check reported as such, the temporary name given relative to the root, the "
+          "temporary-file handle open until the run is done with the name (a new page too), and a "
+          "leftover temporary page file or directory, "
           "only by its whole "
           "name, reported as stray)")
     return 0
