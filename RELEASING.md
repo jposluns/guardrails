@@ -145,8 +145,12 @@ pull request (CLAUDE.md, Gates and CI).
    the evidence page and the `changelog.toml` reserved-key example. The mapping exports under
    `site/downloads/` (`mappings.csv`, `mappings.json`) are reference data regenerated from the corpus and
    covered by the drift and reference-facts gates, so they are not part of the release-integrity set.
-   Nor is the hooks plugin's `skills/aiqt/SKILL.md`: it is pack content recorded in `.aiqt/manifest.toml`,
-   and `gen_skill --check` holds it byte-identical to the `SKILL.md` inside the version-numbered zip.
+   Nor is the hooks plugin's `skills/aiqt/SKILL.md`, although `.aiqt/manifest.toml` lists it under
+   `[[artifacts]]` (as `skill:plugin/aiqt-guardrails-hooks/skills/aiqt/SKILL.md`). That table is the
+   manifest's roster of the declared renderers' generated outputs, each with its digest, and it lists the
+   two release artifacts too; it is not the release-integrity set, which is the two files above, recorded
+   in `changelog.toml` in step 3.
+   `gen_skill --check` holds the plugin copy byte-identical to the `SKILL.md` inside the version-numbered zip.
 3. Record. Add a `[release.artifacts]` sub-table to the latest `[[release]]` in `changelog.toml`,
    listing every release artifact from step 2 with its `sha256:<64 lowercase hex>` digest. This arms the
    artifact-checksum gate, which hashes the latest recorded release's artifacts and fails if any recorded
