@@ -2691,13 +2691,76 @@ def _test_cannot_evaluate_paths(failures, tmp):
                             "the case; got made={!r} recorded={!r}".format(name, made, probe))
 
 
-def _git_out(repo, *args):
+def _git_out(repo, *args, extra_env=None):
     """Run a fixture git command against repo with the fixed test identity and return its stripped stdout,
-    raising on failure."""
+    raising on failure. extra_env adds variables to the fixture environment for this one call."""
     cmd = ["git", "-C", str(repo), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
            "-c", "commit.gpgsign=false"] + list(args)
     return subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30,
-                          env=git_fixture_env()).stdout.strip()
+                          env=git_fixture_env(**(extra_env or {}))).stdout.strip()
+
+
+# The shallow clone is the only ra-fixture step that writes a pack, and index-pack fsyncs a pack by
+# default (core.fsync covers packs; the loose objects every other fixture command writes are not
+# fsynced). On a busy shared filesystem that fsync can block in the kernel for seconds after the whole
+# pack has arrived, which is enough to cross the 30 s bound. A throwaway fixture needs no durability, so
+# the clone switches fsync off.
+_RA_CLONE_PINS = ("-c", "core.fsync=none")
+
+
+def _ra_shallow_clone(tmp, source, dest, pins=None, extra_env=None):
+    """The ra-fixture's real shallow clone of source into dest over file://, run from tmp with pins
+    (default _RA_CLONE_PINS, read at call time) ahead of the subcommand. Raises on failure."""
+    pins = _RA_CLONE_PINS if pins is None else pins
+    return _git_out(tmp, *pins, "clone", "-q", "--depth", "1", "--no-single-branch", source.as_uri(),
+                    str(dest), extra_env=extra_env)
+
+
+def _trace2_fsync_calls(path):
+    """Sum the fsync calls that every git process wrote to the trace2 event file at path, both kinds
+    (hardware-flush and writeout-only): a counter event in category fsync on current git, or a data
+    event whose key names the kind. A file with no fsync record sums to 0. Raises ValueError on a
+    malformed line and OSError when the file cannot be read."""
+    total = 0
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if not isinstance(record, dict) or record.get("category") != "fsync":
+                continue
+            if record.get("event") == "counter":
+                total += int(record.get("count", 0))
+            elif record.get("event") == "data" and str(record.get("key", "")).endswith(
+                    ("hardware-flush", "writeout-only")):
+                total += int(record.get("value", 0))
+    return total
+
+
+def _check_ra_clone_fsync(failures, tmp, source, pinned_trace):
+    """(ra-clone-fsync) the ra-fixture clone, whose trace2 event file is pinned_trace, must make no fsync
+    call. The control clones source again without core.fsync=none but with
+    core.fsyncMethod=writeout-only, which still reports each call without waiting for a journal
+    commit; a control that reports none means this git cannot show the difference, which is recorded
+    as cannot-evaluate."""
+    control_trace = tmp / "reset-ancestry-fsync-control.trace2"
+    try:
+        _ra_shallow_clone(tmp, source, tmp / "reset-ancestry-fsync-control",
+                          pins=("-c", "core.fsyncMethod=writeout-only"),
+                          extra_env={"GIT_TRACE2_EVENT": str(control_trace)})
+        control = _trace2_fsync_calls(control_trace)
+        pinned = _trace2_fsync_calls(pinned_trace)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        failures.append("(ra-clone-fsync-unreadable) the clone fsync trace could not be produced or read: "
+                        "{}".format(exc))
+        return
+    if control < 1:
+        failures.append("(ra-clone-fsync-cannot-evaluate) the control clone reported no fsync call, so "
+                        "this git cannot show whether the fixture clone makes one")
+    elif pinned:
+        failures.append("(ra-clone-fsync) the ra-fixture clone made {} fsync calls (control {}); its pack "
+                        "fsync can wait seconds on a busy filesystem and cross the 30 s bound"
+                        .format(pinned, control))
 
 
 def _make_ancestry_fixture(path):
@@ -2748,7 +2811,8 @@ def _test_reset_ancestry(failures, tmp):
         tree = _git_out(ra, "rev-parse", ids["topic"] + "^{tree}")
         # A real shallow clone: HEAD is topic and origin/sib is a sibling whose parent was not fetched.
         shallow = tmp / "reset-ancestry-shallow"
-        _git_out(tmp, "clone", "-q", "--depth", "1", "--no-single-branch", ra.as_uri(), str(shallow))
+        shallow_trace = tmp / "reset-ancestry-shallow.trace2"
+        _ra_shallow_clone(tmp, ra, shallow, extra_env={"GIT_TRACE2_EVENT": str(shallow_trace)})
         # An unborn HEAD on main beside a branch 'other' that names a real commit.
         unborn = tmp / "reset-ancestry-unborn"
         unborn.mkdir()
@@ -2760,6 +2824,7 @@ def _test_reset_ancestry(failures, tmp):
     except (OSError, subprocess.SubprocessError) as exc:
         failures.append("(ra-fixture) could not build the reset ancestry fixtures: {}".format(exc))
         return
+    _check_ra_clone_fsync(failures, tmp, ra, shallow_trace)
     rp = str(ra)
 
     def reason(command, cwd=rp):
