@@ -519,31 +519,67 @@ def _fixture_literal_head(repo, body, env):
 
 class _RecordedParentRead:
     """Stands in for this module's subprocess global while a case runs the production parent
-    read (head_parents) in process. The fixture's git answer is read once, here, before the
-    stand-in is installed, with the fixture environment and a literal argv: the raw object read
-    head_parents spells, or, with honour_replace, the same read without --no-replace-objects (the
-    mutant that loses that flag). run then answers only head_parents's own argv, spelled again
-    below, with that recorded answer; any other argv (a production read that changed its flags)
-    gets a refusal exit, so no launch happens while the stand-in is installed and no caller
-    configuration is ever read."""
+    read (head_parents) in process. The fixture's two git answers are read once, here, before
+    the stand-in is installed, with the fixture environment and literal argvs: HEAD's raw commit
+    object (replacement objects disabled) and the same read with replacement objects honoured.
+    run answers by what a read asks for, not by its spelling: a read of HEAD's commit object in
+    the fixture repo, with the global options in any order, gets the raw answer when it carries
+    --no-replace-objects and the replace-honouring answer when it does not, so a production read
+    that loses that flag is red on the parents it reads. The read must also pass exactly the
+    keyword arguments a real read needs, capture_output=True and timeout=GIT_TIMEOUT: a read
+    that would not capture git's output, or would run without the git timeout, gets a refusal
+    exit, as does any other argv or keyword (caller configuration such as env), so no launch
+    happens while the stand-in is installed and no caller configuration is ever read."""
+    TimeoutExpired = subprocess.TimeoutExpired
+    # bound here because, while a case runs, this module's subprocess global is the stand-in
+    CompletedProcess = subprocess.CompletedProcess
+    KEYWORDS = ("capture_output", "timeout")
+
+    def __init__(self, repo, env):
+        self.root = str(repo)
+        self.raw = subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "cat-file",
+                                   "commit", "HEAD"], check=True, capture_output=True,
+                                  timeout=GIT_TIMEOUT, env=env)
+        self.honoured = subprocess.run(["git", "-C", str(repo), "cat-file", "commit", "HEAD"],
+                                       check=True, capture_output=True, timeout=GIT_TIMEOUT,
+                                       env=env)
+
+    def _refusal(self, argv, why):
+        return self.CompletedProcess(list(argv), 128, b"",
+                                     "stand-in: {}\n".format(why).encode("ascii"))
+
+    def run(self, argv, **keywords):
+        argv = list(argv)
+        if (sorted(keywords) != sorted(self.KEYWORDS) or keywords["capture_output"] is not True
+                or keywords["timeout"] != GIT_TIMEOUT):
+            return self._refusal(argv, "the read must pass capture_output=True and "
+                                 "timeout=GIT_TIMEOUT and no other keyword")
+        if not argv or argv[0] != "git":
+            return self._refusal(argv, "only a git read is answered")
+        index, root, replace_off = 1, None, False
+        while index < len(argv) and argv[index].startswith("-"):
+            if argv[index] == "--no-replace-objects":
+                replace_off, index = True, index + 1
+            elif argv[index] == "-C" and index + 1 < len(argv):
+                root, index = argv[index + 1], index + 2
+            else:
+                return self._refusal(argv, "unrecorded git option {!r}".format(argv[index]))
+        if root != self.root or argv[index:] != ["cat-file", "commit", "HEAD"]:
+            return self._refusal(argv, "only HEAD's commit object in the fixture repo is answered")
+        return self.raw if replace_off else self.honoured
+
+
+class _FlagDroppingRead:
+    """The mutant that loses one git option from the production parent read: every read is
+    forwarded to the recorded stand-in with that option removed from its argv, so the stand-in's
+    own answer says what such a read would see. It launches nothing."""
     TimeoutExpired = subprocess.TimeoutExpired
 
-    def __init__(self, repo, env, honour_replace=False):
-        self.expected = ["git", "--no-replace-objects", "-C", str(repo), "cat-file", "commit",
-                         "HEAD"]
-        if honour_replace:
-            self.answer = subprocess.run(["git", "-C", str(repo), "cat-file", "commit", "HEAD"],
-                                         check=True, capture_output=True, timeout=GIT_TIMEOUT,
-                                         env=env)
-        else:
-            self.answer = subprocess.run(["git", "--no-replace-objects", "-C", str(repo),
-                                          "cat-file", "commit", "HEAD"], check=True,
-                                         capture_output=True, timeout=GIT_TIMEOUT, env=env)
-        self.refusal = subprocess.CompletedProcess(
-            self.expected, 128, b"", b"stand-in: only the recorded raw object read is answered\n")
+    def __init__(self, recorded, option):
+        self.recorded, self.option = recorded, option
 
-    def run(self, argv, capture_output=False, timeout=None):
-        return self.answer if list(argv) == self.expected else self.refusal
+    def run(self, argv, **keywords):
+        return self.recorded.run([word for word in argv if word != self.option], **keywords)
 
 
 def _mergetag_reading(original, raw):
@@ -932,8 +968,10 @@ def self_test(report_path=None):
             # continuation lines start with a space; each carries one that reads exactly
             # "parent <id>" after that space, with no trailing text, so a reader that took a
             # parent out of either value finds a well-formed id; that is header value text,
-            # never a parent line), when an info/grafts file gives HEAD other parents, and when
-            # a replace ref swaps the base and then HEAD itself
+            # never a parent line; the mergetag's id is the plain merge commit, neither recorded
+            # parent, so a reader that appends it is told apart from one that repeats a parent),
+            # when an info/grafts file gives HEAD other parents, and when a replace ref swaps
+            # the base and then HEAD itself
             repo, base = _fixture_repo(Path(scratch), env)
             _fixture_git(repo, "checkout", "-q", "-b", "merge-train-4", env=env)
             (repo / "site" / "index.html").write_text("b\n")
@@ -953,7 +991,7 @@ def self_test(report_path=None):
                       base.encode("ascii") + b"\n -----END PGP SIGNATURE-----\n\nmerge\n")
             tagged = (header + b"mergetag object " + train_tip.encode("ascii") +
                       b"\n type commit\n tag v1\n tagger " + signature + b" \n parent " +
-                      base.encode("ascii") + b"\n\nmerge\n")
+                      merge.encode("ascii") + b"\n\nmerge\n")
             for check_id, body in (("cidecide/gpgsig-merge-true", signed),
                                    ("cidecide/mergetag-merge-true", tagged)):
                 _fixture_literal_head(repo, body, env)
@@ -965,15 +1003,16 @@ def self_test(report_path=None):
                       (2, (0, "site_only=true\n")))
             # the mergetag case in process, its twin first: HEAD's raw parents are exactly the
             # two recorded ones, and the mergetag mutant (_mergetag_reading) reads the tag's
-            # " parent <id>" continuation line as one more parent, exactly the recorded base
+            # " parent <id>" continuation line as one more parent, exactly the merge commit's
+            # id, which differs from both recorded parents
             _fixture_literal_head(repo, tagged, env)
             recorded = _RecordedParentRead(repo, env)
             with _patched(subprocess=recorded):
                 check("cidecide/mergetag-raw-parents-exact", merge_parents(repo),
                       ((base, train_tip), None))
-                caught = _mergetag_reading(head_parents, recorded.answer.stdout)(repo)
+                caught = _mergetag_reading(head_parents, recorded.raw.stdout)(repo)
             check("revert/mergetag-continuation-parent-read-red", caught,
-                  ([base, train_tip, base], None))
+                  ([base, train_tip, merge], None))
             # info/grafts gives HEAD one parent, and git's own parent read follows it (the
             # fixture's count is 1); --no-replace-objects does not disable grafts, so only the
             # raw object read keeps the decision on the two recorded parents
@@ -1023,12 +1062,15 @@ def self_test(report_path=None):
                   (True, (0, "site_only=true\n")))
             # the parent read in process, its twin first: HEAD's raw parents are the recorded
             # base and train head, and the mutant that drops --no-replace-objects from that read
-            # follows the replace ref on HEAD, so it reads the swapped commit's parents (a
-            # production read that dropped the flag itself is refused by the stand-in's argv)
-            with _patched(subprocess=_RecordedParentRead(repo, env)):
+            # follows the replace ref on HEAD, so it reads the swapped commit's parents. The
+            # stand-in answers by what the read asks for, so a production read that dropped the
+            # flag itself is red on those parents, not on its spelling; the revert case runs the
+            # real read with the flag dropped (_FlagDroppingRead) through the same stand-in
+            recorded = _RecordedParentRead(repo, env)
+            with _patched(subprocess=recorded):
                 check("cidecide/replaced-head-raw-parents-exact", merge_parents(repo),
                       ((base, train_tip), None))
-            with _patched(subprocess=_RecordedParentRead(repo, env, honour_replace=True)):
+            with _patched(subprocess=_FlagDroppingRead(recorded, "--no-replace-objects")):
                 check("revert/parent-read-honours-replace-red", merge_parents(repo),
                       ((replacement, train_tip), None))
         with tempfile.TemporaryDirectory() as scratch:

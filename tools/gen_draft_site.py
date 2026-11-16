@@ -4,7 +4,7 @@ placeholder page each keeps (noindex, linking the root).
 
   gen_draft_site.py              write every registered page
   gen_draft_site.py --check      exit 1 if any target differs from a fresh build or a page folder holds an
-                                 unlisted page or a leftover temporary page file (.<name>.<pid>.tmp),
+                                 unlisted page or a leftover temporary page file (TEMP_NAME_RE),
                                  2 if one cannot be read or a root-relative link resolves
                                  to nothing the site serves (both checks also run on a normal run); it
                                  also compares the reference CLI status lines (STATUS_LINES)
@@ -24,16 +24,18 @@ URLs follow the site's separate asset base ("assets" in SITES), which stays "/dr
 the pinned copy is served where it was staged. A page is refused (exit 2, nothing written) if it carries an
 en or em dash, an inline style or script, an `on*` attribute, "what this is" framing, an id 2 elements
 share (shell, component or inline), an element with more than 1 id attribute or an empty id, or a
-`$BASE/` token outside an inline HTML value. That last refusal is deliberate and also covers the literal
-fields, which have no escape for the token: code text, a code file label, a label's text and the page
+`$BASE/` token outside an inline HTML value (an inline HTML value that still carries one once expanded,
+such as `$BASE$BASE/`, is refused as an inline HTML value). That last refusal is deliberate and also
+covers the literal fields, which have no escape for the token: code text, a code file label, a label's text and the page
 title, among others, cannot carry the literal text `$BASE/` (a character reference there is shown as
 typed), so such content is refused rather than shipped with a token that was meant to expand. The baseline
 files under assets/baseline/ are a pinned copy, not generated here (tools/check_baseline_pin.py).
 
 Writing: each changed page is written to a temporary file beside its target (.<name>.<pid>.tmp, opened
-exclusively, so a file already at that name is neither overwritten nor removed) and then moved over the
-target with os.replace. A write that fails leaves the target's previous bytes and removes only the
-temporary file this run created. Because os.replace renames over the target rather than writing into it,
+exclusively, so a file already at that name is neither overwritten nor removed; the run then tries
+.<name>.<pid>.<n>.tmp for n from 1, up to TEMP_TRIES names in all, and refuses with exit 2 only when
+every one is taken) and then moved over the target with os.replace. A write that fails leaves the
+target's previous bytes and removes only the temporary file this run created. Because os.replace renames over the target rather than writing into it,
 a read-only target (mode 0444) is now replaced and keeps its mode, where the earlier in-place write
 failed on it; this is deliberate. A temporary file left in a page folder (a run killed between its write
 and its replace) is reported as stray output by --check and by a normal run.
@@ -119,6 +121,24 @@ SCHEME_BUTTON = (
     '12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>'
     '<span class="vh">Dark mode</span></button>')
 
+# The registry declaration (read statically by tools/gen_gensrc.py). Each page's sources are the inputs its
+# bytes derive from: the generator and the page's data file, plus VERSION and changelog.toml for a page whose
+# data renders the document control strip (_c_control), STATUS_SOURCE for a page whose data carries the
+# $OPF_STATUS token, and HOOKS_SOURCE for a page whose data carries the $HOOK_COUNT token. The kind "block"
+# entries are the STATUS_LINES files, of which this generator owns only the status line; page_targets() keeps
+# them out of the page set. Two STATUS_LINES files have no entry (_STATUS_LINES_UNREGISTERED). The mappings
+# page also declares the modules whose functions render its bodies (_mappings_data and the _mappings_by_*
+# renderers): tools/gen_mappings.py (rows, registry and wording), tools/gen_rules.py (the rule corpus loader),
+# tools/_standards.py (the manifest loader) and tools/gen_agents.py (the rule order), with the 2 data folders
+# they read (_MAPPINGS_SOURCES). The self-test rows under "gensrc/" hold these sources to the built pages
+# (VERSION, changelog.toml and STATUS_SOURCE through the rendered text a page carries; HOOKS_SOURCE and
+# _MAPPINGS_SOURCES through the pages whose data carries the token or the mappings component, _data_carriers,
+# each set held to the pages whose bytes change with that input, and _MAPPINGS_SOURCES itself to the inputs
+# _mappings_inputs derives from the renderers' code) and to STATUS_LINES. Not declared, a disclosed
+# residual: every page's navigation (_nav) shows a nav item only when a sibling page is built at that item's
+# path, so a page's bytes can change when a sibling data file under the same draft-src/ folder is added,
+# removed, or its path field changes. Directory sources here name content inputs (as .aiqt/standards/ does),
+# and naming each sibling folder would make every page depend on every other page's data.
 GENSRC_OUTPUTS = (
     {"target": "site/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/home.toml", ".aiqt/core/hooks/manifest.toml"),
@@ -140,26 +160,27 @@ GENSRC_OUTPUTS = (
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/install/details/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/install-details.toml",
-                 ".aiqt/core/hooks/manifest.toml"),
+                 ".aiqt/core/hooks/manifest.toml", "VERSION", "changelog.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/license/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/license.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/mappings/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/mappings.toml",
-                 ".aiqt/standards/", ".aiqt/core/rules/"),
+                 ".aiqt/standards/", ".aiqt/core/rules/", "VERSION", "changelog.toml",
+                 "tools/gen_mappings.py", "tools/gen_rules.py", "tools/_standards.py", "tools/gen_agents.py"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/rules/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "site/draft-src/rules.toml"),
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/rules.toml", "VERSION", "changelog.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/standard/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "site/draft-src/standard.toml"),
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/standard.toml", "VERSION", "changelog.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/teams/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/teams.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/home.toml"),
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/home.toml", "opf/tools/opf.py"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/404.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/404.toml"),
@@ -168,7 +189,7 @@ GENSRC_OUTPUTS = (
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/adopt.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/core-files/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/core-files.toml"),
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/core-files.toml", "opf/tools/opf.py"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/draft/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/draft.toml"),
@@ -185,7 +206,16 @@ GENSRC_OUTPUTS = (
     {"target": "opf/site/standard/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/standard.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "opf/site/llms.txt", "kind": "block",
+     "sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
 )
+
+
+def page_targets(entries=GENSRC_OUTPUTS):
+    """The target of every page entry (kind "file") of a declaration: the set build() must produce and the
+    page folders stray_outputs() lists. The kind "block" STATUS_LINES entries are not pages."""
+    return frozenset(entry["target"] for entry in entries if entry["kind"] == "file")
 
 # The 6 project sites in rainbow order (specification section 1): key, name word, domain, footer slice.
 FAMILY = (
@@ -468,12 +498,17 @@ def _inline(site, value):
     """An inline HTML value with the $BASE/ token rendered as the site's base path, the $OPF_STATUS
     token rendered as the reference CLI status note (status_note) and the $HOOK_COUNT token rendered as
     the Claude Code hook count (hook_count) of the site's "tree" (the tree build() is given; ROOT when the site
-    names none)."""
+    names none). A value that still carries a $BASE/ token once expanded (such as $BASE$BASE//x) is refused
+    here, so the refusal names an inline HTML value as its source."""
     if "$OPF_STATUS" in value:
         value = value.replace("$OPF_STATUS", status_note())
     if "$HOOK_COUNT" in value:
         value = value.replace("$HOOK_COUNT", str(hook_count(site.get("tree", ROOT))))
-    return value.replace("$BASE/", site["base"])
+    expanded = value.replace("$BASE/", site["base"])
+    if "$BASE/" in expanded:
+        raise RefusedPage("unexpanded $BASE/ token left in an inline HTML value once expanded: {!r}".format(
+            value))
+    return expanded
 
 
 # The Claude Code hook count the pages state: the [[hook]] entries of the hooks manifest whose platform is
@@ -1664,7 +1699,8 @@ def _model_findings(html):
     shell's main-content and copy-status, a component's id or family, or an id inside an inline HTML
     value; _page_from_doc sees only the component ids), an element with more than 1 id attribute, an
     element whose id is empty (or a bare id attribute), and a $BASE/ token left in the page, which only a
-    field outside _inline can carry, since _inline expands every one. An element's id is its first id
+    field outside _inline can carry, since _inline expands every one and refuses a value that still carries
+    one once expanded. An element's id is its first id
     attribute, the one a browser keeps, so only that value is compared across elements."""
     parser = _Ids()
     parser.feed(html)
@@ -1738,7 +1774,7 @@ def build(pages=None, sites=SITES, registered=True, tree=ROOT):
                 raise RefusedPage("{}: built by more than 1 site".format(target))
             outputs[target] = render_page(dict(site, tree=tree), site_pages, page)
     if declared and registered:
-        targets = {entry["target"] for entry in GENSRC_OUTPUTS}
+        targets = page_targets()
         if set(outputs) != targets:
             raise RefusedPage("built outputs {} differ from GENSRC_OUTPUTS {}".format(
                 sorted(outputs), sorted(targets)))
@@ -1822,20 +1858,32 @@ def unresolved_links(outputs, sites=SITES, tree=ROOT):
 
 
 # The name run() gives a page's temporary file beside its target: "." + the target's name + "." + the
-# writing process id + ".tmp". One left in a page folder (a run killed between its write and its replace)
+# writing process id + ".tmp", or, when a file is already at that name, the same with "." + n inserted
+# before ".tmp" (_temp_names). One left in a page folder (a run killed between its write and its replace)
 # is stray output.
 TEMP_NAME_RE = re.compile(r"\..+\.[0-9]+\.tmp")
+
+# How many temporary names run() tries beside a page before it refuses the write (exit 2).
+TEMP_TRIES = 10
+
+
+def _temp_names(path):
+    """The temporary names run() tries, in order, beside the page at `path`: .<name>.<pid>.tmp, then
+    .<name>.<pid>.<n>.tmp for n from 1, TEMP_TRIES names in all. Each matches TEMP_NAME_RE."""
+    stem = ".{}.{}".format(path.name, os.getpid())
+    return [path.with_name(stem + ".tmp")] + [path.with_name("{}.{}.tmp".format(stem, n))
+                                               for n in range(1, TEMP_TRIES)]
 
 
 def stray_outputs(tree, sites=SITES, targets=None):
     """Every .html file (the extension in any case), and every leftover temporary file (TEMP_NAME_RE), in a
-    folder that holds a generated page of a site (the folder of a target) that the targets (GENSRC_OUTPUTS
-    by default) do not list, apart from a kept live path's own file. Only those
+    folder that holds a generated page of a site (the folder of a target) that the targets (the page targets
+    of GENSRC_OUTPUTS by default) do not list, apart from a kept live path's own file. Only those
     folders are listed, not their subfolders, so the asset folder and a promoted root's other folders (its
     downloads, its draft placeholder) are not read; a page in a folder holding no generated page is not
     found here."""
     if targets is None:
-        targets = {entry["target"] for entry in GENSRC_OUTPUTS}
+        targets = page_targets()
     found = []
     for site in sites:
         prefix = site["root"] + "/"
@@ -1908,14 +1956,26 @@ def run(root, check, outputs=None):
                 return 2
         # The page is written to a temporary file beside it and replaces the target only once its bytes are
         # all written, so a write that fails leaves the target's previous bytes in place (exit 2) and the
-        # temporary file is removed. Pages replaced before the failing one stay replaced.
-        temp = path.with_name(".{}.{}.tmp".format(path.name, os.getpid()))
-        created = False
+        # temporary file is removed. Pages replaced before the failing one stay replaced. Each temporary name
+        # is opened exclusively: a name another file already holds is skipped, and that file is neither
+        # written nor removed (a stray-output report names it); the write is refused only when every name
+        # _temp_names gives is taken.
+        temp = None
         try:
             os.makedirs(path.parent, exist_ok=True)
-            with open(temp, "xb") as handle:
-                created = True
-                handle.write(data)
+            names = _temp_names(path)
+            for candidate in names:
+                try:
+                    handle = open(candidate, "xb")
+                except FileExistsError:
+                    continue
+                temp = candidate
+                with handle:
+                    handle.write(data)
+                break
+            else:
+                raise OSError("every temporary name beside it is taken ({} to {})".format(
+                    names[0].name, names[-1].name))
             if current is not None:
                 os.chmod(temp, stat.S_IMODE(os.lstat(path).st_mode))
             os.replace(temp, path)
@@ -1923,7 +1983,7 @@ def run(root, check, outputs=None):
             print("error: cannot write {} ({}); fail-closed".format(rel, exc), file=sys.stderr)
             return 2
         finally:
-            if created:
+            if temp is not None:
                 try:
                     os.unlink(temp)
                 except FileNotFoundError:
@@ -1941,6 +2001,700 @@ def run(root, check, outputs=None):
     if drift:
         print("run tools/gen_draft_site.py to regenerate")
     return 1 if drift or stray else 0
+
+
+# The register rows: the declared sources of each page entry hold to what its built page carries (or, for the
+# hook count and the mappings bodies, what its data carries), and each STATUS_LINES file has its own entry.
+# Each row id is a key of the dict _register_findings returns.
+_FOOTER_ROW = "gensrc/footer-pages-declare-version-and-changelog"
+_NOTE_ROW = "gensrc/status-note-pages-declare-status-source"
+_LINES_ROW = "gensrc/status-lines-registered"
+_BUILT_ROW = "gensrc/page-entries-built"
+_HOOKS_ROW = "gensrc/hook-count-pages-declare-hooks-source"
+_MAPPINGS_ROW = "gensrc/mappings-pages-declare-renderer-sources"
+_FOOTER_SOURCES = ("VERSION", "changelog.toml")
+# The inputs a mappings component renders from: the 2 data folders _mappings_data reads and the 4 modules
+# whose functions load and render them. The self-test holds this tuple to _mappings_inputs, which derives the
+# same set from this file's own text (the functions _MAPPINGS_RENDERER calls and the modules, folders and
+# files they use, through module-level constants, imports inside them and ROOT.joinpath too), so an entry
+# dropped here, or one gained that no renderer reads, turns the self-test red. The derivation is a
+# best-effort static reading, not complete: it refuses (turns the self-test red on) only the forms its
+# docstring names, among them ROOT taken any way but as a path base or an argument to a tools/ module, a
+# ROOT default argument, an attribute other than joinpath and the plain reads of ROOT, of a ROOT path or
+# of a name bound alone to one, a ".." part, a walrus of a ROOT path taken as the base of another
+# attribute or of "/", a renderer's match capture of a ROOT path, and a renderer's use, by name, of open,
+# getattr, os, Path and the other names on _WALK_REFUSED_NAMES, or of a name an import of one of them binds
+# under any alias. It does not see what a tools/ module a renderer calls reads or imports in turn, a path
+# reaching a renderer as a parameter, return value, container, attribute or unpacking target, a path a
+# module-level match capture binds inside a larger case pattern, code reached through an object's
+# attribute rather than by name, a module-level name bound inside a function, or a file API not on that
+# list or reached as a module's attribute (its docstring's blind spots). A renderer change of those kinds
+# needs this tuple checked by hand.
+_MAPPINGS_RENDERER = "_c_mappings"
+_MAPPINGS_SOURCES = (".aiqt/standards/", ".aiqt/core/rules/", "tools/gen_mappings.py", "tools/gen_rules.py",
+                     "tools/_standards.py", "tools/gen_agents.py")
+# This generator's stem in the registry's discovery (tools/gen_gensrc.py discover_declarations).
+_OWN_STEM = "gen_draft_site"
+# The STATUS_LINES files with no register entry; the status line of each stays covered by this generator's
+# --check alone. .aiqt/core/ownership.toml excludes opf/README.md from the release (repository
+# documentation, not shipped), and tools/gen_manifest.py refuses an exclusion over any register target.
+# tools/check_overclaim.py scans every register target, a block target as its whole file, and the current
+# wording of opf/spec/OPF-SPEC.md draws findings there. The row requires each of these to have no entry, so
+# registering one fails until it is taken off this list.
+_STATUS_LINES_UNREGISTERED = ("opf/README.md", "opf/spec/OPF-SPEC.md")
+# Each flip: (the row it must turn red, alone; the text it replaces inside the GENSRC_OUTPUTS literal, which
+# must occur there exactly once; its replacement). In order: a page that carries the rendered text loses a
+# source (under-declaration); a page that does not carry it gains one (over-declaration); the block entry
+# goes, or loses one of the 2 sources it must name; opf/README.md, on _STATUS_LINES_UNREGISTERED, gains an
+# entry; a page entry names a target the build does not produce; the block entry is declared twice (the upper
+# bound of exactly 1); the block entry's kind becomes "tree", a registry kind the build does not treat as a
+# page, so only the kind guard fires; a footer page loses changelog.toml alone, and a page without the footer
+# gains changelog.toml alone, so each of the 2 footer sources is held in both directions;
+# opf/spec/OPF-SPEC.md, the other file on _STATUS_LINES_UNREGISTERED, gains an entry; the install details and
+# home entries each lose HOOKS_SOURCE, and the mappings entry loses tools/gen_mappings.py (under-declaration);
+# and a page whose data carries neither the $HOOK_COUNT token nor a mappings component gains HOOKS_SOURCE, or
+# tools/gen_mappings.py (over-declaration).
+_LLMS_ENTRY = ('\n    {"target": "opf/site/llms.txt", "kind": "block",\n'
+               '     "sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),\n'
+               '     "regenerate": "python3 tools/gen_draft_site.py"},')
+_REGISTER_FLIPS = (
+    (_FOOTER_ROW, 'site/draft-src/rules.toml", "VERSION", ', 'site/draft-src/rules.toml", '),
+    (_NOTE_ROW, 'opf/site/draft-src/core-files.toml", "opf/tools/opf.py"', 'opf/site/draft-src/core-files.toml"'),
+    (_FOOTER_ROW, '"site/draft-src/license.toml")', '"site/draft-src/license.toml", "VERSION")'),
+    (_NOTE_ROW, '"opf/site/draft-src/license.toml")', '"opf/site/draft-src/license.toml", "opf/tools/opf.py")'),
+    (_LINES_ROW, _LLMS_ENTRY, ''),
+    (_LINES_ROW, '"sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),\n     "regenerate"',
+     '"sources": ("tools/gen_draft_site.py",),\n     "regenerate"'),
+    (_LINES_ROW, '"sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),\n     "regenerate"',
+     '"sources": ("opf/tools/opf.py",),\n     "regenerate"'),
+    (_LINES_ROW, _LLMS_ENTRY, _LLMS_ENTRY + _LLMS_ENTRY.replace('"opf/site/llms.txt"', '"opf/README.md"')),
+    (_BUILT_ROW, _LLMS_ENTRY, _LLMS_ENTRY + '\n    {"target": "site/unbuilt/index.html", "kind": "file",\n'
+                              '     "sources": ("tools/gen_draft_site.py",),\n'
+                              '     "regenerate": "python3 tools/gen_draft_site.py"},'),
+    (_LINES_ROW, _LLMS_ENTRY, _LLMS_ENTRY + _LLMS_ENTRY),
+    (_LINES_ROW, '"opf/site/llms.txt", "kind": "block"', '"opf/site/llms.txt", "kind": "tree"'),
+    (_FOOTER_ROW, 'site/draft-src/rules.toml", "VERSION", "changelog.toml"', 'site/draft-src/rules.toml", "VERSION"'),
+    (_FOOTER_ROW, '"site/draft-src/license.toml")', '"site/draft-src/license.toml", "changelog.toml")'),
+    (_LINES_ROW, _LLMS_ENTRY, _LLMS_ENTRY + _LLMS_ENTRY.replace('"opf/site/llms.txt"', '"opf/spec/OPF-SPEC.md"')),
+    (_HOOKS_ROW, '".aiqt/core/hooks/manifest.toml", "VERSION"', '"VERSION"'),
+    (_HOOKS_ROW, '"site/draft-src/home.toml", ".aiqt/core/hooks/manifest.toml")', '"site/draft-src/home.toml")'),
+    (_MAPPINGS_ROW, '"tools/gen_mappings.py", ', ''),
+    (_HOOKS_ROW, '"site/draft-src/license.toml")', '"site/draft-src/license.toml", ".aiqt/core/hooks/manifest.toml")'),
+    (_MAPPINGS_ROW, '"site/draft-src/license.toml")', '"site/draft-src/license.toml", "tools/gen_mappings.py")'),
+)
+
+
+def _footer_markup(version, status):
+    """The Version and Status cells of the document control strip as _c_control renders them."""
+    return '<div><dt>Version</dt><dd>{}</dd></div><div><dt>Status</dt><dd>{}</dd></div>'.format(
+        _t(version), _t(status))
+
+
+def _naming_entries(entries, rel):
+    """The entries of a declaration that name the file `rel`: an entry whose target is `rel` itself, or a
+    kind "tree" entry whose target is an ancestor folder of `rel`. A tree target is compared as a folder
+    (a trailing "/" is added when the literal lacks one), so the match stops at a path component: a
+    sibling whose name only begins the same way (opf/README.mdx, a tree opf/spe/ or opf/spec/OPF-SPEC/)
+    does not name `rel`. An entry that is not a dict with a string target names nothing here (the
+    registry's own validation refuses it)."""
+    found = []
+    for entry in entries:
+        target = entry.get("target") if isinstance(entry, dict) else None
+        if not isinstance(target, str):
+            continue
+        folder = target if target.endswith("/") else target + "/"
+        if target == rel or (entry.get("kind") == "tree" and rel.startswith(folder)):
+            found.append(entry)
+    return found
+
+
+def _page_strings(page):
+    """Every string value of a page model's data, as the TOML parse decoded it: the title, label, heading,
+    meta and description, and every string nested in the body components (arrays and tables included). A
+    TOML comment is not among them, and an escape such as \\u0024 is decoded."""
+    stack = [page[key] for key in ("title", "label", "heading", "meta", "description", "body")]
+    found = []
+    while stack:
+        value = stack.pop()
+        if isinstance(value, str):
+            found.append(value)
+        elif isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+    return found
+
+
+def _data_carriers(sites=SITES, root=ROOT):
+    """{row id: frozenset of page targets}, found from the page models _load_pages returns (its bounded read
+    and TOML parse; no data file is read again): _FOOTER_ROW maps to the pages with a body component
+    "control", _NOTE_ROW to the pages with a decoded value carrying the $OPF_STATUS token, _HOOKS_ROW to the
+    pages with a decoded value carrying the $HOOK_COUNT token, and _MAPPINGS_ROW to the pages with a body
+    component "mappings". The register rows hold the last 2 from these sets (a hook count renders as a bare
+    number, a mappings body has no fixed marker). A token is looked for in the decoded values, so a TOML
+    comment naming it is no carrier and an escaped spelling is one; a token in a value that renders as
+    escaped text rather than through _inline counts too, and the self-test's -found rows then turn red, so
+    the sets fail closed rather than miss a page."""
+    found = {_FOOTER_ROW: set(), _NOTE_ROW: set(), _HOOKS_ROW: set(), _MAPPINGS_ROW: set()}
+    for site in sites:
+        for page in _load_pages(Path(root) / site["src"], site["src"]):
+            target = "{}/{}".format(site["root"], page["rel"])
+            names = {component["component"] for component in page["body"]}
+            strings = _page_strings(page)
+            for row, carries in ((_FOOTER_ROW, "control" in names),
+                                 (_NOTE_ROW, any("$OPF_STATUS" in value for value in strings)),
+                                 (_HOOKS_ROW, any("$HOOK_COUNT" in value for value in strings)),
+                                 (_MAPPINGS_ROW, "mappings" in names)):
+                if carries:
+                    found[row].add(target)
+    return {row: frozenset(targets) for row, targets in found.items()}
+
+
+class _FolderEntry:
+    """A path part standing for any entry of the folder named by the parts before it (the value of a loop
+    variable over that folder's iterdir())."""
+
+    def __repr__(self):
+        return "<entry>"
+
+
+_ROOT_ENTRY = _FolderEntry()
+
+
+def _root_parts(node, used, bound=None):
+    """The path parts of `node` when it is a path built on ROOT: ROOT itself, a name `bound` maps to parts
+    (bound(name) gives a name's parts, or None when it is no path base), X / "<part>" or
+    X.joinpath("<part>", ...) over such an X. None when `node` is no such path. ValueError (cannot evaluate)
+    when a part is not a string constant. Each node consumed as the base of a longer path is added to
+    `used`."""
+    import ast
+    if isinstance(node, ast.Name) and node.id == "ROOT":
+        return []
+    if isinstance(node, ast.Name):
+        return bound(node.id) if bound is not None and isinstance(node.ctx, ast.Load) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        base, extra = node.left, [node.right]
+    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "joinpath":
+        base, extra = node.func.value, list(node.args)
+    else:
+        return None
+    parts = _root_parts(base, used, bound)
+    if parts is None:
+        return None
+    used.add(id(base))
+    if isinstance(node, ast.Call) and node.keywords \
+            or not all(isinstance(part, ast.Constant) and isinstance(part.value, str) for part in extra):
+        raise ValueError("cannot evaluate a ROOT path whose parts are not all string constants (line {})"
+                         .format(node.lineno))
+    return parts + [part.value for part in extra]
+
+
+def _unwalrus(node):
+    """`node` read through any walrus expressions around it: the value of (a := (b := value))."""
+    import ast
+    while isinstance(node, ast.NamedExpr):
+        node = node.value
+    return node
+
+
+def _module_statements(body):
+    """Every statement of a module body, the bodies of its module-level if, try, with, for, while and match
+    statements included (a definition, assignment or import there binds a module-level name too), but not
+    the bodies of functions and classes."""
+    import ast
+    for node in body:
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            value = getattr(node, field, None)
+            if isinstance(value, list):
+                yield from _module_statements(value)
+        for nested in getattr(node, "handlers", ()) or ():
+            yield from _module_statements(nested.body)
+        for nested in getattr(node, "cases", ()) or ():
+            yield from _module_statements(nested.body)
+
+
+# Names whose use in a walked part makes _mappings_inputs refuse (cannot evaluate): each reaches a file or a
+# module some way the derivation does not follow (a path from __file__, a literal or relative path, a
+# computed import, a computed attribute, or this module's namespace by name). posix, nt and _io are the C
+# modules behind os and io; __loader__ and __spec__ reach this module's loader (get_data reads any path);
+# type of a ROOT path is Path, and operator.truediv extends a path as "/" does, neither seen as a path.
+_WALK_REFUSED_NAMES = frozenset({
+    "__file__", "open", "__import__", "importlib", "getattr", "setattr", "globals", "vars", "locals",
+    "exec", "eval", "compile", "builtins", "__builtins__", "sys", "os", "io", "glob", "shutil", "pathlib",
+    "Path", "tomllib", "tempfile", "subprocess", "posix", "nt", "_io", "__loader__", "__spec__",
+    "type", "operator"})
+# The attributes a walked part may take of a ROOT path (other than joinpath, which extends it): each reads
+# the path itself or the entries of the folder it names, never a path the derivation does not see.
+_ROOT_PATH_READS = frozenset({"iterdir", "read_text", "read_bytes", "open", "is_file", "is_dir", "exists"})
+
+
+def _mappings_inputs(source, root=ROOT):
+    """The inputs a mappings component renders from, derived from `source` (this file's text) alone. The
+    derivation is a best-effort static reading of that text: it derives the forms named below and refuses
+    (ValueError, as cannot evaluate) the forms named below, and a renderer read outside those forms (the
+    blind spots at the end) is the disclosed residual, which no row here turns red.
+
+    From the function _MAPPINGS_RENDERER, every module-level function, class and assigned name it names is
+    walked, directly or through another (a module-level constant's value is walked as the function's code
+    is). A module-level name is one bound by a module-level statement: a def or class, an assignment, an
+    augmented or annotated assignment, a for or with target, a walrus target anywhere in such a statement
+    or in the test of an if or while or the subject or a guard of a match, an import, or a capture (as,
+    star or mapping rest name) of a match case, whose walked value is the match subject; a statement nested
+    in a module-level if, try, with, for, while or match body counts too. The inputs are
+    "tools/<a>.py" (and "tools/<a>/<b>.py" and so on for a dotted name) for each module in root's tools/
+    folder that a walked part imports, or whose module-level import binds a name a walked part uses, and
+    each path a walked part builds on a path base from string constants (X / "<a>" / "<b>",
+    X.joinpath("<a>", "<b>") or both): "<a>/<b>" when that path is a file under root and "<a>/<b>/" when it
+    is a folder. A path base is ROOT; a name whose bindings (local to the walked part, or else at module
+    level) are all the same path and each assign it, alone, a path built on a path base or make it, alone,
+    the variable of a loop over that folder's entries (p = ROOT / "<a>", p := ..., a
+    module-level _P = ROOT / "<a>", a module-level bare match capture of such a path), a walrus around
+    that path being read through (p = (q := ROOT / "<a>")); or the variable, alone, of a for loop or
+    comprehension over X.iterdir() of such a path X, bare or as the one argument of sorted, list, tuple or
+    reversed (a walrus around any of these read through), which stands for an entry of that folder (a path
+    under the entry derives the folder). A walrus expression itself, (p := ROOT / "<a>"), is no path base:
+    the path in it is derived, and its target is a path base as above.
+
+    ValueError, as cannot evaluate, when `source` defines no _MAPPINGS_RENDERER; when the module, or a walked
+    part, has a relative import, a star import, or an import of tools or tools.<name>; when a walked part
+    imports a module on _WALK_REFUSED_NAMES or whose top package is on it (builtins among them), or imports
+    a name on it from any module, under any alias (import os as o, from os import listdir, from pathlib
+    import Path as P, from importlib import import_module, from builtins import open as op); when a walked
+    part uses a name a module-level import of that kind binds (import os as _os, then _os); or when a
+    walked part builds a path from a part that is not a string constant, names a path that is missing under
+    root or leaves it ("", "." or ".." as a part, on ROOT or on a named path base), takes an attribute of
+    ROOT or of a path other than joinpath and _ROOT_PATH_READS (ROOT.iterdir(), ROOT.parent,
+    (ROOT / "<a>").glob(...), p.parent or p.glob(...) for a named path base p, so a loop over X.glob(...)
+    or X.rglob(...) too, an entry's .parent), takes an attribute other than _ROOT_PATH_READS (joinpath
+    included) of a walrus expression whose value is a ROOT path, or has one on either side of "/"
+    ((p := ROOT / "<a>").parent, (p := ROOT / "<a>") / ".."), has a match statement whose subject is a ROOT
+    path (a walrus around it read through) and whose case patterns capture a name at any depth (case p:,
+    case object(parent=p):), uses a name bound to a ROOT path that has another binding as well: one that
+    is no ROOT path (p = ROOT / "<a>" then p /= "..") or one to another ROOT path (a loop variable reused
+    over another folder), is a function whose
+    default arguments use ROOT, uses ROOT any other way than as the base of such a path or as an argument
+    of a call into a module of root's tools/ folder (an alias r = ROOT, str(ROOT), os.path.join(ROOT, ...),
+    a match capture of ROOT), or uses a name on _WALK_REFUSED_NAMES (open, getattr, __file__, os, Path,
+    posix, nt, _io, __loader__, __spec__, type, operator and the others there).
+
+    Blind spots, which no row here turns red: what a tools/ module reads, and the modules it imports in
+    turn, when the walked part calls it (ROOT or a path handed to it included; the module is an input, its
+    own reads are not derived); a path that reaches a walked part other than as a path base (a function
+    parameter or default, a call's return value, an unpacking target, a conditional expression, a
+    container, an attribute or subscript, a with target, a loop over anything but the X.iterdir() forms
+    named above, such as enumerate(p.iterdir()) or a name bound to p.iterdir()): its attributes and further
+    parts are neither derived nor refused; the path a match capture binds inside a larger case pattern of a
+    module-level match (case object(parent=_P):), or from a match subject that is not itself a ROOT path (a
+    container holding one), at module level or in a walked part; a
+    module-level name bound other than by a module-level statement (a global statement in a function,
+    setattr on the module, an assignment through sys.modules) or a name a walked part reaches through an
+    object's attribute rather than by name (a method of a class instance, a callable stored in a
+    container): the code behind it is not walked; a module-level name bound twice is walked in every
+    binding, so one a renderer never reaches can still be refused or derived; a local name that shadows a
+    refused module-level import is refused all the same; and a read through a file API whose module and
+    name are not on _WALK_REFUSED_NAMES (codecs.open, linecache, zipfile, posixpath and the like, imported
+    under any name) or that a walked part reaches as an attribute of a module it may use
+    (gen_rules.Path(".aiqt/core/hooks").iterdir(), gen_mappings.os.listdir(...)), whatever path it names."""
+    import ast
+    tree = ast.parse(source)
+
+    def import_bindings(node):
+        # (bound name, source, refused) for each name an import binds: the source is the module (import) or
+        # module.name (from-import), refused when its module or top package, or the name imported, is on
+        # _WALK_REFUSED_NAMES (builtins among them), whatever alias binds it.
+        if isinstance(node, ast.Import):
+            return [(alias.asname or alias.name.partition(".")[0], alias.name,
+                     alias.name.partition(".")[0] in _WALK_REFUSED_NAMES) for alias in node.names]
+        module = node.module or ""
+        return [(alias.asname or alias.name, "{}.{}".format(module, alias.name),
+                 module.partition(".")[0] in _WALK_REFUSED_NAMES or alias.name in _WALK_REFUSED_NAMES)
+                for alias in node.names]
+
+    # defined: the code walked for a module-level name; module_bindings: each module-level binding of a
+    # name as (kind, value), kind "path" for a value bound to the name alone, "loop" for the iterable of a
+    # for loop over the name alone, "other" for any other binding (a def, an import, an unpacking target,
+    # an augmented assignment, a with target, a capture inside a larger case pattern).
+    defined, imported, refused_imports, module_bindings = {}, {}, {}, {}
+    for node in _module_statements(tree.body):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defined.setdefault(node.name, []).append(node)
+            module_bindings.setdefault(node.name, []).append(("other", node))
+            continue
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = [(target, node.value, "path") for target in
+                       (node.targets if isinstance(node, ast.Assign) else [node.target])]
+        elif isinstance(node, ast.AugAssign):
+            targets = [(node.target, node.value, "other")]
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            targets = [(node.target, node.iter, "loop")]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            targets = [(item.optional_vars, item.context_expr, "other") for item in node.items if item.optional_vars]
+        else:
+            targets = []
+        # The test of an if or while, and the subject and guards of a match, are not statements
+        # _module_statements yields, so their walrus targets are read here; a case pattern's captures (as,
+        # star and mapping rest names) bind parts of the subject, a bare capture the whole of it.
+        if isinstance(node, (ast.If, ast.While)):
+            scanned = [node.test]
+        elif isinstance(node, ast.Match):
+            scanned = [node.subject] + [case.guard for case in node.cases if case.guard is not None]
+            for case in node.cases:
+                for pattern in ast.walk(case.pattern):
+                    name = (pattern.name if isinstance(pattern, (ast.MatchAs, ast.MatchStar))
+                            else pattern.rest if isinstance(pattern, ast.MatchMapping) else None)
+                    if name:
+                        bare = isinstance(pattern, ast.MatchAs) and pattern is case.pattern and pattern.pattern is None
+                        targets.append((ast.Name(id=name, ctx=ast.Store()), node.subject, "path" if bare else "other"))
+        elif isinstance(node, (ast.Try, ast.TryStar, ast.Import, ast.ImportFrom)):
+            scanned = []
+        else:
+            scanned = [node]
+        targets += [(named.target, named.value, "path") for top in scanned for named in ast.walk(top)
+                    if isinstance(named, ast.NamedExpr)]
+        for target, value, kind in targets:
+            for name in ast.walk(target):
+                if isinstance(name, ast.Name) and name.id != "ROOT":
+                    defined.setdefault(name.id, []).append(value)
+                    module_bindings.setdefault(name.id, []).append((kind if name is target else "other", value))
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and not (isinstance(node, ast.ImportFrom)
+                                                                     and (node.level or not node.module)):
+            for name, origin, refused in import_bindings(node):
+                imported[name] = origin if isinstance(node, ast.Import) else node.module
+                module_bindings.setdefault(name, []).append(("other", node))
+                if refused:
+                    refused_imports[name] = origin
+
+    def refuse_import(node):
+        if isinstance(node, ast.ImportFrom) and (node.level or not node.module or node.module == "tools"
+                                                 or node.module.startswith("tools.")
+                                                 or any(alias.name == "*" for alias in node.names)):
+            raise ValueError("cannot evaluate a relative, star or tools-qualified import (line {})"
+                             .format(node.lineno))
+        if isinstance(node, ast.Import) and any(alias.name == "tools" or alias.name.startswith("tools.")
+                                                for alias in node.names):
+            raise ValueError("cannot evaluate a tools-qualified import (line {})".format(node.lineno))
+
+    for node in _module_statements(tree.body):
+        refuse_import(node)
+    if not any(isinstance(node, ast.FunctionDef) for node in defined.get(_MAPPINGS_RENDERER, ())):
+        raise ValueError("cannot evaluate: no module-level function {}".format(_MAPPINGS_RENDERER))
+    walked, pending, inputs = set(), [_MAPPINGS_RENDERER], set()
+
+    def tools_modules(module):
+        # The files of root's tools/ folder a dotted module name loads: tools/<a>.py, tools/<a>/<b>.py, ...
+        pieces = module.split(".")
+        rels = ["tools/{}.py".format("/".join(pieces[:end])) for end in range(1, len(pieces) + 1)]
+        return [rel for rel in rels if (Path(root) / rel).is_file()]
+
+    def add_module(module):
+        inputs.update(tools_modules(module))
+
+    def calls_tools_module(func):
+        while isinstance(func, ast.Attribute):
+            func = func.value
+        return isinstance(func, ast.Name) and func.id in imported and bool(tools_modules(imported[func.id]))
+
+    def entries(node, bound):
+        # The parts of the folder entries `node` iterates, plus _ROOT_ENTRY, when it is X.iterdir() (bare
+        # or as the one argument of sorted, list, tuple or reversed) over a ROOT path X; None otherwise.
+        # X.glob(...) and X.rglob(...) are no folder reads: the attribute check refuses them on a ROOT path.
+        # A walrus around the iterable, the call's argument or X is read through.
+        node = _unwalrus(node)
+        while isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and len(node.args) == 1 \
+                and node.func.id in ("sorted", "list", "tuple", "reversed"):
+            node = _unwalrus(node.args[0])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr == "iterdir":
+            parts = _root_parts(_unwalrus(node.func.value), set(), bound)
+            return None if parts is None else parts + [_ROOT_ENTRY]
+        return None
+
+    def resolver(bindings, fallback):
+        # bound(name) for _root_parts: the parts of a name in `bindings` ({name: [(kind, value)]}) whose
+        # bindings are each a ROOT path ("path", read through a walrus around it) or a loop over a ROOT
+        # folder's entries ("loop"), all the
+        # same, so the name is a path base as ROOT is; ValueError when a name with such a binding has another
+        # binding that is no ROOT path, or a binding to another ROOT path (a loop variable reused over a
+        # second folder); None for a name with no such binding; and fallback(name) for a name not in
+        # `bindings`.
+        memo, active = {}, set()
+
+        def bound(name):
+            if name not in bindings:
+                return fallback(name) if fallback is not None else None
+            if name in memo:
+                return memo[name]
+            if name in active:
+                return None
+            active.add(name)
+            try:
+                found = [(parts, value) for kind, value in bindings[name] for parts in (
+                    _root_parts(_unwalrus(value), set(), bound) if kind == "path" else
+                    entries(value, bound) if kind == "loop" else None,) if parts is not None]
+            finally:
+                active.discard(name)
+            if found and len(found) < len(bindings[name]):
+                raise ValueError("cannot evaluate {}, a name bound to a ROOT path and to another value (line {})"
+                                 .format(name, found[0][1].lineno))
+            other = next((value for parts, value in found if parts != found[0][0]), None)
+            if other is not None:
+                raise ValueError("cannot evaluate {}, a name bound to more than one ROOT path (line {})".format(
+                    name, other.lineno))
+            memo[name] = found[0][0] if found else None
+            return memo[name]
+        return bound
+
+    def local_bindings(nodes):
+        # Each binding of a name inside a walked part, as resolver reads them: a name assigned alone
+        # (=, an annotated assignment or :=) is "path", the target of a for loop or comprehension alone is
+        # "loop", and every other binding (a parameter, an unpacking or augmented target, an import, a
+        # global or nonlocal statement, an except, case or def name) is "other".
+        found, alone = {}, set()
+        for node in nodes:
+            pairs = ([(target, node.value) for target in node.targets] if isinstance(node, ast.Assign) else
+                     [(node.target, node.value)] if isinstance(node, (ast.AnnAssign, ast.NamedExpr))
+                     and node.value is not None else [])
+            loops = [(node.target, node.iter)] if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)) else []
+            for kind, items in (("path", pairs), ("loop", loops)):
+                for target, value in items:
+                    if isinstance(target, ast.Name):
+                        found.setdefault(target.id, []).append((kind, value))
+                        alone.add(id(target))
+        for node in nodes:
+            if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load) and id(node) not in alone:
+                names = [node.id]
+            elif isinstance(node, ast.arg):
+                names = [node.arg]
+            elif isinstance(node, (ast.Global, ast.Nonlocal)):
+                names = list(node.names)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = [name for name, _origin, _refused in import_bindings(node)]
+            elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar, ast.FunctionDef,
+                                   ast.AsyncFunctionDef, ast.ClassDef)):
+                names = [node.name] if node.name else []
+            elif isinstance(node, ast.MatchMapping):
+                names = [node.rest] if node.rest else []
+            else:
+                names = []
+            for name in names:
+                found.setdefault(name, []).append(("other", node))
+        return found
+
+    module_bound = resolver(module_bindings, None)
+    while pending:
+        name = pending.pop()
+        if name in walked:
+            continue
+        walked.add(name)
+        nodes = [node for top in defined[name] for node in ast.walk(top)]
+        bound = resolver(local_bindings(nodes), module_bound)
+        used, paths, chains = set(), [], {}
+        for node in nodes:
+            parts = _root_parts(node, used, bound)
+            if parts is not None:
+                chains[id(node)] = parts
+            if parts:
+                paths.append((node, parts))
+        handed = {id(arg) for node in nodes if isinstance(node, ast.Call) and calls_tools_module(node.func)
+                  for arg in list(node.args) + [keyword.value for keyword in node.keywords]}
+        # Defence in depth: the ROOT-use check below refuses a ROOT default too, unless ROOT there is an
+        # argument of a tools/ module call; no self-test row holds this check on its own.
+        for node in nodes:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) and any(
+                    isinstance(inner, ast.Name) and inner.id == "ROOT"
+                    for default in node.args.defaults + [d for d in node.args.kw_defaults if d is not None]
+                    for inner in ast.walk(default)):
+                raise ValueError("cannot evaluate a function whose default arguments use ROOT (line {})"
+                                 .format(node.lineno))
+        for node in nodes:
+            # A walrus expression whose value is a ROOT path ((p := ROOT / "<a>").parent) is no path base, so
+            # an attribute of it other than _ROOT_PATH_READS (joinpath included), or "/" on either side of
+            # it, is refused; its target is a path base as any name bound alone is.
+            for operand in ([node.value] if isinstance(node, ast.Attribute) and node.attr not in _ROOT_PATH_READS
+                            else [node.left, node.right] if isinstance(node, ast.BinOp) else []):
+                inner = _unwalrus(operand)
+                if inner is not operand and id(inner) in chains:
+                    raise ValueError("cannot evaluate a walrus of a ROOT path as the base of {} (line {})".format(
+                        "." + node.attr if isinstance(node, ast.Attribute) else "/", node.lineno))
+            # A capture (as, star or mapping rest name, at any depth of a case pattern) in a match statement
+            # of a walked part whose subject is a ROOT path is refused: it is not bound as a path base.
+            if isinstance(node, ast.Match):
+                if id(_unwalrus(node.subject)) in chains and any(
+                        isinstance(pattern, (ast.MatchAs, ast.MatchStar)) and pattern.name
+                        or isinstance(pattern, ast.MatchMapping) and pattern.rest
+                        for case in node.cases for pattern in ast.walk(case.pattern)):
+                    raise ValueError("cannot evaluate a match capture of a ROOT path in a renderer (line {})"
+                                     .format(node.lineno))
+            refuse_import(node)
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for _name, origin, refused in import_bindings(node):
+                    if refused:
+                        raise ValueError("cannot evaluate an import of {} in a renderer (line {})".format(
+                            origin, node.lineno))
+            if isinstance(node, ast.Name) and node.id in defined:
+                pending.append(node.id)
+            if isinstance(node, ast.Name) and node.id in _WALK_REFUSED_NAMES:
+                raise ValueError("cannot evaluate {} in a renderer (line {})".format(node.id, node.lineno))
+            if isinstance(node, ast.Name) and node.id in refused_imports:
+                raise ValueError("cannot evaluate {}, a module-level import of {}, in a renderer (line {})".format(
+                    node.id, refused_imports[node.id], node.lineno))
+            if isinstance(node, ast.Name) and node.id in imported:
+                add_module(imported[node.id])
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    add_module(alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                add_module(node.module)
+            elif isinstance(node, ast.Attribute) and id(node.value) in chains and id(node.value) not in used \
+                    and node.attr != "joinpath" and (node.attr not in _ROOT_PATH_READS or not chains[id(node.value)]):
+                raise ValueError("cannot evaluate {}.{} (line {})".format(
+                    "a ROOT path" if chains[id(node.value)] else "ROOT", node.attr, node.lineno))
+            elif isinstance(node, ast.Name) and node.id == "ROOT" and id(node) not in used \
+                    and id(node) not in handed and isinstance(node.ctx, ast.Load):
+                raise ValueError("cannot evaluate ROOT used other than as the base of a path or as an argument "
+                                 "to a tools/ module (line {})".format(node.lineno))
+        for node, parts in paths:
+            if id(node) in used:
+                continue
+            pieces = [piece for part in parts if part is not _ROOT_ENTRY for piece in part.split("/")]
+            if any(piece in ("", ".", "..") for piece in pieces) or parts[0] is _ROOT_ENTRY:
+                raise ValueError("cannot evaluate the ROOT path {!r} (line {})".format(parts, node.lineno))
+            # A path under a folder entry (a loop variable over the folder) reads inside that folder: the
+            # folder is the input.
+            entry = next((index for index, part in enumerate(parts) if part is _ROOT_ENTRY), None)
+            if entry is not None:
+                rel = "/".join(piece for part in parts[:entry] for piece in part.split("/"))
+                if not (Path(root) / rel).is_dir():
+                    raise ValueError("cannot evaluate the entries of {}, which is not a folder under root (line {})"
+                                     .format(rel, node.lineno))
+                inputs.add(rel + "/")
+                continue
+            rel = "/".join(pieces)
+            if (Path(root) / rel).is_file():
+                inputs.add(rel)
+            elif (Path(root) / rel).is_dir():
+                inputs.add(rel + "/")
+            else:
+                raise ValueError("cannot evaluate the ROOT path {}, which is missing under root, as a file or "
+                                 "a folder (line {})".format(rel, node.lineno))
+    return inputs
+
+
+def _mappings_sources_findings(source, declared, root=ROOT):
+    """Findings for `declared` (a _MAPPINGS_SOURCES tuple) against _mappings_inputs(source): each derived
+    input it lacks, and each entry it names that no walked renderer reads. Empty when the 2 sets are equal
+    (order and a repeated entry do not matter). When _mappings_inputs cannot evaluate `source`, that is the
+    one finding, so a read the derivation cannot follow fails closed."""
+    try:
+        derived = _mappings_inputs(source, root)
+    except ValueError as exc:
+        return ["_MAPPINGS_SOURCES cannot be checked: {}".format(exc)]
+    return (["_MAPPINGS_SOURCES lacks {}, which the mappings renderers read".format(rel)
+             for rel in sorted(derived - set(declared))]
+            + ["_MAPPINGS_SOURCES names {}, which no mappings renderer reads".format(rel)
+               for rel in sorted(set(declared) - derived)])
+
+
+def _other_declarations(root=ROOT):
+    """[(stem, declaration)] for every generator the registry reads apart from this one: each tools/gen_*.py
+    declaration as tools/gen_gensrc.py discover_declarations reads it (statically, never importing the
+    generator), then gen_gensrc's own output. Raises ValueError or OSError as discover_declarations does."""
+    import gen_gensrc
+    others = [(stem, decl) for stem, decl in gen_gensrc.discover_declarations(Path(root) / "tools")
+              if stem != _OWN_STEM]
+    return others + [(gen_gensrc.SELF, gen_gensrc.OWN_OUTPUTS)]
+
+
+def _register_findings(entries, outputs, footer, note, others, carriers):
+    """{row id: findings} for a declaration `entries` against the built pages `outputs` ({target: text}).
+    `footer` is the control strip's Version and Status markup and `note` the status note, each as rendered.
+    A page entry whose page carries `footer` must declare VERSION and changelog.toml, and one whose page
+    carries `note` must declare STATUS_SOURCE; a page entry declaring either set while its page does not
+    carry the text is a finding too. `carriers` is _data_carriers() of the live data: a page entry among
+    its _HOOKS_ROW pages must declare HOOKS_SOURCE, and one among its _MAPPINGS_ROW pages every source of
+    _MAPPINGS_SOURCES; a page entry outside those pages declaring any of them is a finding too. A page entry
+    whose target is not among `outputs` is a finding of its own row. Each STATUS_LINES file must have
+    exactly 1 entry, of kind "block", naming this generator and STATUS_SOURCE among its sources, apart from
+    a file on _STATUS_LINES_UNREGISTERED, which must have none. `others` is [(stem, declaration)] for every
+    other generator of the registry (_other_declarations); a STATUS_LINES file named by an entry there, by
+    its exact target or by an ancestor tree target, is a finding, and so is one under an ancestor tree
+    target of `entries`, because each such entry would claim the whole file where this generator owns only
+    its status line, or claim a file kept off the register."""
+    rows = {_FOOTER_ROW: [], _NOTE_ROW: [], _LINES_ROW: [], _BUILT_ROW: [], _HOOKS_ROW: [], _MAPPINGS_ROW: []}
+    for entry in entries:
+        if entry["kind"] != "file":
+            continue
+        target, sources = entry["target"], set(entry["sources"])
+        if target not in outputs:
+            rows[_BUILT_ROW].append("{}: declared but not built".format(target))
+            continue
+        for row, carries, wanted, holder, thing in (
+                (_FOOTER_ROW, footer in outputs[target], set(_FOOTER_SOURCES), "its page", "the rendered text"),
+                (_NOTE_ROW, note in outputs[target], {STATUS_SOURCE}, "its page", "the rendered text"),
+                (_HOOKS_ROW, target in carriers[_HOOKS_ROW], {HOOKS_SOURCE}, "its data", "the $HOOK_COUNT token"),
+                (_MAPPINGS_ROW, target in carriers[_MAPPINGS_ROW], set(_MAPPINGS_SOURCES), "its data",
+                 "a mappings component")):
+            declared = sources & wanted
+            if carries and declared != wanted:
+                rows[row].append("{}: {} carries {} but its sources lack {}".format(
+                    target, holder, thing, ", ".join(sorted(wanted - declared))))
+            elif declared and not carries:
+                rows[row].append("{}: its sources name {} but {} does not carry {}".format(
+                    target, ", ".join(sorted(declared)), holder, thing))
+    for rel, _prefix, _lead in STATUS_LINES:
+        matches = [entry for entry in entries if entry["target"] == rel]
+        if rel in _STATUS_LINES_UNREGISTERED:
+            if matches:
+                rows[_LINES_ROW].append("{}: registered while on _STATUS_LINES_UNREGISTERED ({})".format(
+                    rel, matches))
+        elif len(matches) != 1 or matches[0]["kind"] != "block" or not {
+                "tools/gen_draft_site.py", STATUS_SOURCE} <= set(matches[0]["sources"]):
+            rows[_LINES_ROW].append("{}: needs exactly 1 block entry naming tools/gen_draft_site.py and {} "
+                                    "({} found)".format(rel, STATUS_SOURCE, matches))
+        for entry in _naming_entries(entries, rel):
+            if entry["target"] != rel:
+                rows[_LINES_ROW].append("{}: under the tree entry {!r} of this generator".format(
+                    rel, entry["target"]))
+        for stem, decl in others:
+            if stem == _OWN_STEM:
+                continue
+            for entry in _naming_entries(decl, rel):
+                rows[_LINES_ROW].append("{}: named by the {} entry {!r} of {}.py".format(
+                    rel, entry.get("kind"), entry["target"], stem))
+    return rows
+
+
+def _register_mutant_source(source, old, new):
+    """`source` with `old` replaced by `new` inside its GENSRC_OUTPUTS literal, where `old` must occur
+    exactly once; None otherwise, so a stale anchor fails its flip rather than passing it."""
+    head, sep, rest = source.partition("\nGENSRC_OUTPUTS = (\n")
+    decl, end, tail = rest.partition("\n)\n")
+    if not sep or not end or decl.count(old) != 1:
+        return None
+    return head + sep + decl.replace(old, new) + end + tail
+
+
+def _load_register_mutant(source, directory, tag):
+    """Write one register mutant (this file's own source, read from __file__ by the one caller, with one
+    reviewed literal substitution from _REGISTER_FLIPS, or unmutated as the control) under the self-test's
+    temporary directory and load it with importlib; it is never registered in sys.modules. This is the
+    self-test's one code-loading site, so the dangerous-API allowlist entry is scoped to it."""
+    import importlib.util
+    name = "gen_draft_site_register_{}".format(tag)
+    path = Path(directory) / (name + ".py")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(source)
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    module = importlib.util.module_from_spec(spec)
+    saved_sys_path = list(sys.path)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = saved_sys_path
+    return module
 
 
 def _self_test():
@@ -2487,7 +3241,7 @@ def _self_test():
     # The declared build: both sites at "/", their pages at the live roots, the asset URLs still under
     # /draft/assets/baseline/ (the asset base stays where the files are served), the robots meta gone from
     # every page but the /draft/ placeholder.
-    expect("base/live-targets-at-root", sorted(live_outputs) == sorted(e["target"] for e in GENSRC_OUTPUTS)
+    expect("base/live-targets-at-root", sorted(live_outputs) == sorted(page_targets())
            and all("/draft/" not in rel or rel.endswith("/draft/index.html") for rel in live_outputs),
            sorted(live_outputs))
     for rel, text in sorted(live_outputs.items()):
@@ -2872,8 +3626,8 @@ def _self_test():
            unresolved_links(outputs, staged_))
     promoted_sites_ = promoted_sites(staged_)
     promoted = build(sites=promoted_sites_, registered=False)
-    expect("links/promoted-targets-at-live-root", sorted(promoted) == sorted(
-        entry["target"] for entry in GENSRC_OUTPUTS) and promoted == live_outputs, sorted(promoted))
+    expect("links/promoted-targets-at-live-root", sorted(promoted) == sorted(page_targets())
+           and promoted == live_outputs, sorted(promoted))
     expect("links/resolve-live-clean", unresolved_links(live_outputs) == [], unresolved_links(live_outputs))
     staged_home, opf_home = "site/draft/index.html", "opf/site/draft/index.html"
 
@@ -2971,14 +3725,21 @@ def _self_test():
         expect("stray/promoted-upper-case-extension-flagged", "site/install/UPPER.HTML" in got, got)
         got = stray_outputs(tmp, staged_, set(outputs))
         expect("stray/promoted-staged-targets-see-none", got == [], got)
-        # A temporary page file left in a page folder (.<name>.<pid>.tmp) is stray output; a dot file of
-        # another shape beside it is not.
-        for rel in ("site/install/.index.html.4242.tmp", "site/install/.keep"):
+        # A temporary page file left in a page folder (.<name>.<pid>.tmp, or a later try .<name>.<pid>.<n>.tmp)
+        # is stray output; a dot file of another shape beside it is not, nor is a name that only contains a
+        # temporary name (TEMP_NAME_RE must match the whole name).
+        for rel in ("site/install/.index.html.4242.tmp", "site/install/.index.html.4242.3.tmp",
+                    "site/install/.keep", "site/install/.index.html.4242.tmp.bak",
+                    "site/install/index.html.4242.tmp"):
             with open(Path(tmp) / rel, "w", encoding="utf-8") as handle:
                 handle.write("x")
         got = stray_outputs(tmp, promoted_sites_, promoted_targets)
-        expect("stray/promoted-leftover-temp-page-flagged", "site/install/.index.html.4242.tmp" in got, got)
+        expect("stray/promoted-leftover-temp-page-flagged", "site/install/.index.html.4242.tmp" in got
+               and "site/install/.index.html.4242.3.tmp" in got, got)
         expect("stray/promoted-other-dot-file-passes", "site/install/.keep" not in got, got)
+        expect("stray/promoted-name-only-containing-temp-name-passes",
+               "site/install/.index.html.4242.tmp.bak" not in got and "site/install/index.html.4242.tmp" not in got,
+               got)
     expect("stray/tree-clean", stray_outputs(ROOT) == [], stray_outputs(ROOT))
 
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-selftest-") as tmp:
@@ -3069,6 +3830,389 @@ def _self_test():
             with open(Path(tmp) / STATUS_SOURCE, "w", encoding="utf-8") as handle:
                 handle.write("VERB_STATUS = {}\n".format(bad))
             refused(name, verb_status, tmp)
+
+    # The register rows over the live declaration and the declared build, then each flip of _REGISTER_FLIPS:
+    # a copy of this file whose GENSRC_OUTPUTS literal carries that one change, loaded with importlib, must
+    # turn its row (and only that row) red, while the unmutated copy stays clean. Every call reads the other
+    # generators' declarations as the registry discovers them.
+    footer = _footer_markup(*_version_and_status())
+    others = _other_declarations()
+    # The hooks and mappings carriers come from the live data here, once; a mutant loaded from the temporary
+    # directory below is handed the same sets, since its own ROOT is not the repository.
+    carriers = _data_carriers()
+    expect("gensrc/registry-discovery-reads-other-generators",
+           others and "gen_gensrc" in {stem for stem, _decl in others}
+           and len({stem for stem, _decl in others}) > 1 and _OWN_STEM not in {stem for stem, _decl in others},
+           [stem for stem, _decl in others])
+    for row, found in sorted(_register_findings(GENSRC_OUTPUTS, live_outputs, footer, live_note, others,
+                                                carriers).items()):
+        expect(row, found == [], found)
+    with open(__file__, encoding="utf-8") as handle:
+        own = handle.read()
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-register-") as tmp:
+        control = _load_register_mutant(own, tmp, "control")
+        got = control._register_findings(control.GENSRC_OUTPUTS, live_outputs, footer, live_note, others, carriers)
+        expect("gensrc/flip-control-clean", not any(got.values()), got)
+        for position, (row, old, new) in enumerate(_REGISTER_FLIPS):
+            name = "{}/flip{}-red".format(row, position)
+            mutated = _register_mutant_source(own, old, new)
+            if mutated is None:
+                expect(name, False, "the flip's anchor is not in GENSRC_OUTPUTS exactly once")
+                continue
+            mutant = _load_register_mutant(mutated, tmp, "flip{}".format(position))
+            got = mutant._register_findings(mutant.GENSRC_OUTPUTS, live_outputs, footer, live_note, others,
+                                            carriers)
+            expect(name, sorted(key for key, found in got.items() if found) == [row], got)
+
+    def red_rows(entries, extra_others=()):
+        got = _register_findings(entries, live_outputs, footer, live_note, list(others) + list(extra_others),
+                                 carriers)
+        return sorted(key for key, found in got.items() if found)
+
+    # The pages that carry the control strip and the status note, found from the data files on their own
+    # (_data_carriers: a body component "control"; the $OPF_STATUS token in a decoded value), must be the
+    # pages whose built text carries the rendered strip and note, and neither set is empty, so the rows below
+    # are never vacuous.
+    control_pages, note_pages = carriers[_FOOTER_ROW], carriers[_NOTE_ROW]
+    footer_carriers = {target for target, text in live_outputs.items() if footer in text}
+    note_carriers = {target for target, text in live_outputs.items() if live_note in text}
+    expect("gensrc/control-pages-found", control_pages and control_pages == footer_carriers,
+           (sorted(control_pages), sorted(footer_carriers)))
+    expect("gensrc/status-note-pages-found", note_pages and note_pages == note_carriers,
+           (sorted(note_pages), sorted(note_carriers)))
+    # The hooks and mappings carriers (found from the data files) must be the pages whose built bytes change
+    # with that input: the hooks manifest of the built tree giving another count, and the mappings rows and
+    # registry emptied. Neither set is empty, so the rows below are never vacuous.
+    hook_pages, mappings_pages = carriers[_HOOKS_ROW], carriers[_MAPPINGS_ROW]
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-hook-carriers-") as tmp:
+        os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+        with open(Path(tmp) / HOOKS_SOURCE, "w", encoding="utf-8") as handle:
+            handle.write('[[hook]]\nplatform = "claude-code"\n' * (hook_count() + 1))
+        recounted = build(tree=tmp)
+    hook_changed = {target for target, text in live_outputs.items() if recounted.get(target) != text}
+    expect("gensrc/hook-count-pages-found", hook_pages and hook_pages == hook_changed,
+           (sorted(hook_pages), sorted(hook_changed)))
+    saved_mappings = _MAPPINGS_DATA
+    _MAPPINGS_DATA = ([], [])
+    try:
+        remapped = build()
+    finally:
+        _MAPPINGS_DATA = saved_mappings
+    mappings_changed = {target for target, text in live_outputs.items() if remapped.get(target) != text}
+    expect("gensrc/mappings-pages-found", mappings_pages and mappings_pages == mappings_changed,
+           (sorted(mappings_pages), sorted(mappings_changed)))
+    # Dropping one source from one page entry, for every entry whose page carries the rendered text (or whose
+    # data carries the hook token or a mappings component) and each source it must declare, turns that row
+    # (and only that row) red.
+    for name, row, source, pages in (
+            ("gensrc/control-pages-drop-version-red", _FOOTER_ROW, "VERSION", footer_carriers),
+            ("gensrc/control-pages-drop-changelog-red", _FOOTER_ROW, "changelog.toml", footer_carriers),
+            ("gensrc/status-note-pages-drop-status-source-red", _NOTE_ROW, STATUS_SOURCE, note_carriers),
+            ("gensrc/hook-count-pages-drop-hooks-source-red", _HOOKS_ROW, HOOKS_SOURCE, hook_pages)) + tuple(
+            ("gensrc/mappings-pages-drop-{}-red".format(source), _MAPPINGS_ROW, source, mappings_pages)
+            for source in _MAPPINGS_SOURCES):
+        missed = []
+        for target in sorted(pages):
+            dropped = tuple(dict(entry, sources=tuple(s for s in entry["sources"] if s != source))
+                            if entry["target"] == target else entry for entry in GENSRC_OUTPUTS)
+            if red_rows(dropped) != [row]:
+                missed.append((target, red_rows(dropped)))
+        expect(name, pages and not missed, missed)
+    # _MAPPINGS_SOURCES holds to the inputs derived from this file's own text (_mappings_inputs), which name
+    # at least 1 folder and 1 module, so the pin is never vacuous. The rows after it hold the check itself on
+    # the derived set (not on the tuple, so they neither shrink with it nor turn red beside it): its reverse
+    # order and a repeated entry are clean, and each derived input dropped, an input gained that no renderer
+    # reads, or a renderer reading another folder is a finding.
+    try:
+        derived = tuple(sorted(_mappings_inputs(own)))
+    except ValueError:
+        derived = ()
+    expect("gensrc/mappings-sources-derived", not _mappings_sources_findings(own, _MAPPINGS_SOURCES)
+           and any(rel.endswith("/") for rel in derived) and any(rel.endswith(".py") for rel in derived),
+           (_mappings_sources_findings(own, _MAPPINGS_SOURCES), derived))
+    expect("gensrc/mappings-sources-order-and-repeat-clean", not _mappings_sources_findings(own, derived[::-1])
+           and not _mappings_sources_findings(own, derived + derived[:1]), derived)
+    for rel in derived:
+        got = _mappings_sources_findings(own, tuple(item for item in derived if item != rel))
+        expect("gensrc/mappings-sources-drop-{}-red".format(rel), len(got) == 1 and rel in got[0], got)
+    got = _mappings_sources_findings(own, derived + (HOOKS_SOURCE,))
+    expect("gensrc/mappings-sources-gain-red", len(got) == 1 and HOOKS_SOURCE in got[0], got)
+    start = own.index("\ndef _mappings_data():")
+    end = own.index("\n\n\n", start)
+    loader = own[start:end]
+    got = _mappings_sources_findings(own[:start] + loader.replace('"rules")', '"hooks")') + own[end:],
+                                     derived) if loader.count('"rules")') == 1 else []
+    expect("gensrc/mappings-sources-renderer-reads-another-folder-red",
+           len(got) == 2 and ".aiqt/core/hooks/" in got[0] and ".aiqt/core/rules/" in got[1], got)
+    # Each form a renderer could read a new input by, added to _mappings_data, is derived: a path in a
+    # module-level constant, an import inside the function (plain or from), ROOT.joinpath, and a file read
+    # (derived as the file, never as a folder, so declaring the file is clean). A ROOT path the derivation
+    # cannot evaluate is a finding of its own: a part that is not a string constant, ROOT used through an
+    # attribute other than joinpath, a part leaving root, a path missing under root. The same forms in a
+    # constant no renderer names, a comment, or a function no renderer calls are clean.
+    anchor = "\ndef _mappings_data():\n"
+
+    def reading(body, module="", extra=""):
+        return (own.replace(anchor, "\n" + module + "def _mappings_data():\n    " + body + "\n") + extra
+                if own.count(anchor) == 1 else "")
+
+    hooks = ".aiqt/core/hooks/"
+    for name, text, want in (
+            ("constant-path", reading("_EXTRA_DIR.iterdir()",
+                                      '_EXTRA_DIR = ROOT / ".aiqt" / "core" / "hooks"\n\n\n'), hooks),
+            ("function-import", reading("import gen_hooks"), "tools/gen_hooks.py"),
+            ("function-from-import", reading("from gen_hooks import main"), "tools/gen_hooks.py"),
+            ("joinpath", reading('ROOT.joinpath(".aiqt", "core", "hooks").iterdir()'), hooks),
+            ("file-read", reading('(ROOT / "VERSION").read_text()'), "VERSION")):
+        got = _mappings_sources_findings(text, derived)
+        expect("gensrc/mappings-sources-{}-red".format(name),
+               got == ["_MAPPINGS_SOURCES lacks {}, which the mappings renderers read".format(want)], got)
+    got = _mappings_sources_findings(reading('(ROOT / "VERSION").read_text()'), derived + ("VERSION",))
+    expect("gensrc/mappings-sources-file-read-declared-clean", own.count(anchor) == 1 and not got, got)
+    for name, body in (("non-constant-part", 'ROOT / ".aiqt" / _MAPPINGS_RENDERER'),
+                       ("joinpath-non-constant", 'ROOT.joinpath(".aiqt", _MAPPINGS_RENDERER)'),
+                       ("root-attribute", "ROOT.iterdir()"),
+                       ("missing-path", 'ROOT / ".aiqt" / "no-such-folder"')):
+        got = _mappings_sources_findings(reading(body), derived)
+        expect("gensrc/mappings-sources-cannot-evaluate-{}-red".format(name),
+               own.count(anchor) == 1 and len(got) == 1
+               and got[0].startswith("_MAPPINGS_SOURCES cannot be checked: cannot evaluate") and "(line " in got[0],
+               got)
+    # A part leaving root is refused by its own check, not as a missing path: .aiqt/../.aiqt exists.
+    got = _mappings_sources_findings(reading('ROOT / ".aiqt" / ".." / ".aiqt"'), derived)
+    expect("gensrc/mappings-sources-cannot-evaluate-leaves-root-red",
+           own.count(anchor) == 1 and (ROOT / ".aiqt" / ".." / ".aiqt").is_dir() and len(got) == 1
+           and got[0].startswith("_MAPPINGS_SOURCES cannot be checked: cannot evaluate the ROOT path [")
+           and "(line " in got[0], got)
+    # ROOT reached any other way than as a path base or an argument to a tools/ module, and the names that
+    # reach a file or a module another way, are refused: a local alias of ROOT, a ROOT default argument (on
+    # the renderer, or on a function of this file it calls, as hook_count and verb_status have), ROOT handed
+    # to os.path.join or Path, getattr(ROOT, ...), a module-level alias of ROOT, open, __file__, __import__,
+    # importlib, a ROOT path's glob, and relative, star and tools-qualified imports. A name bound alone to a
+    # ROOT path (local, module-level or a loop variable over a folder's entries) is a path base: its .parent,
+    # a ".." part on it, or a second binding of it is refused. An import of a refused module or name under
+    # an alias, in the renderer or at module level then used there, and a match capture of ROOT are refused.
+    # A walrus of a ROOT path taken as the base of .parent, joinpath or "/" (nested, or around a bound path or
+    # a loop's folder, too), a renderer's match capture of a ROOT path (bare, in a larger pattern, or of a
+    # walrus subject), a module-level bare capture's .parent, a loop over a ROOT path's glob or rglob, a
+    # dotted refused import, a refused name from another module, and type, operator, posix, nt, _io,
+    # __loader__ and __spec__ are refused too. A module-level if or try body is walked as module level is.
+    # ROOT handed whole to a tools/ module call stays clean.
+    rooted = '(root / ".aiqt" / "core" / "hooks").iterdir()'
+    std_path = 'ROOT / ".aiqt" / "standards"'
+    bound = "p = " + std_path + "; "
+    for name, text in (
+            ("local-alias", reading('r = ROOT; (r / ".aiqt" / "core" / "hooks").iterdir()')),
+            ("root-default", own.replace(anchor, "\ndef _mappings_data(root=ROOT):\n    " + rooted + "\n")
+             if own.count(anchor) == 1 else ""),
+            ("calls-hook-count", reading("hook_count()")),
+            ("calls-verb-status", reading("verb_status()")),
+            ("os-path-join", reading('os.listdir(os.path.join(ROOT, ".aiqt", "core", "hooks"))')),
+            ("path-of-root", reading('Path(ROOT, ".aiqt", "core", "hooks").iterdir()')),
+            ("getattr-joinpath", reading('getattr(ROOT, "joinpath")(".aiqt", "core", "hooks").iterdir()')),
+            ("module-alias", reading('(_R / ".aiqt" / "core" / "hooks").iterdir()', "_R = ROOT\n\n\n")),
+            ("open-literal", reading('open(".aiqt/core/hooks/manifest.toml")')),
+            ("file-dunder", reading('(Path(__file__).parents[1] / ".aiqt").iterdir()')),
+            ("dunder-import", reading('__import__("gen_hooks")')),
+            ("importlib", reading('importlib.import_module("gen_hooks")')),
+            ("root-path-glob", reading('(ROOT / ".aiqt" / "standards").glob("../core/hooks/*")')),
+            ("relative-import", reading("load_hooks", "from .gen_hooks import load_hooks\n\n\n")),
+            ("star-import", reading("pass", "from gen_hooks import *\n\n\n")),
+            ("tools-import", reading("from tools import gen_hooks")),
+            ("bound-path-parent", reading(bound + 'p.parent.joinpath("core", "hooks").iterdir()')),
+            ("bound-path-leaves-root", reading(bound + '(p / ".." / "core" / "hooks").iterdir()')),
+            ("bound-path-rebound", reading(bound + 'p /= "../core/hooks"; p.iterdir()')),
+            ("module-path-parent", reading('(_STD.parent / "core" / "hooks").iterdir()',
+                                           '_STD = ROOT / ".aiqt" / "standards"\n\n\n')),
+            ("entry-parent", reading('[e.parent.parent / "core" / "hooks" for e in (ROOT / ".aiqt" / '
+                                     '"standards").iterdir()]')),
+            ("import-os-alias", reading('import os as o; o.listdir(".aiqt/core/hooks")')),
+            ("from-importlib", reading('from importlib import import_module; import_module("gen_hooks")')),
+            ("module-import-os-alias", reading('_os.listdir(".aiqt/core/hooks")', "import os as _os\n\n\n")),
+            ("match-capture-root", reading('(_R2 / ".aiqt" / "core" / "hooks").iterdir()',
+                                           "match ROOT:\n    case _R2:\n        pass\n\n\n")),
+            ("walrus-parent", reading("(p := " + std_path + ').parent.joinpath("core", "hooks").iterdir()')),
+            ("walrus-leaves-root", reading("((p := " + std_path + ') / ".." / "core" / "hooks").iterdir()')),
+            ("walrus-joinpath", reading("(p := " + std_path + ').joinpath("..", "core", "hooks").iterdir()')),
+            ("walrus-right-operand", reading('("x" / (p := ' + std_path + ")).iterdir()")),
+            ("walrus-nested-parent", reading("(q := (p := " + std_path + ")).parent.iterdir()")),
+            ("bound-walrus-parent", reading("p = (q := " + std_path + "); p.parent.iterdir()")),
+            ("entry-walrus-parent", reading('[e.parent.parent / "core" / "hooks" for e in (q := ' + std_path
+                                            + ").iterdir()]")),
+            ("local-match-capture", reading("match " + std_path + ":\n        case p:\n            "
+                                            '(p.parent / "core" / "hooks").iterdir()')),
+            ("local-match-capture-in-pattern", reading("match " + std_path + ":\n        case object(parent=p):\n"
+                                                       '            (p / "core" / "hooks").iterdir()')),
+            ("local-match-walrus-subject", reading("match (q := " + std_path + "):\n        case p:\n"
+                                                   "            p.parent.iterdir()")),
+            ("module-match-capture-parent", reading('(_S.parent / "core" / "hooks").iterdir()',
+                                                    "match " + std_path + ":\n    case _S:\n        pass\n\n\n")),
+            ("module-match-walrus-subject", reading("_S.parent.iterdir()", "match (_Q := " + std_path
+                                                    + "):\n    case _S:\n        pass\n\n\n")),
+            ("entry-glob", reading("[e for e in (" + std_path + ').glob("*")]')),
+            ("entry-rglob", reading("[e for e in sorted((" + std_path + ').rglob("*"))]')),
+            ("import-os-path-alias", reading('import os.path as osp; osp.exists(".aiqt/core/hooks")')),
+            ("from-importlib-machinery", reading("from importlib.machinery import SourceFileLoader; SourceFileLoader")),
+            ("from-module-path-alias", reading('from gen_rules import Path as GP; GP(".aiqt/core/hooks").iterdir()')),
+            ("type-of-path", reading("type(" + std_path + ')(".aiqt/core/hooks").iterdir()')),
+            ("operator-truediv", reading("operator.truediv(" + std_path + ', "..").iterdir()')),
+            ("import-posix", reading('import posix; posix.listdir(".aiqt/core/hooks")')),
+            ("import-nt", reading('import nt; nt.listdir(".aiqt/core/hooks")')),
+            ("from-io-c", reading('from _io import FileIO; FileIO(".aiqt/core/hooks/manifest.toml")')),
+            ("loader-get-data", reading('__loader__.get_data(".aiqt/core/hooks/manifest.toml")')),
+            ("spec-loader", reading('__spec__.loader.get_data(".aiqt/core/hooks/manifest.toml")')),
+            ("module-import-posix", reading('_px.listdir(".aiqt/core/hooks")', "import posix as _px\n\n\n"))):
+        got = _mappings_sources_findings(text, derived)
+        expect("gensrc/mappings-sources-refused-{}-red".format(name),
+               own.count(anchor) == 1 and len(got) == 1
+               and got[0].startswith("_MAPPINGS_SOURCES cannot be checked: cannot evaluate") and "(line " in got[0],
+               got)
+    for name, text, want in (
+            ("module-if-import", reading("gen_hooks.main", "if True:\n    import gen_hooks\n\n\n"),
+             "tools/gen_hooks.py"),
+            ("module-try-def", reading("_helper()", 'try:\n    def _helper():\n        return ROOT / ".aiqt" / '
+                                                    '"core" / "hooks"\nexcept ImportError:\n    pass\n\n\n'),
+             hooks),
+            ("module-if-test-walrus", reading("_H.iterdir()", 'if (_H := ROOT / ".aiqt" / "core" / "hooks"):\n'
+                                                               "    pass\n\n\n"), hooks),
+            ("module-while-test-walrus", reading("_H.iterdir()", 'while (_H := ROOT / ".aiqt" / "core" / "hooks") '
+                                                                 "is None:\n    pass\n\n\n"), hooks),
+            ("module-match-capture", reading("_H.iterdir()", 'match ROOT / ".aiqt" / "core" / "hooks":\n'
+                                                              "    case _H:\n        pass\n\n\n"), hooks),
+            ("module-for-target", reading("_H", 'for _H in [ROOT / ".aiqt" / "core" / "hooks"]:\n    pass\n\n\n'),
+             hooks),
+            ("module-with-target", reading("_H", 'with contextlib.nullcontext(ROOT / ".aiqt" / "core" / "hooks") '
+                                                 "as _H:\n    pass\n\n\n"), hooks),
+            ("module-dotted-import", reading("gen_hooks.main", "import gen_hooks.x\n\n\n"), "tools/gen_hooks.py"),
+            ("module-match-guard-walrus", reading("_H.iterdir()", 'match 0:\n    case _ if (_H := ROOT / ".aiqt" / '
+                                                                  '"core" / "hooks"):\n        pass\n\n\n'), hooks)):
+        got = _mappings_sources_findings(text, derived)
+        expect("gensrc/mappings-sources-{}-red".format(name),
+               got == ["_MAPPINGS_SOURCES lacks {}, which the mappings renderers read".format(want)], got)
+    # A path built on a name bound to a ROOT path is derived as one built on ROOT is (the bound path and the
+    # longer one), at module level and locally.
+    for name, text in (
+            ("module-path-extended", reading('(_CORE / "hooks").iterdir()', '_CORE = ROOT / ".aiqt" / "core"\n\n\n')),
+            ("bound-path-extended", reading('c = ROOT / ".aiqt" / "core"; (c / "hooks").iterdir()'))):
+        got = _mappings_sources_findings(text, derived)
+        expect("gensrc/mappings-sources-{}-red".format(name),
+               got == ["_MAPPINGS_SOURCES lacks {}, which the mappings renderers read".format(rel)
+                       for rel in (".aiqt/core/", hooks)], got)
+    # A name bound alone to a declared ROOT path (local, module-level, a loop variable over its entries) and
+    # read with the plain reads, a path under an entry, a declared path bound to a name and handed to a
+    # tools/ module, a standard-library import not on _WALK_REFUSED_NAMES, and a refused module imported
+    # under an alias at module level that no renderer uses, are all clean.
+    std = 'ROOT / ".aiqt" / "standards"'
+    got = [_mappings_sources_findings(text, derived) for text in (
+        reading(bound + "p.iterdir()"),
+        reading("_STD.iterdir()", "_STD = " + std + "\n\n\n"),
+        reading("for e in (" + std + ").iterdir():\n        e.read_text()"),
+        reading("[e.is_file() for e in sorted((" + std + ').iterdir())]; [(e / "x").exists() for e in ('
+                + std + ").iterdir()]"),
+        reading(bound + "load_manifests(p, root=ROOT)"),
+        reading('import json; json.loads("{}")'),
+        reading("pass", "import os as _os\n\n\n"))]
+    expect("gensrc/mappings-sources-bound-path-reads-clean", own.count(anchor) == 1 and got == [[]] * 7, got)
+    # A loop variable reused over 2 declared folders, and a path base given a second value that is no ROOT
+    # path, are each refused with a message naming that case.
+    for name, text, message in (
+            ("entry-two-folders", reading("for e in (" + std + ").iterdir():\n        e.read_text()\n"
+                                          "    for e in (ROOT / \".aiqt\" / \"core\" / \"rules\").iterdir():\n"
+                                          "        e.read_text()"), "e, a name bound to more than one ROOT path"),
+            ("bound-path-other-value", reading(bound + 'p /= "../core/hooks"; p.iterdir()'),
+             "p, a name bound to a ROOT path and to another value")):
+        got = _mappings_sources_findings(text, derived)
+        expect("gensrc/mappings-sources-refused-{}-message-red".format(name),
+               own.count(anchor) == 1 and len(got) == 1
+               and got[0].startswith("_MAPPINGS_SOURCES cannot be checked: cannot evaluate " + message), got)
+    # A walrus of a declared path read with the plain reads, its target used as a path base, a walrus around a
+    # bound path or a loop's folder, a match on a path with no capture, a capture of a value that is no path,
+    # and a loop variable reused over the same folder, are all clean.
+    got = [_mappings_sources_findings(text, derived) for text in (
+        reading("(p := " + std + ").iterdir()"),
+        reading("if (p := " + std + ").is_dir():\n        p.iterdir()"),
+        reading("p = (q := " + std + "); p.iterdir()"),
+        reading("[e.read_text() for e in (q := " + std + ").iterdir()]"),
+        reading("match " + std + ":\n        case _:\n            pass"),
+        reading("match 1:\n        case p:\n            p"),
+        reading("for e in (" + std + ").iterdir():\n        e.read_text()\n    for e in (" + std
+                + ").iterdir():\n        e.read_text()"))]
+    expect("gensrc/mappings-sources-walrus-and-match-clean", own.count(anchor) == 1 and got == [[]] * 7, got)
+    got = [_mappings_sources_findings(reading(body), derived)
+           for body in ("gen_rules.load_corpus(ROOT)", 'load_manifests(ROOT / ".aiqt" / "standards", root=ROOT)')]
+    expect("gensrc/mappings-sources-root-into-tools-module-clean", own.count(anchor) == 1 and got == [[], []],
+           got)
+    unused = ('\n\ndef _unread_forms(root=ROOT):\n    import gen_hooks\n    ROOT.joinpath(".aiqt").iterdir()\n'
+              '    ROOT.iterdir()\n    r = ROOT\n    hook_count()\n    os.path.join(ROOT, "x")\n'
+              '    getattr(ROOT, "joinpath")("x")\n    open("x")\n'
+              '    return ROOT / ".aiqt" / _MAPPINGS_RENDERER, gen_hooks, r, root\n')
+    got = [_mappings_sources_findings(text, derived) for text in (
+        reading("pass", '_EXTRA_DIR = ROOT / ".aiqt" / "core" / "hooks"\n\n\n'),
+        reading("pass", "_R = ROOT\n\n\n"),
+        reading("pass", "if True:\n    import gen_hooks\n\n\n"),
+        reading('pass  # ROOT / ".aiqt" / "core" / "hooks"; import gen_hooks; r = ROOT; open("x")'),
+        reading("pass", extra=unused))]
+    expect("gensrc/mappings-sources-unread-forms-clean", own.count(anchor) == 1 and got == [[]] * 5, got)
+    # The carriers come from decoded values: in a synthetic data folder, a TOML comment naming both tokens
+    # (a.toml) and a literal string spelling \u0024 (c.toml) carry neither token, while a basic string spelling
+    # each token as the escape \u0024 (b.toml) and a plain token in a body value (d.toml) carry it.
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-carriers-") as tmp:
+        os.makedirs(Path(tmp) / "draft-src")
+        head = 'path = "{}/index.html"\ntitle = "T"\nkind = "document"\nlabel = "L"\nheading = "H"\n'
+        for name, text in (
+                ("a", "# $HOOK_COUNT $OPF_STATUS\n[[body]]\ncomponent = \"prose\"\nhtml = \"<p>P</p>\"\n"),
+                ("b", "[[body]]\ncomponent = \"prose\"\nhtml = \"<p>\\u0024HOOK_COUNT \\u0024OPF_STATUS</p>\"\n"),
+                ("c", "[[body]]\ncomponent = \"prose\"\nhtml = '<p>\\u0024HOOK_COUNT \\u0024OPF_STATUS</p>'\n"),
+                ("d", "[[body]]\ncomponent = \"prose\"\nhtml = \"<p>$HOOK_COUNT</p>\"\n")):
+            with open(Path(tmp) / "draft-src" / (name + ".toml"), "w", encoding="utf-8") as handle:
+                handle.write(head.format(name) + text)
+        got = _data_carriers(({"src": "draft-src", "root": "x"},), tmp)
+    expect("gensrc/data-carriers-skip-comments-and-literals",
+           not {"x/a/index.html", "x/c/index.html"} & (got[_HOOKS_ROW] | got[_NOTE_ROW]), got)
+    expect("gensrc/data-carriers-decode-escapes",
+           got[_HOOKS_ROW] == {"x/b/index.html", "x/d/index.html"} and got[_NOTE_ROW] == {"x/b/index.html"}, got)
+    # A block entry is never a page: page_targets() leaves it out, and the template pages the site gates read
+    # (tools/_template_pages.py) are exactly the page targets, so a block entry neither becomes a template page
+    # nor moves a site's template base.
+    import _template_pages
+    blocks = {entry["target"] for entry in GENSRC_OUTPUTS if entry["kind"] == "block"}
+    expect("gensrc/block-entries-not-pages", blocks and not blocks & page_targets()
+           and _template_pages.template_targets(ROOT) == page_targets(), sorted(blocks))
+
+    # A STATUS_LINES file named outside this generator's own exact entries: by an exact target or an ancestor
+    # tree target in another generator's declaration, or by an ancestor tree target in this one. Each red
+    # vector turns the status-lines row (alone) red, and each of the vectors read from another generator is
+    # clean when the other declarations are left out, so the registry discovery is what finds it. Each twin
+    # names a sibling whose path only begins like the file's (and would match a bare prefix test), and stays
+    # clean.
+    def other(*targets):
+        return [("gen_fixture", tuple({"target": target, "kind": kind, "sources": ("tools/gen_fixture.py",),
+                                       "regenerate": "python3 tools/gen_fixture.py"} for target, kind in targets))]
+
+    own_tree = GENSRC_OUTPUTS + ({"target": "opf/", "kind": "tree", "sources": ("tools/gen_draft_site.py",),
+                                  "regenerate": "python3 tools/gen_draft_site.py"},)
+    own_sibling_tree = GENSRC_OUTPUTS + ({"target": "opf/READ/", "kind": "tree",
+                                          "sources": ("tools/gen_draft_site.py",),
+                                          "regenerate": "python3 tools/gen_draft_site.py"},)
+    for name, entries, extra, want in (
+            ("gensrc/unregistered-exact-target-in-other-generator-red", GENSRC_OUTPUTS,
+             other(("opf/README.md", "file")), [_LINES_ROW]),
+            ("gensrc/unregistered-block-entry-in-other-generator-red", GENSRC_OUTPUTS,
+             other(("opf/spec/OPF-SPEC.md", "block")), [_LINES_ROW]),
+            ("gensrc/unregistered-ancestor-tree-in-other-generator-red", GENSRC_OUTPUTS,
+             other(("opf/spec/", "tree")), [_LINES_ROW]),
+            ("gensrc/registered-ancestor-tree-in-other-generator-red", GENSRC_OUTPUTS,
+             other(("opf/site/", "tree")), [_LINES_ROW]),
+            ("gensrc/unregistered-ancestor-tree-in-own-declaration-red", own_tree, (), [_LINES_ROW]),
+            ("gensrc/sibling-files-in-other-generator-allowed", GENSRC_OUTPUTS,
+             other(("opf/README.mdx", "file"), ("opf/README", "file"), ("opf/spec/OPF-SPEC.md.bak", "block")), []),
+            ("gensrc/sibling-trees-in-other-generator-allowed", GENSRC_OUTPUTS,
+             other(("opf/spe/", "tree"), ("opf/spec/OPF-SPEC/", "tree"), ("opf/site/llms/", "tree")), []),
+            ("gensrc/sibling-tree-in-own-declaration-allowed", own_sibling_tree, (), [])):
+        expect(name, red_rows(entries, extra) == want, (red_rows(entries, extra), want))
+        if extra and want:
+            expect(name, _register_findings(entries, live_outputs, footer, live_note, (), carriers)[_LINES_ROW] == [],
+                   "found without the other declarations")
 
     # The hook count: read from the hooks manifest, rendered for the $HOOK_COUNT token, and the only form the
     # pages state it in.
@@ -3424,15 +4568,26 @@ def _self_test():
     expect("ids/distinct-ids-accepted", '<p id="a">x</p>' in distinct_html and '<h3 id="b">H</h3>' in distinct_html,
            distinct_html[-400:])
     # Ids are counted per element: 1 element that repeats its id attribute, and elements whose id attribute is
-    # bare, are refused with a message that names what they are, not as a duplicate id (nor an id of None).
+    # bare or empty, are refused with a message that names what they are, not as a duplicate id (nor an id of
+    # None); 2 elements sharing a non-empty id are the duplicate-id twin. Only an element's first id (the one
+    # a browser keeps) is compared across elements: a later id attribute that another element's id repeats
+    # is no duplicate, while a first id that another element's id repeats is one.
     for name, inline_ids, want, unwanted in (
             ("refuse/repeated-id-attribute-one-element", '<p id=\\"q\\" id=\\"q\\">x</p>',
-             "a <p> element carries 2 id attributes ('q', 'q')", "duplicate id"),
+             "a <p> element carries 2 id attributes ('q', 'q')", ("duplicate id",)),
             ("refuse/bare-id-attributes", '<p id>x</p><p id>y</p>',
-             "a <p> element carries an empty id", "None")):
+             "a <p> element carries an empty id", ("None", "duplicate id")),
+            ("refuse/empty-ids-not-compared", '<p id=\\"\\">x</p><p id=\\"\\">y</p>',
+             "a <p> element carries an empty id", ("duplicate id",)),
+            ("refuse/non-empty-ids-compared", '<p id=\\"e\\">x</p><p id=\\"e\\">y</p>',
+             "duplicate id 'e'", ("empty id",)),
+            ("ids/first-id-compared-across-elements", '<p id=\\"a\\" id=\\"b\\">x</p><p id=\\"a\\">y</p>',
+             "duplicate id 'a'", ("duplicate id 'b'",)),
+            ("ids/later-id-not-compared-across-elements", '<p id=\\"a\\" id=\\"b\\">x</p><p id=\\"b\\">y</p>',
+             "a <p> element carries 2 id attributes ('a', 'b')", ("duplicate id",))):
         ids_page = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "' + inline_ids + '"\n')
         message = refused(name, render_page, site, [ids_page], ids_page)
-        expect(name, want in message and unwanted not in message, message)
+        expect(name, want in message and not any(text in message for text in unwanted), message)
     one_each = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "<p id=\\"q\\">x</p><p id=\\"r\\">y</p>"\n')
     try:
         one_each_html = render_page(site, [one_each], one_each)
@@ -3447,7 +4602,15 @@ def _self_test():
                              'heading = "H"\n[[body]]\ncomponent = "prose"\nhtml = "<p>P</p>"\n')
     for name, base_page in (("refuse/base-token-outside-inline-label", unexpanded_label),
                             ("refuse/base-token-outside-inline-title", unexpanded_title)):
-        expect(name, "$BASE/" in refused(name, render_page, site, [base_page], base_page))
+        message = refused(name, render_page, site, [base_page], base_page)
+        expect(name, "unexpanded $BASE/ token in a field that is not an inline HTML value" in message, message)
+    # An inline HTML value that still carries a $BASE/ token once expanded ($BASE$BASE//x) is refused as an
+    # inline HTML value, not as a field outside one; its twin is base/inline-token-expanded below.
+    inline_left = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "<a href=\\"$BASE$BASE//x\\">x</a>"\n')
+    message = refused("refuse/base-token-left-in-inline-value", render_page, site, [inline_left], inline_left)
+    expect("refuse/base-token-left-in-inline-value",
+           "unexpanded $BASE/ token left in an inline HTML value once expanded: '<a href=\"$BASE$BASE//x\">x</a>'"
+           in message and "not an inline HTML value" not in message, message)
     inline_base = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "<a href=\\"$BASE/install/\\">x</a>"\n')
     try:
         inline_html = render_page(site, [inline_base], inline_base)
@@ -3461,14 +4624,14 @@ def _self_test():
     # the bytes and leaves no temporary file.
     builtin_open = open
 
-    def run_injected(fail, squatter=False):
+    def run_injected(fail, squatters=0):
         with tempfile.TemporaryDirectory(prefix="gen-draft-site-write-") as tmp:
             folder = Path(tmp) / "site"
             os.makedirs(folder)
             with builtin_open(folder / "index.html", "wb") as handle:
                 handle.write(b"previous bytes\n")
-            squat = folder / ".index.html.{}.tmp".format(os.getpid())
-            if squatter:
+            squats = _temp_names(folder / "index.html")[:squatters]
+            for squat in squats:
                 with builtin_open(squat, "xb") as handle:
                     handle.write(b"someone else's\n")
 
@@ -3500,24 +4663,38 @@ def _self_test():
                 code = "raised: {}".format(exc)
             with builtin_open(folder / "index.html", "rb") as handle:
                 data = handle.read()
-            squatted = None
-            if os.path.lexists(squat):
-                with builtin_open(squat, "rb") as handle:
-                    squatted = handle.read()
+            squatted = []
+            for squat in squats:
+                if os.path.lexists(squat):
+                    with builtin_open(squat, "rb") as handle:
+                        squatted.append(handle.read())
+                else:
+                    squatted.append(None)
             return code, data, sorted(os.listdir(folder)), squatted
 
     got = run_injected(True)
     expect("write/failure-keeps-previous-bytes-and-removes-temp",
-           got == (2, b"previous bytes\n", ["index.html"], None), got)
+           got == (2, b"previous bytes\n", ["index.html"], []), got)
     got = run_injected(False)
-    expect("write/success-replaces-bytes-without-temp", got == (0, b"<p>fresh</p>\n", ["index.html"], None), got)
-    # run() removes only the temporary file it created: a file already at the page's temporary name (another
-    # writer's) is neither overwritten nor removed, and the run exits 2 with the target's previous bytes. Its
-    # twin is write/success-replaces-bytes-without-temp above, the same run with that name free.
-    got = run_injected(False, squatter=True)
-    expect("write/existing-temp-file-survives-and-refuses",
-           got == (2, b"previous bytes\n", [".index.html.{}.tmp".format(os.getpid()), "index.html"],
-                   b"someone else's\n"), got)
+    expect("write/success-replaces-bytes-without-temp", got == (0, b"<p>fresh</p>\n", ["index.html"], []), got)
+    # run() removes only the temporary file it created: a file already at the page's first temporary name
+    # (another writer's, or one a killed run with the same process id left) is neither overwritten nor
+    # removed. The run writes through the next free name instead (.<name>.<pid>.1.tmp, not left behind),
+    # replaces the target, and reports the other file as stray output (exit 1). Its twin is
+    # write/success-replaces-bytes-without-temp above, the same run with that name free (exit 0).
+    got = run_injected(False, squatters=1)
+    expect("write/existing-temp-file-survives-and-next-name-used",
+           got == (1, b"<p>fresh</p>\n", [".index.html.{}.tmp".format(os.getpid()), "index.html"],
+                   [b"someone else's\n"]), got)
+    # Only when every temporary name is taken does the write refuse (exit 2), leaving the target's previous
+    # bytes and every other file as it was.
+    got = run_injected(False, squatters=TEMP_TRIES)
+    expect("write/every-temp-name-taken-survives-and-refuses",
+           got == (2, b"previous bytes\n",
+                   sorted([".index.html.{}.tmp".format(os.getpid())]
+                          + [".index.html.{}.{}.tmp".format(os.getpid(), n) for n in range(1, TEMP_TRIES)]
+                          + ["index.html"]),
+                   [b"someone else's\n"] * TEMP_TRIES), got)
     # --check reports a temporary page file left in a page folder (a run killed between its write and its
     # replace) as stray output (exit 1); the same tree without it is clean (exit 0).
     fresh_pages = {"site/index.html": "<p>fresh</p>\n"}
@@ -3552,11 +4729,18 @@ def _self_test():
           "a symbolically linked parent directory there refused, each layer of the read driven on its "
           "own, and its descriptor closed once), no draft-src data file of either site typing a number (digits or a number word) "
           "with at most 4 words before \"hooks\" once TOML escapes and HTML character references are "
-          "decoded, --check exit codes, an explicit empty defaulted label refused while an optional key "
+          "decoded, --check exit codes, the register rows with their flips, each source dropped from every "
+          "control-strip, status-note, hook-count and mappings page entry, the carriers read from decoded "
+          "data values, _MAPPINGS_SOURCES held to the inputs derived from the mappings renderers, status "
+          "lines named by an exact or ancestor tree target in any generator's declaration, an explicit empty "
+          "defaulted label refused while an optional key "
           "accepts empty, a duplicate shell, component or inline id refused, 1 element repeating its id "
-          "attribute and bare id attributes refused with their own messages, a $BASE/ token outside an inline "
-          "HTML value refused, a failed page write leaving the previous bytes and no temporary file, a file "
-          "already at the temporary name kept, and a leftover temporary page file reported as stray)")
+          "attribute and bare or empty id attributes refused with their own messages, only an element's first "
+          "id compared across elements, a $BASE/ token outside an inline HTML value refused, an inline HTML "
+          "value left with a $BASE/ token refused as one, a failed page write leaving the previous bytes and no "
+          "temporary file, a file already at the temporary name kept while the next name is used, every "
+          "temporary name taken refused, and a leftover temporary page file, only by its whole name, reported "
+          "as stray)")
     return 0
 
 
