@@ -2923,6 +2923,21 @@ def _verdict_row(probe, base, finished, failures, flip):
     return not wrong and bool(flip_wrong), dict(wrong=wrong, flip_caught=bool(flip_wrong))
 
 
+# CLI copies whose entry line is exactly CLI_ENTRY, each (behaviour row id, path, arguments, marker). Under an
+# inherited ignore each must refuse by name at that line; with the line made the bare main() call (its revert
+# row, the id with "-refuses" made "-guard-removed-red"), main() reaches a read-only usage or cannot-evaluate path
+# that exits 2 and prints the marker. The arguments pick that path, so neither launch renders, writes state or
+# runs a self-test.
+GUARDED_ENTRY_ROWS = (
+    ("behaviour/orch-doctor-refuses", "tools/orch_doctor.py", ("--hook-coverage",),
+     "HOOK COVERAGE: cannot evaluate: no settings or hooks.json file named"),
+    ("behaviour/render-og-cards-refuses", "tools/render_og_cards.py", ("--usage",),
+     "error: unrecognized arguments ['--usage']; fail closed"),
+    ("behaviour/load-bound-refuses", "tools/_load_bound.py", ("--usage",), "usage: _load_bound.py --self-test"),
+    ("behaviour/opf-selftest-execution-refuses", "opf/tools/check_opf_selftest_execution.py", ("--usage",),
+     "usage: check_opf_selftest_execution.py --suite <id> | --registry | --self-test"))
+
+
 def _behaviour(probe, base, verdict=None):
     """[(check id, ok, detail)] for every behaviour, control and guard-removed vector; ok is the row's
     _verdict (verdict, when given, in its place), None when every failing part read a launch that reached its
@@ -2971,7 +2986,8 @@ def _behaviour(probe, base, verdict=None):
             ("behaviour/import-complete-self-test-refuses", "opf/tools/_opf_import_complete.py", ("--self-test",)),
             ("behaviour/gitleaks-pin-refuses", "tools/check_gitleaks_pin.py", ()),
             ("behaviour/must-deliver-refuses", "tools/check_must_deliver.py", ()),
-            ("behaviour/verifier-delivery-refuses", "tools/check_verifier_delivery.py", ())):
+            ("behaviour/verifier-delivery-refuses", "tools/check_verifier_delivery.py", ()),
+            *((check_id, rel, args) for check_id, rel, args, _marker in GUARDED_ENTRY_ROWS)):
         got = via("ignore", python + [str(ROOT / rel)] + list(args), cwd=str(ROOT))
         out.append((check_id, verdict((refused(got, Path(rel).name), got)), got))
     for check_id, rel, marker in (("control/opf-cli-default-runs", "opf/tools/opf.py", "opf: the OPFiles"),
@@ -3078,6 +3094,21 @@ def _behaviour(probe, base, verdict=None):
     out.append(("revert/declaration-gate-guard-removed-red", verdict((not refused(got, "check_opf_declaration.py")
                                                                       and "usage: check_opf_declaration.py" in got[2],
                                                                       got)), got))
+    # Each GUARDED_ENTRY_ROWS copy with its CLI entry line made the bare main() call, run with its row's arguments
+    # under an inherited ignore: main() then reaches its read-only usage or cannot-evaluate path and prints its
+    # marker, so that copy's behaviour row would be red. orch_doctor.py imports _gen_common and aiqt_hooks at load
+    # and finds aiqt_hooks under repo_root(), so its tree carries both and a .git marker that makes it that root.
+    entry_tree = Path(base) / "guardless-entry"
+    (entry_tree / ".git").mkdir(parents=True)
+    for rel in ("tools/_gen_common.py", HOOK_COPIES[0]):
+        _copy(rel, entry_tree)
+    for check_id, rel, args, marker in GUARDED_ENTRY_ROWS:
+        name = Path(rel).name
+        copy = _copy(rel, entry_tree, _swap((ROOT / rel).read_text(encoding="utf-8"), CLI_ENTRY.format(name),
+                                            "sys.exit(main())"))
+        got = via("ignore", python + [str(copy)] + list(args), cwd=str(entry_tree))
+        out.append((check_id.replace("behaviour/", "revert/").replace("-refuses", "-guard-removed-red"), verdict(
+            (not refused(got, name) and got[0] == 2 and marker in got[1] + got[2], got)), got))
     tree = Path(base) / "guardless-runner"
     _copy(CANONICAL_REL, tree)
     text = _truncated_runner((ROOT / LOCAL_RUNNER).read_text(encoding="utf-8"), 'if [ "$failed" -ne 0 ]; then')
@@ -3392,6 +3423,9 @@ def self_test(lane, report_path=None):
                                 ("behaviour/import-complete-self-test-refuses", 0),
                                 ("behaviour/gitleaks-pin-refuses", 0), ("behaviour/must-deliver-refuses", 0),
                                 ("behaviour/verifier-delivery-refuses", 0),
+                                ("behaviour/orch-doctor-refuses", 0), ("behaviour/render-og-cards-refuses", 0),
+                                ("behaviour/load-bound-refuses", 0),
+                                ("behaviour/opf-selftest-execution-refuses", 0),
                                 ("control/opf-cli-default-runs", 0),
                                 ("control/launcher-cli-default-runs", 0), ("control/coverage-gate-default-runs", 0),
                                 ("behaviour/opf-declaration-cli-refuses", 0), ("behaviour/declaration-gate-refuses", 0),
@@ -3399,6 +3433,10 @@ def self_test(lane, report_path=None):
                                 ("control/declaration-gate-default-runs", 0),
                                 ("revert/opf-declaration-guard-removed-red", 0),
                                 ("revert/declaration-gate-guard-removed-red", 0),
+                                ("revert/orch-doctor-guard-removed-red", 0),
+                                ("revert/render-og-cards-guard-removed-red", 0),
+                                ("revert/load-bound-guard-removed-red", 0),
+                                ("revert/opf-selftest-execution-guard-removed-red", 0),
                                 ("behaviour/pretool-refuses", 0), ("behaviour/plugin-pretool-refuses", 0),
                                 ("control/pretool-default-runs", 0), ("control/fail-open-default-runs", 0),
                                 ("behaviour/fail-open-restores", 0), ("behaviour/python-reader-loses-refusal", 0),
