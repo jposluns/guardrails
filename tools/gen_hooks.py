@@ -870,12 +870,16 @@ def main():
 #  11. the FULL "warn" default policy, table-driven across every KNOWN_EVENTS event: warn is REJECTED
 #      (exit 2) on every non-warn event and ACCEPTED (clean generate + drift-clean) on Stop and
 #      SubagentStop, the only WARN_EVENTS,
+# 11b. PostToolUseFailure, spelled literally rather than read from the event sets: a warn hook on it with an
+#      all-tools matcher generates drift-clean and renders between PostToolUse and UserPromptSubmit, and the
+#      same hook with no matcher fails closed (exit 2), as on any tool event,
 #  12. render byte-identity: an otherwise-identical Stop hook renders the SAME hooks.json bytes whether
 #      its default is "block" or "warn" (default is authoring metadata, never rendered into output),
 #  13. a malformed/unknown default keyword fails closed (exit 2): the default whitelist.
-#  14. 'warn' on PreToolUse is legal under stage = "bake", or for a handler the dispatcher lists in
-#      NOTE_ONLY_PRETOOL_MODES, and fails closed (exit 2) otherwise; a listed handler that declares "block",
-#      and a list that is not one module-level tuple of string literals, fail closed too.
+#  14. 'warn' on PreToolUse is legal under stage = "bake" and fails closed (exit 2) without it,
+# 14b. 'warn' on PreToolUse is also legal for a handler the dispatcher lists in NOTE_ONLY_PRETOOL_MODES, and
+#      fails closed (exit 2) for any other handler; a listed handler that declares "block", and a list that
+#      is not one module-level tuple of string literals, fail closed too.
 #  15. a SessionStart control declaring 'block' fails closed (exit 2): the platform cannot block there.
 #  16. the repository-local .claude/settings.json renders exactly one PreToolUse group for the project
 #      control, its matcher copied from the manifest and its launcher the exact isolated shell string,
@@ -937,6 +941,9 @@ def main():
 #      unremovable root link is a named failure with the outside tree untouched.
 #      Confinement holds up to the disclosed replacement race between an entry's lstat
 #      classification and the chmod or walk that follows (stated at the helper).
+#  29. the suite's OWN final cleanup: a fault in the final removal of the suite temporary tree never replaces
+#      an escaping ORIGINAL exception and never skips printing the named failures (the removal fault is named
+#      in the escaping-failure block, and the ORIGINAL stays the last traceback line),
 #  30. the PreToolUse deadline derives from TIMEOUT: a script whose HOOK_TIMEOUT_SECONDS differs from
 #      TIMEOUT, that lacks either deadline line, or that binds either name a second time (in any form, or
 #      with the budget line only inside a string) fails closed (exit 2), while reading the budget is
