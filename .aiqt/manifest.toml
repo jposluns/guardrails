@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "9a1aa0ba54bb9b6e5ad17b85807631e26bf6d0cbe9d28d4f6ae6458b361c0f07"
+tree-sha256 = "9b27d47eeb115e0a471bfa42d76b75e79f1f4b60c411ef2e5047713d65dc5f6f"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -837,8 +837,8 @@ sha256 = "622683b912a6c2720502d096f737f59326fa2b6319776dfdaf029cdd2243d1b7"
 
 [[sources]]
 path = ".aiqt/coreutils-tests.json"
-bytes = 2883
-sha256 = "fdc9eae63f4a2874d747b5b3a9c0fb7fcf04951d6d4914545df6113f7fe2ac68"
+bytes = 3058
+sha256 = "555fdb01ca45f0578791ad1bbfb93706800dd1a846379fbb6200c21a5cc78b1a"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
@@ -4227,8 +4227,8 @@ sha256 = "df621f8ed34ccddb5f6958f29a66896de9876e71a21083d6b5dd0143ff0dec3b"
 
 [[sources]]
 path = "tools/check_coreutils_environment.py"
-bytes = 62144
-sha256 = "0208f21a17e957ebd8c0989e00a53b6393a00fc95f9348d17bc34da56ba987f8"
+bytes = 67104
+sha256 = "303d893f95dd54a5e55b67a7eb651d553d42bf3bc79051a45bf2588d34a5ba52"
 
 [[sources]]
 path = "tools/check_crosswalk.py"

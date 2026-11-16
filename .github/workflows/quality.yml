@@ -1019,9 +1019,12 @@ jobs:
         shell: bash
         run: python3 -I -B tools/doctor.py --root .
 
+  # Pinned to ubuntu-24.04, as the selftest-execution job is: the Hooks preview self-test below runs the
+  # preview hooks' differential checks against real coreutils programs, and the coreutils-environment gate
+  # in that job reports the coreutils this image carries only while both jobs run on the same image.
   generated:
     name: Generated surfaces
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1194,11 +1197,14 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_hooks_preview.py
 
+  # Pinned to ubuntu-24.04, as the generated job is: this job runs the coreutils-environment gate, which in CI
+  # requires GNU coreutils on the step's PATH and on /usr/bin:/bin, and the ubuntu-latest image moved to one
+  # whose coreutils are uutils (CI run 43825233435). See the comment on the coreutils steps below.
   selftest-execution:
     name: Execution-reconciled self-tests
     if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1267,6 +1273,12 @@ jobs:
       # The coreutils implementation report: every inventoried program resolved on this step's PATH and on
       # the removal oracle's fixed /usr/bin:/bin, each on its own. GITHUB_ACTIONS=true puts the live leg in CI
       # mode, so a recognised implementation other than GNU fails here, where locally it only warns.
+      # The requirement holds by the runner image, not by a PATH edit: the removal differential of
+      # .preview/record-remove-check.py (run by the Hooks preview self-test in the generated job) asserts
+      # what real rm, cp, mv, truncate, tee, dd, ln, unlink and shred do under the fixed PATH /usr/bin:/bin,
+      # its rm model follows GNU rm option parsing, and a step PATH edit cannot reach that fixed PATH. So
+      # this job and the generated job both run on ubuntu-24.04, whose coreutils are GNU, and a move to an
+      # image with uutils coreutils turns this step red again rather than passing.
       - name: Coreutils environment self-test
         shell: bash
         run: python3 -I -B tools/check_coreutils_environment.py --self-test

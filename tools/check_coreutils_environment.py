@@ -14,6 +14,15 @@ run actually selects and what that file says it is:
 A run is in CI mode with --ci or when the environment variable GITHUB_ACTIONS is exactly true (GitHub Actions
 sets it on every step), so the Quality workflow step and the local runner launch the same command.
 
+Why CI requires GNU. The removal differential self-test of .preview/record-remove-check.py runs Bash cases
+under the fixed PATH /usr/bin:/bin and asserts whether real rm, cp, mv, truncate, tee, dd, ln, unlink and shred
+destroy a file, and its rm model follows GNU rm option parsing (a long option by unambiguous prefix, an option
+after an operand, an option rm rejects); other preview self-tests record option arities observed per
+implementation. So a uutils program is refused in CI mode, never accepted: the GitHub-hosted ubuntu-latest
+image moved to one whose coreutils are uutils (CI run 43825233435 named uutils 0.10.0 on both PATH values),
+and the Quality workflow pins ubuntu-24.04 for the job that runs this gate and for the job that runs the
+preview self-tests instead. A PATH edit in the step could not reach the fixed /usr/bin:/bin.
+
 Environments. The inventory declares each one: the runner's own PATH (this process's PATH, the one the
 launching runner passed on), and fixed PATH values such as the /usr/bin:/bin PATH under which the removal
 differential self-test of .preview/record-remove-check.py runs Bash. Each program is resolved in each
@@ -580,6 +589,11 @@ MUTANTS = (
      "    if differs and ci:\n",
      "    if differs and False:\n",
      "uutils"),
+    ("uutils-refused",
+     "    differs = [row for row in rows if row.outcome != OK or row.implementation != expected]\n",
+     "    differs = [row for row in rows if row.outcome != OK or row.implementation not in "
+     "(expected, \"uutils\")]\n",
+     "uutils-multicall"),
     ("ci-variable",
      "    ci = ci or environ.get(CI_VARIABLE) == CI_VALUE\n",
      "    ci = ci\n",
@@ -704,6 +718,17 @@ def _fixtures(base):
     linked.mkdir()
     os.symlink(os.path.join(dirs["real"], "gnu-cp"), str(linked / "cp"))
     dirs["linked"] = str(linked)
+    # The layout CI run 43825233435 met: one uutils multicall file, its banner naming the program it was run as,
+    # with install, tee and truncate as symbolic links to it; and GNU install, tee and truncate to put first.
+    multicall = Path(base) / "uutils-multicall"
+    multicall.mkdir()
+    (multicall / "coreutils").write_text("#!/bin/sh\n" + stamp
+                                         + "printf '%s (uutils coreutils) 0.10.0\\n' \"${0##*/}\"\n")
+    (multicall / "coreutils").chmod(0o755)
+    for name in ("install", "tee", "truncate"):
+        os.symlink("coreutils", str(multicall / name))
+    dirs["uutils-multicall"] = str(multicall)
+    make("gnu-first", "gnu", ("install", "tee", "truncate"))
     empty = Path(base) / "nothing"
     empty.mkdir()
     dirs["nothing"] = str(empty)
@@ -729,6 +754,8 @@ def _log_lines(log):
 CP = ("cp", "coreutils", "preview-dependency")
 MV = ("mv", "coreutils", "preview-dependency")
 CAT = ("cat", "coreutils", "preview-dependency")
+MULTICALL = (("install", "coreutils", "preview-dependency"), ("tee", "coreutils", "preview-dependency"),
+             ("truncate", "coreutils", "preview-dependency"))
 
 
 def _vectors(m, dirs, log):
@@ -832,6 +859,43 @@ def _vectors(m, dirs, log):
          if not BARE_RE.fullmatch(dirs["gnu"]) else "environment runner: PATH=" + dirs["gnu"],
          "environment fixed: PATH=" + (dirs["uutils"] if BARE_RE.fullmatch(dirs["uutils"])
                                         else json.dumps(dirs["uutils"]))))
+    # uutils coreutils as CI run 43825233435 met it (a multicall file reached through symbolic links, on the
+    # runner's PATH and on the removal oracle's fixed PATH): a recognised implementation, read per program and
+    # environment, that warns locally and is refused in CI mode, every row named in the FAIL line.
+    names = [program[0] for program in MULTICALL]
+    environment_ids = ("runner-path", "removal-oracle")
+    multicall = dirs["uutils-multicall"]
+    uu_envs = tuple((env_id, multicall) for env_id in environment_ids)
+    uu_local = m.evaluate(MULTICALL, uu_envs, "GNU", False)
+    uu_ci = m.evaluate(MULTICALL, uu_envs, "GNU", True)
+    uu_named = ", ".join("{} in {} is uutils 0.10.0".format(name, env_id)
+                         for env_id in environment_ids for name in names)
+    out["uutils-multicall"] = (
+        (uu_local[0], uu_local[3], uu_local[1][-1], rows_of(uu_local),
+         [(row.environment, row.path, row.target) for row in uu_ci[2]], uu_ci[0], uu_ci[3], uu_ci[1][-1]),
+        (0, "differs", "WARNING: 6 program(s) are not identified as GNU, the CI implementation, so this local "
+         "run does not predict CI: " + uu_named,
+         [(name, "OK", "uutils", "0.10.0") for _env_id in environment_ids for name in names],
+         [(env_id, os.path.join(multicall, name), os.path.realpath(os.path.join(multicall, "coreutils")))
+          for env_id in environment_ids for name in names],
+         1, "differs", "FAIL: CI mode requires GNU for every program, and 6 program(s) are not identified as "
+         "GNU: " + uu_named))
+    # GNU first on both PATH values passes CI mode; GNU first on the runner's PATH alone does not, since the
+    # removal oracle's fixed PATH still selects uutils (why a step PATH edit is no fix for CI).
+    gnu_first = os.pathsep.join((dirs["gnu-first"], multicall))
+    both_first = m.evaluate(MULTICALL, tuple((env_id, gnu_first) for env_id in environment_ids), "GNU", True)
+    runner_first = m.evaluate(MULTICALL, (("runner-path", gnu_first), ("removal-oracle", multicall)), "GNU", True)
+    out["uutils-gnu-first"] = (
+        (both_first[0], both_first[3], rows_of(both_first), [row.path for row in both_first[2]],
+         both_first[1][-1], runner_first[0], runner_first[3],
+         [(row.environment, row.implementation) for row in runner_first[2]], runner_first[1][-1]),
+        (0, "match", [(name, "OK", "GNU", "9.4") for _env_id in environment_ids for name in names],
+         [os.path.join(dirs["gnu-first"], name) for _env_id in environment_ids for name in names],
+         "PASS: every program in every environment reports GNU", 1, "differs",
+         [(env_id, "GNU" if env_id == "runner-path" else "uutils")
+          for env_id in environment_ids for _name in names],
+         "FAIL: CI mode requires GNU for every program, and 3 program(s) are not identified as GNU: "
+         + ", ".join("{} in removal-oracle is uutils 0.10.0".format(name) for name in names)))
     _log_lines(log)
     return out
 
