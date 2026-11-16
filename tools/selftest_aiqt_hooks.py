@@ -12713,6 +12713,70 @@ def _main_isolated(monitor):
         (cx_cwp / "u" / "d" / "b.txt").write_text("junk\n", encoding="utf-8")
         expect("(cx-cw-p1) twin: clean -ffd run from inside u/ holding no ignored file and no nested "
                "repository allows with a note", "git clean -ffd", "allow-note", cwd=str(cx_cwp / "u"))
+        # A symlinked run directory: git runs in the PHYSICAL directory and prints '../x/' relative to it, so
+        # the listings resolve the run directory with os.path.realpath; normalized lexically against the link,
+        # '..' named the link's parent, where a decoy x/ holding no repository let a doubly forced clean of
+        # the real a/x (a nested repository with an ignored file) through with a note. L is a committed
+        # symlink to a/b (a/b/keep.txt is tracked, so a/b itself is never removed), and outside/L points at
+        # a/b from outside the repository.
+        cx_sl = _init_repo(tmp / "cleanx-symlink")
+        (cx_sl / "a" / "b").mkdir(parents=True)
+        (cx_sl / "a" / "b" / "keep.txt").write_text("kept\n", encoding="utf-8")
+        os.symlink("a/b", str(cx_sl / "L"))
+        _git(cx_sl, "add", "a/b/keep.txt", "L")
+        _git(cx_sl, "commit", "-q", "-m", "symlinked run directory", env_identity=True)
+        _init_repo(cx_sl / "a" / "x")
+        (cx_sl / "a" / "x" / ".gitignore").write_text("*.zz\n", encoding="utf-8")
+        (cx_sl / "a" / "x" / "wip.txt").write_text("nested work\n", encoding="utf-8")
+        (cx_sl / "a" / "x" / "s.zz").write_text("nested ignored\n", encoding="utf-8")
+        (cx_sl / "x").mkdir()
+        (cx_sl / "x" / "junk.txt").write_text("decoy\n", encoding="utf-8")
+        cx_slo = tmp / "cleanx-symlink-outside"
+        (cx_slo / "x").mkdir(parents=True)
+        (cx_slo / "x" / "junk.txt").write_text("decoy\n", encoding="utf-8")
+        os.symlink(str(cx_sl / "a" / "b"), str(cx_slo / "L"))
+        expect("(cx-sl-s1) clean -ffd .. run from a symlink outside the repository to a/b denies",
+               "git clean -ffd ..", "deny", cwd=str(cx_slo / "L"))
+        expect("(cx-sl-s4) clean -ffd .. run from the committed symlink L to a/b denies", "git clean -ffd ..",
+               "deny", cwd=str(cx_sl / "L"))
+        expect("(cx-sl-s5) clean -ffdx .. run from the committed symlink L to a/b denies", "git clean -ffdx ..",
+               "deny", cwd=str(cx_sl / "L"))
+        expect("(cx-sl-s6) twin: clean -ffdx .. run from the real a/b denies", "git clean -ffdx ..", "deny",
+               cwd=str(cx_sl / "a" / "b"))
+        expect("(cx-sl-s7) clean -ffd x under a relative -C .. from the symlink L denies",
+               "git -C .. clean -ffd x", "deny", cwd=str(cx_sl / "L"))
+        expect("(cx-sl-s7r) twin: clean -ffd x under -C .. from the real a/b denies", "git -C .. clean -ffd x",
+               "deny", cwd=str(cx_sl / "a" / "b"))
+        expect("(cx-sl-s8) twin: clean -fd .. from the symlink L (single -f keeps the nested repository) allows "
+               "with a note", "git clean -fd ..", "allow-note", cwd=str(cx_sl / "L"))
+        if not ((cx_sl / "a" / "x" / "wip.txt").is_file() and (cx_sl / "a" / "x" / "s.zz").is_file()
+                and (cx_sl / "x" / "junk.txt").is_file()):
+            failures.append("(cx-sl-s9) the nested repository's files and the decoy must survive every listing "
+                            "above")
+        # The clean's note names the saved snapshot once (the pointer sentence opens with it), and the deny on
+        # a failed snapshot never says the clean can be undone from a snapshot it then reports as not made.
+        cx_txt = _init_repo(tmp / "cleanx-text")
+        (cx_txt / "untracked.txt").write_text("junk\n", encoding="utf-8")
+        _cx_code, _cx_obj, _ = handler({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                        "tool_input": {"command": "git clean -fd"}, "cwd": str(cx_txt)})
+        _cx_msg = _cx_obj.get("systemMessage", "") if isinstance(_cx_obj, dict) else ""
+        if _cx_msg.count("A pre-command recovery snapshot was saved") != 1 or "It is allowed." not in _cx_msg:
+            failures.append("(cx-t1) the clean allow note must name the saved snapshot exactly once: {!r}".format(
+                _cx_msg))
+        _cx_orig_rec = aiqt_hooks._record_recovery
+        aiqt_hooks._record_recovery = lambda repo, verb: ("fail", "forced snapshot failure (self-test)")
+        try:
+            _cx_code, _cx_obj, _ = handler({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                            "tool_input": {"command": "git clean -fd"}, "cwd": str(cx_txt)})
+        finally:
+            aiqt_hooks._record_recovery = _cx_orig_rec
+        _cx_hso = _cx_obj.get("hookSpecificOutput", {}) if isinstance(_cx_obj, dict) else {}
+        _cx_why = _cx_hso.get("permissionDecisionReason", "")
+        if (_cx_hso.get("permissionDecision") != "deny"
+                or "NOTE: no pre-command recovery snapshot could be created" not in _cx_why
+                or "the recovery snapshot, which holds" in _cx_why):
+            failures.append("(cx-t2) a clean whose snapshot fails must deny without claiming a snapshot holds "
+                            "its files: {!r}".format(_cx_why))
 
         # === round-19 Fix A: an UNPARSEABLE 'git branch' ASKS regardless of any delete flag ====
         # The raw fallback (a tokenizer ValueError) now treats ANY raw 'git' + 'branch' as lossy: it does NOT parse

@@ -9945,10 +9945,13 @@ def _reset_ancestry_deny(refusal, alts):
 # untracked files are ignored under the repository's standard ignore sources (.gitignore files,
 # info/exclude and core.excludesFile) read with no command-level override (git ls-files --others --ignored
 # --exclude-standard --directory with the same pathspecs). Both listings run with the directory the command
-# runs in as git's working directory, and when git clean would remove that directory whole it keeps the
-# directory, prints 'Would refuse to remove current working directory' and removes all of its contents: that
-# line is read as removal of the whole directory (_CLEAN_CWD_LINE), and every entry of both listings is
-# compared as one normalized absolute path (_clean_entry_path), so './x' and 'x/' are the same directory.
+# runs in as git's working directory, resolved PHYSICALLY (os.path.realpath) as the kernel and git resolve
+# it, so a symlinked session directory or a relative -C through one names the directory git enters. When
+# git clean would remove that directory whole it keeps the directory, prints 'Would refuse to remove
+# current working directory' and removes all of its contents: that line is read as removal of the whole
+# directory (_CLEAN_CWD_LINE). git prints every name relative to that physical directory, so every entry of
+# both listings is compared as one absolute path, normalized against the physical directory and never a
+# symlink (_clean_entry_path): './x' and 'x/' are the same directory, and '../x/' is the real parent's x.
 # The clean is DENIED when any entry it would remove is, holds or lies inside an ignored entry, when it is
 # doubly forced (-ff) and a directory it would remove, the directory it runs in included, holds a nested
 # repository at any depth (whose ignored files neither listing shows; a bounded walk, _clean_nested_repo,
@@ -10057,12 +10060,14 @@ def _clean_probe_listing(repo, argv, deadline, env_extra=None, global_opts=()):
     as its process working directory as well as its -C target, so the directory git clean treats as the
     current one (the one it refuses to remove, startup_info->original_cwd, read before any -C) is repo and
     never the hook's own working directory; a dry run therefore lists the same entries wherever the hook
-    runs."""
+    runs. repo is resolved physically (os.path.realpath), never lexically: a run directory such as
+    '<symlink>/..' (a relative -C from a symlinked session directory) names the directory the kernel, and
+    so git, enters, not the one a lexical '..' would reach."""
     left = deadline - time.monotonic()
     if left <= 0:
         return None
     try:
-        where = os.path.abspath(repo)
+        where = os.path.realpath(repo)
         env = _isolate_git_env(dict(os.environ))
         env["GIT_OPTIONAL_LOCKS"] = "0"
         env["LC_ALL"] = "C"
@@ -10186,10 +10191,15 @@ def _clean_unquote(name):
 
 def _clean_entry_path(base, name):
     """The absolute, lexically normalized path (bytes) of `name` as a listing prints it relative to the
-    directory `base` (bytes, absolute) both listings run in, ending in a slash when it names a directory: a
-    name printed with a trailing slash, '.', or a path lstat reads as a directory (git clean prints a
-    directory it removes from inside a kept current directory with no slash, './x'). Both listings are
-    compared in this one form, so './s.local', 's.local' and 'sub/../s.local' name the same entry."""
+    directory `base` (bytes) both listings run in, ending in a slash when it names a directory: a name
+    printed with a trailing slash, '.', or a path lstat reads as a directory (git clean prints a directory it
+    removes from inside a kept current directory with no slash, './x'). Both listings are compared in this
+    one form, so './s.local', 's.local' and 'sub/../s.local' name the same entry. `base` MUST be the
+    PHYSICAL directory (os.path.realpath) git ran in: git prints each name relative to its physical working
+    directory (getcwd), so a '..' in a name climbs that directory's real parent, and lexical normalization
+    is exact only against a base that holds no symbolic link. Against a symlinked base it would name another
+    directory (the parent of the link), and the ignored match and the nested-repository walk would judge
+    that directory instead."""
     full = os.path.normpath(os.path.join(base, name))
     is_dir = name.endswith(b"/") or os.path.basename(name) in (b".", b"..")
     if not is_dir:
@@ -10238,6 +10248,13 @@ def _clean_ignored_refusal(args, repo, cannot=None, global_opts=()):
     if cannot is not None or repo is None:
         return "{}, and no read-only listing taken now can show which files it would remove".format(
             cannot or "the directory it runs in cannot be established")
+    try:
+        # The physical directory git runs in, resolved once: git reports every listed name relative to it
+        # (see _clean_entry_path), so a symlinked run directory is never normalized lexically.
+        repo = os.path.realpath(repo)
+    except (OSError, ValueError):
+        return ("the directory it runs in cannot be resolved to a physical path, so no read-only listing "
+                "taken now can show which files it would remove")
     deadline = time.monotonic() + _CLEAN_PROBE_SECONDS
     private = _clean_private_gitdir(repo, deadline)
     if private is None:
@@ -10262,7 +10279,9 @@ def _clean_listings_refusal(repo, force, d, x, big_x, excludes, paths, deadline,
     if listed is None:
         return ("its read-only dry run (git clean -n with the same options and pathspecs) failed, exited "
                 "nonzero or did not finish within {:g} seconds".format(_CLEAN_PROBE_SECONDS))
-    base = os.fsencode(os.path.abspath(repo))
+    # Physical, as git's own working directory is (never os.path.abspath): a '..' in a listed name climbs
+    # the real parent of the run directory, not the parent of a symlink that names it (_clean_entry_path).
+    base = os.fsencode(os.path.realpath(repo))
     removed = []  # (name as git printed it, its _clean_entry_path form)
     for line in listed.split(b"\n"):
         if not line or line.startswith(_CLEAN_SKIP_LINE):
@@ -11533,9 +11552,11 @@ def _discard_recovery_result(kind, detail, snap, note=""):
             "AIQT guardrail: denied an unrecoverable git discard - no recovery snapshot could be created "
             "(rule prsunc); commit or stash first, then retry.")
     if snap is not None and snap[0] == "ok":
+        # _recovery_pointer itself opens with 'A pre-command recovery snapshot was saved', so the note says it
+        # once.
         return _allow_note(
-            "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. A pre-command recovery snapshot "
-            "was saved, so it is allowed. {}".format(kind, detail, _recovery_pointer(snap[1])) + note)
+            "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. It is allowed. {}".format(
+                kind, detail, _recovery_pointer(snap[1])) + note)
     return _allow_note(
         "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. This guard could not auto-snapshot "
         "it (a ref-level or branch asset a working-tree snapshot cannot capture, which is typically "
@@ -13838,11 +13859,16 @@ def git_discard(data):
             # allow-note, fail -> deny), so a clean with no recovery point never silently allows.
             # The note says what the snapshot can hold and no more: git add --all takes in untracked files
             # (as a configured clean filter outputs them), never an ignored file, the files of a nested
-            # repository or an empty directory.
-            return _discard_recovery_result(
-                kind, "can be undone only from the recovery snapshot, which holds the untracked files git add "
-                      "--all takes in (as a configured clean filter outputs them) and never an ignored file, the "
-                      "files of a nested repository or an empty directory", snap, note)
+            # repository or an empty directory. When no snapshot could be made the deny names none as saved:
+            # its NOTE says why, so the clause before it says only what a snapshot would have had to hold.
+            if snap is not None and snap[0] == "ok":
+                c_detail = ("can be undone only from the recovery snapshot, which holds the untracked files git "
+                            "add --all takes in (as a configured clean filter outputs them) and never an ignored "
+                            "file, the files of a nested repository or an empty directory")
+            else:
+                c_detail = ("can be undone only from a pre-command recovery snapshot of the untracked files git "
+                            "add --all takes in")
+            return _discard_recovery_result(kind, c_detail, snap, note)
         if sub == "stash":
             # 'git stash drop'/'clear' is NOT reflog-recoverable after the fact (it deletes
             # the stash reflog entry, orphaning the stash commit), so a worktree snapshot cannot protect it.
