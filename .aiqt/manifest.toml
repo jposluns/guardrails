@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "7a2c39d40ec40c3720ebb0bac91763ea348397785573b9bdb41b24444fa392b6"
+tree-sha256 = "59c1fc56d16ea6c44ccc0a79bcb3adf96daa92c2e84fbb390484263540f695bb"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4187,8 +4187,8 @@ sha256 = "e79aff5679466a9ea6b5e8022e93158cf8e3979b8cc1e7b00a6942e0bca86703"
 
 [[sources]]
 path = "tools/check_branch_root.py"
-bytes = 93116
-sha256 = "1a07dfe3de9d24ca231519a5a12e4edc2484d948024822ff796f1aee732fd1b4"
+bytes = 93214
+sha256 = "94d18a50b22af2197284338738f8b31438b06d7c61a130e6403eb4993cec0cd3"
 
 [[sources]]
 path = "tools/check_brief_capability.py"
@@ -4712,8 +4712,8 @@ sha256 = "59f6155486925ab9adea0da0203964283937c0dc7543bcfba335d4ac0820279e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 2394680
-sha256 = "e06e21796c7353f0c0cb60c5e214fd66a85f1abd89dac5dc1e5850ca9ed623c7"
+bytes = 2397904
+sha256 = "4e42988b5fd560107895325d20a6c2262b43eaab40ef22ffe24293d6952d5e39"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
@@ -4722,8 +4722,8 @@ sha256 = "79c02a1c2460bb13ccd63dd1d6c32750cb141b875d3f44b47a443b2f99e92189"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
-bytes = 273706
-sha256 = "5218fd5dd347aa7f25cebbbce29bff5d48d94b8ffdd219e678ddd8ccc75ffc0d"
+bytes = 274143
+sha256 = "9b859ffb8f32b7c06060a24e78bed62f5ab2ee1313f9c84f3e799c113d68b3a5"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"

@@ -115,6 +115,11 @@ JQ = "/usr/bin/jq"
 # invoke() stays exactly as before.
 NO_AUTO_MAINTENANCE = ["-c", "gc.auto=0", "-c", "gc.autoDetach=false",
                        "-c", "maintenance.auto=false"]
+# Mirroring _git_fixture_env.FILE_CLONE_PINS for the one fixture step here that writes a pack
+# (pack-objects): git fsyncs a pack it writes by default (core.fsync covers packs), and on a busy
+# shared filesystem that fsync can block for seconds, enough to cross the step's 30 s bound. A
+# throwaway fixture needs no durability; the pin is command scope and writes no config.
+PACK_FSYNC_PINS = ["-c", "core.fsync=none"]
 SCRIPT = ROOT / "tools" / "ci-status.sh"
 # The repository the fixture checkout's origin remote names, and so the one ci-status.sh must read.
 FIXTURE_REPO = "fixture/repository"
@@ -2166,7 +2171,7 @@ def _run_checks():
         # a user that can read a mode-000 file (root) cannot exercise that, so it is not evaluated there.
         pack_prefix, (pack_commit, _pack_blob) = fixture.prefix_pair(("commit", "blob"))
         pack_dir = fixture.repo / ".git" / "objects" / "pack"
-        pack_name = subprocess.run([GIT, "-C", str(fixture.repo)] + NO_AUTO_MAINTENANCE
+        pack_name = subprocess.run([GIT, "-C", str(fixture.repo)] + NO_AUTO_MAINTENANCE + PACK_FSYNC_PINS
                                    + ["pack-objects", str(pack_dir / "pack")], input=pack_commit + "\n",
                                    check=True, capture_output=True, text=True, timeout=30,
                                    env=fixture.base_env).stdout.strip()

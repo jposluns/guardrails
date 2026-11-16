@@ -602,7 +602,9 @@ def run(root, protected=None, head=None, max_lag=None, revert_window=None):
 
 
 def _fixture_git(root, *args, identity=False, input_text=None, input_bytes=None):
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
     from _git_fixture_env import git_fixture_env
     env = git_fixture_env(GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0",
                           GIT_OPTIONAL_LOCKS="0", GIT_NO_REPLACE_OBJECTS="1")
@@ -1323,7 +1325,9 @@ def _shallow_clone(parent, source, dest):
     """The V11 fixture: a depth-1 file:// clone of source at dest (a plain local-path clone ignores
     --depth), run with the shared file:// fixture clone pins (no pack fsync). Raises OSError,
     SubprocessError or CannotEvaluate where a shallow clone cannot be built."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
     from _git_fixture_env import FILE_CLONE_PINS
     _fixture_git(parent, *FILE_CLONE_PINS, "clone", "--depth", "1", "-q", "file://{}".format(source),
                  str(dest), "-b", "protected")

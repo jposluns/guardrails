@@ -2754,13 +2754,30 @@ def _trace2_clone_report(path):
     return total, [dict(params.get(sid, {})) for sid, name in names.items() if name == "index-pack"]
 
 
-def _check_ra_clone_fsync(failures, trace):
+def _git_knows_core_fsync(cwd):
+    """Whether the fixture git understands core.fsync: True when `git help --config` (the config keys
+    that git was built to know) lists it, False when the list is read and lacks it, None when it cannot
+    be read. git reports every -c key as a def_param event, a key it does not understand included, and
+    a git without core.fsync writes no fsync record, so a clean clone trace alone cannot show that the
+    pin reached a git that obeys it."""
+    try:
+        listed = subprocess.run(["git", "-C", str(cwd), "help", "--config"], check=True,
+                                capture_output=True, text=True, timeout=30, env=git_fixture_env()).stdout
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return None
+    return "core.fsync" in (line.strip() for line in listed.splitlines())
+
+
+def _check_ra_clone_fsync(failures, trace, knows_fsync):
     """(ra-clone-fsync) the ra-fixture clone, whose trace2 event file is trace, must make no fsync call,
     and its index-pack must have run with core.fsync=none. No second clone is made: any clone that
     fsyncs its pack can itself wait seconds on a busy filesystem. The trace is its own control:
     index-pack reports user.name, which every fixture call sets, as a def_param event, so the same
     event reports core.fsync whenever the pin reaches it. A git that writes no trace2 file, runs no
-    index-pack or reports no config cannot show the difference, which is recorded as cannot-evaluate."""
+    index-pack or reports no config cannot show the difference, which is recorded as cannot-evaluate.
+    knows_fsync is _git_knows_core_fsync's answer: a git that does not understand core.fsync still
+    reports the pinned value and writes no fsync record while it syncs its pack, so a clean trace
+    passes only when knows_fsync is True and is otherwise recorded as cannot-evaluate."""
     try:
         fsync, packers = _trace2_clone_report(trace)
     except FileNotFoundError:
@@ -2776,6 +2793,9 @@ def _check_ra_clone_fsync(failures, trace):
         gap = "the clone trace names no index-pack process"
     elif not fsync and not all("user.name" in p for p in packers):
         gap = "index-pack reported no config as a def_param event"
+    elif not fsync and knows_fsync is not True and all(p.get("core.fsync") == "none" for p in packers):
+        gap = ("this git does not list core.fsync among its config keys" if knows_fsync is False
+               else "git help --config could not be read to show that this git understands core.fsync")
     if gap:
         failures.append("(ra-clone-fsync-cannot-evaluate) {}, so the trace cannot show whether the fixture "
                         "clone keeps its pack unsynced".format(gap))
@@ -2786,6 +2806,35 @@ def _check_ra_clone_fsync(failures, trace):
                         "process(es) without core.fsync=none (saw: {}); its pack fsync can wait seconds on "
                         "a busy filesystem and cross the 30 s bound"
                         .format(fsync, len(unpinned), ", ".join(unpinned) or "none"))
+
+
+def _test_ra_clone_fsync_old_git(failures, tmp):
+    """(ra-clone-fsync-old-git) rows: a clean pinned trace (index-pack reports user.name and
+    core.fsync=none, no fsync record), which a git with trace2 but no core.fsync also writes, passes only
+    when the git is known to understand core.fsync; when it does not, or that cannot be read, the check
+    records cannot-evaluate, never a pass."""
+    trace = tmp / "ra-clone-fsync-old-git.trace2"
+    records = ({"event": "cmd_name", "sid": "c/i", "name": "index-pack"},
+               {"event": "def_param", "sid": "c/i", "param": "core.fsync", "value": "none"},
+               {"event": "def_param", "sid": "c/i", "param": "user.name", "value": "Test"})
+    try:
+        trace.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    except OSError as exc:
+        failures.append("(ra-clone-fsync-old-git-cannot-evaluate) the synthesized trace could not be "
+                        "written ({}), so the rows were not evaluated".format(exc))
+        return
+    for knows, want in ((True, None), (False, "does not list core.fsync"), (None, "could not be read")):
+        got = []
+        _check_ra_clone_fsync(got, trace, knows)
+        label = _LABEL_RE.match(got[0]) if len(got) == 1 else None
+        if want is None:
+            ok = not got
+        else:
+            ok = (label is not None and label.group(1) == "ra-clone-fsync-cannot-evaluate"
+                  and want in got[0])
+        if not ok:
+            failures.append("(ra-clone-fsync-old-git) knows_fsync={!r}: expected {}, got {!r}".format(
+                knows, "a pass" if want is None else "cannot-evaluate naming {!r}".format(want), got))
 
 
 def _make_ancestry_fixture(path):
@@ -2853,7 +2902,7 @@ def _test_reset_ancestry(failures, tmp):
     except (OSError, subprocess.SubprocessError) as exc:
         failures.append("(ra-fixture) could not build the reset ancestry fixtures: {}".format(exc))
         return
-    _check_ra_clone_fsync(failures, shallow_trace)
+    _check_ra_clone_fsync(failures, shallow_trace, _git_knows_core_fsync(tmp))
     rp = str(ra)
 
     def reason(command, cwd=rp):
@@ -31676,6 +31725,7 @@ def _main_isolated(monitor):
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
         _test_reset_ancestry(failures, tmp)
+        _test_ra_clone_fsync_old_git(failures, tmp)
         _test_clock_inject(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
