@@ -1417,10 +1417,11 @@ def _body_html(site, page):
 # or one of its kept live paths, with no backslash, whitespace or control character, no protocol-relative
 # "//" start and no "." or ".." segment, raw or percent-encoded (%2e, either case); and every a or area whose href is https carries
 # target="_blank", rel with noopener and noreferrer, and the "(opens in a new tab)" hint in its text or
-# aria-label. Residual: the guard judges the markup as Python's html.parser tokenizes it, so a malformed
-# construct a browser repairs differently is outside it; it reads no stylesheet (inline styles are refused
-# separately) and treats a URL-shaped value in any attribute not listed here as text; and it does not
-# check that an allowed target exists.
+# aria-label. A "<![" anywhere on the page is a finding (see _MARKUP_DECLARATION_SPLIT), and attribute names
+# are folded to lower case in ASCII only, as a browser folds them. Residual: the guard judges the markup as
+# Python's html.parser tokenizes it, so a malformed construct a browser repairs differently is outside it;
+# it reads no stylesheet (inline styles are refused separately) and treats a URL-shaped value in any
+# attribute not listed here as text; and it does not check that an allowed target exists.
 LINK_REFUSED_TAGS = frozenset((
     "script", "iframe", "frame", "frameset", "base", "form", "object", "embed", "applet", "portal",
     "animate", "set", "animatemotion", "animatetransform", "handler", "foreignobject"))
@@ -1430,14 +1431,38 @@ LINK_URL_ATTRS = frozenset((
     "lowsrc", "dynsrc"))
 NEWTAB_HINT = "(opens in a new tab)"
 _URL_BAD_CHAR_RE = re.compile(r"[\x00-\x20\x7f\\]")
+# The markup declaration html.parser and a browser read differently. html.parser (3.14) reads "<![CDATA[" as
+# a CDATA section that ends at "]]>"; a browser, in HTML content, reads "<![" as a bogus comment that ends at
+# the first ">", so markup after that ">" is live in the browser and hidden from html.parser (inside svg or
+# math a browser does read a CDATA section). Inline markup holding it is refused (_inline_https), and the link
+# guard reports it wherever it appears on a page (also where both read it as text, such as inside an
+# attribute value), rather than relying on html.parser's private CDATA switch (_set_support_cdata). Every
+# other markup declaration ("<!--", "<!doctype", any other "<!" and "<?") ends, as html.parser reads it,
+# where the WHATWG tokenizer ends it; that rests on reading both, not on a browser run.
+_MARKUP_DECLARATION_SPLIT = "<!["
+_ASCII_LOWER = {code: code + 32 for code in range(ord("A"), ord("Z") + 1)}
+
+
+def _ascii_lower(text):
+    """`text` with only the ASCII letters A to Z folded to a to z, as a browser folds an attribute name.
+    str.lower folds more: it maps KELVIN SIGN (U+212A) to "k", so "bacKground" would read as
+    "background", a name a browser does not see there."""
+    return text.translate(_ASCII_LOWER)
+
+
 def _start_tag_values(parser, tag, attrs):
     """For the start tag `parser` (an html.parser.HTMLParser) has just handed to handle_starttag as `tag` and
-    `attrs`: the tag's source text (get_starttag_text) and, for each attribute in order, the (start, end)
-    span of its value as written in that text (inside its quotes, character references undecoded), or None
-    for an attribute with no value. The text is re-read with the tokenizer's own patterns (tagfind_tolerant,
-    attrfind_tolerant) the way parse_starttag reads it; ValueError when that re-reading does not give the same
-    tag, attribute names, value presence and (for a value with no "&") value, so a caller refuses the tag
-    rather than guess where a value sits."""
+    `attrs`: the tag's source text (get_starttag_text); for each attribute in order, the (start, end) span of
+    its value as written in that text (inside its quotes, character references undecoded), or None for an
+    attribute with no value; and each attribute's name as written, folded to lower case in ASCII only
+    (_ascii_lower), the name a browser reads. The text is re-read with the tokenizer's own patterns
+    (tagfind_tolerant, attrfind_tolerant) the way parse_starttag reads it; ValueError when that re-reading
+    does not give the same tag, attribute names, value presence and value, so a caller refuses the tag rather
+    than guess where a value sits. A value is compared after html.unescape decodes its span. html.parser
+    decodes an attribute value by the attribute rule (a named reference with no ";" before "=", a letter or a
+    digit stays as written, as in a browser) while html.unescape decodes every one, so a value holding such a
+    reference ("?a=1&copy=2") does not compare equal and its tag is refused: fail closed, never accepted on
+    a guess."""
     text = parser.get_starttag_text()
     match = tagfind_tolerant.match(text, 1) if isinstance(text, str) and text.startswith("<") else None
     if match is None or match.group(1).lower() != tag:
@@ -1448,21 +1473,22 @@ def _start_tag_values(parser, tag, attrs):
         if not found:
             break
         if not found.group(2):
-            spans.append((found.group(1).lower(), None))
+            spans.append((found.group(1), None))
         else:
             start, end = found.span(3)
             raw = found.group(3)
             if raw[:1] == "'" == raw[-1:] or raw[:1] == '"' == raw[-1:]:
                 start, end = start + 1, end - 1
-            spans.append((found.group(1).lower(), (start, end)))
+            spans.append((found.group(1), (start, end)))
         k = found.end()
-    if text[k:].strip() not in (">", "/>") or [name for name, _span in spans] != [name for name, _v in attrs]:
+    if text[k:].strip() not in (">", "/>") \
+            or [name.lower() for name, _span in spans] != [name for name, _v in attrs]:
         raise ValueError("start tag {!r} does not re-read to its attributes".format(text))
     for (_name, span), (_n, value) in zip(spans, attrs):
         if (span is None) != (value is None) or (
-                span is not None and "&" not in text[span[0]:span[1]] and text[span[0]:span[1]] != value):
+                span is not None and _html.unescape(text[span[0]:span[1]]) != value):
             raise ValueError("start tag {!r} does not re-read to its attribute values".format(text))
-    return text, [span for _name, span in spans]
+    return text, [span for _name, span in spans], [_ascii_lower(name) for name, _span in spans]
 
 
 class _InlineLinkValues(HTMLParser):
@@ -1482,14 +1508,14 @@ class _InlineLinkValues(HTMLParser):
         line, column = self.getpos()
         offset = self._line_starts[line - 1] + column
         try:
-            text, spans = _start_tag_values(self, tag, attrs)
+            text, spans, names = _start_tag_values(self, tag, attrs)
         except ValueError:
             self.unplaced.append(self.get_starttag_text())
             return
         if self.source[offset:offset + len(text)] != text:
             self.unplaced.append(text)
             return
-        for (name, _value), span in zip(attrs, spans):
+        for name, span in zip(names, spans):
             if name in LINK_URL_ATTRS and span is not None:
                 self.values.append((offset + span[0], offset + span[1]))
 
@@ -1501,8 +1527,18 @@ def _inline_https(value):
     are found by html.parser (_InlineLinkValues), so a quoted ">" or a scheme-shaped text inside another
     attribute value or deeper in a URL is never mistaken for a value's start. A scheme written with a
     character reference is not a literal scheme and is left as written; the link guard refuses it (it
-    accepts only a literal lower-case "https://"). RefusedPage when a start tag's values cannot be placed in
-    the markup exactly."""
+    accepts only a literal lower-case "https://"). An attribute is a link attribute by its name folded in
+    ASCII only, as a browser reads it (_ascii_lower). RefusedPage when a start tag's values cannot be placed
+    in the markup exactly, and when the markup holds "<![" (_MARKUP_DECLARATION_SPLIT), which html.parser and
+    a browser read differently. Each fragment is read alone: raw text or a comment opened by an earlier
+    fragment of the same page (a textarea, title, xmp, noembed or noframes element, or "<!--") is not known
+    here, so an https scheme written as a link attribute value inside such text in a later fragment is
+    written in lower case although the page reads it as text (or as a comment). That changes only the
+    letter case of those 8 characters; the link guard reads the whole page and reads those bytes as text
+    or a comment too, so no link escapes it this way."""
+    if _MARKUP_DECLARATION_SPLIT in value:
+        raise RefusedPage("inline markup holds {!r}, a markup declaration html.parser and a browser read "
+                          "differently".format(_MARKUP_DECLARATION_SPLIT))
     reader = _InlineLinkValues(value)
     reader.feed(value)
     reader.close()
@@ -1553,16 +1589,19 @@ class _LinkGuard(HTMLParser):
         return "{} {!r} on <{}> is neither under {} nor an https URL".format(name, value, tag, base)
 
     def handle_starttag(self, tag, attrs):
-        first = {}
-        for name, value in attrs:
-            first.setdefault(name, value)
-        # Each value as written in the start tag's source text, for the literal-scheme rule of _url_finding.
+        # Each value as written in the start tag's source text, for the literal-scheme rule of _url_finding,
+        # and each attribute name folded in ASCII only, as a browser reads it (html.parser folds with
+        # str.lower; a tag that cannot be re-read keeps those names, which can only add URL checks).
         try:
-            text, spans = _start_tag_values(self, tag, attrs)
+            text, spans, names = _start_tag_values(self, tag, attrs)
             written = [None if span is None else text[span[0]:span[1]] for span in spans]
+            attrs = [(name, value) for name, (_parsed, value) in zip(names, attrs)]
         except ValueError:
             self.found.append("<{}> start tag whose attribute values cannot be read exactly".format(tag))
             written = [None] * len(attrs)
+        first = {}
+        for name, value in attrs:
+            first.setdefault(name, value)
         if tag == "script" and len(attrs) == 2 and attrs[0][0] == "src" and attrs[1] == ("defer", None) \
                 and attrs[0][1] in self.scripts:
             self.scripts.remove(attrs[0][1])
@@ -1606,8 +1645,12 @@ def _link_findings(site, html, scripts=(), scheme_src=None):
     """Every link-rule finding on a built page (see the link guard comment above). `scripts` is the list of
     script src values the shell wrote; each allows 1 script element with exactly that src and defer.
     `scheme_src` is the head's scheme script src; it allows 1 script element with exactly
-    data-cfasync="false" then that src, and nothing else."""
+    data-cfasync="false" then that src, and nothing else. Each "<![" on the page is a finding first: markup
+    after it can be live in a browser yet hidden from html.parser (_MARKUP_DECLARATION_SPLIT)."""
     guard = _LinkGuard(site, scripts, scheme_src)
+    guard.found.extend("{!r} at offset {}, a markup declaration html.parser and a browser read differently"
+                       .format(_MARKUP_DECLARATION_SPLIT, match.start())
+                       for match in re.finditer(re.escape(_MARKUP_DECLARATION_SPLIT), html))
     guard.feed(html)
     guard.close()
     if guard._anchor is not None:
@@ -2450,10 +2493,30 @@ def _self_test():
         def get_starttag_text(self):
             return self.text
 
-    expect("links/start-tag-values-placed",
-           _start_tag_values(_Retold("<a title='a>b' HREF=x href=\"\">"), "a",
-                             [("title", "a>b"), ("href", "x"), ("href", "")])
-           == ("<a title='a>b' HREF=x href=\"\">", [(10, 13), (20, 21), (28, 28)]))
+    def placed(text, tag, attrs):
+        """_start_tag_values on `text`, or None when it raises ValueError, so a row fails by its own name."""
+        try:
+            return _start_tag_values(_Retold(text), tag, attrs)
+        except ValueError:
+            return None
+
+    got = placed("<a title='a>b' HREF=x href=\"\">", "a", [("title", "a>b"), ("href", "x"), ("href", "")])
+    expect("links/start-tag-values-placed", got == ("<a title='a>b' HREF=x href=\"\">", [(10, 13), (20, 21), (28, 28)],
+                                                    ["title", "href", "href"]), got)
+    # A value holding "&" is compared after decoding: a decoded span the tokenizer's value does not match is
+    # refused, and the matching twin is placed. A reference html.unescape decodes and the attribute rule
+    # keeps ("&copy=") does not compare equal, so its tag is refused (fail closed).
+    got = placed('<a href="https://x&amp;y">', "a", [("href", "HTTPS://totally-different/")])
+    expect("links/start-tag-other-value-with-reference-refused", got is None, got)
+    got = placed('<a href="https://x&amp;y">', "a", [("href", "https://x&y")])
+    expect("links/start-tag-value-with-reference-placed",
+           got == ('<a href="https://x&amp;y">', [(9, 24)], ["href"]), got)
+    got = placed('<a href="/x?a=1&copy=2">', "a", [("href", "/x?a=1&copy=2")])
+    expect("links/start-tag-attribute-rule-reference-refused", got is None, got)
+    # Names are folded in ASCII only, as a browser folds them: KELVIN SIGN stays as written, "K" folds.
+    got = placed('<span bacKground="x" bacKground="y">', "span", [("background", "x"), ("background", "y")])
+    expect("links/start-tag-non-ascii-name-kept", got is not None and got[2:] == (["bacKground", "background"],),
+           got)
     for name, text, attrs in (("links/start-tag-other-name-refused", '<a href="x">', [("src", "x")]),
                               ("links/start-tag-other-value-refused", '<a href="x">', [("href", "y")]),
                               ("links/start-tag-missing-value-refused", "<a href>", [("href", "x")]),
@@ -2463,6 +2526,22 @@ def _self_test():
             expect(name, False, text)
         except ValueError:
             pass
+    # The inline reader finds each start tag's text at the offset getpos gives, counting a line at each LF
+    # only, as html.parser does: a reader 1 column late leaves the tag unplaced (so _inline_https refuses it)
+    # rather than rewriting the wrong bytes; the exact reader places it.
+
+    class _Shifted(_InlineLinkValues):
+        def getpos(self):
+            line, column = super().getpos()
+            return line, column + 1
+
+    for name, reader_class, want in (("links/inline-misplaced-start-tag-unplaced", _Shifted,
+                                      (['<a href="HTTPS://example.com/v">'], [])),
+                                     ("links/inline-start-tag-placed", _InlineLinkValues, ([], [(10, 31)]))):
+        reader = reader_class(' <a href="HTTPS://example.com/v">')
+        reader.feed(' <a href="HTTPS://example.com/v">')
+        reader.close()
+        expect(name, (reader.unplaced, reader.values) == want, (reader.unplaced, reader.values))
     # Each value is placed by the tokenizer, so a quoted ">" before the link attribute, scheme-shaped text deeper
     # in a URL or inside another attribute, and every quoting form are handled; each case has a twin that the
     # rule leaves as written.
@@ -2502,7 +2581,22 @@ def _self_test():
             ("links/inline-single-quoted-upper-case-https-anchor-lowercased",
              "<a href='HTTPS://example.com/v'" + newtab_tail, "<a href='https://example.com/v'" + newtab_tail),
             ("links/inline-unquoted-mixed-case-https-img-lowercased", "<IMG SRC=HtTpS://example.com/i.png alt=''>",
-             "<IMG SRC=https://example.com/i.png alt=''>")):
+             "<IMG SRC=https://example.com/i.png alt=''>"),
+            # A CR is not a line end to getpos: a tag on the line after a CR is still placed exactly.
+            ("links/inline-carriage-return-before-tag-lowercased",
+             '<p>a\\rb\\n<a href="HTTPS://example.com/v"' + newtab_tail + "</p>",
+             'a\rb\n<a href="https://example.com/v"' + newtab_tail),
+            ("links/inline-line-feed-before-tag-twin-lowercased",
+             '<p>a b\\n<a href="HTTPS://example.com/v"' + newtab_tail + "</p>",
+             'a b\n<a href="https://example.com/v"' + newtab_tail),
+            # An attribute name holding KELVIN SIGN is not a link attribute to a browser, so its value stays as
+            # written; the ASCII "K" twin is the background attribute and is written in lower case.
+            ("links/inline-non-ascii-attribute-name-unchanged",
+             '<p><span bac\\u212aground="HTTPS://example.com/x">t</span></p>',
+             '<span bacKground="HTTPS://example.com/x">t</span>'),
+            ("links/inline-ascii-attribute-name-twin-lowercased",
+             '<p><span bacKground="HTTPS://example.com/x">t</span></p>',
+             '<span bacKground="https://example.com/x">t</span>')):
         built = accepted(name, inline_page, text)
         expect(name, want in built, built)
     # A scheme written with a character reference is not rewritten (it is not a literal scheme); the guard
@@ -2518,6 +2612,47 @@ def _self_test():
                     '<a href="https://example.com/v"' + newtab_tail)
     expect("links/inline-literal-lower-case-https-anchor-passes",
            '<a href="https://example.com/v"' + newtab_tail in twin, twin)
+    # "<![": html.parser reads "<![CDATA[" as a CDATA section up to "]]>", a browser in HTML content as a bogus
+    # comment up to the first ">", so the link after that ">" is live in a browser yet hidden from the rewrite
+    # and the guard. Inline markup holding "<![" is refused, and the guard reports it on a page. The twins
+    # write the same text escaped ("&lt;!["): the rewrite and the guard then see the link.
+    cdata_vectors = (("upper-case-https-anchor", '<a href="HTTPS://example.com/v"' + newtab_tail),
+                     ("http-anchor", '<a href="http://example.com/v">v</a>'),
+                     ("off-site-path-anchor", '<a href="/elsewhere/">v</a>'))
+    for vector, anchor in cdata_vectors:
+        name = "refuse/inline-cdata-" + vector
+        expect(name, "markup declaration" in refused(name, inline_page, "<p><![CDATA[ x > " + anchor + " ]]></p>"))
+    escaped = "<p>&lt;![CDATA[ x &gt; {} ]]&gt;</p>"
+    twin = accepted("links/inline-escaped-cdata-text-upper-case-https-anchor-lowercased", inline_page,
+                    escaped.format(cdata_vectors[0][1]))
+    expect("links/inline-escaped-cdata-text-upper-case-https-anchor-lowercased",
+           '&gt; <a href="https://example.com/v"' + newtab_tail in twin, twin)
+    for vector, anchor in cdata_vectors[1:]:
+        name = "refuse/inline-escaped-cdata-text-" + vector
+        expect(name, "nor an https URL" in refused(name, inline_page, escaped.format(anchor)))
+    declaration = "'<![' at offset 3, a markup declaration html.parser and a browser read differently"
+    for vector, anchor in cdata_vectors:
+        got = _link_findings(site, "<p><![CDATA[ x > " + anchor + " ]]></p>")
+        expect("links/guard-cdata-" + vector + "-refused", got == [declaration], got)
+    got = _link_findings(site, '<p><![CDATA[ <a href="http://example.com/v">v</a></p>')
+    expect("links/guard-unterminated-cdata-refused", got == [declaration], got)
+    for name, html, want in (
+            ("links/guard-escaped-cdata-text-anchor-passes",
+             escaped.format('<a href="https://example.com/v"' + newtab_tail), []),
+            ("links/guard-comment-before-anchor-passes",
+             '<p><!-- x > --> <a href="https://example.com/v"' + newtab_tail + "</p>", []),
+            ("links/guard-escaped-cdata-text-http-anchor-refused", escaped.format(cdata_vectors[1][1]),
+             ["href 'http://example.com/v' on <a> is neither under /draft/ nor an https URL"]),
+            ("links/guard-escaped-cdata-text-off-site-path-refused", escaped.format(cdata_vectors[2][1]),
+             ["href '/elsewhere/' on <a> is neither under /draft/ nor an https URL"])):
+        got = _link_findings(site, html)
+        expect(name, got == want, got)
+    # A name a browser does not fold to a link attribute (KELVIN SIGN) is not checked as one; the ASCII twin is.
+    got = _link_findings(site, '<span xlinK:href="HTTP://example.com/x">t</span>')
+    expect("links/guard-non-ascii-attribute-name-not-a-link-attribute", got == [], got)
+    got = _link_findings(site, '<span xlinK:href="HTTP://example.com/x">t</span>')
+    expect("links/guard-ascii-attribute-name-twin-refused",
+           got == ["xlink:href 'HTTP://example.com/x' on <span> is neither under /draft/ nor an https URL"], got)
     for name, href in (("links/guard-upper-case-http-anchor-refused", "HTTP://example.com/v"),
                        ("links/guard-upper-case-https-one-slash-anchor-refused", "HTTPS:/example.com/v"),
                        ("links/guard-non-ascii-https-lookalike-anchor-refused", "HTTP\u017f://example.com/v")):

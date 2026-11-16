@@ -141,11 +141,18 @@ INTERACTIVE = {"a", "button"}
 # The Apple touch icon link every live page carries. A generated template page (built under the site
 # template's own rules) is not held to the live pages' head; _template_pages says which pages those are.
 TOUCH_ICON_REL = "apple-touch-icon"
+# The markup declaration html.parser and a browser read differently: html.parser (3.14) reads "<![CDATA[" as
+# a CDATA section that ends at "]]>", a browser in HTML content reads "<![" as a bogus comment that ends at
+# the first ">", so a link after that ">" is live in a browser yet never reaches handle_starttag here. Each
+# "<![" in the text a Page is fed is a structural finding wherever it sits, rather than relying on
+# html.parser's private CDATA switch (_set_support_cdata).
+MARKUP_DECLARATION_SPLIT = "<!["
 
 
 class Page(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
+        self._fed = []        # every text fed, for the MARKUP_DECLARATION_SPLIT scan in finalize
         self.links = []       # (value, line)
         self.ids = set()
         self.id_list = []     # (value, line) for duplicate detection
@@ -250,7 +257,18 @@ class Page(HTMLParser):
         self.tag_findings.append(
             (self.getpos()[0], "end tag </{}> has no matching open tag".format(tag)))
 
+    def feed(self, data):
+        self._fed.append(data)
+        super().feed(data)
+
     def finalize(self):
+        source = "".join(self._fed)
+        start = source.find(MARKUP_DECLARATION_SPLIT)
+        while start >= 0:
+            # A line ends at LF only, as getpos counts lines.
+            self.tag_findings.append((source.count("\n", 0, start) + 1, "{!r}: a markup declaration html.parser "
+                                      "and a browser read differently".format(MARKUP_DECLARATION_SPLIT)))
+            start = source.find(MARKUP_DECLARATION_SPLIT, start + 1)
         for tag, line in self.stack:
             if tag not in OPTIONAL_END_TAGS:
                 self.tag_findings.append(
@@ -1025,6 +1043,7 @@ def _self_test():
 
     _touch_icon_self_test(quiet)
     _card_self_test(quiet)
+    _markup_declaration_self_test(quiet)
     _not_found_links_self_test()
     _declaration_self_test()
     _entry_self_test()
@@ -1334,6 +1353,52 @@ def _card_self_test(quiet):
         (root / "index.html").write_text(template, encoding="utf-8")
         check("card/scan-reports-missing-card", quiet(_scan_root, base, "site", targets) == 1, None)
         check("card/live-page-not-held", quiet(_scan_root, base, "site", frozenset()) == 0, None)
+
+
+def _markup_declaration_self_test(quiet):
+    """The "<![" rule of Page: html.parser reads "<![CDATA[" up to "]]>" while a browser ends "<![" at the
+    first ">", so a link after it is live in a browser but never read here; each "<![" is a finding, with its
+    line. The same text escaped ("&lt;![") and a comment are no finding, and the link after them is read."""
+    import tempfile
+    message = "{!r}: a markup declaration html.parser and a browser read differently".format(
+        MARKUP_DECLARATION_SPLIT)
+    tail = ' target="_blank" rel="noopener noreferrer">v</a>'
+    upper_https = '<a href="HTTPS://example.test/v"' + tail
+
+    def read(text):
+        page = Page()
+        page.feed(text)
+        page.finalize()
+        return page
+
+    for name, twin, href, anchor in (
+            ("page/cdata-upper-case-https-anchor-fails", "page/escaped-cdata-text-upper-case-https-anchor-passes",
+             "HTTPS://example.test/v", upper_https),
+            ("page/cdata-http-anchor-fails", "page/escaped-cdata-text-http-anchor-passes",
+             "http://example.test/v", '<a href="http://example.test/v">v</a>'),
+            ("page/cdata-off-site-path-fails", "page/escaped-cdata-text-off-site-path-passes",
+             "/elsewhere/", '<a href="/elsewhere/">v</a>')):
+        page = read("<title>t</title>\n<p><![CDATA[ x > {} ]]></p>".format(anchor))
+        check(name, page.tag_findings == [(2, message)], (page.tag_findings, page.links))
+        page = read("<title>t</title>\n<p>&lt;![CDATA[ x &gt; {} ]]&gt;</p>".format(anchor))
+        check(twin, page.tag_findings == [] and page.links == [(href, 2)], (page.tag_findings, page.links))
+    page = read('<p><![CDATA[ <a href="/elsewhere/">v</a></p>')
+    check("page/unterminated-cdata-fails", page.tag_findings == [(1, message)], (page.tag_findings, page.links))
+    page = read('<p><!-- x > --> <a href="/elsewhere/">v</a></p>')
+    check("page/comment-before-anchor-passes", page.tag_findings == [] and page.links == [("/elsewhere/", 1)],
+          (page.tag_findings, page.links))
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        root = base / "site"
+        (root / "assets").mkdir(parents=True)
+        (root / "assets" / "t.png").write_bytes(b"png")
+        head = '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/assets/t.png">'
+        (root / "index.html").write_text(head + "<p><![CDATA[ x > {} ]]></p>".format(upper_https),
+                                         encoding="utf-8")
+        check("page/scan-reports-cdata", quiet(_scan_root, base, "site", frozenset()) == 1, None)
+        (root / "index.html").write_text(head + "<p>&lt;![CDATA[ x &gt; {} ]]&gt;</p>".format(upper_https),
+                                         encoding="utf-8")
+        check("page/scan-passes-escaped-cdata-text", quiet(_scan_root, base, "site", frozenset()) == 0, None)
 
 
 def _touch_icon_self_test(quiet):
