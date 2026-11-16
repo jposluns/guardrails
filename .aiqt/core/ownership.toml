@@ -195,6 +195,16 @@ path = ".aiqt/attribution.toml"
 class = "pack-immutable"
 
 [[release-class]]
+path = ".aiqt/LICENSE"
+class = "pack-immutable"
+note = "Byte-for-byte copy of the root LICENSE for the .aiqt/ set an adopter install creates (Apache License 2.0 section 4(a)); generated and drift-gated by tools/gen_hooks.py in the authoring tree, gensrc-registered."
+
+[[release-class]]
+path = ".aiqt/NOTICE"
+class = "pack-immutable"
+note = "Byte-for-byte copy of the root NOTICE for the .aiqt/ set an adopter install creates (Apache License 2.0 section 4(d)); generated and drift-gated by tools/gen_hooks.py in the authoring tree, gensrc-registered."
+
+[[release-class]]
 path = ".aiqt/enforceability.json"
 class = "pack-immutable"
 
@@ -392,6 +402,10 @@ class = "pack-immutable"
 
 [[release-class]]
 path = "site/standard/index.html"
+class = "pack-immutable"
+
+[[release-class]]
+path = "site/teams/index.html"
 class = "pack-immutable"
 
 [[release-class]]

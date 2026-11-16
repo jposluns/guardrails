@@ -1,11 +1,11 @@
 title = "AIQT Guardrails roadmap"
-note = "What you can use today, what is being built, and what is only an idea, each labelled. The label changes only when the thing itself does."
+note = "What you can use today, what is being built, and what is planned, each labelled. The label changes only when the thing itself does."
 
 [[stage]]
 pill_class = "now"
 pill_label = "Available now"
 heading = "The chat assistant"
-body = 'You can have this today. AIQT 1.0.5 packages the governance core for a chat assistant: a Skill you upload to Claude, or a portable instruction file for other assistants (ChatGPT, Copilot, Gemini). It guides that assistant toward a stated standard: claims matched to their sources, checks kept at full strength, and "finished" verified before it is said.'
+body = 'You can have this today. AIQT packages the governance core for a chat assistant: a Skill you upload to Claude, or a portable instruction file for other assistants (ChatGPT, Copilot, Gemini). It guides that assistant toward a stated standard: claims matched to their sources, checks kept at full strength, and "finished" verified before it is said.'
 links = [
   { text = "See what has been tested on each platform.", href = "/evidence" },
   { text = "Add it to your assistant.", href = "/install" },
@@ -19,8 +19,8 @@ body = "Version 1.2.0, in development, installs the same governance core into a 
 links = [{ text = "Read about the development assistant.", href = "/development" }]
 
 [[stage]]
-pill_class = "idea"
-pill_label = "Ideas we are considering"
+pill_class = "planned"
+pill_label = "Planned"
 heading = "Teams and Enterprise"
-body = "A web console would show governance activity across projects without requiring a terminal. Enterprise management would cover what an organization needs beyond an individual: central policy, shared configuration, and reporting across teams. No dates and no commitments."
-links = [{ text = "Read about Teams & Enterprise.", href = "/teams" }]
+body = "The plans cover management and monitoring across projects, performance metrics, and guardrail bundles per project or purpose, managed by the team or enterprise. No dates yet, and none of it is available today."
+links = [{ text = "See the future plans.", href = "/future/" }]
