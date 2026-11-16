@@ -120,7 +120,7 @@
 #                        narrowed to a substantive change to a document that a gate or tool relies on as input,
 #                        with the review brief naming each such gate or tool, found by searching the tooling for
 #                        the document's path and the altered text, and stating what that search could miss:
-#                        measured PACK 136619 at the base ca7461de -> 136827 (+208 units); rule files 119996 ->
+#                        measured PACK 136619 before this change -> 136827 (+208 units); rule files 119996 ->
 #                        120204; managed block 360 and file headers 16263 unchanged. The ratchet rises by the
 #                        measured delta, 136631 + 208 = 136839, keeping the existing headroom of 12 units,
 #                        within the maintainer's authorization of 2026-11-08 for raises up to 148000.
