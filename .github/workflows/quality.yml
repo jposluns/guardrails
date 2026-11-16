@@ -83,7 +83,7 @@ jobs:
   # Within a job the steps keep their original relative order. The Quality gates job at the end
   # is the one required status of this workflow and aggregates every job (msg-leaks.yml is a second).
   # The heavy jobs (opf-tooling-a, opf-tooling-b, opf-tooling-c, selftest-execution, the
-  # git-fixture-env-core canary, the five host-patch jobs and byte-canon-matrix) carry one pinned job-level if:,
+  # git-fixture-env-core canary, the 45 host-patch jobs and byte-canon-matrix) carry one pinned job-level if:,
   # so they run only on a push, on a workflow_dispatch or schedule run of refs/heads/main, and on a pull
   # request whose head is a merge-train-* branch of this repository; every other job runs in every run.
   # This workflow carries no schedule: trigger yet; the schedule arm makes a future scheduled run on
@@ -135,26 +135,27 @@ jobs:
   # fails every lane (the execution-reconciled registration stays in selftest-execution).
   # git-fixture-env-core runs the core suite, whose inputs are tools/ modules and generated
   # fixtures, never site/ or opf/site/; git-fixture-env-core-host-patch is that same core suite
-  # repeated on the pinned host Python. The three git-fixture-env config host jobs rerun the
+  # repeated on the pinned host Python. The git-fixture-env config shard jobs rerun the
   # registered roster against the real checkout under hostile git configurations (combined,
-  # malformed and system config injection), so they inherit the opf-declaration and
-  # opf-homes reads above plus tools/check_python_floor.py, whose live gate reads
+  # malformed and system config injection, each lane's shards together running its whole
+  # roster), so they inherit the opf-declaration and opf-homes reads above plus
+  # tools/check_python_floor.py, whose live gate reads
   # site/development.html, site/install/index.html, opf/site/adopt.md and opf/site/adopt/index.html and runs
   # in two of the three config lanes (the malformed lane excludes its bare launch, which stays in
   # the combined and system lanes); the
   # python-floor live gate also runs in the always-run registry job in every run, so a site-only
   # change that turns it red fails every lane. What the fast lane deliberately gives up for a
-  # site-only train is every check in the eleven jobs that carry the site_only condition
+  # site-only train is every check in the 51 jobs that carry the site_only condition
   # (opf-tooling-a, opf-tooling-b, opf-tooling-c, selftest-execution, git-fixture-env-core,
-  # opf-host-patch, the four git-fixture-env host-patch jobs and byte-canon-matrix): every
-  # step of those jobs is skipped, and of their commands only the child-status probe, the
-  # opf-declaration live gate and its selftest-execution suite, and check_byte_canon.py (live
-  # gate and self-test) also run, as the same command, in an always-run job, so every other
-  # command in them runs nowhere else in CI on such a train (among them the OPF tooling live
-  # gates and self-tests, the opf.py self-test, check_selftest_execution.py --self-test and its
-  # other suites there, check_entry_guard.py, check_child_status_coverage.py, every
-  # git-fixture-env suite, and check_python_host_pin.py beyond the registry job's --jobs-only
-  # run). It also gives up the host, configuration and platform repetitions of the checks above:
+  # opf-host-patch, git-fixture-env-core-host-patch, the 43 config shard jobs and
+  # byte-canon-matrix): every step of those jobs is skipped, and of their commands only the
+  # child-status probe, the opf-declaration live gate and its selftest-execution suite, and
+  # check_byte_canon.py (live gate and self-test) also run, as the same command, in an
+  # always-run job, so every other command in them runs nowhere else in CI on such a train
+  # (among them the OPF tooling live gates and self-tests, the opf.py self-test,
+  # check_selftest_execution.py --self-test and its other suites there, check_entry_guard.py,
+  # check_child_status_coverage.py, every git-fixture-env suite, and check_python_host_pin.py
+  # beyond the registry job's --jobs-only run). It also gives up the host, configuration and platform repetitions of the checks above:
   # the host-patch jobs' exact host Python, the config lanes' hostile git configurations
   # and byte-canon-matrix's platforms. The three regenerated records are
   # validated by the always-run registry and release jobs (gen_manifest.py --check,
@@ -676,9 +677,9 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init_contract.py --self-test
 
-      - name: OPF init contract consistency gate
+      - name: OPF init contract consistency gate (OPF-local and parent integration rosters)
         shell: bash
-        run: python3 -I -B opf/tools/check_opf_init_contract.py
+        run: python3 -I -B opf/tools/check_opf_init_contract.py --parent-integration
 
       - name: OPF operation-lock self-test
         shell: bash
@@ -1292,16 +1293,25 @@ jobs:
 
   # The host-patch legs. Every other job of this workflow that sets up Python pins '3.14' (Quality gates
   # sets up none); with check-latest off, the Python setup action may resolve that pin to a 3.14 already on
-  # the runner rather than the newest patch release. Those jobs stay required. These five run the suites a
+  # the runner rather than the newest patch release. Those jobs stay required. These 45 run the suites a
   # newer patch release most often breaks on the exact patch release the maintainer host runs, which
   # .aiqt/python-host.toml names, so a passing local suite predicts a required CI leg. opf-host-patch runs
-  # the OPF tooling self-test, and each git-fixture-env-*-host-patch job runs one git-fixture-env suite,
-  # so the four suites run as parallel jobs and the host leg takes about as long as its longest suite
-  # rather than the sum of the four. These jobs are the only CI run of the OPF tooling self-test and of
-  # the combined, malformed and system git-fixture-env suites: no '3.14' job runs them. Only the
-  # git-fixture-env-core suite also runs on '3.14', in the git-fixture-env-core job above, the canary
-  # for a newer patch release; a failure there alone is diagnostic evidence of a patch-release
-  # difference, not proof that the change is innocent.
+  # the OPF tooling self-test and git-fixture-env-core-host-patch the core git-fixture-env suite. Each
+  # config suite runs as N shard jobs, git-fixture-env-config-<lane>-shard-K-host-patch running
+  # --suite git-fixture-env-config-<lane> --shard K/N for K = 1 to N (N = 12 for combined, 12 for
+  # malformed and 19 for system, the counts tools/check_selftest_execution.py registers in
+  # SHARD_COUNTS), so every host job runs in parallel and the host leg takes about as long as its
+  # longest job rather than the sum. Before a shard runs, the gate lists the lane and every shard and
+  # refuses unless the shards partition the lane; Quality gates needs every shard job and reads each
+  # one's result in HEAVY_RESULTS, so a config suite passes only when all N of its shards pass. The
+  # counts were sized from CI run 43600403087 (combined 112.8, malformed 113.5 and system 148.5
+  # minutes) so each shard's share of its lane plus its N + 1 shard listings (15.4 s each, from one
+  # measured listing) is at most about 13 minutes; a shard is never shorter than its longest member,
+  # and every shard repeats the lane's controls. These jobs are the only CI run of the OPF tooling
+  # self-test and of the combined, malformed and system git-fixture-env suites: no '3.14' job runs
+  # them. Only the git-fixture-env-core suite also runs on '3.14', in the git-fixture-env-core job
+  # above, the canary for a newer patch release; a failure there alone is diagnostic evidence of a
+  # patch-release difference, not proof that the change is innocent.
   # tools/check_python_host_pin.py holds this workflow's top-level keys (name, on, permissions,
   # jobs, and concurrency only as the pinned block) and each job whole: no job key but name, runs-on,
   # steps and the pinned heavy-job if: line, runs-on ubuntu-24.04 (on 2026-10-12 the Python versions
@@ -1313,9 +1323,9 @@ jobs:
   # carries no if:, so an edit here cannot silence every CI run of it.
   # The child-status probe step right after the gate is the child-status coverage gate's rule, not this
   # gate's: tools/check_child_status_coverage.py accepts the host pin step between the Python setup step
-  # and the probe in these five jobs of this workflow only, and requires the probe step, named for that
+  # and the probe in these 45 jobs of this workflow only, and requires the probe step, named for that
   # placement, right after it.
-  # All five are required through Quality gates. They are heavy jobs, so they run on a push and on a
+  # All 45 are required through Quality gates. They are heavy jobs, so they run on a push and on a
   # merge-train-* pull request of this repository, and in no other pull request run; an edit to a pull
   # request's title or body starts no Quality run.
   opf-host-patch:
@@ -1378,8 +1388,8 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
 
-  git-fixture-env-config-combined-host-patch:
-    name: Git-fixture-env combined config lane (host patch)
+  git-fixture-env-config-combined-shard-1-host-patch:
+    name: Git-fixture-env combined config lane, shard 1 of 12 (host patch)
     if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-24.04
@@ -1402,12 +1412,12 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
-      - name: Git-fixture-env combined config-injection lane (execution-reconciled, host patch)
+      - name: Git-fixture-env combined config-injection lane, shard 1 of 12 (execution-reconciled, host patch)
         shell: bash
-        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 1/12
 
-  git-fixture-env-config-malformed-host-patch:
-    name: Git-fixture-env malformed config lane (host patch)
+  git-fixture-env-config-combined-shard-2-host-patch:
+    name: Git-fixture-env combined config lane, shard 2 of 12 (host patch)
     if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-24.04
@@ -1430,12 +1440,12 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
-      - name: Git-fixture-env malformed-config lane (execution-reconciled, host patch)
+      - name: Git-fixture-env combined config-injection lane, shard 2 of 12 (execution-reconciled, host patch)
         shell: bash
-        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 2/12
 
-  git-fixture-env-config-system-host-patch:
-    name: Git-fixture-env system config lane (host patch)
+  git-fixture-env-config-combined-shard-3-host-patch:
+    name: Git-fixture-env combined config lane, shard 3 of 12 (host patch)
     if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-24.04
@@ -1458,9 +1468,1129 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
-      - name: Git-fixture-env system-config lane (execution-reconciled, host patch)
+      - name: Git-fixture-env combined config-injection lane, shard 3 of 12 (execution-reconciled, host patch)
         shell: bash
-        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 3/12
+
+  git-fixture-env-config-combined-shard-4-host-patch:
+    name: Git-fixture-env combined config lane, shard 4 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env combined config-injection lane, shard 4 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 4/12
+
+  git-fixture-env-config-combined-shard-5-host-patch:
+    name: Git-fixture-env combined config lane, shard 5 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env combined config-injection lane, shard 5 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 5/12
+
+  git-fixture-env-config-combined-shard-6-host-patch:
+    name: Git-fixture-env combined config lane, shard 6 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env combined config-injection lane, shard 6 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 6/12
+
+  git-fixture-env-config-combined-shard-7-host-patch:
+    name: Git-fixture-env combined config lane, shard 7 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env combined config-injection lane, shard 7 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 7/12
+
+  git-fixture-env-config-combined-shard-8-host-patch:
+    name: Git-fixture-env combined config lane, shard 8 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env combined config-injection lane, shard 8 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 8/12
+
+  git-fixture-env-config-combined-shard-9-host-patch:
+    name: Git-fixture-env combined config lane, shard 9 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env combined config-injection lane, shard 9 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 9/12
+
+  git-fixture-env-config-combined-shard-10-host-patch:
+    name: Git-fixture-env combined config lane, shard 10 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env combined config-injection lane, shard 10 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 10/12
+
+  git-fixture-env-config-combined-shard-11-host-patch:
+    name: Git-fixture-env combined config lane, shard 11 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env combined config-injection lane, shard 11 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 11/12
+
+  git-fixture-env-config-combined-shard-12-host-patch:
+    name: Git-fixture-env combined config lane, shard 12 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env combined config-injection lane, shard 12 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 12/12
+
+  git-fixture-env-config-malformed-shard-1-host-patch:
+    name: Git-fixture-env malformed config lane, shard 1 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env malformed-config lane, shard 1 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 1/12
+
+  git-fixture-env-config-malformed-shard-2-host-patch:
+    name: Git-fixture-env malformed config lane, shard 2 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env malformed-config lane, shard 2 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 2/12
+
+  git-fixture-env-config-malformed-shard-3-host-patch:
+    name: Git-fixture-env malformed config lane, shard 3 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env malformed-config lane, shard 3 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 3/12
+
+  git-fixture-env-config-malformed-shard-4-host-patch:
+    name: Git-fixture-env malformed config lane, shard 4 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env malformed-config lane, shard 4 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 4/12
+
+  git-fixture-env-config-malformed-shard-5-host-patch:
+    name: Git-fixture-env malformed config lane, shard 5 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env malformed-config lane, shard 5 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 5/12
+
+  git-fixture-env-config-malformed-shard-6-host-patch:
+    name: Git-fixture-env malformed config lane, shard 6 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env malformed-config lane, shard 6 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 6/12
+
+  git-fixture-env-config-malformed-shard-7-host-patch:
+    name: Git-fixture-env malformed config lane, shard 7 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env malformed-config lane, shard 7 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 7/12
+
+  git-fixture-env-config-malformed-shard-8-host-patch:
+    name: Git-fixture-env malformed config lane, shard 8 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env malformed-config lane, shard 8 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 8/12
+
+  git-fixture-env-config-malformed-shard-9-host-patch:
+    name: Git-fixture-env malformed config lane, shard 9 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env malformed-config lane, shard 9 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 9/12
+
+  git-fixture-env-config-malformed-shard-10-host-patch:
+    name: Git-fixture-env malformed config lane, shard 10 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env malformed-config lane, shard 10 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 10/12
+
+  git-fixture-env-config-malformed-shard-11-host-patch:
+    name: Git-fixture-env malformed config lane, shard 11 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env malformed-config lane, shard 11 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 11/12
+
+  git-fixture-env-config-malformed-shard-12-host-patch:
+    name: Git-fixture-env malformed config lane, shard 12 of 12 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env malformed-config lane, shard 12 of 12 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 12/12
+
+  git-fixture-env-config-system-shard-1-host-patch:
+    name: Git-fixture-env system config lane, shard 1 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 1 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 1/19
+
+  git-fixture-env-config-system-shard-2-host-patch:
+    name: Git-fixture-env system config lane, shard 2 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 2 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 2/19
+
+  git-fixture-env-config-system-shard-3-host-patch:
+    name: Git-fixture-env system config lane, shard 3 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 3 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 3/19
+
+  git-fixture-env-config-system-shard-4-host-patch:
+    name: Git-fixture-env system config lane, shard 4 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 4 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 4/19
+
+  git-fixture-env-config-system-shard-5-host-patch:
+    name: Git-fixture-env system config lane, shard 5 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 5 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 5/19
+
+  git-fixture-env-config-system-shard-6-host-patch:
+    name: Git-fixture-env system config lane, shard 6 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 6 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 6/19
+
+  git-fixture-env-config-system-shard-7-host-patch:
+    name: Git-fixture-env system config lane, shard 7 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 7 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 7/19
+
+  git-fixture-env-config-system-shard-8-host-patch:
+    name: Git-fixture-env system config lane, shard 8 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 8 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 8/19
+
+  git-fixture-env-config-system-shard-9-host-patch:
+    name: Git-fixture-env system config lane, shard 9 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 9 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 9/19
+
+  git-fixture-env-config-system-shard-10-host-patch:
+    name: Git-fixture-env system config lane, shard 10 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 10 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 10/19
+
+  git-fixture-env-config-system-shard-11-host-patch:
+    name: Git-fixture-env system config lane, shard 11 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 11 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 11/19
+
+  git-fixture-env-config-system-shard-12-host-patch:
+    name: Git-fixture-env system config lane, shard 12 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 12 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 12/19
+
+  git-fixture-env-config-system-shard-13-host-patch:
+    name: Git-fixture-env system config lane, shard 13 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 13 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 13/19
+
+  git-fixture-env-config-system-shard-14-host-patch:
+    name: Git-fixture-env system config lane, shard 14 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 14 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 14/19
+
+  git-fixture-env-config-system-shard-15-host-patch:
+    name: Git-fixture-env system config lane, shard 15 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 15 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 15/19
+
+  git-fixture-env-config-system-shard-16-host-patch:
+    name: Git-fixture-env system config lane, shard 16 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 16 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 16/19
+
+  git-fixture-env-config-system-shard-17-host-patch:
+    name: Git-fixture-env system config lane, shard 17 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 17 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 17/19
+
+  git-fixture-env-config-system-shard-18-host-patch:
+    name: Git-fixture-env system config lane, shard 18 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 18 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 18/19
+
+  git-fixture-env-config-system-shard-19-host-patch:
+    name: Git-fixture-env system config lane, shard 19 of 19 (host patch)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.4'
+
+      - name: Python host pin
+        shell: bash
+        run: python3 -I -B tools/check_python_host_pin.py
+
+      - name: Child exit status observable (after the host pin gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Git-fixture-env system-config lane, shard 19 of 19 (execution-reconciled, host patch)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 19/19
 
   registry:
     name: Records, manifest and parity
@@ -1487,6 +2617,14 @@ jobs:
       - name: Record-drift gate
         shell: bash
         run: python3 -I -B tools/check_record_drift.py
+
+      - name: Record-reader inventory self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite record-readers-selftest
+
+      - name: Record-reader inventory gate
+        shell: bash
+        run: python3 -I -B tools/check_record_readers.py
 
       - name: Record-section preservation self-test
         shell: bash
@@ -1557,7 +2695,7 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_python_floor.py
 
-      # The host-pin jobs leg, run OUTSIDE the five host-patch jobs it judges, so an edit to those
+      # The host-pin jobs leg, run OUTSIDE the 45 host-patch jobs it judges, so an edit to those
       # jobs (a job-level env: or defaults: that silences their own steps among them) cannot silence
       # every CI run of this gate; this job pins '3.14', not the host patch, so only the source and
       # jobs legs run (--jobs-only), never the interpreter leg.
@@ -1772,9 +2910,49 @@ jobs:
       - git-fixture-env-core
       - opf-host-patch
       - git-fixture-env-core-host-patch
-      - git-fixture-env-config-combined-host-patch
-      - git-fixture-env-config-malformed-host-patch
-      - git-fixture-env-config-system-host-patch
+      - git-fixture-env-config-combined-shard-1-host-patch
+      - git-fixture-env-config-combined-shard-2-host-patch
+      - git-fixture-env-config-combined-shard-3-host-patch
+      - git-fixture-env-config-combined-shard-4-host-patch
+      - git-fixture-env-config-combined-shard-5-host-patch
+      - git-fixture-env-config-combined-shard-6-host-patch
+      - git-fixture-env-config-combined-shard-7-host-patch
+      - git-fixture-env-config-combined-shard-8-host-patch
+      - git-fixture-env-config-combined-shard-9-host-patch
+      - git-fixture-env-config-combined-shard-10-host-patch
+      - git-fixture-env-config-combined-shard-11-host-patch
+      - git-fixture-env-config-combined-shard-12-host-patch
+      - git-fixture-env-config-malformed-shard-1-host-patch
+      - git-fixture-env-config-malformed-shard-2-host-patch
+      - git-fixture-env-config-malformed-shard-3-host-patch
+      - git-fixture-env-config-malformed-shard-4-host-patch
+      - git-fixture-env-config-malformed-shard-5-host-patch
+      - git-fixture-env-config-malformed-shard-6-host-patch
+      - git-fixture-env-config-malformed-shard-7-host-patch
+      - git-fixture-env-config-malformed-shard-8-host-patch
+      - git-fixture-env-config-malformed-shard-9-host-patch
+      - git-fixture-env-config-malformed-shard-10-host-patch
+      - git-fixture-env-config-malformed-shard-11-host-patch
+      - git-fixture-env-config-malformed-shard-12-host-patch
+      - git-fixture-env-config-system-shard-1-host-patch
+      - git-fixture-env-config-system-shard-2-host-patch
+      - git-fixture-env-config-system-shard-3-host-patch
+      - git-fixture-env-config-system-shard-4-host-patch
+      - git-fixture-env-config-system-shard-5-host-patch
+      - git-fixture-env-config-system-shard-6-host-patch
+      - git-fixture-env-config-system-shard-7-host-patch
+      - git-fixture-env-config-system-shard-8-host-patch
+      - git-fixture-env-config-system-shard-9-host-patch
+      - git-fixture-env-config-system-shard-10-host-patch
+      - git-fixture-env-config-system-shard-11-host-patch
+      - git-fixture-env-config-system-shard-12-host-patch
+      - git-fixture-env-config-system-shard-13-host-patch
+      - git-fixture-env-config-system-shard-14-host-patch
+      - git-fixture-env-config-system-shard-15-host-patch
+      - git-fixture-env-config-system-shard-16-host-patch
+      - git-fixture-env-config-system-shard-17-host-patch
+      - git-fixture-env-config-system-shard-18-host-patch
+      - git-fixture-env-config-system-shard-19-host-patch
       - registry
       - byte-canon-matrix
     runs-on: ubuntu-latest
@@ -1789,7 +2967,7 @@ jobs:
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REPO: ${{ github.repository }}
           OTHER_RESULTS: ${{ needs.scope.result || 'missing' }} ${{ needs.secrets.result || 'missing' }} ${{ needs.site.result || 'missing' }} ${{ needs.opf-closure-a.result || 'missing' }} ${{ needs.opf-closure-b.result || 'missing' }} ${{ needs.opf-closure-c.result || 'missing' }} ${{ needs.opf-closure-d.result || 'missing' }} ${{ needs.opf-closure-e.result || 'missing' }} ${{ needs.opf-closure-f.result || 'missing' }} ${{ needs.release.result || 'missing' }} ${{ needs.generated.result || 'missing' }} ${{ needs.registry.result || 'missing' }}
-          HEAVY_RESULTS: ${{ needs.opf-tooling-a.result || 'missing' }} ${{ needs.opf-tooling-b.result || 'missing' }} ${{ needs.opf-tooling-c.result || 'missing' }} ${{ needs.selftest-execution.result || 'missing' }} ${{ needs.git-fixture-env-core.result || 'missing' }} ${{ needs.opf-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-core-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-host-patch.result || 'missing' }} ${{ needs.byte-canon-matrix.result || 'missing' }}
+          HEAVY_RESULTS: ${{ needs.opf-tooling-a.result || 'missing' }} ${{ needs.opf-tooling-b.result || 'missing' }} ${{ needs.opf-tooling-c.result || 'missing' }} ${{ needs.selftest-execution.result || 'missing' }} ${{ needs.git-fixture-env-core.result || 'missing' }} ${{ needs.opf-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-core-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-shard-1-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-shard-2-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-shard-3-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-shard-4-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-shard-5-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-shard-6-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-shard-7-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-shard-8-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-shard-9-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-shard-10-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-shard-11-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-shard-12-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-shard-1-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-shard-2-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-shard-3-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-shard-4-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-shard-5-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-shard-6-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-shard-7-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-shard-8-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-shard-9-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-shard-10-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-shard-11-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-shard-12-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-1-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-2-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-3-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-4-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-5-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-6-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-7-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-8-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-9-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-10-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-11-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-12-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-13-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-14-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-15-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-16-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-17-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-18-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-shard-19-host-patch.result || 'missing' }} ${{ needs.byte-canon-matrix.result || 'missing' }}
         run: |
           set -euo pipefail
           echo "Needed job results: ${RESULTS}"

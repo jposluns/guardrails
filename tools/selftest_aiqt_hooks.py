@@ -2234,6 +2234,303 @@ def _test_stop_dispatch_note_sites(failures, tmp):
          aiqt_hooks.orch_lease_heartbeat_stop(lease_fx.payload("Stop")), "heartbeat gap")
 
 
+# The clock bindings' context line for the fixed reading the ck-* cases inject (2026-09-23T17:45:02Z, read
+# in a fixed UTC-04:00 zone abbreviated EDT), spelled out whole so any change of wording, order or values
+# fails; {event} is the hook event the binding is registered for.
+_CK_KNOWN = ("[aiqt-clock] Host clock reading at this {event} hook event: UTC 2026-09-23T17:45:02Z; local time "
+             "2026-09-23 13:45:02 UTC-04:00 (EDT). It is the host clock at that moment: it goes stale as time "
+             "passes and carries any host clock error, and it is context for a timestamp, not a check of one.")
+_CK_UNKNOWN = ("[aiqt-clock] Host clock reading at this {event} hook event: UTC 2026-09-23T17:45:02Z; local time "
+               "zone unknown (ck-reason), so no local time is given; use the UTC value. It is the host clock "
+               "at that moment: it goes stale as time passes and carries any host clock error, and it is "
+               "context for a timestamp, not a check of one.")
+
+
+def _test_clock_inject(failures, tmp):
+    """(ck-*) The two context-only clock bindings, clock_inject_post (PostToolUse) and clock_inject_failure
+    (PostToolUseFailure). ck-wiring-*: each is in HANDLERS and HANDLER_EVENT under its own event, and both
+    events are fail-open. ck-known-*: with the clock fixed by replacing aiqt_hooks._clock_now and the zone
+    fixed by replacing aiqt_hooks._clock_local, each returns exactly its event's context line (_CK_KNOWN:
+    UTC, the local time, its numeric offset and the abbreviation; no permission decision, no note), and
+    ck-dispatch-* holds the same through main(). ck-unknown-text-*: a zone _clock_local cannot establish
+    is named unknown, with no local time.
+    ck-wrong-event-*: a payload naming another event gets a note and no reading. ck-offset: the offset text
+    at and on each side of zero (one second, one microsecond) and at whole and half hours. ck-zone-fixed:
+    _clock_local keeps a fixed injected zone (TZ a POSIX rule). ck-zone-known-*: each TZ the C library
+    reads correctly (unset, UTC, zone database names, an absolute zone file, complete POSIX rules, the
+    legacy EST5EDT) is kept when the injected conversion gives what the C library gives for it.
+    ck-zone-legacy-*: each of the four legacy names in _CLOCK_LEGACY_US_ZONES, on a stand-in zone database
+    that lacks the name and holds the zone it is a link to, is looked up under the name and then under that
+    zone, and is kept. ck-zone-unknown-*: TZ empty (pinned by its own reason), an unknown name, an absent
+    file, TZ unset with /etc/localtime not a readable regular file, a conversion that fails or gives no
+    abbreviation, a zone database offset or abbreviation that differs from the conversion's (the C
+    library's fallback name at offset zero included), the abbreviation -00 through TZ and through
+    /etc/localtime, a TZ that only looks like a POSIX rule (an end transition time whose hours, minutes or
+    seconds are out of range included), and a rule whose names or offsets the conversion does not match
+    each give no local time and the reason for that case. ck-rule-*: _clock_posix_rule accepts and refuses
+    each number just inside and just outside its range (in each offset, the daylight offset included, and
+    in each transition time at the start and at the end of the rule, hours are at most 24 and minutes and
+    seconds at most 59; a transition time of 24:59:59 is accepted and 25:00 is refused), refuses a daylight
+    name with no transition rule, and names the rule's (abbreviation, offset) pairs, a daylight offset with
+    minutes among them. ck-localtime-*: _clock_regular_readable on real files in tmp: a regular file and a
+    symlink to one read True; a directory, an absent path, a dangling symlink, a FIFO and (when not root) a
+    mode 000 file read False. ck-malformed-*: main() with an unparseable or a non-object payload warns on
+    exit 0 and adds no reading for both modes. ck-live: the unreplaced clock gives a line of the known or
+    the unknown shape."""
+    utc = datetime.timezone.utc
+    fixed_now = datetime.datetime(2026, 9, 23, 17, 45, 2, tzinfo=utc)
+    edt = datetime.timezone(datetime.timedelta(hours=-4), "EDT")
+    modes = (("clock_inject_post", "PostToolUse"), ("clock_inject_failure", "PostToolUseFailure"))
+    for mode, event in modes:
+        if (aiqt_hooks.HANDLERS.get(mode) is not getattr(aiqt_hooks, mode, None)
+                or aiqt_hooks.HANDLER_EVENT.get(mode) != event or event not in aiqt_hooks.FAIL_OPEN_EVENTS):
+            failures.append("(ck-wiring-{}) {} must be a HANDLERS entry bound to {} in HANDLER_EVENT, and {} "
+                            "must be in FAIL_OPEN_EVENTS".format(mode, mode, event, event))
+    saved = (aiqt_hooks._clock_now, aiqt_hooks._clock_local)
+
+    def dispatch(mode, stdin_text):
+        buf, saved_stdin = io.StringIO(), sys.stdin
+        try:
+            sys.stdin = io.StringIO(stdin_text)
+            with contextlib.redirect_stdout(buf):
+                code = aiqt_hooks.main([mode])
+        finally:
+            sys.stdin = saved_stdin
+        try:
+            return code, json.loads(buf.getvalue())
+        except ValueError:
+            return code, "unparseable stdout " + repr(buf.getvalue())
+    try:
+        aiqt_hooks._clock_now = lambda: fixed_now
+        aiqt_hooks._clock_local = lambda now: (now.astimezone(edt), None)
+        for mode, event in modes:
+            got = aiqt_hooks.HANDLERS[mode]({"hook_event_name": event, "tool_name": "Bash"})
+            want = (0, {"hookSpecificOutput": {"hookEventName": event,
+                                               "additionalContext": _CK_KNOWN.format(event=event)}}, None)
+            if got != want:
+                failures.append("(ck-known-{}) with a fixed clock and zone, {} must return {!r}, got {!r}"
+                                .format(mode, mode, want, got))
+            for kind, stdin_text in (("unparseable", "}{"), ("non-object", "[]")):
+                code, obj = dispatch(mode, stdin_text)
+                if not (code == 0 and isinstance(obj, dict) and set(obj) == {"systemMessage"}
+                        and "unreadable payload" in obj["systemMessage"]):
+                    failures.append("(ck-malformed-{}-{}) main() given the payload {!r} must warn on exit 0 "
+                                    "with no reading, got exit {!r} and {!r}".format(
+                                        mode, kind, stdin_text, code, obj))
+            code, obj = dispatch(mode, json.dumps({"hook_event_name": event, "tool_name": "Read"}))
+            if (code, obj) != (0, want[1]):
+                failures.append("(ck-dispatch-{}) main() given a well-formed {} payload must print {!r} on "
+                                "exit 0, got exit {!r} and {!r}".format(mode, event, want[1], code, obj))
+        aiqt_hooks._clock_local = lambda now: (None, "ck-reason")
+        for mode, event in modes:
+            got = aiqt_hooks.HANDLERS[mode]({"hook_event_name": event, "tool_name": "Bash"})
+            want = (0, {"hookSpecificOutput": {"hookEventName": event,
+                                               "additionalContext": _CK_UNKNOWN.format(event=event)}}, None)
+            if got != want:
+                failures.append("(ck-unknown-text-{}) a zone that cannot be established must be named "
+                                "unknown with no local time: expected {!r}, got {!r}".format(mode, want, got))
+    finally:
+        aiqt_hooks._clock_now, aiqt_hooks._clock_local = saved
+    for mode, event, other in (("clock_inject_post", "PostToolUse", "PostToolUseFailure"),
+                               ("clock_inject_failure", "PostToolUseFailure", "PostToolUse")):
+        for kind, payload in (("other", {"hook_event_name": other}), ("absent", {})):
+            code, obj, err = aiqt_hooks.HANDLERS[mode](payload)
+            if not (_reduce_result(code, obj) == "allow-note" and err is None
+                    and repr(payload.get("hook_event_name")) in obj["systemMessage"]
+                    and "no clock reading was added" in obj["systemMessage"]):
+                failures.append("(ck-wrong-event-{}-{}) {} given a payload naming {!r} must note it and add "
+                                "no reading, got {!r}".format(mode, kind, mode, payload.get("hook_event_name"),
+                                                              (code, obj, err)))
+    td = datetime.timedelta
+    for offset, want in ((td(seconds=-1), "UTC-00:00:01"), (td(0), "UTC+00:00"), (td(seconds=1), "UTC+00:00:01"),
+                         (td(microseconds=-1), "UTC+00:00"), (td(microseconds=1), "UTC+00:00"),
+                         (td(seconds=-60), "UTC-00:01"), (td(seconds=59), "UTC+00:00:59"),
+                         (td(hours=-4), "UTC-04:00"), (td(hours=5, minutes=30), "UTC+05:30"),
+                         (td(hours=14), "UTC+14:00"), (td(hours=-12), "UTC-12:00")):
+        got = aiqt_hooks._clock_offset_text(offset)
+        if got != want:
+            failures.append("(ck-offset-{}) the offset {!r} must read {!r}, got {!r}".format(
+                offset.total_seconds(), offset, want, got))
+    local, reason = aiqt_hooks._clock_local(fixed_now, env={"TZ": "EST5EDT,M3.2.0,M11.1.0"},
+                                            readable=lambda _p: True, convert=lambda now: now.astimezone(edt))
+    if reason is not None or local is None or (local.utcoffset(), local.tzname(), local.hour) != (
+            td(hours=-4), "EDT", 13):
+        failures.append("(ck-zone-fixed) a fixed injected zone under a POSIX TZ rule must be kept, got {!r} "
+                        "and {!r}".format(local, reason))
+
+    def fixed(offset, name):
+        return lambda now: now.astimezone(datetime.timezone(offset, name))
+    ck_dir = Path(tmp) / "ck-localtime"
+    ck_dir.mkdir()
+    zone_file = ck_dir / "zone"
+    zone_file.write_bytes(b"TZif")
+    for label, env, convert in (
+            ("unset", {}, fixed(td(0), "UTC")), ("utc", {"TZ": "UTC"}, fixed(td(0), "UTC")),
+            ("etc-utc", {"TZ": "Etc/UTC"}, fixed(td(0), "UTC")),
+            ("new-york", {"TZ": "America/New_York"}, fixed(td(hours=-4), "EDT")),
+            ("colon-new-york", {"TZ": ":America/New_York"}, fixed(td(hours=-4), "EDT")),
+            ("est5edt", {"TZ": "EST5EDT"}, fixed(td(hours=-4), "EDT")),
+            ("rule-ist", {"TZ": "IST-5:30"}, fixed(td(hours=5, minutes=30), "IST")),
+            ("rule-npt", {"TZ": "NPT-5:45"}, fixed(td(hours=5, minutes=45), "NPT")),
+            ("rule-quoted", {"TZ": "<+0530>-5:30"}, fixed(td(hours=5, minutes=30), "+0530")),
+            ("rule-gmt", {"TZ": "GMT+5"}, fixed(td(hours=-5), "GMT")),
+            ("rule-seconds", {"TZ": "ABC-0:00:01"}, fixed(td(seconds=1), "ABC")),
+            ("rule-full", {"TZ": "ABC5DEF,M3.2.0,M11.1.0"}, fixed(td(hours=-4), "DEF")),
+            ("kolkata", {"TZ": "Asia/Kolkata"}, fixed(td(hours=5, minutes=30), "IST")),
+            ("kathmandu", {"TZ": "Asia/Kathmandu"}, fixed(td(hours=5, minutes=45), "+0545")),
+            ("adelaide", {"TZ": "Australia/Adelaide"}, fixed(td(hours=9, minutes=30), "ACST")),
+            ("london", {"TZ": "Europe/London"}, fixed(td(hours=1), "BST")),
+            ("etc-gmt-plus-5", {"TZ": "Etc/GMT+5"}, fixed(td(hours=-5), "-05")),
+            ("absolute-path", {"TZ": str(zone_file)}, fixed(td(hours=-4), "EDT"))):
+        want = convert(fixed_now)
+        local, reason = aiqt_hooks._clock_local(fixed_now, env=env, readable=lambda _p: True, convert=convert)
+        if reason is not None or local is None or (local, local.tzname()) != (want, want.tzname()):
+            failures.append("(ck-zone-known-{}) TZ {!r} read by the C library as {} ({}) must be kept, got {!r} "
+                            "and {!r}".format(label, env.get("TZ"), want.utcoffset(), want.tzname(), local,
+                                              reason))
+    # ck-zone-legacy-*: a zone database that lacks a legacy name and holds the zone it is a link to. A
+    # stand-in zoneinfo module fixes what the database holds, so each mapping in _CLOCK_LEGACY_US_ZONES is
+    # pinned whatever the host's copy of the database ships, and the row also pins the lookup order.
+    saved_zoneinfo = sys.modules.get("zoneinfo")
+    for name, linked, offset, abbreviation in (("EST5EDT", "America/New_York", td(hours=-4), "EDT"),
+                                               ("CST6CDT", "America/Chicago", td(hours=-5), "CDT"),
+                                               ("MST7MDT", "America/Denver", td(hours=-6), "MDT"),
+                                               ("PST8PDT", "America/Los_Angeles", td(hours=-7), "PDT")):
+        asked = []
+
+        def zone_info(key, linked=linked, offset=offset, abbreviation=abbreviation, asked=asked):
+            asked.append(key)
+            if key != linked:
+                raise KeyError("ck-no-such-zone {}".format(key))
+            return datetime.timezone(offset, abbreviation)
+        stand_in = types.ModuleType("zoneinfo")
+        stand_in.ZoneInfo = zone_info
+        sys.modules["zoneinfo"] = stand_in
+        try:
+            local, reason = aiqt_hooks._clock_local(fixed_now, env={"TZ": name}, readable=lambda _p: True,
+                                                    convert=fixed(offset, abbreviation))
+        finally:
+            if saved_zoneinfo is None:
+                sys.modules.pop("zoneinfo", None)
+            else:
+                sys.modules["zoneinfo"] = saved_zoneinfo
+        want = fixed(offset, abbreviation)(fixed_now)
+        if (reason is not None or local is None or (local, local.tzname()) != (want, want.tzname())
+                or asked != [name, linked]):
+            failures.append("(ck-zone-legacy-{}) TZ {!r}, on a zone database that lacks it and holds {}, must "
+                            "be looked up as {!r} then {!r} and kept as {} ({}), got {!r} and {!r} after the "
+                            "lookups {!r}".format(name.lower(), name, linked, name, linked, offset, abbreviation,
+                                                  local, reason, asked))
+
+    def nameless(now):
+        return now.astimezone(datetime.timezone(td(hours=2), ""))
+
+    class Nameless(datetime.tzinfo):
+        def utcoffset(self, dt):
+            return td(hours=2)
+
+        def tzname(self, dt):
+            return None
+
+        def dst(self, dt):
+            return td(0)
+
+    def overflowing(now):
+        raise OverflowError("ck-overflow")
+    empty = "TZ is set but empty, which leaves the zone to the implementation"
+    neither = "which is neither a complete POSIX TZ rule nor a zone the zone database holds"
+    database = "the zone database's UTC offset or abbreviation for TZ"
+    rule_pairs = "are not the ones the POSIX TZ rule"
+    for label, env, readable, convert, want in (
+            ("empty", {"TZ": ""}, True, None, empty), ("empty-colon", {"TZ": ":"}, True, None, empty),
+            ("unknown-name", {"TZ": "Ck/NoSuchZone"}, True, None, neither),
+            ("absent-file", {"TZ": ":/nonexistent/ck-zone"}, True, None, "which is not a regular file"),
+            ("unset-no-localtime", {}, False, None, "/etc/localtime is not a readable regular file"),
+            ("no-abbreviation", {"TZ": "CKT-2"}, True, nameless, "no zone abbreviation"),
+            ("none-abbreviation", {"TZ": "CKT-2"}, True, lambda now: now.astimezone(Nameless()),
+             "no zone abbreviation"),
+            ("conversion-fails", {"TZ": "CKT-2"}, True, overflowing, "conversion failed (OverflowError)"),
+            ("database-differs", {"TZ": "Etc/GMT-3"}, True, None, database),
+            ("database-abbreviation-differs", {"TZ": "Etc/GMT-3"}, True, fixed(td(hours=3), "XYZ"), database),
+            ("database-zero-offset-fallback", {"TZ": "Etc/UTC"}, True, fixed(td(0), "Etc"), database),
+            ("factory-tz", {"TZ": "Factory"}, True, fixed(td(0), "-00"), "abbreviation is -00"),
+            ("factory-localtime", {}, True, fixed(td(0), "-00"), "abbreviation is -00"),
+            ("rule-junk-daylight-name", {"TZ": "ABC5garbage"}, True, fixed(td(hours=-4), "garbage"), neither),
+            ("rule-junk-transitions", {"TZ": "ABC5DEF,garbage"}, True, fixed(td(hours=-4), "DEF"), neither),
+            ("rule-minutes-99", {"TZ": "ABC5:99"}, True, fixed(td(hours=-5, minutes=-59), "ABC"), neither),
+            ("rule-seconds-99", {"TZ": "ABC5:30:99"}, True,
+             fixed(-td(hours=5, minutes=30, seconds=59), "ABC"), neither),
+            ("rule-end-hour-25", {"TZ": "ABC5DEF,M3.2.0,M11.1.0/25"}, True, fixed(td(hours=-4), "DEF"), neither),
+            ("rule-end-minutes-60", {"TZ": "ABC5DEF,M3.2.0,M11.1.0/2:60"}, True, fixed(td(hours=-4), "DEF"),
+             neither),
+            ("rule-end-seconds-60", {"TZ": "ABC5DEF,M3.2.0,M11.1.0/2:00:60"}, True, fixed(td(hours=-4), "DEF"),
+             neither),
+            ("rule-name-differs", {"TZ": "ABC5"}, True, fixed(td(hours=-5), "XYZ"), rule_pairs),
+            ("rule-offset-differs", {"TZ": "ABC5"}, True, fixed(td(hours=-4), "ABC"), rule_pairs)):
+        if not env and os.name != "posix":
+            continue
+        local, reason = aiqt_hooks._clock_local(fixed_now, env=env, readable=lambda _p, r=readable: r,
+                                                convert=convert or (lambda now: now.astimezone(edt)))
+        if local is not None or not (isinstance(reason, str) and want in reason):
+            failures.append("(ck-zone-unknown-{}) a zone that cannot be established must give no local time "
+                            "and a reason holding {!r}, got {!r} and {!r}".format(label, want, local, reason))
+    for text in ("ABC24", "ABC5:59", "ABC5:30:59", "ABC5DEF,J1,J365", "ABC5DEF,0,365", "ABC5DEF,M12.5.6,M1.1.0",
+                 "ABC5DEF,M3.2.0/24,M11.1.0/0:59:59", "ABC5DEF,M3.2.0/24:59:59,M11.1.0",
+                 "ABC5DEF,M3.2.0,M11.1.0/24:59:59", "ABC5DEF24,M3.2.0,M11.1.0", "ABC5DEF4:59:59,M3.2.0,M11.1.0",
+                 "<AB+1>5<AB+2>,M3.2.0,M11.1.0"):
+        if aiqt_hooks._clock_posix_rule(text) is None:
+            failures.append("(ck-rule-accepts-{}) the complete POSIX TZ rule {!r} must be accepted".format(
+                text, text))
+    for text in ("ABC25", "ABC5:60", "ABC5:30:60", "ABC5DEF,J0,J365", "ABC5DEF,J1,J366", "ABC5DEF,0,366",
+                 "ABC5DEF,M13.1.0,M11.1.0", "ABC5DEF,M0.1.0,M11.1.0", "ABC5DEF,M3.0.0,M11.1.0",
+                 "ABC5DEF,M3.6.0,M11.1.0", "ABC5DEF,M3.2.7,M11.1.0", "ABC5DEF,M3.2.0/25,M11.1.0",
+                 "ABC5DEF,M3.2.0/2:60,M11.1.0", "ABC5DEF,M3.2.0/-2,M11.1.0", "ABC5DEF,M3.2.0/25:00,M11.1.0",
+                 "ABC5DEF,M3.2.0/2:00:60,M11.1.0", "ABC5DEF,M3.2.0,M11.1.0/25", "ABC5DEF,M3.2.0,M11.1.0/25:00",
+                 "ABC5DEF,M3.2.0,M11.1.0/2:60", "ABC5DEF,M3.2.0,M11.1.0/2:00:60", "ABC5DEF,M3.2.0,M11.1.0/-2",
+                 "ABC5DEF25,M3.2.0,M11.1.0", "ABC5DEF4:60,M3.2.0,M11.1.0", "ABC5DEF4:30:60,M3.2.0,M11.1.0",
+                 "ABC5DEF", "ABC5garbage", "ABC5DEF,M3.2.0", "ABC5DEF,garbage", "AB5", ":ABC5", "ABC5 ", "ABC"):
+        if aiqt_hooks._clock_posix_rule(text) is not None:
+            failures.append("(ck-rule-refuses-{}) {!r} is not a complete POSIX TZ rule and must be refused"
+                            .format(text, text))
+    for text, want in (("ABC5DEF,M3.2.0,M11.1.0", {("ABC", td(hours=-5)), ("DEF", td(hours=-4))}),
+                       ("ABC5DEF6,J60/2,300/3", {("ABC", td(hours=-5)), ("DEF", td(hours=-6))}),
+                       ("ABC5DEF4:30,M3.2.0,M11.1.0",
+                        {("ABC", td(hours=-5)), ("DEF", -td(hours=4, minutes=30))}),
+                       ("<+0530>-5:30", {("+0530", td(hours=5, minutes=30))}),
+                       ("ABC-0:00:01", {("ABC", td(seconds=1))})):
+        got = aiqt_hooks._clock_posix_rule(text)
+        if got != want:
+            failures.append("(ck-rule-pairs-{}) the rule {!r} must name {!r}, got {!r}".format(text, text, want,
+                                                                                            got))
+    regular_link, dangling = ck_dir / "regular-link", ck_dir / "dangling-link"
+    regular_link.symlink_to(zone_file)
+    dangling.symlink_to(ck_dir / "absent")
+    rows = [("regular", zone_file, True), ("symlink-to-regular", regular_link, True),
+            ("directory", ck_dir, False), ("absent", ck_dir / "absent", False),
+            ("dangling-symlink", dangling, False)]
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(str(ck_dir / "fifo"))
+        rows.append(("fifo", ck_dir / "fifo", False))
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        unreadable = ck_dir / "unreadable"
+        unreadable.write_bytes(b"TZif")
+        unreadable.chmod(0)
+        rows.append(("unreadable", unreadable, False))
+    for label, path, want in rows:
+        if aiqt_hooks._clock_regular_readable(str(path)) is not want:
+            failures.append("(ck-localtime-{}) _clock_regular_readable must give {} for a path that is {}"
+                            .format(label, want, label.replace("-", " ")))
+    context = aiqt_hooks.clock_inject_post({"hook_event_name": "PostToolUse"})[1]["hookSpecificOutput"][
+        "additionalContext"]
+    if not re.fullmatch(r"\[aiqt-clock\] Host clock reading at this PostToolUse hook event: UTC "
+                        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z; (local time \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} "
+                        r"UTC[+-]\d{2}:\d{2}(:\d{2})? \([^()]+\)|local time zone unknown \(.+\), so no local "
+                        r"time is given; use the UTC value)\. It is the host clock at that moment: .*", context,
+                        re.ASCII):
+        failures.append("(ck-live) the unreplaced clock must give a line of the known or the unknown shape, got "
+                        "{!r}".format(context))
+
+
 def _git(repo, *args, env_identity=False):
     """Run a git command against repo, raising on failure so a setup fault surfaces as a harness error."""
     cmd = ["git", "-C", str(repo)]
@@ -2709,20 +3006,26 @@ def _test_git_stash_ref(failures):
         if result != aiqt_hooks._deny_missing_tool_name("expbnd"):
             failures.append("{}: expected shared missing-tool deny, got {!r}".format(label, result))
 
-    # These payloads take the sibling's exact unreadable-command note path.
-    for tool_input in (None, [], {}, {"command": None}, {"command": 42}, {"command": ""}):
+    # An unreadable command denies through the shared reader, as in the sibling; an empty command is
+    # readable and takes the sibling's exact convention note.
+    for tool_input in (None, [], {}, {"command": None}, {"command": 42}):
         data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
                 "tool_input": tool_input}
         result = run("(sr-unreadable)", data)
         code, stdout_obj, stderr = result
-        if not (result == aiqt_hooks.git_explicit_binding(data) and code == 0 and
-                isinstance(stdout_obj, dict) and
-                isinstance(stdout_obj.get("systemMessage"), str) and
-                stdout_obj["systemMessage"] and
-                "hookSpecificOutput" not in stdout_obj and
-                "permissionDecision" not in stdout_obj and stderr is None):
-            failures.append("(sr-unreadable) expected sibling note for {!r}, got {!r}"
+        if _reduce_result(code, stdout_obj) != "deny" or stderr is not None:
+            failures.append("(sr-unreadable) expected the unreadable-command deny for {!r}, got {!r}"
                             .format(tool_input, result))
+    data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "tool_input": {"command": ""}}
+    result = run("(sr-empty)", data)
+    code, stdout_obj, stderr = result
+    if not (result == aiqt_hooks.git_explicit_binding(data) and code == 0 and
+            isinstance(stdout_obj, dict) and
+            isinstance(stdout_obj.get("systemMessage"), str) and
+            stdout_obj["systemMessage"] and
+            "hookSpecificOutput" not in stdout_obj and
+            "permissionDecision" not in stdout_obj and stderr is None):
+        failures.append("(sr-empty) expected sibling note for an empty command, got {!r}".format(result))
 
     data = payload("git stash pop")
     data["tool_name"] = "Read"
@@ -2739,6 +3042,151 @@ def _test_git_stash_ref(failures):
     if (aiqt_hooks.HANDLERS.get("git_stash_ref") is not aiqt_hooks.git_stash_ref or
             aiqt_hooks.HANDLER_EVENT.get("git_stash_ref") != aiqt_hooks.PRETOOL):
         failures.append("(sr-wiring) git_stash_ref handler/event wiring is missing or wrong")
+
+
+# A Bash payload whose command cannot be read: the malformed command shapes (absent, null, an array, an
+# integer, a float, an object, an object whose only key is __str__, a boolean), then a tool_input that is
+# itself missing or not an object (the same class). Each row is (name, the payload fields beside
+# hook_event_name and tool_name, the phrase the deny reason must hold to name the malformed field).
+_MALFORMED_BASH_INPUTS = (
+    ("command-absent", {"tool_input": {}}, "tool_input.command is missing"),
+    ("command-null", {"tool_input": {"command": None}}, "tool_input.command is null"),
+    ("command-list", {"tool_input": {"command": ["git", "push"]}}, "tool_input.command is an array"),
+    ("command-int", {"tool_input": {"command": 42}}, "tool_input.command is a number"),
+    ("command-float", {"tool_input": {"command": 1.5}}, "tool_input.command is a number"),
+    ("command-object", {"tool_input": {"command": {"command": "git push"}}}, "tool_input.command is an object"),
+    ("command-str-key-object", {"tool_input": {"command": {"__str__": "git push"}}},
+     "tool_input.command is an object"),
+    ("command-bool", {"tool_input": {"command": True}}, "tool_input.command is a boolean"),
+    ("tool-input-absent", {}, "tool_input is missing"),
+    ("tool-input-null", {"tool_input": None}, "tool_input is null"),
+    ("tool-input-list", {"tool_input": ["git push"]}, "tool_input is an array"),
+    ("tool-input-string", {"tool_input": "git push"}, "tool_input is a string"),
+    ("tool-input-number", {"tool_input": 7}, "tool_input is a number"),
+)
+# A command string holding a NUL: bash ends a command string at its first NUL, so the text before it runs
+# and the text after it never does. Each row is (name, command, the reverted verdicts that are not deny):
+# the git diff family at the end, at the start, mid-word and in place of a space, then the same places in
+# a plain echo. With the NUL check reverted every echo row goes red in every hook; a git diff row stays a
+# deny where the hook's own fallback for a command its lexer refuses already fails closed, and those
+# hooks are named in the row's revert exceptions.
+_NUL_BASH_COMMANDS = (
+    ("git-diff-nul-end", "git diff\x00", ("gate_weakening",)),
+    ("git-diff-nul-start", "\x00git diff", ()),
+    ("git-diff-nul-mid", "git d\x00iff", ("gate_weakening",)),
+    ("git-diff-nul-space", "git\x00diff", ("gate_weakening", "git_discard", "protected_line", "branch_root")),
+    ("echo-nul-end", "echo hi\x00", ()),
+    ("echo-nul-start", "\x00echo hi", ()),
+    ("echo-nul-mid", "ec\x00ho hi", ()),
+    ("echo-nul-space", "echo\x00hi", ()),
+)
+# The Bash hooks with a deny tier that judge every session's commands. The others read the command only
+# inside the scope an orchestration registry, a review dispatch binding or a live review hold gives them,
+# and inert outside it, so tools/selftest_orch_hooks.py builds that scope for their rows.
+_SCOPED_BASH_HANDLERS = frozenset((
+    "orch_truncation_guard", "orch_untracked_wait_loop", "review_dispatch_pin", "review_workdir_hold"))
+# The always-on Bash hooks that deny an empty or blank command on their own (gensrc_guard: its write-sink
+# detector reads no command in it). With the shared reader reverted to the lax empty read their malformed rows
+# still deny, which is pinned; a second revert to a lax read of a harmless command (true) must go red, so
+# the deny there still comes from the reader.
+_EMPTY_COMMAND_DENIED = frozenset(("gensrc_guard",))
+
+
+def _malformed_bash_handlers():
+    """The handler of every PreToolUse hook the manifest registers for Bash with the block default, outside
+    _SCOPED_BASH_HANDLERS, read from the manifest itself so a new Bash hook is covered when it lands."""
+    hooks = load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml")["hook"]
+    return [h["handler"] for h in hooks
+            if h.get("event") == "PreToolUse" and h.get("default") == "block" and h.get("matcher")
+            and re.fullmatch(h["matcher"], "Bash") and h["handler"] not in _SCOPED_BASH_HANDLERS]
+
+
+def _test_malformed_bash_payload(failures):
+    """Every always-on Bash hook with a deny tier denies each _MALFORMED_BASH_INPUTS shape with a reason
+    naming the malformed field, and each case goes red with the shared reader (_bash_command) reverted to
+    the lax read that took an unreadable command for an empty one; a well-formed command is judged as
+    before (the rows above pin it), and an empty one still reads as a command. A hook in
+    _EMPTY_COMMAND_DENIED denies that empty read on its own, which is pinned, and goes red instead with the
+    reader reverted to a lax read of a harmless command (true)."""
+    names = _malformed_bash_handlers()
+    if len(names) < 11:
+        failures.append("(mbp-enumeration) expected at least the 11 always-on Bash hooks with a deny tier in the "
+                        "manifest, got {!r}".format(names))
+    saved = aiqt_hooks._bash_command
+    for name in names:
+        handler = aiqt_hooks.HANDLERS[name]
+        for shape, fields, phrase in _MALFORMED_BASH_INPUTS:
+            data = dict({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash"}, **fields)
+            code, stdout_obj, _stderr = handler(data)
+            got = _reduce_result(code, stdout_obj)
+            reason = (stdout_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                      if isinstance(stdout_obj, dict) else "")
+            if got != "deny" or phrase not in reason:
+                failures.append("(mbp-{}-{}) a Bash payload whose {} must deny with a reason naming it; got {} "
+                                "({!r})".format(name, shape, phrase, got, reason))
+            aiqt_hooks._bash_command = lambda payload: ("", None)
+            try:
+                code, stdout_obj, _stderr = handler(data)
+            finally:
+                aiqt_hooks._bash_command = saved
+            if (_reduce_result(code, stdout_obj) == "deny") != (name in _EMPTY_COMMAND_DENIED):
+                failures.append("(mbp-{}-{}-revert) with the shared reader reverted to the lax read the case "
+                                "must {}".format(name, shape, "still deny on the hook's own empty-command deny"
+                                                 if name in _EMPTY_COMMAND_DENIED
+                                                 else "go red (not deny), so the deny comes from the reader"))
+            if name in _EMPTY_COMMAND_DENIED:
+                aiqt_hooks._bash_command = lambda payload: ("true", None)
+                try:
+                    code, stdout_obj, _stderr = handler(data)
+                finally:
+                    aiqt_hooks._bash_command = saved
+                if _reduce_result(code, stdout_obj) == "deny":
+                    failures.append("(mbp-{}-{}-revert-true) with the shared reader reverted to a lax read of "
+                                    "true the case must go red (not deny), so the deny comes from the reader"
+                                    .format(name, shape))
+
+
+def _test_nul_bash_command(failures):
+    """Every always-on Bash hook with a deny tier denies each _NUL_BASH_COMMANDS command with a reason naming
+    the NUL, and with the shared reader's NUL check reverted (a command holding a NUL read as it stands) each
+    case goes red, except where the row names the hook as already denying on its own fallback; that
+    exception is pinned too, so a row that stops going red, or starts, is reported."""
+    names = _malformed_bash_handlers()
+    for required in ("diff_source_pretool", "gate_weakening", "protected_line", "bash_absolute_paths"):
+        if required not in names:
+            failures.append("(nul-enumeration) {} is not among the always-on Bash hooks {!r}".format(
+                required, names))
+    saved = aiqt_hooks._bash_command
+
+    def nul_lax(payload):
+        tool_input = payload.get("tool_input")
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        if isinstance(command, str) and "\x00" in command:
+            return command, None
+        return saved(payload)
+
+    for name in names:
+        handler = aiqt_hooks.HANDLERS[name]
+        for shape, command, still_denied in _NUL_BASH_COMMANDS:
+            data = {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "cwd": str(repo_root()),
+                    "tool_input": {"command": command}}
+            code, stdout_obj, _stderr = handler(data)
+            got = _reduce_result(code, stdout_obj)
+            reason = (stdout_obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                      if isinstance(stdout_obj, dict) else "")
+            if got != "deny" or "holds a NUL character at offset {}".format(command.index("\x00")) not in reason:
+                failures.append("(nul-{}-{}) a Bash command holding a NUL must deny with a reason naming the "
+                                "NUL; got {} ({!r})".format(name, shape, got, reason))
+            aiqt_hooks._bash_command = nul_lax
+            try:
+                code, stdout_obj, _stderr = handler(data)
+            finally:
+                aiqt_hooks._bash_command = saved
+            reverted = _reduce_result(code, stdout_obj)
+            if (reverted == "deny") != (name in still_denied):
+                failures.append("(nul-{}-{}-revert) with the NUL check reverted the case must {}; got {}".format(
+                    name, shape, "still deny on the hook's own fallback" if name in still_denied
+                    else "go red (not deny), so the deny comes from the NUL check", reverted))
 
 
 # The inline_errexit mutants: each is the live hook source with one rule removed by exact source edits
@@ -2896,10 +3344,12 @@ _IE_MUTANTS = {
                            "return _allow()"),),
     "unread-command": (('return _errexit_unreadable("command", "command" in tool_input, command, "a string")',
                         "return _allow()"),),
-    "unread-empty-command": (("if not isinstance(command, str) or not command:\n"
-                              '        return _errexit_unreadable("command"',
-                              "if not isinstance(command, str):\n"
-                              '        return _errexit_unreadable("command"'),),
+    "unread-empty-command": (("if not command:\n"
+                              '        return _errexit_unreadable("command", True, command, "a string")',
+                              "if False:\n"
+                              '        return _errexit_unreadable("command", True, command, "a string")'),),
+    "unread-nul-command": (("return _allow_note(_ERREXIT_UNREADABLE_NOTE.format(  # a command string holding a NUL",
+                            "_allow_note(_ERREXIT_UNREADABLE_NOTE.format(  # a command string holding a NUL"),),
     "unread-rest": (("if _errexit_unread_mentions(unread):", "if False:"),),
     "unread-any": (("if _errexit_unread_mentions(unread):", "if unread:"),),
     "unread-on": (("if unread and on:", "if False:"),),
@@ -3103,8 +3553,8 @@ _IE_UNREAD_ROWS = (
     ("(ie-n35) a set the lexer stopped inside, never read as a set", "set -e <(true); a; b", "unread-rest", True),
     ("(ie-u4) a construct that stops the lexer at the start of a segment", "a; <<< x; set -e; false; echo after",
      "unread-rest", True),
-    ("(ie-u5) a NUL stops the lexer before any segment", "true\x00; set -e; false; echo after", "unread-none",
-     True),
+    ("(ie-u5) a here-string stops the lexer before any segment", "<<< x; set -e; false; echo after",
+     "unread-none", True),
     ("(ie-u6) a rest past an unquoted heredoc read again",
      "cat <<EOF > /abs/out.txt\nbody\nEOF\ndiff <(a) <(b); set -e; false; echo after", "unread-rest", True),
     ("(ie-u7) a rest that mentions only shopt", "cat <(true); shopt -s nullglob; a; b", "unread-shopt", True),
@@ -3419,6 +3869,32 @@ def _test_inline_errexit(failures, tmp):
         if mutants[mutant](data) != (0, None, None):
             failures.append("{}: the {} mutant must silence this row, so the row shows the note decides it; got "
                             "{!r}".format(label, mutant, mutants[mutant](data)))
+    # A command string holding a NUL (bash runs only the text before it) comes through the shared reader
+    # (_bash_command) and allows with the unreadable-input note carrying the reader's detail, which names the
+    # NUL's offset. Under the mutant that drops that note the command reaches the lexer again, and each row
+    # then gives the result pinned beside it, so the row shows the NUL note decides it.
+    for label, command, flip in (
+            ("(ie-m14) a NUL after set -e and a failing step", "set -e; false\x00; echo after",
+             aiqt_hooks._allow_note(aiqt_hooks._ERREXIT_UNREAD_NOTE)),
+            ("(ie-m15) a NUL at the start of the command", "\x00set -e; false; echo after",
+             aiqt_hooks._allow_note(aiqt_hooks._ERREXIT_UNREAD_NOTE)),
+            ("(ie-m16) a NUL at the end of a plain command", "echo hi\x00", (0, None, None))):
+        mutant = "unread-nul-command"
+        used.add(mutant)
+        detail = aiqt_hooks._bash_command(payload(command))[1]
+        want = aiqt_hooks._allow_note(unread.format("command", "a string holding a NUL ({})".format(detail)))
+        got = handler(payload(command))
+        offset = "holds a NUL character at offset {}".format(command.index("\x00"))
+        if got != want or offset not in (detail or ""):
+            failures.append("{}: expected the unreadable-input note naming the NUL ({}), got {!r}".format(
+                label, offset, got))
+        if mutant not in mutants:
+            failures.append("{}: its mutant {} was not built".format(label, mutant))
+            continue
+        flipped = mutants[mutant](payload(command))
+        if flipped != flip:
+            failures.append("{}: the {} mutant must give {!r} for this row, so the row shows the NUL note decides "
+                            "it; got {!r}".format(label, mutant, flip, flipped))
     # A command the lexer could not read in full, whose read part shows no hazard, notes that the rest was not
     # read where errexit is on where the lexer stopped, and otherwise only where that rest mentions set or
     # shopt as a word, errexit or pipefail; each row must then give the other result under its mutant.
@@ -3728,9 +4204,13 @@ def _psm_oracle(failures, handler):
 
 
 # Foreground trkasy rows with no '&' byte anywhere: a quoted here-document write followed by another command
-# reads its body as code, so an apostrophe there left the scan open and the guard denied a detach the
+# had its body read as code, so an apostrophe there left the scan open and the guard denied a detach the
 # command cannot hold. The full row has the shape of a real markdown brief (quotes, backquotes, parentheses,
-# a '#' heading) written with cat, then hashed.
+# a '#' heading) written with cat, then hashed. The scan now reads such a body apart from the command's
+# quote state, so the raw scan no longer reads those two rows as open; the rows the raw scan still reads as
+# open (_TRKASY_NOAMP_FLIP_ROWS: a stray quote, a body whose delimiter line never comes, and an unquoted
+# delimiter's body holding a command substitution, which the scan still reads as shell text) pin the no-'&'
+# branch instead.
 _TRKASY_NOAMP_FULL = (
     "cat > /abs/qa/brief.md <<'EOF'\n# Verify the fix (the ci-status check)\n\n"
     "You are an independent reviewer. Check that the findings are fixed; do not just confirm.\n\n"
@@ -3739,8 +4219,12 @@ _TRKASY_NOAMP_FULL = (
     "2. A present null head_sha was reported as \"missing required field\".\n"
     "Keep this well under one hour; the branch's newest commit holds the fix.\nEOF\n"
     "sha256sum /abs/qa/brief.md")
-_TRKASY_NOAMP_ALLOW_ROWS = (
+_TRKASY_NOAMP_FLIP_ROWS = (
     ("trkasy-noamp-min", "'"),
+    ("trkasy-noamp-heredoc-unterminated", "cat > /abs/f <<'EOF'\nit's\nsha256sum /abs/f"),
+    ("trkasy-noamp-heredoc-unquoted-subst", "cat > /abs/f <<EOF\nit's $(date)\nEOF\nsha256sum /abs/f"),
+)
+_TRKASY_NOAMP_ALLOW_ROWS = _TRKASY_NOAMP_FLIP_ROWS + (
     ("trkasy-noamp-heredoc-min", "cat > /abs/f <<'EOF'\nit's\nEOF\nsha256sum /abs/f"),
     ("trkasy-noamp-full", _TRKASY_NOAMP_FULL),
 )
@@ -3751,9 +4235,10 @@ _TRKASY_REAL_AMP_DENY_ROWS = (
     ("trkasy-amp-after-noamp-full", _TRKASY_NOAMP_FULL + "\nsleep 5 &"),
 )
 # Runtime start forms that can start a background job with no '&' byte, each beside an apostrophe in a
-# here-document body read as code and beside an uncertain '#': the open quote or '#' still denies, since
-# the guard takes the no-'&' allow only for a command holding no such form. The plain forms are the
-# disclosed silent allow and are not rows here.
+# here-document body the scan still reads as code (an unquoted delimiter's body holding a command
+# substitution) and beside an uncertain '#': the open quote or '#' still denies, since the guard takes the
+# no-'&' allow only for a command holding no such form. The plain forms are the disclosed silent allow and
+# are not rows here.
 _TRKASY_RUNTIME_START_FORMS = (
     ("coproc", "coproc sleep 5"),
     ("eval-runtime-amp", "eval \"sleep 5 $(printf '\\x26')\""),
@@ -3832,8 +4317,8 @@ _TRKASY_RUNTIME_START_QUOTED_FORMS = (
 
 def _trkasy_start_rows(forms, contexts=("heredoc-apos", "uncertain-hash")):
     """Deny rows for runtime start forms, each beside the named contexts: an apostrophe in a here-document body
-    read as code, and an uncertain '#'."""
-    prefixes = {"heredoc-apos": "cat <<'EOF'\nit's\nEOF\n", "uncertain-hash": "(true)# x\n"}
+    the scan still reads as code, and an uncertain '#'."""
+    prefixes = {"heredoc-apos": "cat <<EOF\nit's $(date)\nEOF\n", "uncertain-hash": "(true)# x\n"}
     return tuple(("trkasy-start-" + context + "-" + label, prefixes[context] + form)
                  for label, form in forms for context in contexts)
 
@@ -3941,13 +4426,538 @@ def _test_trkasy_no_amp(failures, tmp):
         return fixed(command, lifts)
     aiqt_hooks._orch_foreground_detach_lexed = unfixed
     try:
-        for label, command in _TRKASY_NOAMP_ALLOW_ROWS:
+        for label, command in _TRKASY_NOAMP_FLIP_ROWS:
             got = _decision(handler, command, cwd=str(root))
             if got != "deny":
                 failures.append("({}-flip) the row must deny with the no-'&' branch reading the raw scan, "
                                 "so it pins that branch; got {}".format(label, got))
     finally:
         aiqt_hooks._orch_foreground_detach_lexed = fixed
+
+
+# The adopter's refused command as submitted, with only its absolute host path prefix replaced by /abs/proj/
+# (a tracked file holds no host path): a mkdir, then a quoted here-document write whose body holds
+# apostrophes and the word source (a runtime start form), then a python3 -c command. It holds no '&'.
+_TRKASY_HEREDOC_ADOPTER = (
+    "mkdir -p /abs/proj/tmp/t217-220/fix4prep; cat > "
+    "/abs/proj/tmp/t217-220/fix4prep/keep-list.txt <<'EOF'\n"
+    "Keep list for fix 4 of the staged TODO 217 and TODO 220 change to dispatch-when-free.sh\n"
+    "The staged fix 3 candidate passed the orchestrator's own staging runs: test 699 of 699, with fixtures 713 "
+    "of 713,\n"
+    "mutants as expected (67 named killed, each with the guard passing), every earlier finding and both older "
+    "defects gone.\n"
+    "Each item below was validated at source by the orchestrator, most by a reproduction kept in ctx/. Fix each "
+    "across its\n"
+    "class, not only at the cited line. Every new or changed check gets a test case that fails without it and a "
+    "named\n"
+    "mutant that a case kills.\n"
+    "\n"
+    "f. dispatch-retry.sh line 10 computes its output path as "
+    '/abs/proj/tmp/dispatch-$FAMILY-$(basename "$BRIEF"\n'
+    "   .md).out. For a relative brief name starting with a hyphen, basename prints an error and the path is\n"
+    "   dispatch-claude-.out; for a name ending in a line feed, command substitution drops it. Either way the "
+    "retry script\n"
+    "   reads, keeps aside and renames another file than the one the wrapper writes. Reproduced "
+    "(ctx/val-extra.sh, E2):\n"
+    "   with an earlier output at the wrapper's path, a retry copy run for -dash.md and for tail.md LF kept "
+    "nothing aside\n"
+    "   and the wrapper overwrote the earlier output, which the retry script promises never to happen (M-87). "
+    "Compute the\n"
+    "   path with the same name rules as the wrapper (hyphen-leading names, trailing line feeds kept), and with "
+    "the same\n"
+    "   folder rule, so the two paths are equal for every brief argument.\n"
+    "g. The case reply-ok-en-US-unreadable-quote runs under en_US.UTF-8, and every other case under C.UTF-8, "
+    "both host\n"
+    "   locales. Reproduced (ctx/locale-probe.sh): with the locale name replaced by one not installed, the "
+    "candidate fails\n"
+    "   that case on a bash setlocale warning in stderr, and the reply-ok-locale-removed mutant is killed only "
+    "by that\n"
+    "   warning, not by the shape check. Make the test independent of what the host happens to have installed: "
+    "either pick\n"
+    "   at run time an installed locale that is shown to make the check matter and fail closed, naming the gap, "
+    "when there\n"
+    "   is none, or use a construction that does not depend on a host locale. The class is every case whose "
+    "locale the\n"
+    "   test sets or defaults.\n"
+    "h. Defects found at staging:\n"
+    "   1. The output path of 1 brief can be the same file as another brief of the same call. Reproduced "
+    "(ctx/val-extra.sh,\n"
+    "      E1a and E1b): with briefs y.md and <out>/dispatch-claude-y.out, the first dispatch overwrites the "
+    "second brief\n"
+    "      before its dispatch, which then sends that output as its prompt; in the reverse order the second "
+    "dispatch\n"
+    "      overwrites the first brief after its dispatch, so the brief is lost. Both exit 0. The class is any "
+    "output path\n"
+    "      of 1 call that is the same file as any brief of that call, however the 2 are spelled.\n"
+    "   2. dispatch-retry.sh prints its output path and its keep-aside path raw, in 3 lines. Reproduced "
+    "(ctx/val-extra3.sh,\n"
+    '      E3): a brief name holding a line feed splits the line "kept the earlier output as ..." over 2 lines. '
+    "The wrapper's\n"
+    "      rule (each byte outside printable ASCII shown as 1 ?) applies to every path these lines print.\n"
+    '   3. NOTES.txt line 35 says the en_US.UTF-8 case "passes either way" on a host without that locale; it '
+    "fails either\n"
+    "      way, on the stderr warning (item g). Make the sentence true for the code handed back.\n"
+    '   4. NOTES.txt line 44 says "test-dispatch-rc.sh is unchanged"; the staged copy differs from the live one '
+    "by its added\n"
+    "      Time line. Make it true.\n"
+    '   5. Test line 830 reads "accepted =ref[0]" (missing space). The mutant branch for a mutant whose guard '
+    "passed but\n"
+    "      some cases were not run cannot be reached (a case is NOT RUN only when the guard failed) and would "
+    'print "guard\n'
+    '      failed (guard passed, but N cases not run)", which contradicts itself. Fix the spacing; remove the '
+    "branch or make\n"
+    "      its text true.\n"
+    "Observation for the orchestrator, not a keep item: dist/edit-scripts/discovery-launch.sh, the only caller "
+    "of\n"
+    'dispatch-retry.sh, names its 3 launch logs by $(basename "$BRIEF" .md) without --. Its names stay '
+    "consistent between\n"
+    "the write and the read, so the effect is basename error text on its stderr for a hyphen-leading name. It "
+    "is not a file\n"
+    "of this hand-back; leave it unchanged and name it in NOTES.txt as a sibling for the orchestrator.\n"
+    "EOF\n"
+    'python3 -I -c "\n'
+    "import sys,hashlib,re\n"
+    "d=open(sys.argv[1],'rb').read(); print(hashlib.sha256(d).hexdigest(), len(d), d.count(b'\\n'), 'nonascii', "
+    "sum(b>127 for b in d), 'longest', max(len(l) for l in d.split(b'\\n')))\n"
+    '" /abs/proj/tmp/t217-220/fix4prep/keep-list.txt\n'
+)
+_TAB = "\t"
+# Here-document forms from the bash manual (Here Documents): bash reads no quote, comment or operator in a
+# body, under a quoted delimiter ('EOF', "EOF", \EOF) or an unquoted one, where only parameter expansion,
+# command substitution, arithmetic expansion and the backslash before '$', a backquote, a backslash or a
+# newline apply; <<- strips leading tabs from each body line and from the delimiter line; the bodies of two
+# here-documents on one line follow it in order. Each row is (label, command, expected decision, base
+# decision): the base decision is the guard's before the scan read a body apart from the command's quote
+# state, and every row whose two decisions differ must give its base decision under the reverted mutant.
+_TRKASY_HEREDOC_BODY_ROWS = (
+    # A DATA body's quote never leaves the command's quote open: a plain cat write (or cat to standard output)
+    # followed only by a reader of the data-writing allowlist (sha256sum, ls and the like) still allows, its
+    # delimiter form and apostrophe notwithstanding. Each delimiter-form row's body also holds a start form
+    # (coproc) beside its apostrophe or quote, so reading that body as code (the body-spans-off mutant) denies
+    # it: the row's base decision is deny, and it pins the body-on-its-own reading. A command holding anything
+    # else (the adopter's python3, a source, a coproc outside a data shape) is not a data shape, so its body
+    # is read as commands (_orch_heredoc_data_shape).
+    ("hdb-adopter-exact", _TRKASY_HEREDOC_ADOPTER, "deny", "deny"),
+    ("hdb-unquoted-apostrophe-source", "cat > /tmp/k.txt <<EOF\na'b\nsource\nEOF", "allow", "deny"),
+    ("hdb-single-quoted-delim", "cat > /abs/f <<'EOF'\ncoproc sleep 5\necho it's\nEOF\nsha256sum /abs/g",
+     "allow", "deny"),
+    ("hdb-double-quoted-delim", "cat > /abs/f <<\"EOF\"\ncoproc sleep 5\necho it's\nEOF\nsha256sum /abs/g",
+     "allow", "deny"),
+    ("hdb-backslash-delim", "cat > /abs/f <<\\EOF\ncoproc sleep 5\necho it's\nEOF\nsha256sum /abs/g",
+     "allow", "deny"),
+    ("hdb-dash-tabs-unquoted", "cat <<-EOF\n" + _TAB + "coproc sleep 5\n" + _TAB + "echo it's\n" + _TAB
+     + "EOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-dash-tabs-quoted", "cat <<-'EOF'\n" + _TAB + "coproc sleep 5\n" + _TAB + "echo it's\n" + _TAB
+     + "EOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-two-on-one-line",
+     "cat <<A <<'B'\nit's\ncoproc sleep 5\nA\nsay \"hi\ncoproc sleep 5\nB\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-double-quote-body", "cat <<EOF\nsay \"hi\ncoproc sleep 5\nEOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-plain-brace-body", "cat <<EOF\nit's ${HOME}\ncoproc sleep 5\nEOF\nsha256sum /abs/f", "allow", "deny"),
+    ("hdb-escaped-substitutions", "cat <<EOF\nit's \\$(date) \\`date\\`\ncoproc sleep 5\nEOF\nsha256sum /abs/f",
+     "allow", "deny"),
+    ("hdb-and-list-after-body", "cat > /abs/f <<'EOF'\nit's\nEOF\nls /abs && sha256sum /abs/f", "allow", "allow"),
+    # The quote a body left open hid a real bare '&' after the delimiter line (QUOTE SHIFT): now read.
+    ("hdb-amp-between-bodies", "cat <<A\nit's\nA\nsleep 5 & cat <<B\nx'\nB", "deny", "allow"),
+    ("hdb-amp-before-stray-quote", "cat <<EOF\nit's\nEOF\nsleep 5 & echo '", "deny", "allow"),
+    # DISCLOSED RESIDUAL the fix keeps, pinned at its current allow: a quote one data body opens and a later
+    # data body closes is not read across the two (the command never runs the file they share; a cat reading
+    # both prints them). A body a shell reads, a coproc after the body, or a written file the command runs
+    # makes the command not a data shape, so its body is read as commands (_TRKASY_HEREDOC_CONSUMER_ROWS).
+    ("hdb-residual-cross-body-pair",
+     "cat > /abs/s <<A\nit's\nA\ncat >> /abs/s <<B\nx'; sleep 5 & echo '\nB\nsha256sum /abs/s", "allow", "deny"),
+    ("hdb-residual-coproc-after-body", "cat <<EOF\nit's\nEOF\ncoproc sleep 5", "deny", "deny"),
+    # Unchanged denies: a substitution an unquoted body runs, read as today (as shell text); a body whose
+    # delimiter line never comes; a bare '&' after the delimiter line; a body fed to a shell; an open body
+    # quote hiding an '&'; an uncertain '#' in a body; and a body this scan does not read on its own.
+    ("hdb-subst-amp-apostrophe", "cat <<EOF\nit's $(sleep 5 &)\nEOF", "deny", "deny"),
+    ("hdb-subst-amp", "cat <<EOF\n$(sleep 5 &)\nEOF", "deny", "deny"),
+    ("hdb-backquote-amp-apostrophe", "cat <<EOF\nit's `sleep 5 &`\nEOF", "deny", "deny"),
+    ("hdb-brace-subst-amp", "cat <<EOF\nit's ${x:-$(sleep 5 &)}\nEOF", "deny", "deny"),
+    ("hdb-subst-setsid-apostrophe", "cat <<EOF\nit's $(setsid -f sleep 5)\nEOF", "deny", "deny"),
+    ("hdb-subst-source-apostrophe", "cat <<EOF\nit's $(date)\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-unterminated-quoted", "cat <<'EOF'\nit's\nsource /abs/f", "deny", "deny"),
+    ("hdb-unterminated-unquoted-amp", "cat <<EOF\nit's\nsleep 5 &", "deny", "deny"),
+    ("hdb-indented-delim-unterminated", "cat <<EOF\nit's\n EOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-amp-after-quoted", "cat <<'EOF'\nit's\nEOF\nsleep 5 &", "deny", "deny"),
+    ("hdb-amp-after-unquoted", "cat <<EOF\nit's\nEOF\nsleep 5 &", "deny", "deny"),
+    ("hdb-shell-body-amp", "bash <<EOF\nsleep 5 &\nEOF", "deny", "deny"),
+    ("hdb-shell-body-closed-quote-amp", "bash <<EOF\nit's\nx'\nsleep 5 &\nEOF", "deny", "deny"),
+    # A body left with a quote open makes every bare '&' in the command unreadable, so the lexer's lift of a
+    # quoted body's '&' never frees one that a shell running the body detaches.
+    ("hdb-shell-body-amp-then-apostrophe", "bash <<'EOF'\nsleep 5 &\necho it's\nEOF", "deny", "deny"),
+    ("hdb-written-file-run",
+     "cat > /abs/s.sh <<'EOF'\nsleep 5 &\nEOF\ncat > /abs/n.txt <<'EOF'\nit's\nEOF\nbash /abs/s.sh", "deny", "deny"),
+    ("hdb-open-quote-hides-amp", "cat <<EOF\nit's & more\nEOF", "deny", "deny"),
+    ("hdb-uncertain-hash-body", "cat <<'EOF'\n(x #y)\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-after-paren", "(true); cat <<'EOF'\nit's\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-backslash-newline-unquoted", "cat <<EOF\nit's \\\nEOF\nsource /abs/f", "deny", "deny"),
+    ("hdb-in-substitution", "x=$(cat <<EOF\nit's\nEOF\n); source /abs/f", "deny", "deny"),
+    ("hdb-appended-bodies-amp",
+     "cat > /abs/s <<A\nit's\nA\ncat >> /abs/s <<B\nx'; sleep 5 &\nB\nbash /abs/s", "deny", "deny"),
+    # Unchanged allows: a body quote that hides an '&' a shell reading the body also hides, a plain cat write
+    # call, and the commit message form.
+    ("hdb-shell-body-quoted-amp", "bash <<EOF\necho 'a & b'\nEOF", "allow", "allow"),
+    ("hdb-data-command", "cat > /abs/f <<'EOF'\nit's & so\nEOF", "allow", "allow"),
+    ("hdb-commit-form", "git commit -m \"$(cat <<'EOF'\nDon't merge & go\nEOF\n)\"", "allow", "allow"),
+)
+# The mutant reverts the fix: the scan never reads a body on its own, so every body it does not skip as a
+# plain cat write is read as shell text again, its quotes shifting the command's quote state.
+_TRKASY_HEREDOC_MUTANT_ANCHOR = "else _orch_heredoc_body_spans(command, i + 1, n, specs))"
+_TRKASY_HEREDOC_MUTANT_REPLACEMENT = "else (None, i))"
+_TRKASY_HEREDOC_MUTANT_CHILD = (
+    "import importlib.util, json, resource, sys\n"
+    "limit = int(sys.argv[3])\n"
+    "resource.setrlimit(resource.RLIMIT_AS, (limit, limit))\n"
+    "spec = importlib.util.spec_from_file_location(sys.argv[2], sys.argv[1])\n"
+    "module = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(module)\n"
+    "job = json.loads(sys.stdin.read())\n"
+    "out = []\n"
+    "for command in job['commands']:\n"
+    "    data = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'tool_input': {'command': command},\n"
+    "            'cwd': job['cwd']}\n"
+    "    _code, obj, _err = module.orch_truncation_guard(data)\n"
+    "    hso = obj.get('hookSpecificOutput') if isinstance(obj, dict) else None\n"
+    "    out.append(hso.get('permissionDecision', 'allow') if isinstance(hso, dict) else 'allow')\n"
+    "sys.stdout.write(json.dumps(out))\n"
+)
+_TRKASY_HEREDOC_MUTANT_AS_LIMIT = 2 * 1024 ** 3
+_TRKASY_HEREDOC_MUTANT_TIMEOUT = 300
+
+
+def _trkasy_heredoc_mutant_decisions(failures, tmp, root, commands, anchor=_TRKASY_HEREDOC_MUTANT_ANCHOR,
+                                     replacement=_TRKASY_HEREDOC_MUTANT_REPLACEMENT, tag="hdb"):
+    """The reverted mutant's decision for each command, run in a child of its own session (process group)
+    under RLIMIT_AS and a wall-clock timeout, the whole group killed when it ends; None (with a failure
+    appended) when the anchor is not found exactly once or the child does not give one decision per
+    command. The mutant is the hook source with anchor replaced by replacement; tag names its failures and
+    its directory."""
+    source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+    if source.count(anchor) != 1:
+        failures.append("({}-mutant-anchor) the mutant anchor {!r} occurs {} times in the hook source, expected "
+                        "once".format(tag, anchor, source.count(anchor)))
+        return None
+    mutant_dir = tmp / ("trkasy-" + tag + "-mutant")
+    os.makedirs(mutant_dir, exist_ok=True)
+    module_name = tag + "_mutant_aiqt_hooks"
+    path = mutant_dir / (module_name + ".py")
+    path.write_text(source.replace(anchor, replacement), encoding="utf-8")
+    payload = json.dumps({"commands": list(commands), "cwd": str(root)})
+    proc = subprocess.Popen(
+        [sys.executable, "-I", "-B", "-c", _TRKASY_HEREDOC_MUTANT_CHILD, str(path), module_name,
+         str(_TRKASY_HEREDOC_MUTANT_AS_LIMIT)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True)
+    try:
+        out, err = proc.communicate(payload, timeout=_TRKASY_HEREDOC_MUTANT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        out, err = None, "timed out after {} s".format(_TRKASY_HEREDOC_MUTANT_TIMEOUT)
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait(timeout=30)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
+    try:
+        decisions = json.loads(out) if out else None
+    except ValueError:
+        decisions = None
+    if not isinstance(decisions, list) or len(decisions) != len(commands):
+        failures.append("({}-mutant-run) the reverted mutant gave no decision per row (exit {!r}, stderr {!r})"
+                        .format(tag, proc.returncode, (err or "")[-400:]))
+        return None
+    return decisions
+
+
+def _test_trkasy_heredoc_body_data(failures, tmp):
+    """Foreground trkasy rows in registry scope for here-document bodies (_TRKASY_HEREDOC_BODY_ROWS): each row
+    gives its expected decision, and each row whose decision the fix changed gives its base decision under
+    the reverted mutant (_trkasy_heredoc_mutant_decisions), so every such row fails with the fix reverted."""
+    root = tmp / "trkasy-heredoc-body"
+    (root / ".aiqt").mkdir(parents=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_truncation_guard
+    for label, command, expected, _base in _TRKASY_HEREDOC_BODY_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != expected:
+            failures.append("({}) expected {} in registry scope; got {}".format(label, expected, got))
+    changed = [(label, command, base) for label, command, expected, base in _TRKASY_HEREDOC_BODY_ROWS
+               if expected != base]
+    if not changed:
+        failures.append("(hdb-changed-rows) no row pins a changed decision")
+        return
+    decisions = _trkasy_heredoc_mutant_decisions(failures, tmp, root, [command for _l, command, _b in changed])
+    if decisions is None:
+        return
+    for (label, _command, base), got in zip(changed, decisions):
+        if got != base:
+            failures.append("({}-mutant) the row must give its base decision {} with the fix reverted, so it "
+                            "pins the fix; got {}".format(label, base, got))
+
+
+_HDC_APOS = "coproc sleep 5\necho it's\n"  # a runtime start form beside an apostrophe, no '&'
+_HDC_PLAIN = "coproc sleep 5\necho its\n"  # the same with no apostrophe
+_HDC_AMP = "sleep 5 &\n"  # a bare '&'
+
+
+def _hdc_rows(label, head, body_names, tail=""):
+    """One row per body kind for a here-document whose consumer line is head and whose delimiter is EOF:
+    (label-kind, command, expected) for each (kind, expected) in body_names."""
+    bodies = {"apos": _HDC_APOS, "plain": _HDC_PLAIN, "amp": _HDC_AMP}
+    return tuple(("hdc-{}-{}".format(label, kind), head + "\n" + bodies[kind] + "EOF" + tail, expected)
+                 for kind, expected in body_names)
+
+
+# Unless the WHOLE command is a safe data-writing shape (_orch_heredoc_data_shape), a here-document body is
+# read as its consumer's commands: a quote it leaves open denies beside a runtime start form, as in the
+# command's own text, and a bare '&' in it denies, never lifted as quoted body text. The same body with no
+# apostrophe and no '&' is the plain start form's silent allow. Each row is (label, command, expected
+# decision, decision before the consumer was read); every row whose two decisions differ must give the
+# earlier one under the mutant that reads every body as data.
+_HDC_SHELL_APOS = (("apos", "deny"), ("plain", "allow"))
+_HDC_SHELL_ALL = _HDC_SHELL_APOS + (("amp", "deny"),)
+_TRKASY_HEREDOC_CONSUMER_ROWS = tuple(
+    (label, command, expected, "allow")
+    for label, command, expected in (
+        _hdc_rows("bash-unquoted", "bash <<EOF", _HDC_SHELL_APOS)
+        + _hdc_rows("bash-quoted", "bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("bash-dq", "bash <<\"EOF\"", _HDC_SHELL_ALL)
+        + _hdc_rows("bash-s", "bash -s <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("sh", "sh <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("dash", "dash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("zsh", "zsh <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("abs-bash", "/bin/bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("env-bash", "env bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("source-stdin", "source /dev/stdin <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("dot-stdin", ". /dev/stdin <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("bash-dash-tabs", "bash <<-'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("cat-piped-to-bash", "cat <<'EOF' | bash", _HDC_SHELL_ALL)
+        + _hdc_rows("after-and-list", "cd /abs && bash <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("unnamed", "runner <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("git-commit-file-stdin", "git commit -F - <<'EOF'", (("amp", "deny"),))
+        + _hdc_rows("cat-renamed", "hash -p /usr/bin/bash cat; cat <<'EOF'", _HDC_SHELL_ALL)
+        + _hdc_rows("write-bash", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nbash /abs/s.sh")
+        + _hdc_rows("write-sh", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nsh /abs/s.sh")
+        + _hdc_rows("write-source", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nsource /abs/s.sh")
+        + _hdc_rows("write-dot", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\n. /abs/s.sh")
+        + _hdc_rows("write-dot-slash", "cat > s.sh <<'EOF'", _HDC_SHELL_ALL, "\nchmod +x s.sh; ./s.sh")
+        + _hdc_rows("write-python3", "cat > /abs/s.py <<'EOF'", _HDC_SHELL_ALL, "\npython3 /abs/s.py")
+        + _hdc_rows("write-same-line-bash", "cat > /abs/s.sh <<'EOF'; bash /abs/s.sh", _HDC_SHELL_ALL)
+        + _hdc_rows("write-redirect-into-bash", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\nbash < /abs/s.sh")
+        + _hdc_rows("write-piped-to-bash", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL, "\ncat /abs/s.sh | bash")
+        + _hdc_rows("write-bash-c", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL,
+                    "\nbash -c 'source /abs/s.sh'")
+        + _hdc_rows("write-python3-c-exec", "cat > /abs/s.py <<'EOF'", _HDC_SHELL_ALL,
+                    "\npython3 -c \"exec(open('/abs/s.py').read())\"")
+        + _hdc_rows("write-mv-then-run", "cat > /abs/s.sh <<'EOF'", _HDC_SHELL_ALL,
+                    "\nmv /abs/s.sh /abs/t.sh; bash /abs/t.sh")
+        + (("hdc-two-shell-bodies-rebalance", "bash <<'EOF'\n" + _HDC_APOS + "EOF\nbash <<'EOF'\necho it's\nEOF",
+            "deny"),
+           ("hdc-write-run-cross-body-pair",
+            "cat > /abs/s <<A\nit's\nA\ncat >> /abs/s <<B\nx'; sleep 5 & echo '\nB\nbash /abs/s", "deny"),
+           ("hdc-write-sourced-single-quoted", "cat > /abs/f <<'EOF'\nit's\nEOF\nsource /abs/f", "deny"),
+           ("hdc-write-sourced-double-quoted", "cat > /abs/f <<\"EOF\"\nit's\nEOF\nsource /abs/f", "deny"),
+           ("hdc-write-sourced-backslash", "cat > /abs/f <<\\EOF\nit's\nEOF\nsource /abs/f", "deny"))
+        # The cost ceilings, each end just inside, at and just outside (_orch_heredoc_data_shape fails toward
+        # commands): a command holding more than 64 here-documents is not proved a data shape, and neither is
+        # one longer than 65536 characters (here, a plain cat write with an '&' body padded to that length).
+        # The body-limit label is the TOTAL number of here-documents in the command (the last one carries the
+        # '&' body), so 64 is the limit itself (allow), 63 just inside it and 65 just outside it (deny).
+        + tuple(("hdc-body-limit-{}".format(total),
+                 "cat <<'E'\nx\nE\n" * (total - 1) + "cat <<'E'\n" + _HDC_AMP + "E", expected)
+                for total, expected in ((63, "allow"), (64, "allow"), (65, "deny")))
+        + tuple(("hdc-run-text-limit-{}".format(size),
+                 "cat > /abs/s <<'E'\n" + _HDC_AMP + "E\nsha256sum /" + "a" * (size - 42), expected)
+                for size, expected in ((65535, "allow"), (65536, "allow"), (65537, "deny")))
+    )
+) + tuple((label, command, expected, before) for label, command, expected, before in (
+    # Unchanged allows (the -plain rows above too): the plain start form with no apostrophe and no '&' is the
+    # silent allow (as in the command's own text), an apostrophe with no start form or '&' is allowed, a
+    # quoted '&' in a shell's body is quoted text, an unquoted shell body's '&' and a shell body's '&'
+    # before an apostrophe were denied already, and a data body (a plain cat write followed only by a reader,
+    # or a cat to standard output) keeps its allow: its quote opens nothing and the lexer lifts its quoted
+    # '&'. A python3 -c reading the file, a bash run of another written file, and the adopter (python3 after
+    # the write) are NOT data shapes, so their bodies read as commands and now deny; 'cat1>f' is the word
+    # cat1 with an fd-1 redirect, not cat, so it is not a data shape either.
+    ("hdc-bash-apostrophe-no-start-form", "bash <<'EOF'\necho it's\nEOF", "allow", "allow"),
+    ("hdc-bash-quoted-amp-text", "bash <<'EOF'\necho 'a & b'\nEOF", "allow", "allow"),
+    ("hdc-bash-unquoted-amp", "bash <<EOF\n" + _HDC_AMP + "EOF", "deny", "deny"),
+    ("hdc-bash-amp-then-apostrophe", "bash <<'EOF'\nsleep 5 &\necho it's\nEOF", "deny", "deny"),
+    ("hdc-cat-stdout-apos", "cat <<'EOF'\n" + _HDC_APOS + "EOF\necho done", "allow", "allow"),
+    ("hdc-cat-stdout-amp", "cat <<'EOF'\n" + _HDC_AMP + "EOF\necho done", "allow", "allow"),
+    ("hdc-write-hashed-apos", "cat > /abs/n.txt <<'EOF'\n" + _HDC_APOS + "EOF\nsha256sum /abs/n.txt", "allow",
+     "allow"),
+    ("hdc-write-hashed-amp", "cat > /abs/n.txt <<'EOF'\n" + _HDC_AMP + "EOF\nsha256sum /abs/n.txt", "allow",
+     "allow"),
+    ("hdc-write-python3-c-argument", "mkdir -p /abs; cat > /abs/k.txt <<'EOF'\n" + _HDC_APOS
+     + "EOF\npython3 -I -c \"import sys; print(open(sys.argv[1]).read())\" /abs/k.txt", "deny", "allow"),
+    ("hdc-write-other-file-run", "cat > /abs/n.txt <<'EOF'\n" + _HDC_APOS + "EOF\nbash /abs/other.sh", "deny",
+     "allow"),
+    ("hdc-cat1-fd-redirect", "cat1>/abs/f <<'E'\n" + _HDC_AMP + "E", "deny", "allow"),
+    ("hdc-cat-partly-quoted-delim-amp", "cat <<EO'F'\n" + _HDC_AMP + "EOF", "allow", "allow"),
+    ("hdc-bash-partly-quoted-delim-amp", "bash <<EO'F'\n" + _HDC_AMP + "EOF", "deny", "allow"),
+    ("hdc-adopter-exact", _TRKASY_HEREDOC_ADOPTER, "deny", "allow"),
+    ("hdc-adopter-unquoted", "cat > /tmp/k.txt <<EOF\na'b\nsource\nEOF", "allow", "allow"),
+))
+# The mutant reads every body as data (the reading before the command's data shape was proved).
+_TRKASY_HDC_MUTANT_ANCHOR = "runs = not data_shape"
+_TRKASY_HDC_MUTANT_REPLACEMENT = "runs = False"
+
+
+def _test_trkasy_heredoc_consumer(failures, tmp):
+    """Foreground trkasy rows in registry scope for a here-document body's consumer
+    (_TRKASY_HEREDOC_CONSUMER_ROWS): each row gives its expected decision, and each row whose decision
+    reading the consumer changed gives its earlier decision under the mutant that reads every consumer as
+    data (_trkasy_heredoc_mutant_decisions), so every such row fails with that change reverted."""
+    root = tmp / "trkasy-heredoc-consumer"
+    (root / ".aiqt").mkdir(parents=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_truncation_guard
+    labels = [row[0] for row in _TRKASY_HEREDOC_CONSUMER_ROWS]
+    if len(set(labels)) != len(labels):
+        failures.append("(hdc-labels) the consumer rows repeat a label")
+    for label, command, expected, _before in _TRKASY_HEREDOC_CONSUMER_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != expected:
+            failures.append("({}) expected {} in registry scope; got {}".format(label, expected, got))
+    changed = [(label, command, before) for label, command, expected, before in _TRKASY_HEREDOC_CONSUMER_ROWS
+               if expected != before]
+    if not changed:
+        failures.append("(hdc-changed-rows) no row pins a changed decision")
+        return
+    decisions = _trkasy_heredoc_mutant_decisions(
+        failures, tmp, root, [command for _l, command, _b in changed], _TRKASY_HDC_MUTANT_ANCHOR,
+        _TRKASY_HDC_MUTANT_REPLACEMENT, "hdc")
+    if decisions is None:
+        return
+    for (label, _command, before), got in zip(changed, decisions):
+        if got != before:
+            failures.append("({}-mutant) the row must give its earlier decision {} with every consumer read as "
+                            "data, so it pins the consumer reading; got {}".format(label, before, got))
+
+
+# Each data-shape proof rule, as (tag, anchor, replacement, rows): the anchor/replacement revert exactly that
+# rule in a scratch mutant, and every row DENIES in registry scope but ALLOWS with the rule reverted, so each
+# row is red precisely when its rule is gone. The reverts gate a condition with `False and` or widen a word
+# pattern, leaving the rest of the proof intact.
+# The cat write target rule has three clauses, each with its own revert: the '..' clause, the absolute /dev
+# and /proc clause, and the allowlisted-last-component clause.
+_DS_DOTDOT_ANCHOR = '            if not parts or ".." in parts:\n'
+_DS_DOTDOT_REPL = '            if not parts:\n'
+_DS_DEVPROC_ANCHOR = '            if (target.startswith("/") and parts[0] in ("dev", "proc")\n'
+_DS_DEVPROC_REPL = '            if False and (target.startswith("/") and parts[0] in ("dev", "proc")\n'
+_DS_READER_ANCHOR = "            if parts[-1] in _ORCH_DATA_SHAPE_ALLOWED:\n"
+_DS_READER_REPL = "            if False and parts[-1] in _ORCH_DATA_SHAPE_ALLOWED:\n"
+_DS_PIPE_ANCHOR = 'if ch in "&|" and not command.startswith(ch * 2, i):'
+_DS_PIPE_REPL = 'if ch == "&" and not command.startswith(ch * 2, i):'
+_DS_EXTRA_ANCHOR = "extra_word = True"
+_DS_EXTRA_REPL = "extra_word = False"
+_DS_REDIR_ANCHOR = (
+    "        if has_redirect:\n"
+    "            return False\n"
+    "        return first_word in _ORCH_DATA_SHAPE_ALLOWED")
+_DS_REDIR_REPL = (
+    "        if False and has_redirect:\n"
+    "            return False\n"
+    "        return first_word in _ORCH_DATA_SHAPE_ALLOWED")
+_DS_WORD_ANCHOR = '_ORCH_DATA_SHAPE_WORD_RE = re.compile(r"[A-Za-z0-9_./+,:@%=-]+")'
+_DS_WORD_REPL = '_ORCH_DATA_SHAPE_WORD_RE = re.compile(r"[^\\s;&|<>]+")'
+_TRKASY_DATA_SHAPE_RULE_GROUPS = (
+    ("dsreadername", _DS_READER_ANCHOR, _DS_READER_REPL, (
+        ("ds-target-wc", "cat > /abs/bin/wc <<'EOF'\n" + _HDC_APOS + "EOF\nwc /dev/null"),
+        ("ds-target-ls", "cat > /abs/bin/ls <<'EOF'\n" + _HDC_APOS + "EOF\nls /abs"),
+        ("ds-target-stat", "cat > /abs/bin/stat <<'EOF'\n" + _HDC_APOS + "EOF\nstat /abs"),
+        ("ds-target-mkdir", "cat > /abs/bin/mkdir <<'EOF'\n" + _HDC_APOS + "EOF\nmkdir /abs/d"),
+        ("ds-target-cat", "cat > /abs/bin/cat <<'EOF'\n" + _HDC_APOS + "EOF\ncat /abs/f"),
+    )),
+    ("dsdevproc", _DS_DEVPROC_ANCHOR, _DS_DEVPROC_REPL, (
+        ("ds-target-dev", "cat > /dev/stdout <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-fd-1", "cat > /dev/fd/1 <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-stderr", "cat > /dev/stderr <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-tty", "cat > /dev/tty <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-shm-itself", "cat > /dev/shm <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dev-null-prefix", "cat > /dev/nullx <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-proc", "cat > /proc/self/fd/0 <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-proc-fd-1", "cat > /proc/self/fd/1 <<'EOF'\n" + _HDC_APOS + "EOF"),
+    )),
+    ("dsdotdot", _DS_DOTDOT_ANCHOR, _DS_DOTDOT_REPL, (
+        ("ds-target-dotdot-dev", "cat > /abs/../dev/stdout <<'EOF'\n" + _HDC_APOS + "EOF"),
+        ("ds-target-dotdot-relative", "cat > ../x/stdout <<'EOF'\n" + _HDC_APOS + "EOF\nwc ../x/stdout"),
+    )),
+    ("dspipe", _DS_PIPE_ANCHOR, _DS_PIPE_REPL, (
+        ("ds-pipe-cat", "cat <<'EOF' | wc -c\n" + _HDC_APOS + "EOF"),
+        ("ds-pipe-after-write", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\nwc /abs/f | wc -l"),
+    )),
+    ("dsextra", _DS_EXTRA_ANCHOR, _DS_EXTRA_REPL, (
+        ("ds-extra-word", "cat x > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF"),
+    )),
+    ("dsredir", _DS_REDIR_ANCHOR, _DS_REDIR_REPL, (
+        ("ds-reader-redirect", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\nwc /abs/f > /abs/c.txt"),
+    )),
+    ("dsword", _DS_WORD_ANCHOR, _DS_WORD_REPL, (
+        ("ds-plain-word-subst", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\necho $(bash /abs/f)"),
+        ("ds-plain-word-quoted-subst", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\nls \"$(bash /abs/f)\""),
+        ("ds-plain-word-backquote", "cat > /abs/f <<'EOF'\n" + _HDC_APOS + "EOF\ntest -n `bash /abs/f`"),
+    )),
+)
+# The narrowing of the /dev and /proc clause, as (tag, anchor, replacement, rows): every row ALLOWS in registry
+# scope and DENIES with the clause put back to its wider form (any target whose first non-empty part is dev
+# or proc, absolute or relative, /dev/null and /dev/shm included), so each row is red if that wider rule
+# returns. Each is an ordinary message-body write whose bare '&' is text: a /dev/shm hand-back file alone or
+# then hashed, a write to /dev/null, and a relative project path under a directory named dev or proc.
+_DS_DEVPROC_WIDE_ANCHOR = (
+    '            if (target.startswith("/") and parts[0] in ("dev", "proc")\n'
+    '                    and parts != ["dev", "null"] and not (len(parts) > 2 and parts[:2] == ["dev", "shm"])):\n')
+_DS_DEVPROC_WIDE_REPL = '            if parts[0] in ("dev", "proc"):\n'
+_DS_AMP_BODY = "Tom & Jerry\n"
+_TRKASY_DATA_SHAPE_ALLOW_GROUPS = (
+    ("dsdevwide", _DS_DEVPROC_WIDE_ANCHOR, _DS_DEVPROC_WIDE_REPL, (
+        ("ds-allow-dev-shm-alone", "cat > /dev/shm/handoff.txt <<'EOF'\n" + _DS_AMP_BODY + "EOF"),
+        ("ds-allow-dev-shm-hashed", "cat > /dev/shm/handoff.txt <<'EOF'\n" + _DS_AMP_BODY
+         + "EOF\nsha256sum /dev/shm/handoff.txt"),
+        ("ds-allow-dev-null", "cat > /dev/null <<'EOF'\n" + _DS_AMP_BODY + "EOF"),
+        ("ds-allow-relative-dev-alone", "cat > dev/notes.md <<'EOF'\n" + _DS_AMP_BODY + "EOF"),
+        ("ds-allow-relative-dev-wc", "cat > dev/notes.md <<'EOF'\n" + _DS_AMP_BODY + "EOF\nwc dev/notes.md"),
+        ("ds-allow-relative-proc", "cat > proc/notes.md <<'EOF'\n" + _DS_AMP_BODY + "EOF\nls proc"),
+    )),
+)
+
+
+def _test_trkasy_data_shape_rules(failures, tmp):
+    """Each data-shape proof rule has rows that DENY in registry scope and ALLOW when that one rule is reverted
+    (_TRKASY_DATA_SHAPE_RULE_GROUPS, a scratch mutant per rule), so each row is red precisely when its rule is
+    gone: each clause of the cat write target restriction on its own (a '..' component, an absolute /dev or
+    /proc target other than /dev/null or a path under /dev/shm/, an allowlisted last path component), the
+    single-pipe rule, the no-extra-words-on-the-cat-line rule, the no-redirect-on-a-reader-segment rule, and the
+    plain-word rule (a substitution or quoted substitution in a reader's argument after a write). The rows of
+    _TRKASY_DATA_SHAPE_ALLOW_GROUPS ALLOW in registry scope and DENY with the /dev and /proc clause widened
+    back to every dev or proc first part, so each is red if that wider rule returns."""
+    root = tmp / "trkasy-data-shape-rules"
+    (root / ".aiqt").mkdir(parents=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_truncation_guard
+    seen = set()
+    for groups, expected, reverted in ((_TRKASY_DATA_SHAPE_RULE_GROUPS, "deny", "allow"),
+                                       (_TRKASY_DATA_SHAPE_ALLOW_GROUPS, "allow", "deny")):
+        for tag, anchor, replacement, rows in groups:
+            for label, command in rows:
+                if label in seen:
+                    failures.append("(ds-labels) the rule rows repeat a label {!r}".format(label))
+                seen.add(label)
+                got = _decision(handler, command, cwd=str(root))
+                if got != expected:
+                    failures.append("({}) expected {} in registry scope; got {}".format(label, expected, got))
+            decisions = _trkasy_heredoc_mutant_decisions(
+                failures, tmp, root, [command for _l, command in rows], anchor, replacement, tag)
+            if decisions is None:
+                continue
+            for (label, _command), got in zip(rows, decisions):
+                if got != reverted:
+                    failures.append("({}-mutant) the row must {} with its rule reverted, so it pins the rule; "
+                                    "got {}".format(label, reverted, got))
 
 
 _WAIT_LOOP_DENY_COMMAND = "while true; do gh run view 1; sleep 30; done &"
@@ -7012,49 +8022,68 @@ _DEADLINE_ALLOW_CASES = frozenset((
     ("pgrep_self_match", "pgrep_distinct"),
     ("python_stdin_program", "stdin_py_glue_run")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
-# CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
-# CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
-# 3.14.4 (2026-10-15) after the linear scans, the slowest case used at most 0.09 s of CPU at 64 KB, 0.40 s
-# at 256 KB and 1.83 s at 1 MB (on nest_parens, under git_discard or git_stash_ref), its wall-clock time
-# within 0.01 s of that; before them, five handlers took 15 to 39 s or more at 64 KB. A further run on a
-# 24-core host with Python 3.14.4 (2026-10-16) measured at most 0.10, 0.48 and 2.07 s of CPU (2.07 s on
-# nest_parens under git_stash_ref), each within 0.01 s of its wall-clock time. inline_errexit, timed on these
-# shapes later, costs more at 1 MB: at most 2.22 s of CPU on paren_hash4 (above), and a further run of it on a
-# 24-core host with Python 3.14.4 (2026-10-25) measured at most 0.10, 0.46 and 2.01 s of CPU, each on
-# paren_hash4. Every timed row, here and in
-# the lex-cost rows, compares the median of its _TIMED_RUNS (3) runs' CPU times (_judged, the
-# second-fastest) with its CPU bound and checks every run's outcome: one run slowed by a loaded host is
-# tolerated, while a slowdown on two of the three runs fails. Measured on one shared 80-CPU host
-# (2026-11-01, one-minute load average 38 to 44, no load added), as that median over 3 to 5 trials with
-# the handler's work done once (honest) and twice (doubled): cd_git_fetch_unbal under review_workdir_hold
-# at 256 KB, honest 0.861 to 0.947 s, doubled 1.801 to 1.908 s, so a 2.0 s bound would pass every doubled
-# trial and 256 KB keeps its 3.0 s bound; git_add_unbal under gate_weakening at 1 MB, honest 3.737 to
-# 3.868 s, doubled 7.925 to 8.709 s, each over the 7.0 s bound. The truncation guard on seps_hash_lines
-# with its '&' (_DEADLINE_HASH_DETACH_SHAPES) later measured about 2.9 to 3.2 s of CPU at 1 MB with Python
-# 3.14.4 (2026-11-02), which leaves the 1 MB bound a margin of about 2.2 times. These are measured bounds
-# on these cases, not a complexity guarantee: they fail a return of the growth the old scans had, but an
-# implementation whose super-linear cost is small enough on these sizes fits all three.
+# CPU seconds one in-process handler call may use on a shape of that size, judged on the calling thread's own
+# CPU clock (time.thread_time, read inside the call by _deadline_timed_call). The figures below were recorded
+# before these rows moved to that clock, on this process's CPU time plus that of the child processes it
+# reaped, which over the same span is never less than the calling thread's own. Over two runs on a 24-core
+# host with Python 3.14.4 (2026-10-15) after the linear scans, the slowest case used at most 0.09 s of CPU at
+# 64 KB, 0.40 s at 256 KB and 1.83 s at 1 MB (on nest_parens, under git_discard or git_stash_ref), its
+# wall-clock time within 0.01 s of that; before them, five handlers took 15 to 39 s or more at 64 KB. A
+# further run on a 24-core host with Python 3.14.4 (2026-10-16) measured at most 0.10, 0.48 and 2.07 s of CPU
+# (2.07 s on nest_parens under git_stash_ref), each within 0.01 s of its wall-clock time. inline_errexit,
+# timed on these shapes later, costs more at 1 MB: at most 2.22 s of CPU on paren_hash4 (above), and a further
+# run of it on a 24-core host with Python 3.14.4 (2026-10-25) measured at most 0.10, 0.46 and 2.01 s of CPU,
+# each on paren_hash4. Every timed row, here and in the lex-cost rows, compares the median of its _TIMED_RUNS
+# (3) runs' CPU times (_judged, the second-fastest) with its CPU bound and checks every run's outcome: one run
+# slowed by a loaded host is tolerated, while a slowdown on two of the three runs fails. Measured on one
+# shared 80-CPU host (2026-11-01, one-minute load average 38 to 44, no load added), as that median over 3 to 5
+# trials with the handler's work done once (honest) and twice (doubled): cd_git_fetch_unbal under
+# review_workdir_hold at 256 KB, honest 0.861 to 0.947 s, doubled 1.801 to 1.908 s, so a 2.0 s bound would
+# pass every doubled trial and 256 KB keeps its 3.0 s bound; git_add_unbal under gate_weakening at 1 MB,
+# honest 3.737 to 3.868 s, doubled 7.925 to 8.709 s, each over the 7.0 s bound. The truncation guard on
+# seps_hash_lines with its '&' (_DEADLINE_HASH_DETACH_SHAPES) later measured about 2.9 to 3.2 s of CPU at 1 MB
+# with Python 3.14.4 (2026-11-02), which leaves the 1 MB bound a margin of about 2.2 times. These are measured
+# bounds on these cases, not a complexity guarantee: they fail a return of the growth the old scans had, but
+# an implementation whose super-linear cost is small enough on these sizes fits all three.
 _DEADLINE_BOUNDS = {65536: 1.5, 262144: 3.0, 1048576: 7.0}
 _TIMED_RUNS = 3
-# Wall-clock seconds one such call may take on any size: PRETOOL_BUDGET_SECONDS, the deadline main() gives
-# the same call in production, so a regression whose time goes to waiting (a sleep, a lock, a slow
-# filesystem), which the CPU bounds do not see, fails here as that call would fail closed there. Against
-# the 2026-10-16 wall-clock times above at 64 KB and 256 KB (at most 0.10 and 0.49 s) the 8-second gate
-# leaves a margin of about 80 and 16 times; at 1 MB the truncation guard on seps_hash_lines with its '&'
-# (_DEADLINE_HASH_DETACH_SHAPES) measured about 2.9 to 3.2 s of CPU, its wall-clock time within 0.01 s of
-# that, a margin of about 2.5 times, and against the 2026-11-01 honest 1 MB runs above, whose wall-clock
-# medians were 3.738 to 3.869 s on the loaded host (the figures above are those runs' CPU medians), about
-# 2.1 times. inline_errexit's CPU time at 1 MB (at most 2.22 s, above; its wall-clock time was not
-# recorded) is under those 1 MB figures. Like the CPU bounds, this bound judges the median of the case's _TIMED_RUNS runs: a hang or
-# wait on two of the three runs fails, while one run stalled by a loaded host does not fail the case, so a
-# wait on only one run in three passes here. A case whose median wall-clock time is over it, with at least
-# one run reaching a decision, fails and is run once more only as a diagnostic, which never clears it; the
-# failure carries every run's wall-clock time, CPU time and outcome, and the diagnostic run's as well.
-_DEADLINE_WALL_BOUND = aiqt_hooks.PRETOOL_BUDGET_SECONDS
+# Seconds of its own work one such call may take on any size: PRETOOL_BUDGET_SECONDS, the deadline main()
+# gives the same call in production. A call whose own CPU time and own waits (a sleep, a lock, a slow
+# filesystem, a child or another thread it waits for) add up to more than that fails here in every mode. In
+# production the same overrun fails closed with exit 2 only in a mode that fails closed: a note-only
+# PreToolUse mode (NOTE_ONLY_PRETOOL_MODES) warns on exit 0 when its deadline passes, and a fail-open mode is
+# not held to that deadline. The two also measure differently: production's deadline is a wall-clock window
+# armed before the payload read, so it also charges reading the payload and any time queued for a CPU, while
+# this budget times only the handler call and judges the median of its runs' own work (below). Its own work is
+# its wall-clock time less the time its thread spent runnable but queued for a CPU (_deadline_run_own), read
+# as the second field (nanoseconds, converted to seconds) of the calling thread's /proc/thread-self/schedstat
+# before and after the call (_deadline_run_queue_seconds), so a loaded host's queueing of the calling thread
+# is not charged; time a child or thread the call waits for spends queued for a CPU is charged, since the
+# calling thread is then waiting, not queued. Where that file is missing, unreadable or all zeros (scheduler
+# statistics off), the case reports its own work as not evaluated rather than judging a guess. No reading is
+# scaled by a load factor. Own work is at most wall-clock time, so against the 2026-10-16 wall-clock times
+# above at 64 KB and 256 KB (at most 0.10 and 0.49 s) the 8-second budget leaves a margin of at least about 80
+# and 16 times; at 1 MB the truncation guard on seps_hash_lines with its '&' (_DEADLINE_HASH_DETACH_SHAPES)
+# measured about 2.9 to 3.2 s of CPU, its wall-clock time within 0.01 s of that, a margin of about 2.5 times,
+# and against the 2026-11-01 honest 1 MB runs above, whose wall-clock medians were 3.738 to 3.869 s on the
+# loaded host (the figures above are those runs' CPU medians), at least about 2.1 times. inline_errexit's CPU
+# time at 1 MB (at most 2.22 s, above; its wall-clock time was not recorded) is under those 1 MB figures. The
+# loaded-host truncation-guard runs that dl-shape-load-absorbed-wall starts from (3.9 s of CPU in 3.93, 8.47
+# and 8.92 s wall-clock, recorded on an 80-CPU host at a load of 30 to 40) recorded no run-queue delay, so how
+# much of their 4.57 and 5.02 s off the CPU was queueing is not known: had all of it been the call's own
+# waiting, their median, 8.47 s, would fail here. The CPU work is also bounded per size on the thread clock
+# (_DEADLINE_BOUNDS). Like the CPU bounds, this budget judges the median of the case's _TIMED_RUNS runs: own
+# work over it on two of the three runs fails, on only one run in three passes. A case whose median own work
+# is over it, with at least one run reaching a decision, fails and is run once more only as a diagnostic,
+# which never clears it; the failure carries every run's wall-clock time, CPU time, run-queue delay, own work
+# and outcome, and the diagnostic run's as well.
+_DEADLINE_OWN_WORK_BOUND = aiqt_hooks.PRETOOL_BUDGET_SECONDS
 # Each case runs under a _DeadlineWindow of this many wall-clock seconds, a hang guard only: it ends a case
-# that would run on for minutes, so the run reports it instead of stalling. The wall-clock gate is
-# _DEADLINE_WALL_BOUND, well below it.
+# that would run on for minutes, so the run reports it instead of stalling. The own-work gate is
+# _DEADLINE_OWN_WORK_BOUND, well below it.
 _DEADLINE_HANG_SECONDS = 60.0
+# The deadline child's fixed wall-clock limit (_deadline_child_wait): a child still running after it is
+# killed, whatever the load, and nothing is divided by anything.
 _DEADLINE_CHILD_TIMEOUT = 900
 
 
@@ -7079,12 +8108,6 @@ def _deadline_fixtures(tmp):
     (gensrc / ".aiqt" / "gensrc.json").write_text(
         json.dumps({"version": 1, "generated": entries}), encoding="utf-8")
     return plain, orch, gensrc
-
-
-def _cpu_seconds():
-    """CPU seconds this process has used (every thread), plus those of the child processes it reaped."""
-    children = os.times()
-    return time.process_time() + children.children_user + children.children_system
 
 
 def _hook_cpu_timed(call, bound=None, runs=3):
@@ -7114,10 +8137,10 @@ def _hook_cpu_timed(call, bound=None, runs=3):
     of CPU per call at 400 KB, so about five minutes), while the rows that time a small probe first
     fail on that probe; a call that keeps state between runs (a memoised quadratic helper, for example)
     can read low on its second and third runs, and its least reading then passes the bound. The
-    median-judged rows (_timed_runs over the
-    lex-cost and deadline-shape cases) keep their existing clocks, time.process_time in the lex-cost
-    rows and _cpu_seconds in the deadline-shape cases, and judge the median of three runs, which
-    already tolerates one slowed run."""
+    median-judged rows (_timed_runs over the lex-cost and deadline-shape cases) judge the median of
+    three runs, which already tolerates one slowed run: the lex-cost rows on time.process_time, the
+    deadline-shape cases on time.thread_time read inside the call (_deadline_timed_call), with no
+    collector hold."""
     import gc
     spent = None
     for _ in range(max(1, runs)):
@@ -7177,26 +8200,87 @@ def _lex_cost_problems(name, guard, length, cpu, runs, want):
     return out
 
 
+def _deadline_run_queue_seconds():
+    """The calling thread's run-queue delay so far, in seconds: the second field of
+    /proc/thread-self/schedstat (nanoseconds it spent runnable but waiting for a CPU), or None where that
+    cannot be read: no such file (not Linux, or a kernel before 3.17), an unreadable or malformed one, or
+    one whose first field (the thread's time on a CPU) is 0, which a kernel without scheduler statistics
+    reports for every thread."""
+    try:
+        with open("/proc/thread-self/schedstat", "rb") as handle:
+            fields = handle.read(256).split()
+        on_cpu, queued = int(fields[0]), int(fields[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    if on_cpu <= 0 or queued < 0:
+        return None
+    return queued / 1e9
+
+
+def _deadline_timed_call(call):
+    """(cpu_seconds, wall_seconds, outcome, queued_seconds) for outcome = call(): cpu_seconds the CPU time
+    of the calling thread alone (time.thread_time, read inside the timed span), wall_seconds its
+    time.monotonic span, queued_seconds the calling thread's run-queue delay across the call
+    (_deadline_run_queue_seconds, read inside the span before and after it), or None where either reading
+    failed. Other threads' and children's CPU time is not directly charged to the thread clock, and time
+    the thread spent runnable but queued for a CPU is neither on that clock nor in the call's own work
+    (_deadline_run_own: wall-clock time less that delay), which is judged at full length against the
+    production budget."""
+    began = time.monotonic()
+    queued_began = _deadline_run_queue_seconds()
+    cpu_began = time.thread_time()
+    outcome = call()
+    cpu = time.thread_time() - cpu_began
+    queued_ended = _deadline_run_queue_seconds()
+    wall = time.monotonic() - began
+    if queued_began is None or queued_ended is None:
+        return cpu, wall, outcome, None
+    return cpu, wall, outcome, max(0.0, queued_ended - queued_began)
+
+
 def _deadline_shape_case(name, shape, size, cwd):
-    """One (handler, shape, size) case, in-process under a _DeadlineWindow of _DEADLINE_HANG_SECONDS:
-    (cpu_seconds, wall_seconds, outcome), the outcome being the reduced decision, "deadline" when the window
-    fired, "hard-block" for an exit 2, or "crash: <type>"."""
+    """One (handler, shape, size) case, in-process under a _DeadlineWindow of _DEADLINE_HANG_SECONDS and
+    timed by _deadline_timed_call: (cpu_seconds, wall_seconds, outcome, queued_seconds), the outcome being
+    the reduced decision, "deadline" when the window fired, "hard-block" for an exit 2, or "crash: <type>"."""
     tool, tool_input = _DEADLINE_HASH_DETACH_SHAPES.get((name, shape), _DEADLINE_SHAPES[shape])(size, cwd)
     data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
             "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
     window = aiqt_hooks._DeadlineWindow(_DEADLINE_HANG_SECONDS)
-    began, cpu_began = time.monotonic(), _cpu_seconds()
-    try:
-        with window:
-            code, stdout_obj, _stderr = aiqt_hooks.HANDLERS[name](data)
-        outcome = "hard-block" if code == 2 else _reduce_result(code, stdout_obj)
-    except aiqt_hooks._HookDeadline as exc:
-        if exc.args[:1] != (window,):
-            raise
-        outcome = "deadline"
-    except Exception as exc:
-        outcome = "crash: {}".format(type(exc).__name__)
-    return _cpu_seconds() - cpu_began, time.monotonic() - began, outcome
+
+    def call():
+        try:
+            with window:
+                code, stdout_obj, _stderr = aiqt_hooks.HANDLERS[name](data)
+            return "hard-block" if code == 2 else _reduce_result(code, stdout_obj)
+        except aiqt_hooks._HookDeadline as exc:
+            if exc.args[:1] != (window,):
+                raise
+            return "deadline"
+        except Exception as exc:
+            return "crash: {}".format(type(exc).__name__)
+    return _deadline_timed_call(call)
+
+
+def _deadline_run_own(run):
+    """The own work of one timed run (cpu_seconds, wall_seconds, outcome, queued_seconds)
+    (_deadline_timed_call): its wall-clock seconds less its run-queue delay, never under 0, so its own CPU
+    time plus every second it waited on a sleep, a lock, I/O, a child or another thread, at full length
+    (the time that child or thread spent queued for a CPU included); None when the run-queue delay could
+    not be read (never a guess). A recorded run given as (cpu_seconds, wall_seconds, outcome) is recorded
+    with no run-queue delay, its whole wall-clock time its own work."""
+    queued = run[3] if len(run) > 3 else 0.0
+    return None if queued is None else max(0.0, run[1] - queued)
+
+
+def _deadline_run_text(run):
+    """One run's account for a dl-shape line: its raw times, its run-queue delay, its own work and its
+    outcome."""
+    own = _deadline_run_own(run)
+    if own is None:
+        queued_text = "run-queue delay unread, own work not evaluated"
+    else:
+        queued_text = "{:.2f}s queued, {:.2f}s own work".format(run[3] if len(run) > 3 else 0.0, own)
+    return "{:.2f}s wall-clock, {:.2f}s of CPU time, {}, outcome {}".format(run[1], run[0], queued_text, run[2])
 
 
 def _deadline_shape_runs(tmp, sizes):
@@ -7243,10 +8327,10 @@ def _no_registry_above(root):
         aiqt_hooks._orch_dirfd_has_registry = probe
 
 
-def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
-    """What one run of a (handler, shape, size) case got wrong, cpu and wall being the CPU and wall-clock
-    times judged: the medians of the case's runs (_judged), or a diagnostic re-run's own, as a list of
-    phrases ([] for none)."""
+def _deadline_shape_problems(name, shape, size, cpu, own, outcome):
+    """What one run of a (handler, shape, size) case got wrong, cpu and own being the calling thread's CPU
+    time and the own work judged (_deadline_run_own, None when not evaluated): the medians of the case's
+    runs (_judged), or a diagnostic re-run's own, as a list of phrases ([] for none)."""
     if outcome == "deadline":
         return ["reached no decision within the {:g}-second hang guard".format(_DEADLINE_HANG_SECONDS)]
     problems = []
@@ -7254,9 +8338,12 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
         problems.append("a note-only mode must never deny, whatever its timing")
     if cpu > _DEADLINE_BOUNDS[size]:
         problems.append("used {:.2f}s of CPU time, over its {}s bound".format(cpu, _DEADLINE_BOUNDS[size]))
-    if wall > _DEADLINE_WALL_BOUND:
-        problems.append("took {:.2f}s wall-clock, over the {:g}s wall-clock bound".format(
-            wall, _DEADLINE_WALL_BOUND))
+    if own is None:
+        problems.append("own work not evaluated: the calling thread's run-queue delay "
+                        "(/proc/thread-self/schedstat) could not be read")
+    elif own > _DEADLINE_OWN_WORK_BOUND:
+        problems.append("took {:.2f}s of its own work (wall-clock time less its run-queue delay), over the "
+                        "{:g}s production budget".format(own, _DEADLINE_OWN_WORK_BOUND))
     if (name, shape) in _DEADLINE_DENY_CASES and outcome != "deny":
         problems.append("expected deny, got {}".format(outcome))
     elif (name, shape) in _DEADLINE_NOTE_CASES and outcome != "allow-note":
@@ -7271,46 +8358,66 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
 
 
 def _deadline_shape_verdicts(runs, retime):
-    """The dl-shape failures for runs [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome) for
-    each run...)]: one line for each case whose median CPU time (_judged) is over its CPU bound, whose median
-    wall-clock time is over the wall-clock bound, or any of whose runs fails another check. A case whose
-    median wall-clock time is over the wall-clock bound, with at least one run reaching a decision, is run
-    once more by retime(handler, shape, size, cwd) only as a diagnostic: the line still records the
-    failure, carries every run's wall-clock time, CPU time and outcome, and applies every check to the
-    diagnostic run as well."""
+    """The dl-shape failures for runs [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome,
+    queued_seconds) for each run...)] (_deadline_timed_call): one line for each case whose median CPU time
+    of the calling thread (_judged) is over its CPU bound, whose median own work (_deadline_run_own) is over
+    the production budget or could not be evaluated on some run, or any of whose runs fails another check.
+    A case whose median own work is over the budget, with at least one run reaching a decision, is run once
+    more by retime(handler, shape, size, cwd) only as a diagnostic: the line still records the failure,
+    carries every run's wall-clock time, CPU time, run-queue delay, own work and outcome, and applies every
+    check to the diagnostic run as well."""
     out = []
     for name, shape, size, cwd, *timed in runs:
-        cpu_judged = _judged([cpu for cpu, _wall, _outcome in timed])
-        wall_judged = _judged([wall for _cpu, wall, _outcome in timed])
+        cpu_judged = _judged([run[0] for run in timed])
+        owns = [_deadline_run_own(run) for run in timed]
+        own_judged = None if None in owns else _judged(owns)
         problems = []
-        for _cpu, _wall, outcome in timed:
+        for run in timed:
             problems += [problem for problem
-                         in _deadline_shape_problems(name, shape, size, cpu_judged, wall_judged, outcome)
+                         in _deadline_shape_problems(name, shape, size, cpu_judged, own_judged, run[2])
                          if problem not in problems]
         if not problems:
             continue
         line = "(dl-shape-{}-{}-{}) {} (median times judged; {})".format(
-            name, shape, size, "; ".join(problems), "; ".join(
-                "run: {:.2f}s wall-clock, {:.2f}s of CPU time, outcome {}".format(wall, cpu, outcome)
-                for cpu, wall, outcome in timed))
-        if wall_judged > _DEADLINE_WALL_BOUND and any(
-                outcome != "deadline" for _cpu, _wall, outcome in timed):
-            cpu_again, wall_again, outcome_again = retime(name, shape, size, cwd)
-            again = _deadline_shape_problems(name, shape, size, cpu_again, wall_again, outcome_again)
-            line += ("; a diagnostic re-run, which never clears the case's failure, took {:.2f}s "
-                     "wall-clock and {:.2f}s of CPU time with outcome {} ({})".format(
-                         wall_again, cpu_again, outcome_again, "; ".join(again) if again else "within every check"))
+            name, shape, size, "; ".join(problems), "; ".join("run: " + _deadline_run_text(run) for run in timed))
+        if (own_judged is not None and own_judged > _DEADLINE_OWN_WORK_BOUND
+                and any(run[2] != "deadline" for run in timed)):
+            again_run = retime(name, shape, size, cwd)
+            again = _deadline_shape_problems(name, shape, size, again_run[0], _deadline_run_own(again_run),
+                                             again_run[2])
+            line += ("; a diagnostic re-run, which never clears the case's failure, took {} ({})".format(
+                _deadline_run_text(again_run).replace(", outcome ", " with outcome ", 1),
+                "; ".join(again) if again else "within every check"))
         out.append(line)
     return out
 
 
 def _deadline_shape_failures(tmp):
     """(dl-shape) Every PreToolUse handler has shapes here, and on each shape at 64 KB, 256 KB and 1 MB it
-    reaches a decision within the hang guard, that size's CPU-time bound and the wall-clock bound, denying
-    where the case carries a hazard and reaching the pinned base commit's decision on each uncertain '#'
-    shape (_DEADLINE_HASH_SHAPES, which every handler runs) (_deadline_shape_verdicts: a case whose median
-    wall-clock time is over the wall-clock bound fails, and a diagnostic re-run is reported beside it, never
-    in its place)."""
+    reaches a decision within the hang guard, that size's CPU-time bound and the production budget on its
+    own work (below), denying where the case carries a hazard and reaching the pinned base commit's
+    decision on each uncertain '#' shape (_DEADLINE_HASH_SHAPES, which every handler runs)
+    (_deadline_shape_verdicts: a case whose median own work is over the budget fails, and a diagnostic
+    re-run is reported beside it, never in its place).
+
+    LOAD: the CPU bounds judge the calling thread's own CPU clock (time.thread_time read inside the call,
+    _deadline_timed_call), to which other threads' and children's CPU time is not directly charged. The
+    call's own work (_deadline_run_own: wall-clock time less the calling thread's run-queue delay from
+    /proc/thread-self/schedstat) is its CPU time plus its own waits, judged at full length against
+    PRETOOL_BUDGET_SECONDS, the budget the same call has in production (where an overrun fails closed only
+    in a mode that fails closed; see _DEADLINE_OWN_WORK_BOUND), while time the calling thread spent
+    runnable but queued for a CPU on a loaded host is not charged; no reading is scaled by a load factor.
+    Where the run-queue delay cannot be read, every case reports its own work as not evaluated, a failure
+    line, rather than judging a guess. Residual, exactly: (1) time the calling thread is queued for a CPU
+    is bounded only by the 60-second hang guard, a fixed wall-clock bound; (2) shared-cache,
+    memory-bandwidth and frequency effects of other work on the host still move the thread clock and the
+    own work somewhat, and no measurement here bounds how much; (3) CPU work the handler moves to another
+    thread or a child is not on the thread clock, so while the call waits for it it is judged only as own
+    work against the 8 s budget, that worker's own time queued for a CPU included, not the per-size CPU
+    bound, and work it leaves running after the call returns is not measured at all; (4) own work counts
+    the thread's waits on I/O and locks at full length, so a slow filesystem on the runner can fail an
+    honest case; and (5) as before, these are measured bounds, not a complexity guarantee: a super-linear
+    cost small enough on these sizes passes."""
     out = []
     missing = sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
                      if event == aiqt_hooks.PRETOOL and name not in _DEADLINE_CASES)
@@ -7321,23 +8428,24 @@ def _deadline_shape_failures(tmp):
 
 def _deadline_shape_rerun_failures():
     """(dl-shape-rerun-*) A failed case is never erased by its diagnostic re-run. _deadline_shape_verdicts
-    is given recorded runs and a re-run that returns a recorded result, with no handler run:
-    dl-shape-rerun-pass: a run over the wall-clock bound (9.25 s, 0.03 s of CPU, allow) whose re-run passes
+    is given recorded runs and a re-run that returns a recorded result, with no handler run. These
+    recorded runs carry no run-queue delay, so each one's own work is its whole wall-clock time.
+    dl-shape-rerun-pass: a run over the own-work budget (9.25 s, 0.03 s of CPU, allow) whose re-run passes
     (0.15 s, 0.02 s, allow) must still fail, with both runs' wall-clock times, CPU times and outcomes.
-    dl-shape-rerun-decision: a deny case run over the wall-clock bound that allowed (9.25 s, 0.03 s, allow)
+    dl-shape-rerun-decision: a deny case run over the own-work budget that allowed (9.25 s, 0.03 s, allow)
     and whose re-run denies in time (0.15 s, 0.02 s, deny) must fail on the allow as well as the time.
-    dl-shape-rerun-both: a deny case run over the bound that denied (9.25 s, 0.03 s, deny) and whose re-run
+    dl-shape-rerun-both: a deny case run over the budget that denied (9.25 s, 0.03 s, deny) and whose re-run
     allows (0.15 s, 0.02 s, allow) must fail with both outcomes and the re-run's wrong decision named.
     dl-shape-rerun-control, a control, which also passes on the pinned base commit: a run within every
     check gives no line and no re-run.
-    dl-shape-rerun-bounds: each bound at its edge, both inclusive. A run a microsecond inside or exactly at
-    the wall-clock bound (8 s) or the 64 KB CPU bound (1.5 s) gives no line and no re-run; one a microsecond
-    over the wall-clock bound whose re-run passes gives one line and one re-run; one a microsecond over the
-    CPU bound gives one line and no re-run (its time within the wall-clock bound). Both bounds judge the
-    median of a case's runs: three runs at 9 s, 5 s and 5 s wall-clock give no line and no re-run, three at
-    9 s, 9 s and 5 s give one line and one re-run. Three runs at 256 KB, one a second over its CPU bound
-    (3.0 s), one at 0.5 s and the median a microsecond inside or exactly at the bound, give no line; with
-    the median a microsecond over it, one line and no re-run.
+    dl-shape-rerun-bounds: each bound at its edge, both inclusive. A run with 0.5 s of CPU time whose own
+    work is a microsecond inside or exactly at the 8 s budget, or at the 64 KB CPU bound (1.5 s), gives no
+    line and no re-run; one a microsecond over the budget whose re-run passes gives one line and one
+    re-run; one a microsecond over the CPU bound gives one line and no re-run (its own work within the
+    budget). Both bounds judge the median of a case's runs: three runs at 9 s, 5 s and 5 s wall-clock give
+    no line and no re-run, three at 9 s, 9 s and 5 s give one line and one re-run. Three runs at 256 KB,
+    one a second over its CPU bound (3.0 s), one at 0.5 s and the median a microsecond inside or exactly
+    at the bound, give no line; with the median a microsecond over it, one line and no re-run.
     dl-shape-rerun-outcomes: every run's outcome is checked. A deny case whose three runs are within every
     bound and decide deny, allow and deny gives one line naming the allow, and none when all three deny.
     timed-runs-count and timed-runs-median: _timed_runs calls its timed function three times, whatever an
@@ -7368,7 +8476,7 @@ def _deadline_shape_rerun_failures():
         retimed.clear()
         lines = _deadline_shape_verdicts([run], recorded(result))
         if len(lines) != 1 or retimed != [run[:3]] or not all(want in lines[0] for want in wants):
-            out.append("(dl-shape-rerun-{}) a run over the wall-clock bound must stay a failure carrying both "
+            out.append("(dl-shape-rerun-{}) a run over the own-work budget must stay a failure carrying both "
                        "runs' times and outcomes {!r}, got {!r} with re-runs {!r}".format(
                            label, wants, lines, retimed))
     retimed.clear()
@@ -7376,12 +8484,12 @@ def _deadline_shape_rerun_failures():
     if lines or retimed:
         out.append("(dl-shape-rerun-control) a run within every check must give no line and no re-run, got "
                    "{!r} with re-runs {!r}".format(lines, retimed))
-    wall_bound, cpu_bound = float(_DEADLINE_WALL_BOUND), _DEADLINE_BOUNDS[65536]
+    own_bound, cpu_bound = float(_DEADLINE_OWN_WORK_BOUND), _DEADLINE_BOUNDS[65536]
     plain_256k, cpu_bound_256k = plain[:2] + (262144,) + plain[3:], 3.0
     for edge, run, want_lines, want_reruns in (
-            ("just inside the wall-clock bound", plain + ((0.03, wall_bound - 1e-6, "allow"),), 0, 0),
-            ("at the wall-clock bound", plain + ((0.03, wall_bound, "allow"),), 0, 0),
-            ("over the wall-clock bound", plain + ((0.03, wall_bound + 1e-6, "allow"),), 1, 1),
+            ("with own work just inside the budget", plain + ((0.5, own_bound - 1e-6, "allow"),), 0, 0),
+            ("with own work at the budget", plain + ((0.5, own_bound, "allow"),), 0, 0),
+            ("with own work over the budget", plain + ((0.5, own_bound + 1e-6, "allow"),), 1, 1),
             ("of three at 9 s, 5 s and 5 s wall-clock",
              plain + ((0.03, 9.0, "allow"), (0.03, 5.0, "allow"), (0.03, 5.0, "allow")), 0, 0),
             ("of three at 9 s, 9 s and 5 s wall-clock",
@@ -7425,6 +8533,255 @@ def _deadline_shape_rerun_failures():
             out.append("(lex-cost-runs) a lex-cost pair expecting deny whose runs decide {} must give {} "
                        "line(s), got {!r}".format(", ".join(decisions), want_lines, lines))
     return out
+
+
+def _deadline_load_judgement_failures(tmp):
+    """(dl-shape-load-*) The dl-shape bounds judge the calling thread's own CPU clock against the per-size CPU
+    bounds and each call's own work (wall-clock time less the thread's run-queue delay) at full length against
+    the production budget (_deadline_timed_call, _deadline_run_own); no reading is scaled by a load factor.
+    The rows feed _deadline_shape_verdicts recorded runs, except those marked real, which time a call: a
+    stand-in with no handler in each but dl-shape-load-real-case. Three of them, dl-shape-load-absorbed-cpu,
+    dl-shape-load-wait and dl-shape-load-thread, run hashing threads (_deadline_hashing_thread; hashlib
+    releases the interpreter lock on a 1 MB buffer, so a hashing thread computes beside the caller) on the
+    64 KB deny case, whose CPU bound is 1.5 s:
+    dl-shape-load-absorbed-cpu (real): a call that spends 0.3 s of CPU on its own thread while a worker it
+    starts hashes for 1.6 s, then joins it, gives no line: the worker's CPU time, which process CPU time
+    would add to the call's (about 1.7 to 1.9 s, over the bound), is not on the call's thread clock.
+    dl-shape-load-absorbed-wall: 1 MB truncation-guard runs of 3.9 s of CPU time in 3.93, 8.47 and 8.92 s
+    wall-clock (the wall-clock times a loaded 80-CPU host recorded) give no line when 0, 4.5 and 5.0 s of
+    each was queued for a CPU (own work 3.93, 3.97 and 3.92 s), and one line and one re-run when none of
+    it was (a median own work of 8.47 s).
+    dl-shape-load-regression: 40 s of the call's own CPU time at 1 MB gives one line naming 40.00 s.
+    dl-shape-load-bounds: each bound at its edge, both inclusive: 1 MB CPU time a microsecond under,
+    exactly at and ten microseconds over 7 s gives 0, 0 and 1 line; 3 s of CPU time with own work a
+    microsecond under, exactly at and ten microseconds over 8 s gives 0, 0 and 1 line (one re-run when
+    over), both with no time queued (a wall-clock time of 8 s at the edge) and with 3 s queued (11 s).
+    dl-shape-load-unread: a run whose run-queue delay could not be read gives one line saying its own
+    work was not evaluated, and no re-run.
+    dl-shape-load-wait (real): a call that sleeps 9.3 s while a hashing thread it starts runs for 9 s and
+    ends before the call returns gives one line on its own work and one re-run: the thread's CPU time does
+    not shorten the sleep.
+    dl-shape-load-thread (real): a call that leaves a busy hashing thread running, while a thread alive
+    before the call ends during it, and spends 1.5 times the 64 KB CPU bound (2.25 s) on its own thread
+    gives one line on its CPU time.
+    dl-shape-load-cpu-then-sleep (real, 1 MB case, CPU bound 7 s): a call that spends 4.0 s of its own CPU
+    and then sleeps 6.0 s gives one line on its own work and one re-run, as the production budget fails
+    it closed; judging only its wait (wall-clock time less CPU time, 6 s) would pass it.
+    dl-shape-load-induced (real, 1 MB case): an honest call spending 3.0 s of its own CPU while its thread
+    shares one CPU (os.sched_setaffinity) with _DEADLINE_LOAD_SPINNERS busy-loop children pinned there gives
+    no line, and the load must have pushed its wall-clock time over 8 s, or the row fails as not exercised;
+    judging its whole wall-clock time would fail it. A run over 8 s wall-clock for which schedstat reported no
+    run-queue delay at all fails the row as not evaluated, naming that, rather than as an over-budget call
+    (_deadline_induced_verdict). Each child is sys.executable -I -S -c over a loop that ends itself after
+    60 s, started in its own session and killed by its process group when the call ends; the loop opens no
+    file and makes no network call, but -I -S and a new session do not remove the environment or the account
+    credentials the child inherits. A platform without CPU affinity fails the row as not evaluated.
+    dl-shape-load-induced-verdicts: the induced row's judgement (_deadline_induced_verdict) on recorded runs
+    of 3.0 s of CPU time: 12 s wall-clock with 9 s queued gives no line; 12 s, and 8 s plus a microsecond,
+    each with nothing queued, give the not-evaluated line naming schedstat's missing delay; exactly 8 s and a
+    microsecond under it, nothing queued, give the not-exercised line.
+    dl-shape-load-real-case (real): one real handler case records its own thread's CPU time as a positive
+    number no greater than its wall-clock time."""
+    out = []
+    retimed = []
+
+    def retime(name, shape, size, cwd):
+        retimed.append((name, shape, size))
+        return 0.02, 0.15, "deny"
+    seps = ("orch_truncation_guard", "seps_hash_lines", 1048576, "/")
+    paren = ("orch_truncation_guard", "paren_hash4", 1048576, "/")
+    deny = ("protected_line", "push_force_after", 65536, "/")
+
+    def own_cpu(seconds):
+        began = time.thread_time()
+        while time.thread_time() - began < seconds:
+            pass
+
+    def absorbed_call():
+        worker = _deadline_hashing_thread("dl-shape-load-worker", 1.6)
+        own_cpu(0.3)
+        worker.join(30)
+        return "deny"
+    retimed.clear()
+    absorbed_run = _deadline_timed_call(absorbed_call)
+    lines = _deadline_shape_verdicts([deny + (absorbed_run,) * 3], retime)
+    if lines or retimed:
+        out.append("(dl-shape-load-absorbed-cpu) a call spending 0.3 s of its own CPU while a worker hashes for "
+                   "1.6 s must give no line, got {!r} with re-runs {!r} (the run {!r})".format(
+                       lines, retimed, absorbed_run))
+    for runs, want_lines, want_reruns in (
+            (((3.9, 3.93, "deny", 0.0), (3.9, 8.47, "deny", 4.5), (3.9, 8.92, "deny", 5.0)), 0, 0),
+            (((3.9, 3.93, "deny", 0.0), (3.9, 8.47, "deny", 0.0), (3.9, 8.92, "deny", 0.0)), 1, 1)):
+        retimed.clear()
+        lines = _deadline_shape_verdicts([paren + runs], retime)
+        if len(lines) != want_lines or len(retimed) != want_reruns:
+            out.append("(dl-shape-load-absorbed-wall) 1 MB runs {!r} must give {} line(s) and {} re-run(s), got "
+                       "{!r} with re-runs {!r}".format(runs, want_lines, want_reruns, lines, retimed))
+    retimed.clear()
+    lines = _deadline_shape_verdicts([seps + ((40.0, 40.15, "deny"),) * 3], retime)
+    if len(lines) != 1 or "40.00s of CPU" not in lines[0]:
+        out.append("(dl-shape-load-regression) 40 s of the call's own CPU time must give one line naming 40.00 "
+                   "s, got {!r}".format(lines))
+    cpu_bound, own_bound = _DEADLINE_BOUNDS[1048576], float(_DEADLINE_OWN_WORK_BOUND)
+    for edge, cpu, wall, queued, want_lines, want_reruns in (
+            ("CPU time just under its bound", cpu_bound - 1e-6, cpu_bound + 0.15, 0.0, 0, 0),
+            ("CPU time at its bound", cpu_bound, cpu_bound + 0.15, 0.0, 0, 0),
+            ("CPU time just over its bound", cpu_bound + 1e-5, cpu_bound + 0.15, 0.0, 1, 0),
+            ("3 s of CPU time and own work just under 8 s", 3.0, own_bound - 1e-6, 0.0, 0, 0),
+            ("3 s of CPU time and own work of 8 s", 3.0, own_bound, 0.0, 0, 0),
+            ("3 s of CPU time and own work just over 8 s", 3.0, own_bound + 1e-5, 0.0, 1, 1),
+            ("3 s queued and own work just under 8 s", 3.0, 3.0 + own_bound - 1e-6, 3.0, 0, 0),
+            ("3 s queued and own work of 8 s", 3.0, 3.0 + own_bound, 3.0, 0, 0),
+            ("3 s queued and own work just over 8 s", 3.0, 3.0 + own_bound + 1e-5, 3.0, 1, 1)):
+        retimed.clear()
+        lines = _deadline_shape_verdicts([seps + ((cpu, wall, "deny", queued),)], retime)
+        if len(lines) != want_lines or len(retimed) != want_reruns:
+            out.append("(dl-shape-load-bounds) {} must give {} line(s) and {} re-run(s), got {!r} with re-runs "
+                       "{!r}".format(edge, want_lines, want_reruns, lines, retimed))
+    retimed.clear()
+    lines = _deadline_shape_verdicts([seps + ((3.0, 3.1, "deny", None),) * 3], retime)
+    if len(lines) != 1 or retimed or "own work not evaluated" not in lines[0]:
+        out.append("(dl-shape-load-unread) a run whose run-queue delay could not be read must give one line "
+                   "saying its own work was not evaluated and no re-run, got {!r} with re-runs {!r}".format(
+                       lines, retimed))
+
+    def overlapped_wait_call():
+        worker = _deadline_hashing_thread("dl-shape-load-overlap", 9.0)
+        time.sleep(9.3)
+        worker.join(30)
+        return "deny"
+    retimed.clear()
+    wait_run = _deadline_timed_call(overlapped_wait_call)
+    lines = _deadline_shape_verdicts([deny + (wait_run,) * 3], retime)
+    if len(lines) != 1 or len(retimed) != 1 or "production budget" not in lines[0]:
+        out.append("(dl-shape-load-wait) a call sleeping 9.3 s beside a 9-second hashing thread must give one "
+                   "line on its own work and one re-run, got {!r} with re-runs {!r}".format(lines, retimed))
+    stop = threading.Event()
+    decoy = _deadline_hashing_thread("dl-shape-load-decoy", 0.5)
+    busy = []
+
+    def busy_thread_call():
+        busy.append(_deadline_hashing_thread("dl-shape-load-busy", 60.0, stop))
+        own_cpu(1.5 * _DEADLINE_BOUNDS[65536])
+        return "deny"
+    try:
+        thread_run = _deadline_timed_call(busy_thread_call)
+    finally:
+        stop.set()
+        for thread in busy + [decoy]:
+            thread.join(30)
+    retimed.clear()
+    lines = _deadline_shape_verdicts([deny + (thread_run,) * 3], retime)
+    if len(lines) != 1 or "of CPU time, over its 1.5s bound" not in lines[0]:
+        out.append("(dl-shape-load-thread) a call that leaves a busy thread running and spends 2.25 s of its own "
+                   "CPU must give one line on its CPU time, got {!r} (the run {!r})".format(lines, thread_run))
+
+    def cpu_then_sleep_call():
+        own_cpu(4.0)
+        time.sleep(6.0)
+        return "deny"
+    retimed.clear()
+    sleep_run = _deadline_timed_call(cpu_then_sleep_call)
+    lines = _deadline_shape_verdicts([seps + (sleep_run,) * 3], retime)
+    if (len(lines) != 1 or len(retimed) != 1 or "production budget" not in lines[0]
+            or "of CPU time, over" in lines[0]):
+        out.append("(dl-shape-load-cpu-then-sleep) a call spending 4.0 s of its own CPU and then sleeping 6.0 s "
+                   "must give one line on its own work and one re-run, got {!r} with re-runs {!r} (the run "
+                   "{!r})".format(lines, retimed, sleep_run))
+    out += _deadline_induced_load_failures(seps, retime, retimed, own_cpu)
+    no_delay = "not evaluated: schedstat reports no run-queue delay"
+    for wall, queued, want in ((12.0, 9.0, None), (12.0, 0.0, no_delay), (own_bound + 1e-6, 0.0, no_delay),
+                               (own_bound, 0.0, "not exercised"), (own_bound - 1e-6, 0.0, "not exercised")):
+        got = _deadline_induced_verdict(seps, (3.0, wall, "deny", queued), retime, retimed)
+        if (got != []) if want is None else (len(got) != 1 or want not in got[0]):
+            out.append("(dl-shape-load-induced-verdicts) a recorded induced run of 3.0 s of CPU time, {!r} s "
+                       "wall-clock and {!r} s queued must give {}, got {!r}".format(
+                           wall, queued, "no line" if want is None else "one line saying " + want, got))
+    plain = tmp / "load-reading"
+    plain.mkdir(parents=True, exist_ok=True)
+    real = _deadline_shape_case("orch_truncation_guard", "seps_hash", 65536, str(plain))
+    if len(real) != 4 or not (isinstance(real[0], float) and 0 < real[0] <= real[1]):
+        out.append("(dl-shape-load-real-case) a real case must record its own thread's CPU time as a positive "
+                   "number no greater than its wall-clock time, got {!r}".format(real))
+    return out
+
+
+# Busy-loop children the dl-shape-load-induced row pins to the calling thread's one CPU, so that thread
+# gets about a quarter of it and spends most of its call queued for it.
+_DEADLINE_LOAD_SPINNERS = 3
+_DEADLINE_LOAD_SPIN_SOURCE = "import time\nends = time.monotonic() + 60\nwhile time.monotonic() < ends:\n    pass\n"
+
+
+def _deadline_induced_load_failures(case, retime, retimed, own_cpu):
+    """(dl-shape-load-induced) The induced-load row of _deadline_load_judgement_failures, on case (a 1 MB
+    handler, shape, size and cwd): own_cpu(3.0) timed while _DEADLINE_LOAD_SPINNERS busy-loop children
+    share the calling thread's one CPU must give no line from _deadline_shape_verdicts, with the call's
+    wall-clock time over the production budget so the row exercises the load (_deadline_induced_verdict).
+    The calling thread's CPU affinity is restored and every child's process group killed and reaped before
+    it returns."""
+    label = "(dl-shape-load-induced)"
+    if not hasattr(os, "sched_setaffinity"):
+        return [label + " not evaluated: this platform has no os.sched_setaffinity to pin the load"]
+    saved = os.sched_getaffinity(0)
+    cpu = min(saved)
+    spinners = []
+    try:
+        os.sched_setaffinity(0, {cpu})
+        for _ in range(_DEADLINE_LOAD_SPINNERS):
+            spinners.append(subprocess.Popen(
+                [sys.executable, "-I", "-S", "-c", _DEADLINE_LOAD_SPIN_SOURCE], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True))
+            os.sched_setaffinity(spinners[-1].pid, {cpu})
+        time.sleep(0.5)
+        run = _deadline_timed_call(lambda: (own_cpu(3.0), "deny")[1])
+    finally:
+        for proc in spinners:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=30)
+        os.sched_setaffinity(0, saved)
+    return _deadline_induced_verdict(case, run, retime, retimed)
+
+
+def _deadline_induced_verdict(case, run, retime, retimed):
+    """The dl-shape-load-induced lines for run, one timed run (cpu_seconds, wall_seconds, outcome,
+    queued_seconds) of the induced-load call on case: [] when _deadline_shape_verdicts gives three copies of
+    it no line and its wall-clock time is over the production budget; a not-evaluated line when that time is
+    over the budget but schedstat reported no run-queue delay at all, so its own work would be its whole
+    wall-clock time and the delay reading, not the call's cost, is in doubt; otherwise the verdict lines, or
+    a line saying the load was not exercised."""
+    label = "(dl-shape-load-induced)"
+    retimed.clear()
+    lines = _deadline_shape_verdicts([case + (run,) * 3], retime)
+    if run[3] == 0.0 and run[1] > _DEADLINE_OWN_WORK_BOUND:
+        return ["{} not evaluated: schedstat reports no run-queue delay, though the induced load left the call's "
+                "wall-clock time at {:.2f}s, over the {:g}s budget (the run {!r}, judged {!r})".format(
+                    label, run[1], _DEADLINE_OWN_WORK_BOUND, run, lines)]
+    if lines or retimed:
+        return ["{} an honest call spending 3.0 s of its own CPU under {} pinned busy-loop children must give no "
+                "line, got {!r} with re-runs {!r} (the run {!r})".format(
+                    label, _DEADLINE_LOAD_SPINNERS, lines, retimed, run)]
+    if run[1] <= _DEADLINE_OWN_WORK_BOUND:
+        return ["{} not exercised: the induced load left the call's wall-clock time at {:.2f}s, not over the "
+                "{:g}s budget (the run {!r})".format(label, run[1], _DEADLINE_OWN_WORK_BOUND, run)]
+    return []
+
+
+def _deadline_hashing_thread(name, seconds, stop=None):
+    """A started daemon thread named name that hashes a 1 MB buffer over and over for seconds of wall-clock
+    time, or until the event stop is set: real CPU work on another thread (hashlib releases the interpreter
+    lock on a buffer this size), for the rows that check that such work neither adds to nor hides the
+    calling thread's own CPU time or wait."""
+    def run():
+        block = b"\0" * (1 << 20)
+        ends = time.monotonic() + seconds
+        while time.monotonic() < ends and not (stop is not None and stop.is_set()):
+            hashlib.sha256(block)
+    thread = threading.Thread(target=run, name=name, daemon=True)
+    thread.start()
+    return thread
 
 
 def _deadline_note_only_deny_failures():
@@ -7523,9 +8880,16 @@ def _restored_countdown_bounds(seconds, armed, read, clocks=None, holder=None):
     from the restore's clock read to the setitimer that re-arms it, which only the high end allows, each
     measured up to the monotonic read just after that setitimer returned. Rounding to the microsecond moves
     the low end by two microseconds (getitimer, and a take's setitimer, read a countdown rounded down) and the
-    high end by one (a re-arming setitimer rounds up). Nothing else is allowed for: a host stall outside the
-    two gaps moves both ends with the reads, and one inside a gap widens only that gap's end, by the stall.
-    With either gap not measured, no countdown is in bounds."""
+    high end by one (a re-arming setitimer rounds up). Nothing else is allowed for, so the bound's width is
+    the two measured spans plus both bracket widths (and those three microseconds). A host stall between
+    armed[1] and read[0] and outside both gaps moves both ends and the right countdown together; one inside
+    a gap, or inside the armed or read bracket, widens the bound by its length on one side of the right
+    countdown only: above it for a stall in the take's gap, between the setitimer that set the countdown
+    and armed[1], or between read[0] and the getitimer; below it for a stall in the restore's gap, between
+    armed[0] and that setitimer, or between the getitimer and read[1] (a stall from a gap's setitimer
+    acting to the read after it returns falls on the other side). So a wrong countdown whose error lies on
+    the widened side, and is no larger than the stall, can be in bounds under that stall; an unstalled run
+    discriminates. With either gap not measured, no countdown is in bounds."""
     early = late = 0.0
     if holder is not None:
         early, late = clocks.settled(holder, 0), clocks.settled(holder, 1)
@@ -8075,50 +9439,110 @@ def _deadline_restore_failures():
     verbatim) with its interval and handler; an inactive one stays inactive; one that comes due inside the
     window ends the window there and is delivered once; a nested window passes an outer deadline to its
     owner and the outer window restores what it found; and a caller that blocks SIGALRM, or a call off the
-    main thread, gets no deadline and keeps its state."""
+    main thread, gets no deadline and keeps its state. Every restored countdown bounded from below is
+    judged inside _restored_countdown_bounds for its own run, over the gaps a _WindowClocks measured from
+    that run's take and restore (the way dl-nested-outer reads its inner arming), so no fixed host-speed
+    slack is left in any restored-countdown bound. Other fixed limits remain here, such as
+    dl-nested-outer's 0.3-second window, dl-refused-thread's 10-second join, and the 0.4-second body
+    under the default budget. A stall in the right place can let a wrong restore pass
+    (_restored_countdown_bounds says where); an unstalled run discriminates."""
     out = []
     fired = []
 
     def caller_alarm(signum, frame):
         fired.append(signum)
 
+    finished = []
+
     def as_caller(value, interval, stub_seconds, budget=None):
         fired.clear()
+        finished.clear()
+
+        def body(_data):
+            time.sleep(stub_seconds)
+            finished.append(True)
+            return (0, None, None)
+
         signal.signal(signal.SIGALRM, caller_alarm)
+        # The window's own gaps are measured at source: `clocks` stands in for aiqt_hooks.time and
+        # aiqt_hooks.signal, and _restored_countdown_bounds widens its ends by exactly the measured
+        # spans from the take's clock read to the cancel that takes the caller's timer (a span the
+        # window counts twice: the kernel countdown runs on through it and the restore subtracts it
+        # again, as _take discloses) and from the restore's clock read to the re-arming setitimer. A
+        # host stall widens the measured span or armed/read bracket it falls in, never a fixed slack,
+        # so a stall inside the take no longer fails a correct restore. The bound's width is those
+        # two spans plus both bracket widths, so a wrong restore whose error lies on the side a stall
+        # widened, and is no larger than the stall, can pass under it: a stall in the restore's gap
+        # passes one that subtracts too much or twice, and one between the arming setitimer and
+        # armed[1], or between read[0] and the getitimer, passes a verbatim restore. Unstalled runs
+        # discriminate. `finished` says whether the stub's sleep ran to its end, so a deadline that
+        # cut the body is told from one that did not without comparing the run's time against any
+        # bound.
+        clocks = _WindowClocks()
+        armed = (time.monotonic(),)
         signal.setitimer(signal.ITIMER_REAL, value, interval)
-        before = signal.getitimer(signal.ITIMER_REAL)
-        began = time.monotonic()
+        armed += (time.monotonic(),)
         try:
-            with _stub_handler("diff_source_pretool", _sleeper(stub_seconds)):
-                code, err, _seconds = _main_run("diff_source_pretool", budget=budget)
-            used = time.monotonic() - began
-            return code, before, signal.getitimer(signal.ITIMER_REAL), used, signal.getsignal(signal.SIGALRM)
+            aiqt_hooks.time, aiqt_hooks.signal = clocks.time, clocks.signal
+            with _stub_handler("diff_source_pretool", body):
+                code, _err, _seconds = _main_run("diff_source_pretool", budget=budget)
+            read = (time.monotonic(),)
+            after = signal.getitimer(signal.ITIMER_REAL)
+            read += (time.monotonic(),)
+            handler = signal.getsignal(signal.SIGALRM)
         finally:
+            aiqt_hooks.time, aiqt_hooks.signal = time, signal
             signal.setitimer(signal.ITIMER_REAL, 0)
+            cancelled = time.monotonic()
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        borrowers = clocks.windows()
+        return types.SimpleNamespace(
+            code=code, after=after, armed=armed, read=read, clocks=clocks,
+            holder=borrowers[0] if len(borrowers) == 1 else None, borrowers=len(borrowers),
+            cancelled=cancelled, handler=handler, used=read[1] - armed[0])
 
     for label, interval in (("single", 0.0), ("periodic", 1800.0)):
-        code, before, after, used, handler = as_caller(3600.0, interval, 0.4)
-        if not (code == 0 and handler is caller_alarm and after[1] == interval and not fired
-                and before[0] - used - 0.1 <= after[0] <= before[0] - 0.3):
-            out.append("(dl-restore-{}) expected the caller countdown back less the {:.2f}s used, with its "
-                       "interval and handler, got exit {}, {!r} -> {!r}, fired {!r}".format(
-                           label, used, code, before, after, fired))
-    code, before, after, used, handler = as_caller(0.0, 0.0, 0.2)
-    if not (code == 0 and before == after == (0.0, 0.0) and handler is caller_alarm and not fired):
+        run = as_caller(3600.0, interval, 0.4)
+        low, high = (_restored_countdown_bounds(3600.0, run.armed, run.read, run.clocks, run.holder)
+                     if run.holder is not None else (float("inf"), float("-inf")))
+        if not (run.code == 0 and run.handler is caller_alarm and run.after[1] == interval and not fired
+                and low <= run.after[0] <= high):
+            out.append("(dl-restore-{}) expected the caller countdown back inside the run's measured "
+                       "bound [{!r}, {!r}] with its interval and handler, got exit {}, timer {!r} after "
+                       "{:.2f}s with {} window(s), fired {!r}".format(
+                           label, low, high, run.code, run.after, run.used, run.borrowers, fired))
+    run = as_caller(0.0, 0.0, 0.2)
+    if not (run.code == 0 and run.after == (0.0, 0.0) and run.handler is caller_alarm and not fired):
         out.append("(dl-restore-inactive) an inactive caller timer must stay inactive, got exit {} and {!r}"
-                   .format(code, after))
-    code, before, after, used, handler = as_caller(0.2, 0.0, 1.0)
-    if not (code == 2 and fired == [signal.SIGALRM] and after == (0.0, 0.0) and handler is caller_alarm
-            and used < 0.8):
+                   .format(run.code, run.after))
+    run = as_caller(0.2, 0.0, 1.0)
+    if not (run.code == 2 and fired == [signal.SIGALRM] and run.after == (0.0, 0.0)
+            and run.handler is caller_alarm and not finished):
         out.append("(dl-restore-due) a caller deadline due inside the window must end it and be delivered "
-                   "once, got exit {} after {:.2f}s, fired {!r}, timer {!r}".format(code, used, fired, after))
-    code, before, after, used, handler = as_caller(0.2, 0.5, 1.0)
-    if not (code == 2 and fired == [signal.SIGALRM] and after[1] == 0.5 and 0 < after[0] <= 0.5
-            and handler is caller_alarm):
+                   "once, got exit {} after {:.2f}s with the stub's sleep returned {}, fired {!r}, timer "
+                   "{!r}".format(run.code, run.used, bool(finished), fired, run.after))
+    run = as_caller(0.2, 0.5, 1.0)
+    reads = [entry[2] for entry in run.clocks.log if entry[0] == "read" and entry[1] is run.holder]
+    # The one due delivery may be followed by real period expiries when the run stalls between the
+    # restore's clock read and the row's own cancel of the timer: each full 0.5-second period in that
+    # measured span allows one more delivery, and the allowance is 0 on an unstalled run, so a second
+    # delivery with no measured period in the span still fails. The allowance ignores the re-arm's
+    # phase inside the period: the restore re-arms the due timer one period less its overdue time
+    # (taken modulo the period; 0.15 to 0.27 ms in one host's measurement) ahead, so a stall from the
+    # restore's clock read to the cancel whose length lands within about that overdue time below a
+    # multiple of 0.5 s delivers one more than the allowance, and such a run turns this row red with
+    # the hook right, a disclosed residual. The phase could be bounded from the measured clock reads
+    # and brackets, not derived exactly; the allowance does not use it. The high end allows the
+    # microsecond a re-arming setitimer rounds up.
+    allowed = 1 + (int((run.cancelled - reads[-1]) // 0.5) if len(reads) == 2 else 0)
+    if not (run.code == 2 and fired and fired == [signal.SIGALRM] * len(fired) and len(fired) <= allowed
+            and run.after[1] == 0.5 and 0 < run.after[0] <= 0.5 + 1e-6
+            and run.handler is caller_alarm and not finished):
         out.append("(dl-restore-due-periodic) a periodic caller deadline due inside the window must be "
-                   "delivered once and resume its period, got exit {}, fired {!r}, timer {!r}".format(
-                       code, fired, after))
+                   "delivered once (plus one delivery per full 0.5s period measured from its restore to "
+                   "the row's cancel, {} allowed here) and resume its period, got exit {}, fired {!r}, "
+                   "timer {!r}, with the stub's sleep returned {}".format(
+                       allowed, run.code, fired, run.after, bool(finished)))
 
     # The inner call's body reads the inner window's countdown, then sleeps 60 s, so once that read is made
     # only a deadline ends the body: a sleep that returns means the outer deadline did not end the inner
@@ -8173,15 +9597,52 @@ def _deadline_restore_failures():
     if problem:
         out.append("(dl-nested-outer) an enclosing window's deadline must reach that window's owner and leave "
                    "the timer as found, {}".format(problem))
-    with aiqt_hooks._DeadlineWindow(5.0):
-        with _stub_handler("diff_source_pretool", _sleeper(1.0)):
-            code, err, seconds = _main_run("diff_source_pretool", budget=0.1)
-        inside = signal.getitimer(signal.ITIMER_REAL)
-    if (code != 2 or seconds >= 0.8 or not 4.0 < inside[0] <= 5.0
+    finished_inner = []
+
+    def outlasting(_data):
+        time.sleep(60.0)
+        finished_inner.append(True)
+        return (0, None, None)
+
+    # The outer window is wide enough (600 s) that no host stall brings it due over the run; the inner
+    # deadline is proved to have cut the body by the sleep not returning; and the outer countdown is
+    # judged inside _restored_countdown_bounds for this run, over the gaps `clocks` measured from the
+    # inner window's own take and restore: the low end allows exactly the measured span from the inner
+    # take's clock read to the cancel that takes the countdown (the span the window counts twice), the
+    # high end exactly the measured span from the restore's clock read to the re-arming setitimer, each
+    # plus setitimer's microsecond rounding. A host stall only widens the measured span or bracket it
+    # falls in, so no fixed host-speed slack is left, and the bound's width is the two measured spans
+    # plus both bracket widths. A wrong restore whose error lies on the side a stall widened, and is
+    # no larger than the stall, can pass under it: a verbatim restore (too high by at least the
+    # 0.1-second budget) fails on the high end on an unstalled run, but passes under a stall longer
+    # than that error between the outer window's arming setitimer and armed[1] or between read[0]
+    # and the getitimer, and a stall in the inner restore's gap can likewise pass one that subtracts
+    # too much or twice. Unstalled runs discriminate.
+    clocks = _WindowClocks()
+    outer = aiqt_hooks._DeadlineWindow(600.0)
+    armed = (time.monotonic(),)
+    try:
+        aiqt_hooks.time, aiqt_hooks.signal = clocks.time, clocks.signal
+        with outer:
+            armed += (time.monotonic(),)
+            with _stub_handler("diff_source_pretool", outlasting):
+                code, _err, _seconds = _main_run("diff_source_pretool", budget=0.1)
+            read = (time.monotonic(),)
+            inside = signal.getitimer(signal.ITIMER_REAL)
+            read += (time.monotonic(),)
+    finally:
+        aiqt_hooks.time, aiqt_hooks.signal = time, signal
+    used = read[1] - armed[0]
+    inner = [window for window in clocks.windows() if window is not outer]
+    low, high = (_restored_countdown_bounds(600.0, armed, read, clocks, inner[0]) if len(inner) == 1
+                 else (float("inf"), float("-inf")))
+    if (code != 2 or finished_inner or not low <= inside[0] <= high
             or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
             or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
-        out.append("(dl-nested-inner) an inner deadline must end only the inner call and give the outer window "
-                   "its countdown back, got exit {} after {:.2f}s, outer timer {!r}".format(code, seconds, inside))
+        out.append("(dl-nested-inner) an inner deadline must end only the inner call and give the outer "
+                   "window its countdown back inside the run's measured bound [{!r}, {!r}], got exit {} "
+                   "after {:.2f}s with the stub's sleep returned {}, outer timer {!r} and {} inner "
+                   "window(s)".format(low, high, code, used, bool(finished_inner), inside, len(inner)))
 
     old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
     try:
@@ -9037,8 +10498,10 @@ def _deadline_enclosing_restore_failures():
     under a caller with a counting handler and a periodic 30-second timer, ends normally; SIGALRM is raised,
     as the outer window's expiry, from an opcode trace event at each instruction of the inner window's
     frames once the outer window's handler is back (one run per instruction). The outer deadline must reach
-    its owner each time, with the caller's handler and periodic timer back, no caller delivery, and neither
-    window left armed."""
+    its owner each time, with the caller's handler and periodic timer back (its countdown judged inside
+    _restored_countdown_bounds for the run, over the gaps a _WindowClocks measured from the outer window's
+    take and restore, with no fixed host-speed slack), no caller delivery, and neither window left
+    armed."""
     out = []
     calls = []
 
@@ -9048,8 +10511,11 @@ def _deadline_enclosing_restore_failures():
     def run(index):
         calls.clear()
         counted = [0]
+        clocks = _WindowClocks()
         signal.signal(signal.SIGALRM, counting)
+        armed = (time.monotonic(),)
         signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
+        armed += (time.monotonic(),)
         outer, inner = aiqt_hooks._DeadlineWindow(600.0), aiqt_hooks._DeadlineWindow(5.0)
 
         def when(frame):
@@ -9061,6 +10527,7 @@ def _deadline_enclosing_restore_failures():
         tracer, at = _window_tracer(inner, (when, lambda: signal.raise_signal(signal.SIGALRM)))
         escaped = None
         try:
+            aiqt_hooks.time, aiqt_hooks.signal = clocks.time, clocks.signal
             try:
                 with outer:
                     with inner:
@@ -9071,17 +10538,29 @@ def _deadline_enclosing_restore_failures():
                 escaped = type(exc).__name__
             finally:
                 sys.settrace(None)
-            handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+            handler = signal.getsignal(signal.SIGALRM)
+            # The reads either side of the final getitimer close the bracket _restored_countdown_bounds
+            # judges the caller countdown in: the outer window is the borrower that took and re-armed
+            # the caller's timer, so the bound widens by exactly the spans `clocks` measured from the
+            # outer take's and restore's clock reads to their setitimers, with no fixed host-speed slack.
+            read = (time.monotonic(),)
+            timer = signal.getitimer(signal.ITIMER_REAL)
+            read += (time.monotonic(),)
         finally:
+            aiqt_hooks.time, aiqt_hooks.signal = time, signal
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
         if index is None:
             return counted[0]
+        low, high = _restored_countdown_bounds(30.0, armed, read, clocks, outer)
+        used = read[1] - armed[0]
         if (at and escaped == "the outer deadline" and handler is counting and timer[1] == 30.0
-                and 29.0 < timer[0] <= 30.0 and not calls and not inner.armed and not outer.armed):
+                and low <= timer[0] <= high and not calls and not inner.armed
+                and not outer.armed):
             return ""
-        return "at {!r}: escaped {}, handler {!r}, timer {!r}, caller deliveries {}, armed {} and {}".format(
-            at, escaped, handler, timer, len(calls), inner.armed, outer.armed)
+        return ("at {!r}: escaped {}, handler {!r}, timer {!r} with {:.2f}s used and the measured bound "
+                "[{!r}, {!r}], caller deliveries {}, armed {} and {}".format(
+                    at, escaped, handler, timer, used, low, high, len(calls), inner.armed, outer.armed))
 
     total = run(None)
     failed = [problem for problem in (run(index) for index in range(total)) if problem]
@@ -9115,7 +10594,7 @@ def _deadline_rearm_failures():
     scheduling delay at the exit, and fails if the window's own timer is armed for real again.
     Neither case shows that no delay can fail the run: two bounds remain that these checks do not remove,
     the 1 s allowed for the kernel to expire the re-armed timer and the deadline child's
-    _DEADLINE_CHILD_TIMEOUT (900 s)."""
+    _DEADLINE_CHILD_TIMEOUT (900 s of wall-clock time, _deadline_child_wait)."""
     out = []
     take = aiqt_hooks._DeadlineWindow._take.__code__
     twice = aiqt_hooks._DeadlineWindow._twice.__code__
@@ -9863,9 +11342,15 @@ def _deadline_restore_fault_failures():
     caller's periodic 30-second timer (unnested) and for a 600-second outer window (nested), raising on its
     first call ("once") and on its first two calls ("twice"). Each operation runs in the scenario
     _RESTORE_OPERATIONS gives it: "plain", a 5-second window whose body sleeps 0.05 s, so that a restore
-    that counts the window's time twice, or not at all, is off by at least that much, while a host stall
-    inside the restore's gap widens the bounds by only the stall (_restored_countdown_bounds) and passes
-    such a restore only when it lasts about as long as the body; "expired", a 0.2-second
+    that counts the window's time twice, or not at all, is off by at least that much. A host stall widens
+    the bounds by only the stall (_restored_countdown_bounds), and on one side only, so it passes such a
+    restore only when it lasts about as long as the body and falls on that restore's side. The one that
+    counts twice (too low) can pass under a stall in the restore's gap, between armed[0] and the arming
+    setitimer, or between the getitimer and read[1]; the one that counts not at all (too high) under a
+    stall between the arming setitimer and armed[1], between read[0] and the getitimer, or from the
+    re-arming setitimer's action to the read after it returns. A stall in the take's gap, or anywhere
+    between the take's clock read and the restore's, adds to either wrong restore's error as much as it
+    widens the bound, so it passes neither; "expired", a 0.2-second
     window whose body ends while the first instruction of _give_back waits (up to 1 s, from an opcode trace
     stage) until the window's own expiry is pending, so the restore discards it; "due", the window's own
     expiry at a caller timer due 0.05 s in. Each case is checked at return from the with statement, before
@@ -10449,10 +11934,124 @@ def _deadline_relation_failures():
     return out
 
 
+# How long _deadline_child_wait waits for a child it killed to be reaped before it stops waiting.
+_DEADLINE_CHILD_REAP_SECONDS = 10.0
+
+
+def _deadline_child_within(waited, limit):
+    """Whether a child's wall-clock seconds (_deadline_child_wait) are within its limit, the limit included."""
+    return waited <= limit
+
+
+def _deadline_child_wait(code, args, limit):
+    """(subprocess.CompletedProcess with text stdout and stderr, or None when the child was stopped or
+    finished past its limit, and a phrase giving the wall-clock seconds waited) for a child running the
+    Python source code with the arguments args (sys.executable -I -B -c code args...), judged against limit
+    as a fixed wall-clock bound, nothing divided by anything: the child is accepted only if it has finished
+    and both pipes reached their end within limit seconds of its start (_deadline_child_within). A child
+    still running at limit is killed and waited for up to _DEADLINE_CHILD_REAP_SECONDS, and leaving the
+    with block closes both pipes without waiting for anything else that holds them (a grandchild the child
+    started), so a hang (a blocked wait or an endless loop) fails after about limit seconds, whatever
+    threads the child runs or however busy the host is. Residual: a killed child the kernel does not reap
+    within that bound (one in an uninterruptible sleep) still blocks leaving the with block, since
+    Popen's exit waits for it with no timeout."""
+    began = time.monotonic()
+    argv = [sys.executable, "-I", "-B", "-c", code] + list(args)
+    with subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=limit)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=_DEADLINE_CHILD_REAP_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+            return None, "stopped after {:.1f}s wall-clock".format(time.monotonic() - began)
+    waited = time.monotonic() - began
+    if not _deadline_child_within(waited, limit):
+        return None, "finished past its limit, after {:.1f}s wall-clock".format(waited)
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr), "{:.1f}s wall-clock".format(waited)
+
+
+def _deadline_child_wait_failures(tmp):
+    """(dl-child-wait-*) _deadline_child_wait stops a child that outlives its wall-clock limit and returns
+    one that finishes within it:
+    dl-child-wait-hang: a child sleeping 600 s under a 1-second limit is stopped (None), and not before
+    that second of wall-clock time.
+    dl-child-wait-done: a child that prints and exits at once returns its exit status and output.
+    dl-child-wait-last-stretch: a child sleeping 1.3 s under a 1-second limit is refused (None).
+    dl-child-wait-edge: the acceptance at the limit's edge (_deadline_child_within), the limit included:
+    a wait a microsecond under and exactly at a 1-second limit is within it, a microsecond over is not.
+    dl-child-wait-busy-child: a child sleeping 6.2 s while its own thread hashes for 6 s, under a 4-second
+    limit, is stopped (None), within 4 s plus the reap bound: the child's CPU work does not shorten its
+    wait.
+    dl-child-wait-grandchild: a child that starts a grandchild sleeping 30 s on the same output pipes and
+    then sleeps 600 s, under a 1-second limit, is stopped within 15 s, not when the grandchild lets go of
+    the pipes; the grandchild, found by its pid and the marker path in its arguments, is then killed."""
+    out = []
+    began = time.monotonic()
+    proc, waited = _deadline_child_wait("import time; time.sleep(600)", (), 1.0)
+    spent = time.monotonic() - began
+    if proc is not None or spent < 1.0:
+        out.append("(dl-child-wait-hang) a child sleeping 600 s under a 1-second limit must be stopped, "
+                   "and not within 1 s, got {!r} after {:.1f}s ({})".format(proc, spent, waited))
+    proc, waited = _deadline_child_wait("print('done')", (), 900)
+    if proc is None or proc.returncode != 0 or proc.stdout != "done\n":
+        out.append("(dl-child-wait-done) a child that prints and exits must return exit 0 and its output, got "
+                   "{!r} ({})".format(proc, waited))
+    proc, waited = _deadline_child_wait("import time; time.sleep(1.3)", (), 1.0)
+    if proc is not None:
+        out.append("(dl-child-wait-last-stretch) a child sleeping 1.3 s under a 1-second limit must be "
+                   "refused, got {!r} ({})".format(proc, waited))
+    for waited, want in ((1.0 - 1e-6, True), (1.0, True), (1.0 + 1e-6, False)):
+        if _deadline_child_within(waited, 1.0) is not want:
+            out.append("(dl-child-wait-edge) {!r} s waited against a 1-second limit must read within: {}".format(
+                waited, want))
+    code = ("import hashlib, threading, time; block = b'\\0' * (1 << 20); ends = time.monotonic() + 6.0\n"
+            "def run():\n    while time.monotonic() < ends:\n        hashlib.sha256(block)\n"
+            "threading.Thread(target=run, daemon=True).start(); time.sleep(6.2)")
+    began = time.monotonic()
+    proc, waited = _deadline_child_wait(code, (), 4.0)
+    spent = time.monotonic() - began
+    if proc is not None or spent >= 4.0 + _DEADLINE_CHILD_REAP_SECONDS:
+        out.append("(dl-child-wait-busy-child) a child sleeping 6.2 s beside its own 6-second hashing thread must "
+                   "be stopped under a 4-second limit, got {!r} after {:.1f}s ({})".format(proc, spent, waited))
+    marker = Path(tmp) / "dl-child-wait-grandchild.pid"
+    code = ("import subprocess, sys, time; g = subprocess.Popen([sys.executable, '-I', '-S', '-c', "
+            "'import time; time.sleep(30)', sys.argv[1]]); open(sys.argv[1], 'w').write(str(g.pid)); "
+            "time.sleep(600)")
+    began = time.monotonic()
+    try:
+        proc, waited = _deadline_child_wait(code, (str(marker),), 1.0)
+        spent = time.monotonic() - began
+    finally:
+        _deadline_kill_marked(marker)
+    if proc is not None or spent >= 15.0:
+        out.append("(dl-child-wait-grandchild) a child whose grandchild holds its pipes must be stopped within "
+                   "15 s under a 1-second limit, got {!r} after {:.1f}s ({})".format(proc, spent, waited))
+    return out
+
+
+def _deadline_kill_marked(marker):
+    """Kill the process whose pid the file marker holds, only while /proc shows that pid running with the
+    marker's path among its arguments (so a reused pid is never signalled); nothing where there is no
+    marker, no /proc, or no such process."""
+    try:
+        pid = int(marker.read_text(encoding="ascii"))
+        with open("/proc/{}/cmdline".format(pid), "rb") as handle:
+            arguments = handle.read().split(b"\0")
+        if os.fsencode(str(marker)) in arguments:
+            os.kill(pid, signal.SIGKILL)
+    except (OSError, ValueError):
+        pass
+
+
 def _test_deadline_posture(failures, tmp):
     """(dl-*) The PreToolUse deadline posture; see the section comment above."""
     failures.extend(_deadline_relation_failures())
     failures.extend(_deadline_shape_rerun_failures())
+    failures.extend(_deadline_load_judgement_failures(Path(tmp)))
     failures.extend(_deadline_note_only_deny_failures())
     failures.extend(_raw_sequence_failures())
     failures.extend(_raw_mirror_failures())
@@ -10468,16 +12067,16 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_lex_repeats_failures())
     failures.extend(_lex_fork_failures())
     failures.extend(_errexit_runs_failures())
+    failures.extend(_deadline_child_wait_failures(tmp))
     child_tmp = tmp / "deadline"
     child_tmp.mkdir()
     code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "
             "sys.stdout.write(json.dumps(m._deadline_child(sys.argv[2])))")
-    try:
-        proc = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(Path(__file__).resolve().parent),
-                               str(child_tmp)], capture_output=True, text=True, timeout=_DEADLINE_CHILD_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        failures.append("(dl-child-timeout) the deadline child did not finish within {}s".format(
-            _DEADLINE_CHILD_TIMEOUT))
+    proc, waited = _deadline_child_wait(code, (str(Path(__file__).resolve().parent), str(child_tmp)),
+                                        _DEADLINE_CHILD_TIMEOUT)
+    if proc is None:
+        failures.append("(dl-child-timeout) the deadline child did not finish within its {}s wall-clock limit ({})"
+                        .format(_DEADLINE_CHILD_TIMEOUT, waited))
         return
     try:
         found = json.loads(proc.stdout)
@@ -25357,7 +26956,7 @@ def _main_isolated(monitor):
         cmexpect("(cm-residual-global-subst) pre-subcommand unquoted $( fragments the segment and allows",
                  'git -C $(x) commit -m "$(y)"', "allow")
 
-        # Payload postures: unreadable command ASKS; only the shared missing-tool contract DENIES.
+        # Payload postures: a missing command and a missing tool_name each DENY (fail closed).
         cmdataexpect("(cm-ae) missing command denies",
                      {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}, "deny")
         cmdataexpect("(cm-af) missing tool_name denies",
@@ -29854,15 +31453,18 @@ def _main_isolated(monitor):
         # malformed / out-of-scope payloads for the Bash floor
         _bap = aiqt_hooks.bash_absolute_paths
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                          "tool_input": {"command": 5}}) != "allow-note":
-            failures.append("(ap-c29) non-string command allows with a note (abspth is a convention, not a "
-                            "hazard; cannot read)")
+                          "tool_input": {"command": 5}}) != "deny":
+            failures.append("(ap-c29) non-string command denies (a truncating redirect, the deny tier, may sit "
+                            "in what was not read)")
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                          "tool_input": None}) != "allow-note":
-            failures.append("(ap-c30) non-mapping tool_input allows with a note (cannot read command)")
+                          "tool_input": None}) != "deny":
+            failures.append("(ap-c30) non-mapping tool_input denies (cannot read command)")
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                          "tool_input": {}}) != "allow-note":
-            failures.append("(ap-c31) missing command allows with a note (cannot read)")
+                          "tool_input": {}}) != "deny":
+            failures.append("(ap-c31) missing command denies (cannot read)")
+        if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                          "tool_input": {"command": ""}}) != "allow-note":
+            failures.append("(ap-c31b) an empty command is readable and still allows with a note")
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Read",
                           "tool_input": {"command": "cd rel"}}) != "allow":
             failures.append("(ap-c32) out-of-scope tool must allow (matcher governs)")
@@ -29949,9 +31551,13 @@ def _main_isolated(monitor):
         ebexpect("(eb-e16) unparseable command outside the visible patterns allows",
                  'ls -la "unbalanced', "allow")
         if _reduce(aiqt_hooks.git_explicit_binding,
-                   {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}) != "allow-note":
-            failures.append("(eb-e17) absent command allows with a note (expbnd is a binding convention, not a "
-                            "hazard; cannot evaluate target or scope)")
+                   {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}) != "deny":
+            failures.append("(eb-e17) absent command denies (the breadth-then-publish pair, the deny tier, may "
+                            "sit in what was not read)")
+        if _reduce(aiqt_hooks.git_explicit_binding,
+                   {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                    "tool_input": {"command": ""}}) != "allow-note":
+            failures.append("(eb-e17b) an empty command is readable and still allows with a note")
         if _reduce(aiqt_hooks.git_explicit_binding,
                    {"hook_event_name": "PreToolUse", "tool_input": {"command": "git commit -m x"}}) != "deny":
             failures.append("(eb-e18) missing tool_name must DENY (shared fail-closed contract)")
@@ -30410,10 +32016,15 @@ def _main_isolated(monitor):
                             "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
 
         _test_git_stash_ref(failures)
+        _test_malformed_bash_payload(failures)
+        _test_nul_bash_command(failures)
         _test_inline_errexit(failures, tmp)
         _test_pgrep_self_match(failures)
         _test_python_stdin_program(failures)
         _test_trkasy_no_amp(failures, tmp)
+        _test_trkasy_heredoc_body_data(failures, tmp)
+        _test_trkasy_heredoc_consumer(failures, tmp)
+        _test_trkasy_data_shape_rules(failures, tmp)
         _test_wait_loop_deny_text(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
@@ -30423,6 +32034,7 @@ def _main_isolated(monitor):
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
         _test_reset_ancestry(failures, tmp)
+        _test_clock_inject(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
@@ -31390,7 +33002,7 @@ def _main_isolated(monitor):
           "cnsdif (diff_source_pretool) DENIES-and-educates a confirmed console diff dump and ALLOWS "
           "with a note any producer-capable-but-unproven or unparseable form (a convention, not a "
           "hazard). abspth (bash_absolute_paths) ALLOWS with a note a relative or opaque cd/redirect and "
-          "an unreadable command (a convention nudge), and DENIES-and-educates a TRUNCATING redirect "
+          "an empty command (a convention nudge), and DENIES-and-educates a TRUNCATING redirect "
           "('>'/'>|'/'&>'/'>&') to a relative or opaque target (it could zero the wrong file). "
           "expbnd (git_explicit_binding) ALLOWS with a note an ambient git target or a relocated whole-tree "
           "breadth op, and DENIES-and-educates a whole-tree breadth stage paired with a publish in one "

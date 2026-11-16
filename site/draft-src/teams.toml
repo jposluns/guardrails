@@ -1,0 +1,152 @@
+# The aiqt.ai Teams and Enterprise page, restored from the pre-cutover site/teams.html. By the maintainer's
+# rulings of 2026-11-15 it is listed in sitemap.xml but linked from no page, the nav, the footer or
+# llms.txt, and its team features are "Planned", the same features and wording as the future plans page.
+path = "teams/index.html"
+title = "Teams & Enterprise"
+kind = "document"
+label = "For teams and organizations"
+heading = "One standard your whole team can work to."
+description = "AIQT gives a team one shared governance standard for AI-assisted work, designed to be portable across tools, that asks for claims traced to evidence and overrides logged. Management and monitoring, performance metrics, and guardrail bundles for teams are planned, with no dates yet, and not available today."
+
+[[body]]
+component = "lead"
+html = '''Ask two colleagues what their AI assistant means by "done" and you will get two answers. Today the quality of your team's AI-assisted work depends on who did it and which tool they used. AIQT offers a single governance standard intended to reach across Claude, ChatGPT, and Copilot, so a colleague on one assistant is meant to work to the same rules as a colleague on another. That cross-assistant reach is the intent, not a verified result yet: the evidence page marks every platform pending, with ChatGPT, Gemini, and Copilot not yet tested. Adoption today is human-led: each person adds AIQT to their own assistant, under a rollout your team runs. Team features, such as management and monitoring, performance metrics, and guardrail bundles, are planned, with no dates yet, and not available today.'''
+
+[[body]]
+component = "prose"
+html = '''<p><a href="#pilot">Start a team pilot</a>. <a href="#today">See what is available today</a>.</p>'''
+
+[[body]]
+component = "section"
+lbl = "Today"
+heading = "What a shared standard gives your team today"
+id = "today"
+rail = "Today"
+
+[[body]]
+component = "prose"
+html = '''<p>One definition of "done", intended for every assistant on the team, with a record behind it. Most teams already have people using AI assistants, each with their own habits and their own idea of what "done" means; AIQT gives them one ordering, decided in advance.</p>'''
+
+[[body]]
+component = "subhead"
+heading = "Consistency you did not have to police"
+
+[[body]]
+component = "prose"
+html = '''<p>The quality-versus-speed argument is settled once, in advance, instead of on every deadline. Every assistant on the team is meant to work to the same ordering, so the call is already made before the pressure arrives.</p>'''
+
+[[body]]
+component = "subhead"
+heading = "Sign-off backed by evidence you can check"
+
+[[body]]
+component = "prose"
+html = '''<p>The standard asks the assistant to trace claims to sources, say what a guardrail caught, and log overrides. With the chat Skill (1.0.6, in the AIQT 1.0.5 release), that record lives in the conversation itself: the stated sources, the named catches, and the logged overrides you can scroll back to. Repository-level records are part of the 1.2.0 design, in development. Reporting across a team is planned, as <a href="#planned">performance metrics</a>.</p>'''
+
+[[body]]
+component = "subhead"
+heading = "A standard designed to survive tool changes"
+
+[[body]]
+component = "prose"
+html = '''<p>The standard is designed to be portable across assistants and toolchains, so that swapping Claude for ChatGPT, or adding Copilot, keeps the same rules and your team's definition of "done" is not locked to any vendor. That is the design intent, not a tested result: ChatGPT and Copilot are not yet tested.</p>'''
+
+[[body]]
+component = "subhead"
+heading = "Gaps turned into guardrails"
+
+[[body]]
+component = "prose"
+html = '''<p>When the assistant's own gap lets an issue through, Rule 5 asks it to propose a guardrail so the issue should not recur, and to draft it if you ask. Sending the lesson back to AIQT, so one team's lesson can become every team's guardrail, is part of the 1.2.0 design: an opt-in step, Rule 5's voluntary Guardrail-Seed give-back, separate from the software licence.</p>'''
+
+[[body]]
+component = "prose"
+html = '''<p>Teams that write code have a version in development: the <a href="/development">development assistant</a> (1.2.0) is designed to install the same standard into a project, keep to its own directory, and integrate with your CI. It is not available yet.</p>'''
+
+[[body]]
+component = "section"
+lbl = "Not available today"
+heading = "What does not exist yet"
+id = "not-today"
+rail = "Not available today"
+
+[[body]]
+component = "prose"
+html = '''<p>Said plainly, so you can plan around it.</p><ul><li>Central deployment of the Skill to a team.</li><li>Technical enforcement of the standard: it is a behavioural standard the assistant follows, not a control that blocks a model.</li><li>A shared or aggregate record across people.</li><li>Admin controls, policy management, and cross-team reporting.</li><li>Commercial support and service levels.</li></ul><p>For what is planned, see the <a href="#planned">planned features</a> below: management and monitoring, performance metrics, and guardrail bundles. They have no dates yet.</p>'''
+
+[[body]]
+component = "section"
+lbl = "Start a team pilot"
+heading = "How to evaluate AIQT with your team"
+id = "pilot"
+rail = "Start a team pilot"
+
+[[body]]
+component = "prose"
+html = '''<p>Today's team path is a human-led pilot: a small group, the assistants they already use, and a few weeks of normal work. Here is one way to run it.</p>'''
+
+[[body]]
+component = "steps"
+items = [
+  '''<b>Choose a small group</b> and the assistants they already use (Claude, ChatGPT, or Copilot).''',
+  '''<b>Each person adds AIQT 1.0.5 to their own assistant</b>: the chat Skill (1.0.6) where the assistant accepts Skills, or the instruction file otherwise (see the <a href="$BASE/install/details/">step-by-step instructions</a>), and confirms that it is on.''',
+  '''<b>Run two or three weeks of normal work</b>, noting a few observations: unsupported factual claims, completion claims without a check, missed requirements, clarification questions asked, overrides, rework, and reviewer confidence.''',
+  '''<b>Compare</b> against the period before, on the same observations.''',
+  '''<b>Decide</b>: keep it, extend it, or remove it.''',
+]
+
+[[body]]
+component = "prose"
+html = '''<p>Questions, or want to share what you found? <a href="https://github.com/jposluns/guardrails/discussions" target="_blank" rel="noopener noreferrer">Open a GitHub discussion<span class="vh"> (opens in a new tab)</span></a>. There is no sales or support team yet; this is an open project, and that is the honest state of it. The <a href="/evidence">evidence page</a> collects the release, limitations, and documented cases.</p>'''
+
+[[body]]
+component = "section"
+lbl = "Planned"
+heading = "What is coming for teams and enterprises"
+id = "planned"
+rail = "Planned"
+
+[[body]]
+component = "prose"
+html = '''<p>Everything in this section is planned, with no dates yet. None of it ships today. What you can use today is the AIQT 1.0.5 chat assistant (its chat Skill is version 1.0.6), which each person adds to their own assistant, and the pack, which is open to read in full on GitHub. The <a href="$BASE/future/">future plans page</a> lists the same plans.</p><p>We share these plans so you can tell us whether they would help your organization. <a href="https://github.com/jposluns/guardrails/discussions" target="_blank" rel="noopener noreferrer">Open a GitHub discussion<span class="vh"> (opens in a new tab)</span></a> to send your comments.</p>'''
+
+[[body]]
+component = "clauses"
+
+[[body.items]]
+n = "1"
+html = "<p><strong>Management and monitoring.</strong> One view of every project using AIQT: which guardrails each runs, at which version, and where an update is waiting.</p>"
+
+[[body.items]]
+n = "2"
+html = "<p><strong>Performance metrics.</strong> How often each guardrail fires and what it stopped, per project and per team, so you can see where the standard is earning its place.</p>"
+
+[[body.items]]
+n = "3"
+html = "<p><strong>Guardrail bundles.</strong> Pre-built sets of guardrails per project type or purpose, curated, versioned, and rolled out by the team or enterprise, so every project starts from the same agreed baseline.</p>"
+
+[[body]]
+component = "prose"
+html = '''<p>For a team lead, these would give one place to see what the guardrails stopped and how the standard is holding across the work. For an organization, they would let the standard be set once, as a bundle, so every team starts from it.</p>'''
+
+[[body]]
+component = "section"
+lbl = "How we decide"
+heading = "How we decide what ships"
+id = "how-we-ship"
+rail = "How we decide"
+
+[[body]]
+component = "prose"
+html = '''<p>We move a planned feature into a release only when we can say what it does and point to the evidence behind it, marking what is still pending rather than implying it. That rule is why this page separates what is available today from what is planned: the same standard AIQT holds an assistant to, we hold ourselves to. A claim about the product should trace to evidence, and "available" should mean a check actually ran.</p>'''
+
+[[body]]
+component = "section"
+lbl = "Open source"
+heading = "Open source, portable, and shared"
+id = "open"
+rail = "Open source"
+
+[[body]]
+component = "prose"
+html = '''<p>The guardrails are designed to be portable across toolchains, so that adopting the standard leaves your team free to change tools without changing rules. Sending an improvement back is Rule 5's voluntary Guardrail-Seed give-back, separate from the software licence; the route for it, a seed pull request, is part of the 1.2.0 design. Start with the <a href="$BASE/">overview on the home page</a>, or go straight to the source.</p><p><a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub<span class="vh"> (opens in a new tab)</span></a>. <a href="https://github.com/jposluns/guardrails/blob/main/ROADMAP.md" target="_blank" rel="noopener noreferrer">See where each stage stands: the roadmap<span class="vh"> (opens in a new tab)</span></a>.</p>'''

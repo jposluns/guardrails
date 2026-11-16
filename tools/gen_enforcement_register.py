@@ -170,6 +170,9 @@ EXPLAINER = (
 # no-control row says only that no shipped control cites the rule (not that one will be built).
 COLUMN_HEADING = "Linked controls or planned build"
 NO_CONTROL_TEXT = "No shipped control cites this rule."
+# The accessible name of the HTML rules table, emitted as a visually hidden caption (the site's vh class, as
+# on the evidence page) so a screen reader announces what the table holds. The Markdown view has no caption.
+TABLE_CAPTION = "Rule status and linked controls or planned build"
 
 GENERATED_NOTE = (
     "This file is generated from the enforceability ledger, the enforcement roadmap, and the rule corpus "
@@ -573,6 +576,7 @@ def render_html(rows, roadmap, controls, enforced_union):
         '{}: <strong>{}</strong>'.format(_t(label), counts[label]) for label in STATUS_LABELS)))
     out.append('        <div class="tablewrap">')
     out.append('          <table class="dtable">')
+    out.append('            <caption class="vh">{}</caption>'.format(_t(TABLE_CAPTION)))
     out.append('            <thead><tr><th>Rule</th><th>Corpus ID</th><th>Status</th>'
                '<th>{}</th></tr></thead>'.format(_t(COLUMN_HEADING)))
     out.append('            <tbody>')
@@ -1220,6 +1224,17 @@ def self_test_main():
                       "Gate-linked (class c only): <strong>0</strong>"):
             if token not in html_page:
                 failures.append("conformant tree: {!r} missing from the generated page".format(token))
+        # The rules table carries a visually hidden caption as its accessible name, placed as the table's
+        # first child (where HTML requires a caption), with the same vh class the evidence page uses.
+        caption_html = '<table class="dtable">\n            <caption class="vh">{}</caption>\n'.format(
+            _t(TABLE_CAPTION))
+        if caption_html not in html_page or html_page.count("<caption") != 1:
+            failures.append("conformant tree: the rules table must open with exactly one visually hidden "
+                            "caption <caption class=\"vh\">{}</caption>".format(TABLE_CAPTION))
+        # The expected markup above is built from TABLE_CAPTION itself, so it cannot tell an empty caption,
+        # which gives the table no accessible name, from a real one: require caption text after stripping.
+        if not TABLE_CAPTION.strip():
+            failures.append("conformant tree: the rules table caption text must not be empty or whitespace")
         for chrome_token in ("<title>Guardrail Enforcement Register</title>",
                              "<p class=\"eyebrow\">Enforcement register</p>"):
             if chrome_token not in html_page:
@@ -1590,7 +1605,8 @@ def self_test_main():
     print("SELF-TEST PASS: a conformant tree generates and regenerates drift-clean with gate-linked, "
           "gate-linked partial, hook-linked, no control, and pending all present and no rule labelled "
           "Enforced, a class c only gate link labelled as such (and as partial) in both views and the summary, "
-          "stable anchors, the composed page chrome, the class legend, and each "
+          "stable anchors, the rules table's visually hidden caption, the composed page chrome, the class "
+          "legend, and each "
           "mechanism's ledger residual rendered VERBATIM (a tag-shaped token survives as visible text, a "
           "three-backtick run is wrapped in a lengthened fence, and a MULTI-PARAGRAPH residue round-trips "
           "verbatim inside its own Markdown fence and its HTML blockquote); the display-fidelity assertion "
