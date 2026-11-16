@@ -1328,9 +1328,9 @@ A premise that one agent hands another and that states a past fact, when somethi
 state something was in at a given time, carries the source its sender checked it against, one able to
 establish the fact for that time, or else is marked unverified. The receiving agent relies on the
 premise, or records it as fact, only after it has corroborated it against the cited source or another
-authoritative one. Until then it keeps that source or mark with the premise wherever it forwards or
-records it; once it has corroborated the premise, it drops the mark and carries the source it checked
-in its place.
+one able to establish the fact for that time. Until then it keeps that source or mark with the premise
+wherever it forwards or records it; once it has corroborated the premise, it carries the source it checked
+in place of any mark.
 
 ## Key management
 
