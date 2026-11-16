@@ -4191,6 +4191,8 @@ expected-check-ids = [
   "preflight/p6-tree-workdir-dot-component-mapped",
   "preflight/p1-tree-advice-names-tree",
   "preflight/p3-tree-prose-as-written-advisory",
+  "preflight/p3-tree-prose-declared-spelling-only",
+  "preflight/p3-tree-prose-climbs-out-advisory",
   "preflight/p6-tree-sibling-prefix-cannot-evaluate",
   "preflight/p3-tree-prose-resolves-outside-advisory",
   "preflight/p3-tree-prose-lookup-error-advisory",

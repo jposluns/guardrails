@@ -106,10 +106,12 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        repository the lint is pointed at (--repo, default this repository), read with
                        `git cat-file -e <commit>:<path>` from the object store, never the working tree. The
                        path may be a file the brief asks the worker to create, so P3 prints an ADVISORY line
-                       and never refuses. With --tree (see P6), each such path that is not a declared input is
-                       also looked up in the staged tree, pin or no pin, as written and not folded, like P6
-                       (os.lstat of the path as written after its parent directory's real path is placed, so
-                       file/../x is ENOTDIR there), and one missing there, resolving outside it or that cannot be
+                       and never refuses. With --tree (see P6), each relative path the brief names, one whose
+                       `..` climbs out of the tree included, is also looked up in the staged tree, pin or no
+                       pin, as written and not folded, like P6 (os.lstat of the path as written after its parent
+                       directory's real path is placed, so file/../x is ENOTDIR there), unless it is the exact
+                       spelling of a declared input (P6 judges that spelling; another spelling of the same path
+                       is looked up on its own), and one missing there, resolving outside it or that cannot be
                        looked up there (another stat error: EACCES, ELOOP, ENAMETOOLONG) is ADVISORY too, never
                        exit 2. A pin that does not resolve to one commit (unknown, ambiguous), a git
                        that cannot be launched or times out, or a pin with no repository to read is
@@ -267,10 +269,14 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        only in this mode, under the shape refusals below) and an absolute one that is the
                        brief's one declared workdir or lies under it (read lexically, the workdir's part
                        mapped onto the tree) are judged in the tree, not on the host: the tree's real path is
-                       joined with the input's part as written, never normalised, and the real path of that
-                       join must stay in the tree (a symbolic link that escapes it is CANNOT_EVALUATE), while
-                       the join itself is what is judged as above, so its `.` components, a trailing slash
-                       and its links are resolved by the stat (file/. and a link to file/. are ENOTDIR), and
+                       joined with the input's part as written, never normalised. Every symbolic link the
+                       input reaches is judged by where it resolves for the worker, who reads the tree at
+                       another place, not at the tree's current place: a link with an absolute target, a `..`
+                       that climbs above the tree's root (even one that comes back in by the tree's own name),
+                       more than 40 links and a link that cannot be read are CANNOT_EVALUATE, and a relative
+                       link that stays inside the tree is followed. The join itself is what is judged as
+                       above, so its `.` components, a trailing slash and its links are resolved by the stat
+                       (file/. and a link to file/. are ENOTDIR), and
                        one missing there (ENOENT, ENOTDIR) is HARD and the message names the tree, and a FIFO
                        or device, an unreadable path and any other stat error are CANNOT_EVALUATE. An absolute
                        input outside the workdir, or in a brief with no workdir declaration, keeps the host
@@ -2518,11 +2524,12 @@ def pin_conflict_message(conflict):
 def rule_p3(names, row, repo, tree=None):
     """P3 ADVISORY: the brief pins a revision and a repository-relative path it names (repository_path) does
     not exist at that revision in `repo`; it may be a file the brief asks the worker to create, so it never
-    refuses. With a staged tree (`tree`, the real path staged_tree returned), each such path that is not a
-    declared input (P6 judges those) is also looked up in the tree as written, not folded (tree_prose_state:
-    file/../x is ENOTDIR there, as the worker's read would be, while the pinned-revision lookup folds it), pin
-    or no pin, and one missing there, resolving outside it or that cannot be looked up there is ADVISORY too, never
-    CannotEvaluate. A pin label with no valid pin (bad_pins), pin lines
+    refuses. With a staged tree (`tree`, the real path staged_tree returned), each relative path the brief
+    names, one whose `..` climbs out of the tree included, is also looked up in the tree as written, not folded
+    (tree_prose_state: file/../x is ENOTDIR there, as the worker's read would be, while the pinned-revision lookup
+    folds it), pin or no pin, unless it is the exact spelling of a declared input (P6 judges that spelling; another
+    spelling of the same path is looked up on its own), and one missing there, resolving outside it or that
+    cannot be looked up there is ADVISORY too, never CannotEvaluate. A pin label with no valid pin (bad_pins), pin lines
     that disagree (brief_pin_conflict, reviewed_head_conflict, near_pin_conflict for a look-alike pin line: the
     message names both lines, pin_conflict_message), a pin that does not resolve, or no repository to read is
     CannotEvaluate, whether or not the brief names a relative path."""
@@ -2536,11 +2543,12 @@ def rule_p3(names, row, repo, tree=None):
     paths = _first_seen([(line, path) for line, path in paths if path is not None])
     findings = []
     if tree is not None:
-        # the tree lookup reads each path as written, like P6, so its own spellings stay apart
-        written = _first_seen([(line, path) for line, path in names.relative if repository_path(path) is not None])
-        declared = set(repository_path(path) for _, path in names.inputs if not path.startswith("/"))
-        for line, path in written:
-            state = None if repository_path(path) in declared else tree_prose_state(tree, path)
+        # the tree lookup reads each path as written, like P6, so its own spellings stay apart: a path whose
+        # `..` climbs out of the tree is looked up too (it resolves outside), and only a declared input's exact
+        # spelling is left to P6, so a valid declaration cannot hide another spelling the worker cannot read
+        declared = set(path for _, path in names.inputs if not path.startswith("/"))
+        for line, path in _first_seen(names.relative):
+            state = None if path in declared else tree_prose_state(tree, path)
             if state is not None:
                 findings.append(("P3", "ADVISORY", line, "path {} the staged tree {}: if it is an input, the "
                                  "worker cannot read it there; if the brief asks the worker to create it, nothing "
@@ -8481,7 +8489,9 @@ def self_test(report_path=None):
                              (Path("..") / sibling.name, "sib"), (Path("..") / full.name / "notes.md", "climblink"),
                              (Path("..") / full.name / "inputs", "climbdir"), ("plans/up", "chain"),
                              ("alink", "toabs"), ("../notes.md", "plans/up"), ("..", "plans/root"),
-                             (Path("../..") / full.name / "notes.md", "plans/over"), (full, "plans/home")):
+                             (Path("../..") / full.name / "notes.md", "plans/over"), (full, "plans/home"),
+                             # `.` steps kept as written (a Path would drop them): it escapes to the outside file
+                             ("./../../{}/in.md".format(outside.name), "plans/dotesc")):
             os.symlink(target, full / name)
         os.symlink("loopb", lookup / "loopa")
         os.symlink("loopa", lookup / "loopb")
@@ -8624,11 +8634,13 @@ def self_test(report_path=None):
         # a link judged by where it resolves for the worker, not at the tree's current place: an absolute
         # target (even one naming the tree's current place, a file in it, its root, or reached through a
         # relative link) and a relative one that climbs above the root (even one that comes back in by the
-        # tree's own name) are exit 2, relative or mapped; each lands in the tree today
+        # tree's own name) are exit 2, relative or mapped; each lands in the tree today but plans/dotesc, whose
+        # `.` steps before its climb must be skipped, not entered, for the climb to be seen
         check("preflight/p6-tree-link-worker-place-cannot-evaluate", [staged(text, full) for text in (
             "INPUT: alink\n", "INPUT: adir\n", "INPUT: adir/\n", "INPUT: absdotlink\n", "INPUT: toabs\n",
             "INPUT: climblink\n", "INPUT: climbdir/\n", "INPUT: plans/over\n", "INPUT: plans/home/notes.md\n",
-            "Workdir: {H}\nINPUT: {H}/alink\n", "Workdir: {H}\nINPUT: {H}/climblink\n")], ["CannotEvaluate"] * 11)
+            "INPUT: plans/dotesc\n", "Workdir: {H}\nINPUT: {H}/alink\n", "Workdir: {H}\nINPUT: {H}/climblink\n")],
+              ["CannotEvaluate"] * 12)
         # the `.` and empty components inside the workdir's own part of a mapped input are skipped, however
         # many (workdir_remainder), so the rest is judged in the tree: present is quiet, missing is HARD
         dotted = str(host_workdir.parent) + "/./" + host_workdir.name
@@ -8676,6 +8688,28 @@ def self_test(report_path=None):
                                   staged_messages(text, full)]) for text in (
                 "Read notes.md/../plans/plan.md and summarise it.\n", "Read ./notes.md/../notes.md first.\n")],
             [((0, [("P3", "ADVISORY")], True), [True])] * 2)
+        # only a declared input's exact spelling is left to P6: another spelling of the same path is looked up
+        # on its own, so a valid declaration cannot hide a prose spelling the worker cannot read (ENOTDIR), and a
+        # missing declaration adds the P3 line of its other spelling to its P6 one; the same spelling, as a word,
+        # a code span or with `./`, and a readable other spelling add nothing
+        check("preflight/p3-tree-prose-declared-spelling-only", [staged(text, full) for text in (
+            "INPUT: plans/plan.md\nRead notes.md/../plans/plan.md and summarise it.\n",
+            "INPUT: plans/missing.md\nRead inputs/../plans/missing.md first.\n",
+            "INPUT: plans/plan.md\nRead plans/plan.md first.\n",
+            "INPUT: `plans/plan.md`\nRead `plans/plan.md` first.\n",
+            "INPUT: ./plans/plan.md\nRead ./plans/plan.md first.\n",
+            "INPUT: plans/plan.md\nRead inputs/../plans/plan.md first.\n",
+            "INPUT: plans/missing.md\nRead plans/missing.md first.\n")],
+            [(0, [("P3", "ADVISORY")], True), (1, [("P3", "ADVISORY"), ("P6", "HARD")], True)] + [tree_quiet] * 4 + [
+                tree_missing])
+        # a prose path whose `..` climbs out of the tree, as written, resolves outside it: ADVISORY, not skipped;
+        # one that climbs back to the root or stays inside is quiet
+        check("preflight/p3-tree-prose-climbs-out-advisory", [
+            (staged(text, full), [message.startswith("path resolves outside the staged tree") for message in
+                                  staged_messages(text, full)]) for text in (
+                "Read plans/../../outside/in.md first.\n", "Read ../outside/in.md first.\n",
+                "Read ./plans/.. first.\n", "Read plans/../notes.md first.\n")],
+            [((0, [("P3", "ADVISORY")], True), [True])] * 2 + [(tree_quiet, [])] * 2)
         # a prose path that cannot be looked up in the tree for a reason other than ENOENT or ENOTDIR (a
         # symbolic link loop, a name too long, and where this uid honours mode 000 a directory it cannot
         # search) stays ADVISORY, never exit 2: a prose path is never a declared input
