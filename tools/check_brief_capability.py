@@ -4290,12 +4290,13 @@ P10_REASON_SEPARATOR = " -- "
 # substitution surface for the parents git reports
 P10_GIT_OPTIONS = ("-c", "core.commitGraph=false")
 # a LOOK-ALIKE declaration label: a line that is not a column-zero BRIEF-DIFF line but opens, after markup (any run
-# of characters that are not letters: spaces, digits, list, quote, bullet and arrow marks, emphasis, backticks, table
-# pipes; a task box [x] or [ ]; an HTML tag such as <b>; a one-letter item marker such as a)), with BRIEF and DIFF in
-# any case joined by a dash, an underscore, spaces or nothing, then a colon or `=` or a hex word. It is read after
+# of characters that are not ASCII letters: spaces, digits, list, quote, bullet and arrow marks, emphasis, backticks,
+# table pipes, any non-ASCII letter or digit; a task box [x] or [ ]; an HTML tag such as <b>; a one-letter item marker
+# such as a)), with BRIEF and DIFF in any case joined by a dash, an underscore, spaces or nothing, then a colon or `=`
+# or a hex word. The markup class is the explicit ASCII [^A-Za-z], not a Unicode \W, \d or \w class. It is read after
 # NFKC, the dash fold (as near_pin), P10_COLON_FORMS read as a colon and P10_LABEL_CONFUSABLES read as their Latin
 # letters, and is CannotEvaluate, never a silent non-declaration
-P10_LOOKALIKE_RE = re.compile(r"(?:\[[x ]\]|</?[a-z][a-z0-9]*+>|[a-z]\)|[\W\d_])*+(BRIEF[-_\s]*+DIFF)[`|*_\s]*+"
+P10_LOOKALIKE_RE = re.compile(r"(?:\[[x ]\]|</?[a-z][a-z0-9]*+>|[a-z]\)|[^A-Za-z])*+(BRIEF[-_\s]*+DIFF)[`|*_\s]*+"
                               r"(?:[:=]|[0-9a-f]{7})", re.I)
 # the colon look-alikes NFKC leaves as they are (modifier letter triangular colon, ratio, modifier letter colon)
 P10_COLON_FORMS = frozenset("˸∶꞉")
@@ -11243,6 +11244,16 @@ def self_test(report_path=None):
         check("preflight/p10-lookalike-marked-cannot-evaluate",
               [p10(text) for text in p10_lookalikes_marked] + [p10(p10_ok + text) for text in p10_lookalikes_marked],
               ["CannotEvaluate"] * (2 * len(p10_lookalikes_marked)))
+        # a look-alike label behind a non-ASCII word character (a Latin-1 letter, a Cyrillic letter that is no
+        # confusable) is markup as any character that is not an ASCII letter is (the markup class is ASCII
+        # [^A-Za-z], not a Unicode [\W\d_] that reads such a letter as a word character and lets the line declare
+        # nothing); a non-ASCII digit stays markup
+        p10_lookalikes_nonascii = [form.format(p10_m2, p10_x2) for form in (
+            "é BRIEF-DIFF: {} {} branch\n", "Ж BRIEF-DIFF: {} {} branch\n", "٣. BRIEF-DIFF: {} {} branch\n")]
+        check("preflight/p10-lookalike-nonascii-cannot-evaluate",
+              [p10(text) for text in p10_lookalikes_nonascii]
+              + [p10(p10_ok + text) for text in p10_lookalikes_nonascii],
+              ["CannotEvaluate"] * (2 * len(p10_lookalikes_nonascii)))
         # a branch-mode refusal says where the base lies: on the branch after the fork (X1), on the protected line
         # (R before the fork, M2 after it), or on neither (O)
 
@@ -11342,6 +11353,12 @@ def self_test(report_path=None):
             [p10_case(text) for text in p10_lookalikes_marked], [(0, [])] * len(p10_lookalikes_marked),
             P10_LOOKALIKE_RE=re.compile(r"[`|*_>#+\s\d.)-]*+(BRIEF[-_\s]*+DIFF)[`|*_\s]*+(?:[:=]|[0-9a-f]{7})", re.I),
             P10_LABEL_CONFUSABLES={}))
+        # with the markup class read as Unicode (the [\W\d_] of round 2), a non-ASCII letter before the label is a
+        # word character, so the line declares nothing and the brief passes
+        check("revert/p10-lookalike-ascii-class-red", *flip(
+            [p10_case(text) for text in p10_lookalikes_nonascii[:2]], [(0, [])] * 2,
+            P10_LOOKALIKE_RE=re.compile(r"(?:\[[x ]\]|</?[a-z][a-z0-9]*+>|[a-z]\)|[\W\d_])*+(BRIEF[-_\s]*+DIFF)"
+                                        r"[`|*_\s]*+(?:[:=]|[0-9a-f]{7})", re.I)))
         check("revert/p10-branch-base-reason-red", *flip(
             [p10_reasons], [[False, True, True, False]],
             _p10_branch_base_reason=lambda repo, base, fork, head, target:
@@ -11354,8 +11371,8 @@ def self_test(report_path=None):
             P10_RANGE_RE=re.compile(r"([0-9A-Za-z_/-]++)\.\.\.?+([0-9A-Za-z_/-]++)")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    # 289, or 288 where the uid reads a mode-000 file and revert/p9-pack-damage-red is recorded as skipped
-    check("revert/every-flip-ran", len(flipped), 289 if p9_locked else 288)
+    # 290, or 289 where the uid reads a mode-000 file and revert/p9-pack-damage-red is recorded as skipped
+    check("revert/every-flip-ran", len(flipped), 290 if p9_locked else 289)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
