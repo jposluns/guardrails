@@ -407,6 +407,15 @@ class = "c"
 residue = "It checks that site/.well-known/security.txt and opf/site/.well-known/security.txt each exist as a regular file whose lines are exactly the 6 owner fields (Contact, Expires, Encryption, Policy, Preferred-Languages, Canonical) in that order, each once, with the owner's values and the Canonical URL of that root's own domain; a missing, unreadable, oversized, non-UTF-8 or not field-shaped file fails closed. It covers a recognizable SUBSET (class c, partial): it reads the repository only, so it does not show that Cloudflare serves the file, at that path, with a text/plain type, nor that the Contact, Encryption and Policy targets resolve, nor that the Expires date is still in the future at serving time. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
+id = "selftest-removal"
+script = "tools/check_selftest_removal.py"
+rules = ["gatdis"]
+platform = "ci"
+default = "block"
+class = "c"
+residue = "It reads the expected-check-ids lists of tools/selftest_checks.toml at the change's comparison base (derived by tools/check_release_cut.py: the pull request's merge parent, the pushed range, or the local merge base with origin/HEAD) and at its head, and refuses a registered (suite, check id) pair the head no longer holds unless .aiqt/check-removals.toml at the head names that pair, in an entry this change wrote, as covered by a check id registered at the head, unreachable (with the change that removed the capability and the observed attempt), or disclosed (with the maintainer's authorization reference); an underivable base, a failed git read, a registry absent at the head, and a registry or record that is not UTF-8 TOML of the declared shape fail closed. It covers a recognizable SUBSET (class c, partial): it reads registered ids, not test code, so a case kept in the registry while its body or assertion is weakened, and a test outside the registry, are not seen; a renamed id reads as a removal and needs an entry; the record shows that an accounting was written, never that it is true or that the authorization reference names a real record; and only the two endpoints are compared, so a removal undone inside the range is not seen. It cites gate-discipline (gatdis) for the one slice it holds mechanically: a registered check removed in a change is accounted for in that change."
+
+[[gate]]
 id = "record-readers"
 script = "tools/check_record_readers.py"
 rules = []

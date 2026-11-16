@@ -12,7 +12,8 @@ and for every family, a path outside a declared workdir when the family's row sa
 reset, fetch, pull, worktree add, merge, rebase, restore --source, archive) reaches through a ref that can move with
 no later cure, or through a dispatch ref that resolves to another commit (P5), or an input the brief declares on an
 INPUT: line that does not exist on the host the lint runs on (P6), or a git command line whose subcommand is commit
-or push when the family's row says git-write = "no" (W1). The signal is structural, not certain: the lint fails
+or push when the family's row says git-write = "no" (W1), or a task line that asks to remove a test or check with
+no coverage-accounting clause and authorization reference (T1). The signal is structural, not certain: the lint fails
 closed, so some text a human would pass refuses (see RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
 its hits are printed so a human sees them, and it never refuses; so is P8, a warning on a request that the
 worker write the harness's status line. For a family that can execute (`yes` or
@@ -508,6 +509,39 @@ execute):
                        outside subcommand position or in the PROHIBITED shape; and other writing subcommands (tag,
                        merge, rebase, reset, branch) are not read.
 
+CHECK REMOVAL (beside the preflight, for every family, before the execution rules' early return):
+
+  T1 check removal     HARD. Replacing or removing a check is a reduction until its coverage is accounted for, so a
+                       brief must not offer the removal of a test as a plain option. A TASK LINE is a line that opens at
+                       column zero with TASK: (upper case, the colon directly after; no markup, no indent). Its text
+                       after the label is split into words on whitespace, each word stripped of surrounding quotes,
+                       backticks, emphasis, brackets and punctuation and lower-cased; a word that ended in . ; : , ! ?
+                       or ) closes its clause. T1 fires when a word is a REMOVAL VERB (remove, removing, delete,
+                       deleting, drop or dropping; removed, removal and deletion are not read) whose OBJECT, in the
+                       same clause, is test, tests, self-test, self-tests, selftest, selftests, assertion, assertions,
+                       assert, asserts, check or checks, either right after the verb or after at most three FILLER
+                       words (a, an, the, one, this, that, these, those, each, any, every, some, its, their, existing,
+                       failing, flaky, redundant, old, stale, obsolete, duplicate, registered, unit, regression). So
+                       "TASK: remove the flaky test", "TASK: fix it, or drop one self-test case" and "TASK: options:
+                       removing a check" fire. Two shapes do not: a PROHIBITION (never, not, don't, mustn't or
+                       shouldn't within the four words before the verb, in its clause: "TASK: never remove a test",
+                       "TASK: do not delete the check") and a DESCRIPTION (an -ing verb whose object is followed
+                       directly by is, are, was, were or counts: "TASK: removing a check is a reduction"). A hit
+                       refuses (exit 1) unless the brief carries BOTH cure lines, each at column zero with text after
+                       its colon: COVERAGE-ACCOUNTING: <how each removed case is covered by a named surviving check,
+                       unreachable, or disclosed> and AUTHORIZATION: <the maintainer's recorded authorization
+                       reference>; with both, the hit is INFO. One finding per task line, at the first hit. RESIDUALS:
+                       the lint checks only that the two cure lines exist and are not blank, never that the accounting
+                       is true, complete or matches the cases removed, nor that the authorization reference names a
+                       real record (the changed-lines gate tools/check_selftest_removal.py holds the registered check
+                       ids themselves); a removal asked anywhere but a column-zero TASK: line (another line, a
+                       numbered step, **TASK:** in emphasis, an indented TASK:), in other words (cut, strip, prune,
+                       retire, disable, skip, comment out, replace, "get rid of"), with another verb between (remove or
+                       rewrite the test), with an unlisted word or more than three fillers before the object (remove
+                       the brittle test), or of an unlisted object (a case, a guard, a gate, a hook, a validator) is
+                       not read; and a prohibition or description is read lexically, so "TASK: it is not wise to remove
+                       a test" passes and "TASK: deleting the check counted twice" refuses.
+
 TEXT. A brief holding a line separator other than LF anywhere (a carriage return, bare or in CRLF, U+0085
 NEXT LINE, U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR), or a format character (Unicode category Cf: a
 byte order mark, zero-width and bidirectional controls) outside a fenced code block, is CANNOT_EVALUATE
@@ -628,13 +662,14 @@ not one, so "do not run, build or install" stays negated.
 Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one summary line:
 
   exit 0  OK               no HARD hit (INFO and ADVISORY findings may be printed).
-  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5, P6, P7 or W1). Rewrite the brief, or send the
+  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5, P6, P7, W1 or T1). Rewrite the brief, or send the
                            item to a family that can execute (S1 to S3), name paths it can read (P2) or, after the
                            reach, add the cure line the hit gives (git -C <dir> checkout --detach <pin>^{commit}) or
                            reach the pin by a dispatch ref (P5), or provide each missing declared input or correct
                            its INPUT line (P6), or correct each ACCEPTED-RESIDUAL line or re-pin the brief (P7), or
                            drop the git commit or push, state it in the PROHIBITED shape, or send it to a family that
-                           can write (W1).
+                           can write (W1), or add the COVERAGE-ACCOUNTING: and AUTHORIZATION: lines or drop the
+                           removal (T1).
                            A P8 warning never sets the exit code: it adds its hint (ask only for the verdict and
                            completion lines and state the harness-owned attestation line as a prohibition) to the
                            OK or REFUSE line the other rules select, after that line's own advice.
@@ -3969,6 +4004,112 @@ def preflight(text, row, repo, raw):
         names, row, repo) + rule_p8(names, row, repo)
 
 
+# T1: a task line that asks to remove a test or check. The label that makes a line a task line, and the two
+# column-zero labels whose lines together cure it (each with text after the colon).
+TASK_LABEL = "TASK:"
+T1_CURE_LABELS = ("COVERAGE-ACCOUNTING:", "AUTHORIZATION:")
+# the removal verbs, in their plain and -ing forms only (removed, removal and deletion are not read)
+T1_VERBS = frozenset(("remove", "removing", "delete", "deleting", "drop", "dropping"))
+T1_GERUNDS = frozenset(("removing", "deleting", "dropping"))
+# the words that may stand between the verb and its object (at most T1_FILLER_MAX of them)
+T1_FILLERS = frozenset(("a", "an", "the", "one", "this", "that", "these", "those", "each", "any", "every", "some",
+                        "its", "their", "existing", "failing", "flaky", "redundant", "old", "stale", "obsolete",
+                        "duplicate", "registered", "unit", "regression"))
+T1_FILLER_MAX = 3
+# the objects that make the request a removal of a test or check
+T1_OBJECTS = frozenset(("test", "tests", "self-test", "self-tests", "selftest", "selftests", "assertion",
+                        "assertions", "assert", "asserts", "check", "checks"))
+# a word right after the object that makes a gerund the subject of a description, not a request
+T1_DESCRIBED = frozenset(("is", "are", "was", "were", "counts"))
+# the words that, in the clause before the verb (at most T1_PROHIBITION_REACH words), make it a prohibition
+T1_PROHIBITIONS = frozenset(("never", "not", "don't", "mustn't", "shouldn't"))
+T1_PROHIBITION_REACH = 4
+
+
+def t1_words(line):
+    """[(word, boundary)] for one line: each whitespace-separated chunk with its surrounding markup and punctuation
+    stripped, lower-cased, and whether a clause boundary follows it (the chunk ended with sentence or clause
+    punctuation). Walked in Python, with no pattern, so the read is linear in the line."""
+    strip_chars, stops = "\"'`*_([{<>}])", ".;:,!?)"
+    words = []
+    for chunk in line.split():
+        word = chunk.strip(strip_chars + stops).lower()
+        boundary = chunk.rstrip("\"'`*_]}>")[-1:] in stops
+        if chunk[:1] == "(" and words:
+            words[-1] = (words[-1][0], True)
+        if word:
+            words.append((word, boundary))
+        elif words:
+            words[-1] = (words[-1][0], True)
+    return words
+
+
+def t1_prohibited(words, index):
+    """Whether a prohibition word stands within T1_PROHIBITION_REACH words before words[index], in its clause."""
+    for back in range(index - 1, max(-1, index - 1 - T1_PROHIBITION_REACH), -1):
+        word, boundary = words[back]
+        if boundary:
+            return False
+        if word in T1_PROHIBITIONS:
+            return True
+    return False
+
+
+def t1_object(words, index):
+    """The index of the object a removal verb at words[index] takes (a T1_OBJECTS word after at most
+    T1_FILLER_MAX filler words, in the verb's clause), or None."""
+    if words[index][1]:
+        return None
+    for ahead in range(index + 1, min(len(words), index + 2 + T1_FILLER_MAX)):
+        word, boundary = words[ahead]
+        if word in T1_OBJECTS:
+            return ahead
+        if word not in T1_FILLERS or boundary:
+            return None
+    return None
+
+
+def t1_described(words, verb, obj):
+    """Whether a gerund verb and its object are the subject of a description ("removing a check is a reduction")."""
+    return (words[verb][0] in T1_GERUNDS and not words[obj][1] and obj + 1 < len(words)
+            and words[obj + 1][0] in T1_DESCRIBED)
+
+
+def t1_accounted(lines):
+    """Whether the brief carries both cure lines: a column-zero COVERAGE-ACCOUNTING: line and a column-zero
+    AUTHORIZATION: line, each with text after its colon."""
+    return all(any(line.startswith(label) and line[len(label):].strip() for line in lines)
+               for label in T1_CURE_LABELS)
+
+
+def rule_t1(text):
+    """T1 (HARD, every family): a column-zero TASK: line that asks to remove, delete or drop a test, self-test,
+    assertion or check refuses unless the brief carries the two cure lines (t1_accounted); with them it is INFO."""
+    lines = text.split("\n")
+    accounted, findings = None, []
+    for number, line in enumerate(lines, 1):
+        if not line.startswith(TASK_LABEL):
+            continue
+        words = t1_words(line[len(TASK_LABEL):])
+        for index, (word, _) in enumerate(words):
+            if word not in T1_VERBS or t1_prohibited(words, index):
+                continue
+            obj = t1_object(words, index)
+            if obj is None or t1_described(words, index, obj):
+                continue
+            if accounted is None:
+                accounted = t1_accounted(lines)
+            asked = "task line asks to {} a {}".format(word, words[obj][0])
+            if accounted:
+                findings.append(("T1", "INFO", number, asked + ", with a coverage-accounting clause and an "
+                                 "authorization reference", _excerpt(line)))
+            else:
+                findings.append(("T1", "HARD", number, asked + " and the brief has no {} line or no {} line with "
+                                 "text after it".format(*T1_CURE_LABELS), _excerpt(line)))
+            break
+    return findings
+
+
 def can_execute(row):
     """Whether a family's table row lets it run commands; the execution rules apply only to one that cannot."""
     return row["execute"] != "no"
@@ -3984,7 +4125,7 @@ def evaluate(data, family, table, scoped=True, repo=None):
     text = decode_brief(data)
     # the preflight and W1 apply to every family, so they run before the return for a family that can execute
     early = preflight(text, table[family], repo, data.decode("utf-8")) + rule_w1(
-        text, table[family], family, set(table), scoped)
+        text, table[family], family, set(table), scoped) + rule_t1(text)
     if can_execute(table[family]):
         early.sort(key=lambda finding: finding[2])
         hard = any(severity == "HARD" for _, severity, _, _, _ in early)
@@ -4033,7 +4174,7 @@ COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or ent
 
 PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"))
 # the rules that apply to every family, whether or not it can execute
-EVERY_FAMILY_RULES = PREFLIGHT_RULES | frozenset(("W1",))
+EVERY_FAMILY_RULES = PREFLIGHT_RULES | frozenset(("W1", "T1"))
 # added to a REFUSE line when a P6 hit is among the hard hits
 INPUT_HINT = "; provide each missing declared input, or correct its INPUT line, before sending"
 # added to the summary line (REFUSE or OK) when a P8 warning is among the findings; P8 never sets the exit code
@@ -4043,6 +4184,10 @@ STATUS_HINT = ("; the harness writes the WORKER_STATUS line and its account, mod
 # added to a REFUSE line when a W1 hit is among the hard hits
 GIT_WRITE_HINT = ("; the family's row says git-write = \"no\": drop the git commit or push, state it as a prohibition "
                   "(Do not run `git push`.), or send it to a family that can write")
+# added to a REFUSE line when a T1 hit is among the hard hits
+REMOVAL_HINT = ("; a task line asks to remove a test or check: add a column-zero COVERAGE-ACCOUNTING: line that "
+                "accounts for each removed case (covered by a named surviving check, unreachable, or disclosed) and a "
+                "column-zero AUTHORIZATION: line naming the maintainer's recorded authorization, or drop the request")
 
 
 def run(brief_path, family, table_path, scoped=True, repo=None):
@@ -4057,6 +4202,7 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
     hard = [rule for rule, severity, _, _, _ in findings if severity == "HARD"]
     missing_input = INPUT_HINT if "P6" in hard else ""
     git_write = GIT_WRITE_HINT if "W1" in hard else ""
+    git_write += REMOVAL_HINT if "T1" in hard else ""
     # P8 is ADVISORY: a hit adds its hint to whichever summary line the other rules select, and never selects one
     status_ask = STATUS_HINT if any(rule == "P8" for rule, _, _, _, _ in findings) else ""
     if code == EXIT_REFUSE and set(hard) - EVERY_FAMILY_RULES:
@@ -4069,6 +4215,11 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
         print("REFUSE: family {}: the brief carries a git command line that commits or pushes ({} hard hit(s): {}){}"
               "{}{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
                             git_write, missing_input, status_ask))
+    elif code == EXIT_REFUSE and "T1" in hard:
+        print("REFUSE: family {}: a task line asks to remove a test or check with no coverage accounting ({} hard "
+              "hit(s): {}){}{}{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r))
+                                                                     for r in sorted(set(hard))),
+                                         git_write, missing_input, status_ask))
     elif code == EXIT_REFUSE and "P5" in hard:
         print("REFUSE: family {}: the brief reaches a pinned revision through a ref that can move ({} hard hit(s): "
               "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}; "
@@ -7287,6 +7438,71 @@ def self_test(report_path=None):
           [(0, [])] * 2 + [(1, [("S3", "HARD")])] * 2)
     check("w1/every-family", [_w1_outcome(W1_COMMIT, family) for family in ("alpha", "beta", "gamma")],
           [w1_refused] * 2 + [(1, [("S3", "HARD"), ("W1", "HARD")])])
+    # ---------- T1: a task line that asks to remove a test or check, with no coverage accounting ----------
+    t1_refused, t1_info = (1, [("T1", "HARD")]), (0, [("T1", "INFO")])
+    t1_cure = "COVERAGE-ACCOUNTING: covered by check a/b, observed red without it\nAUTHORIZATION: decision 7\n"
+    check("t1/remove-test-refused", _outcome("TASK: remove the flaky test in the parser suite.\n", "alpha"),
+          t1_refused)
+    check("t1/verb-object-forms-refused",
+          [_outcome(text, "alpha") for text in (
+              "TASK: delete the assertion.\n", "TASK: drop one self-test case.\n",
+              "TASK: fix the parser, or optionally removing a registered check.\n",
+              "TASK: Remove `checks` that duplicate.\n", "TASK: options: dropping tests\n")], [t1_refused] * 5)
+    check("t1/accounted-info", _outcome("TASK: remove the flaky test.\n" + t1_cure, "alpha"), t1_info)
+    check("t1/cure-needs-both-lines",
+          [_outcome("TASK: remove the flaky test.\n" + cure, "alpha") for cure in (
+              "COVERAGE-ACCOUNTING: covered by check a/b\n", "AUTHORIZATION: decision 7\n",
+              "COVERAGE-ACCOUNTING: covered by check a/b\nAUTHORIZATION:   \n",
+              "COVERAGE-ACCOUNTING: covered by check a/b\n AUTHORIZATION: decision 7\n")], [t1_refused] * 4)
+    check("t1/prohibited-ok",
+          [_outcome(text, "alpha") for text in ("TASK: fix the parser; never remove a test.\n",
+                                                "TASK: do not delete the check.\n",
+                                                "TASK: you mustn't drop any assertion.\n")], [(0, [])] * 3)
+    check("t1/prohibition-other-clause-refused",
+          _outcome("TASK: do not stop early; remove the test.\n", "alpha"), t1_refused)
+    check("t1/gerund-description-ok",
+          [_outcome(text, "alpha") for text in ("TASK: note that removing a check is a reduction.\n",
+                                                "TASK: deleting tests are never free.\n")], [(0, [])] * 2)
+    check("t1/plain-verb-not-description-refused", _outcome("TASK: remove the check is the ask.\n", "alpha"),
+          t1_refused)
+    check("t1/not-a-task-line-ok",
+          [_outcome(text, "alpha") for text in ("Remove the flaky test.\n", " TASK: remove the test.\n",
+                                                "**TASK:** remove the test.\n", "task: remove the test.\n")],
+          [(0, [])] * 4)
+    check("t1/other-object-or-form-ok",
+          [_outcome(text, "alpha") for text in ("TASK: remove the unused helper.\n",
+                                                "TASK: the removed test stays removed.\n",
+                                                "TASK: remove the brittle old flaky test.\n",
+                                                "TASK: remove check_x.py from the list.\n",
+                                                "TASK: remove the stale. Test it.\n")], [(0, [])] * 5)
+    check("t1/filler-bound",
+          [_outcome("TASK: remove {}test.\n".format("the old stale "[:end]), "alpha") for end in (0, 4, 14)]
+          + [_outcome("TASK: remove a the old stale test.\n", "alpha")], [t1_refused] * 3 + [(0, [])])
+    check("t1/every-family", [_outcome("TASK: remove the flaky test.\n", family) for family in ("alpha", "beta",
+                                                                                                "gamma")],
+          [t1_refused] * 3)
+    check("t1/one-finding-per-task-line",
+          len(evaluate(b"TASK: remove the test and drop the check.\nTASK: delete one assertion.\n", "alpha",
+                       parse_table(TABLE_FIXTURE.encode("utf-8")))[1]), 2)
+    t1_tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-t1-"))
+    try:
+        with open(t1_tmp / "brief.md", "w", encoding="utf-8") as handle:
+            handle.write("Context.\nTASK: remove the flaky test.\n")
+        with open(t1_tmp / "table.toml", "w", encoding="utf-8") as handle:
+            handle.write(TABLE_FIXTURE)
+        t1_printed = io.StringIO()
+        with contextlib.redirect_stdout(t1_printed):
+            t1_code = run(str(t1_tmp / "brief.md"), "alpha", str(t1_tmp / "table.toml"))
+        t1_lines = t1_printed.getvalue().splitlines()
+        check("t1/main-refuse-line",
+              (t1_code, [line.endswith(":2: HARD T1: task line asks to remove a test and the brief has no "
+                                       "COVERAGE-ACCOUNTING: line or no AUTHORIZATION: line with text after it: "
+                                       "TASK: remove the flaky test.") for line in t1_lines[:-1]],
+               t1_lines[-1].startswith("REFUSE: family alpha: a task line asks to remove a test")
+               and t1_lines[-1].endswith(REMOVAL_HINT)),
+              (EXIT_REFUSE, [True], True))
+    finally:
+        shutil.rmtree(t1_tmp, ignore_errors=True)
     w1_tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-w1-"))
     try:
         with open(w1_tmp / "brief.md", "w", encoding="utf-8") as handle:
@@ -7351,10 +7567,10 @@ def self_test(report_path=None):
           [p8_warned] * len(P8_TEMPLATE_ASKED))
     check("p8/empty-cells-quiet", _outcome(P8_EMPTY_CELLS, "alpha"), (0, []))
     check("p8/valued-cells-warned", _outcome(P8_VALUED_CELLS, "alpha"), p8_warned)
-    # the exit section names every rule that can refuse (each HARD rule), P7 included
+    # the exit section names every rule that can refuse (each HARD rule), P7 and T1 included
     check("p8/exit-section-hard-rules",
           re.search(r"at least one HARD hit \(([^)]*)\)", " ".join(__doc__.split())).group(1),
-          "S1, S2, S3, P2, P5, P6, P7 or W1")
+          "S1, S2, S3, P2, P5, P6, P7, W1 or T1")
     check("p8/application-fields-ok", [_outcome(text, "alpha") for text in P8_APPLICATION_FIELDS],
           [(0, [])] * len(P8_APPLICATION_FIELDS))
     check("p8/harness-actions-ok", [_outcome(text, "alpha") for text in P8_HARNESS_ACTIONS],
@@ -9223,7 +9439,26 @@ def self_test(report_path=None):
                 lambda data: data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:2], "replace")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 270)
+    # T1: the rule, its verbs, its objects, its fillers, its cure, its prohibition and its description each patched
+    # out flips its fixture
+    t1_task = "TASK: remove the flaky test.\n"
+    check("revert/t1-red", *flip([code(t1_task)], [0], rule_t1=nothing))
+    check("revert/t1-verbs-red", *flip([code(t1_task), code("TASK: drop one check.\n")], [0, 0],
+                                       T1_VERBS=frozenset()))
+    check("revert/t1-objects-red", *flip([code(t1_task), code("TASK: delete the assertion.\n")], [0, 0],
+                                         T1_OBJECTS=frozenset()))
+    check("revert/t1-fillers-red", *flip([code(t1_task)], [0], T1_FILLERS=frozenset()))
+    check("revert/t1-cure-red", *flip([code(t1_task)], [0], t1_accounted=lambda lines: True))
+    check("revert/t1-cure-both-red", *flip([code(t1_task + "AUTHORIZATION: decision 7\n")], [0],
+                                           T1_CURE_LABELS=("AUTHORIZATION:",)))
+    check("revert/t1-prohibition-red", *flip([code("TASK: never remove a test.\n")], [1],
+                                             t1_prohibited=lambda words, index: False))
+    check("revert/t1-description-red", *flip([code("TASK: removing a check is a reduction.\n")], [1],
+                                             t1_described=lambda words, verb, obj: False))
+    check("revert/t1-clause-boundary-red", *flip([code("TASK: do not stop early; remove the test.\n")], [0],
+                                                 t1_words=lambda line, real=t1_words: [
+                                                     (word, False) for word, _ in real(line)]))
+    check("revert/every-flip-ran", len(flipped), 279)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
