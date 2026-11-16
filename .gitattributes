@@ -846,6 +846,7 @@ tools/check_child_status_coverage.py text eol=lf
 tools/check_ci_parity.py text eol=lf
 tools/check_cited_standards.py text eol=lf
 tools/check_clauses.py text eol=lf
+tools/check_commit_claims.py text eol=lf
 tools/check_crosswalk.py text eol=lf
 tools/check_dangerous_api.py text eol=lf
 tools/check_derived_command_parameters.py text eol=lf

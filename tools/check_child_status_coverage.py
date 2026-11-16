@@ -454,6 +454,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_byte_canon.py",
     "tools/check_ci_parity.py",
     "tools/check_clauses.py",
+    "tools/check_commit_claims.py",
     "tools/check_crosswalk.py",
     "tools/check_entry_guard.py",
     "tools/check_footer.py",
