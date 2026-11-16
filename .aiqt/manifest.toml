@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "25e1cce37ec9836d954dc65973e2a9aeabd6c9f4e3141161933ba546e887dd40"
+tree-sha256 = "98753d2b7697e4af544051d0a4c80a900413efcd8972a4887a87585eb01bd1cd"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4122,8 +4122,8 @@ sha256 = "50ba7641dfc3dcdae1618dbfc7398ce8402f57574ed7279081d5e041be28abbd"
 
 [[sources]]
 path = "tools/_site_markup.py"
-bytes = 12241
-sha256 = "34bf94394121bf9421539b5a773f3895f268f5aa0485523062064387f2288972"
+bytes = 12267
+sha256 = "995cf47effde93e0307f5db9a49cb8365415e9fd6c1d88a58c750929b3b0aad5"
 
 [[sources]]
 path = "tools/_standards.py"

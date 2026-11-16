@@ -132,8 +132,9 @@ class ElementRule:
         problem = self._judge("<{}>".format(tag), tag, written)
         literal = literal_in_start_tag(written) if problem is None else None
         if literal is not None:
+            _, where = self._context()
             problem = "<{}>{} with a literal {!r} inside its start tag (an attribute value writes it as {})".format(
-                tag, self._context()[1], literal, "&lt;" if literal == "<" else "&gt;")
+                tag, where, literal, "&lt;" if literal == "<" else "&gt;")
         if self.page and not closed and tag == SVG_ROOT:
             self.svg += 1
         if self.page and self.head and not closed and tag in _HEAD_RAW_TEXT:
