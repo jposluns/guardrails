@@ -144,9 +144,10 @@ INTERACTIVE = {"a", "button"}
 TOUCH_ICON_REL = "apple-touch-icon"
 # The markup constructs html.parser and a browser can end at different places (_site_markup.split_constructs,
 # the definition tools/gen_draft_site.py also reads): html.parser (3.14) reads "<![CDATA[" as a CDATA section
-# that ends at "]]>" where a browser in HTML content ends "<![" at the first ">", and it keeps a comment opened
-# at "<!-->" or "<!--->" open to the next "-->" where a browser ends each at once, so a link after such a
-# construct is live in a browser yet never reaches handle_starttag here. Each one in the text a Page is fed (any
+# that ends at "]]>" where a browser in HTML content ends "<![" at the first ">", and some 3.14 patch releases
+# keep a comment opened at "<!-->" or "<!--->" open to the next "-->" where a browser ends each at once, so a
+# link after such a construct can be live in a browser yet never reach handle_starttag here. The scan is
+# lexical, so the finding does not depend on the patch release. Each one in the text a Page is fed (any
 # "<!" but an ordinary comment and "<!doctype html>", any "<?", any "</" not followed by an ASCII letter) is a
 # structural finding wherever it sits, on every page, live or generated; an ordinary comment's text is scanned
 # too, so a "<!--" inside an attribute value cannot hide a later construct. A generated page is also held to
@@ -1400,9 +1401,10 @@ def _card_self_test(quiet):
 
 def _markup_declaration_self_test(quiet):
     """The construct rule of Page (_site_markup.split_constructs): html.parser reads "<![CDATA[" up to "]]>"
-    while a browser ends "<![" at the first ">", and it keeps a comment opened at "<!-->" or "<!--->" open to
-    the next "-->" while a browser ends each at once, so a link after either is live in a browser but never
-    read here; each such construct is a finding, with its line, on a live page and a generated one. The same
+    while a browser ends "<![" at the first ">", and some patch releases keep a comment opened at "<!-->" or
+    "<!--->" open to the next "-->" while a browser ends each at once, so a link after either can be live in a
+    browser but never read here; each such construct is a finding, with its line, on a live page and a
+    generated one, whichever way the running html.parser ends it. The same
     text escaped ("&lt;![") and an ordinary comment are no finding, and the link after them is read."""
     import tempfile
 
@@ -1439,9 +1441,12 @@ def _markup_declaration_self_test(quiet):
     page = read('<p><!-- x > --> <a href="/elsewhere/">v</a></p>')
     check("page/comment-before-anchor-passes", page.tag_findings == [] and page.links == [("/elsewhere/", 1)],
           (page.tag_findings, page.links))
-    # An abrupt comment ("<!-->", "<!--->") ends at once in a browser; html.parser keeps it open to the next
-    # "-->", hiding the anchor and the script between. Each is a finding on a live page and on a generated
-    # template page; the ordinary comment twin is none, and the anchor after it is read.
+    # An abrupt comment ("<!-->", "<!--->") ends at once in a browser. Whether html.parser keeps it open to
+    # the next "-->" (hiding the anchor and the script between) or ends it at once as a browser does depends on
+    # the Python patch release, so the row does not assert what the parser reads after it: the finding comes
+    # from the lexical scan (split_constructs), not from the parser, and is required on a live page and on a
+    # generated template page on every release. The ordinary comment twin is none, and the anchor after it is
+    # read.
     hidden = '<a href="HTTP://example.test/v">v</a><script>alert(1)</script>-->'
     for name, opener in (("page/abrupt-comment-hidden-anchor-fails", "<!-->"),
                          ("page/abrupt-dash-comment-hidden-anchor-fails", "<!--->")):
@@ -1450,7 +1455,7 @@ def _markup_declaration_self_test(quiet):
         live, generated = read(text), Page(template=True)
         generated.feed(text)
         generated.finalize()
-        check(name, want in live.tag_findings and want in generated.tag_findings and live.links == [],
+        check(name, want in live.tag_findings and want in generated.tag_findings,
               (live.tag_findings, generated.tag_findings, live.links))
     page = read('<title>t</title>\n<p>x</p><!-- x --><a href="HTTP://example.test/v">v</a>')
     check("page/ordinary-comment-anchor-read-passes",
