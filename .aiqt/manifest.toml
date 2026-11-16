@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "6d83cece88ae09a85c4e25daa1f882ca39371ba439ed62ffc30e40afcd8d92ee"
+tree-sha256 = "c2c662e5dcbc0900762fda0ddd96c73f593af9a35196e598c62d31b16baa2e73"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4572,8 +4572,8 @@ sha256 = "e3deb7d09eb5872fc676b3b8e17d7018944fd8d3cac45855845b9265b8b11e11"
 
 [[sources]]
 path = "tools/gen_hooks.py"
-bytes = 277563
-sha256 = "c48c6f21f0f682f28f89c225fa1488bd656a49be77c00f9a658556636c6f992c"
+bytes = 278254
+sha256 = "4e5a1b9ab0a1c40991873ebfaaed129f648c980dada13fd389d5b87871c92d61"
 
 [[sources]]
 path = "tools/gen_manifest.py"
