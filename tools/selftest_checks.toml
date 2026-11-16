@@ -2830,6 +2830,23 @@ expected-check-ids = [
   "exit/git-prose-loader-filter-0",
   "revert/short-name-after-inline-token-red",
   "revert/git-prose-loader-filter-red",
+  # ---------- change shape (--change-shape) ----------
+  "shape/clean-raise-0",
+  "shape/unchanged-0",
+  "shape/lower-only-0",
+  "shape/stray-whitespace-other-line-1",
+  "shape/second-entry-1",
+  "shape/missing-entry-1",
+  "shape/unreadable-base-2",
+  "shape/declared-exception-0",
+  "shape/undeclared-other-line-1",
+  "shape/stale-declaration-1",
+  "shape/declared-exception-keeps-entry-rule-1",
+  "revert/shape-stray-whitespace-red",
+  "revert/shape-second-entry-red",
+  "revert/shape-missing-entry-red",
+  "revert/shape-unreadable-base-red",
+  "revert/shape-declaration-binding-red",
 ]
 
 [[suite]]
