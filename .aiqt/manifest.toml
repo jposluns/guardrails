@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "a6f4b64a3462ea338eb873d1d3428a398a853f3beb1b1833e2190e2a1f451d4b"
+tree-sha256 = "1adc06b06b903f826f4214a78587c9116b0d1b70850a47fe275ab87caa5a6276"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4162,8 +4162,8 @@ sha256 = "670497debf8f21b516b24f4d4647f9ac0f2b165a7cd930f7a5d67e3c8f7b5ed0"
 
 [[sources]]
 path = "tools/check_baseline_pin.py"
-bytes = 51056
-sha256 = "f56cbc628bcb60b74689c5dbbfee4120055ff3ad58f7f2730caca339bfd972b9"
+bytes = 51703
+sha256 = "3702fb354574ee887f1357e48b9f1557140ce465f2560824aca0098a75cbc744"
 
 [[sources]]
 path = "tools/check_branch_root.py"
@@ -4222,8 +4222,8 @@ sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 136176
-sha256 = "62d7ed91c139d642001513d31dd3d1fb1a867752462d341796bd3de06b76df44"
+bytes = 138738
+sha256 = "49100eede30034ae13f5bc222f8f69bfee71ab6f9b6583e3ea047961772a8cbd"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
@@ -4697,8 +4697,8 @@ sha256 = "85af66ecb238a3221b6e0b5834dbbc891a37487b1fa6a8d113e8ee6ce0f23a0d"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 242239
-sha256 = "da115f2f00db009e868e3d50afacbc8ade3bca28d67311014fccaea874dd54df"
+bytes = 242273
+sha256 = "2e805a2a50fedb76ee526805d7d4b26f4636571f81672a5b8927a1f8dfbfc489"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

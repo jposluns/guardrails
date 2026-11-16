@@ -611,6 +611,20 @@ def _self_test():
         "{}: parent folder {} is a symbolic link or not a directory".format(FIXTURE_ROOT, top_rel)],
           (findings, errors))
 
+    # The folder just above the copy root (site/draft/assets) as a link to a real folder holding the exact
+    # copy: red if the parent check skips the last parent before the root.
+    middle_rel = FIXTURE_ROOT.rsplit("/", 1)[0]
+
+    def _link_middle(tmp):
+        real = tmp / "elsewhere-middle"
+        os.rename(tmp / middle_rel, real)
+        os.symlink(real, tmp / middle_rel)
+
+    findings, errors = _scan_case(mutate=_link_middle)
+    check("refuse/symlink-middle-parent", errors == [] and findings == [
+        "{}: parent folder {} is a symbolic link or not a directory".format(FIXTURE_ROOT, middle_rel)],
+          (findings, errors))
+
     def _fifo(tmp):
         os.mkfifo(tmp / FIXTURE_ROOT / "pipe")
 

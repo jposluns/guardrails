@@ -172,9 +172,10 @@ _TABLE_PART_START = frozenset({"caption", "col", "colgroup", "tbody", "td", "tfo
 # 13.2.4.1): searching down from the current node, the first of these decides whether a table is open.
 _TABLE_CONTEXT = frozenset({"table", "caption", "colgroup", "tbody", "thead", "tfoot", "tr", "td", "th",
                             "template"})
-# Void elements never go on the stack; a self-closing slash on any other HTML element is ignored.
-_VOID = frozenset({"area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img", "input",
-                   "keygen", "link", "meta", "param", "source", "track", "wbr"})
+# Void elements never go on the stack; a self-closing slash on any other HTML element is ignored. The "in
+# body" mode reads an <image> start tag as <img> (13.2.6.4.7), so it is void too.
+_VOID = frozenset({"area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "image", "img",
+                   "input", "keygen", "link", "meta", "param", "source", "track", "wbr"})
 # The special category (13.2.4.2): an end tag outside the rules above stops at one of these, so it never pops
 # a <p>.
 _SPECIAL = frozenset({
@@ -1034,6 +1035,12 @@ def _self_test_cases():
     for tag in ("html", "caption"):
         region_rows.append(("the About link after an enclosing </li> past an ignored <{}> is missing".format(tag),
                             '<ul><li><p class="about">x<{}></li>'.format(tag) + link, "missing"))
+    # "in body" reads an <image> start tag as <img>, a void element. The parser at 4b322f9e pushed it, so it
+    # kept </form> from popping the About <p> and a landing page with no disclosure link in its About
+    # paragraph passed; html5lib 1.2 pops the paragraph. The <img> row is its control.
+    for tag in ("image", "img"):
+        region_rows.append(("the About link after a </form> past a void <{}> is missing".format(tag),
+                            '<form><p class="about">x<{}></form>'.format(tag) + link, "missing"))
     region_rows.append(("a link on each side of an ignored <th> leaves one in the region",
                         '<div><p class="about">' + link + '<th></div>' + link, "ok"))
     region_rows.append(("the About link after an enclosing </div> past a <td> ignored in a template's body",
@@ -1057,6 +1064,13 @@ def _self_test_cases():
                             '<div><p class="about">' + link + '<{0}></div></{0}>'.format(tag) + link, "two"))
         region_rows.append(("an enclosing </li> past an open <{}> leaves 2 links in the region".format(tag),
                             '<ul><li><p class="about">' + link + '<{0}></li></{0}>'.format(tag) + link, "two"))
+    # <caption>, <td> and <th> as default scope boundaries. A <div> straight in a <table> is foster-parented,
+    # and the parser pops it at the next cell or caption (clearing the stack back to a table context), so
+    # the </div> after the paragraph is ignored and both links stay in it, as html5lib 1.2 places them.
+    # This model keeps the <div> on its stack, so only the cell or caption above it stops that </div>.
+    for tag in ("caption", "td", "th"):
+        region_rows.append(("a </div> past an open <{}> leaves 2 links in the region".format(tag),
+                            '<table><div><{}><p class="about">'.format(tag) + link + '</div>' + link, "two"))
     region_rows += [
         ("the About link after </div> past an enclosing <td> is found",
          '<div><table><tr><td><p class="about">x</div>' + link, "ok"),
@@ -1074,6 +1088,11 @@ def _self_test_cases():
          '<p class="about">x<button></p>' + link, "ok"),
         ("the About link after </tr> past an enclosing inner <table> is found",
          '<table><tr><td><table><p class="about">x</tr>' + link, "ok"),
+        # <template> as a table scope boundary: the </td> search stops at the template opened inside the
+        # paragraph, and </template> then pops only the template. html5lib 1.2 does not model the "in
+        # template" mode, so this row follows the spec's rule that the mode ignores the </td>.
+        ("a </td> past an open <template> leaves 2 links in the region",
+         '<table><td><p class="about">' + link + '<template></td></template>' + link, "two"),
         ("the About link after </template> past an open <object> is missing",
          '<template><object><p class="about">x</template>' + link, "missing"),
         ("the About link inside a self-closed <p class=\"about\"/> is found",
@@ -1103,6 +1122,19 @@ def _self_test_cases():
         got = check_site_pages(pages, frozenset(), DISCLOSURE_HREF, "site", staged)
         if got != sorted(expected):
             failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
+    # The About parser itself, on the hrefs it collects. An <image> is void like <img>, so </form> pops the
+    # paragraph and no About anchor follows, as html5lib 1.2 places the link (red at 4b322f9e).
+    parser_cases = [
+        ("About parser: no About anchor after a </form> past an <image>",
+         '<form><p class="about">x<image></form><a href="/t">', []),
+        ("About parser: no About anchor after a </form> past an <img>",
+         '<form><p class="about">x<img></form><a href="/t">', []),
+    ]
+    for label, text, expected in parser_cases:
+        parser = _AboutAnchors()
+        parser.feed(text)
+        if parser.hrefs != expected:
+            failures.append("{}: expected {} got {}".format(label, expected, parser.hrefs))
     # The same partition on the opf/site root: live opfiles.ai pages keep the relative ./disclosure nav
     # rule, and opf/site/draft/ follows the draft rule (the landing page's About link, none elsewhere).
     opf_nav = '<nav><a href="./disclosure">Disclosure</a></nav>'
@@ -1451,12 +1483,12 @@ def _self_test_cases():
         for f in failures:
             print("  " + f)
         return 1
-    print("PASS: check_footer self-test ({} check_pages cases + {} draft-rule cases + {} opfiles draft-rule "
-          "cases + {} promoted draft-rule cases + {} staged and promoted template cases + run() exit-code legs + "
-          "7 declaration cases + {} #378 close-vector runs + "
+    print("PASS: check_footer self-test ({} check_pages cases + {} draft-rule cases + {} About parser cases + "
+          "{} opfiles draft-rule cases + {} promoted draft-rule cases + {} staged and promoted template cases + "
+          "run() exit-code legs + 7 declaration cases + {} #378 close-vector runs + "
           "{} close-vector guard cases + {} argument cases)".format(
-              len(cases), len(site_cases), len(opf_cases), len(promoted_cases), len(state_cases), close_runs,
-              guard_cases, len(_ARGV_CASES)))
+              len(cases), len(site_cases), len(parser_cases), len(opf_cases), len(promoted_cases),
+              len(state_cases), close_runs, guard_cases, len(_ARGV_CASES)))
     return 0
 
 
