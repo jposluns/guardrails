@@ -1,7 +1,7 @@
 # Hooks preview
 
 This directory is a preview channel for AIQT Guardrails hooks that are not yet part of the pack's plugin
-(two of them now also have a counterpart in the plugin; see the section Also in the pack's plugin below).
+(`future-stamp-write.py` now also has a counterpart in the plugin; see the section Also in the pack's plugin below).
 Each hook is one self-contained Python file that you can download, check, test, and switch on in Claude
 Code by hand. This page is written so that you can hand it to your AI coding assistant and ask it to
 install a hook for you: every step below is a command it can run, and every check tells it when to stop.
@@ -183,21 +183,20 @@ the authority, and the summary further down this page only points to it.
 
 ## Also in the pack's plugin
 
-Since plugin version 0.6.0, the pack's Claude Code plugin, `aiqt-guardrails-hooks`, carries the controls of
-`clock-inject.py` and `future-stamp-write.py` as two handlers of its own hook dispatcher, `clock_inject` and
-`future_stamp_write` in `.aiqt/core/hooks/scripts/aiqt_hooks.py`. The two files here stay published
-unchanged, and they behave differently from the plugin's handlers:
+Since plugin version 0.6.0, the pack's Claude Code plugin, `aiqt-guardrails-hooks`, carries the control of
+`future-stamp-write.py` as a handler of its own hook dispatcher, `future_stamp_write` in
+`.aiqt/core/hooks/scripts/aiqt_hooks.py`. The file here stays published unchanged, and it behaves
+differently from the plugin's handler:
 
 - The plugin's `future_stamp_write` never denies. A write that would record a future-dated timestamp into a
   declared store gets one warning line (a `systemMessage` of at most 100 characters), and the call goes
   ahead. The `future-stamp-write.py` here denies that write.
-- The plugin's handlers have no worker skip and read no `ORCH_` spelling: they read only `AIQT_LEASE_FILE`
-  and `AIQT_STORE_ROOT`. The two files here keep the worker skip and the `ORCH_` fallback.
-- The plugin registers its clock line on `PostToolUse` only, so a failed tool call gets none.
+- The plugin's handler has no worker skip and reads no `ORCH_` spelling: it reads only `AIQT_STORE_ROOT`.
+  The file here keeps the worker skip and the `ORCH_` fallback.
 
-Install one form of each of these two hooks, not both. If you use the plugin, remove any `settings.json`
-entry you made from this page for `clock-inject.py` or `future-stamp-write.py`; otherwise each tool call
-gets two clock lines, and a future-dated store write is both warned on and denied.
+Install one form of this hook, not both. If you use the plugin, remove any `settings.json` entry you made
+from this page for `future-stamp-write.py`; otherwise a future-dated store write is both warned on and
+denied.
 
 ## Integrity
 
@@ -209,13 +208,13 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `char-policy-write.py` | `6529312e9dadd856353294d8774f09f02525f1a65b71598d88843140617894dc` | [char-policy-write.py](char-policy-write.py) |
-| `clock-inject.py` | `8b1764f13377d4d80154ada6ef09179a5c2f489505bb9b521e71275c41c02967` | [clock-inject.py](clock-inject.py) |
+| `clock-inject.py` | `b796beaf2ae352bb55fab5ef5e2ca76d160b2a2c46fe18c9f7b76e58daecb3ca` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `5f8ffc633993ebb9b84b1c858b5d03fa94511c30cc1624f6c2813a0e3268a9fb` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `be125990e7ba4505821be61d832bcac9e7280cca82488f1690c99cce6bda576d` | [future-stamp-write.py](future-stamp-write.py) |
 | `pattern-self-match.py` | `84bcb120cc1d30df845e4c2f77d7033a1bb9af473b9a0ffd336a622ae67fe6cd` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `6ea79f2809054e1458f679e4219db8e45188f5f1f63eeccf401aa95478fce1d6` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `319f4de2aff71cca9d1cf33ae990c264982141ca38ec44e939780a0961996f66` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `74d119261117b20ca97bfd521d412bcfe0a00e7ee230948dc2b2619f40c676a6` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `fcfdab3d99fe6e0868f27d10fad7fa691c5a5f58ad1f2242e8721e1df4f5312b` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `da1917e92cc4dc93585ee6eabac75040926ba3068e5241892dfb87fe83f40842` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `5eedf3c960cdc34f35504ab6ea0935da31a0b3d9bf14126c8e8ee5a4c112b4e0` | [ungated-record.py](ungated-record.py) |
 
@@ -811,8 +810,8 @@ and checks helper-session calls.
 
 This is a preview channel. When a hook here becomes part of the pack's plugin, it is removed from this
 directory and its row is replaced by a pointer to where it now lives, with one exception so far:
-`clock-inject.py` and `future-stamp-write.py` stay published here beside the plugin's handlers, as the
-section Also in the pack's plugin describes. When every hook has moved, this directory is removed.
+`future-stamp-write.py` stays published here beside the plugin's handler, as the section Also in the
+pack's plugin describes. When every hook has moved, this directory is removed.
 
 A change to any hook here ships with new checksums on this page and a matching SHA256SUMS, all in the
 same change.

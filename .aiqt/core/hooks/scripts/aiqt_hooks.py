@@ -18,7 +18,6 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   commit_msg_subst    PreToolUse  sectvl  deny shell substitution in a git commit argument
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
-  clock_inject        PostToolUse tstamp  add the real clock (and the session elapsed time) to the model context
   future_stamp_write  PreToolUse  tstamp  WARN (never deny) on a future-dated time written into a declared store
 
 Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
@@ -280,7 +279,7 @@ import sys
 # streams: with a sys.stderr whose write works but whose flush fails, `raise SystemExit` here ended
 # as the interpreter's own exit 120 instead of the refusal exit. Nothing runs before this guard, so
 # os._exit discards no other buffered output; the warning itself is flushed before the exit.
-FLOOR_FAIL_OPEN_MODES = ("clock_inject", "clock_inject_failure", "clock_inject_post", "diff_wall_stop",
+FLOOR_FAIL_OPEN_MODES = ("clock_inject_failure", "clock_inject_post", "diff_wall_stop",
                          "future_stamp_write", "inline_errexit", "orch_dispatch_ledger",
                          "orch_lease_heartbeat_post", "orch_lease_heartbeat_stop", "orch_prompt_stamp",
                          "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle")
@@ -37672,168 +37671,11 @@ def write_scope_guard(data):
                         .format(tool_name, slice_name))                                      # row 21
 
 
-# --- clock hooks: clock_inject (PostToolUse) and future_stamp_write (PreToolUse, warn only) ---------------
-# Both were standalone scripts in the hand-installed preview channel; here they are dispatcher handlers (the
-# .preview/ copies stay published as they are, with their own older behaviour, and are not rendered into
-# the plugin). Every module-level name of the two former scripts carries a _clk_/_CLK_/_Clk or
-# _fsw_/_FSW_/_Fsw prefix here, so neither collides with the rest of this module.
-
-_CLK_LEASE_MAX_BYTES = 1 << 20
-_CLK_SESS_RE = re.compile(r"[A-Za-z0-9]{1,32}-([0-9]{8}T[0-9]{6}Z)")
-_CLK_EVENTS = ("PostToolUse", "PostToolUseFailure")
-
-
-def _clk_cfg(name, env=None):
-    """AIQT_<name>, or None when it is unset; no other spelling is read, and callers treat an empty value as
-    not configured."""
-    env = os.environ if env is None else env
-    return env.get("AIQT_" + name)
-
-
-# ---- clock_inject: lease / elapsed (the same code as .preview/stamp-truth-stop.py's; the clk-parity row of
-# tools/selftest_aiqt_hooks.py holds the two copies equal) ----
-
-def _clk_read_regular(path, limit):
-    """Bytes (at most `limit`) of a REGULAR file, or None. Opened non-blocking so a FIFO cannot stall us."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0))
-    except (OSError, TypeError, ValueError):
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        chunks, got = [], 0
-        while got < limit:
-            b = os.read(fd, min(1 << 16, limit - got))
-            if not b:
-                break
-            chunks.append(b)
-            got += len(b)
-        return b"".join(chunks)
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
-
-
-def _clk_lease_file():
-    """Return the configured lease file path (env AIQT_LEASE_FILE, see _cfg), or None when none is set."""
-    env = _clk_cfg("LEASE_FILE")
-    if env:
-        return env
-    return None
-
-
-_CLK_LEASE_FIELD_RE = re.compile(r"[ \t]*(?:[-*][ \t]+)?(\*\*)?(Active-session|Session-start-UTC):(?(1)\*\*)(.*)")
-_CLK_START_VALUE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z|[0-9]{8}T[0-9]{6}Z")
-_CLK_HEADING_RE = re.compile(r"[ \t]{0,3}#{1,6}(?:[ \t]|$)")
-_CLK_TRANSCRIPT_PREFIX_BYTES = 256 << 10
-
-
-def _clk_utc_field(value):
-    """Aware UTC datetime for a lease time value, YYYYMMDDTHHMMSSZ or YYYY-MM-DDTHH:MM:SSZ, else None."""
-    if not isinstance(value, str) or not _CLK_START_VALUE_RE.fullmatch(value):
-        return None
-    try:
-        return datetime.datetime.strptime(value.replace("-", "").replace(":", ""), "%Y%m%dT%H%M%SZ").replace(
-            tzinfo=datetime.timezone.utc)
-    except ValueError:
-        return None
-
-
-def _clk_transcript_start(path):
-    """Earliest parseable top-level `timestamp` (UTC; a naive value is read as UTC) among the complete JSONL
-    records in the first TRANSCRIPT_PREFIX_BYTES of a REGULAR transcript file, else None. Same read posture as
-    the lease (non-blocking open, regular files only, bounded read). A record the bound may have cut is not
-    parsed, and only a record holding the bytes `"timestamp"` is parsed at all."""
-    if not isinstance(path, str) or not path:
-        return None
-    data = _clk_read_regular(path, _CLK_TRANSCRIPT_PREFIX_BYTES)
-    if not data:
-        return None
-    recs = data.split(b"\n")
-    if len(data) >= _CLK_TRANSCRIPT_PREFIX_BYTES:
-        recs.pop()  # the last piece may be cut by the bound
-    best = None
-    for rec in recs:
-        if b'"timestamp"' not in rec:
-            continue
-        try:
-            entry = json.loads(rec)
-            ts = entry.get("timestamp") if isinstance(entry, dict) else None
-            if not isinstance(ts, str):
-                continue
-            dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            dt = dt.replace(tzinfo=datetime.timezone.utc) if dt.tzinfo is None else dt.astimezone(
-                datetime.timezone.utc)
-        except (ValueError, TypeError, OverflowError, RecursionError):
-            continue
-        if best is None or dt < best:
-            best = dt
-    return best
-
-
-def _clk_lease_start(path, transcript=None):
-    """UTC session start, or None. Only the FIRST Active-session field (`Active-session:`, `**Active-session:**`,
-    or either after a `-` or `*` bullet) is read. Precedence: (a) its id's time when the value is
-    <label>-YYYYMMDDTHHMMSSZ; (b) when the id carries no time, the FIRST Session-start-UTC field (same forms)
-    of the lease's header section (the file up to the first heading after the Active-session field); (c)
-    else the earliest timestamp of `transcript`, when given; (d) else None. An inactive lease (`none`, any
-    case, or an empty value), a well-formed id with an impossible time, no Active-session field, or an
-    unreadable lease is None with no fallback."""
-    if not path:
-        return None
-    data = _clk_read_regular(path, _CLK_LEASE_MAX_BYTES)
-    if data is None:
-        return None
-    active, start = False, None  # start: the text of the first Session-start-UTC value seen
-    for line in data.decode("utf-8", "replace").splitlines():
-        if active and _CLK_HEADING_RE.match(line):
-            break  # the header section ends at the first heading after the Active-session field
-        m = _CLK_LEASE_FIELD_RE.match(line)
-        if not m:
-            continue
-        value = m.group(3).strip()
-        if m.group(2) == "Session-start-UTC":
-            if start is None:
-                start = value
-                if active:
-                    break
-            continue
-        if active:
-            continue  # only the FIRST Active-session field is read
-        if not value or value.lower() == "none":
-            return None  # inactive: no elapsed, and no fallback
-        sess = _CLK_SESS_RE.fullmatch(value)
-        if sess:
-            return _clk_utc_field(sess.group(1))
-        active = True  # an active id that carries no time
-        if start is not None:
-            break
-    if not active:
-        return None
-    got = _clk_utc_field(start)
-    return got if got is not None else _clk_transcript_start(transcript)
-
-
-def _clk_fmt_elapsed(delta):
-    """HH:MM (hours may exceed 24) for a non-negative timedelta, else None."""
-    secs = int(delta.total_seconds())
-    if secs < 0:
-        return None
-    return f"{secs // 3600:02d}:{(secs % 3600) // 60:02d}"
-
-
-def _clk_clock_line(now_utc, start=None):
-    local = now_utc.astimezone()
-    line = (f"CLOCK (read by hook, authoritative): {local.strftime('%Y-%m-%d %H:%M:%S')} {local.tzname()} | "
-            f"{now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}")
-    if start is not None:
-        el = _clk_fmt_elapsed(now_utc - start)
-        if el is not None:
-            line += f" | session elapsed {el}"
-    return line
-
+# --- future_stamp_write (PreToolUse, warn only) ----------------------------------------------------------
+# It was a standalone script in the hand-installed preview channel; here it is a dispatcher handler (the
+# .preview/ copy stays published as it is, with its own older behaviour, and is not rendered into the
+# plugin). Every module-level name of the former script carries a _fsw_/_FSW_/_Fsw prefix here, so none
+# collides with the rest of this module.
 
 _FSW_UTC = datetime.timezone.utc
 _FSW_US = 1_000_000
@@ -40582,98 +40424,6 @@ def _fsw_cfg(name, env=None):
     return env.get("AIQT_" + name)
 
 
-def clock_inject(data):
-    """tstamp, PostToolUse (all tools; PostToolUseFailure too where a host registers it): inject the real clock into
-    the assistant's context.
-
-    Motivated by an assistant composing console timestamps and "Session elapsed HH:MM" footers from its own
-    sense of time instead of reading the clock, drifting up to 4h40m ahead (timestamp-from-clock;
-    claims-rest-on-observation). After a tool call that ran, it emits ONE short additionalContext line read from
-    the process clock, for example:
-
-        CLOCK (read by hook, authoritative): 2026-09-23 13:45:02 EDT | 2026-09-23T17:45:02Z | session elapsed 03:27
-
-    so a fresh authoritative reading is the most recent time value in context.
-
-    Coverage. Registered under PostToolUse it fires after a tool call that SUCCEEDED; registered under
-    PostToolUseFailure it fires after a tool call that started and FAILED. The emitted hookEventName matches the
-    incoming payload's hook_event_name (PostToolUseFailure when that is the event, otherwise PostToolUse), as the
-    hooks contract requires. Both registrations are needed for both outcomes. Neither event fires for a tool
-    call rejected before execution (an unknown tool, input failing validation, or a permission denial), so such
-    calls, and any stretch of prose with no tool call, see no fresh reading.
-
-    Elapsed resolution. The lease file is env AIQT_LEASE_FILE when it is set to a non-empty value (no other
-    spelling is read, see _cfg); otherwise there is NO lease and the elapsed segment is
-    omitted. No lease is derived from the project directory, the payload cwd, or the process cwd: set
-    AIQT_LEASE_FILE (absolute) per session to enable elapsed.
-
-    Lease start (shared with the preview Stop hook .preview/stamp-truth-stop.py; the clk-parity row of
-    tools/selftest_aiqt_hooks.py holds the two copies equal). A lease FIELD line is `Name: value`, `**Name:** value`, or either form after a `-` or `*` list
-    bullet, with optional surrounding whitespace; the name is case-sensitive. ONLY the FIRST Active-session field
-    is read, and its value decides, in this precedence:
-      a. `<label>-YYYYMMDDTHHMMSSZ`, where <label> is 1 to 32 characters of [A-Za-z0-9] (for example `sess-` or
-         `S88-`): the start is that time (an impossible time, such as month 13, is unknown with no fallback).
-      b. `none` (any case) or an empty value: the lease is INACTIVE, elapsed is unknown, and neither the
-         Session-start-UTC field nor the transcript is consulted, so an inactive lease never shows elapsed.
-      c. Any other value is an active id that carries no time (for example `sess-2026-09-23-alpha1`, or a
-         malformed id): the start is the FIRST Session-start-UTC field of the lease's header section (the file
-         up to the first markdown heading after the Active-session field), valued `YYYY-MM-DDTHH:MM:SSZ` or
-         `YYYYMMDDTHHMMSSZ`. A malformed value there falls through to d.
-      d. Else, when the payload carries transcript_path, the EARLIEST parseable top-level `timestamp` (UTC; a naive
-         value is read as UTC) among the complete JSONL records in the transcript's first 256 KiB, read with the
-         lease's posture (non-blocking open, regular files only, bounded). Only a record containing the bytes
-         `"timestamp"` is parsed. There is no cache (this hook keeps no state), so this bounded read repeats on
-         every call where it applies. Measured on the development host (2026-09-23, a full 256 KiB prefix of
-         2 KiB timestamped records): about 0.5 ms per call in-process, within the noise of the roughly 25 ms
-         the hook process takes to start and run.
-      e. Else unknown.
-    No Active-session field at all is unknown with no fallback (a project with no lease shows no elapsed). The
-    lease file is opened non-blocking, must be a regular file, and at most 1 MiB is read. When the file is absent,
-    unreadable, not regular, or the start lies in the future, the elapsed segment is omitted. Local time is the
-    process zone.
-
-    Contract: context = (0, {"hookSpecificOutput": {hookEventName, additionalContext}}, None), that JSON on
-    stdout with exit 0. This handler NEVER fails the tool: an internal error is a silent pass (_allow(): no
-    output, exit 0). As a dispatcher handler it no longer reads the payload itself: main() reads and parses it
-    first, and PostToolUse is one of FAIL_OPEN_EVENTS, so a payload main() cannot read or parse, a payload that
-    is not an object, a handler crash, a bad argv, a child exit status the probe cannot read, or a stdout that
-    cannot be written ends with exit 0 and, where main() writes one, a non-blocking systemMessage warning IN
-    PLACE OF the clock line (the former standalone script still emitted the clock line for unparseable input).
-    There is no worker bypass: no environment variable skips the handler, so a subordinate session gets the
-    clock line too. The handler writes nothing to stderr. The names this docstring uses are the former
-    script's: read each as its prefixed form in this module (_cfg as _clk_cfg, for example).
-    In-session subagents are deliberately NOT skipped (there is no agent_id check): they benefit from the true
-    time too, and this hook only adds context, it never blocks.
-
-    RESIDUAL COVERAGE. This INFORMS; it enforces nothing. The model can
-    still ignore the line or mis-copy it; no check of final prose ships with this hook. The line
-    reflects the host clock, so a wrong host clock (no NTP) is reproduced faithfully. Elapsed is only as right
-    as the lease: a lease id minted from a wrong clock, a stale id after an unclean exit, or a configured lease
-    file that belongs to another session yields a wrong or missing elapsed. No session
-    ownership of the lease is validated. The Session-start-UTC field is trusted as written: a stale value, or
-    (when the current header section holds none) one from an earlier session's lines that sit above the next
-    heading, yields a wrong elapsed. The transcript fallback measures from the transcript's FIRST entry, not the
-    lease: for a resumed or continued session, or a transcript that predates the current lease, it OVERSTATES
-    elapsed; a transcript whose first 256 KiB holds no complete record with a top-level timestamp (a huge
-    first record, say) leaves elapsed unknown. A lease field in an unrecognized form (`Active-session**:`, a `+`
-    bullet, a numbered list) is not a field, so a later line in a recognized form is read instead. The events
-    covered are exactly those listed under Coverage.
-
-    Self-test: tools/selftest_aiqt_hooks.py (the clk-* rows and the clk-unit-* checks, which carry the former
-    standalone self-test's vectors), with the deadline shape rows of clock_inject; clk-parity compares the
-    lease code shared with .preview/stamp-truth-stop.py.
-    """
-    try:
-        event = data.get("hook_event_name")
-        event = event if event in _CLK_EVENTS else "PostToolUse"
-        transcript = data.get("transcript_path") if isinstance(data.get("transcript_path"), str) else None
-        now = datetime.datetime.now(datetime.timezone.utc)
-        line = _clk_clock_line(now, _clk_lease_start(_clk_lease_file(), transcript))
-    except Exception:
-        return _allow()  # never fail the tool: an internal error is a silent pass
-    return (0, {"hookSpecificOutput": {"hookEventName": event, "additionalContext": line}}, None)
-
-
 def future_stamp_write(data):
     """tstamp, PreToolUse (Write|Edit|MultiEdit|Bash), WARN ONLY (stage bake): warn on writing a FUTURE-dated
     observed-time literal to a store.
@@ -41404,7 +41154,6 @@ HANDLERS = {
     "orch_resume_barrier": orch_resume_barrier,
     "orch_lease_heartbeat_post": orch_lease_heartbeat_post,
     "orch_lease_heartbeat_stop": orch_lease_heartbeat_stop,
-    "clock_inject": clock_inject,
     "future_stamp_write": future_stamp_write,
     "clock_inject_post": clock_inject_post,
     "clock_inject_failure": clock_inject_failure,
@@ -41451,7 +41200,6 @@ HANDLER_EVENT = {
     "orch_resume_barrier": PRETOOL,
     "orch_lease_heartbeat_post": "PostToolUse",
     "orch_lease_heartbeat_stop": "Stop",
-    "clock_inject": "PostToolUse",
     "future_stamp_write": PRETOOL_WARN_ONLY,
     "clock_inject_post": "PostToolUse",
     "clock_inject_failure": "PostToolUseFailure",

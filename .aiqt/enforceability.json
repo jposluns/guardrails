@@ -2067,15 +2067,6 @@
         {
           "class": "c",
           "default": "warn",
-          "event": "PostToolUse",
-          "id": "clock-inject",
-          "matcher": ".*",
-          "platform": "claude-code",
-          "residue": "An INFORMING hook, not an enforcement point: after a tool call that succeeded it adds one line to the assistant context, CLOCK (read by hook, authoritative): <local time> <zone> | <UTC time>, plus the session elapsed time when AIQT_LEASE_FILE names a valid lease. It blocks nothing and denies nothing; the assistant can still ignore or mis-copy the line. It reproduces the host clock and the lease faithfully, so a wrong host clock or a wrong lease gives a wrong reading, and TZ changes the local field and zone name. It is registered on PostToolUse only: a failed tool call (the PostToolUseFailure event, whose name is not yet verified against the host) gets no clock line, and neither does a tool call rejected before it ran or a stretch of prose with no tool call. The matcher .* is taken to mean every tool name; that host behaviour is not verified here. No worker-marker bypass remains, and no legacy ORCH_ variable is read, so a setup that set only ORCH_LEASE_FILE gets no elapsed segment while the preview stamp-truth-stop.py may still read that lease. It is a dispatcher handler (clock_inject in scripts/aiqt_hooks.py) on a fail-open event: the handler turns its own internal error into a silent pass, and a payload the dispatcher cannot read or parse, a payload that is not an object, a handler crash or a stdout that cannot be written ends with exit 0 and, where the dispatcher writes one, a non-blocking warning in place of the clock line, never exit 2; an interpreter that cannot start the dispatcher fails first with Python's own exit, as the dispatcher's PYTHON-FLOOR note states. On PostToolUse the tool call has already run, so no outcome undoes it. The preview copy .preview/clock-inject.py stays published with its older behaviour (a worker skip and the ORCH_ fallback); an adopter who installs it beside the plugin gets two clock lines per tool call, and the .preview README says to keep one."
-        },
-        {
-          "class": "c",
-          "default": "warn",
           "event": "PostToolUseFailure",
           "id": "clock-inject-failure",
           "matcher": ".*",

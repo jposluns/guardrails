@@ -150,14 +150,13 @@ at 64 KB, 256 KB and 1 MB within CPU-time bounds set from a measured run and the
 (a case over that gate alone is re-timed once before it fails), under a 60-second hang guard. The timer and
 timing checks run in a child process.
 
-It also covers the two clock-hook handlers (clock_inject, tstamp; future_stamp_write, tstamp, warn only), ported
-from the former standalone preview scripts (the fsw-*, clk-* and clock-* rows, _test_clock_hooks): clock_inject
-adds one clock line of model context and never blocks; future_stamp_write warns on a future-dated literal written
-into an AIQT_STORE_ROOT store and never denies, its PRETOOL_WARN_ONLY class giving it main()'s fail-open posture;
-neither honours a worker marker or an ORCH_ spelling; the former scripts' own self-tests run against the ported
-code (fsw-unit-*, clk-unit-*, less the tests of their own stdin and stdout handling, which main() now owns:
-_CLOCK_UNIT_RETIRED); the code they share with .preview/stamp-truth-stop.py is compared as syntax trees
-(clock-parity); and both handlers have deadline shape rows.
+It also covers the warn-only clock-stamp handler (future_stamp_write, tstamp), ported from the former
+standalone preview script (the fsw-* and clock-* rows, _test_clock_hooks): it warns on a future-dated literal
+written into an AIQT_STORE_ROOT store and never denies, its PRETOOL_WARN_ONLY class giving it main()'s fail-open
+posture; it honours no worker marker or ORCH_ spelling; the former script's own self-test runs against the ported
+code (fsw-unit-*, less the tests of its own stdin and stdout handling, which main() now owns:
+_CLOCK_UNIT_RETIRED); the code it shares with .preview/stamp-truth-stop.py is compared as syntax trees
+(clock-parity); and it has deadline shape rows.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
@@ -7525,9 +7524,6 @@ _DEADLINE_CASES = {
     "bash_absolute_paths": ("git_words", "redirects_many", "nest_parens", "nest_cmdsubst", "dq_case_substs",
                             "dq_case_substs_after"),
     "branch_root": ("heredocs", "git_push_words_unbal", "nest_parens", "procsubst_run_after"),
-    # clock_inject reads no tool input (its cost is the bounded lease and transcript reads), so its shapes are
-    # two of the largest payloads here; it is timed for its PostToolUse latency and must answer "context".
-    "clock_inject": ("git_words", "write_content"),
     "commit_identity": ("nest_parens", "git_words_unbal_dq"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
@@ -7588,11 +7584,8 @@ _DEADLINE_NOTE_CASES = frozenset((
     ("orch_truncation_guard", "fg_heredocs_amp"),
     # future_stamp_write warns (never denies) on a Write whose changed lines carry a future literal, at every size
     ("future_stamp_write", "fsw_store_write_after"), ("future_stamp_write", "fsw_literal_lines")))
-# The handlers whose every timed case must answer "context" (_reduce_clock_context: one clock line of model
-# context on exit 0), whatever the shape, and the environment each named handler's cases run under.
-_DEADLINE_CONTEXT_HANDLERS = frozenset(("clock_inject",))
-_DEADLINE_ENV = {"future_stamp_write": lambda cwd: {"AIQT_STORE_ROOT": cwd},
-                 "clock_inject": lambda cwd: {"AIQT_LEASE_FILE": None}}
+# The environment each named handler's cases run under.
+_DEADLINE_ENV = {"future_stamp_write": lambda cwd: {"AIQT_STORE_ROOT": cwd}}
 # The (handler, shape) cases whose known outcome outside registry scope is a silent allow, each within its
 # bound: the plain-delimiter heredoc bodies of fg_heredocs_plain (skipped data, every body closed, and no
 # `&` or quote in them, so the in-scope detector reads nothing and the note scan reads the whole command;
@@ -7829,19 +7822,18 @@ def _deadline_timed_call(call):
 def _deadline_shape_case(name, shape, size, cwd):
     """One (handler, shape, size) case, in-process under a _DeadlineWindow of _DEADLINE_HANG_SECONDS and the
     handler's _DEADLINE_ENV environment, timed by _deadline_timed_call: (cpu_seconds, wall_seconds, outcome,
-    queued_seconds), the outcome being the reduced decision (or "context" for a _DEADLINE_CONTEXT_HANDLERS
-    handler), "deadline" when the window fired, "hard-block" for an exit 2, or "crash: <type>"."""
+    queued_seconds), the outcome being the reduced decision, "deadline" when the window fired, "hard-block"
+    for an exit 2, or "crash: <type>"."""
     tool, tool_input = _DEADLINE_HASH_DETACH_SHAPES.get((name, shape), _DEADLINE_SHAPES[shape])(size, cwd)
     data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
             "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
-    reduce = _reduce_clock_context if name in _DEADLINE_CONTEXT_HANDLERS else _reduce_result
     window = aiqt_hooks._DeadlineWindow(_DEADLINE_HANG_SECONDS)
 
     def call():
         try:
             with window:
                 code, stdout_obj, _stderr = aiqt_hooks.HANDLERS[name](data)
-            return "hard-block" if code == 2 else reduce(code, stdout_obj)
+            return "hard-block" if code == 2 else _reduce_result(code, stdout_obj)
         except aiqt_hooks._HookDeadline as exc:
             if exc.args[:1] != (window,):
                 raise
@@ -7935,10 +7927,7 @@ def _deadline_shape_problems(name, shape, size, cpu, own, outcome):
     elif own > _DEADLINE_OWN_WORK_BOUND:
         problems.append("took {:.2f}s of its own work (wall-clock time less its run-queue delay), over the "
                         "{:g}s production budget".format(own, _DEADLINE_OWN_WORK_BOUND))
-    if name in _DEADLINE_CONTEXT_HANDLERS:
-        if outcome != "context":
-            problems.append("expected context, got {}".format(outcome))
-    elif (name, shape) in _DEADLINE_DENY_CASES and outcome != "deny":
+    if (name, shape) in _DEADLINE_DENY_CASES and outcome != "deny":
         problems.append("expected deny, got {}".format(outcome))
     elif (name, shape) in _DEADLINE_NOTE_CASES and outcome != "allow-note":
         problems.append("expected allow-note, got {}".format(outcome))
@@ -7992,8 +7981,7 @@ def _deadline_shape_failures(tmp):
     that size's CPU-time bound and the production budget on its own work (below), denying where the case
     carries a hazard and reaching the pinned base commit's decision on each uncertain '#' shape
     (_DEADLINE_HASH_SHAPES, which every handler runs) (_deadline_shape_verdicts: a case whose median own
-    work is over the budget fails, and a diagnostic re-run is reported beside it, never in its place). A
-    handler named here on another event (clock_inject) is held to the same bounds.
+    work is over the budget fails, and a diagnostic re-run is reported beside it, never in its place).
 
     LOAD: the CPU bounds judge the calling thread's own CPU clock (time.thread_time read inside the call,
     _deadline_timed_call), to which other threads' and children's CPU time is not directly charged. The
@@ -11684,28 +11672,11 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(found)
 
 
-# --- clock hooks: clock_inject and future_stamp_write (the dispatcher handlers ported from the former
-# standalone preview scripts) ----------------------------------------------------------------------------
-# _CLOCK_HOOK_NAMES maps each module-level name of the two former scripts to its prefixed name in aiqt_hooks;
-# the unit suites bind those names, and the parity rows read the map backwards.
+# --- clock hooks: future_stamp_write (the dispatcher handler ported from the former standalone preview
+# script) ------------------------------------------------------------------------------------------------
+# _CLOCK_HOOK_NAMES maps each module-level name of the former script to its prefixed name in aiqt_hooks; the
+# unit suite binds those names, and the parity rows read the map backwards.
 _CLOCK_HOOK_NAMES = {
-    'clk': {
-        'LEASE_MAX_BYTES': '_CLK_LEASE_MAX_BYTES',
-        'TRANSCRIPT_PREFIX_BYTES': '_CLK_TRANSCRIPT_PREFIX_BYTES',
-        '_EVENTS': '_CLK_EVENTS',
-        '_HEADING_RE': '_CLK_HEADING_RE',
-        '_LEASE_FIELD_RE': '_CLK_LEASE_FIELD_RE',
-        '_SESS_RE': '_CLK_SESS_RE',
-        '_START_VALUE_RE': '_CLK_START_VALUE_RE',
-        '_cfg': '_clk_cfg',
-        '_utc_field': '_clk_utc_field',
-        'clock_line': '_clk_clock_line',
-        'fmt_elapsed': '_clk_fmt_elapsed',
-        'lease_file': '_clk_lease_file',
-        'lease_start': '_clk_lease_start',
-        'read_regular': '_clk_read_regular',
-        'transcript_start': '_clk_transcript_start',
-    },
     'fsw': {
         'BASH_WORK_BUDGET': '_FSW_BASH_WORK_BUDGET',
         'CWD_COST': '_FSW_CWD_COST',
@@ -11853,13 +11824,11 @@ _CLOCK_HOOK_NAMES = {
 _HOOK_FILE = os.path.abspath(aiqt_hooks.__file__)
 _FSW_DOC = aiqt_hooks.future_stamp_write.__doc__
 _FSW_GLOBALS = {old: getattr(aiqt_hooks, new) for old, new in _CLOCK_HOOK_NAMES["fsw"].items()}
-# The former scripts' tests NOT carried into the unit suites, with why: each tested the script's own stdin or
+# The former script's tests NOT carried into the unit suite, with why: each tested the script's own stdin or
 # stdout handling, which the dispatcher's main() now owns (its stream-failure and payload checks above).
 _CLOCK_UNIT_RETIRED = (
     ("fsw", "test_payload_read_as_bytes", "main() reads the payload as text, not bytes"),
     ("fsw", "test_emit_rescue_failure_exits_0", "the script's own output writer, _emit_line, is gone"),
-    ("clk", "test_payload_read_as_bytes", "main() reads the payload as text, not bytes"),
-    ("clk", "test_emit_rescue_failure_exits_0", "the script's own output writer, _emit_line, is gone"),
 )
 
 
@@ -14932,337 +14901,6 @@ def _fsw_unit_suite():
     return T, _BASE
 
 
-def _clk_unit_suite():
-    """(clk-unit-*) The former standalone clock-inject.py self-test, run against the dispatcher handler's
-    code, bound as _fsw_unit_suite binds its names (lease_start to _clk_lease_start, and so on), with run_main
-    driving the dispatcher's main() for this mode. Returns (the TestCase class, None)."""
-    import inspect
-    _cfg = aiqt_hooks._clk_cfg
-    _utc_field = aiqt_hooks._clk_utc_field
-    clock_line = aiqt_hooks._clk_clock_line
-    fmt_elapsed = aiqt_hooks._clk_fmt_elapsed
-    lease_file = aiqt_hooks._clk_lease_file
-    lease_start = aiqt_hooks._clk_lease_start
-
-    import io
-    import shutil
-    import subprocess
-    import tempfile
-    import unittest
-
-    utc = datetime.timezone.utc
-    # a FIFO test's child timeout is a hang guard only (a blocking open never returns), far above the child's own
-    # run (well under a second), so the verdict never depends on the host's speed
-    HANG_TIMEOUT = 120
-    line_re = re.compile(r"^CLOCK \(read by hook, authoritative\): "
-                         r"[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} \S+ \| "
-                         r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z( \| session elapsed [0-9]{2,}:[0-9]{2})?$")
-
-    def run_main(stdin_text, env=None, argv=("clock_inject",)):
-        old_in, old_out, old_env = sys.stdin, sys.stdout, dict(os.environ)
-        sys.stdin = io.StringIO(stdin_text) if isinstance(stdin_text, str) else stdin_text
-        sys.stdout = io.StringIO()
-        try:
-            for k in ("AIQT_HOOKS_WORKER", "AIQT_LEASE_FILE", "CLAUDE_PROJECT_DIR"):
-                os.environ.pop(k, None)
-            os.environ.update(env or {})
-            rc = aiqt_hooks.main(list(argv))
-            return rc, sys.stdout.getvalue()
-        finally:
-            sys.stdin, sys.stdout = old_in, old_out
-            os.environ.clear()
-            os.environ.update(old_env)
-
-    class T(unittest.TestCase):
-        def setUp(self):
-            base = None
-            self.tmp = tempfile.mkdtemp(prefix="clk.", dir=base)
-            self.lease = os.path.join(self.tmp, "lease.md")
-            self._env = {k: os.environ.pop(k, None) for k in ("AIQT_LEASE_FILE", "CLAUDE_PROJECT_DIR")}
-
-        def tearDown(self):
-            shutil.rmtree(self.tmp, ignore_errors=True)
-            for k, v in self._env.items():
-                os.environ.pop(k, None)
-                if v is not None:
-                    os.environ[k] = v
-
-        def test_line_well_formed_with_elapsed(self):
-            now = datetime.datetime(2026, 9, 23, 17, 45, 2, tzinfo=utc)
-            ln = clock_line(now, datetime.datetime(2026, 9, 23, 14, 17, 10, tzinfo=utc))
-            self.assertRegex(ln, line_re)
-            self.assertIn("| 2026-09-23T17:45:02Z | session elapsed 03:27", ln)
-
-        def test_line_omits_elapsed_when_unknown(self):
-            ln = clock_line(datetime.datetime(2026, 9, 23, 17, 45, 2, tzinfo=utc), None)
-            self.assertRegex(ln, line_re)
-            self.assertNotIn("elapsed", ln)
-
-        def test_future_lease_omits_elapsed(self):
-            now = datetime.datetime(2026, 9, 23, 17, 0, 0, tzinfo=utc)
-            self.assertNotIn("elapsed", clock_line(now, now + datetime.timedelta(hours=1)))
-
-        def test_elapsed_over_24h(self):
-            self.assertEqual(fmt_elapsed(datetime.timedelta(hours=27, minutes=5)), "27:05")
-
-        def test_lease_parse_first_field_only(self):
-            with open(self.lease, "w") as f:
-                f.write("Status: active\nActive-session: sess-20260923T141710Z\n"
-                        "Active-session: sess-20200101T000000Z\n")
-            self.assertEqual(lease_start(self.lease), datetime.datetime(2026, 9, 23, 14, 17, 10, tzinfo=utc))
-
-        def test_inactive_lease_never_reads_history(self):
-            # `none` followed by a history line must not resolve to the historical id
-            with open(self.lease, "w") as f:
-                f.write("Active-session: none\n## History\nActive-session: sess-20200101T000000Z\n")
-            self.assertIsNone(lease_start(self.lease))
-            with open(self.lease, "w") as f:
-                f.write("Active-session: sess-2026BAD\nActive-session: sess-20200101T000000Z\n")
-            self.assertIsNone(lease_start(self.lease))
-
-        def test_lease_missing(self):
-            self.assertIsNone(lease_start(os.path.join(self.tmp, "absent.md")))
-            self.assertIsNone(lease_start(None))
-
-        def test_fifo_lease_does_not_block(self):
-            fifo = os.path.join(self.tmp, "fifo")
-            os.mkfifo(fifo)
-            code = ("import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
-                    "s.loader.exec_module(m);print(m._clk_lease_start(%r))" % (_HOOK_FILE, fifo))
-            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
-                               timeout=HANG_TIMEOUT)
-            self.assertEqual(r.stdout.strip(), "None")
-
-        def test_lease_file_derivation(self):
-            self.assertIsNone(lease_file())  # nothing configured: no lease, no derivation
-            os.environ["AIQT_LEASE_FILE"] = self.lease
-            self.assertEqual(lease_file(), self.lease)
-            os.environ["AIQT_LEASE_FILE"] = ""
-            self.assertIsNone(lease_file())  # set but empty: no lease
-
-        def test_cfg_reads_only_aiqt(self):
-            self.assertEqual(_cfg("X", {"AIQT_X": "a", "OTHER_X": "o"}), "a")
-            self.assertEqual(_cfg("X", {"AIQT_X": "", "OTHER_X": "o"}), "")
-            self.assertIsNone(_cfg("X", {"OTHER_X": "o"}))  # no other spelling is read
-            self.assertIsNone(_cfg("X", {}))
-
-        def test_no_implicit_lease_discovery(self):
-            # the project-directory and cwd tiers were removed: only an explicit env lease enables elapsed
-            proj = os.path.join(self.tmp, "proj")
-            for sub in (".working", ".aiqt", "private"):
-                os.makedirs(os.path.join(proj, sub))
-                for name in ("lease.md", "session-lease.md"):
-                    with open(os.path.join(proj, sub, name), "w") as f:
-                        f.write("Active-session: S88-20000101T000000Z\n")
-            os.environ["CLAUDE_PROJECT_DIR"] = proj
-            self.assertIsNone(lease_file())
-            rc, out = run_main(json.dumps({"tool_name": "Bash", "cwd": proj}), {"CLAUDE_PROJECT_DIR": proj})
-            self.assertNotIn("elapsed", json.loads(out)["hookSpecificOutput"]["additionalContext"])
-
-        def test_garbage_input_emits_and_exits_0(self):
-            # dispatcher form: unparseable input is main()'s fail-open warning on exit 0, not the clock line
-            rc, out = run_main("}{ not json", {"AIQT_LEASE_FILE": self.lease})
-            self.assertEqual(rc, 0)
-            obj = json.loads(out)
-            self.assertEqual(list(obj), ["systemMessage"])
-            self.assertIn("the clock_inject check could not run (unreadable payload", obj["systemMessage"])
-
-        def test_payload_with_lease_emits_elapsed(self):
-            with open(self.lease, "w") as f:
-                f.write("Active-session: sess-20000101T000000Z\n")
-            rc, out = run_main(json.dumps({"tool_name": "Bash", "cwd": "/"}), {"AIQT_LEASE_FILE": self.lease})
-            self.assertEqual(rc, 0)
-            self.assertIn("session elapsed", json.loads(out)["hookSpecificOutput"]["additionalContext"])
-
-        def test_failure_event_name_matches(self):
-            rc, out = run_main(json.dumps({"hook_event_name": "PostToolUseFailure", "tool_name": "Bash"}))
-            self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUseFailure")
-            rc, out = run_main(json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Bash"}))
-            self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUse")
-            rc, out = run_main(json.dumps({"hook_event_name": "Bogus"}))
-            self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUse")
-
-
-
-        def test_no_worker_bypass(self):
-            # no environment variable skips the hook: a subordinate session gets the clock line too
-            for value in ("1", "0", "", "true", "yes", " 1"):
-                rc, out = run_main(json.dumps({"tool_name": "Bash"}), {"AIQT_HOOKS_WORKER": value})
-                self.assertEqual(rc, 0, value)
-                self.assertRegex(json.loads(out)["hookSpecificOutput"]["additionalContext"], line_re)
-
-        def test_subagent_still_gets_clock(self):
-            # deliberate: in-session subagents are not skipped (context only, never a block)
-            rc, out = run_main(json.dumps({"tool_name": "Bash", "agent_id": "a1"}))
-            self.assertRegex(json.loads(out)["hookSpecificOutput"]["additionalContext"], line_re)
-
-        def test_lease_label_portability(self):
-            want = datetime.datetime(2026, 9, 23, 14, 17, 10, tzinfo=utc)
-            for label in ("sess", "S88", "a", "A" * 32):
-                with open(self.lease, "w") as f:
-                    f.write(f"Active-session: {label}-20260923T141710Z\n")
-                self.assertEqual(lease_start(self.lease), want, label)
-            for bad in ("A" * 33 + "-20260923T141710Z", "-20260923T141710Z", "S_88-20260923T141710Z",
-                        "S88 20260923T141710Z", "S88-20260923T141710"):
-                with open(self.lease, "w") as f:
-                    f.write(f"Active-session: {bad}\nActive-session: sess-20200101T000000Z\n")
-                self.assertIsNone(lease_start(self.lease), bad)
-
-        def test_non_ascii_digit_time_refused(self):
-            # a str \d admits every Unicode digit and strptime reads them, so the time is matched with [0-9]
-            self.assertEqual(_utc_field("20260923T141710Z"), datetime.datetime(2026, 9, 23, 14, 17, 10, tzinfo=utc))
-            for value in ("2026092٣T141710Z", "2026-09-2٣T14:17:10Z"):
-                self.assertIsNone(_utc_field(value), ascii(value))
-
-        def test_non_ascii_digit_session_id_carries_no_time(self):
-            # an id whose time holds a non-ASCII digit is not <label>-YYYYMMDDTHHMMSSZ, so Session-start-UTC is read
-            self.write_lease("Active-session: sess-2026092٣T141710Z\nSession-start-UTC: 20260923T141800Z\n")
-            self.assertEqual(lease_start(self.lease), datetime.datetime(2026, 9, 23, 14, 18, tzinfo=utc))
-
-        # -- lease start sources --
-        def write_lease(self, text):
-            with open(self.lease, "w") as f:
-                f.write(text)
-            return self.lease
-
-        def transcript(self, *stamps):
-            tp = os.path.join(self.tmp, "t.jsonl")
-            with open(tp, "w") as f:
-                f.write(json.dumps({"type": "summary", "summary": "s"}) + "\n")
-                for ts in stamps:
-                    f.write(json.dumps({"type": "user", "timestamp": ts, "message": {"content": "x"}}) + "\n")
-            return tp
-
-        def test_lease_field_forms(self):
-            want = datetime.datetime(2026, 9, 23, 14, 17, 10, tzinfo=utc)
-            for line in ("Active-session: sess-20260923T141710Z", "**Active-session:** sess-20260923T141710Z",
-                         "- Active-session: sess-20260923T141710Z", "* Active-session: sess-20260923T141710Z",
-                         "  - **Active-session:**  sess-20260923T141710Z "):
-                self.assertEqual(lease_start(self.write_lease(f"# Lease\n\n{line}\n")), want, line)
-            self.assertEqual(lease_start(self.write_lease("+ Active-session: sess-20200101T000000Z\n"
-                                                          "Active-session: sess-20260923T141710Z\n")), want)
-
-        def test_date_only_id_with_and_without_session_start(self):
-            ids = "# Lease\n\n**Active-session:** sess-2026-09-23-alpha1\n\n**Status:** active\n"
-            self.assertIsNone(lease_start(self.write_lease(ids)))
-            want = datetime.datetime(2026, 9, 23, 14, 18, 0, tzinfo=utc)
-            for field in ("**Session-start-UTC:** 2026-09-23T14:18:00Z", "* Session-start-UTC: 20260923T141800Z"):
-                self.assertEqual(lease_start(self.write_lease(ids + field + "\n")), want, field)
-            self.assertIsNone(lease_start(self.write_lease(ids + "## History\nSession-start-UTC: 20260920T010000Z\n")))
-
-        def test_transcript_fallback_and_main(self):
-            ids = "**Active-session:** sess-2026-09-23-alpha1\n"
-            tp = self.transcript("2026-09-23T14:30:00.000Z", "2026-09-23T14:18:00.000Z", "garbage")
-            self.assertEqual(lease_start(self.write_lease(ids), tp), datetime.datetime(2026, 9, 23, 14, 18, tzinfo=utc))
-            self.assertIsNone(lease_start(self.lease))  # no transcript given: unknown
-            start = datetime.datetime.now(utc) - datetime.timedelta(hours=2, minutes=5, seconds=30)
-            tp = self.transcript(start.strftime("%Y-%m-%dT%H:%M:%S.000Z"))
-            rc, out = run_main(json.dumps({"tool_name": "Bash", "transcript_path": tp}),
-                               {"AIQT_LEASE_FILE": self.lease})
-            self.assertRegex(json.loads(out)["hookSpecificOutput"]["additionalContext"], r"session elapsed 02:0[56]$")
-            rc, out = run_main(json.dumps({"tool_name": "Bash", "transcript_path": 7}), {"AIQT_LEASE_FILE": self.lease})
-            self.assertNotIn("elapsed", json.loads(out)["hookSpecificOutput"]["additionalContext"])
-
-        def test_inactive_lease_stays_unknown(self):
-            tp = self.transcript("2026-09-23T14:18:00Z")
-            for head in ("Active-session: none", "**Active-session:** none", "- Active-session: None", "Active-session:"):
-                self.write_lease(f"{head}\nSession-start-UTC: 2026-09-23T14:18:00Z\n")
-                self.assertIsNone(lease_start(self.lease, tp), head)
-                rc, out = run_main(json.dumps({"tool_name": "Bash", "transcript_path": tp}),
-                                   {"AIQT_LEASE_FILE": self.lease})
-                self.assertNotIn("elapsed", json.loads(out)["hookSpecificOutput"]["additionalContext"], head)
-            self.assertIsNone(lease_start(self.write_lease("# no lease field\n"), tp))
-
-        def test_fifo_transcript_does_not_block(self):
-            fifo = os.path.join(self.tmp, "tfifo")
-            os.mkfifo(fifo)
-            self.write_lease("**Active-session:** sess-2026-09-23-alpha1\n")
-            code = ("import importlib.util as u;s=u.spec_from_file_location('m',%r);m=u.module_from_spec(s);"
-                    "s.loader.exec_module(m);print(m._clk_lease_start(%r, %r))" % (_HOOK_FILE, self.lease, fifo))
-            r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
-                               timeout=HANG_TIMEOUT)
-            self.assertEqual(r.stdout.strip(), "None")
-
-
-
-        # -- an output error fails open --
-        def test_output_error_fails_open(self):
-            # a failed stdout write (a full device) is swallowed: the hook still exits 0
-            if not os.path.exists("/dev/full"):
-                self.skipTest("/dev/full absent")
-            env = dict(os.environ)
-            env["AIQT_LEASE_FILE"] = os.path.join(self.tmp, "no-lease.md")  # never the host's real lease
-            with open("/dev/full", "w") as full:
-                p = subprocess.run([sys.executable, "-I", "-B", _HOOK_FILE, "clock_inject"], stdout=full,
-                                   stderr=subprocess.PIPE, text=True, env=env, timeout=30, input="{}")
-            self.assertEqual(p.returncode, 0, p.stderr)
-
-        # -- generic port: bytes payload, a failed output rescue, fail-open before evaluation --
-        def test_fail_open_before_evaluation(self):
-            # dispatcher form: main() reads the payload, so input it cannot read or parse is its fail-open
-            # warning on exit 0 IN PLACE OF the clock line (the former script still emitted the line)
-            class Unreadable:
-                def read(self, *a):
-                    raise OSError("unreadable stdin")
-            for stdin in (Unreadable(), "[1, 2]", '"text"'):
-                rc, out = run_main(stdin)
-                self.assertEqual(rc, 0, stdin)
-                self.assertTrue(json.loads(out)["systemMessage"].startswith(
-                    "AIQT guardrail: the clock_inject check could not run (unreadable payload"), out)
-            rc, out = run_main("{}", argv=["clock_inject", "extra"])  # a bad argv count
-            self.assertEqual(rc, 0)
-            self.assertIn("bad invocation", json.loads(out)["systemMessage"])
-            rc, out = run_main("{}")
-            obj = json.loads(out)["hookSpecificOutput"]
-            self.assertEqual((rc, obj["hookEventName"]), (0, "PostToolUse"))
-            self.assertRegex(obj["additionalContext"], line_re)
-
-        # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
-        HANG_GUARD_TESTS = ()
-
-        def test_no_wall_clock_verdict(self):
-            """Residual (disclosed): the scan covers direct calls, imported aliases, and assigned aliases within a
-            function, not values passed between functions, so a time figure handed to a helper that asserts on it
-            is not flagged. Nor is a reading from a clock the scan does not name (os.times, date.today,
-            time.localtime or gmtime, a third-party clock, a file's mtime), nor a time figure routed through an
-            expression form the scan does not follow: an assignment expression (walrus), a dict literal, a
-            container built by a comprehension or filled by a store into a subscript, a starred or mismatched
-            unpacking, or any other routing; see _wall_clock_asserts."""
-            # every assertion of this file is scanned (see _wall_clock_asserts): none bounds a time figure, a
-            # ratio of two time figures excepted, outside the hang-guard tests named in HANG_GUARD_TESTS
-            src = inspect.getsource(_clk_unit_suite)  # this suite's own source, not the whole self-test file
-            self.assertEqual(_wall_clock_asserts(src, self.HANG_GUARD_TESTS), [])
-            flagged = [name for name, _line in _wall_clock_asserts(src)]
-            for name in self.HANG_GUARD_TESTS:  # an exemption names a real hang guard the scan would flag
-                self.assertIn(name, flagged)
-            # the forms a substring check missed are caught: a harness result, an elapsed name, a bare assert, a
-            # for target, a time.time difference, and a comparison inside assertTrue
-            bad = ("def test_a(self):\n    small, large = run_timed(code, HANG_TIMEOUT)\n"
-                   "    self.assertLess(large, 2.0)\n"
-                   "def test_b(self):\n    started = time.monotonic()\n    run()\n"
-                   "    elapsed = time.monotonic() - started\n    self.assertLess(elapsed, 0.5)\n"
-                   "def test_c(self):\n    t0 = time.perf_counter()\n    assert time.perf_counter() - t0 < 1\n"
-                   "def test_d(self):\n    for name, (s, big) in run_timed(c, 9).items():\n"
-                   "        self.assertTrue(big < 3, name)\n"
-                   "def test_e(self):\n    t = time.time()\n    self.assertLessEqual(time.time() - t, 1)\n"
-                   "def test_f(self):\n    def inner():\n        self.assertLess(growth_in_child(src, 9)[1], 1)\n")
-            self.assertEqual([name for name, _line in _wall_clock_asserts(bad)],
-                             ["test_a", "test_b", "test_c", "test_d", "test_e", "test_f"])
-            # a ratio of two time figures, a time figure in the message only, and an exempt hang guard pass
-            good = ("def test_g(self):\n    small, large = run_timed(code, HANG_TIMEOUT)\n"
-                    "    self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))\n"
-                    "    self.assertTrue(large / small < 2, (small, large))\n"
-                    "def test_h(self):\n    t0 = time.monotonic()\n    self.assertLess(time.monotonic() - t0, 30.0)\n")
-            self.assertEqual(_wall_clock_asserts(good, ("test_h",)), [])
-            self.assertEqual(_wall_clock_asserts(good), [("test_h", 7)])
-            # a clock read through an alias (import-as, from-import, an assigned name) or a keyword operand is
-            # caught; the same aliases used for a hang-guard timeout, a count, or a msg keyword are not
-            bad, want, good = _wall_clock_alias_fixtures()
-            self.assertEqual([name for name, _line in _wall_clock_asserts(bad)], want)
-            self.assertEqual(_wall_clock_asserts(good), [])
-    return T, None
-
-
 @contextlib.contextmanager
 def _env_values(**values):
     """Set (a str) or unset (None) each named environment variable for the block, then restore the prior state."""
@@ -15282,27 +14920,10 @@ def _env_values(**values):
                 os.environ[key] = value
 
 
-# Every variable the two clock handlers could be thought to read, unset for a row unless the row sets it: only
-# AIQT_STORE_ROOT and AIQT_LEASE_FILE are read; the worker markers and the ORCH_ spellings are proven inert.
-_CLOCK_ENV = ("AIQT_STORE_ROOT", "AIQT_LEASE_FILE", "AIQT_HOOKS_WORKER", "ORCH_STORE_ROOT", "ORCH_LEASE_FILE",
-              "ORCH_WORKER", "ORCH_VERIFY_OWNER")
-_CLOCK_LINE_RE = re.compile(r"CLOCK \(read by hook, authoritative\): "
-                            r"[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} \S+ \| "
-                            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z( \| session elapsed [0-9]{2,}:[0-9]{2})?")
+# Every variable the clock-stamp handler could be thought to read, unset for a row unless the row sets it: only
+# AIQT_STORE_ROOT is read; the worker markers and the ORCH_ spelling are proven inert.
+_CLOCK_ENV = ("AIQT_STORE_ROOT", "AIQT_HOOKS_WORKER", "ORCH_STORE_ROOT", "ORCH_WORKER", "ORCH_VERIFY_OWNER")
 _FSW_WARN_PREFIX = "future-stamp-write: future stamp "
-
-
-def _reduce_clock_context(code, stdout_obj, event="PostToolUse"):
-    """"context" for clock_inject's one result shape: exit 0 with exactly a hookSpecificOutput holding the given
-    hookEventName and an additionalContext that is one well-formed clock line; else the _reduce_result value
-    (so a silent pass reads "allow" and anything else an "unexpected" string)."""
-    if (code == 0 and isinstance(stdout_obj, dict) and set(stdout_obj) == {"hookSpecificOutput"}
-            and stdout_obj["hookSpecificOutput"].get("hookEventName") == event
-            and set(stdout_obj["hookSpecificOutput"]) == {"hookEventName", "additionalContext"}
-            and isinstance(stdout_obj["hookSpecificOutput"]["additionalContext"], str)
-            and _CLOCK_LINE_RE.fullmatch(stdout_obj["hookSpecificOutput"]["additionalContext"])):
-        return "context"
-    return _reduce_result(code, stdout_obj)
 
 
 def _clock_dispatch(mode, stdin):
@@ -15359,13 +14980,11 @@ def _clock_shape(node, back=None):
     return ast.dump(node, include_attributes=False)
 
 
-# The definitions each handler shares with .preview/stamp-truth-stop.py (the former scripts' parity lists, less
-# _cfg, _is_worker and the self-test helpers: the handlers read no legacy spelling and keep no worker skip).
+# The definitions the handler shares with .preview/stamp-truth-stop.py (the former script's parity list, less
+# _cfg, _is_worker and the self-test helpers: the handler reads no legacy spelling and keeps no worker skip).
 _FSW_PARITY = ("SCHED_KEYWORDS", "SCHED_GAP_TOKENS", "SCHED_STEMS", "TIME_GRAMMAR", "ZONE_GRAMMAR", "_SCHED_RE",
                "_TOKEN_RE", "_WORDCH_RE", "_BTICK_RE", "_FENCE_RE", "sched_exempter", "_code_lines", "_code_spans",
                "_in_spans")
-_CLK_PARITY = ("LEASE_MAX_BYTES", "TRANSCRIPT_PREFIX_BYTES", "_SESS_RE", "_LEASE_FIELD_RE", "_START_VALUE_RE",
-               "_HEADING_RE", "read_regular", "lease_file", "_utc_field", "transcript_start", "lease_start")
 
 
 def _clock_parity_problems(hook_text, preview_text):
@@ -15378,7 +14997,7 @@ def _clock_parity_problems(hook_text, preview_text):
 def _clock_parity_definition_problems(hook, preview):
     """_clock_parity_problems over the two sides' parsed definitions ({name: node}, _clock_definitions)."""
     out = []
-    for kind, shared in (("fsw", _FSW_PARITY), ("clk", _CLK_PARITY)):
+    for kind, shared in (("fsw", _FSW_PARITY),):
         names = _CLOCK_HOOK_NAMES[kind]
         back = {new: old for old, new in names.items()}
         for name in shared:
@@ -15393,11 +15012,11 @@ def _clock_parity_definition_problems(hook, preview):
 
 def _clock_parity_mutants(hook):
     """(label, mutated hook definitions, the one parity problem it must be reported as) for every shared definition
-    of either handler: its value (an assignment) or body (a function) changed; its name in aiqt_hooks changed, so
+    of the handler: its value (an assignment) or body (a function) changed; its name in aiqt_hooks changed, so
     the map no longer finds it; and, through _CLOCK_HOOK_NAMES, each prefixed name its value or body reads, and a
     function's own name, changed to another prefixed name of the same handler."""
     import copy
-    for kind, shared in (("fsw", _FSW_PARITY), ("clk", _CLK_PARITY)):
+    for kind, shared in (("fsw", _FSW_PARITY),):
         names = _CLOCK_HOOK_NAMES[kind]
         prefixed = sorted(names.values())
         differs = "{}: {{}} differs from .preview/stamp-truth-stop.py".format(kind)
@@ -15429,15 +15048,14 @@ def _clock_parity_mutants(hook):
 
 
 def _test_clock_hooks(failures, tmp):
-    """(fsw-*, clk-*) The two clock-hook dispatcher handlers ported from the former standalone preview scripts.
-    clock_inject (PostToolUse) adds one clock line to the model context and never blocks; future_stamp_write
-    (PreToolUse, stage bake) WARNS, never denies, on a future-dated literal written into an AIQT_STORE_ROOT store,
-    and its HANDLER_EVENT class PRETOOL_WARN_ONLY gives it main()'s fail-open posture, so no path of either exits
-    2. The rows below drive each handler and main() for its mode; fsw-unit-* and clk-unit-* run the former
-    scripts' own self-tests against the ported code (_clock_hook_unit_failures); fsw-parity and clk-parity hold
-    the code shared with .preview/stamp-truth-stop.py equal; and clk-preview-dup keeps the plugin-and-preview
-    pair documented, the form the former hook-scripts gate's no-preview-duplicate leg takes now that the two
-    preview copies stay published."""
+    """(fsw-*) The clock-stamp dispatcher handler ported from the former standalone preview script.
+    future_stamp_write (PreToolUse, stage bake) WARNS, never denies, on a future-dated literal written into an
+    AIQT_STORE_ROOT store, and its HANDLER_EVENT class PRETOOL_WARN_ONLY gives it main()'s fail-open posture, so
+    no path of it exits 2. The rows below drive the handler and main() for its mode; fsw-unit-* runs the former
+    script's own self-test against the ported code (_clock_hook_unit_failures); fsw-parity holds the code shared
+    with .preview/stamp-truth-stop.py equal; and fsw-preview-dup keeps the plugin-and-preview pair documented,
+    the form the former hook-scripts gate's no-preview-duplicate leg takes now that the preview copy stays
+    published. The pack's clock reading (clock_inject_post, clock_inject_failure) is _test_clock_inject's."""
     store = tmp / "clock-store"
     other = tmp / "clock-elsewhere"
     store.mkdir()
@@ -15570,56 +15188,7 @@ def _test_clock_hooks(failures, tmp):
     finally:
         aiqt_hooks._fsw_evaluate = saved_evaluate
 
-    def clk(label, data, want, event="PostToolUse", lease=None, needle=None, absent=None, **env):
-        with _env_values(**dict(unset, **dict({"AIQT_LEASE_FILE": lease}, **env))):
-            code, stdout_obj, stderr_text = aiqt_hooks.clock_inject(data)
-        got = _reduce_clock_context(code, stdout_obj, event)
-        text = stdout_obj["hookSpecificOutput"]["additionalContext"] if got == "context" else ""
-        if got != want or stderr_text is not None:
-            failures.append("{}: expected {}, got {} (stderr {!r})".format(label, want, got, stderr_text))
-        elif needle is not None and needle not in text:
-            failures.append("{}: expected {!r} in the clock line, got {!r}".format(label, needle, text))
-        elif absent is not None and absent in text:
-            failures.append("{}: expected no {!r} in the clock line, got {!r}".format(label, absent, text))
-
-    lease = tmp / "clock-lease.md"
-    lease.write_text("Active-session: sess-20000101T000000Z\n", encoding="utf-8")
-    inactive = tmp / "clock-lease-inactive.md"
-    inactive.write_text("Active-session: none\nSession-start-UTC: 2000-01-01T00:00:00Z\n", encoding="utf-8")
-    untimed = tmp / "clock-lease-untimed.md"
-    untimed.write_text("**Active-session:** sess-alpha\n", encoding="utf-8")
-    transcript = tmp / "clock-transcript.jsonl"
-    transcript.write_text(json.dumps({"type": "user", "timestamp": "2000-01-01T00:00:00.000Z"}) + "\n",
-                          encoding="utf-8")
-    post = {"hook_event_name": "PostToolUse", "tool_name": "Bash"}
-    clk("(clk-line-shape) a PostToolUse call gets one clock line of context", post, "context", absent="elapsed")
-    clk("(clk-failure-event-echoed) a PostToolUseFailure payload is answered under its own event name",
-        {"hook_event_name": "PostToolUseFailure", "tool_name": "Bash"}, "context", event="PostToolUseFailure")
-    clk("(clk-unknown-event-posttooluse) any other event name is answered as PostToolUse",
-        {"hook_event_name": "Bogus", "tool_name": "Bash"}, "context")
-    clk("(clk-lease-elapsed) a valid lease adds the session elapsed time", post, "context", lease=str(lease),
-        needle="session elapsed")
-    clk("(clk-inactive-lease-no-elapsed) an inactive lease adds no elapsed time", post, "context",
-        lease=str(inactive), absent="elapsed")
-    clk("(clk-transcript-fallback) a lease id with no time falls back to the transcript's first timestamp",
-        dict(post, transcript_path=str(transcript)), "context", lease=str(untimed), needle="session elapsed")
-    clk("(clk-orch-lease-unread) ORCH_LEASE_FILE alone adds no elapsed time", post, "context",
-        absent="elapsed", ORCH_LEASE_FILE=str(lease))
-    for marker, value in (("AIQT_HOOKS_WORKER", "1"), ("ORCH_WORKER", "1"), ("ORCH_VERIFY_OWNER", "x")):
-        clk("(clk-worker-marker-{}-ignored) a worker marker skips nothing: the clock line is still added".format(
-            marker.lower()), post, "context", **{marker: value})
-    clk("(clk-subagent-gets-clock) a subagent call gets the clock line too", dict(post, agent_id="a1"), "context")
-    saved_lease_file = aiqt_hooks._clk_lease_file
-
-    def broken():
-        raise RuntimeError("injected")
-    aiqt_hooks._clk_lease_file = broken
-    try:
-        clk("(clk-internal-error-silent) an internal error passes silently, never failing the tool", post, "allow")
-    finally:
-        aiqt_hooks._clk_lease_file = saved_lease_file
-
-    # Dispatcher rows: main() for each mode, on the paths the former scripts handled themselves.
+    # Dispatcher rows: main() for the mode, on the paths the former script handled itself.
     with _env_values(**dict(unset, AIQT_STORE_ROOT=st)):
         payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Write",
                               "tool_input": {"file_path": st + "/state.md", "content": "hb: " + future}})
@@ -15629,16 +15198,12 @@ def _test_clock_hooks(failures, tmp):
                 ("(fsw-dispatch-unreadable-exit-0) an unparseable payload is main()'s warning on exit 0, never 2",
                  "future_stamp_write", "not json", "could not run (unreadable payload"),
                 ("(fsw-dispatch-non-object-exit-0) a payload that is not an object is a warning on exit 0",
-                 "future_stamp_write", "[1, 2]", "could not run (unreadable payload"),
-                ("(clk-dispatch-context-exit-0) main() writes the clock line and exits 0", "clock_inject",
-                 json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Bash"}), "CLOCK (read by hook"),
-                ("(clk-dispatch-garbage-exit-0) unparseable input is main()'s warning on exit 0, not the clock line",
-                 "clock_inject", "}{ not json", "could not run (unreadable payload")):
+                 "future_stamp_write", "[1, 2]", "could not run (unreadable payload")):
             code, out, _err = _clock_dispatch(mode, stdin)
             if code != 0 or needle not in out or len(out.strip().splitlines()) != 1:
                 failures.append("{}: expected exit 0 with one stdout line holding {!r}, got exit {} and {!r}"
                                 .format(label, needle, code, out))
-        for mode in ("future_stamp_write", "clock_inject"):
+        for mode in ("future_stamp_write",):
             def crash(_data):
                 raise RuntimeError("injected crash")
             with _stub_handler(mode, crash):
@@ -15646,28 +15211,25 @@ def _test_clock_hooks(failures, tmp):
             if code != 0 or "handler crash" not in out:
                 failures.append("(clock-dispatch-crash-exit-0) a {} crash must be main()'s warning on exit 0, got "
                                 "exit {} and {!r}".format(mode, code, out))
-    for mode in ("future_stamp_write", "clock_inject"):
+    for mode in ("future_stamp_write",):
         if (mode not in aiqt_hooks.FLOOR_FAIL_OPEN_MODES
                 or aiqt_hooks.HANDLER_EVENT.get(mode) not in aiqt_hooks.FAIL_OPEN_EVENTS
                 or aiqt_hooks.HANDLERS.get(mode) is not getattr(aiqt_hooks, mode)):
             failures.append("(clock-posture-fail-open) {} must be a HANDLERS entry whose HANDLER_EVENT class is in "
                             "FAIL_OPEN_EVENTS and whose mode is in FLOOR_FAIL_OPEN_MODES".format(mode))
     if (aiqt_hooks.HANDLER_EVENT.get("future_stamp_write") != aiqt_hooks.PRETOOL_WARN_ONLY
-            or aiqt_hooks.HANDLER_EVENT.get("clock_inject") != "PostToolUse"
             or [mode for mode, event in aiqt_hooks.HANDLER_EVENT.items()
                 if event == aiqt_hooks.PRETOOL_WARN_ONLY] != ["future_stamp_write"]):
-        failures.append("(clock-posture-classes) future_stamp_write must be the one PRETOOL_WARN_ONLY mode and "
-                        "clock_inject a PostToolUse mode")
+        failures.append("(clock-posture-classes) future_stamp_write must be the one PRETOOL_WARN_ONLY mode")
     hooks = {hook["id"]: hook for hook in load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "manifest.toml")["hook"]}
-    for hook_id, want in (("clock-inject", {"event": "PostToolUse", "handler": "clock_inject", "default": "warn"}),
-                          ("future-stamp-write", {"event": "PreToolUse", "handler": "future_stamp_write",
-                                                  "default": "warn", "stage": "bake"})):
+    for hook_id, want in (("future-stamp-write", {"event": "PreToolUse", "handler": "future_stamp_write",
+                                                  "default": "warn", "stage": "bake"}),):
         row = hooks.get(hook_id, {})
         if any(row.get(key) != value for key, value in want.items()):
             failures.append("(clock-manifest-rows) the {} manifest row must carry {!r}, got {!r}".format(
                 hook_id, want, {key: row.get(key) for key in want}))
 
-    # (fsw-parity, clk-parity) the code shared with the preview Stop hook, and the mutants the comparison must catch:
+    # (fsw-parity) the code shared with the preview Stop hook, and the mutants the comparison must catch:
     # one edit of the hook text, then every mutant _clock_parity_mutants makes of each shared definition.
     hook_text = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
     preview_text = (repo_root() / ".preview" / "stamp-truth-stop.py").read_text(encoding="utf-8")
@@ -15685,28 +15247,28 @@ def _test_clock_hooks(failures, tmp):
             failures.append("(clock-parity-definition-mutant) {}: must be the one parity problem {!r}, got {!r}".format(
                 label, want, got))
 
-    # (clk-preview-dup) a plugin control whose preview copy stays published is documented as a pair to keep one of.
+    # (fsw-preview-dup) a plugin control whose preview copy stays published is documented as a pair to keep one of.
     preview_ids = {entry["id"] for entry in load_toml(repo_root() / ".aiqt" / "core" / "hooks" / "preview.toml")
                    .get("preview", [])}
     both = sorted(set(hooks) & preview_ids)
     readme = (repo_root() / ".preview" / "README.md").read_text(encoding="utf-8")
     section = readme.split("\n## Also in the pack's plugin\n", 1)[1].split("\n## ", 1)[0] if (
         "\n## Also in the pack's plugin\n" in readme) else ""
-    if both != ["clock-inject", "future-stamp-write"] or "Install one form of each of these two hooks, not both." \
+    if both != ["future-stamp-write"] or "Install one form of this hook, not both." \
             not in section or any("`{}.py`".format(hook_id) not in section for hook_id in both):
-        failures.append("(clk-preview-dup) the plugin controls whose preview copy stays published must be exactly "
-                        "clock-inject and future-stamp-write, each named in the .preview README section Also in "
-                        "the pack's plugin with its keep-one instruction; got {!r}".format(both))
+        failures.append("(fsw-preview-dup) the plugin controls whose preview copy stays published must be exactly "
+                        "future-stamp-write, named in the .preview README section Also in the pack's plugin with "
+                        "its keep-one instruction; got {!r}".format(both))
 
     failures.extend(_clock_hook_unit_failures())
 
 
 def _clock_hook_unit_failures():
-    """(fsw-unit-*, clk-unit-*) Run the two ported unit suites; one line per failing or erroring test, and one for
-    a suite that ran no test."""
+    """(fsw-unit-*) Run the ported unit suite; one line per failing or erroring test, and one for a suite that ran
+    no test."""
     import unittest
     out = []
-    for prefix, suite in (("fsw-unit", _fsw_unit_suite), ("clk-unit", _clk_unit_suite)):
+    for prefix, suite in (("fsw-unit", _fsw_unit_suite),):
         case, base = suite()
         try:
             stream = io.StringIO()
@@ -36633,7 +36195,6 @@ def _main_isolated(monitor):
           "returns permissionDecision 'ask' over the exercised vectors, and the _ask constructor is "
           "removed; every decision is allow / allow-with-note / snapshot-then-allow / deny-and-educate. "
           "Current outcomes, by guard: "
-          "tstamp (clock_inject) ADDS one clock line of model context after a tool call and never blocks; "
           "tstamp (future_stamp_write) WARNS, and never denies, on a future-dated literal written into a "
           "declared store, as a fail-open, warn-only PreToolUse mode. "
           "cnsdif (diff_source_pretool) DENIES-and-educates a confirmed console diff dump and ALLOWS "
