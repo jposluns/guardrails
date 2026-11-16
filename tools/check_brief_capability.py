@@ -359,7 +359,8 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        commit id of 7 to 40 or 64 hex digits (hex_ref) that resolves to a commit in the
                        repository the lint is pointed at (--repo; main passes this repository when --repo is
                        absent), read as every P9 word is (revision_commit: git --no-lazy-fetch rev-parse under
-                       LC_ALL=C, hermetic, replace objects disabled, never fetching a missing object).
+                       LC_ALL=C, hermetic, replace objects disabled, never fetching a missing object), once per
+                       distinct value (a value repeated in any case is one value).
                        The DECLARED SET is the union of the BRIEF-PIN, REVIEWED HEAD and BRIEF-REVISIONS
                        values. With a declaration, P9 splits every line of the raw text (prose, code spans,
                        fences, web addresses, pin lines and the declaration itself alike) into words at every
@@ -378,8 +379,9 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        7-hex prefix two commits share: exit 1, nothing printed; any text is CANNOT_EVALUATE).
                        With no declaration the rule is quiet. Two
                        declaration lines, a column-zero label without its colon or with a glued suffix, a
-                       declaration with no value, a value that is not such a commit id (a branch name such as
-                       main) or does not resolve to one commit (unknown, ambiguous), a declaration with no
+                       declaration with no value, more than P9_MAX_REVISIONS distinct declared values (counted
+                       before any value is resolved), a value that is not such a commit id (a branch name such
+                       as main) or does not resolve to one commit (unknown, ambiguous), a declaration with no
                        repository to read, a repository git refuses for its ownership, a git that cannot be
                        launched or times out, a probe that fails in any other way (a corrupt or unreadable
                        object, text on stderr, another exit, output that is no commit id; a git older than
@@ -660,6 +662,9 @@ Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one su
                            (P7), or replace each undeclared hex word with a declared revision or add it to the
                            BRIEF-REVISIONS line (P9), or drop the git commit or push, state it in the PROHIBITED
                            shape, or send it to a family that can write (W1).
+                           Whichever summary the REFUSE line prints, it carries the P6, P7 and P9 hint for
+                           each of those rules among the hard hits; hits of more than one of P6, P7 and P9 with
+                           no other HARD rule print one mixed summary carrying each of their hints.
                            When a hit is a command line (S2 or S3), the REFUSE line
                            says how to rewrite: name the function, row or entry instead of embedding the
                            command (quote the def line of X, not the line that runs git push).
@@ -672,7 +677,8 @@ Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one su
                            BRIEF-REVISIONS lines, a malformed one, a value that is not a commit id or does not
                            resolve, a declaration with no repository, a hex word git cannot read or a repository
                            that is not whole (a damaged object store, a partial or a shallow clone) lacks, a
-                           shallow file the lint cannot read, or too many hex words to probe (P9); the
+                           shallow file the lint cannot read, or too many declared values or hex words to
+                           probe (P9); the
                            family is not in the table; the
                            table is missing, unreadable, or malformed (format-version must be the
                            integer 1); or the arguments are wrong (a repeated --family or --table
@@ -3756,6 +3762,9 @@ REVISIONS_LABEL = "BRIEF-REVISIONS"
 P9_MAX_DECLARATIONS = 1
 # at most this many distinct undeclared hex words are probed in the repository; more is CannotEvaluate
 P9_MAX_WORDS = 256
+# at most this many distinct declared values (declared_values) are resolved in the repository; more is
+# CannotEvaluate, counted before any value is resolved
+P9_MAX_REVISIONS = 256
 # a word of the raw text: a run of ASCII letters and digits, so `a..b`, `^{commit}`, `~N`, a URL's path
 # segments, code-span backticks and every other character split words
 HEX_WORD_RE = re.compile(r"[0-9A-Za-z]++")
@@ -4085,6 +4094,16 @@ def revision_declarations(raw):
     return declarations
 
 
+def declared_values(declarations):
+    """The distinct values of the BRIEF-REVISIONS declarations (revision_declarations), in the order they first
+    appear, each in its first spelling: a value repeated in any case is one value, resolved once."""
+    distinct = {}
+    for _, values in declarations:
+        for value in values:
+            distinct.setdefault(value.lower(), value)
+    return list(distinct.values())
+
+
 def _describe_hex(line, word):
     """Whether the word `word` (a HEX_WORD_RE match in `line`) is the g<hex> tail of a git describe name
     (v1.2-3-g<hex>): a lower-case g right after a hyphen, then a commit id as a pin is written, which git
@@ -4148,7 +4167,9 @@ def rule_p9(names, row, repo):
     of the BRIEF-PIN, REVIEWED HEAD and BRIEF-REVISIONS values, and a word is in it when it and a declared value
     name the same commit by their spelling (pin_matches: either a prefix of the other, in any case). A hex word
     that names no commit there (absent, ambiguous, a blob or a tree) is quiet. With no declaration the rule is
-    quiet. More than P9_MAX_DECLARATIONS declaration lines, a malformed declaration, a value that is not a
+    quiet. Each distinct declared value (declared_values: a value repeated in any case is one) is resolved
+    once. More than P9_MAX_DECLARATIONS declaration lines, a malformed declaration, more than P9_MAX_REVISIONS
+    distinct declared values (counted before any git read), a value that is not a
     commit id or does not resolve to a commit (declared_commit), a declaration with no repository to read, a
     probe git fails, a word that names no commit present in a repository that is not whole (object_store_gap:
     a damaged or unreadable object store, a partial clone, a shallow clone), and more than P9_MAX_WORDS
@@ -4160,11 +4181,15 @@ def rule_p9(names, row, repo):
         raise CannotEvaluate("lines {}: the brief has {} {} lines; declare every revision it names on one "
                              "line".format(", ".join(str(line) for line, _ in declarations), len(declarations),
                                            REVISIONS_LABEL))
+    values = declared_values(declarations)
+    if len(values) > P9_MAX_REVISIONS:
+        raise CannotEvaluate("line {}: the {} line declares {} distinct values, more than the {} the lint "
+                             "resolves; declare fewer".format(declarations[0][0], REVISIONS_LABEL, len(values),
+                                                              P9_MAX_REVISIONS))
     if repo is None:
         raise CannotEvaluate("the brief declares its revisions on a {} line but no repository was given to "
                              "resolve them in".format(REVISIONS_LABEL))
     gap = object_store_gap(repo)
-    values = [value for _, line_values in declarations for value in line_values]
     for value in values:
         declared_commit(repo, value, gap)
     declared = [pin for _, pin in names.pins] + values
@@ -4367,6 +4392,8 @@ GIT_WRITE_HINT = ("; the family's row says git-write = \"no\": drop the git comm
 # added to a REFUSE line when a P9 hit is among the hard hits
 REVISIONS_HINT = ("; replace each P9 hex word with a declared revision, or add it to the BRIEF-REVISIONS line when "
                   "the brief names it on purpose")
+# added to a REFUSE line when a P7 hit is among the hard hits
+ANCHOR_HINT = "; correct each ACCEPTED-RESIDUAL line ({}), or re-pin the brief".format(ANCHOR_SHAPE)
 
 
 def run(brief_path, family, table_path, scoped=True, repo=None, tree=None):
@@ -4382,24 +4409,25 @@ def run(brief_path, family, table_path, scoped=True, repo=None, tree=None):
     missing_input = INPUT_HINT if "P6" in hard else ""
     git_write = GIT_WRITE_HINT if "W1" in hard else ""
     revisions = REVISIONS_HINT if "P9" in hard else ""
+    anchors = ANCHOR_HINT if "P7" in hard else ""
     if code == EXIT_REFUSE and set(hard) - EVERY_FAMILY_RULES:
         print("REFUSE: family {} cannot execute and the brief carries a structural execution request ({} hard "
-              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}{}{}".format(
+              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}{}{}{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
                   "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else "", missing_input, git_write,
-                  revisions))
+                  anchors, revisions))
     elif code == EXIT_REFUSE and "W1" in hard:
         print("REFUSE: family {}: the brief carries a git command line that commits or pushes ({} hard hit(s): {}){}"
-              "{}{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r))
-                                                         for r in sorted(set(hard))), git_write, missing_input,
-                            revisions))
+              "{}{}{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r))
+                                                           for r in sorted(set(hard))), git_write, missing_input,
+                              anchors, revisions))
     elif code == EXIT_REFUSE and "P5" in hard:
         print("REFUSE: family {}: the brief reaches a pinned revision through a ref that can move ({} hard hit(s): "
-              "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}{}; "
+              "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}{}{}; "
               "{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
                   CURE_EXAMPLE.format("<pin>"), ", and name paths under the declared workdir" if "P2" in hard else "",
-                  missing_input, revisions, CURE_SHAPE))
+                  missing_input, anchors, revisions, CURE_SHAPE))
     elif code == EXIT_REFUSE and set(hard) == {"P9"}:
         print("REFUSE: family {}: the brief names a commit outside its declared revisions ({} hard hit(s): P9 x{})"
               "{}".format(family, len(hard), len(hard), REVISIONS_HINT))
@@ -4409,13 +4437,18 @@ def run(brief_path, family, table_path, scoped=True, repo=None, tree=None):
                                  len(hard), len(hard), INPUT_HINT))
     elif code == EXIT_REFUSE and set(hard) == {"P7"}:
         print("REFUSE: family {}: the brief accepts a residual whose anchor does not hold at the pinned "
-              "revision ({} hard hit(s): P7 x{}); correct each ACCEPTED-RESIDUAL line ({}), or re-pin the "
-              "brief".format(family, len(hard), len(hard), ANCHOR_SHAPE))
-    elif code == EXIT_REFUSE:
+              "revision ({} hard hit(s): P7 x{}){}".format(family, len(hard), len(hard), ANCHOR_HINT))
+    elif code == EXIT_REFUSE and "P2" in hard:
         print("REFUSE: family {}: the brief names an input the family cannot read ({} hard hit(s): {}); name "
-              "paths under the declared workdir, or state a path the worker must not use as a prohibition{}{}".format(
-                  family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
-                  missing_input, revisions))
+              "paths under the declared workdir, or state a path the worker must not use as a prohibition{}{}"
+              "{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
+                          missing_input, anchors, revisions))
+    elif code == EXIT_REFUSE:
+        # hits of more than one of P6, P7 and P9 and no other HARD rule: one summary with each rule's hint
+        print("REFUSE: family {}: the brief carries hard hits of more than one preflight rule ({} hard hit(s): "
+              "{}){}{}{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r))
+                                                               for r in sorted(set(hard))),
+                                 missing_input, anchors, revisions))
     elif can_execute(table[family]):
         advisory = sum(1 for _, severity, _, _, _ in findings if severity == "ADVISORY")
         print("OK: family {} can execute ({}); the execution rules do not apply{}".format(
@@ -9758,6 +9791,61 @@ def self_test(report_path=None):
                   p9_a, p9_b)))))
         check("preflight/p9-word-bound",
               [p9(p9_words(P9_MAX_WORDS + 1)), p9(p9_words(P9_MAX_WORDS))], ["CannotEvaluate", (0, [])])
+        p9_counted_local = _rev_parse_local
+
+        def p9_probes(declaration, lines=""):
+            """(outcome, number of git rev-parse probes of B) for a brief with `declaration` beside `lines`."""
+            probed = []
+
+            def counting(repo, rev):
+                probed.append(rev.lower())
+                return p9_counted_local(repo, rev)
+
+            with _patched(_rev_parse_local=counting):
+                outcome = p9(lines, declaration)
+            return outcome, probed.count(p9_b.lower())
+
+        # a value repeated on the declaration, in any case, is one declared value, resolved by one probe
+        p9_repeated = "BRIEF-REVISIONS: {} {} {}\n".format(p9_b, p9_b, p9_b.upper())
+        check("preflight/p9-declared-once",
+              [p9_probes(p9_repeated), p9_probes(p9_declared), p9_probes(p9_repeated, "The base is {}.\n".format(
+                  p9_c))], [((0, []), 1), ((0, []), 1), (p9_hard, 1)])
+        p9_bound_text = "more than the {} the lint resolves".format(P9_MAX_REVISIONS)
+
+        def p9_declared_many(count):
+            """A declaration of `count` distinct values, none of which names a commit of the repository."""
+            return "BRIEF-REVISIONS: {}\n".format(" ".join("dd{:06x}".format(number) for number in range(count)))
+
+        def p9_bound_named(declaration):
+            """Whether the refusal of a brief with `declaration` names the declared-value bound."""
+            refusal = p9_refusal("BRIEF-PIN: {}\n{}".format(p9_a, declaration))
+            return refusal is not None and p9_bound_text in refusal
+
+        def p9_bound_probes(declaration):
+            """The number of git rev-parse probes a brief with `declaration` runs."""
+            probed = []
+
+            def counting(repo, rev):
+                probed.append(rev)
+                return p9_counted_local(repo, rev)
+
+            with _patched(_rev_parse_local=counting):
+                p9("", declaration)
+            return len(probed)
+
+        def p9_small_bound(declaration):
+            with _patched(P9_MAX_REVISIONS=2):
+                return p9("", declaration)
+
+        # more distinct declared values than the bound refuses before any is resolved, naming the bound; the
+        # same value repeated past the bound is one value, and at the bound the declaration resolves
+        check("preflight/p9-declared-bound",
+              [p9_bound_named(p9_declared_many(P9_MAX_REVISIONS + 1)),
+               p9_bound_probes(p9_declared_many(P9_MAX_REVISIONS + 1)),
+               p9("", "BRIEF-REVISIONS: {}\n".format(" ".join([p9_b] * (P9_MAX_REVISIONS + 1)))),
+               p9_small_bound("BRIEF-REVISIONS: {} {}\n".format(p9_b[:7], p9_b[:8])),
+               p9_small_bound("BRIEF-REVISIONS: {} {} {}\n".format(p9_b[:7], p9_b[:8], p9_b[:9]))],
+              [True, 0, (0, []), (0, []), "CannotEvaluate"])
         p9_brief, p9_table = p7_base / "p9-brief.md", p7_base / "p9-table.toml"
         with open(p9_brief, "w", encoding="utf-8") as handle:
             handle.write("BRIEF-PIN: {}\n{}The base is {}.\n".format(p9_a, p9_declared, p9_c))
@@ -9792,6 +9880,37 @@ def self_test(report_path=None):
                        "through a ref that can move"),
                p9_hint("gamma", "Workdir: /w/repo\nRead /etc/passwd first.\n",
                        "names an input the family cannot read")], [(1, True, True)] * 4)
+        p9_absent_anchor = "ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: not there\n"
+
+        def p7_p9_hint(family, lines, phrase, table_text=TABLE_FIXTURE):
+            """(exit code, the one REFUSE line is the branch `phrase` names, it carries ANCHOR_HINT, it carries
+            REVISIONS_HINT, it advises naming paths) for a brief with an absent residual anchor (P7) and C (P9)
+            beside `lines`."""
+            with open(p9_brief, "w", encoding="utf-8") as handle:
+                handle.write("BRIEF-PIN: {}\n{}{}{}The base is {}.\n".format(p9_a, p9_declared, p9_absent_anchor,
+                                                                         lines, p9_c))
+            with open(p9_hint_table, "w", encoding="utf-8") as handle:
+                handle.write(table_text)
+            shown = io.StringIO()
+            with contextlib.redirect_stdout(shown):
+                code = run(str(p9_brief), family, p9_hint_table, True, p7_repo)
+            refuse = [line for line in shown.getvalue().splitlines() if line.startswith("REFUSE:")]
+            one = refuse[0] if len(refuse) == 1 else ""
+            return (code, phrase in one, ANCHOR_HINT in one, REVISIONS_HINT in one,
+                    "name paths under the declared workdir" in one)
+
+        # P7 beside P9 alone prints the mixed summary with both hints and no advice to name paths, and every other
+        # REFUSE branch a P7 hit can join carries the P7 hint beside the P9 one
+        check("preflight/p7-p9-refuse-hint-every-branch",
+              [p7_p9_hint("alpha", "", "hard hits of more than one preflight rule"),
+               p7_p9_hint("gamma", "1. Run `git log -1` in the clone.\n", "cannot execute and the brief carries"),
+               p7_p9_hint("alpha", "Then run git commit -q -m done.\n", "commits or pushes",
+                          TABLE_FIXTURE.replace('git-write = "undeclared"', 'git-write = "no"', 1)),
+               p7_p9_hint("alpha", "Clone with `git clone --branch main https://h.example/r.git w`.\n",
+                          "through a ref that can move"),
+               p7_p9_hint("gamma", "Workdir: /w/repo\nRead /etc/passwd first.\n",
+                          "names an input the family cannot read")],
+              [(1, True, True, True, False)] * 4 + [(1, True, True, True, True)])
         # one finding per line and word, whatever its case; the same word on another line is another finding
         p9_twice = "The base is {0}, again {0} and {1}.\n".format(p9_c, p9_c.upper())
 
@@ -10173,14 +10292,27 @@ def self_test(report_path=None):
                                                    [p9_hard], P9_NO_FETCH_OPTIONS=()))
         check("revert/p9-word-bound-red", *flip([p9_case(p9_words(P9_MAX_WORDS + 1))], [(0, [])],
                                                 P9_MAX_WORDS=P9_MAX_WORDS + 1))
+        # with every declared value kept, repeats included, B is probed once per spelling, and B repeated past
+        # the bound refuses
+        check("revert/p9-declared-once-red", *flip(
+            [lambda: p9_probes(p9_repeated),
+             p9_case("", "BRIEF-REVISIONS: {}\n".format(" ".join([p9_b] * (P9_MAX_REVISIONS + 1))))],
+            [((0, []), 3), "CannotEvaluate"],
+            declared_values=lambda declarations: [value for _, values in declarations for value in values]))
+        # with the bound raised past the declaration (built once, at the shipped bound), its first value is
+        # probed and refused as unresolved
+        p9_over_bound = p9_declared_many(P9_MAX_REVISIONS + 1)
+        check("revert/p9-declared-bound-red", *flip(
+            [lambda: p9_bound_named(p9_over_bound), lambda: p9_bound_probes(p9_over_bound)], [False, 1],
+            P9_MAX_REVISIONS=P9_MAX_REVISIONS + 1))
         check("revert/p9-word-split-red", *flip(
             [p9_case("Compare `git diff {}..{}` first.\n".format(p9_c, p9_a)),
              p9_case("See https://h.example/o/r/commit/{} now.\n".format(p9_c))], [(0, [])] * 2,
             HEX_WORD_RE=re.compile(r"\S++")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    # 267, or 266 where the uid reads a mode-000 file and revert/p9-pack-damage-red is recorded as skipped
-    check("revert/every-flip-ran", len(flipped), 267 if p9_locked else 266)
+    # 269, or 268 where the uid reads a mode-000 file and revert/p9-pack-damage-red is recorded as skipped
+    check("revert/every-flip-ran", len(flipped), 269 if p9_locked else 268)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -10252,7 +10384,8 @@ def self_test(report_path=None):
           "commit outside the BRIEF-PIN, REVIEWED HEAD and BRIEF-REVISIONS values (prefix either way), stays quiet "
           "on a word that names no commit (a nonce, a digest, a blob id, a date, an ambiguous prefix) and with no "
           "declaration, and exits 2 on two declarations, a malformed one, a value that is not a commit id or does "
-          "not resolve, no repository, or more hex words than it probes (P9), and "
+          "not resolve, no repository, or more distinct declared values or hex words than it probes, resolving "
+          "a repeated declared value once (P9), and "
           "each preflight rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
