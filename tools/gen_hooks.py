@@ -13,7 +13,9 @@ This tool renders them into the shipped, NESTED plugin surface under plugin/aiqt
   .claude/settings.json                                     this repository's own project hook registration
                                                             (the authoring tree only, never an adopter tree)
 The plugin is nested (not the whole repo) so an adopter installs only the plugin, never the authoring
-repo. The .aiqt/core/hooks/ tree is the single edit point; the generated surface is always
+repo. The plugin's skills/ directory (the chat skill, skills/aiqt/SKILL.md) is NOT an output of this tool:
+tools/gen_skill.py owns, writes and orphan-scans it, and this tool never writes or prunes there. The
+.aiqt/core/hooks/ tree is the single edit point; the generated surface is always
 regenerated, never hand-edited, and plugin/aiqt-guardrails-hooks/hooks/ is a RESERVED subtree (100%
 generated, orphan-pruned) exactly like the .cursor/rules/aiqt-guardrails/ adapter. The repository-local
 .claude/settings.json is generated WHOLE (personal settings belong in .claude/settings.local.json): it
