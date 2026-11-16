@@ -12,11 +12,11 @@ and for every family, a path outside a declared workdir when the family's row sa
 reset, fetch, pull, worktree add, merge, rebase, restore --source, archive) reaches through a ref that can move with
 no later cure, or through a dispatch ref that resolves to another commit (P5), or an input the brief declares on an
 INPUT: line that does not exist on the host the lint runs on (P6), or a git command line whose subcommand is commit
-or push when the family's row says git-write = "no" (W1), or a task line that asks to remove a test or check with
-no coverage-accounting clause and authorization reference (T1). The signal is structural, not certain: the lint fails
+or push when the family's row says git-write = "no" (W1). The signal is structural, not certain: the lint fails
 closed, so some text a human would pass refuses (see RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
 its hits are printed so a human sees them, and it never refuses; so is P8, a warning on a request that the
-worker write the harness's status line. For a family that can execute (`yes` or
+worker write the harness's status line, and so is T1, a WARN on a task line that asks to remove a test or check,
+carried in the summary line. For a family that can execute (`yes` or
 `read-only-sandbox`) no execution rule applies; the PREFLIGHT rules and GIT WRITE (W1) below apply to every family.
 
 PREFLIGHT (the input paths, pins and residuals a brief names, and the attestation lines it asks for; read over the
@@ -511,13 +511,20 @@ execute):
 
 CHECK REMOVAL (beside the preflight, for every family, before the execution rules' early return):
 
-  T1 check removal     HARD. Replacing or removing a check is a reduction until its coverage is accounted for, so a
-                       brief must not offer the removal of a test as a plain option. A TASK LINE is a line that opens at
-                       column zero with TASK: (upper case, the colon directly after; no markup, no indent), outside a
-                       fenced code block (a fenced task line is an example, not the brief's ask). For T1 a fence
-                       opens only at an indent of at most three spaces (four spaces open an indented code block, not a
-                       fence), and a fence that never closes and holds a column-zero TASK: line is CANNOT_EVALUATE
-                       (exit 2), so an unclosed fence never hides the task lines after it. Its text after the
+  T1 check removal     ADVISORY (a WARN; it never refuses and never changes the exit code). Replacing or removing a
+                       check is a reduction until its coverage is accounted for, so a brief should not offer the
+                       removal of a test as a plain option. T1 is advisory because three rounds of its word-level
+                       reading oscillated between refusing briefs that offer no removal and missing ones that do (a
+                       recorded maintainer-proxy decision); the enforcing layer for a removed registered check is the
+                       changed-lines gate tools/check_selftest_removal.py. Each hit is one WARN naming the brief line,
+                       carried in the summary line (OK or REFUSE) that the other rules select, after that line's own
+                       advice, as P8's hint is; it is not printed as a finding line of its own. A TASK LINE is a line
+                       that opens at column zero with TASK: (upper case, the colon directly after; no markup, no
+                       indent), outside a fenced code block (a fenced task line is an example, not the brief's ask).
+                       For T1 a fence opens only at an indent of at most three spaces (four spaces or a tab open an
+                       indented code block, not a fence), and a fence that never closes and holds a column-zero TASK:
+                       line is one WARN naming the fence's opening line (T1 does not read the task lines in it; the
+                       lines before it are still read). Its text after the
                        label has each QUOTATION that holds whitespace (between straight or curly double quotes, or
                        backticks) read as one opaque word, so a quoted or cited removal is not read; a quoted single
                        word (`checks`) stays. The text is then split into words on whitespace, each word stripped of
@@ -565,12 +572,12 @@ CHECK REMOVAL (beside the preflight, for every family, before the execution rule
                        removing a check is a reduction", "TASK: removing a check, as the draft did, is a reduction"),
                        except that a predicate granting a permission or naming an option (a permission word after only
                        permission frame words: "TASK: removing the failing tests is fine", "TASK: dropping flaky
-                       checks is allowed", "TASK: removing the test is an option") is an offer and fires. A hit refuses
-                       (exit 1) unless the brief carries BOTH cure lines, each at column zero, outside a fence, with
+                       checks is allowed", "TASK: removing the test is an option") is an offer and fires. The WARN
+                       says whether the brief carries BOTH cure lines, each at column zero, outside a fence, with
                        text after its colon: COVERAGE-ACCOUNTING: <how each removed case is covered by a named
                        surviving check, unreachable, or disclosed> and AUTHORIZATION: <the maintainer's recorded
-                       authorization reference>; with both, the hit is INFO. One finding per task line, at the first
-                       hit; it names the verb in its plain form. RESIDUALS: the lint checks only that the two cure
+                       authorization reference>; with or without them it is a WARN. One WARN per task line, at the
+                       first hit; it names the verb in its plain form. RESIDUALS: the lint checks only that the two cure
                        lines exist and are not blank, never that the accounting is true, complete or matches the cases
                        removed, nor that the authorization reference names a real record (a cure line reading "none"
                        counts; the changed-lines gate tools/check_selftest_removal.py holds the registered check ids
@@ -588,8 +595,24 @@ CHECK REMOVAL (beside the preflight, for every family, before the execution rule
                        (remove the test harness, remove the header row: a table row that is not a test fires); an
                        unclosed fence with no TASK: line in it still hides the cure lines in it; and a prohibition,
                        description, permission or coordination is read lexically, so "TASK: not only remove the test
-                       but fix the parser" passes, "TASK: removing the check counted twice" refuses, and "TASK: do not
-                       fix the parser and remove the test" passes.
+                       but fix the parser" is quiet, "TASK: removing the check counted twice" warns, and "TASK: do not
+                       fix the parser and remove the test" is quiet. MISSES (quiet on a real offer), each measured on
+                       the current matching: "fix the flaky test or remove it", "either fix the test or delete it"
+                       (an unlisted object, it); "consider removing the flaky test", "you may want to remove the
+                       flaky test", "it would be fine to remove the test", "the worker may remove the test" (a word
+                       before the verb that is not a lead word); "remove test_parser_roundtrip" (an unlisted
+                       object); "remove or rewrite the test" (another verb after the removal verb); "keeping or
+                       dropping the flaky test is your call" (an -ing coordination); "delete the brittle old flaky
+                       test" (too many words before the object). FALSE WARNINGS (a WARN on a line that offers no
+                       removal of a test; in one reviewer's run over a corpus of real briefs, 6 of its 10 hits were
+                       such lines):
+                       a table or register row ("remove the row if its count reaches zero", "removing their
+                       exemption rows", "remove the header row from the CSV", "drop the results row into the
+                       table"); a finding described after a colon ("removing the gate from X turns nothing red"); a
+                       noun phrase ("found, declare and drop rows"); a red-on-revert probe ("remove one new row, the
+                       gate fails"); a reference that is not a test ("drop the stale gate reference"); and a brief
+                       that describes this rule ("refusing a task line that asks to remove, delete or drop a test",
+                       where delete is read as an imperative conjunct).
 
 TEXT. A brief holding a line separator other than LF anywhere (a carriage return, bare or in CRLF, U+0085
 NEXT LINE, U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR), or a format character (Unicode category Cf: a
@@ -711,17 +734,18 @@ not one, so "do not run, build or install" stays negated.
 Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one summary line:
 
   exit 0  OK               no HARD hit (INFO and ADVISORY findings may be printed).
-  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5, P6, P7, W1 or T1). Rewrite the brief, or send the
+  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5, P6, P7 or W1). Rewrite the brief, or send the
                            item to a family that can execute (S1 to S3), name paths it can read (P2) or, after the
                            reach, add the cure line the hit gives (git -C <dir> checkout --detach <pin>^{commit}) or
                            reach the pin by a dispatch ref (P5), or provide each missing declared input or correct
                            its INPUT line (P6), or correct each ACCEPTED-RESIDUAL line or re-pin the brief (P7), or
                            drop the git commit or push, state it in the PROHIBITED shape, or send it to a family that
-                           can write (W1), or add the COVERAGE-ACCOUNTING: and AUTHORIZATION: lines or drop the
-                           removal (T1).
+                           can write (W1).
                            A P8 warning never sets the exit code: it adds its hint (ask only for the verdict and
                            completion lines and state the harness-owned attestation line as a prohibition) to the
-                           OK or REFUSE line the other rules select, after that line's own advice.
+                           OK or REFUSE line the other rules select, after that line's own advice. A T1 WARN never
+                           sets the exit code either: each adds "; WARN T1 <brief>:<line>: <message>: <excerpt>" to
+                           that same line, after the P8 hint.
                            When a hit is a command line (S2 or S3), the REFUSE line
                            says how to rewrite: name the function, row or entry instead of embedding the
                            command (quote the def line of X, not the line that runs git push).
@@ -4143,7 +4167,7 @@ def t1_lines(text):
     indented by more than T1_FENCE_INDENT spaces, or by a tab, is an indented code block line, not a fence. A fence
     that never closes and holds a column-zero TASK: line is CannotEvaluate (t1_unclosed): its task lines would
     otherwise be hidden to the end of the brief."""
-    found, opening, hidden = [], None, []
+    found, opening, hidden, opened_at = [], None, [], None
     for number, line in enumerate(text.split("\n"), 1):
         if opening is not None:
             if _fence_closes(line, opening):
@@ -4154,13 +4178,22 @@ def t1_lines(text):
         opened = FENCE_OPEN_RE.match(line)
         if opened and len(opened.group(1)) <= T1_FENCE_INDENT and "\t" not in opened.group(1) and not (
                 opened.group(2)[0] == "`" and "`" in opened.group(3)):
-            opening, hidden = opened.group(2), []
+            opening, hidden, opened_at = opened.group(2), [], number
             continue
         found.append((number, line))
     if opening is not None and t1_unclosed(hidden):
-        raise CannotEvaluate("T1: a fenced code block opened with {} never closes and holds a TASK: line, so the "
-                             "brief's task lines cannot be told from an example; close the fence".format(opening))
+        raise T1UnclosedFence(found, opened_at, opening)
     return found
+
+
+class T1UnclosedFence(Exception):
+    """Raised by t1_lines for a fence that never closes and holds a column-zero TASK: line: it carries the lines
+    read before the fence, the fence's opening line number and its marker, so rule_t1 can warn on it (T1 is
+    advisory, so this never changes the exit code)."""
+
+    def __init__(self, found, number, opening):
+        super().__init__(number)
+        self.found, self.number, self.opening = found, number, opening
 
 
 def t1_unclosed(hidden):
@@ -4343,11 +4376,21 @@ def t1_accounted(lines):
 
 
 def rule_t1(text):
-    """T1 (HARD, every family): a column-zero TASK: line outside a fence that instructs the worker to remove, delete
-    or drop a test, self-test, case, assertion or check refuses unless the brief carries the two cure lines outside
-    a fence (t1_accounted); with them it is INFO."""
-    lines = t1_lines(text)
+    """T1 (ADVISORY, every family): a column-zero TASK: line outside a fence that instructs the worker to remove,
+    delete or drop a test, self-test, case, assertion or check is one WARN finding naming the line, whose message
+    says whether the brief carries the two cure lines outside a fence (t1_accounted); a fence that never closes
+    and holds a TASK: line is one WARN naming the fence's opening line. A WARN never sets the exit code: run()
+    carries each in the summary line the other rules select."""
+    unclosed = None
+    try:
+        lines = t1_lines(text)
+    except T1UnclosedFence as exc:
+        lines, unclosed = exc.found, exc
     accounted, findings = None, []
+    if unclosed is not None:
+        findings.append(("T1", "WARN", unclosed.number, "a fenced code block opened with {} never closes and holds a "
+                         "TASK: line, so T1 did not read the task lines in it; close the fence".format(
+                             unclosed.opening), _excerpt(unclosed.opening)))
     for number, line in lines:
         if not line.startswith(TASK_LABEL):
             continue
@@ -4364,13 +4407,13 @@ def rule_t1(text):
             asked = "task line asks to {} {}{}".format(T1_PLAIN.get(word, word),
                                                        "a " if named in T1_SINGULAR else "", named)
             if accounted:
-                findings.append(("T1", "INFO", number, asked + ", with a coverage-accounting clause and an "
+                findings.append(("T1", "WARN", number, asked + ", with a coverage-accounting clause and an "
                                  "authorization reference", _excerpt(line)))
             else:
-                findings.append(("T1", "HARD", number, asked + " and the brief has no {} line or no {} line with "
+                findings.append(("T1", "WARN", number, asked + " and the brief has no {} line or no {} line with "
                                  "text after it".format(*T1_CURE_LABELS), _excerpt(line)))
             break
-    return findings
+    return sorted(findings, key=lambda finding: finding[2])
 
 
 def can_execute(row):
@@ -4447,10 +4490,14 @@ STATUS_HINT = ("; the harness writes the WORKER_STATUS line and its account, mod
 # added to a REFUSE line when a W1 hit is among the hard hits
 GIT_WRITE_HINT = ("; the family's row says git-write = \"no\": drop the git commit or push, state it as a prohibition "
                   "(Do not run `git push`.), or send it to a family that can write")
-# added to a REFUSE line when a T1 hit is among the hard hits
-REMOVAL_HINT = ("; a task line asks to remove a test or check: add a column-zero COVERAGE-ACCOUNTING: line that "
-                "accounts for each removed case (covered by a named surviving check, unreachable, or disclosed) and a "
-                "column-zero AUTHORIZATION: line naming the maintainer's recorded authorization, or drop the request")
+# the WARN a T1 finding adds to the summary line (REFUSE or OK); T1 never sets the exit code
+REMOVAL_WARN = "; WARN T1 {}:{}: {}: {}"
+
+
+def removal_warnings(brief_path, findings):
+    """The text each T1 finding adds to the summary line: one WARN per finding, naming the brief line."""
+    return "".join(REMOVAL_WARN.format(brief_path, line, message, excerpt)
+                   for rule, _, line, message, excerpt in findings if rule == "T1")
 
 
 def run(brief_path, family, table_path, scoped=True, repo=None):
@@ -4460,14 +4507,16 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
     except CannotEvaluate as exc:
         print("CANNOT_EVALUATE: {}".format(exc))
         return EXIT_CANNOT_EVALUATE
+    # T1 is ADVISORY: each hit is one WARN carried in the summary line below, not a finding line of its own
+    removal = removal_warnings(brief_path, findings)
+    findings = [finding for finding in findings if finding[0] != "T1"]
     for rule, severity, line, message, excerpt in findings:
         print("{}:{}: {} {}: {}: {}".format(brief_path, line, severity, rule, message, excerpt))
     hard = [rule for rule, severity, _, _, _ in findings if severity == "HARD"]
     missing_input = INPUT_HINT if "P6" in hard else ""
     git_write = GIT_WRITE_HINT if "W1" in hard else ""
-    git_write += REMOVAL_HINT if "T1" in hard else ""
     # P8 is ADVISORY: a hit adds its hint to whichever summary line the other rules select, and never selects one
-    status_ask = STATUS_HINT if any(rule == "P8" for rule, _, _, _, _ in findings) else ""
+    status_ask = (STATUS_HINT if any(rule == "P8" for rule, _, _, _, _ in findings) else "") + removal
     if code == EXIT_REFUSE and set(hard) - EVERY_FAMILY_RULES:
         print("REFUSE: family {} cannot execute and the brief carries a structural execution request ({} hard "
               "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}{}{}".format(
@@ -4478,11 +4527,6 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
         print("REFUSE: family {}: the brief carries a git command line that commits or pushes ({} hard hit(s): {}){}"
               "{}{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
                             git_write, missing_input, status_ask))
-    elif code == EXIT_REFUSE and "T1" in hard:
-        print("REFUSE: family {}: a task line asks to remove a test or check with no coverage accounting ({} hard "
-              "hit(s): {}){}{}{}".format(family, len(hard), ", ".join("{} x{}".format(r, hard.count(r))
-                                                                     for r in sorted(set(hard))),
-                                         git_write, missing_input, status_ask))
     elif code == EXIT_REFUSE and "P5" in hard:
         print("REFUSE: family {}: the brief reaches a pinned revision through a ref that can move ({} hard hit(s): "
               "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}; "
@@ -7742,9 +7786,18 @@ def self_test(report_path=None):
           [(0, [])] * 2 + [(1, [("S3", "HARD")])] * 2)
     check("w1/every-family", [_w1_outcome(W1_COMMIT, family) for family in ("alpha", "beta", "gamma")],
           [w1_refused] * 2 + [(1, [("S3", "HARD"), ("W1", "HARD")])])
-    # ---------- T1: a task line that asks to remove a test or check, with no coverage accounting ----------
-    t1_refused, t1_info = (1, [("T1", "HARD")]), (0, [("T1", "INFO")])
+    # ---------- T1: a task line that asks to remove a test or check (ADVISORY: a WARN, exit 0) ----------
+    # the row ids keep the names they had when T1 refused; each now asserts the WARN and exit 0
+    t1_refused = (0, [("T1", "WARN")])
     t1_cure = "COVERAGE-ACCOUNTING: covered by check a/b, observed red without it\nAUTHORIZATION: decision 7\n"
+    t1_table = parse_table(TABLE_FIXTURE.encode("utf-8"))
+
+    def t1_accounting(text):
+        """For each T1 WARN in the brief, "accounted" when its message says both cure lines are there, else
+        "unaccounted"."""
+        return ["accounted" if message.endswith("authorization reference") else "unaccounted"
+                for rule, _, _, message, _ in evaluate(text.encode("utf-8"), "alpha", t1_table)[1] if rule == "T1"]
+
     check("t1/remove-test-refused", _outcome("TASK: remove the flaky test in the parser suite.\n", "alpha"),
           t1_refused)
     check("t1/verb-object-forms-refused",
@@ -7752,12 +7805,15 @@ def self_test(report_path=None):
               "TASK: delete the assertion.\n", "TASK: drop one self-test case.\n",
               "TASK: fix the parser, or optionally removing a registered check.\n",
               "TASK: Remove `checks` that duplicate.\n", "TASK: options: dropping tests\n")], [t1_refused] * 5)
-    check("t1/accounted-info", _outcome("TASK: remove the flaky test.\n" + t1_cure, "alpha"), t1_info)
+    check("t1/accounted-info", [_outcome("TASK: remove the flaky test.\n" + t1_cure, "alpha"),
+                                t1_accounting("TASK: remove the flaky test.\n" + t1_cure)], [t1_refused, ["accounted"]])
     check("t1/cure-needs-both-lines",
-          [_outcome("TASK: remove the flaky test.\n" + cure, "alpha") for cure in (
+          [(_outcome("TASK: remove the flaky test.\n" + cure, "alpha"), t1_accounting("TASK: remove the flaky test.\n"
+                                                                                       + cure)) for cure in (
               "COVERAGE-ACCOUNTING: covered by check a/b\n", "AUTHORIZATION: decision 7\n",
               "COVERAGE-ACCOUNTING: covered by check a/b\nAUTHORIZATION:   \n",
-              "COVERAGE-ACCOUNTING: covered by check a/b\n AUTHORIZATION: decision 7\n")], [t1_refused] * 4)
+              "COVERAGE-ACCOUNTING: covered by check a/b\n AUTHORIZATION: decision 7\n")],
+          [(t1_refused, ["unaccounted"])] * 4)
     check("t1/prohibited-ok",
           [_outcome(text, "alpha") for text in ("TASK: fix the parser; never remove a test.\n",
                                                 "TASK: do not delete the check.\n",
@@ -7801,8 +7857,9 @@ def self_test(report_path=None):
                                                 "TASK: remove all failing tests.\n",
                                                 "TASK: remove these two checks.\n")], [t1_refused] * 5)
     check("t1/fenced-task-line-ok", _outcome(T1_FENCED_TASK, "alpha"), (0, []))
-    check("t1/fenced-cure-refused", _outcome("TASK: remove the flaky test.\n```text\n" + t1_cure + "```\n", "alpha"),
-          t1_refused)
+    check("t1/fenced-cure-refused", [_outcome("TASK: remove the flaky test.\n```text\n" + t1_cure + "```\n", "alpha"),
+                                     t1_accounting("TASK: remove the flaky test.\n```text\n" + t1_cure + "```\n")],
+          [t1_refused, ["unaccounted"]])
     check("t1/noun-modifier-ok",
           [_outcome(text, "alpha") for text in ("TASK: remove the check mark.\n",
                                                 "TASK: drop the test fixture directory.\n",
@@ -7821,12 +7878,25 @@ def self_test(report_path=None):
                                                 "TASK: removing the test is an option.\n")], [t1_refused] * 3)
     check("t1/offer-twins-ok", [_outcome(text, "alpha") for text in T1_OFFER_TWINS],
           [(0, [])] * len(T1_OFFER_TWINS))
+    # an unclosed fence holding a TASK: line is one WARN naming the fence's opening line (line 2), and the task
+    # line before the fence is still read (a second WARN, line 1)
     check("t1/unclosed-fence-cannot-evaluate",
           [_outcome(T1_UNCLOSED_FENCE, "alpha"), _outcome("TASK: fix it.\n```\nexample, never closed\n", "alpha"),
-           _outcome("Notes:\n```\nTASK: remove the flaky test.\n```\n", "alpha")], ["CannotEvaluate", (0, []), (0, [])])
+           _outcome("Notes:\n```\nTASK: remove the flaky test.\n```\n", "alpha"),
+           [line for rule, _, line, _, _ in evaluate(T1_UNCLOSED_FENCE.encode("utf-8"), "alpha", t1_table)[1]
+            if rule == "T1"],
+           [line for rule, _, line, _, _ in evaluate(("TASK: drop the check.\n" + T1_UNCLOSED_FENCE).encode("utf-8"),
+                                                     "alpha", t1_table)[1] if rule == "T1"]],
+          [t1_refused, (0, []), (0, []), [2], [1, 3]])
     check("t1/indented-fence-not-a-fence-refused",
           [_outcome(T1_INDENTED_FENCE, "alpha"), _outcome("   ```\nTASK: remove the flaky test.\n```\n", "alpha")],
           [t1_refused, (0, [])])
+    # a tab-indented fence line is an indented code block line, not a fence, so the task line between warns
+    check("t1/tab-fence-not-a-fence-warned", _outcome("\t```\nTASK: remove the flaky test.\n\t```\n", "alpha"),
+          t1_refused)
+    # a permission after a later clause boundary is an offer, not a description
+    check("t1/permission-later-clause-warned",
+          _outcome("TASK: removing the failing tests, if they block you, is fine.\n", "alpha"), t1_refused)
     t1_tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-t1-"))
     try:
         with open(t1_tmp / "brief.md", "w", encoding="utf-8") as handle:
@@ -7837,13 +7907,24 @@ def self_test(report_path=None):
         with contextlib.redirect_stdout(t1_printed):
             t1_code = run(str(t1_tmp / "brief.md"), "alpha", str(t1_tmp / "table.toml"))
         t1_lines = t1_printed.getvalue().splitlines()
+        t1_warn_text = REMOVAL_WARN.format(
+            t1_tmp / "brief.md", 2, "task line asks to remove a test and the brief has no COVERAGE-ACCOUNTING: line "
+            "or no AUTHORIZATION: line with text after it", "TASK: remove the flaky test.")
+        # with a HARD hit from another rule (S3, family gamma), the same WARN rides on the REFUSE line
+        with open(t1_tmp / "brief.md", "w", encoding="utf-8") as handle:
+            handle.write("Context.\nTASK: remove the flaky test.\n\nRead only `git show HEAD:x.py`.\n")
+        t1_refuse_printed = io.StringIO()
+        with contextlib.redirect_stdout(t1_refuse_printed):
+            t1_refuse_code = run(str(t1_tmp / "brief.md"), "gamma", str(t1_tmp / "table.toml"))
+        t1_refuse_lines = t1_refuse_printed.getvalue().splitlines()
+        # T1 is ADVISORY: exit 0, no finding line of its own, one WARN at the end of the OK summary line; and with
+        # a refusal from another rule, the exit code is that rule's and the WARN ends the REFUSE line
         check("t1/main-refuse-line",
-              (t1_code, [line.endswith(":2: HARD T1: task line asks to remove a test and the brief has no "
-                                       "COVERAGE-ACCOUNTING: line or no AUTHORIZATION: line with text after it: "
-                                       "TASK: remove the flaky test.") for line in t1_lines[:-1]],
-               t1_lines[-1].startswith("REFUSE: family alpha: a task line asks to remove a test")
-               and t1_lines[-1].endswith(REMOVAL_HINT)),
-              (EXIT_REFUSE, [True], True))
+              (t1_code, len(t1_lines), t1_lines[-1].startswith("OK: family alpha"),
+               t1_lines[-1].endswith(t1_warn_text), t1_lines[-1].count("WARN T1"),
+               t1_refuse_code, t1_refuse_lines[-1].startswith("REFUSE: family gamma"),
+               t1_refuse_lines[-1].endswith(t1_warn_text), any("T1" in line for line in t1_refuse_lines[:-1])),
+              (EXIT_OK, 1, True, True, 1, EXIT_REFUSE, True, True, False))
     finally:
         shutil.rmtree(t1_tmp, ignore_errors=True)
     w1_tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-w1-"))
@@ -7910,10 +7991,10 @@ def self_test(report_path=None):
           [p8_warned] * len(P8_TEMPLATE_ASKED))
     check("p8/empty-cells-quiet", _outcome(P8_EMPTY_CELLS, "alpha"), (0, []))
     check("p8/valued-cells-warned", _outcome(P8_VALUED_CELLS, "alpha"), p8_warned)
-    # the exit section names every rule that can refuse (each HARD rule), P7 and T1 included
+    # the exit section names every rule that can refuse (each HARD rule), P7 included; T1 is advisory, so not
     check("p8/exit-section-hard-rules",
           re.search(r"at least one HARD hit \(([^)]*)\)", " ".join(__doc__.split())).group(1),
-          "S1, S2, S3, P2, P5, P6, P7, W1 or T1")
+          "S1, S2, S3, P2, P5, P6, P7 or W1")
     check("p8/application-fields-ok", [_outcome(text, "alpha") for text in P8_APPLICATION_FIELDS],
           [(0, [])] * len(P8_APPLICATION_FIELDS))
     check("p8/harness-actions-ok", [_outcome(text, "alpha") for text in P8_HARNESS_ACTIONS],
@@ -9785,43 +9866,59 @@ def self_test(report_path=None):
     # T1: the rule, its verbs, its objects, its fillers, its cure, its prohibition and its description each patched
     # out flips its fixture
     t1_task = "TASK: remove the flaky test.\n"
-    check("revert/t1-red", *flip([code(t1_task)], [0], rule_t1=nothing))
-    check("revert/t1-verbs-red", *flip([code(t1_task), code("TASK: drop one check.\n")], [0, 0],
+
+    def warned(text):
+        """Whether the brief draws a T1 WARN (T1 is advisory, so its flips are read from the WARN, not the exit
+        code), or "CannotEvaluate"."""
+        def outcome():
+            got = _outcome(text)
+            return got if isinstance(got, str) else ("T1", "WARN") in got[1]
+        return outcome
+
+    def accounting(text):
+        return lambda: t1_accounting(text)
+
+    check("revert/t1-red", *flip([warned(t1_task)], [False], rule_t1=nothing))
+    check("revert/t1-verbs-red", *flip([warned(t1_task), warned("TASK: drop one check.\n")], [False, False],
                                        T1_VERBS=frozenset()))
-    check("revert/t1-objects-red", *flip([code(t1_task), code("TASK: delete the assertion.\n")], [0, 0],
+    check("revert/t1-objects-red", *flip([warned(t1_task), warned("TASK: delete the assertion.\n")], [False, False],
                                          T1_OBJECTS=frozenset()))
-    check("revert/t1-fillers-red", *flip([code(t1_task)], [0], T1_FILLERS=frozenset()))
-    check("revert/t1-cure-red", *flip([code(t1_task)], [0], t1_accounted=lambda lines: True))
-    check("revert/t1-cure-both-red", *flip([code(t1_task + "AUTHORIZATION: decision 7\n")], [0],
+    check("revert/t1-fillers-red", *flip([warned(t1_task)], [False], T1_FILLERS=frozenset()))
+    check("revert/t1-cure-red", *flip([accounting(t1_task)], [["accounted"]], t1_accounted=lambda lines: True))
+    check("revert/t1-cure-both-red", *flip([accounting(t1_task + "AUTHORIZATION: decision 7\n")], [["accounted"]],
                                            T1_CURE_LABELS=("AUTHORIZATION:",)))
-    check("revert/t1-prohibition-red", *flip([code("TASK: never remove a test.\n")], [1],
+    check("revert/t1-prohibition-red", *flip([warned("TASK: never remove a test.\n")], [True],
                                              t1_prohibited=lambda words, index: False))
-    check("revert/t1-description-red", *flip([code("TASK: removing a check is a reduction.\n")], [1],
+    check("revert/t1-description-red", *flip([warned("TASK: removing a check is a reduction.\n")], [True],
                                              t1_described=lambda words, verb, obj: False))
-    check("revert/t1-clause-boundary-red", *flip([code("TASK: do not stop early; remove the test.\n")], [0],
+    check("revert/t1-clause-boundary-red", *flip([warned("TASK: do not stop early; remove the test.\n")], [False],
                                                  t1_words=lambda line, real=t1_words: [
                                                      (word, False) for word, _ in real(line)]))
-    check("revert/t1-instruction-red", *flip([code(T1_NOT_ASKED[0]), code(T1_NOT_ASKED[3])], [1, 1],
+    check("revert/t1-instruction-red", *flip([warned(T1_NOT_ASKED[0]), warned(T1_NOT_ASKED[3])], [True, True],
                                              t1_instruction=lambda words, index: True))
-    check("revert/t1-quotation-red", *flip([code(T1_NOT_ASKED[4])], [1], t1_unquoted=lambda line: line))
-    check("revert/t1-fence-red", *flip([code(T1_FENCED_TASK)], [1],
+    check("revert/t1-quotation-red", *flip([warned(T1_NOT_ASKED[4])], [True], t1_unquoted=lambda line: line))
+    check("revert/t1-fence-red", *flip([warned(T1_FENCED_TASK)], [True],
                                        t1_lines=lambda text: list(enumerate(text.split("\n"), 1))))
-    check("revert/t1-noun-modifier-red", *flip([code("TASK: remove the check mark.\n")], [1],
+    check("revert/t1-noun-modifier-red", *flip([warned("TASK: remove the check mark.\n")], [True],
                                                T1_NOT_OBJECT_AFTER=frozenset()))
-    check("revert/t1-coordination-red", *flip([code(T1_OFFERS[3]), code(T1_OFFERS[0])], [0, 0],
+    check("revert/t1-coordination-red", *flip([warned(T1_OFFERS[3]), warned(T1_OFFERS[0])], [False, False],
                                               t1_imperative_conjunct=lambda words, end: False))
-    check("revert/t1-coordination-subordinate-red", *flip([code(T1_OFFER_TWINS[4])], [1],
+    check("revert/t1-coordination-subordinate-red", *flip([warned(T1_OFFER_TWINS[4])], [True],
                                                           T1_SUBORDINATE=frozenset()))
-    check("revert/t1-permission-red", *flip([code(T1_OFFERS[6]), code("TASK: removing the failing tests is fine.\n")],
-                                            [0, 0], T1_PERMISSIONS=frozenset()))
-    check("revert/t1-permission-description-red", *flip([code("TASK: removing the failing tests is fine.\n")], [0],
-                                                         t1_permission=lambda words, link: False))
-    check("revert/t1-modifier-slot-red", *flip([code(T1_OFFERS[1])], [0], T1_MODIFIER_SLOT=False))
-    check("revert/t1-filler-stops-red", *flip([code("TASK: delete what tests do not need.\n")], [1],
+    check("revert/t1-permission-red", *flip([warned(T1_OFFERS[6]),
+                                             warned("TASK: removing the failing tests is fine.\n")],
+                                            [False, False], T1_PERMISSIONS=frozenset()))
+    # both description branches: the predicate right after the object, and one after a later clause boundary
+    check("revert/t1-permission-description-red", *flip(
+        [warned("TASK: removing the failing tests is fine.\n"),
+         warned("TASK: removing the failing tests, if they block you, is fine.\n")], [False, False],
+        t1_permission=lambda words, link: False))
+    check("revert/t1-modifier-slot-red", *flip([warned(T1_OFFERS[1])], [False], T1_MODIFIER_SLOT=False))
+    check("revert/t1-filler-stops-red", *flip([warned("TASK: delete what tests do not need.\n")], [True],
                                               T1_FILLER_STOPS=frozenset()))
     check("revert/t1-unclosed-fence-red", *flip([lambda: _outcome(T1_UNCLOSED_FENCE, "alpha")], [(0, [])],
                                                 t1_unclosed=lambda hidden: False))
-    check("revert/t1-fence-indent-red", *flip([code(T1_INDENTED_FENCE)], [0], T1_FENCE_INDENT=8))
+    check("revert/t1-fence-indent-red", *flip([warned(T1_INDENTED_FENCE)], [False], T1_FENCE_INDENT=8))
     check("revert/every-flip-ran", len(flipped), 291)
 
     for check_id in sorted(expected - _EXECUTED_SET):

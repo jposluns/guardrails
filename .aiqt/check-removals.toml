@@ -7,5 +7,5 @@ schema = 1
 suite = "selftest-removal-selftest"
 id = "refuse/moved-suite-counts"
 state = "unreachable"
-capability-removed = "commit bdb72195 (removal gate round 1): a check id newly registered in another suite with the same check() body is reported as moved, not removed, so the refusal of a move that this row asserted no longer exists"
-observed = "pass/moved-between-suites runs the same fixture (check id c moved from suite s to suite t) and asserts exit 0; refuse/move-target-held-at-base, refuse/move-absorbs-one-removal and refuse/move-other-body assert the refusals that remain"
+capability-removed = "the move rule of tools/check_selftest_removal.py, introduced in the change series that also adds this record: a check id newly registered in another suite with the same launch (runner path and args) and the same check() body, not generic, is reported as moved, not removed, so the refusal of a move that this row asserted no longer exists"
+observed = "pass/moved-between-suites runs the same fixture (check id c moved from suite s to suite t, one runner) and asserts exit 0; refuse/move-target-held-at-base, refuse/move-absorbs-one-removal, refuse/move-other-body, refuse/move-other-runner, refuse/move-other-args, refuse/move-body-generic and refuse/move-live-generic-twin assert the refusals that remain"

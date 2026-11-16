@@ -19,16 +19,33 @@ pair in one of the three states of the gate-discipline rule, in an entry this ch
                                form D-<number> (<YYYY-MM-DD>): the decision number, 1 to 6 digits, one space,
                                and the decision's calendar date in parentheses, for example D-417 (2026-10-04)
 
+SCOPE. The unit this gate reads is a REGISTERED CHECK ID: a (suite id, check id) pair in the expected-check-ids
+list of a [[suite]] row of tools/selftest_checks.toml, with that row's runner and args. It covers the removal of
+such a pair, by deleting the id, renaming it, or deleting or renaming its whole suite row. It does NOT cover a
+self-test case that is not a registered check id: a test function, a subtest, an assertion or a fixture row
+inside a runner that no registered id names, a test file that no suite row runs, or the code behind an id that
+stays registered (tools/check_selftest_execution.py reconciles the ids a runner executes with the registry; this
+gate reads the registry only, plus the runner text a move compares).
+
 A MOVE is not a removal: a removed pair whose check id is newly registered at the head in another suite (a
-pair the base did not hold) WITH THE SAME BODY is reported as moved and needs no entry. The body of a check
-id is the AST dump, without positions, of the innermost statement holding its direct check() call in the
-suite's registered runner (with the loop row that names the id, for an id a for loop binds); the old suite's
-runner is read at the base and the new suite's at the head, from the commit trees. A runner that is absent,
-not a plain relative path, unreadable, not UTF-8 or unparsable, and an id named by no call site or by more
-than one, give no body, so the pair counts as removed. Each new registration absorbs one removed pair, so an
-id removed from two suites and added to one is one move and one removal, and an id that the other suite
-already held at the base is not a move. A move needs no entry because the moved id stays registered with the
-case it named, so tools/check_selftest_execution.py still requires its new suite to run it.
+pair the base did not hold) with the SAME LAUNCH and the SAME BODY, where the body is not GENERIC, is reported
+as moved and needs no entry. The launch of a suite is its registered runner path and its args list (no args
+key reads as an empty list): the old suite's launch at the base and the new suite's at the head must be
+equal, so a move into a suite with another runner, or with the same runner and other args, is a removal (the
+same check() statement in another program, such as the refuse/unrecognized-argument boilerplate each runner
+holds, does not run the same case). The body of a check id is the AST dump, without positions, of the
+innermost statement holding its direct check() call in that runner (with the loop row that names the id, for
+an id a for loop binds), read at the base for the old suite and at the head for the new one, from the commit
+trees. A body is generic when the same check id has the identical body in the runner of any other suite
+whose runner path differs, among the suites registering that id at the base (runner read at the base) or at
+the head (runner read at the head): such a body is boilerplate, not evidence that the case moved. A runner
+that is absent, not a plain relative path, unreadable, not UTF-8 or unparsable, an args value that is not a
+list of strings, and an id named by no call site or by more than one, give no launch or no body, so the pair
+counts as removed. Each new registration absorbs one removed pair, so an id removed from two suites and added
+to one is one move and one removal, and an id that the other suite already held at the base is not a move. A
+move needs no entry because the moved id stays registered with the case it named, so
+tools/check_selftest_execution.py still requires its new suite to run it. A removal that is not a move is
+accounted for like any other (a covered entry naming the new pair is the usual one).
 
 An entry accounts for a removal only when it is FRESH: the base record holds no entry for the pair, or holds
 one whose fields differ from the head's after each value is whitespace-collapsed and case-folded, so a
@@ -64,7 +81,8 @@ repeated pair, a format-version other than 1). Never a pass.
   check_selftest_removal.py --self-test [--execution-report ABS_PATH]
 
 RESIDUALS: it reads registered ids, not test code, so a case kept in the registry while its body is
-weakened, a check whose assertion is emptied, and a test file outside the registry are not seen; an id
+weakened, a check whose assertion is emptied, a test function or subtest that no registered id names, and a
+test file outside the registry are not seen; an id
 renamed in the registry reads as a removal and an addition, so it needs an entry (covered by the new id);
 the record proves that an accounting was written in a checkable form, never that it is true: the covered-by
 pair is checked to be registered at the head, not to catch what the removed case did; the authorization's
@@ -72,8 +90,12 @@ form is checked, but the decision it names is not looked up; and the unreachable
 freshness proves the entry was rewritten beyond whitespace and letter case, not that the rewrite is a new
 accounting (a reworded old entry reads as fresh; a disclosed entry, whose one field has a fixed form, must
 name another decision or date), and the form admits D-0 and a future date; a malformed base record makes
-every head entry read as fresh; a move is judged by the id and its check() statement only, so a moved case
-whose call is unchanged while the helpers or fixtures it calls changed reads as a move; the comparison is of
+every head entry read as fresh; a move is judged by the id, its suite's launch (runner path and args) and its
+check() statement only, so a moved case whose call is unchanged while the runner's helpers or fixtures it calls
+changed reads as a move, and a boilerplate body is caught as generic only when another registered runner
+holds it for the same id (a runner rewritten in place under the same path, keeping a boilerplate statement
+that no other runner holds, reads as a move); the generic test fails toward a removal, so a suite rename
+whose runner shares a boilerplate id with another runner needs an entry for that id; the comparison is of
 the two endpoints, so a removal and re-addition inside the range is not seen; and, like its base
 derivation, it trusts the git binary, the repository configuration and origin/HEAD.
 """
@@ -205,8 +227,8 @@ def net_removed(base_pairs, head_pairs):
 
 def moved(removed, base_pairs, head_pairs, same_body):
     """{removed pair: the suite its check id moved to}: a removed pair whose check id is newly registered (a pair
-    the base did not hold) in another suite at the head, with the same body there (same_body(old suite, new
-    suite, check id)), each new registration absorbing one removed pair."""
+    the base did not hold) in another suite at the head, with the same launch and the same body there, the body
+    not generic (same_body(old suite, new suite, check id)), each new registration absorbing one removed pair."""
     added = {}
     for suite, check_id in sorted(head_pairs - base_pairs):
         added.setdefault(check_id, []).append(suite)
@@ -220,13 +242,25 @@ def moved(removed, base_pairs, head_pairs, same_body):
     return result
 
 
-def runners(raw):
-    """{suite id: runner path} for a registry's bytes that load_registry accepted ({} when absent); a runner that is
-    not a string is left out, so its suite has no body to compare."""
+def launches(raw):
+    """{suite id: (runner path, args tuple)} for a registry's bytes that load_registry accepted ({} when absent): the
+    LAUNCH of a suite, its runner and the args it is run with (no args key reads as no args). A runner that is not
+    a string, or args that are not a list of strings, leave the suite out, so it has no launch to compare."""
     if raw is None:
         return {}
-    return {row["id"]: row["runner"] for row in parse_toml(raw, "registry")["suite"]
-            if isinstance(row.get("runner"), str)}
+    found = {}
+    for row in parse_toml(raw, "registry")["suite"]:
+        runner, args = row.get("runner"), row.get("args", [])
+        if isinstance(runner, str) and isinstance(args, list) and all(isinstance(arg, str) for arg in args):
+            found[row["id"]] = (runner, tuple(args))
+    return found
+
+
+def generic(body, elsewhere):
+    """Whether a check id's body is GENERIC: the identical body is held for the same id by the runner of another
+    suite (elsewhere: the bodies the id has in the runners, at another path, of the suites that register it at the
+    base or the head). Boilerplate such as the refuse/unrecognized-argument row each runner holds is generic."""
+    return body in elsewhere
 
 
 def _relative_path(path):
@@ -294,11 +328,15 @@ def check_bodies(raw):
 
 
 def body_reader(base_registry, head_registry, base_read, head_read):
-    """same_body(old suite, new suite, check id) for moved(): whether the check id has one body in its old suite's
-    runner at the base and the same body in its new suite's runner at the head. A runner that is unregistered, not a
-    plain relative path, absent, unreadable or unparsable, or an id with no single body there, is not the same body,
-    so the pair counts as removed."""
-    old_runners, new_runners, cache = runners(base_registry), runners(head_registry), {}
+    """same_body(old suite, new suite, check id) for moved(): whether the old suite's launch at the base equals the
+    new suite's launch at the head (the same runner path and args), the check id has one body in that runner at the
+    base and the same body in it at the head, and that body is not generic (no runner at another path, of a suite
+    that registers the id, holds it: such a runner is read at the base for a base suite and at the head for a head
+    suite). A launch that differs or is missing, a runner that is not a plain relative path, absent, unreadable or
+    unparsable, or an id with no single body there, is not the same body, so the pair counts as removed."""
+    old_launches, new_launches, cache = launches(base_registry), launches(head_registry), {}
+    sides = ((base_read, old_launches, set() if base_registry is None else load_registry(base_registry, "base")),
+             (head_read, new_launches, set() if head_registry is None else load_registry(head_registry, "head")))
 
     def bodies(read, path):
         if read is None or not isinstance(path, str) or not _relative_path(path):
@@ -310,9 +348,17 @@ def body_reader(base_registry, head_registry, base_read, head_read):
                 cache[(read, path)] = {}
         return cache[(read, path)]
 
+    def elsewhere(check_id, runner):
+        return [bodies(read, table[suite][0]).get(check_id) for read, table, pairs in sides
+                for suite, other in sorted(pairs) if other == check_id and suite in table and table[suite][0] != runner]
+
     def same_body(old_suite, new_suite, check_id):
-        old = bodies(base_read, old_runners.get(old_suite)).get(check_id)
-        return old is not None and old == bodies(head_read, new_runners.get(new_suite)).get(check_id)
+        launch = old_launches.get(old_suite)
+        if launch is None or launch != new_launches.get(new_suite):
+            return False
+        old = bodies(base_read, launch[0]).get(check_id)
+        return (old is not None and old == bodies(head_read, launch[0]).get(check_id)
+                and not generic(old, elsewhere(check_id, launch[0])))
 
     return same_body
 
@@ -486,6 +532,89 @@ OTHER_C = {"tools/x.py": X_RUNNER.replace(b'main(["--bogus"]) == 2', b"True")}.g
 REFORMATTED_C = {"tools/x.py": X_RUNNER.replace(b'main(["--bogus"]) == 2', b'main( [ "--bogus" ] )==2')}.get
 TWICE_C = {"tools/x.py": X_RUNNER + b'check("c", 1)\n'}.get
 LOOP_C = b'for name, value in (("b", 1), ("c", 2)):\n    check(name, value == 2)\n'
+# another program holding the very statement X_RUNNER holds for c (its main always returns 2), and one holding
+# another body for c
+Z_RUNNER = b'def main(argv):\n    return 2\ncheck("c", main(["--bogus"]) == 2)\n'
+W_OTHER = b'check("c", 0)\n'
+# the live twin: a boilerplate id whose check() statement two registered runners hold word for word
+LIVE_ID, LIVE_SUITE, LIVE_TARGET = "refuse/unrecognized-argument", "headers-selftest", "tools/check_sitemap.py"
+
+
+def _quote(value):
+    return '"{}"'.format(value.replace("\\", "\\\\").replace('"', '\\"'))
+
+
+def _launch_registry(*rows):
+    """Registry bytes for (suite id, runner, (check id, ...)[, args]) rows; args None or absent writes no args key."""
+    out = ["format-version = 1\n"]
+    for suite, runner, ids, *args in rows:
+        out.append("[[suite]]\nid = {}\nrunner = {}\n{}expected-check-ids = [{}]\n".format(
+            _quote(suite), _quote(runner), "" if not args or args[0] is None else "args = [{}]\n".format(
+                ", ".join(_quote(arg) for arg in args[0])), ", ".join(_quote(i) for i in ids)))
+    return "".join(out).encode("utf-8")
+
+
+def _live_twin():
+    """(precondition, code) for the live twin: LIVE_ID removed from LIVE_SUITE in the live registry and registered
+    in a new suite whose runner is LIVE_TARGET, both runners read from this checkout. The precondition is that the
+    live suite registers the id and that both runners hold the same single body for it, so the twin is the generic
+    case; when a later change breaks that, the row fails and must be re-pointed at another such pair."""
+    live = (ROOT / REGISTRY).read_bytes()
+
+    def read(path):
+        target = ROOT / path
+        return target.read_bytes() if target.is_file() else None
+
+    rows = [(row["id"], row["runner"], [i for i in row["expected-check-ids"] if (row["id"], i) != (LIVE_SUITE, LIVE_ID)],
+             row.get("args")) for row in tomllib.loads(live.decode("utf-8"))["suite"]]
+    runner = launches(live).get(LIVE_SUITE, (None,))[0]
+    body = check_bodies(read(runner) if isinstance(runner, str) else None).get(LIVE_ID)
+    precondition = ((LIVE_SUITE, LIVE_ID) in load_registry(live, "live") and body is not None
+                    and body == check_bodies(read(LIVE_TARGET)).get(LIVE_ID) and runner != LIVE_TARGET)
+    head = _launch_registry(*rows, ("live-twin-selftest", LIVE_TARGET, (LIVE_ID,)))
+    return precondition, _code(live, head, None, None, read, read)
+
+
+def _generic_case(base_w):
+    """The code for a move of c from s to t (one runner, tools/x.py) while suite v registers c in another runner:
+    at the base, v's runner tools/w.py holds base_w (read at the base only); at the head, v runs tools/w2.py, whose
+    body for c differs."""
+    base = _launch_registry(("s", "tools/x.py", ("a", "b", "c")), ("t", "tools/x.py", ("x",)),
+                            ("v", "tools/w.py", ("c",)))
+    head = _launch_registry(("s", "tools/x.py", ("a", "b")), ("t", "tools/x.py", ("x", "c")),
+                            ("v", "tools/w2.py", ("c",)))
+    return _code(base, head, None, None, {"tools/x.py": X_RUNNER, "tools/w.py": base_w}.get,
+                 {"tools/x.py": X_RUNNER, "tools/w2.py": W_OTHER}.get)
+
+
+def _generic_head_case():
+    """The code for the same move while a suite new at the head registers c in tools/w.py, which holds X_RUNNER's
+    statement for c at the head."""
+    base = _launch_registry(("s", "tools/x.py", ("a", "b", "c")), ("t", "tools/x.py", ("x",)))
+    head = _launch_registry(("s", "tools/x.py", ("a", "b")), ("t", "tools/x.py", ("x", "c")),
+                            ("v", "tools/w.py", ("c",)))
+    files = {"tools/x.py": X_RUNNER, "tools/w.py": Z_RUNNER}
+    return _code(base, head, None, None, files.get, files.get)
+
+
+def _other_runner_case():
+    """The code for c moved from suite s (tools/x.py) to a new suite u whose runner tools/z.py holds the same
+    statement for c."""
+    files = {"tools/x.py": X_RUNNER, "tools/z.py": Z_RUNNER}
+    return _code(_launch_registry(("s", "tools/x.py", ("a", "b", "c")), ("t", "tools/x.py", ("x",))),
+                 _launch_registry(("s", "tools/x.py", ("a", "b")), ("t", "tools/x.py", ("x",)),
+                                  ("u", "tools/z.py", ("c",))), None, None, files.get, files.get)
+
+
+def _not_plain_case(runner):
+    """The code for c moved from s to t, both on the runner path given, with readers that return X_RUNNER for any
+    path (as a filesystem read of ./tools/x.py or tools//x.py would)."""
+    return _code(_launch_registry(("s", runner, ("a", "b", "c")), ("t", runner, ("x",))),
+                 _launch_registry(("s", runner, ("a", "b")), ("t", runner, ("x", "c"))), None, None,
+                 lambda path: X_RUNNER, lambda path: X_RUNNER)
+
+
+NOT_PLAIN_RUNNERS = ("./tools/x.py", "tools/../tools/x.py", "/tools/x.py", "tools//x.py", "tools\\x.py", "")
 # authorization references outside the stated form: free text, no date, a bad date, too many digits, lower case,
 # two spaces, no parentheses, a non-ASCII digit
 UNAUTHORIZED = ("decision 7", "x", "D-7", "D-7 (2026-13-01)", "D-1234567 (2026-11-01)", "d-7 (2026-11-01)",
@@ -614,9 +743,24 @@ def self_test():
     check("refuse/move-absorbs-one-removal", _code(_registry(("s", ("a", "c")), ("t", ("x",)), ("u", ("c",))),
                                                    _registry(("s", ("a",)), ("t", ("x",)), ("v", ("c",))), None,
                                                    None, SAME, SAME) == EXIT_REFUSE)
-    # a move counts only when the id has the same body in its new suite's runner, so a generic id reused by a new
-    # case in another suite is a removal
+    # a move counts only when the old and new suites have the same launch (runner path and args) and the id has
+    # the same body, not generic, in that runner; a changed body, another runner, other args, a body another
+    # registered runner also holds, and a runner path that is not plain are each a removal
     check("refuse/move-other-body", _code(BASE, MOVED_C, None, None, SAME, OTHER_C) == EXIT_REFUSE)
+    check("refuse/move-other-runner", _other_runner_case() == EXIT_REFUSE)
+    check("refuse/move-other-args", _code(_launch_registry(("s", "tools/x.py", ("c",), ("--one",))), _launch_registry(
+        ("t", "tools/x.py", ("c",), ("--two",))), None, None, SAME, SAME) == EXIT_REFUSE)
+    check("pass/move-same-launch", [_code(_launch_registry(("s", "tools/x.py", ("c",), ("--one",))), _launch_registry(
+        ("t", "tools/x.py", ("c",), ("--one",))), None, None, SAME, SAME), _code(_launch_registry(
+            ("s", "tools/x.py", ("c",))), _launch_registry(("t", "tools/x.py", ("c",))), None, None, SAME, SAME)]
+          == [EXIT_OK] * 2)
+    check("refuse/move-body-generic", [_generic_case(Z_RUNNER), _generic_head_case()] == [EXIT_REFUSE] * 2)
+    check("pass/move-body-not-generic", _generic_case(W_OTHER) == EXIT_OK)
+    check("refuse/move-runner-not-plain", [_not_plain_case(runner) for runner in NOT_PLAIN_RUNNERS]
+          == [EXIT_REFUSE] * len(NOT_PLAIN_RUNNERS))
+    # the live twin the review ran: refuse/unrecognized-argument moved from headers-selftest to a new suite on
+    # tools/check_sitemap.py, whose statement for that id is word for word the same
+    check("refuse/move-live-generic-twin", _live_twin() == (True, EXIT_REFUSE), _live_twin())
     check("pass/move-same-body-reformatted", _code(BASE, MOVED_C, None, None, SAME, REFORMATTED_C) == EXIT_OK)
     check("refuse/move-runner-absent", [_code(BASE, MOVED_C, None, None, SAME, {}.get), _code(
         BASE, MOVED_C, None, None, {}.get, SAME)] == [EXIT_REFUSE] * 2)
@@ -699,6 +843,19 @@ def self_test():
         check("revert/move-red", _code(BASE, MOVED_C, None, None, SAME, SAME) == EXIT_REFUSE)
     with _patched(body_reader=lambda *readers: lambda old_suite, new_suite, check_id: True):
         check("revert/move-body-red", _code(BASE, MOVED_C, None, None, SAME, OTHER_C) == EXIT_OK)
+    with _patched(launches=lambda raw: {} if raw is None else {
+            suite: ("tools/x.py", ()) for suite, _ in load_registry(raw, "launch")}):
+        check("revert/move-launch-red", _other_runner_case() == EXIT_OK)
+    with _patched(generic=lambda body, elsewhere: False):
+        check("revert/move-generic-red", [_generic_case(Z_RUNNER), _generic_head_case()] == [EXIT_OK] * 2)
+    with _patched(_relative_path=lambda path: True):
+        check("revert/relative-path-red", [_not_plain_case(runner) for runner in NOT_PLAIN_RUNNERS]
+              == [EXIT_OK] * len(NOT_PLAIN_RUNNERS))
+    # the base runner read at the head and the head runner at the base: tools/w.py, which holds c's statement at
+    # the base only, is no longer read, so the generic body goes unseen
+    with _patched(body_reader=lambda base_registry, head_registry, base_read, head_read, real=body_reader: real(
+            base_registry, head_registry, head_read, base_read)):
+        check("revert/move-reader-sides-red", _generic_case(Z_RUNNER) == EXIT_OK)
     with _patched(authorized=lambda value: True):
         check("revert/authorization-form-red", _code(BASE, WITHOUT_C, None, _record(dict(
             DISCLOSED, authorization="decision 7"))) == EXIT_OK)
@@ -727,7 +884,9 @@ def self_test():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: check_selftest_removal {} checks (no removal, an addition, a move between suites with "
-          "the same check() body and a registry new at the base pass; a move whose body changed or cannot be read, "
+          "the same launch and the same check() body that no other runner holds, and a registry new at the base "
+          "pass; a move whose body changed or cannot be read, whose runner or args differ, whose body is generic "
+          "(the live refuse/unrecognized-argument twin included) or whose runner path is not plain, "
           "an unaccounted removal, a stale entry (whitespace or case edits "
           "included), an entry for another suite, a covered-by pair that does not survive and an authorization "
           "outside the stated form refuse; covered, unreachable and disclosed entries pass; a registry or head "

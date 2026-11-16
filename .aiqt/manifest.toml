@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "f5c4c517cfac065396016c32a323bf39ad8beb436778ac4796931f852eddc4af"
+tree-sha256 = "b71ad7b303cc822f1fd3523a1fcf6cdf1c35246be3b17da870f75f527bb35830"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 606418
-sha256 = "ac6f3fa27785ce256f755633d92f39adb8aa5502d81327426656a3ff7924d1a8"
+bytes = 608754
+sha256 = "ae8f575a8023e569ef01f7a059a71d3b97e9b25036a26a0bdff5d200224376e1"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -837,8 +837,8 @@ sha256 = "622683b912a6c2720502d096f737f59326fa2b6319776dfdaf029cdd2243d1b7"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 1160158
-sha256 = "921de02dab55ce346d169ed771fd559a2e44f49f65553a30c9905e62f551bbbb"
+bytes = 1160846
+sha256 = "6f39fa30e3c6ea43ccdda9e2db40ba4bb134663cddca69842f112865cf530c27"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2402,8 +2402,8 @@ sha256 = "b845e896ec04415f73c65ed5c52ccd0e03db62bc889f8d9a1e5cc72c196117c4"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 675181
-sha256 = "dc9240226f06e80f23494ef9c996e693f1f6f47b20bc03e56f3c1618e46c4f25"
+bytes = 675869
+sha256 = "34ba72c584a48a298ad789ef921600d916e8b0a7b2dab0d7759b70fb5cf1f465"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3997,8 +3997,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 737314
-sha256 = "381a4b6e1bbcc26e427d3e437d36bedbe7f919ccca4193e9a4cd363217a0d1d3"
+bytes = 738002
+sha256 = "810853d30314b97e25b54c31c98ec55fefbecb249f8311fc33f4f93e9918d966"
 
 [[sources]]
 path = "site/evidence.html"
@@ -4192,8 +4192,8 @@ sha256 = "9ec3224a7e8f517b357ab6738f82a4ce41a9bca6fcba66c3194b3a9157ff9ce0"
 
 [[sources]]
 path = "tools/check_brief_capability.py"
-bytes = 687161
-sha256 = "a5def3371aa9698be036d5c7eecec5c4bfb7226787fe9a0806a13e302369f260"
+bytes = 694216
+sha256 = "784230c5598ecbd560221901f9f4f443f7649b096b7f723d38e5b9b1207bc0df"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
@@ -4437,8 +4437,8 @@ sha256 = "6d32c57b8ae951e3b5d8af009ce00836f8383a8857664845c1b59b86c4e67c3d"
 
 [[sources]]
 path = "tools/check_selftest_removal.py"
-bytes = 43454
-sha256 = "ed4d4e14968ef732657c8216f7301299a5b18552e558af3e2524c60947309877"
+bytes = 54872
+sha256 = "4f64de4e2bd54ceb499ec29de8ce38d2ff743563f52a6b8f3ff5921b92baba0e"
 
 [[sources]]
 path = "tools/check_shell_function_standins.py"
@@ -4722,8 +4722,8 @@ sha256 = "0c74332579c50e13e8da9dda962e53524ff2390dcdc51ad2e838eb5b2365f100"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 254186
-sha256 = "31e15a3bd12b31095015c4828ffbc98b0d7b0ed4112009f759dde5b778242af7"
+bytes = 254599
+sha256 = "095df316240ae3930db7eaad53fbaffa81bc0e63538ce9b8ea69941df32bd016"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
