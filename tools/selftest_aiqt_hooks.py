@@ -31450,6 +31450,24 @@ def _main_isolated(monitor):
                 ("(ci-idc-b7) a let word in an sh -c operand makes the text inexact (over-deny)",
                  "export X; bash -c 'let X'; " + _ci_human)):
             ciexpect(_ci_label, _ci_cmd, "deny")
+        # A quoted or escaped compound array operand of declare, typeset, readonly or local is searched for a
+        # [X]=v word with its quotes and backslashes dropped, so each of the review's six shapes after a
+        # run-time-built subscript denies (each allowed by the one-pass reading before this change, and denied by
+        # the lexical [X]=v search it replaced).
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-d1) a double-quoted declare -a compound operand after a run-time-built subscript denies",
+                 _ci_built + "declare -a \"b=([X]=1)\""),
+                ("(ci-idc-d2) a single-quoted typeset -a compound operand after a run-time-built subscript denies",
+                 _ci_built + "typeset -a 'b=([X]=1)'"),
+                ("(ci-idc-d3) a double-quoted readonly -a compound operand after a run-time-built subscript denies",
+                 _ci_built + "readonly -a \"b=([X]=1)\""),
+                ("(ci-idc-d4) a backslash-escaped local -a compound operand after a run-time-built subscript denies",
+                 _ci_built + "local -a b=\\([X]=1\\)"),
+                ("(ci-idc-d5) a declare -a operand with a single-quoted compound value after a run-time-built "
+                 "subscript denies", _ci_built + "declare -a b='([X]=1)'"),
+                ("(ci-idc-d6) a declare -a operand with a double-quoted compound value after a run-time-built "
+                 "subscript denies", _ci_built + "declare -a b=\"([X]=1)\"")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
         for _ci_label, _ci_cmd in (
                 ("(ci-idc-a-c4) the maintainer's EMAIL beside a [tag] message prefix after && allows",
                  "cd . && EMAIL=jeff@posluns.ca git commit -m '[hooks] refresh CLAUDE.md'"),

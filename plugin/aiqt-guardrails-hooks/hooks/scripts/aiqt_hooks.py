@@ -5427,6 +5427,13 @@ _CMTIDN_CMD_SUBSCRIPT_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\[")
 _CMTIDN_NAME_SUBSCRIPT_RE = re.compile(r"(?<![A-Za-z0-9_./])[A-Za-z_][A-Za-z_0-9]*\[")
 # A [X]=v or [X]+=v word of a compound array assignment (a=([X]=v)), matched at the start of a word as written.
 _CMTIDN_COMPOUND_WORD_RE = re.compile(r"\[[^\]\n]*\]\+?=")
+# The builtins whose operand bash reads as an assignment and may read as a compound array assignment even when
+# the operand is quoted or escaped as written (declare -a "b=([X]=1)", local -a b=\([X]=1\)). Each operand is
+# searched for a [X]=v or [X]+=v word after the start of the operand, a blank or a ( with its quotes and
+# backslashes dropped (_CMTIDN_COMPOUND_OPERAND_RE). The [X]=v pattern stops at the next [, so each start scans
+# no further than the next one and the search stays linear in the operand.
+_CMTIDN_CMD_COMPOUND_BUILTINS = frozenset(("declare", "typeset", "readonly", "local"))
+_CMTIDN_COMPOUND_OPERAND_RE = re.compile(r"(?<![^\s(])\[[^\]\n\[]*\]\+?=")
 # A let or [[ word, a name directly followed by [, or a [X]=v word, anywhere in a word that bash may read as
 # shell text again (an operand of eval, trap or sh -c) or that the lexical reading may misread (a doubtful word of
 # _cmtidn_raw_words), sought in the word with its quotes and backslashes dropped. The [X]=v alternative stops at
@@ -5496,7 +5503,9 @@ def _cmtidn_arithmetic_word(command):
     let). In that position a let word, a [[ word or a name directly followed by [ (a[X]=v), each read with its
     quotes and backslashes dropped ('let', l\\et, "a"[X]=v), counts; so does a name directly followed by [ in an
     operand of a builtin that takes a variable name (_CMTIDN_CMD_NAME_BUILTINS: read "a"[X], unset a\\[X\\],
-    printf -v, declare), a [X]=v word of a compound array assignment wherever it stands, and a let or [[ word,
+    printf -v, declare), a [X]=v word of a compound array assignment at the start of a word as written or, with
+    its quotes and backslashes dropped, in an operand of declare, typeset, readonly or local
+    (_CMTIDN_CMD_COMPOUND_BUILTINS: declare -a "b=([X]=1)", local -a b=\\([X]=1\\)), and a let or [[ word,
     a name directly followed by [ or a [X]=v word anywhere in an operand of a word that runs its operands as
     shell text (_CMTIDN_CMD_SHELL_TEXT: eval 'let X', trap, sh -c) or in a doubtful word, one the lexical
     reading may misread (_CMTIDN_SHELL_TEXT_ARITHMETIC_RE). A [ inside a quoted message ('[hooks] ...') or a
@@ -5508,16 +5517,19 @@ def _cmtidn_arithmetic_word(command):
     options = False  # a prefix word was read, so an option word keeps command position
     shell_text = False  # the command word runs its operands as shell text
     names = False  # the command word is a builtin that takes a variable name
+    compound = False  # the command word is a builtin that may read an operand as a compound array assignment
     for k, (word, doubtful) in enumerate(words):
         gap = gaps[k]
         if _CMTIDN_CMD_SEPARATOR_RE.search(gap) or word in ("{", "}"):
-            position, options, shell_text, names = True, False, False, False
+            position, options, shell_text, names, compound = True, False, False, False, False
         bare = _CMTIDN_SET_UNREAD_RE.sub("", word)
         if word.startswith("[") and _CMTIDN_COMPOUND_WORD_RE.match(word):
             return True
         if (doubtful or shell_text) and _CMTIDN_SHELL_TEXT_ARITHMETIC_RE.search(bare):
             return True
         if names and _CMTIDN_NAME_SUBSCRIPT_RE.search(bare):
+            return True
+        if compound and _CMTIDN_COMPOUND_OPERAND_RE.search(bare):
             return True
         tail = gap.rstrip(" \t")
         if tail.endswith(("<", ">", "<&", ">&", ">|")):
@@ -5543,6 +5555,7 @@ def _cmtidn_arithmetic_word(command):
         position, options = False, False
         shell_text = name in _CMTIDN_CMD_SHELL_TEXT
         names = name in _CMTIDN_CMD_NAME_BUILTINS
+        compound = name in _CMTIDN_CMD_COMPOUND_BUILTINS
     return False
 
 
