@@ -145,16 +145,17 @@ SECURITY_RE = re.compile(r"^(SECC|SECI|SECA|SECP)-" + _SLUG + r"\.md$")
 
 
 def repo_root_default():
-    p = Path.cwd().resolve()
-    return next((a for a in [p, *p.parents] if (a / ".git").exists()), p)
+    """This script's own repository (the parent of tools/), never the working directory."""
+    return ROOT
 
 
 def root_problem(root_arg):
     """Return why an explicitly named --root cannot be evaluated, or None when it names an existing directory.
 
-    The root is resolved non-strictly and an absent .claude/rules/ is a PASS, so without this an absent or
-    mistyped root would read as a tree with no rules and pass over input never read, and an empty value would
-    silently name the working directory. os.stat follows a symlink, as resolve() does, so a symlink to a
+    The root is resolved non-strictly and an absent .claude/rules/ under any root but this repository is a
+    PASS (this repository's generated tree absent is exit 2), so without this an absent or mistyped root would
+    read as a tree with no rules and pass over input never read, and an empty value would silently name the
+    working directory. os.stat follows a symlink, as resolve() does, so a symlink to a
     directory is accepted and a dangling one is refused."""
     if not root_arg:
         return "--root is empty"
@@ -487,6 +488,10 @@ def main(argv=None):
         print("cannot read {}: {} {} (cannot evaluate)".format(rules, rules, problem), file=sys.stderr)
         return 2
     if chain is None:
+        if root == ROOT:
+            print("cannot read {}: this repository's generated rules tree is absent (cannot evaluate)".format(
+                rules), file=sys.stderr)
+            return 2
         print("PASS: no .claude/rules/ tree")
         return 0
     findings = []
@@ -1140,9 +1145,9 @@ def _run_vectors(module, roots):
     return results
 
 
-def _launch(*args):
+def _launch(*args, cwd=None):
     result = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve())] + list(args),
-                            capture_output=True, text=True, timeout=CHILD_TIMEOUT, cwd=str(ROOT),
+                            capture_output=True, text=True, timeout=CHILD_TIMEOUT, cwd=str(cwd or ROOT),
                             env=dict(LC_ALL="C.UTF-8"))
     return result.returncode, result.stdout, result.stderr
 
@@ -1633,6 +1638,22 @@ def self_test(report_path=None):
                 got = _launch("--root", roots[key])
                 check(check_id, got[0] == 2 and got[1] == "" and "--root {}: ".format(roots[key]) in got[2],
                       got)
+
+            # 5b. the default root is this script's repository, never the working directory: launched from
+            # a directory marked as a repository (.git) whose rules tree holds a violation, the gate still
+            # reads this repository and passes; and with this repository's generated rules tree absent
+            # (ROOT patched to a root holding none), the default root exits 2 naming it, never a PASS.
+            elsewhere = _root_fixture(base, "launch-elsewhere", rules="dir")
+            (elsewhere / ".git").mkdir()
+            (elsewhere / ".claude" / "rules" / "stray.md").write_text("# stray\n", encoding="utf-8")
+            got = _launch(cwd=elsewhere)
+            check("launch/default-root-ignores-working-directory",
+                  got == (0, "PASS: rule placement conforms to the taxonomy\n", ""), got)
+            absent = _root_fixture(base, "gate-generated-absent").resolve()
+            with _patched(this, "ROOT", absent):
+                got = _gate(this, [])
+            check("gate/generated-tree-absent-exits-2", got[0] == 2 and got[1] == ""
+                  and "cannot read {}: ".format(absent / ".claude" / "rules") in got[2], got)
 
             # 6. every --root guard mutant fails exactly its named vectors, and every vector fails under
             # at least one mutant
