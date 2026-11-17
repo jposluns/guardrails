@@ -53,8 +53,10 @@ registered pin as committed at the base. With --base REF the base is exactly the
 be an ancestor of HEAD (git merge-base --is-ancestor); a REF that is not, such as the before SHA of a force or
 otherwise divergent push, is cannot-evaluate, never replaced by a common ancestor, and so is a REF git resolves
 with a diagnostic on stderr (such as an ambiguous name). The leg reads the pins in the working tree, so --base
-HEAD compares the working tree with HEAD: an uncommitted digest row change under an unchanged version fails,
-and on a clean tree it compares nothing (every row equals itself). With --local-base REF (the
+HEAD (or any --base REF that resolves to HEAD's own commit) compares the working tree with HEAD: an uncommitted
+digest row change under an unchanged version fails. When every registered pin in the working tree holds the
+same version and rows as at HEAD (a clean tree), it compares nothing, so the run is cannot-evaluate (exit 2),
+never a PASS that claims a comparison. With --local-base REF (the
 local runner's form) the base is the fork point of HEAD and the commit REF points at (git merge-base, the form of
 check_version_monotonicity.py's default base, which reads the short name origin/main instead, so where a tag or a
 local branch shadows that short name the two bases can differ). REF must be a full ref name (refs/remotes/origin/main):
@@ -68,13 +70,16 @@ shown readable and well formed when REF reads as absent (see --probe-local-base 
 does not resolve to a readable commit (its object is missing, or it names a blob or a tree) and any other git
 failure. The leg compares the base and HEAD endpoints only: a row
 changed in one commit of a range and restored by a later one is not seen. The leg reads each pin at the base (git
-ls-tree and cat-file, with replacement objects off and every GIT_ variable dropped but the config-isolation
-pins) and compares the parsed tables, not the text, so a comment edit or a reordering is ignored. A pin whose
+ls-tree and cat-file, with replacement objects off, every GIT_ variable dropped but the config-isolation
+pins, and HOME and XDG_CONFIG_HOME set to os.devnull, under which no file exists, so no global or XDG git
+config is read) and compares the parsed tables, not the text, so a comment edit or a reordering is ignored. A pin whose
 version differs from its base version has moved, so its rows may change (a NOTE says the hand comparison
 against the published SHA256SUMS is due). Under an unchanged version, every row in both tables, keyed by its
 path within the copy root or its build-tool path, must keep its base digest; a changed digest is a finding
 (exit 1). A removed row passes, and an added row passes with a NOTE. A pin absent at the base is compared,
-path by path, with each registered pin present at the base under the same version. The pin records no
+path by path, with each registered pin present at the base under the same version; a base that holds no
+registered pin at all (as after a change that renames every pin path) leaves nothing to compare against and is
+cannot-evaluate. The pin records no
 archive digest, so the version is the only pin key: a change that also moves the version passes. A REF that
 is empty, starts with "-" or holds ":", whitespace or a control character, a --base REF that does not resolve
 to a commit, resolves with a git diagnostic or is not an ancestor of HEAD, a --local-base REF that is a short name, that the clone lacks or that
@@ -86,7 +91,8 @@ With neither flag the leg is not evaluated, and the run says so on a NOTE line.
 
 A --local-base REF at HEAD (an ordinary checkout of the protected line, or a commit HEAD descends from with no change)
 makes the fork point a commit holding HEAD's tree, and the leg still runs: it compares the pins in the working tree,
-so an uncommitted digest row change under an unchanged version fails and a clean checkout passes. Disclosed limit: a
+so an uncommitted digest row change under an unchanged version fails and a clean checkout passes (unlike --base,
+whose REF the caller names, a fork point at HEAD on a clean tree is not cannot-evaluate). Disclosed limit: a
 REF that descends from HEAD, such as a symbolic ref to the checked-out branch, also makes HEAD the fork point, so a
 row changed in a commit on that branch is compared with itself and not seen; only a REF naming the protected line's
 own commit gives the local leg its anchor. Disclosed limit: every base read turns replacement objects off, which
@@ -500,8 +506,13 @@ def _check_tool(root, rel, digest, findings, errors):
 def _git_env():
     """The process environment with every GIT_-prefixed variable dropped and only the config-isolation pins
     re-applied at the exact values the fixture scrub sets (the rule of git_authority_env() in
-    tools/check_mistakes_register.py), so no inherited variable can point a base read at another repository."""
+    tools/check_mistakes_register.py), so no inherited variable can point a base read at another repository. HOME
+    and XDG_CONFIG_HOME are set to os.devnull, under which no file exists (git reads a config path that is not
+    there as empty), so no global (~/.gitconfig) or XDG ($XDG_CONFIG_HOME/git/config) git config is read either; a
+    checkout git trusts only through a safe.directory entry there is cannot-evaluate."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["HOME"] = os.devnull
+    env["XDG_CONFIG_HOME"] = os.devnull
     if os.environ.get("GIT_CONFIG_NOSYSTEM") == "1":
         env["GIT_CONFIG_NOSYSTEM"] = "1"
     for pin in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
@@ -807,17 +818,24 @@ def _rows(parsed):
     return version, rows
 
 
-def coupling_findings(root, base, pins=PINS):
+def coupling_findings(root, base, pins=PINS, fork_point=False):
     """(findings, notes) of the base-coupling leg: every registered pin in the tree under root against the
     same pin at the exact commit base names (_base_commit); CannotEvaluate when the base or any pin cannot be
-    read."""
+    read, when the base holds no registered pin (nothing to compare against), and, unless fork_point (base is the
+    --local-base fork point, where HEAD is an ordinary checkout of the protected line), when base is HEAD's own
+    commit and every registered pin in the working tree holds the same version and rows as there (nothing is
+    compared)."""
     commit = _base_commit(root, base)
     based = {}
     for pin_rel, _assigned in pins:
         parsed = _base_pin(root, commit, pin_rel)
         if parsed is not None:
             based[pin_rel] = _rows(parsed)
-    findings, notes = [], []
+    if not based:
+        raise CannotEvaluate("base: no registered pin ({}) exists at the base {} ({}), as after a change that renames "
+                             "every pin path, so the base-coupling leg has nothing to compare against".format(
+                                 ", ".join(pin_rel for pin_rel, _root in pins), base, commit))
+    findings, notes, current = [], [], {}
     for pin_rel, _assigned in pins:
         pin_path = Path(root) / pin_rel
         try:
@@ -826,12 +844,13 @@ def coupling_findings(root, base, pins=PINS):
             version, rows = _rows(parse_pin(_read_pin_bytes(pin_path), pin_rel))
         except OSError as exc:
             raise CannotEvaluate("{}: unreadable ({})".format(pin_rel, exc)) from None
+        current[pin_rel] = (version, rows)
         if pin_rel in based:
             against = [(pin_rel, based[pin_rel])]
         else:
             against = [(other, based[other]) for other, _root in pins if other in based]
             notes.append("{}: absent at the base {}; compared with {}".format(
-                pin_rel, commit, ", ".join(other for other, _rows_ in against) or "no registered pin there"))
+                pin_rel, commit, ", ".join(other for other, _rows_ in against)))
         for other, (base_version, base_rows) in against:
             if base_version != version:
                 notes.append("{}: the pin moved from version {} ({} at the base {}) to {}; compare its rows by "
@@ -847,6 +866,14 @@ def coupling_findings(root, base, pins=PINS):
             for key in sorted(set(rows) - set(base_rows)):
                 notes.append("{}: the row for {} was added under the unchanged version {} ({} at the base "
                              "{} has none)".format(pin_rel, key, version, other, commit))
+    if not fork_point and current == based:
+        head = _commit_id(_git_base_read(root, ["rev-parse", "--verify", "HEAD^{commit}"]),
+                          "git rev-parse --verify HEAD^{commit}")
+        if commit == head:
+            raise CannotEvaluate("base: {} resolves to HEAD itself ({}), and every registered pin in the working tree "
+                                 "holds the same version and rows as there (a clean tree), so the base-coupling leg "
+                                 "compares nothing; name a commit HEAD descends from, such as HEAD^1".format(
+                                     base, commit))
     return findings, notes
 
 
@@ -867,7 +894,7 @@ def run_gate(root, pins=PINS, base=None, local_base=None):
                      "an unchanged version is not refused by this run")
     if against is not None:
         try:
-            more, more_notes = coupling_findings(root, against, pins)
+            more, more_notes = coupling_findings(root, against, pins, fork_point=local_base is not None)
             findings.extend(more)
             notes.extend(more_notes)
         except CannotEvaluate as exc:
@@ -1039,7 +1066,7 @@ def _coupling_gate(tmp, base, pins, reverted, local=False):
     before this leg)."""
     original = coupling_findings
     if reverted:
-        globals()["coupling_findings"] = lambda _root, _base, _pins=PINS: ([], [])
+        globals()["coupling_findings"] = lambda _root, _base, _pins=PINS, fork_point=False: ([], [])
     try:
         with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
             code = (run_gate(tmp, pins, local_base=base) if local else run_gate(tmp, pins, base=base))
@@ -1085,7 +1112,7 @@ def _coupling_cases():
     second = (SECOND_PIN, SECOND_ROOT)
     # The controls: each passes with the leg in place.
     for name, base_kw, head_kw, text in (
-            ("couple/no-change-passes", {}, None, "no digest row changed"),
+            ("couple/no-change-passes", {}, {}, "no digest row changed"),
             ("couple/row-modified-version-moved-passes", {},
              {"files": changed, "pin": _pin_text(changed, version=moved),
               "attribution": _attribution_text(version=moved)},
@@ -1277,23 +1304,41 @@ def _coupling_cases():
         check(name, got == code and text in report and "CANNOT EVALUATE" not in report
               and ("PASS" in report) == (code == 0), (got, report))
 
-    # --base HEAD is not an empty comparison: the leg reads the pins in the working tree, so a digest row changed
-    # there under an unchanged version (not committed) fails, and passes with the leg reverted. On a clean tree it
-    # compares nothing (every row equals itself) and passes; that limit is disclosed in the module docstring.
-    for name, setup, code, text in (
-            ("couple/base-head-uncommitted-row-change-refused", "row", 1,
-             "FAIL: {}: the row for baseline.css changed from ".format(PIN_REL)),
-            ("couple/base-head-clean-passes", "clean", 0, "no digest row changed from the base HEAD")):
+    # A --base REF that resolves to HEAD's own commit: the leg reads the pins in the working tree, so when they
+    # differ from HEAD's there is a comparison: a digest row changed there under an unchanged version (not
+    # committed) fails, and passes with the leg reverted; a version moved there passes with its NOTE. On a clean
+    # tree every registered pin holds HEAD's own tables, so nothing is compared: --base HEAD and --base with HEAD's
+    # full commit id are cannot-evaluate, never a PASS claiming a comparison, and pass with the leg reverted.
+    for name, flip, setup, form, code, text in (
+            ("couple/base-head-uncommitted-row-change-refused", "couple/base-head-uncommitted-row-change-refused-flip",
+             "row", "HEAD", 1, "FAIL: {}: the row for baseline.css changed from ".format(PIN_REL)),
+            ("couple/base-head-clean-cannot-evaluate", "couple/base-head-clean-cannot-evaluate-flip", "clean", "HEAD",
+             2, "CANNOT EVALUATE: base: HEAD resolves to HEAD itself ("),
+            ("couple/base-head-full-id-clean-cannot-evaluate", "couple/base-head-full-id-clean-cannot-evaluate-flip",
+             "clean", "id", 2, "resolves to HEAD itself (")):
         with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+            from _git_fixture_env import git_fixture_env
             _fixture(tmp)
             _commit_all(tmp, "base", init=True)
             if setup == "row":
                 _fixture(tmp, changed, _pin_text(changed))
-            got, report = _coupling_gate(tmp, "HEAD", FIXTURE_PINS, False)
-            reverted, reverted_report = _coupling_gate(tmp, "HEAD", FIXTURE_PINS, True)
-        check(name, got == code and text in report and "CANNOT EVALUATE" not in report, (got, report))
-        if setup == "row":
-            check("couple/base-head-uncommitted-row-change-refused-flip", reverted == 0, (reverted, reverted_report))
+            if form == "id":
+                form = subprocess.run(["git", "-C", tmp, "rev-parse", "--verify", "HEAD^{commit}"], check=True,
+                                      capture_output=True, env=git_fixture_env(),
+                                      timeout=GIT_TIMEOUT).stdout.decode("ascii").strip()
+            got, report = _coupling_gate(tmp, form, FIXTURE_PINS, False)
+            reverted, reverted_report = _coupling_gate(tmp, form, FIXTURE_PINS, True)
+        check(name, got == code and text in report and ("CANNOT EVALUATE" in report) == (code == 2)
+              and "PASS" not in report, (got, report))
+        check(flip, reverted == 0, (reverted, reverted_report))
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+        _fixture(tmp)
+        _commit_all(tmp, "base", init=True)
+        _fixture(tmp, changed, _pin_text(changed, version=moved), attribution=_attribution_text(version=moved))
+        got, report = _coupling_gate(tmp, "HEAD", FIXTURE_PINS, False)
+    check("couple/base-head-uncommitted-version-move-passes", got == 0 and "NOTE: {}: the pin moved from version {} "
+          .format(PIN_REL, FIXTURE_VERSION) in report and "no digest row changed from the base HEAD" in report
+          and "CANNOT EVALUATE" not in report, (got, report))
 
     # A --base REF git resolves with a diagnostic on stderr is cannot-evaluate, as --local-base refuses one on its
     # name read: a tag base and a branch base naming different commits make git warn that the name is ambiguous
@@ -1339,6 +1384,104 @@ def _coupling_cases():
             check(name, len(parents) == 3 and parents[1] == full and got == 0
                   and "no digest row changed from the base {} under".format(form) in report
                   and "CANNOT EVALUATE" not in report, (parents, full, form, got, report))
+
+    # A base that holds no registered pin leaves nothing to compare against: the base commit holds the pin at another
+    # path (.baseline/old-pin.toml), and HEAD renames it to the registered path and changes a row under the unchanged
+    # version, so a leg that compared each pin only with the pins present at the base would pass. It is
+    # cannot-evaluate, and passes with the leg reverted.
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+        _fixture(tmp, pin_rel=".baseline/old-pin.toml")
+        _commit_all(tmp, "base", init=True)
+        os.unlink(Path(tmp) / ".baseline" / "old-pin.toml")
+        _fixture(tmp, changed, _pin_text(changed))
+        _commit_all(tmp, "head")
+        got, report = _coupling_gate(tmp, "base", FIXTURE_PINS, False)
+        reverted, reverted_report = _coupling_gate(tmp, "base", FIXTURE_PINS, True)
+    check("couple/no-base-pin-cannot-evaluate", got == 2 and "CANNOT EVALUATE: base: no registered pin ({}) exists at "
+          "the base base (".format(PIN_REL) in report and "PASS" not in report, (got, report))
+    check("couple/no-base-pin-cannot-evaluate-flip", reverted == 0, (reverted, reverted_report))
+
+    # A base read that exits 0 but prints anything other than 1 full commit id is cannot-evaluate (_commit_id): the
+    # --base read is made to print HEAD's abbreviated id, a name git still resolves. HEAD changes a row under an
+    # unchanged version, so a run that took the printed text as the base would compare HEAD with itself and pass.
+    original_read = _git_base_read
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+        from _git_fixture_env import git_fixture_env
+        _fixture(tmp)
+        _commit_all(tmp, "base", init=True)
+        _fixture(tmp, changed, _pin_text(changed))
+        _commit_all(tmp, "head")
+        short = subprocess.run(["git", "-C", tmp, "rev-parse", "--short=12", "HEAD"], check=True, capture_output=True,
+                               env=git_fixture_env(), timeout=GIT_TIMEOUT).stdout.strip()
+
+        def _abbreviated(root, args, _short=short):
+            if args == ["rev-parse", "--verify", "base^{commit}"]:
+                return subprocess.CompletedProcess(args, 0, _short + b"\n", b"")
+            return original_read(root, args)
+
+        globals()["_git_base_read"] = _abbreviated
+        try:
+            got, report = _coupling_gate(tmp, "base", FIXTURE_PINS, False)
+        finally:
+            globals()["_git_base_read"] = original_read
+    check("couple/base-read-not-commit-id-cannot-evaluate", len(short) == 12 and got == 2
+          and "CANNOT EVALUATE: base: git rev-parse --verify base printed '{}\\n', not 1 commit id".format(
+              short.decode("ascii")) in report and "PASS" not in report, (short, got, report))
+
+    # A base pin that is not a regular file is cannot-evaluate (_base_pin): the base commit holds the pin path as a
+    # symbolic link whose target text is HEAD's pin, which changes a row under the unchanged version, so a read that
+    # took the link's blob as the pin would compare HEAD's rows with themselves and pass. It passes with the leg
+    # reverted.
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+        _fixture(tmp, changed, False)
+        os.makedirs(Path(tmp) / ".baseline", exist_ok=True)
+        os.symlink(_pin_text(changed), Path(tmp) / PIN_REL)
+        _commit_all(tmp, "base", init=True)
+        os.unlink(Path(tmp) / PIN_REL)
+        _fixture(tmp, changed, _pin_text(changed))
+        _commit_all(tmp, "head")
+        got, report = _coupling_gate(tmp, "base", FIXTURE_PINS, False)
+        reverted, reverted_report = _coupling_gate(tmp, "base", FIXTURE_PINS, True)
+    check("couple/base-pin-symlink-cannot-evaluate", got == 2 and "CANNOT EVALUATE: {} at the base ".format(PIN_REL)
+          in report and "not a regular file (mode 120000)" in report and "PASS" not in report, (got, report))
+    check("couple/base-pin-symlink-cannot-evaluate-flip", reverted == 0, (reverted, reverted_report))
+
+    # The leg's git reads read no global or XDG git config (_git_env sets HOME and XDG_CONFIG_HOME to os.devnull). The
+    # gate runs as a child, a copy of this file in a fixture tree holding both registered pairs whose HEAD changes a row
+    # under an unchanged version, with no GIT_ variable (so no GIT_CONFIG_GLOBAL pin), HOME naming a directory whose
+    # .gitconfig is malformed and XDG_CONFIG_HOME naming one whose git/config is malformed. Each poison alone makes a
+    # plain git read of the fixture fail (the controls), so a gate read that kept either variable would be
+    # cannot-evaluate; the true result reads neither and fails the changed row.
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp, \
+            tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-home-") as poison:
+        _fixture(tmp)
+        _fixture(tmp, None, None, root=SECOND_ROOT, pin_rel=SECOND_PIN, attribution=False)
+        _commit_all(tmp, "base", init=True)
+        _fixture(tmp, changed, _pin_text(changed))
+        _commit_all(tmp, "head")
+        home, xdg, empty = Path(poison) / "home", Path(poison) / "xdg", Path(poison) / "empty"
+        os.makedirs(home)
+        os.makedirs(xdg / "git")
+        os.makedirs(empty)
+        with open(home / ".gitconfig", "xb") as handle:
+            handle.write(b"[poisoned\n")
+        with open(xdg / "git" / "config", "xb") as handle:
+            handle.write(b"[poisoned\n")
+        bare = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        controls = []
+        for env_home, env_xdg in ((home, empty), (empty, xdg)):
+            try:
+                controls.append(subprocess.run(["git", "-C", tmp, "rev-parse", "--verify", "HEAD"], capture_output=True,
+                                               env=dict(bare, HOME=str(env_home), XDG_CONFIG_HOME=str(env_xdg)),
+                                               timeout=GIT_TIMEOUT, check=False).returncode)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                controls.append(repr(exc))
+        got, out, err = _probe_child(tmp, "base", env=dict(bare, HOME=str(home), XDG_CONFIG_HOME=str(xdg)),
+                                     option="--base")
+    report = (out + err).decode("utf-8", "replace")
+    check("couple/home-xdg-config-ignored", all(isinstance(code, int) and code != 0 for code in controls) and got == 1
+          and "FAIL: {}: the row for baseline.css changed from ".format(PIN_REL) in report
+          and "CANNOT EVALUATE" not in report, (controls, got, report))
 
     # Every base read runs with replacement objects off (--no-replace-objects). HEAD changes a row under an unchanged
     # version; a replacement of the base commit's tree or of the base pin's blob by HEAD's would make the base read
@@ -1683,7 +1826,7 @@ def _probe_cases():
     # registered pairs, HEAD unchanged), and the leg raises.
     original_root, original_leg = ROOT, coupling_findings
 
-    def _leg_raises(_root, _base, _pins=PINS):
+    def _leg_raises(_root, _base, _pins=PINS, fork_point=False):
         raise RuntimeError("injected")
 
     with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
@@ -2201,9 +2344,14 @@ def _self_test():
           "missing or that names a blob, a broken loose ref, a broken packed-refs line and a dangling "
           "symbolic ref are cannot-evaluate, while a ref naming HEAD compares the working tree (a clean "
           "checkout passes, an uncommitted changed row fails, an uncommitted version move passes); --base HEAD "
-          "fails an uncommitted changed row (and passes with the leg reverted) and passes a clean tree; a --base "
+          "fails an uncommitted changed row (and passes with the leg reverted) and passes an uncommitted version "
+          "move, while --base HEAD and --base with HEAD's full commit id on a clean tree are cannot-evaluate (and "
+          "pass with the leg reverted); a --base "
           "name git reports ambiguous is cannot-evaluate (and passes with the leg reverted); --base HEAD^1, "
-          "HEAD^ and a full commit id pass on a clean two-parent train merge; a replaced "
+          "HEAD^ and a full commit id pass on a clean two-parent train merge; a base holding no registered pin "
+          "(every pin path renamed) and a base pin that is a symbolic link are cannot-evaluate (and pass with the "
+          "leg reverted), as is a base read that prints an abbreviated commit id; a child run with HOME and "
+          "XDG_CONFIG_HOME naming malformed git config reads neither; a replaced "
           "base tree, a replaced base pin blob and a git replace --graft parent are ignored (a legacy "
           ".git/info/grafts file is not covered); a child run under an ambient "
           "GIT_DIR naming a "
