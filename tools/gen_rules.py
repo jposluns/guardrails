@@ -832,7 +832,8 @@ def _valued_option_failures():
 # --check cases then run on the current tree only.
 # Residuals, not covered:
 # - the check reads the committed tree: an uncommitted change to a generator is checked once it is committed, and
-#   a stale generated file committed at HEAD can still fail it (the --check gates fail that commit as well);
+#   a stale generated file committed at HEAD does not fail it, since on the current tree a --check run passes with
+#   exit 1 as with exit 0 and a no-argument run passes by reaching a write (the --check gates fail that commit);
 # - the mode cases show behaviour, not the mode: a no-argument run passes by reaching any write in the copy (the
 #   hook ends it there, so what it would have written is not seen), and a --check run passes by exiting 1 with
 #   nothing blocked on the stale tree, whatever made it exit 1; a path relative to a dir_fd passed to os.open is

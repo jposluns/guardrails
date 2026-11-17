@@ -85,8 +85,11 @@ def unknown_args_refused(argv, usage, flags=("--check", "--self-test"), valued=(
     flags, or one of valued followed by its value; a token starting with "-" is never taken as a value, so
     `--root --chek` is refused, not run against a directory named --chek. Otherwise print an error line and
     `usage: <usage>` to stderr and return True, so the caller returns exit 2 instead of dispatching. Return False
-    when every token is defined. This function opens no file; that a generator writes nothing before this
-    refusal is checked by the gen_rules self-test class check, and nothing checks that it reads nothing."""
+    when every token is defined. This function opens no file. The gen_rules self-test class check shows only that
+    a generator's refusal makes no write its audit hook sees (a Python-level write, delete or child process) and
+    changes no file in its throwaway copy, with the targets the registry declares made stale; a write the hook
+    does not see that changes no file in the copy, or a write on difference to a file the registry does not
+    declare, is not caught (see the residuals in tools/gen_rules.py), and nothing checks that it reads nothing."""
     i = 0
     while i < len(argv):
         tok = argv[i]
