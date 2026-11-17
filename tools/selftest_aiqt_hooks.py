@@ -31204,8 +31204,9 @@ def _main_isolated(monitor):
             ciexpect(_ci_label + " [AI twin denies]", _ci_twin, "deny")
         # author.* and committer.* writes behind find -exec, flock, ionice and xargs are judged as user.* ones
         # are, xargs reading the value from its input included; a GIT_CONFIG_VALUE_<n> is judged when a
-        # GIT_CONFIG_KEY_<n> names an identity key. Each deny vector allowed before this change; the controls set
-        # a value that names no AI or a key that is not an identity key.
+        # GIT_CONFIG_KEY_<n> names an identity key. Each deny vector but ci-idc-g3 allowed before this change
+        # (ci-idc-g3 denied already and pins that the --config-env form still denies); the controls set a value
+        # that names no AI or a key that is not an identity key.
         for _ci_label, _ci_cmd in (
                 ("(ci-idc-w1) find -exec git config author.name naming an AI denies",
                  "find . -exec git config author.name Claude ';'"),
@@ -31238,6 +31239,53 @@ def _main_isolated(monitor):
                 ("(ci-idc-g-c2) a human GIT_CONFIG_VALUE_0 for author.name beside a CLAUDE.md message allows",
                  "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0=Alice git commit -m 'docs: "
                  "CLAUDE.md'")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
+        # A quote character in a comment or a heredoc body is read as a quote by the raw reader, which can split
+        # a later value before its AI part, so an identity assignment at or after such a construct is judged as a
+        # value the text does not spell (ci-idc-s1 to s6); so is a {} placeholder or an xargs -I replacement
+        # string (ci-idc-r1 to r4), and xargs behind a wrapper reads the value from its input as bare xargs does
+        # (ci-idc-x1 to x4). Each deny vector allowed before this change; the controls set the maintainer's
+        # identity after a comment or before a quoted heredoc, or name no AI.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-s1) an AI EMAIL default after a comment holding an apostrophe denies",
+                 "# don't\nset -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-s2) a --config-env pair after a quoted heredoc holding an apostrophe denies",
+                 "cat > msg <<'EOF'\nDon't merge yet\nEOF\nV='Claude Code' git --config-env=author.name=V commit -m x"),
+                ("(ci-idc-s3) an AI GIT_AUTHOR_NAME default after a quoted heredoc holding an apostrophe denies",
+                 "cat >/dev/null <<'EOF'\ndon't\nEOF\nset -a; : ${GIT_AUTHOR_NAME:='Bot Claude'}; git commit -m x"),
+                ("(ci-idc-s4) an AI GIT_CONFIG_PARAMETERS pair after a comment holding an apostrophe denies",
+                 "# don't\nGIT_CONFIG_PARAMETERS=\"'author.name'='x Claude'\" git commit -m x"),
+                ("(ci-idc-s5) an AI GIT_CONFIG_VALUE_0 after a comment holding an apostrophe denies",
+                 "# don't\nGIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0='x Claude' git commit -m x"),
+                ("(ci-idc-s6) an AI EMAIL default after an unquoted heredoc holding an apostrophe denies",
+                 "cat >/dev/null <<EOF\ndon't\nEOF\nset -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-r1) an xargs -I{} placeholder as an author.name value beside an AI name denies",
+                 "echo Claude | xargs -I{} git -c author.name={} commit -m x"),
+                ("(ci-idc-r2) an xargs -I{} placeholder as an EMAIL value beside an AI address denies",
+                 "echo noreply@anthropic.com | xargs -I{} env EMAIL={} git commit -m x"),
+                ("(ci-idc-r3) a find -exec {} placeholder as an author.name value beside an AI name denies",
+                 "find . -name Claude -exec git -c author.name={} commit -m x ';'"),
+                ("(ci-idc-r4) an xargs -I replacement string as an author.name value beside an AI name denies",
+                 "echo Claude | xargs -I NAME git -c author.name=NAME commit -m x"),
+                ("(ci-idc-x1) xargs behind nice reading an AI author.name from its input denies",
+                 "echo Claude | nice xargs git config author.name"),
+                ("(ci-idc-x2) xargs behind env reading an AI author.name from its input denies",
+                 "echo Claude | env xargs git config author.name"),
+                ("(ci-idc-x3) xargs behind sudo reading an AI author.name from its input denies",
+                 "echo Claude | sudo -u ci xargs git config author.name"),
+                ("(ci-idc-x4) xargs behind timeout reading an AI author.name from its input denies",
+                 "echo Claude | timeout 5 xargs git config author.name")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-s-c1) the maintainer's EMAIL before a quoted heredoc holding an apostrophe allows",
+                 "EMAIL=jeff@posluns.ca git commit -F - <<'EOF'\nrules: regenerate .claude/rules\n\nDon't edit by "
+                 "hand.\nEOF"),
+                ("(ci-idc-s-c2) the maintainer's EMAIL after a comment holding an apostrophe allows",
+                 "# don't\nEMAIL=jeff@posluns.ca git commit -m 'docs: fix typo'"),
+                ("(ci-idc-x-c1) xargs behind nice with a human value on its input allows",
+                 "echo Alice | nice xargs git config author.name"),
+                ("(ci-idc-r-c1) xargs -I{} git add of .claude/ files allows",
+                 "git ls-files .claude | xargs -I{} git add {}")):
             ciexpect(_ci_label, _ci_cmd, "allow")
         # The raw-text rule finds only that the text names an identity assignment form and an AI identity, so its
         # deny says that and that it fails closed, never that a git command sets an AI identity: on a command

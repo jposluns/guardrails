@@ -5348,20 +5348,33 @@ _CMTIDN_CONFIG_VALUE_SET_RE = re.compile(r"(?<![A-Za-z0-9_])GIT_CONFIG_VALUE_[0-
 _CMTIDN_EXPANSION_RE = re.compile(r"`|\$[A-Za-z_0-9{(@*#?!$'-]")
 # The characters that end a word of the raw-text rule where they stand outside every quote and body.
 _CMTIDN_WORD_STOPS = frozenset(" \t\n;&|<>()")
+# A replacement string that xargs fills in from its input (xargs -I STR, -ISTR, a cluster ending in I, -iSTR,
+# --replace=STR), read from a raw word after an xargs word; find -exec and xargs -i fill in {} as well.
+_CMTIDN_XARGS_REPLACE_RE = re.compile(r"(?s)^(?:-[A-Za-z0-9]*I(.*)|-i(.+)|--replace=(.+))$")
+# How many replacement strings the raw-text rule keeps, so each value is searched a fixed number of times; past
+# it, every identity value counts as one the text does not spell (a safe-direction over-deny).
+_CMTIDN_PLACES_MAX = 16
 
 
 def _cmtidn_raw_words(text):
     """The words of the raw text for the raw-text rule (_cmtidn_identity_set_ai), heredoc bodies, redirect words
-    and here-strings included, read in one pass. A word ends at a space, a tab, a newline or a shell operator
-    character (_CMTIDN_WORD_STOPS) that stands outside every single or double quote, backslash escape and open
-    ${...}, $(...) or backquote body, so a value keeps the quoted spaces, nested expansions and quoted braces
-    that bash keeps in it (${EMAIL:="}"x@y}). The reading is lexical: a quote or body left open runs to the
-    end of the text, and a quote character in a heredoc body or a comment is read as a quote, which can join or
-    split the words after it. The word reader (find_ai_authorship) judges every command it can parse before
-    this rule; this rule is its backstop."""
+    and here-strings included, read in one pass, each as (word, doubtful). A word ends at a space, a tab, a
+    newline or a shell operator character (_CMTIDN_WORD_STOPS) that stands outside every single or double
+    quote, backslash escape and open ${...}, $(...) or backquote body, so a value keeps the quoted spaces, nested
+    expansions and quoted braces that bash keeps in it (${EMAIL:="}"x@y}). The reading is lexical: a quote or
+    body left open runs to the end of the text, and a quote character in a heredoc body or a comment is read as
+    a quote, which can join or split the words after it. So a word is doubtful when, at or before its end, the
+    reader has passed a construct that bash reads otherwise: a '#' that can start a comment (at the start of
+    the text or after a blank, an operator character or a backquote), a heredoc operator '<<' (not a '<<<'
+    here-string), an ANSI-C quote $'...' (whose \\' bash keeps inside it), a single quote right inside a
+    ${...} body that stands inside double quotes, or a ')' that closes no '(' outside every body (a case
+    pattern inside $(...)). Each of these is read outside single and double quotes. The word reader
+    (find_ai_authorship) judges every command it can parse before this rule; this rule is its backstop."""
     words = []
     stack = []  # the open contexts: "'", '"', "{" (a ${ body), "(" (a $( body or a ( inside one), "`"
     start = None
+    doubt = False  # a construct the lexical reading may misread has been passed
+    groups = 0  # the '(' read outside every body and not yet closed
     i, n = 0, len(text)
     while i < n:
         c = text[i]
@@ -5371,9 +5384,21 @@ def _cmtidn_raw_words(text):
                 stack.pop()
             i += 1
             continue
+        if top != '"' and not doubt:
+            prev = text[i - 1] if i else " "
+            if ((c == "#" and (prev in _CMTIDN_WORD_STOPS or prev == "`"))
+                    or (c == "<" and text.startswith("<<", i) and not text.startswith("<<<", i) and prev != "<")
+                    or (c == "$" and text.startswith("$'", i))
+                    or (c == "'" and top == "{" and '"' in stack)
+                    or (c == ")" and top is None and groups == 0)):
+                doubt = True
         if top is None and c in _CMTIDN_WORD_STOPS:
+            if c == "(":
+                groups += 1
+            elif c == ")" and groups:
+                groups -= 1
             if start is not None:
-                words.append(text[start:i])
+                words.append((text[start:i], doubt))
                 start = None
             i += 1
             continue
@@ -5406,7 +5431,7 @@ def _cmtidn_raw_words(text):
             stack.pop()
         i += 1
     if start is not None:
-        words.append(text[start:])
+        words.append((text[start:], doubt))
     return words
 
 
@@ -5446,12 +5471,17 @@ def _cmtidn_identity_set_ai(command):
     assignment or default-value form (_CMTIDN_IDENTITY_SET_RE), as written or once the characters of
     _CMTIDN_SET_UNREAD_RE are dropped, is judged by the VALUE it assigns: the rest of that word after the '='.
     The value denies when it names an AI identity (AI_IDENTITY_RE). A value that the text does not spell, one
-    that holds an expansion (_CMTIDN_EXPANSION_RE: EMAIL=$ME, ${EMAIL:=${USER:-u}@x}, $'\\x43laude') or the
-    environment variable name of a --config-env pair (--config-env=author.name=V), cannot be told from one
-    that names no AI, so for it the rule fails closed and denies when the command names an AI identity
-    anywhere, as written or once those characters are dropped. A GIT_CONFIG_VALUE_<n> assignment is judged the
+    that holds an expansion (_CMTIDN_EXPANSION_RE: EMAIL=$ME, ${EMAIL:=${USER:-u}@x}, $'\\x43laude'), a {}
+    placeholder or a replacement string given to xargs -I, -i or --replace (find . -exec git -c
+    author.name={} ..., xargs -I{} env EMAIL={} git commit), or the environment variable name of a --config-env
+    pair (--config-env=author.name=V), cannot be told from one that names no AI, so for it the rule fails
+    closed and denies when the command names an AI identity anywhere, as written or once those characters are
+    dropped. So does a value in a doubtful word (_cmtidn_raw_words), one at or after a comment, a heredoc
+    operator or another construct the lexical reading may misread, since a quote character there can split the
+    value before its AI part (# don't, then ${EMAIL:=' X'}). A GIT_CONFIG_VALUE_<n> assignment is judged the
     same way when a GIT_CONFIG_KEY_<n> assignment in the text names a user, author or committer name or email
-    key, or holds an expansion (GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0=X). So a
+    key, holds an expansion or stands in a doubtful word (GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name
+    GIT_CONFIG_VALUE_0=X). So a
     command that sets a human identity by a spelled value is allowed whatever else its text names (git -c
     user.email=me@example.com commit -m 'regenerate .claude/rules'). The cost is a disclosed over-deny of
     text that only quotes an assignment of an AI value (a commit message that holds EMAIL=X@anthropic.com, an
@@ -5466,27 +5496,45 @@ def _cmtidn_identity_set_ai(command):
     config_key = None  # a GIT_CONFIG_KEY_<n> assignment that names an identity key or holds an expansion
     config_values = []
     previous = ""
-    for word in _cmtidn_raw_words(command.replace("\\\n", "")):
+    places = {"{}"}  # the strings that xargs -I or -i, or find -exec, fill in at run time
+    many = False  # more replacement strings than _CMTIDN_PLACES_MAX were read
+    xargs = False
+    for word, doubtful in _cmtidn_raw_words(command.replace("\\\n", "")):
+        bare = _CMTIDN_SET_UNREAD_RE.sub("", word)
+        if xargs:
+            m = _CMTIDN_XARGS_REPLACE_RE.match(bare)
+            if previous == "-I" or (previous.startswith("-") and not previous.startswith("--")
+                                    and previous.endswith("I")):
+                places.add(bare)
+            elif m and (m.group(1) or m.group(2) or m.group(3)):
+                places.add(m.group(1) or m.group(2) or m.group(3))
+            if len(places) > _CMTIDN_PLACES_MAX:
+                many = True  # past the bound every value counts as one the text does not spell (fail closed)
+                places = set()
+        xargs = xargs or bare.rsplit("/", 1)[-1] == "xargs"
         for name, raw, dropped in _cmtidn_assigned_values(word, _CMTIDN_IDENTITY_SET_RE):
             ai = _cmtidn_value_ai(raw, dropped)
             if ai is not None:
                 return "identity assignment {!r} whose value names an AI identity ({!r})".format(name, ai.group(0))
-            config_env = previous == "--config-env" or _CMTIDN_SET_UNREAD_RE.sub("", word).startswith(
-                "--config-env=")
-            if unspelled is None and (config_env or _CMTIDN_EXPANSION_RE.search(raw)):
+            config_env = previous == "--config-env" or bare.startswith("--config-env=")
+            if unspelled is None and (config_env or doubtful or many or _CMTIDN_EXPANSION_RE.search(raw)
+                                      or any(p and p in dropped for p in places)):
                 unspelled = name
         for name, raw, dropped in _cmtidn_assigned_values(word, _CMTIDN_CONFIG_KEY_SET_RE):
-            if config_key is None and (IDENTITY_CONF_NAME_RE.search(dropped) or _CMTIDN_EXPANSION_RE.search(raw)):
+            if config_key is None and (doubtful or IDENTITY_CONF_NAME_RE.search(dropped)
+                                       or _CMTIDN_EXPANSION_RE.search(raw)):
                 config_key = name
-        config_values.extend(_cmtidn_assigned_values(word, _CMTIDN_CONFIG_VALUE_SET_RE))
-        previous = _CMTIDN_SET_UNREAD_RE.sub("", word)
+        config_values.extend((name, raw, dropped, doubtful) for name, raw, dropped
+                             in _cmtidn_assigned_values(word, _CMTIDN_CONFIG_VALUE_SET_RE))
+        previous = bare
     if config_key is not None:
-        for name, raw, dropped in config_values:
+        for name, raw, dropped, doubtful in config_values:
             ai = _cmtidn_value_ai(raw, dropped)
             if ai is not None:
                 return ("identity assignment {!r} beside {!r}, whose value names an AI identity ({!r})"
                         .format(name, config_key, ai.group(0)))
-            if unspelled is None and _CMTIDN_EXPANSION_RE.search(raw):
+            if unspelled is None and (doubtful or many or _CMTIDN_EXPANSION_RE.search(raw)
+                                      or any(p and p in dropped for p in places)):
                 unspelled = name
     if unspelled is None:
         return None
@@ -6082,12 +6130,14 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
 
 
 def _cmtidn_stdin_identity_ai(tokens, command):
-    """A hit label when one segment's command word (past reserved words and VAR=value words) is xargs, the git
-    command it runs is a git config that sets a value (_cmtidn_config_setting) and names a user, author or
-    committer name or email key, and the command line names an AI identity anywhere, as written or once the
-    characters of _CMTIDN_SET_UNREAD_RE are dropped; else None. xargs adds the words it reads from its input
-    to that command, so the value can come from another segment (echo X | xargs git config author.name), and
-    the check fails closed there, as the raw-text rule does on a value the text does not spell; the cost is a
+    """A hit label when one segment's command word (past reserved words and VAR=value words) is xargs, or is a
+    wrapper the git command finder reads (_CMTIDN_FINDER_WRAPPERS) with an xargs word after it and before the
+    git config words (nice xargs git config ..., sudo -u ci xargs git config ...), the git command it runs is a
+    git config that sets a value (_cmtidn_config_setting) and names a user, author or committer name or email
+    key, and the command line names an AI identity anywhere, as written or once the characters of
+    _CMTIDN_SET_UNREAD_RE are dropped; else None. xargs adds the words it reads from its input to that
+    command, so the value can come from another segment (echo X | xargs git config author.name), and the
+    check fails closed there, as the raw-text rule does on a value the text does not spell; the cost is a
     disclosed over-deny of such a line that names an AI for another reason."""
     n = len(tokens)
     i = 0
@@ -6095,10 +6145,12 @@ def _cmtidn_stdin_identity_ai(tokens, command):
         i += 1
     while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
         i += 1
-    if i >= n or tokens[i].rsplit("/", 1)[-1] != "xargs":
+    if i >= n or tokens[i].rsplit("/", 1)[-1] not in _CMTIDN_FINDER_WRAPPERS:
         return None
     start = _cmtidn_config_setting(tokens)
     if start is None or not any(IDENTITY_CONF_NAME_RE.fullmatch(tok) for tok in tokens[start:]):
+        return None
+    if not any(tok.rsplit("/", 1)[-1] == "xargs" for tok in tokens[i:start]):
         return None
     ai = AI_IDENTITY_RE.search(command) or AI_IDENTITY_RE.search(_CMTIDN_SET_UNREAD_RE.sub("", command))
     if ai is None:
