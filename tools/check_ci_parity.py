@@ -986,6 +986,48 @@ ALLOWLIST = (
     },
     {
         "side": "ci-only",
+        "identity": "tools/check_baseline_pin.py --base HEAD^1",
+        "reason": (
+            "On a pull_request the CI job checks out the test merge, whose "
+            "first parent HEAD^1 is the protected line the change merges "
+            "into; the local runner has no test merge and passes "
+            "origin/main instead."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
+        "identity": "tools/check_baseline_pin.py --base HEAD^",
+        "reason": (
+            "On a push or workflow_dispatch run the CI job passes the "
+            "previous commit HEAD^ when it resolves; the local runner "
+            "passes origin/main instead."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
+        "identity": "tools/check_baseline_pin.py",
+        "reason": (
+            "The CI else-branch, taken only when HEAD^ does not resolve, "
+            "prints a NOTE and runs the gate with no --base, so the pin "
+            "and copy legs still run; the local runner always passes a "
+            "base."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "local-only",
+        "identity": "tools/check_baseline_pin.py --base origin/main",
+        "reason": (
+            "The local runner compares against origin/main, the protected "
+            "line, as check_version_monotonicity.py takes its default "
+            "base; CI derives its base from the event (HEAD^1 or HEAD^)."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
         "identity": (
             "tools/check_branch_root.py --protected <ref:origin/${GITHUB_BASE_REF}> --head <ref:$PR_HEAD_SHA> --max-lag 200"
         ),

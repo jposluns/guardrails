@@ -120,7 +120,9 @@ run_gate "site-versions" python3 -I -B tools/check_site_versions.py
 run_gate "draft-site-selftest" python3 -I -B tools/gen_draft_site.py --self-test
 run_gate "draft-site-drift" python3 -I -B tools/gen_draft_site.py --check
 run_gate "baseline-pin-selftest" python3 -I -B tools/check_selftest_execution.py --suite baseline-pin-selftest
-run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py
+# The base-coupling leg runs against origin/main, the protected line, as check_version_monotonicity.py
+# takes its default base; an origin/main that does not resolve is cannot-evaluate (exit 2), never a pass.
+run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py --base origin/main
 run_gate "palette-aiqt" python3 -I -B .baseline/check_palette.py --site aiqt --palettes site/draft/assets/baseline/palettes.css
 run_gate "palette-opfiles" python3 -I -B .baseline/check_palette.py --site opfiles --palettes opf/site/draft/assets/baseline/palettes.css
 run_gate "security-txt-selftest" python3 -I -B tools/check_selftest_execution.py --suite security-txt-selftest
