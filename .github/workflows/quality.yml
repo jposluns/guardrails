@@ -919,6 +919,29 @@ jobs:
             fi
           fi
 
+      - name: Self-test check removal self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite selftest-removal-selftest
+
+      - name: Self-test check removal
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 -I -B tools/check_selftest_removal.py
+          else
+            if [ "$EVENT_NAME" = "push" ]; then
+              # The pushed range: every check id registered before the push and gone after it.
+              python3 -I -B tools/check_selftest_removal.py --protected "origin/${GITHUB_REF_NAME}" --base "$PUSH_BEFORE"
+            else
+              # A workflow_dispatch or schedule run compares the checked-out tip with its first parent.
+              python3 -I -B tools/check_selftest_removal.py --protected "origin/${GITHUB_REF_NAME}"
+            fi
+          fi
+
       - name: Version monotonicity self-test
         shell: bash
         run: python3 -I -B tools/check_version_monotonicity.py --self-test

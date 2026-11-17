@@ -482,6 +482,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_release_cut.py",
     "tools/check_release_delta.py",
     "tools/check_rule_placement.py",
+    "tools/check_selftest_removal.py",
     "tools/check_site.py",
     "tools/check_sized_instructions.py",
     "tools/check_standards_currency.py",
