@@ -151,7 +151,7 @@ import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root  # noqa: E402
+from _gen_common import repo_root, unknown_args_refused  # noqa: E402
 from _standards import (dir_chain_or_absent, dir_or_absent, dir_present, load_manifests, map_keys,  # noqa: E402
                         withdrawn_mappings)
 
@@ -717,14 +717,11 @@ def run(root, check):
 
 def main():
     argv = sys.argv[1:]
-    # Unknown-option rejection precedes every dispatch (the tools/gen_manifest.py shape): main() defines only
-    # --check and --self-test, so any other token (a misspelled --chek, a stray --help, a positional) is exit 2
-    # with the usage line on stderr and nothing read or written, never a fall-through to a write-mode run.
-    for tok in argv:
-        if tok not in ("--check", "--self-test"):
-            print("error: unrecognized option {!r}; fail closed".format(tok), file=sys.stderr)
-            print("usage: gen_rules.py [--check | --self-test]", file=sys.stderr)
-            return 2
+    # Unknown-option rejection precedes every dispatch: main() defines only --check and --self-test, so any other
+    # token (a misspelled --chek, a stray --help, a positional) is exit 2 with the usage line on stderr, never a
+    # fall-through to a write-mode run.
+    if unknown_args_refused(argv, "gen_rules.py [--check | --self-test]"):
+        return 2
     if "--self-test" in argv:
         return self_test_main()
     return run(repo_root(), "--check" in argv)
@@ -769,14 +766,44 @@ def _argv_guard_failures(namespace, prog, run_name="run"):
     return failures
 
 
+def _valued_option_failures():
+    """One failure line per vector where _gen_common.unknown_args_refused mishandles a valued option: a following
+    token that starts with "-" is never taken as its value (red when that rule is reverted)."""
+    import io
+    from contextlib import redirect_stderr
+    failures = []
+    usage = "gen_x.py [--check] [--root DIR]"
+    for argv, want in ((["--root", "--chek"], True), (["--root", "-x"], True), (["--check", "--root"], True),
+                       (["--root", "dir", "--check"], False), (["--check", "--root", "dir"], False)):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            got = unknown_args_refused(argv, usage, valued=("--root",))
+        lines = err.getvalue().splitlines()
+        if got != want or (lines[-1:] != ["usage: " + usage] if want else lines):
+            failures.append("valued option {}: expected {}; got refused={}, stderr {!r}".format(
+                " ".join(argv), "a refusal with the usage line" if want else "acceptance with no output", got,
+                err.getvalue()[-200:]))
+    return failures
+
+
 # The class check: EVERY tools/gen_*.py, enumerated at run time, refuses each _GEN_ARGV_CLASS_CASES argv with exit
-# 2 and its usage line on stderr. Each generator runs as __main__ in a child whose audit hook ends the child (exit
-# 97) at its first write, delete, directory creation or child process, before the operation happens, so a
-# generator whose guard is reverted shows as exit 97 (or a non-2 exit) and never changes the tree.
+# 2, and its stderr is the refusal and nothing else: an optional `error:` line, then a last line that starts with
+# `usage: <its name>`. An exit 2 for another reason (a different error, a usage text inside some other line, a
+# line after the usage line) is reported. Each generator runs as __main__ in a child whose audit hook ends the
+# child (exit 97) before a Python-level open for writing, a delete, rename, link, directory creation, os.mkfifo
+# (which raises no audit event of its own, so the child wraps it to raise one) or a child process, so a generator
+# whose guard is reverted shows as exit 97 (or a non-2 exit). Residual, not covered: a write made inside C code
+# without an audit event (for example the database file sqlite3 creates, os.mknod, or an extension module's own
+# I/O) is not seen by the hook, so such a write before the refusal would pass this check.
 _GEN_ARGV_CLASS_CASES = (["--chek"], ["--check", "--chek"], ["--self-test", "--chek"], ["--help"], ["check"])
 _GEN_ARGV_CHILD = """import contextlib, io, json, os, runpy, sys
+_real_mkfifo = os.mkfifo
+def _audited_mkfifo(path, mode=0o666, *, dir_fd=None):
+    sys.audit("os.mkfifo", path, mode, dir_fd)
+    return _real_mkfifo(path, mode, dir_fd=dir_fd)
+os.mkfifo = _audited_mkfifo
 _MUTATING = frozenset(("os.chflags", "os.chmod", "os.chown", "os.exec", "os.fork", "os.forkpty", "os.kill",
-                       "os.killpg", "os.lchflags", "os.link", "os.mkdir", "os.posix_spawn", "os.remove",
+                       "os.killpg", "os.lchflags", "os.link", "os.mkdir", "os.mkfifo", "os.posix_spawn", "os.remove",
                        "os.removexattr", "os.rename", "os.rmdir", "os.setxattr", "os.spawn", "os.symlink",
                        "os.system", "os.truncate", "os.utime", "shutil.chown", "shutil.copyfile", "shutil.copymode",
                        "shutil.copystat", "shutil.copytree", "shutil.make_archive", "shutil.move", "shutil.rmtree",
@@ -809,7 +836,7 @@ for argv in cases:
 
 def _gen_argv_class_failures(tools):
     """One failure line per tools/gen_*.py in the directory tools that does not refuse every
-    _GEN_ARGV_CLASS_CASES argv with exit 2 and exactly one `usage: <its name>` line on stderr."""
+    _GEN_ARGV_CLASS_CASES argv with exit 2 and a stderr that is only the refusal (see _gen_argv_refusal)."""
     import json
     import subprocess
     failures = []
@@ -827,20 +854,37 @@ def _gen_argv_class_failures(tools):
         seen = {tuple(argv): (code, err) for argv, code, err in rows if isinstance(argv, list)}
         for argv in _GEN_ARGV_CLASS_CASES:
             code, err = seen.get(tuple(argv), ("no result (child exit {})".format(done.returncode), ""))
-            if code != 2 or err.count("usage: " + path.name) != 1:
-                failures.append("{} {}: expected exit 2 with one usage line on stderr and nothing written; got "
-                                "exit {}, stderr {!r}, child stderr {!r}".format(
-                                    path.name, " ".join(argv), code, err[-200:], done.stderr[-200:]))
+            if code != 2 or not _gen_argv_refusal(err, path.name):
+                failures.append("{} {}: expected exit 2 with stderr only the refusal (an optional error: line, "
+                                "then a last line starting usage: {}) and nothing written; got exit {}, stderr "
+                                "{!r}, child stderr {!r}".format(path.name, " ".join(argv), path.name, code,
+                                                                 err[-200:], done.stderr[-200:]))
         if done.returncode != 0:
             failures.append("{}: the unknown-option child exited {} (97 is a blocked write, delete or child "
                             "process); stderr {!r}".format(path.name, done.returncode, done.stderr[-300:]))
     return failures
 
 
+def _gen_argv_refusal(err, name):
+    """True when the stderr text err is only an unknown-option refusal by the generator name: at most one line
+    starting `error:`, then a last line that is `usage: <name>` or starts with `usage: <name> `."""
+    lines = err.splitlines()
+    usage = "usage: " + name
+    if not lines or not (lines[-1] == usage or lines[-1].startswith(usage + " ")):
+        return False
+    return len(lines) == 1 or (len(lines) == 2 and lines[0].startswith("error:"))
+
+
 # Controls for the class check over a private tools directory: a generator that ignores its arguments and writes
-# must be reported, with its write blocked, and one that refuses them must not be.
+# must be reported, with its write blocked; so must one that makes a FIFO, and one that exits 2 for another reason
+# with the usage text inside its error line; and one that refuses its arguments must not be.
 _GEN_ARGV_WRITER = ("import sys\nfrom pathlib import Path\n"
                     "Path(__file__).with_name('written.txt').write_text('x')\nsys.exit(0)\n")
+_GEN_ARGV_FIFO = ("import os, sys\nfrom pathlib import Path\n"
+                  "os.mkfifo(str(Path(__file__).with_name('written.fifo')))\nsys.exit(0)\n")
+_GEN_ARGV_OTHER2 = ("import sys\n"
+                    "print('error: cannot read the source (see usage: gen_other2.py)', file=sys.stderr)\n"
+                    "sys.exit(2)\n")
 _GEN_ARGV_REFUSER = ("import sys\nif sys.argv[1:]:\n    print('usage: gen_refuser.py', file=sys.stderr)\n"
                      "    sys.exit(2)\n")
 
@@ -861,6 +905,18 @@ def _gen_argv_class_check_failures():
             failures.append("class-check control: a generator that ignores its arguments and writes must be "
                             "reported with its write blocked; got {} failure line(s), written.txt {}".format(
                                 len(writer), "present" if (tmp / "writer" / "written.txt").exists() else "absent"))
+        (tmp / "fifo").mkdir()
+        (tmp / "fifo" / "gen_fifo.py").write_text(_GEN_ARGV_FIFO, encoding="utf-8")
+        fifo = _gen_argv_class_failures(tmp / "fifo")
+        if not fifo or os.path.lexists(tmp / "fifo" / "written.fifo"):
+            failures.append("class-check control: a generator that ignores its arguments and makes a FIFO must be "
+                            "reported with the FIFO blocked; got {} failure line(s), written.fifo {}".format(
+                                len(fifo), "present" if os.path.lexists(tmp / "fifo" / "written.fifo") else "absent"))
+        (tmp / "other2").mkdir()
+        (tmp / "other2" / "gen_other2.py").write_text(_GEN_ARGV_OTHER2, encoding="utf-8")
+        if not _gen_argv_class_failures(tmp / "other2"):
+            failures.append("class-check control: a generator that exits 2 for another reason, with the usage text "
+                            "inside its error line, must be reported; it passed")
         refuser = _gen_argv_class_failures(tmp / "refuser")
         if refuser:
             failures.append("class-check control: a generator that refuses its arguments must pass; got "
@@ -2243,6 +2299,8 @@ def self_test_main():
 
     # An unknown option is exit 2 with the usage line and runs nothing (red when main()'s guard is reverted).
     failures.extend(_argv_guard_failures(globals(), "gen_rules.py"))
+    # A valued option never takes a following flag as its value (--root --chek is refused, not run).
+    failures.extend(_valued_option_failures())
     # Every tools/gen_*.py refuses an unknown option with exit 2 and its usage line, writing nothing (red when any
     # one generator's guard is reverted).
     failures.extend(_gen_argv_class_check_failures())
@@ -2263,7 +2321,8 @@ def self_test_main():
           "and goes red under the ASCII-only revert; {} parse-level revert(s) each go red; {} adopter-mode "
           "case(s) pass the placement gate and are refused by the pack reader, {} more are refused by both, "
           "and {} adopter-mode revert(s) each go red; an unknown option is exit 2 with the usage line and runs "
-          "nothing, here and in every tools/gen_*.py; {}.".format(
+          "nothing, here and in every tools/gen_*.py, and a valued option never takes a following flag as its value; "
+          "{}.".format(
               len(_MAP_KEYS_CONDITIONS), ", ".join(_MAP_KEYS_CONDITIONS),
               len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1, len(_PARSE_REVERTS), len(_ADOPTER_MODE_CASES),
               len(_ADOPTER_MODE_REFUSALS), len(_ADOPTER_MODE_REVERTS),

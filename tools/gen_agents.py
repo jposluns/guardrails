@@ -33,7 +33,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root  # noqa: E402
+from _gen_common import repo_root, unknown_args_refused  # noqa: E402
 from _adapter_compose import legacy_render, run  # noqa: E402
 from gen_rules import DETAIL_HEADING, load_corpus  # noqa: E402
 
@@ -98,14 +98,11 @@ def render(pairs):
 
 def main():
     args = sys.argv[1:]
-    # Unknown-option rejection precedes every dispatch (the tools/gen_manifest.py shape): main() defines only
-    # --check and --self-test, so any other token (a misspelled --chek, a stray --help, a positional) is exit 2
-    # with the usage line on stderr and nothing read or written, never a fall-through to a write-mode run.
-    for tok in args:
-        if tok not in ("--check", "--self-test"):
-            print("error: unrecognized option {!r}; fail closed".format(tok), file=sys.stderr)
-            print("usage: gen_agents.py [--check | --self-test]", file=sys.stderr)
-            return 2
+    # Unknown-option rejection precedes every dispatch: main() defines only --check and --self-test, so any other
+    # token (a misspelled --chek, a stray --help, a positional) is exit 2 with the usage line on stderr, never a
+    # fall-through to a write-mode run.
+    if unknown_args_refused(args, "gen_agents.py [--check | --self-test]"):
+        return 2
     if "--self-test" in args:
         return self_test_main()
     return run(repo_root(), "--check" in args, [(AGENTS_REL, HEADER)], "tools/gen_agents.py", corpus_bodies)

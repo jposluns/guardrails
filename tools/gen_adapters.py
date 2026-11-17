@@ -33,7 +33,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root  # noqa: E402
+from _gen_common import repo_root, unknown_args_refused  # noqa: E402
 from _adapter_compose import legacy_render, run  # noqa: E402
 from gen_agents import body_of, corpus_bodies  # noqa: E402  shared body transform and AIQT ordering
 
@@ -91,15 +91,12 @@ def render(pairs, header):
 
 def main():
     argv = sys.argv[1:]
-    # Unknown-option rejection precedes every dispatch (the tools/gen_manifest.py shape): main() defines only
-    # --check, so any other token (a misspelled --chek, a stray --help, a positional) is exit 2 with the usage
-    # line on stderr and nothing read or written, never a fall-through to a write-mode run. gen_agents.py's
-    # self-test drives this guard (vector T39), as this generator has no self-test of its own.
-    for tok in argv:
-        if tok != "--check":
-            print("error: unrecognized option {!r}; fail closed".format(tok), file=sys.stderr)
-            print("usage: gen_adapters.py [--check]", file=sys.stderr)
-            return 2
+    # Unknown-option rejection precedes every dispatch: main() defines only --check, so any other token (a
+    # misspelled --chek, a stray --help, a positional) is exit 2 with the usage line on stderr, never a
+    # fall-through to a write-mode run. gen_agents.py's self-test drives this guard (vector T39), as this
+    # generator has no self-test of its own.
+    if unknown_args_refused(argv, "gen_adapters.py [--check]", flags=("--check",)):
+        return 2
     return run(repo_root(), "--check" in argv, TARGETS, "tools/gen_adapters.py", corpus_bodies)
 
 

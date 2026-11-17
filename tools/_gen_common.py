@@ -82,13 +82,15 @@ def is_external_url(href):
 
 def unknown_args_refused(argv, usage, flags=("--check", "--self-test"), valued=()):
     """The unknown-option guard a tools/gen_*.py main() runs before any dispatch. Every token of argv must be one of
-    flags, or one of valued followed by its value. Otherwise print an error line and `usage: <usage>` to stderr
-    and return True, having read and written nothing, so the caller returns exit 2: a misspelled --chek, a stray
-    --help or a positional never falls through to a write-mode run. Return False when every token is defined."""
+    flags, or one of valued followed by its value; a token starting with "-" is never taken as a value, so
+    `--root --chek` is refused, not run against a directory named --chek. Otherwise print an error line and
+    `usage: <usage>` to stderr and return True, so the caller returns exit 2 instead of dispatching. Return False
+    when every token is defined. This function opens no file; that a generator writes nothing before this
+    refusal is checked by the gen_rules self-test class check, and nothing checks that it reads nothing."""
     i = 0
     while i < len(argv):
         tok = argv[i]
-        if tok in valued and i + 1 < len(argv):
+        if tok in valued and i + 1 < len(argv) and not argv[i + 1].startswith("-"):
             i += 2
             continue
         if tok not in flags:
