@@ -77,11 +77,18 @@ is empty, starts with "-" or holds ":", whitespace or a control character, a --b
 to a commit or is not an ancestor of HEAD, a --local-base REF that is a short name, that the clone lacks or that
 git reports broken or dangling, a --local-base
 REF that exists but does not resolve to a readable commit, a --local-base merge-base that cannot be resolved, a base pin that is not a regular file, and a base
-pin that is oversized or malformed are cannot-evaluate (exit 2), never a pass. So is a --local-base fork point whose
-tree is HEAD's own (REF names HEAD, a commit HEAD descends from with no change, or a commit that descends from HEAD,
-as a symbolic ref to the checked-out branch does), since the leg would then compare nothing, and, with --base, any
-exception the run raises other than a cannot-evaluate one (named on the CANNOT EVALUATE line), never Python's exit 1.
+pin that is oversized or malformed are cannot-evaluate (exit 2), never a pass. So is, with --base, any exception
+the run raises other than a cannot-evaluate one (named on the CANNOT EVALUATE line), never Python's exit 1.
 With neither flag the leg is not evaluated, and the run says so on a NOTE line.
+
+A --local-base REF at HEAD (an ordinary checkout of the protected line, or a commit HEAD descends from with no change)
+makes the fork point a commit holding HEAD's tree, and the leg still runs: it compares the pins in the working tree,
+so an uncommitted digest row change under an unchanged version fails and a clean checkout passes. Disclosed limit: a
+REF that descends from HEAD, such as a symbolic ref to the checked-out branch, also makes HEAD the fork point, so a
+row changed in a commit on that branch is compared with itself and not seen; only a REF naming the protected line's
+own commit gives the local leg its anchor. Disclosed limit: every base read turns replacement objects off, which
+covers a graft made with git replace --graft, but not a legacy graft file (.git/info/grafts), which git still honours
+and which can change the commit a --base REF such as HEAD^ names.
 
 --probe-local-base REF runs only those --local-base reads and scans nothing, so tools/run_all_checks.sh decides
 whether to pass --local-base by this gate's own reading rather than a second one: the probe and --local-base both
@@ -100,7 +107,7 @@ absence (exit 2); one that resolves is read like any other name. Anything else e
 with one CANNOT EVALUATE line on stderr: an unsafe or short name, a broken loose ref, a broken packed-refs line, a
 dangling symbolic ref, a ref store not shown readable and well formed, a full name git resolves only through
 another ref (a local branch refs/heads/REF), an object that is missing or not a commit, a merge-base that does not
-resolve, a fork point whose tree is HEAD's own, and any other git failure.
+resolve, and any other git failure.
 
 The entry line runs an inline copy of the canonical child-status guard (opf/tools/_child_status.py) before
 main(), since the leg reads git's exit statuses.
@@ -714,25 +721,7 @@ def _local_base_commit(root, ref):
                              "{} is missing or is not a commit; git rev-parse --verify {}^{{commit}} exit {})".format(
                                  ref, named, named, proc.returncode))
     commit = _commit_id(proc, "git rev-parse --verify " + named + "^{commit}")
-    fork = _commit_id(_git_base_read(root, ["merge-base", "HEAD", commit]), "git merge-base HEAD " + commit)
-    if _tree_id(root, fork) == _tree_id(root, "HEAD"):
-        raise CannotEvaluate("base: the fork point {} of HEAD and {} holds HEAD's own tree ({} names HEAD, a commit "
-                             "HEAD descends from with no change, or a commit that descends from HEAD, as a symbolic "
-                             "ref to the checked-out branch does), so the leg would compare nothing and pass; point {} "
-                             "at the protected line's commit and rerun, or run without --local-base for the check "
-                             "without that leg".format(fork, ref, ref, ref))
-    return fork
-
-
-def _tree_id(root, rev):
-    """The id of the tree the commit rev names; CannotEvaluate on a nonzero exit or any other output."""
-    what = "git rev-parse --verify {}^{{tree}}".format(rev)
-    text = _git_stdout(_git_base_read(root, ["rev-parse", "--verify", "--quiet", rev + "^{tree}"]), what).decode(
-        "ascii", "replace")
-    tree = text[:-1] if text.endswith("\n") else text
-    if not COMMIT_RE.fullmatch(tree):
-        raise CannotEvaluate("base: {} printed {!r}, not 1 tree id".format(what, text))
-    return tree
+    return _commit_id(_git_base_read(root, ["merge-base", "HEAD", commit]), "git merge-base HEAD " + commit)
 
 
 def local_base_decision(root, ref):
@@ -1254,35 +1243,35 @@ def _coupling_cases():
         check(name, written and got == 2 and "CANNOT EVALUATE: base: refs/remotes/origin/main does not resolve, and "
               "git " in report and "does not exist in this clone" not in report, (written, got, report))
 
-    # A --local-base fork point whose tree is HEAD's own leaves the leg nothing to compare, so it is cannot-evaluate,
-    # never an empty pass: refs/remotes/origin/main is a symbolic ref to the checked-out branch, names HEAD itself, or
-    # names the base commit when HEAD is an empty commit over it. In the first 2, HEAD changes a row under an unchanged
-    # version, so a leg run against that fork point would compare HEAD with itself and pass.
-    for name, setup in (("couple/local-base-symref-to-checked-out-branch-cannot-evaluate", "symref"),
-                        ("couple/local-base-names-head-cannot-evaluate", "head"),
-                        ("couple/local-base-unchanged-descent-cannot-evaluate", "empty")):
+    # A checkout at the protected line: refs/remotes/origin/main names HEAD, so the fork point is HEAD and the leg
+    # compares the pins in the working tree with HEAD's. A clean checkout passes, a digest row changed in the working
+    # tree under an unchanged version (not committed) fails, and a version move in the working tree passes with its
+    # NOTE. A ref that descends from HEAD (a symbolic ref to the checked-out branch) is the disclosed limit in the
+    # module docstring, not a row here.
+    for name, setup, code, text in (
+            ("couple/local-base-at-head-clean-passes", "clean", 0, "no digest row changed"),
+            ("couple/local-base-at-head-uncommitted-row-change-refused", "row", 1,
+             "FAIL: {}: the row for baseline.css changed from ".format(PIN_REL)),
+            ("couple/local-base-at-head-uncommitted-version-move-passes", "move", 0,
+             "NOTE: {}: the pin moved from version {} ".format(PIN_REL, FIXTURE_VERSION))):
         with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
             _fixture(tmp)
             _commit_all(tmp, "base", init=True)
-            if setup == "empty":
-                _commit_all(tmp, "head")
-                _git_fixture(tmp, "update-ref", "refs/remotes/origin/main", "base")
-            else:
+            _git_fixture(tmp, "update-ref", "refs/remotes/origin/main", "HEAD")
+            if setup == "row":
                 _fixture(tmp, changed, _pin_text(changed))
-                _commit_all(tmp, "head")
-                _git_fixture(tmp, "branch", "-M", "work")
-                if setup == "symref":
-                    _git_fixture(tmp, "symbolic-ref", "refs/remotes/origin/main", "refs/heads/work")
-                else:
-                    _git_fixture(tmp, "update-ref", "refs/remotes/origin/main", "HEAD")
+            elif setup == "move":
+                _fixture(tmp, changed, _pin_text(changed, version=moved), attribution=_attribution_text(version=moved))
             got, report = _coupling_gate(tmp, "refs/remotes/origin/main", FIXTURE_PINS, False, local=True)
-        check(name, got == 2 and "CANNOT EVALUATE: base: the fork point " in report
-              and "holds HEAD's own tree" in report and "PASS" not in report, (got, report))
+        check(name, got == code and text in report and "CANNOT EVALUATE" not in report
+              and ("PASS" in report) == (code == 0), (got, report))
 
     # Every base read runs with replacement objects off (--no-replace-objects). HEAD changes a row under an unchanged
     # version; a replacement of the base commit's tree or of the base pin's blob by HEAD's would make the base read
-    # return HEAD's pin and pass, and a graft giving HEAD the divergent before commit (which already holds the changed
-    # row) as its parent would make that commit an ancestor and pass.
+    # return HEAD's pin and pass, and a graft made with git replace --graft, giving HEAD the divergent before commit
+    # (which already holds the changed row) as its parent, would make that commit an ancestor and pass. The graft row
+    # covers replacement-object grafts only: a legacy graft file (.git/info/grafts) is not turned off by
+    # --no-replace-objects and has no row; the module docstring discloses it as a limit.
     for name, setup, code, text in (
             ("couple/replaced-base-tree-ignored", "tree", 1, "FAIL: {}: the row for baseline.css changed from "),
             ("couple/replaced-base-pin-blob-ignored", "blob", 1, "FAIL: {}: the row for baseline.css changed from "),
@@ -1415,7 +1404,8 @@ def _probe_cases():
     a packed-refs that is a directory, a directory at the ref's loose path, a full name git resolves only through a
     local branch refs/heads/REF and a short name. On every fixture, --local-base over the same tree must agree with
     the probe (_agrees), and the runner's baseline-pin block, extracted from tools/run_all_checks.sh and run by bash
-    with real git, fails the present and packed-refs directory fixtures and passes the absent one with its NOTE.
+    with real git, fails the present and packed-refs directory fixtures and passes the absent one with its NOTE and
+    a clean checkout at the ref.
     Run after _coupling_cases, whose scrub of this process's git environment the children inherit."""
     changed = dict(FIXTURE_FILES, **{"baseline.css": b"body{ }\n"})
     ref = "refs/remotes/origin/main"
@@ -1485,6 +1475,20 @@ def _probe_cases():
     check("runner/packed-refs-directory-fails", got == 1 and note not in report
           and "GATE FAILED: baseline-pin (check_baseline_pin.py --probe-local-base {} exit 2, stderr: {}".format(
               ref, store) in report, (got, report))
+
+    # The runner's own block on a clean checkout at the protected line (refs/remotes/origin/main names HEAD, both
+    # registered pairs exact, nothing changed in the working tree): the probe finds the ref usable, the leg runs
+    # against HEAD as the fork point, and the block exits 0.
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+        _fixture(tmp)
+        _fixture(tmp, None, None, root=SECOND_ROOT, pin_rel=SECOND_PIN, attribution=False)
+        _commit_all(tmp, "base", init=True)
+        _git_fixture(tmp, "update-ref", ref, "HEAD")
+        probe = _probe_child(tmp, ref)
+        got, report = _runner_child(tmp, block)
+    check("runner/clean-checkout-at-ref-passes", probe == (0, b"", b"") and got == 0
+          and "no digest row changed from the base " in report and note not in report and "GATE FAILED" not in report,
+          (probe, got, report))
 
     # The packed-refs shapes, read directly: absent, empty, and a header, a ref line and its peel line are well
     # formed; a directory, a line git does not write, a peel line with no ref line before it and a missing final
@@ -2099,9 +2103,10 @@ def _self_test():
           "the fork point), and a full ref name the clone lacks, a short name shadowed by a tag or a local "
           "branch, a full name reachable only through a local branch, a ref whose commit object is "
           "missing or that names a blob, a broken loose ref, a broken packed-refs line and a dangling "
-          "symbolic ref are cannot-evaluate, and so is a fork point holding HEAD's own tree (a symbolic ref to "
-          "the checked-out branch, a ref naming HEAD, or HEAD an empty commit over the ref); a replaced base "
-          "tree, a replaced base pin blob and a grafted parent are ignored; a child run under an ambient "
+          "symbolic ref are cannot-evaluate, while a ref naming HEAD compares the working tree (a clean "
+          "checkout passes, an uncommitted changed row fails, an uncommitted version move passes); a replaced "
+          "base tree, a replaced base pin blob and a git replace --graft parent are ignored (a legacy "
+          ".git/info/grafts file is not covered); a child run under an ambient "
           "GIT_DIR naming a "
           "decoy repository reads its own base; --probe-local-base exits 0 silently for a usable ref, 1 "
           "silently for an absent one, 2 with one CANNOT EVALUATE line for a broken loose ref, a broken "
@@ -2110,7 +2115,8 @@ def _self_test():
           "a short name, and 0 under an ambient GIT_DIR naming a decoy repository that lacks the ref; "
           "--local-base agrees with the probe on every one of those fixtures; the runner's extracted "
           "baseline-pin block, with real git, fails a changed row against a usable ref and a packed-refs "
-          "that is a directory, and passes a genuine absence with its NOTE; packed-refs shapes are checked "
+          "that is a directory, and passes a genuine absence with its NOTE and a clean checkout at the ref; "
+          "packed-refs shapes are checked "
           "and a reftable ref store is refused, never read as absence, as are a per-worktree name that reads as "
           "absent, a symbolically linked and an unlistable directory on the ref's loose path, while a present "
           "per-worktree name is usable; an unexpected exception in the "
