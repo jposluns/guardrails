@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "ffbcee02a86a0765d1cf706d6b1f02781fa2f937f0b43a693cd6f8a5605d61c0"
+tree-sha256 = "5fa289e7578ed19bd6c29ef411721bb81d32b9d1dc1cfec7a0025f5f30469958"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -158,7 +158,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3159
-sha256 = "c586f5afeef974cd4c1fe79ca515807da083089b8a7ee0401230f5742dcb9273"
+sha256 = "2c1cdd87f1f9cb0b1baf47f51f9477be6c509cc67da51899272586df83a616f3"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -4502,8 +4502,8 @@ sha256 = "b0fa40d1f94ac44b818660015db141d889882c48c31f3576994f9083dc1e8bcc"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 119001
-sha256 = "791c7f37b5bbe734b2e27d6cd1ed7393b0ee0908d4fc8365134f7339f5c9b092"
+bytes = 120929
+sha256 = "6b1da176a5c7e510e150efab60bf702e8d88da58dd1792de7cf8f510bc0c8e80"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -4627,8 +4627,8 @@ sha256 = "2f19dc1e1f6bac53f5afebb6b1857889467c249b29d566954a89e25687f884c3"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 212545
-sha256 = "8e780069ea86c9d049b02941caa5f3ae8d1e3d56453cb729705ce9e03344eaa5"
+bytes = 213046
+sha256 = "4ed3adf093e3f007a0b536e43d737e1e58a2c237229e4c827df3b47f11f62ee2"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"

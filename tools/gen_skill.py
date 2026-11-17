@@ -3345,6 +3345,9 @@ def self_test_main():
 
         # 13k. A plugin root that is there but cannot be read as a directory (a regular file) is refused in both
         #      modes (exit 2), never read as an absent plugin, and a drifted output beside it is not rewritten.
+        #      The refusal must be the plugin-root probe's own, naming the root as not a directory (cannot
+        #      evaluate): the later skills/ orphan scan also refuses this tree, with a different message, so exit 2
+        #      alone would pass with the probe's refusal removed.
         nf = tmp / "plugin-skill-root-file"
         nf.mkdir()
         _write_fixture(nf, good_src)
@@ -3359,11 +3362,13 @@ def self_test_main():
         nf.joinpath(*PLUGIN_ROOT_PARTS).write_bytes(b"not a directory\n")
         nf_inst = nf.joinpath(*INSTRUCTIONS_PARTS)
         nf_inst.write_text("drifted\n", encoding="utf-8")
+        nf_refusal = "{} is not a directory (cannot evaluate)".format(nf.joinpath(*PLUGIN_ROOT_PARTS))
         for check_ in (True, False):
             code, out = capture(nf, check_)
-            if code != 2 or nf_inst.read_text(encoding="utf-8") != "drifted\n":
-                failures.append("13k: a plugin root that is a regular file expected exit 2 (check={}) writing "
-                                "nothing, got {}\n{}".format(check_, code, out))
+            if code != 2 or nf_refusal not in out or nf_inst.read_text(encoding="utf-8") != "drifted\n":
+                failures.append("13k: a plugin root that is a regular file expected exit 2 (check={}) with the "
+                                "plugin-root refusal {!r}, writing nothing, got {}\n{}".format(
+                                    check_, nf_refusal, code, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

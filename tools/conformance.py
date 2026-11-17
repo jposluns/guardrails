@@ -349,9 +349,17 @@ def _skill_drift(root, corpus):
     installed, as gen_skill writes it: the plugin root (gen_skill.PLUGIN_ROOT_PARTS) is present, probed as C5
     and gen_hooks probe it. There it must equal the rendered SKILL.md byte for byte (a missing copy, CRLF or
     one changed byte is drift), and the plugin's skills/ subtree holds nothing else (an extra entry is an
-    orphan). That holds with the reserved surface installed, and in a plugin-only install whose skills/ is
-    present (no site/downloads/aiqt/); with neither the reserved surface nor the plugin's skills/ the skill is
-    NOT APPLICABLE. With no plugin root the plugin copy is never required (the plugin is opt-in)."""
+    orphan). The hooks plugin always ships the chat skill, so that holds wherever the plugin root is present:
+    with the reserved surface installed, and in a plugin-only install (no site/downloads/aiqt/), where a
+    deleted copy, skills/aiqt/ or whole skills/ is each reported missing. The skill is NOT APPLICABLE only with
+    neither the reserved surface nor the plugin root. With no plugin root the plugin copy is never required
+    (the plugin is opt-in).
+
+    Disclosed difference from gen_skill: this check accepts two shapes of the plugin copy that gen_skill
+    refuses (exit 2). A hard-linked copy passes here when its bytes match (gen_skill's reader requires exactly
+    one link), and a skills/ that is a symlink to a directory inside the root is followed here as
+    dir_chain_or_absent reads it (gen_skill opens every component with O_NOFOLLOW). The content is still
+    compared byte for byte, so neither shape hides drift."""
     reserved_dir = root.joinpath(*gen_skill.RESERVED_PARTS)
     # dir_chain_or_absent: the reserved subtree at every component under the root (site/ and site/downloads/,
     # which hold the standalone and zip outputs, too). gen_skill refuses a symlink at any of them, so one that
@@ -375,8 +383,8 @@ def _skill_drift(root, corpus):
         _aiqt_present, err = _reachable(plugin_skill.parent, root, dir_chain_or_absent)
         if err:
             return (MALFORMED, err)
-    if not present and not skills_present:
-        return (NA, "no site/downloads/aiqt/ chat-skill surface installed")
+    if not present and not plugin_present:
+        return (NA, "no site/downloads/aiqt/ chat-skill surface and no hooks plugin installed")
     try:
         reserved_map, standalone, binary = gen_skill.build_outputs(root)
     except (ValueError, OSError) as exc:
@@ -1146,7 +1154,9 @@ def _build_hooks(base, plugin_version="0.1.0"):
     """Add a hooks source tree (manifest + stub script) to an existing conformant install under base
     and generate its plugin surface via gen_hooks.build_desired, so C5 has both a source and a matching
     surface to compare. The manifest cites seci001, a real corpus-id in the conformant fixture; its [plugin]
-    version is plugin_version."""
+    version is plugin_version. The hooks plugin always ships the chat skill, so where the plugin root is present
+    C2 requires the plugin's copy of SKILL.md: the chat skill is installed too (_add_skill_surface, which writes
+    that copy), and the other surfaces are regenerated for the corpus rules it adds."""
     hooks_src = base / ".aiqt" / "core" / "hooks"
     (hooks_src / "scripts").mkdir(parents=True)
     (hooks_src / "scripts" / gen_hooks.SCRIPT_NAME).write_text(_HOOKS_SCRIPT, encoding="utf-8")
@@ -1157,6 +1167,8 @@ def _build_hooks(base, plugin_version="0.1.0"):
         target = base / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+    _add_skill_surface(base)
+    _write_surfaces(base)
 
 
 def self_test_main():
@@ -1346,7 +1358,9 @@ def self_test_main():
         #     here as a literal) is judged where the plugin is installed. A tree with the plugin and the skill,
         #     generated clean, passes (C2 and C5 PASS); one changed byte, CRLF line ends, a missing copy and an
         #     extra entry under skills/ are each C2 FAIL naming it (exit 1), and a symlink at the copy is MALFORMED
-        #     (exit 2). With site/ removed (a plugin-only install) the clean copy passes and a changed byte fails.
+        #     (exit 2). With site/ removed (a plugin-only install) the clean copy passes, and a changed byte and a
+        #     deletion of the plugin's whole skills/, of skills/aiqt/ or of the copy alone each fail naming the
+        #     missing copy (the plugin always ships the skill, so its root present means the copy is required).
         plugin_rel = "plugin/aiqt-guardrails-hooks/skills/aiqt/SKILL.md"
 
         def plugin_skill_tree(label):
@@ -1380,7 +1394,12 @@ def self_test_main():
                 ("extra entry", _orphan, False, 1, FAIL, "orphan plugin/aiqt-guardrails-hooks/skills/aiqt/LICENSE"),
                 ("symlink", _symlink, False, 2, MALFORMED, plugin_rel),
                 ("plugin-only clean", None, True, 0, PASS, "skill: PASS"),
-                ("plugin-only one changed byte", _flip, True, 1, FAIL, plugin_rel)):
+                ("plugin-only one changed byte", _flip, True, 1, FAIL, plugin_rel),
+                ("plugin-only skills deleted", lambda f: shutil.rmtree(f.parents[1]), True, 1, FAIL,
+                 "missing " + plugin_rel),
+                ("plugin-only skills-aiqt deleted", lambda f: shutil.rmtree(f.parent), True, 1, FAIL,
+                 "missing " + plugin_rel),
+                ("plugin-only copy deleted", lambda f: f.unlink(), True, 1, FAIL, "missing " + plugin_rel)):
             t, md = plugin_skill_tree(label.replace(" ", "-"))
             if plugin_only:
                 shutil.rmtree(t / "site")
@@ -1672,15 +1691,18 @@ def self_test_main():
         if code != 0 or status_of(out, "C5") != NA:
             failures.append("hooks-source-only tree expected exit 0 + C5 NOT APPLICABLE:\n{}".format(out))
 
-        # 16e. Surface present, hooks source deleted -> exit 1, C5 FAIL (orphaned enforcement surface).
+        # 16e. Surface present, hooks source deleted -> C5 FAIL (orphaned enforcement surface). The plugin root is
+        #      present, so C2 requires the plugin's chat skill, and its identity input (the hooks manifest) is gone:
+        #      C2 skill MALFORMED, exit 2.
         hnosource = tmp / "hooks-no-source"
         hnosource.mkdir()
         _build_conformant(hnosource)
         _build_hooks(hnosource)
         shutil.rmtree(hnosource / ".aiqt" / "core" / "hooks")
         code, out = run_capture(hnosource)
-        if code != 1 or status_of(out, "C5") != FAIL:
-            failures.append("hooks-surface-only tree expected exit 1 + C5 FAIL:\n{}".format(out))
+        if code != 2 or status_of(out, "C5") != FAIL or "skill: MALFORMED" not in out:
+            failures.append("hooks-surface-only tree expected exit 2, C5 FAIL and C2 skill MALFORMED:\n{}".format(
+                out))
 
         # 16f. An unreadable plugin hooks/ subtree must fail closed via C5 (exit 2), not conceal an
         #      orphan. Same root-vs-nonroot guard as cases 9-15.
@@ -2102,7 +2124,8 @@ def self_test_main():
           "adapters, and the chat-skill surface in both its SKILL.md text and its binary download zip), "
           "the hooks plugin's copy of the chat skill where the plugin is installed (a changed byte, CRLF, a "
           "missing copy or an extra skills/ entry fails and a symlinked copy is MALFORMED, a plugin-only "
-          "install included), gen_skill's write run leaving C5 NOT APPLICABLE without the plugin, "
+          "install included, where deleting the copy, skills/aiqt/ or the whole skills/ each fails), "
+          "gen_skill's write run leaving C5 NOT APPLICABLE without the plugin, "
           "empty-core orphans, fabricated mapping ids, a bare (fit-less) map key, and an id "
           "asserted both tight and broad fail; a composed AGENTS.md passes, a local edit or a CRLF "
           "conversion fails, a missing block source, a wrong-typed registry field, a symlinked registry or "
