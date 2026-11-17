@@ -5514,6 +5514,7 @@ expected-check-ids = [
   "revert/base-record-head-side-red",
   "revert/unknown-key-red",
   "repo/move-same-body-passes",
+  "repo/poisoned-caller-config-not-reaching-git",
   "repo/move-other-body-refused",
   "repo/unaccounted-removal-refused",
   "repo/accounted-removal-passes",

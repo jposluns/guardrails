@@ -717,15 +717,6 @@ CONFIG_EXCLUSIONS = {
             " and as the direct self-test launch CONFIG_DIRECT_SELFTESTS keeps, so each poisoned"
             " lane still enters that self-test's own entry point without any launcher sanitizing"
             " the environment first.",
-        ("tools/check_selftest_removal.py",):
-            "A bare launch is the real gate over this checkout, whose base derivation and tree reads"
-            " (tools/check_release_cut.py's git reads, imported) drop the GIT_* environment but"
-            " deliberately keep the caller's on-disk configuration (where safe.directory trust for"
-            " the checkout lives), so it reads the caller's home and XDG configuration by design;"
-            " its self-test stays in this roster twice: as the selftest-removal-selftest suite step,"
-            " whose launcher sanitizes the child environment, and as the direct self-test launch"
-            " CONFIG_DIRECT_SELFTESTS keeps, so each poisoned lane still enters that self-test's own"
-            " entry point without any launcher sanitizing the environment first.",
         ("tools/ci_site_scope.py",):
             "A bare launch is a usage error by design, not a self-test: the tool runs only with a"
             " mode flag, so with none it prints its usage and exits 2 (cannot evaluate) in every"

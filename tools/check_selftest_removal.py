@@ -118,6 +118,7 @@ import contextlib
 import datetime
 import io
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -693,6 +694,44 @@ def _run_quiet(root, *args):
         return run(root, *args)
 
 
+def _poisoned_run(tmp, repo):
+    """(code, observed) for the real gate run at repo with the caller's HOME, XDG_CONFIG_HOME and GIT_CONFIG_GLOBAL
+    poisoned: each names a distinct malformed configuration, and an observer placed first on PATH records, for every
+    git launch, which poisoned value that git process received, then runs the real git. observed is the record's lines:
+    one "ran" per launch, plus "home", "xdg" or "global" for each poisoned value that reached it. Called with
+    os.environ already the fixture environment; restores it before returning."""
+    poison = Path(tmp) / "poison"
+    home, xdg, global_config, observer = poison / "home", poison / "xdg", poison / "global", poison / "bin"
+    for directory in (home, xdg / "git", observer):
+        os.makedirs(directory)
+    for path in (home / ".gitconfig", xdg / "git" / "config", global_config):
+        path.write_text("[core\n\tbroken\n", encoding="utf-8")
+    real_git = shutil.which("git", path=os.environ.get("PATH", os.defpath))
+    if real_git is None:
+        raise OSError("poisoned run: git not found on PATH")
+    log = poison / "observed"
+    log.write_bytes(b"")
+    (observer / "git").write_text(
+        '#!/bin/sh\n'
+        'printf "ran\\n" >> {log}\n'
+        '[ "${{HOME:-}}" != {home} ] || printf "home\\n" >> {log}\n'
+        '[ "${{XDG_CONFIG_HOME:-}}" != {xdg} ] || printf "xdg\\n" >> {log}\n'
+        '[ "${{GIT_CONFIG_GLOBAL:-}}" != {global_config} ] || printf "global\\n" >> {log}\n'
+        'exec {git} "$@"\n'.format(log=shlex.quote(str(log)), home=shlex.quote(str(home)), xdg=shlex.quote(str(xdg)),
+                                   global_config=shlex.quote(str(global_config)), git=shlex.quote(real_git)),
+        encoding="utf-8")
+    (observer / "git").chmod(0o700)
+    saved = dict(os.environ)
+    os.environ.update({"HOME": str(home), "XDG_CONFIG_HOME": str(xdg), "GIT_CONFIG_GLOBAL": str(global_config),
+                       "PATH": str(observer) + os.pathsep + saved.get("PATH", os.defpath)})
+    try:
+        code = _run_quiet(repo)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    return code, log.read_text(encoding="utf-8").splitlines()
+
+
 def _repo_cases(tmp):
     """The end-to-end cases: a fixture repository whose origin/HEAD names its protected line, so the base is
     derived by check_release_cut.context() exactly as a local run derives it."""
@@ -711,6 +750,13 @@ def _repo_cases(tmp):
         # the runner bodies a move compares are read from the base and head commit trees
         _commit(repo, env, {REGISTRY: MOVED_C}, "move c")
         check("repo/move-same-body-passes", _run_quiet(repo) == EXIT_OK)
+        # DISCRIMINATING: the same gate run, its base derivation and tree reads included, with the caller's HOME,
+        # XDG_CONFIG_HOME and GIT_CONFIG_GLOBAL poisoned: it must still pass, the observer must have seen its git
+        # launches, and no poisoned value may reach any of them. A read that keeps the caller's home or XDG
+        # configuration, or inherits GIT_CONFIG_GLOBAL, fails this.
+        code, observed = _poisoned_run(tmp, repo)
+        check("repo/poisoned-caller-config-not-reaching-git",
+              code == EXIT_OK and "ran" in observed and set(observed) == {"ran"}, (code, sorted(set(observed))))
         _commit(repo, env, {"tools/x.py": OTHER_C("tools/x.py")}, "move c and change its body")
         check("repo/move-other-body-refused", _run_quiet(repo) == EXIT_REFUSE)
         _commit(repo, env, {REGISTRY: WITHOUT_C, "tools/x.py": X_RUNNER}, "drop c")

@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "41c3b9cdfb4ae95b99dc29edd0147c6046c24efaf02d59b4abe2fd48db3e2b8c"
+tree-sha256 = "1faf51b420cd184098939e9f2a7ac9f772ab1e477a3dfd546b5e91a3712895a9"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4402,8 +4402,8 @@ sha256 = "1062f2cdf038f39b3a88bb1a124c4e9d6bc58d89e5aa3b4b8855dadf04d8c447"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 305329
-sha256 = "8018c683be72410d249b6d4005d6aa2c27d4094d874788f5c683addc8dc3e507"
+bytes = 305867
+sha256 = "f74d6df8a26873f2c02fca97ed6bdd98407228165212878ec5ec8662c4303cd7"
 
 [[sources]]
 path = "tools/check_release_delta.py"
@@ -4437,8 +4437,8 @@ sha256 = "6d32c57b8ae951e3b5d8af009ce00836f8383a8857664845c1b59b86c4e67c3d"
 
 [[sources]]
 path = "tools/check_selftest_removal.py"
-bytes = 55021
-sha256 = "5612f80c4dcae095fab45ac7fa4873381868961c54656da4e72d22bd2629a605"
+bytes = 57855
+sha256 = "2fdc2c8b4bd98abc6dce17df86ad7a0de97cb3f64b8eb65f524a244794efa5fc"
 
 [[sources]]
 path = "tools/check_shell_function_standins.py"
@@ -4722,8 +4722,8 @@ sha256 = "0c74332579c50e13e8da9dda962e53524ff2390dcdc51ad2e838eb5b2365f100"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 254599
-sha256 = "095df316240ae3930db7eaad53fbaffa81bc0e63538ce9b8ea69941df32bd016"
+bytes = 254649
+sha256 = "08de6b26135ba424189f4e9f738192350a14d1c50aaf15c971c9eec537641311"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -4732,8 +4732,8 @@ sha256 = "5218fd5dd347aa7f25cebbbce29bff5d48d94b8ffdd219e678ddd8ccc75ffc0d"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 489892
-sha256 = "371ed2c4e1fac891e6a5a934125eba2fea02b5d5c367da4ba119941847887488"
+bytes = 489063
+sha256 = "4730e8efbbf73ba87d2edafb00080cf3a12439d3f356ec527d40877a049f792f"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"
