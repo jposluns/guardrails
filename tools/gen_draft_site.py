@@ -243,6 +243,7 @@ KEPT_LIVE_PATHS = (
     "/enforcement",
     "/evidence",
     "/tech-details",
+    "/tracker-labels",
 )
 
 # The opfiles.ai kept live paths: its machine-readable entry point and its adoption guide, each of which

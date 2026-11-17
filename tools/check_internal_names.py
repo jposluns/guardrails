@@ -93,7 +93,7 @@ positive this shape layer cannot avoid, absorbed by its path's baseline entry ra
 line; and archive contents are not unpacked.
 
 ADOPTER SHAPES AND --diff BASE. An adopter-owned closed configuration, TRACKER_CONFIG_RELPATH
-(.aiqt/tracker-labels.toml, shipped with no shape), adds shapes, each a name, a regex and required red
+(.aiqt/tracker-labels.toml, tracked here with no shape and not shipped), adds shapes, each a name, a regex and required red
 and green fixtures, counted in the same ratchet under "adopter-<name>" after the four built-in keys;
 it is validated before any scan and fails closed (exit 2) when malformed, over a bound, off-schema, or
 when a regex does not compile, a red fixture misses, a green fixture hits or a match is zero-width.
@@ -864,15 +864,21 @@ def write_baseline_main(root):
 
 # --- adopter tracker shapes (.aiqt/tracker-labels.toml) ------------------------------------------------
 # An adopter-owned, CLOSED configuration of extra tracker-label shapes, joining the per-file ratchet
-# above under the baseline key "adopter-<name>". This repository ships it with no shape. An ABSENT file
+# above under the baseline key "adopter-<name>". This repository tracks it with no shape and does not
+# ship it (an .aiqt/core/ownership.toml exclusion). An ABSENT file
 # means no extra shape; a PRESENT file that is not a regular file, over ADOPTER_CONFIG_MAX_BYTES, not
 # valid UTF-8, not valid TOML, or off the schema fails closed (exit 2), and so does a shape whose regex
 # does not compile, whose red fixture is not matched, whose green fixture is matched, or whose match is
 # zero-width. Adopter regexes are compiled, checked against their fixtures and matched ONLY inside one
 # terminable worker subprocess under a wall-clock budget (ADOPTER_MATCH_BUDGET_SECONDS for the whole
 # adopter-pattern phase of one run); a timeout, a worker failure or malformed worker output is exit 2,
-# never a slow shape dropped and the scan continued clean. The limits are proposed bounds, not a
-# measured performance claim.
+# never a slow shape dropped and the scan continued clean. The budget is sized from one measurement:
+# the worker alone, over this repository's shipped set (926 decodable files, 721140 lines, 48318983
+# bytes), with ADOPTER_MAX_SHAPES linear-time shapes of the form \bZQX00-[0-9]+\b, took 39.6 seconds
+# on one shared and loaded host (1 shape 2.6 s, 4 shapes 6.4 s, so about 1.2 s per shape); 300
+# seconds leaves about 7.5 times that figure. It is one host's figure, not a performance guarantee:
+# a slower host, a larger shipped set or a costlier regex can still exceed it and fail closed. The
+# other limits are proposed bounds, not measured.
 TRACKER_CONFIG_RELPATH = ".aiqt/tracker-labels.toml"
 ADOPTER_KEY_PREFIX = "adopter-"
 ADOPTER_CONFIG_MAX_BYTES = 64 * 1024
@@ -881,7 +887,7 @@ ADOPTER_MAX_NAME_CHARS = 48
 ADOPTER_MAX_REGEX_CHARS = 512
 ADOPTER_MAX_FIXTURES = 16
 ADOPTER_MAX_FIXTURE_CHARS = 4096
-ADOPTER_MATCH_BUDGET_SECONDS = 10
+ADOPTER_MATCH_BUDGET_SECONDS = 300
 _ADOPTER_NAME = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
 _ADOPTER_WORKER_FLAG = "--adopter-match-worker"
 
@@ -1075,12 +1081,15 @@ _OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
 def _git_read(root, args):
     """One git read under tracked_files' discipline (GIT_* environment dropped, core.fsmonitor=false,
-    protocol.allow=never, GIT_NO_LAZY_FETCH=1, a 120-second timeout); returns the CompletedProcess and
-    raises OSError when git cannot run or times out."""
+    protocol.allow=never, GIT_NO_LAZY_FETCH=1, a 120-second timeout) plus the three automatic-maintenance
+    pins in option position (gc.auto=0, gc.autoDetach=false, maintenance.auto=false), the spelling the
+    maintenance-pin scan resolves for a funnel whose subcommand is a parameter; returns the
+    CompletedProcess and raises OSError when git cannot run or times out."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_NO_LAZY_FETCH"] = "1"
     try:
         return subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+                               "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
                                *args], capture_output=True, timeout=120, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise OSError("git {} could not run ({})".format(args[0], exc))
@@ -1181,10 +1190,16 @@ def _read_head_tracker_inputs(root, head):
 def _added_line_ranges(root, old, new):
     """The HEAD-side line numbers added from blob `old` to blob `new` (1-based, LF-delimited), from a
     zero-context blob diff with a fixed algorithm, no whitespace ignoring, no external diff, no text
-    conversion and --text (so a binary attribute cannot hide a change). Each hunk is consumed by its
+    conversion and --text (so a binary attribute cannot hide a change). Each option that user or
+    repository configuration could otherwise change is given on the command line, which outranks
+    that configuration: --no-color (color.ui, color.diff), --no-ext-diff (diff.external and a diff
+    driver's command), --no-textconv (a textconv driver), explicit a/ and b/ prefixes
+    (diff.noprefix, diff.mnemonicPrefix) and --inter-hunk-context=0 (diff.interHunkContext, which
+    would otherwise merge nearby hunks with context lines between them). Each hunk is consumed by its
     header's own counts, so content that looks like a patch line is never parsed as one; a malformed
     hunk raises OSError."""
     out = _git_ok(root, ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "-U0",
+                         "--inter-hunk-context=0", "--src-prefix=a/", "--dst-prefix=b/",
                          "--diff-algorithm=myers", "--no-indent-heuristic", old, new])
     lines = out.split(b"\n")
     if lines and lines[-1] == b"":
@@ -1814,7 +1829,9 @@ def main():
             and argv[:-2] in ([], ["--self-test"]):
         report_path, argv = argv[-1], ["--self-test"]
     # UNKNOWN-OPTION REJECTION precedes the dispatch: this gate accepts only --self-test, --write-baseline
-    # alone, the --execution-report form above, or no args for a real scan, so any other token (a
+    # alone, --diff BASE, the --execution-report form above, no args for a real scan, and the internal
+    # --adopter-match-worker entry (alone; the worker _run_adopter_matcher launches, which reads JSON on
+    # stdin, and whose failures are never exit 0), so any other token (a
     # misspelled --self-testx, a stray flag) is a LOUD exit 2, never a silent fall-through to the default
     # scan path that would exit without running the self-test the caller asked for (which would let
     # --self-testx masquerade as --self-test in CI parity).
@@ -2074,6 +2091,25 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
         check("adopter/worker-failure-refused",
               fail_exit is not None and "exited 4" in fail_exit
               and fail_out is not None and "malformed output" in fail_out, (fail_exit, fail_out))
+        # The shape-count limit under the shipped budget: ADOPTER_MAX_SHAPES linear-time shapes over one
+        # eighth of the measured shipped-set volume (90000 lines of about 67 characters) finish, and in
+        # under an eighth of the budget, the headroom the budget comment states. Red when the budget is
+        # cut back below what the limit needs or the worker slows by that factor.
+        limit_shapes = [dict(sample, name="limit{}".format(i), regex=r"\bZQX{:02d}-[0-9]+\b".format(i),
+                             red=["ZQX{:02d}-1".format(i)], green=["ZQX"])
+                        for i in range(ADOPTER_MAX_SHAPES)]
+        volume = [["docs/v{}.md".format(f), [[n, "volume line {} of a realistic shipped page, nothing "
+                                              "to match here {}".format(n, f)] for n in range(1, 901)]]
+                  for f in range(100)]
+        started = time.monotonic()
+        try:
+            _run_adopter_matcher(parse_tracker_config(config_text(limit_shapes).encode("utf-8")), volume)
+            at_limit = None
+        except OSError as exc:
+            at_limit = str(exc)
+        elapsed = time.monotonic() - started
+        check("adopter/limit-shapes-within-budget",
+              at_limit is None and elapsed * 8 < ADOPTER_MATCH_BUDGET_SECONDS, (at_limit, elapsed))
 
         # The ratchet: adopter counts held at, above and below the baseline beside the built-in shapes,
         # two matches on one line both counted, an overlapping built-in match counted independently,
@@ -2129,6 +2165,21 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
         check("adopter/config-file-scanned-no-exemption",
               any(f.startswith(".aiqt/tracker-labels.toml: adopter-qa-token count") for f in own)
               and any(f.startswith(".aiqt/tracker-labels.toml: qa-" + "round count") for f in own), own)
+        # The supported adopter procedure: the baseline is pack content, so an adopter shape must match
+        # nothing in the shipped set; then the pack's own baseline render (built-in keys only) is
+        # byte-identical with or without the shape, and the gate passes against it unchanged.
+        manifest.write_text('format-version = 1\n\n[[sources]]\npath = "docs/a.md"\n', encoding="utf-8")
+        (lab / ".aiqt" / "tracker-labels.toml").write_text(config_text([sample]), encoding="utf-8")
+        (lab / "docs" / "a.md").write_text("clean {}\n".format(qa_vec), encoding="utf-8")
+        adopter_shapes = load_tracker_shapes(lab)
+        pack_render = render_tracker_baseline(_collect_tracker_counts(lab, [], (), (), []))
+        with_shape = render_tracker_baseline(_collect_tracker_counts(lab, [], (), (), adopter_shapes),
+                                             [k for k, _l in _tracker_registry(adopter_shapes)])
+        base_path.write_text(pack_render, encoding="utf-8")
+        unchanged = scan_shipped_tracker_labels(lab, [])
+        check("adopter/zero-hit-shape-keeps-pack-baseline",
+              adopter_shapes and pack_render == with_shape and "adopter-" not in with_shape
+              and qa_key + " = 1" in pack_render and unchanged == [], (pack_render, with_shape, unchanged))
     finally:
         shutil.rmtree(lab, ignore_errors=True)
 
@@ -2244,6 +2295,43 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
         check("diff/out-of-scope-not-reported", lacks("notes/out.md:1:"), detail)
         check("diff/adopter-shape-on-added-line",
               has("docs/page.md:5:") and "adopter-plan-section" in out, detail)
+        # HEAD, not the working tree, supplies the configuration, the manifest and the baseline: break
+        # all three on disk (a configuration whose green fixture is matched, a manifest that is not
+        # TOML, a baseline that is not canonical) and the diff check reports exactly as before.
+        write(".aiqt/tracker-labels.toml", config_text([dict(sample, green=["a plan section"])]))
+        write(".aiqt/manifest.toml", "not = [toml\n")
+        write(".aiqt/tracker-label-baseline.toml", "# not canonical\n")
+        disk = gate("--diff", "main")
+        git("checkout", "-q", "--", ".aiqt/tracker-labels.toml", ".aiqt/manifest.toml")
+        (repo / ".aiqt" / "tracker-label-baseline.toml").unlink()
+        disk_reported = {line.strip().split(" ")[0] for line in disk[1].splitlines() if line.startswith("  ")}
+        check("diff/head-inputs-not-working-tree",
+              built and disk[0] == rc == 1 and disk_reported == reported, (disk, rc))
+        # Ordinary user or repository git configuration cannot change which lines count as added. Each
+        # row sets one setting in the fixture repository and expects the same report; with
+        # diff.interHunkContext the two changes of docs/move.md (lines 1 and 3) would otherwise share
+        # one hunk with a context line, which the parser refuses.
+        info = repo / ".git" / "info"
+        for row_id, settings, attributes in (
+                ("diff/user-config-no-prefix", (("diff.noprefix", "true"),), None),
+                ("diff/user-config-colour", (("color.ui", "always"), ("color.diff", "always")), None),
+                ("diff/user-config-external-diff", (("diff.external", "false"),), None),
+                ("diff/user-config-textconv", (("diff.conv.textconv", "printf x"),), "* diff=conv\n"),
+                ("diff/user-config-inter-hunk-context", (("diff.interHunkContext", "2"),), None)):
+            for key, value in settings:
+                git("config", key, value)
+            if attributes is not None:
+                info.mkdir(exist_ok=True)
+                (info / "attributes").write_text(attributes, encoding="utf-8")
+            configured = gate("--diff", "main")
+            for key, _value in settings:
+                git("config", "--unset", key)
+            if attributes is not None:
+                (info / "attributes").unlink()
+            configured_reported = {line.strip().split(" ")[0] for line in configured[1].splitlines()
+                                   if line.startswith("  ")}
+            check(row_id, built and configured[0] == rc == 1 and configured_reported == reported,
+                  (settings, configured, rc))
         refused = {}
         for name, args in (("missing-operand", ("--diff",)), ("option-operand", ("--diff", "--self-test")),
                            ("combined", ("--diff", "main", "--write-baseline")),
