@@ -3,7 +3,8 @@
 
   check_hook_coverage.py --launch-dir ABS_DIR --require ABS_FILE
                                          exit 0 every required entry present, 1 a required entry missing
-                                         (each one named), 2 cannot evaluate (fail closed)
+                                         (each one named) or disableAllHooks true in a settings file (each
+                                         one named), 2 cannot evaluate (fail closed)
   check_hook_coverage.py --self-test     assert every row over tempdir fixtures, each mutation row red
                                          with its check reverted
   check_hook_coverage.py [--self-test] --execution-report ABS_PATH
@@ -15,33 +16,48 @@ gate therefore runs OUTSIDE the session: the orchestrator runs it before it star
 given on the command line and must be absolute; nothing is discovered from the working directory, because
 the failure being caught is a wrong working directory.
 
-The declaration (--require) is a JSON object holding exactly one key, "required_hooks", a non-empty list of
-entries, each an object holding exactly the keys scope, event, matcher and command, each a string; scope
-must be "project", event and command must be non-empty. The gate reads ONLY <launch>/.claude/settings.json
-and <launch>/.claude/settings.local.json. An entry is present when either file has, under hooks.<event>, a
-group whose matcher equals the declared matcher (a group with no matcher reads as the empty matcher) and
-that group holds a hook of type "command" whose command equals the declared command, all compared as exact
-strings. An absent .claude directory or an absent settings file contributes no entries.
+The declaration (--require) is a JSON object, a registry file such as the orchestration registry included,
+whose "required_hooks" key holds a non-empty list of entries; the gate reads only that key and ignores every
+other top-level key, and a file without it exits 2. Each entry is an object holding exactly the keys scope,
+event, matcher and command, each a string; scope must be "project", event and command must be non-empty.
+The whole file is still read under the rules below, so a duplicated key or a NaN constant anywhere in it
+exits 2. The gate reads ONLY <launch>/.claude/settings.json and <launch>/.claude/settings.local.json. An
+entry is present when either file has, under hooks.<event>, a group whose matcher equals the declared
+matcher (a group with no matcher reads as the empty matcher) and that group holds a hook of type "command"
+whose command equals the declared command, all compared as exact strings. An absent .claude directory or an
+absent settings file contributes no entries; a settings file holding JSON null, or any other value that is
+not an object, is malformed (exit 2), never read as absent.
 
-Exit 0: every required entry is present. Exit 1: at least one is missing, and each missing entry is named
-on its own MISSING line. Exit 2 (fail closed, never a pass): a relative launch directory or declaration
-path; a launch directory that is not a directory; a .claude that is a symbolic link or not a directory; a
-settings file or declaration that is a symbolic link, not a regular file (a FIFO is opened non-blocking and
-refused without a read), unreadable, larger than MAX_BYTES, not UTF-8 (decoded strictly), not JSON (a
-duplicated object key or a NaN or Infinity constant included) or not a JSON object; a hooks value, event
-list, group, group matcher, group hook list, hook, hook type or command hook's command of the wrong JSON
-type; and a declaration that is empty, carries an unknown or missing key, a value of the wrong type, an
-empty event or command, or a scope other than "project".
+Exit 0: every required entry is present and neither settings file sets disableAllHooks to true. Exit 1: at
+least one is missing, each missing entry named on its own MISSING line, or a settings file sets
+disableAllHooks to true, each such file named on its own DISABLED line. Exit 2 (fail closed, never a pass):
+a relative launch directory or declaration path; a launch directory or declaration reached through a
+symbolic link anywhere on its path (each directory on the path is opened from the root one component at a
+time without following a link, and the final file with O_NOFOLLOW, so pass paths with every link resolved;
+a directory on the path that cannot be searched, or where the platform has no O_PATH cannot be read, also
+exits 2); a launch directory that is absent or not a directory; a .claude that is a symbolic link or not a
+directory; a settings file or declaration that is a symbolic link, not a regular file (a FIFO is opened
+non-blocking and refused without a read), unreadable, larger than MAX_BYTES, not UTF-8 (decoded strictly),
+not JSON (a duplicated object key or a NaN, Infinity or -Infinity constant included; a number literal too
+large for a float, such as 1e999, is not refused and reads as infinity) or not a JSON object; a hooks
+value, event list, group, group matcher, group hook list, hook, hook type, command hook's command or
+disableAllHooks of the wrong JSON type; and a declaration with no required_hooks key, a required_hooks that
+is not a list or is empty, an entry with an unknown or missing key, a value of the wrong type, an empty
+event or command, or a scope other than "project".
 
 RESIDUALS (what this gate does not establish):
 - It predicts loading from files on disk; it never observes what the client actually loaded. Outside its
   view (inferred, not documented in this repository): command-line settings flags, managed policy, user
   scope settings, plugin enablement, workspace trust, client-version differences in how settings scopes
-  are resolved or merged, settings keys other than hooks that change whether hooks run, and edits made
-  between this check and the launch (a write can still change the settings after the gate passes).
+  are resolved or merged, settings keys other than hooks and disableAllHooks that change whether hooks
+  run, and edits made between this check and the launch (a write can still change the settings after the
+  gate passes).
 - It reads the two project settings files as a union (an entry in either counts); that the client merges
-  the two files' hooks that way is inferred, not documented here.
-- It protects only launches that call it: a session started by hand is still unnoticed.
+  the two files' hooks that way is inferred, not documented here. That disableAllHooks set to true switches
+  hooks off is also inferred, not documented here; the gate fails on it (exit 1, the safe direction).
+- It protects only launches that call it: a session started by hand is still unnoticed, and no launcher
+  this repository ships calls it yet, so it protects no launch until an orchestrator's own launch path runs
+  it.
 - Exact string matching fails a launch whose hook command or matcher is equivalent but spelt differently;
   that errs on the safe side (exit 1, never a false pass).
 - A declared scope other than "project" exits 2, because user and managed settings sources are outside
@@ -70,13 +86,24 @@ from pathlib import Path
 MAX_BYTES = 1048576
 SETTINGS_DIR = ".claude"
 SETTINGS_NAMES = ("settings.json", "settings.local.json")
-DECL_TOP_KEYS = frozenset({"required_hooks"})
+DECL_KEY = "required_hooks"
 DECL_ENTRY_KEYS = frozenset({"scope", "event", "matcher", "command"})
 SUPPORTED_SCOPES = frozenset({"project"})
+DISABLE_KEY = "disableAllHooks"
 # The flags every settings and declaration open carries: never follow a final symbolic link, never block on
 # a FIFO, never leak the descriptor. The self-test reverts _NOFOLLOW to show the symlink row turns red.
 _NOFOLLOW = os.O_NOFOLLOW
 _OPEN_FLAGS_BASE = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
+# The flags every directory open carries; the self-test reverts it (O_DIRECTORY dropped) to show the
+# not-a-directory rows turn red.
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | os.O_CLOEXEC
+# The path walk opens each directory with O_PATH where the platform has it (Linux), so a directory the
+# reader may search but not list (mode 0711, say) can still be walked; elsewhere it falls back to a read
+# open, which refuses (exit 2) such a directory.
+_O_PATH = getattr(os, "O_PATH", 0)
+# What _load_json_file returns for an absent file, distinct from every parsed JSON value (JSON null
+# included); the self-test reverts it to None to show the null-settings rows turn red.
+_ABSENT = object()
 
 
 class CannotEvaluate(Exception):
@@ -126,6 +153,45 @@ def _check_decl_scope(scope, where):
     if scope not in SUPPORTED_SCOPES:
         raise CannotEvaluate("{}: scope {!r} is not supported (only project settings are documented)"
                              .format(where, scope))
+
+
+def _check_decl_has_key(doc, where):
+    if DECL_KEY not in doc:
+        raise CannotEvaluate("{}: no {} key".format(where, DECL_KEY))
+
+
+def _check_decl_list(entries, where):
+    _expect(entries, list, where + ": " + DECL_KEY)
+
+
+def _check_decl_value_types(entry, where):
+    for key in sorted(DECL_ENTRY_KEYS):
+        if key in entry:
+            _expect(entry[key], str, "{}.{}".format(where, key))
+
+
+def _check_decl_nonempty_fields(entry, where):
+    if not entry.get("event") or not entry.get("command"):
+        raise CannotEvaluate("{}: event and command must be non-empty".format(where))
+
+
+def _check_hook_type(value, where):
+    _expect(value, str, where)
+
+
+def _check_regular(mode, where):
+    if not stat.S_ISREG(mode):
+        raise CannotEvaluate("{}: not a regular file".format(where))
+
+
+def _hooks_disabled(doc, where):
+    """True when the settings object sets disableAllHooks to true; CannotEvaluate when it is not a boolean."""
+    if DISABLE_KEY not in doc:
+        return False
+    value = doc[DISABLE_KEY]
+    if not isinstance(value, bool):
+        raise CannotEvaluate("{}: {}: expected bool, found {}".format(where, DISABLE_KEY, type(value).__name__))
+    return value
 
 
 def _same_event(declared, found):
@@ -178,9 +244,7 @@ def _open_file(name, dir_fd, where):
 def _read_fd(fd, where):
     """The bytes of an open descriptor, at most MAX_BYTES + 1 of them; a non-regular file is refused unread."""
     try:
-        mode = os.fstat(fd).st_mode
-        if not stat.S_ISREG(mode):
-            raise CannotEvaluate("{}: not a regular file".format(where))
+        _check_regular(os.fstat(fd).st_mode, where)
         chunks, total = [], 0
         while total <= MAX_BYTES:
             chunk = os.read(fd, MAX_BYTES + 1 - total)
@@ -196,37 +260,65 @@ def _read_fd(fd, where):
 
 
 def _load_json_file(name, dir_fd, where, absent_ok):
+    """The parsed JSON value of name, or _ABSENT when the file is absent and absent_ok is set."""
     fd = _open_file(name, dir_fd, where)
     if fd is None:
         if absent_ok:
-            return None
+            return _ABSENT
         raise CannotEvaluate("{}: absent".format(where))
     data = _read_fd(fd, where)
     _check_size(data, where)
     return _parse_json(_decode(data, where), where)
 
 
+def _open_dir_nofollow(path, what):
+    """A descriptor for the directory path, opened one component at a time (from the root for an absolute
+    path) with no symbolic link followed anywhere on it; CannotEvaluate when a component is absent, a
+    symbolic link or not a directory."""
+    fd = None
+    try:
+        fd = os.open("/" if path.startswith("/") else ".", _DIR_FLAGS | _O_PATH)
+        for part in path.split("/"):
+            if part in ("", "."):
+                continue
+            parent, fd = fd, None
+            try:
+                fd = os.open(part, _DIR_FLAGS | _O_PATH | _NOFOLLOW, dir_fd=parent)
+            finally:
+                os.close(parent)
+        return fd
+    except (OSError, ValueError) as exc:
+        if fd is not None:
+            os.close(fd)
+        raise CannotEvaluate("{} {!r} is not a directory that can be opened without following a symbolic "
+                             "link anywhere on its path ({})".format(what, path, exc)) from None
+
+
 def load_declaration(path):
     """The declared entries as (event, matcher, command) tuples; CannotEvaluate on anything malformed."""
     where = "declaration {}".format(path)
     _check_absolute(path, "declaration")
-    doc = _load_json_file(path, None, where, absent_ok=False)
+    head, _sep, name = path.rpartition("/")
+    if name in ("", ".", ".."):
+        raise CannotEvaluate("{}: does not name a file".format(where))
+    dfd = _open_dir_nofollow(head or "/", "declaration directory")
+    try:
+        doc = _load_json_file(name, dfd, where, absent_ok=False)
+    finally:
+        os.close(dfd)
     _expect(doc, dict, where)
-    _check_decl_keys(doc.keys(), DECL_TOP_KEYS, where)
-    entries = doc.get("required_hooks", [])
-    _expect(entries, list, where + ": required_hooks")
+    _check_decl_has_key(doc, where)
+    entries = doc[DECL_KEY]
+    _check_decl_list(entries, where)
     _check_decl_nonempty(entries, where)
     required = []
     for index, entry in enumerate(entries):
-        at = "{}: required_hooks[{}]".format(where, index)
+        at = "{}: {}[{}]".format(where, DECL_KEY, index)
         _expect(entry, dict, at)
         _check_decl_keys(entry.keys(), DECL_ENTRY_KEYS, at)
-        for key in sorted(DECL_ENTRY_KEYS):
-            if key in entry:
-                _expect(entry[key], str, "{}.{}".format(at, key))
+        _check_decl_value_types(entry, at)
         _check_decl_scope(entry.get("scope"), at)
-        if not entry.get("event") or not entry.get("command"):
-            raise CannotEvaluate("{}: event and command must be non-empty".format(at))
+        _check_decl_nonempty_fields(entry, at)
         required.append((entry.get("event"), entry.get("matcher", ""), entry.get("command")))
     return required
 
@@ -259,8 +351,7 @@ def _settings_entries(doc, where):
                 hat = "{}.hooks[{}]".format(gat, hindex)
                 if not _expect(hook, dict, hat):
                     continue
-                if not _expect(hook.get("type"), str, hat + ".type"):
-                    continue
+                _check_hook_type(hook.get("type"), hat + ".type")
                 if hook.get("type") != "command":
                     continue
                 if not _expect(hook.get("command"), str, hat + ".command"):
@@ -270,32 +361,31 @@ def _settings_entries(doc, where):
 
 
 def load_settings(launch_dir):
-    """Every entry the launch directory's two project settings files register, as one list."""
+    """(every entry the launch directory's two project settings files register, as one list; the path of
+    each of those files that sets disableAllHooks to true)."""
     _check_absolute(launch_dir, "launch directory")
-    try:
-        lfd = os.open(launch_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | os.O_CLOEXEC)
-    except (OSError, ValueError) as exc:
-        raise CannotEvaluate("launch directory {!r} is not an openable directory ({})"
-                             .format(launch_dir, exc)) from None
+    lfd = _open_dir_nofollow(launch_dir, "launch directory")
     try:
         try:
-            cfd = os.open(SETTINGS_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | os.O_CLOEXEC | _NOFOLLOW,
-                          dir_fd=lfd)
+            cfd = os.open(SETTINGS_DIR, _DIR_FLAGS | _NOFOLLOW, dir_fd=lfd)
         except FileNotFoundError:
-            return []
+            return [], []
         except OSError as exc:
             raise CannotEvaluate("{}/{}: not a directory that can be opened without following a link ({})"
                                  .format(launch_dir, SETTINGS_DIR, exc)) from None
     finally:
         os.close(lfd)
     try:
-        found = []
+        found, disabled = [], []
         for name in SETTINGS_NAMES:
             where = "{}/{}/{}".format(launch_dir.rstrip("/") or "/", SETTINGS_DIR, name)
             doc = _load_json_file(name, cfd, where, absent_ok=True)
-            if doc is not None:
-                found.extend(_settings_entries(doc, where))
-        return found
+            if doc is _ABSENT:
+                continue
+            found.extend(_settings_entries(doc, where))
+            if _hooks_disabled(doc, where):
+                disabled.append(where)
+        return found, disabled
     finally:
         os.close(cfd)
 
@@ -314,14 +404,20 @@ def evaluate(launch_dir, require):
     """(exit code, stdout lines, stderr lines) for one launch directory and one declaration."""
     try:
         required = load_declaration(require)
-        found = load_settings(launch_dir)
+        found, disabled = load_settings(launch_dir)
     except CannotEvaluate as exc:
         return 2, [], ["CANNOT EVALUATE: " + str(exc)]
     missing = missing_entries(required, found)
-    if missing:
-        out = ["MISSING: event={!r} matcher={!r} command={!r}".format(*entry) for entry in missing]
-        out.append("FAIL: {} of {} required hook entr{} missing from the project settings at {}"
-                   .format(len(missing), len(required), "y" if len(required) == 1 else "ies", launch_dir))
+    if missing or disabled:
+        out = ["DISABLED: {} sets {} to true".format(where, DISABLE_KEY) for where in disabled]
+        out.extend("MISSING: event={!r} matcher={!r} command={!r}".format(*entry) for entry in missing)
+        if disabled:
+            out.append("FAIL: {} project settings file{} at {} set{} {} to true".format(
+                len(disabled), "" if len(disabled) == 1 else "s", launch_dir,
+                "s" if len(disabled) == 1 else "", DISABLE_KEY))
+        if missing:
+            out.append("FAIL: {} of {} required hook entr{} missing from the project settings at {}"
+                       .format(len(missing), len(required), "y" if len(required) == 1 else "ies", launch_dir))
         return 1, out, []
     return 0, ["PASS: all {} required hook entr{} present in the project settings at {}".format(
         len(required), "y" if len(required) == 1 else "ies", launch_dir)], []
@@ -381,10 +477,11 @@ class _Case:
 
     def __init__(self, decl=None):
         self.tmp = tempfile.TemporaryDirectory(prefix="hook-coverage-selftest-")
-        base = Path(self.tmp.name)
-        self.launch = base / "launch"
+        # Every link above the temporary directory resolved, since the gate refuses a path through one.
+        self.base = Path(os.path.realpath(self.tmp.name))
+        self.launch = self.base / "launch"
         self.launch.mkdir()
-        self.require = base / "require.json"
+        self.require = self.base / "require.json"
         _write(self.require, _decl([GUARD_A, GUARD_B]) if decl is None else decl)
 
     def settings(self, body, name="settings.json"):
@@ -404,6 +501,23 @@ def _code(case, **kwargs):
         return case.run(**kwargs)[0]
     finally:
         case.close()
+
+
+def _result(case, **kwargs):
+    """(exit code, stdout lines, stderr lines) for case, closed afterwards."""
+    try:
+        return case.run(**kwargs)
+    finally:
+        case.close()
+
+
+def _guarded(thunk):
+    """thunk()'s result, or a description of the exception it raised (a reverted check may crash, and a
+    crash is never the expected exit)."""
+    try:
+        return thunk()
+    except Exception as exc:
+        return "raised " + type(exc).__name__
 
 
 def _reverted(name, replacement, thunk):
@@ -515,9 +629,9 @@ def _self_test():
 
     def _symlinked():
         case = _Case()
-        _write(Path(case.tmp.name) / "real.json", good)
+        _write(case.base / "real.json", good)
         (case.launch / SETTINGS_DIR).mkdir()
-        os.symlink(Path(case.tmp.name) / "real.json", case.launch / SETTINGS_DIR / "settings.json")
+        os.symlink(case.base / "real.json", case.launch / SETTINGS_DIR / "settings.json")
         return _code(case)
     got, mutant = _run(_symlinked, revert=("_NOFOLLOW", 0))
     check("refuse/symlinked-file", got == 2, got)
@@ -525,8 +639,8 @@ def _self_test():
 
     def _symlinked_dir():
         case = _Case()
-        _write(Path(case.tmp.name) / "elsewhere" / "settings.json", good)
-        os.symlink(Path(case.tmp.name) / "elsewhere", case.launch / SETTINGS_DIR)
+        _write(case.base / "elsewhere" / "settings.json", good)
+        os.symlink(case.base / "elsewhere", case.launch / SETTINGS_DIR)
         return _code(case)
     got, mutant = _run(_symlinked_dir, revert=("_NOFOLLOW", 0))
     check("refuse/symlinked-claude-dir", got == 2, got)
@@ -547,12 +661,37 @@ def _self_test():
     got, _m = _run(_directory_in_place)
     check("refuse/directory-in-place", got == 2, got)
 
+    # Opened without O_DIRECTORY, a .claude that is a plain file would be refused one step later, at the
+    # settings file, so the row asserts the refusal names .claude itself.
     def _claude_file():
         case = _Case()
         _write(case.launch / SETTINGS_DIR, "{}")
-        return _code(case)
-    got, _m = _run(_claude_file)
-    check("refuse/claude-not-directory", got == 2, got)
+        code, _out, err = _result(case)
+        return code, bool(err) and "/{}: not a directory".format(SETTINGS_DIR) in err[0]
+    got, mutant = _run(_claude_file, revert=("_DIR_FLAGS", _DIR_FLAGS & ~os.O_DIRECTORY))
+    check("refuse/claude-not-directory", got == (2, True), got)
+    check("refuse/claude-not-directory/red-when-reverted", mutant != (2, True), mutant)
+
+    # A FIFO holding valid settings and no writer: without the regular-file check its bytes would be read and
+    # pass, so it is the row that shows that check.
+    def _fifo_with_data():
+        case = _Case()
+        fifo = case.launch / SETTINGS_DIR / "settings.json"
+        fifo.parent.mkdir()
+        os.mkfifo(fifo)
+        holder = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            writer = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+            try:
+                os.write(writer, json.dumps(good).encode("utf-8"))
+            finally:
+                os.close(writer)
+            return _code(case)
+        finally:
+            os.close(holder)
+    got, mutant = _run(_fifo_with_data, revert=("_check_regular", lambda mode, where: None))
+    check("refuse/fifo-with-data", got == 2, got)
+    check("refuse/fifo-with-data/red-when-reverted", mutant != 2, mutant)
 
     padded = json.dumps(good) + " " * MAX_BYTES
     got, mutant = _run(lambda: _code(_Case().settings(padded)), revert=("MAX_BYTES", 4 * MAX_BYTES))
@@ -598,6 +737,57 @@ def _self_test():
                        revert=("_expect", _lenient_expect))
     check("refuse/wrong-type-not-a-miss", got == 2, got)
     check("refuse/wrong-type-not-a-miss/red-when-reverted", mutant != 2, mutant)
+    # A hook whose type is not a string, beside every required entry: without the type check it is skipped
+    # as a non-command hook and the run passes.
+    got, mutant = _run(lambda: _code(_Case().settings({"hooks": {"PreToolUse": good["hooks"]["PreToolUse"] + [
+        {"matcher": "Bash", "hooks": [{"type": 7, "command": "x"}]}]}})),
+        revert=("_check_hook_type", lambda value, where: None))
+    check("refuse/hook-type-not-string", got == 2, got)
+    check("refuse/hook-type-not-string/red-when-reverted", mutant != 2, mutant)
+    # A NaN constant beside every required entry: without parse_constant it parses and the run passes.
+    got, mutant = _run(lambda: _code(_Case().settings(json.dumps(good)[:-1] + ', "x": NaN}')),
+                       revert=("_json_constant", float))
+    check("refuse/nan-constant", got == 2, got)
+    check("refuse/nan-constant/red-when-reverted", mutant != 2, mutant)
+
+    # Row 10a. A settings file holding JSON null (or any other non-object) is malformed, never absent: alone
+    # (not a plain miss) and beside a file with every required entry (not a pass).
+    got, mutant = _run(lambda: _code(_Case().settings("null")), revert=("_ABSENT", None))
+    check("refuse/settings-null", got == 2, got)
+    check("refuse/settings-null/red-when-reverted", mutant != 2, mutant)
+    got, mutant = _run(lambda: _code(_Case().settings(good).settings("null", name="settings.local.json")),
+                       revert=("_ABSENT", None))
+    check("refuse/settings-local-null-beside-good", got == 2, got)
+    check("refuse/settings-local-null-beside-good/red-when-reverted", mutant != 2, mutant)
+    got, _m = _run(lambda: _code(_Case().settings("7", name="settings.local.json")))
+    check("refuse/settings-local-not-object", got == 2, got)
+
+    # Row 10b. disableAllHooks true in either file is a named failure (exit 1) even with every entry present;
+    # false passes, and a value that is not a boolean cannot be evaluated.
+    def _disabled(name):
+        case = _Case().settings(good)
+        if name == "settings.json":
+            return case.settings(dict(good, disableAllHooks=True))
+        return case.settings({"disableAllHooks": True}, name=name)
+
+    def _disabled_result(name):
+        code, out, _err = _result(_disabled(name))
+        ending = "/{} sets {} to true".format(name, DISABLE_KEY)
+        named = any(line.startswith("DISABLED: ") and line.endswith(ending) for line in out)
+        return code, named and out[-1].startswith("FAIL: 1 project settings file ")
+    for name, row, red_row in (
+            ("settings.json", "fail/disable-all-hooks/settings.json",
+             "fail/disable-all-hooks/settings.json/red-when-reverted"),
+            ("settings.local.json", "fail/disable-all-hooks/settings.local.json",
+             "fail/disable-all-hooks/settings.local.json/red-when-reverted")):
+        got, mutant = _run(lambda name=name: _disabled_result(name),
+                           revert=("_hooks_disabled", lambda doc, where: False))
+        check(row, got == (1, True), got)
+        check(red_row, mutant != (1, True), mutant)
+    got, _m = _run(lambda: _code(_Case().settings(dict(good, disableAllHooks=False))))
+    check("pass/disable-all-hooks-false", got == 0, got)
+    got, _m = _run(lambda: _code(_Case().settings(dict(good, disableAllHooks="true"))))
+    check("refuse/disable-all-hooks-not-bool", got == 2, got)
 
     # Row 11. Relative launch directory, or one that is not a directory.
     def _relative():
@@ -607,12 +797,44 @@ def _self_test():
     check("refuse/relative-launch-dir", got == 2, got)
     check("refuse/relative-launch-dir/red-when-reverted", mutant != 2, mutant)
 
+    # The launch directory and .claude are opened with O_DIRECTORY: without it a plain file is opened and
+    # refused one step later under another message, so these rows assert which path the refusal names.
     def _not_dir():
         case = _Case()
-        _write(Path(case.tmp.name) / "plain-file", "x")
-        return _code(case, launch=str(Path(case.tmp.name) / "plain-file"))
-    got, _m = _run(_not_dir)
-    check("refuse/launch-not-directory", got == 2, got)
+        _write(case.base / "plain-file", "x")
+        code, _out, err = _result(case, launch=str(case.base / "plain-file"))
+        return code, bool(err) and err[0].startswith("CANNOT EVALUATE: launch directory ")
+    got, mutant = _run(_not_dir, revert=("_DIR_FLAGS", _DIR_FLAGS & ~os.O_DIRECTORY))
+    check("refuse/launch-not-directory", got == (2, True), got)
+    check("refuse/launch-not-directory/red-when-reverted", mutant != (2, True), mutant)
+
+    # A launch directory or declaration reached through a symbolic link anywhere on its path: the link as
+    # the launch directory itself, as a directory above it, and as a directory above the declaration.
+    def _lenient_open_dir(path, what):
+        return os.open(path, _DIR_FLAGS)
+
+    def _launch_link(depth):
+        def make():
+            case = _Case().settings(good)
+            real = case.launch if depth == 0 else case.base
+            link = case.base / ("launch-link" if depth == 0 else "base-link")
+            os.symlink(real, link)
+            return _code(case, launch=str(link) if depth == 0 else str(link / "launch"))
+        return make
+    got, mutant = _run(_launch_link(0), revert=("_open_dir_nofollow", _lenient_open_dir))
+    check("refuse/launch-dir-symlinked", got == 2, got)
+    check("refuse/launch-dir-symlinked/red-when-reverted", mutant != 2, mutant)
+    got, mutant = _run(_launch_link(1), revert=("_open_dir_nofollow", _lenient_open_dir))
+    check("refuse/launch-dir-symlinked-ancestor", got == 2, got)
+    check("refuse/launch-dir-symlinked-ancestor/red-when-reverted", mutant != 2, mutant)
+
+    def _decl_link_ancestor():
+        case = _Case().settings(good)
+        os.symlink(case.base, case.base / "base-link")
+        return _code(case, require=str(case.base / "base-link" / case.require.name))
+    got, mutant = _run(_decl_link_ancestor, revert=("_open_dir_nofollow", _lenient_open_dir))
+    check("refuse/decl-symlinked-ancestor", got == 2, got)
+    check("refuse/decl-symlinked-ancestor/red-when-reverted", mutant != 2, mutant)
     got, _m = _run(lambda: _code(_Case(), launch="/nonexistent-hook-coverage-launch-dir"))
     check("refuse/launch-absent", got == 2, got)
 
@@ -625,11 +847,41 @@ def _self_test():
     check("refuse/decl-empty-object", got == 2, got)
     got, _m = _run(lambda: _code(_Case(decl="").settings(good)))
     check("refuse/decl-empty-file", got == 2, got)
-    unknown_top = dict(_decl([GUARD_A]), optional_hooks=[])
-    got, mutant = _run(lambda: _code(_Case(decl=unknown_top).settings(good)),
-                       revert=("_check_decl_keys", lambda keys, allowed, where: None))
-    check("refuse/decl-unknown-top-key", got == 2, got)
-    check("refuse/decl-unknown-top-key/red-when-reverted", mutant != 2, mutant)
+    # A registry file: other top-level keys are ignored and only required_hooks is read; without
+    # required_hooks it cannot be evaluated (with that check reverted, the missing key crashes the gate).
+    registry = dict(_decl([GUARD_A]), version=1, record={"store": "notes"}, optional_hooks=[7])
+    got, _m = _run(lambda: _code(_Case(decl=registry).settings(good)))
+    check("pass/decl-registry-other-top-keys", got == 0, got)
+    got, _m = _run(lambda: _code(_Case(decl=dict(registry, required_hooks=[
+        {"scope": "project", "event": "PreToolUse", "matcher": "Bash", "command": "absent"}])).settings(good)))
+    check("missing/decl-registry-other-top-keys", got == 1, got)
+    no_key = {"version": 1, "record": {"store": "notes"}}
+    got, mutant = _run(lambda: _guarded(lambda: _code(_Case(decl=no_key).settings(good))),
+                       revert=("_check_decl_has_key", lambda doc, where: None))
+    check("refuse/decl-no-required-hooks-key", got == 2, got)
+    check("refuse/decl-no-required-hooks-key/red-when-reverted", mutant != 2, mutant)
+    # required_hooks not a list: with the list check reverted a number crashes the gate rather than exit 2.
+    got, mutant = _run(lambda: _guarded(lambda: _code(_Case(decl={"required_hooks": 5}).settings(good))),
+                       revert=("_check_decl_list", lambda entries, where: None))
+    check("refuse/decl-required-hooks-not-list", got == 2, got)
+    check("refuse/decl-required-hooks-not-list/red-when-reverted", mutant != 2, mutant)
+    # Entry values of the wrong type, and an empty event or command: with each check reverted the entry is
+    # judged as a plain miss (exit 1), not refused.
+    for name, red_name, key, value, check_name in (
+            ("refuse/decl-matcher-not-string", "refuse/decl-matcher-not-string/red-when-reverted",
+             "matcher", ["Bash"], "_check_decl_value_types"),
+            ("refuse/decl-command-not-string", "refuse/decl-command-not-string/red-when-reverted",
+             "command", 7, "_check_decl_value_types"),
+            ("refuse/decl-empty-event", "refuse/decl-empty-event/red-when-reverted",
+             "event", "", "_check_decl_nonempty_fields"),
+            ("refuse/decl-empty-command", "refuse/decl-empty-command/red-when-reverted",
+             "command", "", "_check_decl_nonempty_fields")):
+        bad = _decl([GUARD_A])
+        bad["required_hooks"][0][key] = value
+        got, mutant = _run(lambda bad=bad: _guarded(lambda: _code(_Case(decl=bad).settings(good))),
+                           revert=(check_name, lambda entry, where: None))
+        check(name, got == 2, got)
+        check(red_name, mutant != 2, mutant)
     unknown_entry = _decl([GUARD_A])
     unknown_entry["required_hooks"][0]["timeout"] = 10
     got, mutant = _run(lambda: _code(_Case(decl=unknown_entry).settings(good)),
@@ -654,7 +906,7 @@ def _self_test():
     # Row 13. Unreadable declaration (its open refused with EACCES, as a mode-000 file would be for a
     # non-root reader).
     case = _Case().settings(good)
-    real_open, denied = _denied_open(str(case.require))
+    real_open, denied = _denied_open(case.require.name)
     os.open = denied
     try:
         got = _code(case)
@@ -684,17 +936,19 @@ def _self_test():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: check_hook_coverage {} checks (every required entry present passes, in either "
-          "settings file or twice; an absent file, an absent event, a different matcher, command or event "
-          "is a named miss; malformed, duplicate-key, non-UTF-8, symlinked, FIFO, non-regular, oversized, "
-          "unreadable and wrong-typed settings, a relative or non-directory launch directory and an empty, "
-          "unknown-key, non-project-scope, relative, symlinked, unreadable or absent declaration exit 2; "
-          "each mutation row is red with its check reverted)".format(len(EXECUTED)))
+          "settings file or twice, and a registry declaration's other top-level keys are ignored; an absent "
+          "file, an absent event, a different matcher, command or event, and disableAllHooks true in either "
+          "file are a named failure; malformed, duplicate-key, NaN, null, non-UTF-8, symlinked, FIFO, "
+          "non-regular, oversized, unreadable and wrong-typed settings, a relative, symlinked or "
+          "non-directory launch directory and an empty, keyless, unknown-entry-key, wrong-typed, "
+          "non-project-scope, relative, symlinked, unreadable or absent declaration exit 2; each mutation row "
+          "is red with its check reverted)".format(len(EXECUTED)))
     return 0
 
 
 def _symlinked_decl(good):
     case = _Case().settings(good)
-    real = Path(case.tmp.name) / "real-require.json"
+    real = case.base / "real-require.json"
     case.require.rename(real)
     os.symlink(real, case.require)
     return case
