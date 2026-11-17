@@ -1967,7 +1967,10 @@ def _probe_cases():
             _commit_all(tmp, "base", init=True)
             _git_fixture(tmp, "update-ref", ref, "base")
             globals()["ROOT"] = Path(tmp)
-            globals()[swap] = _leg_raises if swap == "coupling_findings" else _scan_raises
+            if swap == "coupling_findings":
+                globals()["coupling_findings"] = _leg_raises
+            else:
+                globals()["scan"] = _scan_raises
             try:
                 with contextlib.redirect_stdout(io.StringIO()) as out, \
                         contextlib.redirect_stderr(io.StringIO()) as err:
