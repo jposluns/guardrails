@@ -77,7 +77,11 @@ is empty, starts with "-" or holds ":", whitespace or a control character, a --b
 to a commit or is not an ancestor of HEAD, a --local-base REF that is a short name, that the clone lacks or that
 git reports broken or dangling, a --local-base
 REF that exists but does not resolve to a readable commit, a --local-base merge-base that cannot be resolved, a base pin that is not a regular file, and a base
-pin that is oversized or malformed are cannot-evaluate (exit 2), never a pass. With neither flag the leg is not evaluated, and the run says so on a NOTE line.
+pin that is oversized or malformed are cannot-evaluate (exit 2), never a pass. So is a --local-base fork point whose
+tree is HEAD's own (REF names HEAD, a commit HEAD descends from with no change, or a commit that descends from HEAD,
+as a symbolic ref to the checked-out branch does), since the leg would then compare nothing, and, with --base, any
+exception the run raises other than a cannot-evaluate one (named on the CANNOT EVALUATE line), never Python's exit 1.
+With neither flag the leg is not evaluated, and the run says so on a NOTE line.
 
 --probe-local-base REF runs only those --local-base reads and scans nothing, so tools/run_all_checks.sh decides
 whether to pass --local-base by this gate's own reading rather than a second one: the probe and --local-base both
@@ -91,11 +95,12 @@ packed-refs must be absent or a regular, readable file of well-formed lines (an 
 header first, then "<object id> <ref name>" lines, each optionally followed by a "^<object id>" peel line, every
 line ending in LF); refs must be a readable directory, not a symbolic link; each directory on REF's loose path
 that exists must be a readable directory, not a symbolic link; and nothing may exist at REF's loose path itself.
-A per-worktree name (under refs/bisect/, refs/worktree/ or refs/rewritten/) is refused. Anything else exits 2
+A per-worktree name (under refs/bisect/, refs/worktree/ or refs/rewritten/) that reads as absent is never read as
+absence (exit 2); one that resolves is read like any other name. Anything else exits 2
 with one CANNOT EVALUATE line on stderr: an unsafe or short name, a broken loose ref, a broken packed-refs line, a
 dangling symbolic ref, a ref store not shown readable and well formed, a full name git resolves only through
 another ref (a local branch refs/heads/REF), an object that is missing or not a commit, a merge-base that does not
-resolve, and any other git failure.
+resolve, a fork point whose tree is HEAD's own, and any other git failure.
 
 The entry line runs an inline copy of the canonical child-status guard (opf/tools/_child_status.py) before
 main(), since the leg reads git's exit statuses.
@@ -615,7 +620,8 @@ def _ref_store_problem(root, ref):
     store, or a git that reports neither, is refused); in the common git directory, packed-refs must be absent or
     a regular, readable file of well-formed lines, refs a readable directory (not a symbolic link), each directory
     on ref's loose path that exists a readable directory (not a symbolic link), and nothing may exist at ref's loose
-    path itself. A per-worktree name is refused, since it is stored outside the common git directory."""
+    path itself. A per-worktree name is refused, since it is stored outside the common git directory (this runs only
+    for a name git reads as a clean miss; a per-worktree name that resolves never reaches it)."""
     if ref.startswith(PER_WORKTREE_PREFIXES):
         return "{} is a per-worktree ref name, whose absence this gate does not classify".format(ref)
     form = _git_line(root, ["rev-parse", "--show-ref-format"])
@@ -708,7 +714,25 @@ def _local_base_commit(root, ref):
                              "{} is missing or is not a commit; git rev-parse --verify {}^{{commit}} exit {})".format(
                                  ref, named, named, proc.returncode))
     commit = _commit_id(proc, "git rev-parse --verify " + named + "^{commit}")
-    return _commit_id(_git_base_read(root, ["merge-base", "HEAD", commit]), "git merge-base HEAD " + commit)
+    fork = _commit_id(_git_base_read(root, ["merge-base", "HEAD", commit]), "git merge-base HEAD " + commit)
+    if _tree_id(root, fork) == _tree_id(root, "HEAD"):
+        raise CannotEvaluate("base: the fork point {} of HEAD and {} holds HEAD's own tree ({} names HEAD, a commit "
+                             "HEAD descends from with no change, or a commit that descends from HEAD, as a symbolic "
+                             "ref to the checked-out branch does), so the leg would compare nothing and pass; point {} "
+                             "at the protected line's commit and rerun, or run without --local-base for the check "
+                             "without that leg".format(fork, ref, ref, ref))
+    return fork
+
+
+def _tree_id(root, rev):
+    """The id of the tree the commit rev names; CannotEvaluate on a nonzero exit or any other output."""
+    what = "git rev-parse --verify {}^{{tree}}".format(rev)
+    text = _git_stdout(_git_base_read(root, ["rev-parse", "--verify", "--quiet", rev + "^{tree}"]), what).decode(
+        "ascii", "replace")
+    tree = text[:-1] if text.endswith("\n") else text
+    if not COMMIT_RE.fullmatch(tree):
+        raise CannotEvaluate("base: {} printed {!r}, not 1 tree id".format(what, text))
+    return tree
 
 
 def local_base_decision(root, ref):
@@ -865,6 +889,18 @@ def run_gate(root, pins=PINS, base=None, local_base=None):
               "version".format(base if local_base is None else "{} (the merge-base of HEAD and {})".format(
                   against, local_base))))
     return 0
+
+
+def run_base_gate(root, base, pins=PINS):
+    """--base REF at the top: run_gate's exit code, or 2 with one CANNOT EVALUATE line naming the exception when the
+    run raises anything other than a cannot-evaluate one (which run_gate reports itself), so an unexpected failure
+    never ends with Python's exit 1, the code of a finding."""
+    try:
+        return run_gate(root, pins, base=base)
+    except Exception as exc:
+        print("CANNOT EVALUATE: base: the --base {!r} run failed unexpectedly ({}: {})".format(
+            base, type(exc).__name__, exc), file=sys.stderr)
+        return 2
 
 
 # The registered execution-suite identity (tools/selftest_checks.toml) and the executed-check-id record
@@ -1218,6 +1254,61 @@ def _coupling_cases():
         check(name, written and got == 2 and "CANNOT EVALUATE: base: refs/remotes/origin/main does not resolve, and "
               "git " in report and "does not exist in this clone" not in report, (written, got, report))
 
+    # A --local-base fork point whose tree is HEAD's own leaves the leg nothing to compare, so it is cannot-evaluate,
+    # never an empty pass: refs/remotes/origin/main is a symbolic ref to the checked-out branch, names HEAD itself, or
+    # names the base commit when HEAD is an empty commit over it. In the first 2, HEAD changes a row under an unchanged
+    # version, so a leg run against that fork point would compare HEAD with itself and pass.
+    for name, setup in (("couple/local-base-symref-to-checked-out-branch-cannot-evaluate", "symref"),
+                        ("couple/local-base-names-head-cannot-evaluate", "head"),
+                        ("couple/local-base-unchanged-descent-cannot-evaluate", "empty")):
+        with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+            _fixture(tmp)
+            _commit_all(tmp, "base", init=True)
+            if setup == "empty":
+                _commit_all(tmp, "head")
+                _git_fixture(tmp, "update-ref", "refs/remotes/origin/main", "base")
+            else:
+                _fixture(tmp, changed, _pin_text(changed))
+                _commit_all(tmp, "head")
+                _git_fixture(tmp, "branch", "-M", "work")
+                if setup == "symref":
+                    _git_fixture(tmp, "symbolic-ref", "refs/remotes/origin/main", "refs/heads/work")
+                else:
+                    _git_fixture(tmp, "update-ref", "refs/remotes/origin/main", "HEAD")
+            got, report = _coupling_gate(tmp, "refs/remotes/origin/main", FIXTURE_PINS, False, local=True)
+        check(name, got == 2 and "CANNOT EVALUATE: base: the fork point " in report
+              and "holds HEAD's own tree" in report and "PASS" not in report, (got, report))
+
+    # Every base read runs with replacement objects off (--no-replace-objects). HEAD changes a row under an unchanged
+    # version; a replacement of the base commit's tree or of the base pin's blob by HEAD's would make the base read
+    # return HEAD's pin and pass, and a graft giving HEAD the divergent before commit (which already holds the changed
+    # row) as its parent would make that commit an ancestor and pass.
+    for name, setup, code, text in (
+            ("couple/replaced-base-tree-ignored", "tree", 1, "FAIL: {}: the row for baseline.css changed from "),
+            ("couple/replaced-base-pin-blob-ignored", "blob", 1, "FAIL: {}: the row for baseline.css changed from "),
+            ("couple/grafted-parent-ignored", "graft", 2, "is not an ancestor of HEAD")):
+        with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+            _fixture(tmp)
+            _commit_all(tmp, "base", init=True)
+            base = "base"
+            if setup == "graft":
+                _fixture(tmp, changed, _pin_text(changed))
+                _commit_all(tmp, "before")
+                _git_fixture(tmp, "tag", "before")
+                _git_fixture(tmp, "reset", "-q", "--hard", "base")
+                base = "before"
+            _fixture(tmp, changed, _pin_text(changed))
+            _commit_all(tmp, "head")
+            if setup == "tree":
+                _git_fixture(tmp, "replace", "base^{tree}", "HEAD^{tree}")
+            elif setup == "blob":
+                _git_fixture(tmp, "replace", "base:" + PIN_REL, "HEAD:" + PIN_REL)
+            else:
+                _git_fixture(tmp, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                             "replace", "--graft", "HEAD", "before")
+            got, report = _coupling_gate(tmp, base, FIXTURE_PINS, False)
+        check(name, got == code and text.format(PIN_REL) in report and "PASS" not in report, (got, report))
+
     # The leg's git reads drop every caller GIT_ variable (_git_env). The scrub above clears this process, so the
     # gate runs here as a child, a copy of this file in a fixture tree (both registered pairs, so ROOT is the
     # fixture), under an ambient GIT_DIR naming a decoy repository whose tag base already holds HEAD's changed pin.
@@ -1437,6 +1528,79 @@ def _probe_cases():
             globals()["_git_base_read"] = original
     check("probe/reftable-store-refused", control[0] == "absent" and decision[0] == "cannot"
           and "reftable" in decision[1], (control, decision))
+
+    # The ref store guards a fixture can reach, each over a clone git reads as a clean miss of the name, so each would
+    # otherwise be the absence (exit 1): a per-worktree name that reads as absent (refs/bisect/good), while a present
+    # one resolves like any other name; refs/remotes as a symbolic link to an empty directory; and refs/remotes/origin
+    # as a directory that cannot be listed (mode 000; a privileged process lists it anyway, so under root os.listdir
+    # refuses that one directory instead). A refs directory that is missing is not reachable: git then does not take
+    # the directory for a repository at all.
+    real_listdir = os.listdir
+    for name, setup, probed, want, text in (
+            ("probe/per-worktree-absent-refused", "absent", "refs/bisect/good", "cannot", "is a per-worktree ref name"),
+            ("probe/per-worktree-present-usable", "bisect", "refs/bisect/good", "usable", None),
+            ("probe/symlinked-ref-directory-refused", "linked", ref, "cannot",
+             "is not a directory (a symbolic link, a file or another entry)"),
+            ("probe/unlistable-ref-directory-refused", "unlistable", ref, "cannot", "is not a readable directory")):
+        with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+            _fixture(tmp)
+            _commit_all(tmp, "base", init=True)
+            _fixture(tmp, changed, _pin_text(changed))
+            _commit_all(tmp, "head")
+            gitdir = Path(tmp) / ".git"
+            locked = gitdir / "refs" / "remotes" / "origin"
+            if setup == "bisect":
+                _git_fixture(tmp, "update-ref", probed, "base")
+            elif setup == "linked":
+                os.mkdir(Path(tmp) / "elsewhere-refs")
+                os.symlink(Path(tmp) / "elsewhere-refs", gitdir / "refs" / "remotes")
+            elif setup == "unlistable":
+                os.makedirs(locked)
+                os.chmod(locked, 0)
+
+            def _refuse(path=".", _locked=str(locked), _real=real_listdir):
+                if os.fspath(path) == _locked:
+                    raise PermissionError(13, "listing refused by the self-test", _locked)
+                return _real(path)
+
+            if setup == "unlistable" and os.geteuid() == 0:
+                os.listdir = _refuse
+            try:
+                decision = local_base_decision(tmp, probed)
+            finally:
+                os.listdir = real_listdir
+                if setup == "unlistable":
+                    os.chmod(locked, 0o755)
+        if want == "usable":
+            ok = decision[0] == "usable" and COMMIT_RE.fullmatch(decision[1] or "") is not None
+        else:
+            ok = (decision[0] == "cannot" and text in decision[1] and decision[1].startswith(
+                "base: {} does not resolve, and this clone's ref store could not be shown ".format(probed)))
+        check(name, ok, decision)
+
+    # The --base path at the top (main): an exception the run raises other than a cannot-evaluate one exits 2 on one
+    # CANNOT EVALUATE line naming it, never Python's exit 1, the code of a finding. ROOT is the fixture (both
+    # registered pairs, HEAD unchanged), and the leg raises.
+    original_root, original_leg = ROOT, coupling_findings
+
+    def _leg_raises(_root, _base, _pins=PINS):
+        raise RuntimeError("injected")
+
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+        _fixture(tmp)
+        _fixture(tmp, None, None, root=SECOND_ROOT, pin_rel=SECOND_PIN, attribution=False)
+        _commit_all(tmp, "base", init=True)
+        globals()["ROOT"], globals()["coupling_findings"] = Path(tmp), _leg_raises
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+                got = main(["--base", "base"])
+        except Exception as exc:
+            got = "escaped main: {}: {}".format(type(exc).__name__, exc)
+        finally:
+            globals()["ROOT"], globals()["coupling_findings"] = original_root, original_leg
+    line = "CANNOT EVALUATE: base: the --base 'base' run failed unexpectedly (RuntimeError: injected)"
+    check("couple/base-unexpected-exception-exits-2", got == 2 and out.getvalue() == ""
+          and err.getvalue() == line + "\n", (got, out.getvalue(), err.getvalue()))
 
     # An unexpected exception in the --local-base reads is cannot-evaluate, never absence: the probe exits 2 with one
     # CANNOT EVALUATE line naming it, and --local-base exits 2 on that same line. A decision that mapped it to absence
@@ -1935,7 +2099,10 @@ def _self_test():
           "the fork point), and a full ref name the clone lacks, a short name shadowed by a tag or a local "
           "branch, a full name reachable only through a local branch, a ref whose commit object is "
           "missing or that names a blob, a broken loose ref, a broken packed-refs line and a dangling "
-          "symbolic ref are cannot-evaluate; a child run under an ambient GIT_DIR naming a "
+          "symbolic ref are cannot-evaluate, and so is a fork point holding HEAD's own tree (a symbolic ref to "
+          "the checked-out branch, a ref naming HEAD, or HEAD an empty commit over the ref); a replaced base "
+          "tree, a replaced base pin blob and a grafted parent are ignored; a child run under an ambient "
+          "GIT_DIR naming a "
           "decoy repository reads its own base; --probe-local-base exits 0 silently for a usable ref, 1 "
           "silently for an absent one, 2 with one CANNOT EVALUATE line for a broken loose ref, a broken "
           "packed-refs line, a dangling symbolic ref, a packed-refs that is a directory, a directory at the "
@@ -1944,8 +2111,11 @@ def _self_test():
           "--local-base agrees with the probe on every one of those fixtures; the runner's extracted "
           "baseline-pin block, with real git, fails a changed row against a usable ref and a packed-refs "
           "that is a directory, and passes a genuine absence with its NOTE; packed-refs shapes are checked "
-          "and a reftable ref store is refused, never read as absence; an unexpected exception in the "
-          "--local-base reads makes the probe and --local-base exit 2 on one CANNOT EVALUATE line; "
+          "and a reftable ref store is refused, never read as absence, as are a per-worktree name that reads as "
+          "absent, a symbolically linked and an unlistable directory on the ref's loose path, while a present "
+          "per-worktree name is usable; an unexpected exception in the "
+          "--local-base reads makes the probe and --local-base exit 2 on one CANNOT EVALUATE line, and one in "
+          "a --base run exits 2 on one CANNOT EVALUATE line naming it; "
           "without --base the leg is reported as not evaluated; the exit codes are 0, 1 and 2; "
           "the live tree passes)".format(len(EXECUTED)))
     return 0
@@ -1967,7 +2137,7 @@ def main(argv=None):
     # The base-coupling leg: --base REF or --local-base REF, alone, or the local runner's --probe-local-base REF
     # (the REF itself is checked where it is used).
     if len(argv) == 2 and argv[0] == "--base":
-        return run_gate(ROOT, base=argv[1])
+        return run_base_gate(ROOT, argv[1])
     if len(argv) == 2 and argv[0] == "--local-base":
         return run_gate(ROOT, local_base=argv[1])
     if len(argv) == 2 and argv[0] == "--probe-local-base":
