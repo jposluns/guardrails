@@ -25634,6 +25634,10 @@ def _orch_lexed_detach(command, grouped=None):
         readings = _lex_readings(command, skip_empty=_SKIP_EMPTY_REPEATS)
     except ValueError:
         return None
+    # grouped is set whether or not a bare `&` was found. The guard reads it only on a "detach" verdict, which
+    # comes from the raw scan where this lex finds no bare `&`; even then every reading here holds a '(' or ')'
+    # separator, so every reading of the full lex _orch_bg_poll_loop runs does too, it gives 'indeterminate'
+    # either way, and the wider setting cannot change a verdict (dl-orch-detach-lex-grouped).
     if grouped is not None and readings and all(
             any(seg.sep_after in ("(", ")") for seg in segments) for segments in readings):
         grouped.append(True)

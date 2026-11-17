@@ -7591,9 +7591,10 @@ def _orch_detach_lex_failures(tmp, count=3000, seed=20261117):
     grouped exactly where every reading holds a '(' or ')' separator, on _ORCH_DETACH_LEX_TEXTS, _LEX_SKIP_TEXTS,
     _LEX_FORK_TEXTS and `count` seeded random texts over _LEX_SKIP_ALPHABET; wherever grouped is read,
     _orch_bg_poll_loop gives 'indeterminate', the answer orch_truncation_guard takes for it without that
-    classifier's lex. (dl-orch-detach-lex-corpus) the corpus holds a bare '&' a lex leaving out every record with
-    no word and no redirect (skip_empty True) loses, a grouped and an ungrouped detach, a lexed command with no
-    bare '&' and a refused one, so the comparison discriminates. (dl-orch-detach-lex-taken) orch_truncation_guard
+    classifier's lex (dl-orch-detach-lex-grouped). (dl-orch-detach-lex-corpus) the corpus holds a grouped and an
+    ungrouped detach, a lexed command with no bare '&' and a refused one, and (dl-orch-detach-lex-corpus-skip-all)
+    a bare '&' that a lex leaving out every record with no word and no redirect (skip_empty True) loses, so the
+    comparison discriminates. (dl-orch-detach-lex-taken) orch_truncation_guard
     in registry scope denies a run of 200 separators before four '#' lines with an '&' glued to the last
     (sixteen readings), builds fewer than 50 records for it (_lex_records_built), where the default lex of that
     command builds more than 200 (dl-orch-detach-lex-taken-red), and makes no _orch_bg_poll_loop call there; on
@@ -7618,8 +7619,8 @@ def _orch_detach_lex_failures(tmp, count=3000, seed=20261117):
                        .format(text, got, want))
         if want[1] and aiqt_hooks._orch_bg_poll_loop(text) != "indeterminate" and wrong < 3:
             wrong += 1
-            out.append("(dl-orch-detach-lex) every reading of {!r} holds a '(' or ')' separator but "
-                       "_orch_bg_poll_loop gave {!r}, not 'indeterminate'".format(
+            out.append("(dl-orch-detach-lex-grouped) every reading of {!r} holds a '(' or ')' separator "
+                       "but _orch_bg_poll_loop gave {!r}, not 'indeterminate'".format(
                            text, aiqt_hooks._orch_bg_poll_loop(text)))
         if want[0] is not None and not skip_all_caught:
             skip_all = any(seg.sep_after == "&" for seg in aiqt_hooks._lex_command(text, skip_empty=True))
@@ -7629,8 +7630,9 @@ def _orch_detach_lex_failures(tmp, count=3000, seed=20261117):
             out.append("(dl-orch-detach-lex-corpus) no text reads (lexed, grouped) {!r}, so the comparison does "
                        "not cover it".format(need))
     if not skip_all_caught:
-        out.append("(dl-orch-detach-lex-corpus) no text holds a bare '&' that a lex leaving out every record with "
-                   "no word and no redirect loses, so the comparison cannot see a lexer mode that drops it")
+        out.append("(dl-orch-detach-lex-corpus-skip-all) no text holds a bare '&' that a lex leaving out every "
+                   "record with no word and no redirect loses, so the comparison cannot see a lexer mode that "
+                   "drops it")
     try:
         root = _init_repo(tmp / "orch-detach-lex")
     except (OSError, subprocess.SubprocessError) as exc:
