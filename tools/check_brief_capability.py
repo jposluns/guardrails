@@ -15,7 +15,8 @@ INPUT: line that does not exist on the host the lint runs on (P6), or a git comm
 or push when the family's row says git-write = "no" (W1). The signal is structural, not certain: the lint fails
 closed, so some text a human would pass refuses (see RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
 its hits are printed so a human sees them, and it never refuses; so is P8, a warning on a request that the
-worker write the harness's status line. For a family that can execute (`yes` or
+worker write the harness's status line, and so is T1, a WARN on a task line that asks to remove a test or check,
+carried in the summary line. For a family that can execute (`yes` or
 `read-only-sandbox`) no execution rule applies; the PREFLIGHT rules and GIT WRITE (W1) below apply to every family.
 
 PREFLIGHT (the input paths, pins and residuals a brief names, and the attestation lines it asks for; read over the
@@ -508,6 +509,111 @@ execute):
                        outside subcommand position or in the PROHIBITED shape; and other writing subcommands (tag,
                        merge, rebase, reset, branch) are not read.
 
+CHECK REMOVAL (beside the preflight, for every family, before the execution rules' early return):
+
+  T1 check removal     ADVISORY (a WARN; it never refuses and never changes the exit code). Replacing or removing a
+                       check is a reduction until its coverage is accounted for, so a brief should not offer the
+                       removal of a test as a plain option. T1 is advisory because three rounds of its word-level
+                       reading oscillated between refusing briefs that offer no removal and missing ones that do (a
+                       recorded maintainer-proxy decision); the enforcing layer for a removed registered check is the
+                       changed-lines gate tools/check_selftest_removal.py. Each hit is one WARN naming the brief line,
+                       carried in the summary line (OK or REFUSE) that the other rules select, after that line's own
+                       advice, as P8's hint is; it is not printed as a finding line of its own. A TASK LINE is a line
+                       that opens at column zero with TASK: (upper case, the colon directly after; no markup, no
+                       indent), outside a fenced code block (a fenced task line is an example, not the brief's ask).
+                       For T1 a fence opens only at an indent of at most three spaces (four spaces or a tab open an
+                       indented code block, not a fence), and a fence that never closes and holds a column-zero TASK:
+                       line is one WARN naming the fence's opening line (T1 does not read the task lines in it; the
+                       lines before it are still read). Its text after the
+                       label has each QUOTATION that holds whitespace (between straight or curly double quotes, or
+                       backticks) read as one opaque word, so a quoted or cited removal is not read; a quoted single
+                       word (`checks`) stays. The text is then split into words on whitespace, each word stripped of
+                       surrounding quotes, backticks, emphasis, brackets, an ellipsis and punctuation and lower-cased;
+                       a word that ended in . ; ! or ? closes its sentence and its clause, and one that ended in , :
+                       or ) closes its clause. T1 fires only on an INSTRUCTION OR OFFER: a word that is a REMOVAL VERB
+                       (remove, removing, delete, deleting, drop or dropping; removed, removal and deletion are not
+                       read) that heads its clause, every word before it in the clause being a LEAD word (please, and,
+                       or, then, but, also, optionally, just, now, first, next, finally, so, either, instead, simply,
+                       you, we, may, can, could, should, must, might, need, needs, to, do, feel, free, or a
+                       prohibition word) or a PERMISSION FRAME (it, it's, is, are, you're, we're, be and intensifiers
+                       such as perfectly, read only with a PERMISSION word among them: free, fine, ok, okay, allowed,
+                       acceptable, permitted, welcome, alright, optional, option, options; "TASK: you are free to
+                       remove the test", "TASK: it is fine to delete the check"); or a plain removal verb COORDINATED
+                       by and, or, then or but with an earlier part of its clause that reads as an imperative (its
+                       first word after lead words is no subject, determiner, subordinator or -ing removal verb, and
+                       none of its words is a prohibition, a removal verb after the first, or a subordinator or
+                       infinitive marker: that, which, who, whether, if, how, why, when, where, what, while, because,
+                       unless, until, since, to, once, as): "TASK: fix the parser and remove the flaky test", "TASK:
+                       keep or remove self-test rows". Its OBJECT, in the same clause, is test, tests, self-test,
+                       self-tests, selftest, selftests, assertion, assertions, assert, asserts, check, checks, case,
+                       cases, test-case, test-cases, testcase, testcases, gate, gates, hook, hooks, row or rows,
+                       either right after the verb or after at most three FILLER words (a, an, the, one, this, that,
+                       these, those, each, any, every, some, its, their, existing, failing, flaky, redundant, old,
+                       stale, obsolete, duplicate, registered, unit, regression, all, both, two, three, several, other,
+                       remaining, unused, broken, outdated, skipped, disabled, slow), the last of which may be one
+                       unlisted MODIFIER right before the object ("remove the duplicated check", "remove the PR's
+                       tests") unless it is a stop word (a preposition, conjunction, question or relative word,
+                       pronoun, linking verb, modal or negation: "delete what tests do not need" does not fire). A
+                       run of object words is one object (self-test case); an object word followed by a noun it
+                       modifies (mark, box, fixture, data, file, directory, dir, folder, helper, log, output,
+                       artifact, report, script, tool, image, account, manifest, each with its plural, environment,
+                       server, database) is not an object ("remove the check mark", "delete the test data file"). So
+                       "TASK: remove the flaky test", "TASK: fix it, or drop one self-test case", "TASK: you should
+                       delete the check" and "TASK: options: removing a check" fire, while a clause that describes,
+                       reviews or reports a removal ("TASK: verify the gate refuses removing a test", "TASK: review the
+                       change that proposes to remove a test", "TASK: review whether it is fine to remove the test",
+                       "TASK: confirm no change can drop a check") and a quotation ("TASK: \"remove the test\" is what
+                       the draft said") do not. Two further shapes do not fire: a PROHIBITION (never, not, no, don't,
+                       mustn't, shouldn't, cannot, can't or won't within the four words before the verb, in its
+                       clause: "TASK: never remove a test", "TASK: do not delete the check", "TASK: no need to remove
+                       the test", "TASK: you are not allowed to remove a test") and a DESCRIPTION (an -ing verb whose
+                       object is followed directly by is, are, was, were or counts, or, when the object closes a
+                       clause, one of those words right after a later clause boundary in the same sentence: "TASK:
+                       removing a check is a reduction", "TASK: removing a check, as the draft did, is a reduction"),
+                       except that a predicate granting a permission or naming an option (a permission word after only
+                       permission frame words: "TASK: removing the failing tests is fine", "TASK: dropping flaky
+                       checks is allowed", "TASK: removing the test is an option") is an offer and fires. The WARN
+                       says whether the brief carries BOTH cure lines, each at column zero, outside a fence, with
+                       text after its colon: COVERAGE-ACCOUNTING: <how each removed case is covered by a named
+                       surviving check, unreachable, or disclosed> and AUTHORIZATION: <the maintainer's recorded
+                       authorization reference>; with or without them it is a WARN. One WARN per task line, at the
+                       first hit; it names the verb in its plain form. RESIDUALS: the lint checks only that the two cure
+                       lines exist and are not blank, never that the accounting is true, complete or matches the cases
+                       removed, nor that the authorization reference names a real record (a cure line reading "none"
+                       counts; the changed-lines gate tools/check_selftest_removal.py holds the registered check ids
+                       themselves); a removal asked anywhere but a column-zero TASK: line outside a fence (another
+                       line, a numbered step, **TASK:** in emphasis, an indented TASK:), in other words (cut, strip,
+                       prune, retire, disable, skip, comment out, replace, "get rid of"), after a word that is not a
+                       lead word outside a coordination ("it is flaky so remove the test", "you may want to remove the
+                       test"), coordinated with a part that holds a subordinator or infinitive ("ask the worker to fix
+                       the parser and remove the test"), as an -ing verb coordinated with another verb ("keeping or
+                       dropping the test"), with another verb after it (remove or rewrite the test), with two unlisted
+                       words or more than three words before the object (remove the brittle old flaky test), with a
+                       permission phrased in other words ("up to you", "your call" alone, "nobody minds if"), of an
+                       unlisted object (a guard, a validator, "it"), or inside a quotation (including a quoted object:
+                       remove the "flaky test") is not read; an unlisted noun after the object leaves it an object
+                       (remove the test harness, remove the header row: a table row that is not a test fires); an
+                       unclosed fence with no TASK: line in it still hides the cure lines in it; and a prohibition,
+                       description, permission or coordination is read lexically, so "TASK: not only remove the test
+                       but fix the parser" is quiet, "TASK: removing the check counted twice" warns, and "TASK: do not
+                       fix the parser and remove the test" is quiet. MISSES (quiet on a real offer), each measured on
+                       the current matching: "fix the flaky test or remove it", "either fix the test or delete it"
+                       (an unlisted object, it); "consider removing the flaky test", "you may want to remove the
+                       flaky test", "it would be fine to remove the test", "the worker may remove the test" (a word
+                       before the verb that is not a lead word); "remove test_parser_roundtrip" (an unlisted
+                       object); "remove or rewrite the test" (another verb after the removal verb); "keeping or
+                       dropping the flaky test is your call" (an -ing coordination); "delete the brittle old flaky
+                       test" (too many words before the object). FALSE WARNINGS (a WARN on a line that offers no
+                       removal of a test; in one reviewer's run over a corpus of real briefs, 6 of its 10 hits were
+                       such lines):
+                       a table or register row ("remove the row if its count reaches zero", "removing their
+                       exemption rows", "remove the header row from the CSV", "drop the results row into the
+                       table"); a finding described after a colon ("removing the gate from X turns nothing red"); a
+                       noun phrase ("found, declare and drop rows"); a red-on-revert probe ("remove one new row, the
+                       gate fails"); a reference that is not a test ("drop the stale gate reference"); and a brief
+                       that describes this rule ("refusing a task line that asks to remove, delete or drop a test",
+                       where delete is read as an imperative conjunct).
+
 TEXT. A brief holding a line separator other than LF anywhere (a carriage return, bare or in CRLF, U+0085
 NEXT LINE, U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR), or a format character (Unicode category Cf: a
 byte order mark, zero-width and bidirectional controls) outside a fenced code block, is CANNOT_EVALUATE
@@ -637,7 +743,9 @@ Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one su
                            can write (W1).
                            A P8 warning never sets the exit code: it adds its hint (ask only for the verdict and
                            completion lines and state the harness-owned attestation line as a prohibition) to the
-                           OK or REFUSE line the other rules select, after that line's own advice.
+                           OK or REFUSE line the other rules select, after that line's own advice. A T1 WARN never
+                           sets the exit code either: each adds "; WARN T1 <brief>:<line>: <message>: <excerpt>" to
+                           that same line, after the P8 hint.
                            When a hit is a command line (S2 or S3), the REFUSE line
                            says how to rewrite: name the function, row or entry instead of embedding the
                            command (quote the def line of X, not the line that runs git push).
@@ -3969,6 +4077,345 @@ def preflight(text, row, repo, raw):
         names, row, repo) + rule_p8(names, row, repo)
 
 
+# T1: a task line that asks to remove a test or check. The label that makes a line a task line, and the two
+# column-zero labels whose lines together cure it (each with text after the colon).
+TASK_LABEL = "TASK:"
+T1_CURE_LABELS = ("COVERAGE-ACCOUNTING:", "AUTHORIZATION:")
+# the removal verbs, in their plain and -ing forms only (removed, removal and deletion are not read)
+T1_VERBS = frozenset(("remove", "removing", "delete", "deleting", "drop", "dropping"))
+T1_GERUNDS = frozenset(("removing", "deleting", "dropping"))
+# the words that may stand between the verb and its object (at most T1_FILLER_MAX of them)
+T1_FILLERS = frozenset(("a", "an", "the", "one", "this", "that", "these", "those", "each", "any", "every", "some",
+                        "its", "their", "existing", "failing", "flaky", "redundant", "old", "stale", "obsolete",
+                        "duplicate", "registered", "unit", "regression", "all", "both", "two", "three", "several",
+                        "other", "remaining", "unused", "broken", "outdated", "skipped", "disabled", "slow"))
+T1_FILLER_MAX = 3
+# whether one word that is not a filler may stand right before the object, as its modifier ("remove the duplicated
+# check", "remove the PR's tests"); it counts toward T1_FILLER_MAX and is never a T1_FILLER_STOPS word
+T1_MODIFIER_SLOT = True
+# the words that never fill the modifier slot: prepositions, conjunctions, question and relative words, pronouns,
+# linking verbs, modals and negations ("delete what tests do not need" is no removal of tests)
+T1_FILLER_STOPS = frozenset((
+    "and", "or", "but", "nor", "so", "then", "if", "when", "while", "because", "unless", "until", "since", "once",
+    "whether", "that", "which", "who", "whom", "whose", "where", "how", "why", "what", "whatever", "whichever",
+    "to", "from", "in", "into", "on", "onto", "of", "for", "with", "without", "at", "by", "about", "under", "over",
+    "after", "before", "than", "as", "via", "per", "inside", "within", "across", "through", "between", "it", "them",
+    "him", "me", "us", "you", "we", "they", "i", "nothing", "everything", "something", "anything", "none", "is",
+    "are", "was", "were", "be", "been", "being", "has", "have", "had", "does", "did", "do", "can", "could", "will",
+    "would", "should", "must", "may", "might", "not", "never", "no", "only", "just", "also"))
+# the objects that make the request a removal of a test, case, check, gate, hook or row
+T1_OBJECTS = frozenset(("test", "tests", "self-test", "self-tests", "selftest", "selftests", "assertion",
+                        "assertions", "assert", "asserts", "check", "checks", "case", "cases", "test-case",
+                        "test-cases", "testcase", "testcases", "gate", "gates", "hook", "hooks", "row", "rows"))
+# the objects named in the singular, which the finding gives an article ("asks to remove a test")
+T1_SINGULAR = frozenset(("test", "self-test", "selftest", "assertion", "assert", "check", "case", "test-case",
+                         "testcase", "gate", "hook", "row"))
+# the nouns that, right after an object word, make that word a modifier of another noun (the check mark, the
+# test data file, the test fixture directory), so the request is not a removal of a test or check
+T1_NOT_OBJECT_AFTER = frozenset(("mark", "marks", "box", "boxes", "fixture", "fixtures", "data", "file", "files",
+                                 "directory", "directories", "dir", "folder", "folders", "helper", "helpers", "log",
+                                 "logs", "output", "outputs", "artifact", "artifacts", "report", "reports",
+                                 "script", "scripts", "tool", "tools", "image", "images", "account", "accounts",
+                                 "environment", "server", "database", "manifest", "manifests"))
+# a word that makes a gerund the subject of a description, not a request: right after the object, or right after
+# a clause boundary later in the same sentence when the object closes a clause
+T1_DESCRIBED = frozenset(("is", "are", "was", "were", "counts"))
+# the words that grant a permission or name an option: before the verb ("you are free to remove the test", "it is
+# fine to delete the check") they make the clause an offer, and after a description's linking word ("removing the
+# test is fine", "dropping checks is allowed", "removing the test is an option") they make it one too
+T1_PERMISSIONS = frozenset(("free", "fine", "ok", "okay", "allowed", "acceptable", "permitted", "welcome",
+                            "alright", "optional", "option", "options"))
+# the words a permission is framed with ("it is", "you are", "perfectly"); before the verb they are read only when a
+# T1_PERMISSIONS word is among them, and after a linking word they (and an article) may come before the permission
+T1_PERMISSION_FRAME = frozenset(("it", "it's", "is", "are", "you're", "we're", "be", "totally", "perfectly",
+                                 "entirely", "quite", "absolutely", "also", "still", "always", "a", "an", "one"))
+# the coordinators that join a removal to an earlier imperative clause ("fix the parser and remove the test",
+# "keep or remove the rows")
+T1_COORDINATORS = frozenset(("and", "or", "then", "but"))
+# the words that, anywhere in the earlier conjunct, make it no imperative the removal is coordinated with: a
+# subordinate or relative clause or an infinitive ("review the change that proposes to fix the parser and remove the
+# test"); and the words that do so as its first word, those and a subject ("the gate refuses it and drop the check")
+T1_SUBORDINATE = frozenset(("that", "which", "who", "whom", "whose", "whether", "if", "how", "why", "when", "where",
+                            "what", "while", "whereas", "because", "unless", "until", "since", "to", "once", "as"))
+T1_NOT_IMPERATIVE_HEAD = T1_SUBORDINATE | frozenset(("the", "a", "an", "this", "these", "those", "it", "its", "they",
+                                                     "he", "she", "i", "there", "each", "every", "some", "any", "all",
+                                                     "both", "no", "my", "our", "your", "their"))
+# the words that, in the clause before the verb (at most T1_PROHIBITION_REACH words), make it a prohibition
+T1_PROHIBITIONS = frozenset(("never", "not", "no", "don't", "mustn't", "shouldn't", "cannot", "can't", "won't"))
+T1_PROHIBITION_REACH = 4
+# the only words that may stand before the verb in its clause for the clause to be an INSTRUCTION (the verb heads
+# it, after connectives, modals and courtesy words); a prohibition word is one of them, so t1_prohibited decides
+T1_LEADS = frozenset(("please", "and", "or", "then", "but", "also", "optionally", "just", "now", "first", "next",
+                      "finally", "so", "either", "instead", "simply", "you", "we", "may", "can", "could", "should",
+                      "must", "might", "need", "needs", "to", "do", "feel", "free")) | T1_PROHIBITIONS
+# the deepest indentation (in spaces, no tab) at which T1 reads a fence opening line: four spaces open an indented
+# code block, not a fence
+T1_FENCE_INDENT = 3
+# the plain form a gerund verb is named in by a finding
+T1_PLAIN = {"removing": "remove", "deleting": "delete", "dropping": "drop"}
+# the quotation marks whose span, when it holds whitespace, reads as one opaque word (opening: closing)
+T1_QUOTES = {"\"": "\"", "“": "”", "`": "`"}
+T1_QUOTATION = "[quotation]"
+# the two kinds of boundary t1_words records after a word: one that ends the sentence, one that ends a clause
+T1_SENTENCE, T1_CLAUSE = ".", ","
+
+
+def t1_lines(text):
+    """[(line number, line)] for the lines of the brief outside fenced code blocks, the fence lines left out too: a
+    task line or a cure line inside a fence is an example or a quotation, not the brief's own ask or cure. The
+    fence is read as parse_blocks reads it (FENCE_OPEN_RE, closed by _fence_closes), except that an opening line
+    indented by more than T1_FENCE_INDENT spaces, or by a tab, is an indented code block line, not a fence. A fence
+    that never closes and holds a column-zero TASK: line is CannotEvaluate (t1_unclosed): its task lines would
+    otherwise be hidden to the end of the brief."""
+    found, opening, hidden, opened_at = [], None, [], None
+    for number, line in enumerate(text.split("\n"), 1):
+        if opening is not None:
+            if _fence_closes(line, opening):
+                opening = None
+            else:
+                hidden.append(line)
+            continue
+        opened = FENCE_OPEN_RE.match(line)
+        if opened and len(opened.group(1)) <= T1_FENCE_INDENT and "\t" not in opened.group(1) and not (
+                opened.group(2)[0] == "`" and "`" in opened.group(3)):
+            opening, hidden, opened_at = opened.group(2), [], number
+            continue
+        found.append((number, line))
+    if opening is not None and t1_unclosed(hidden):
+        raise T1UnclosedFence(found, opened_at, opening)
+    return found
+
+
+class T1UnclosedFence(Exception):
+    """Raised by t1_lines for a fence that never closes and holds a column-zero TASK: line: it carries the lines
+    read before the fence, the fence's opening line number and its marker, so rule_t1 can warn on it (T1 is
+    advisory, so this never changes the exit code)."""
+
+    def __init__(self, found, number, opening):
+        super().__init__(number)
+        self.found, self.number, self.opening = found, number, opening
+
+
+def t1_unclosed(hidden):
+    """Whether the lines of a fence that never closes hold a column-zero TASK: line."""
+    return any(line.startswith(TASK_LABEL) for line in hidden)
+
+
+def t1_unquoted(line):
+    """The line with each quotation that holds whitespace (between straight double quotes, curly double quotes or
+    backticks) replaced by the one opaque word T1_QUOTATION, so a removal the line quotes or cites ("remove the
+    test" is what the draft said) is not read as asked; a quoted single word (`checks`) stays as written. Each
+    search either consumes its span or finds no closing mark, after which that mark is not searched again, so the
+    walk is linear in the line."""
+    out, index, missing = [], 0, set()
+    while index < len(line):
+        char = line[index]
+        close = T1_QUOTES.get(char)
+        end = -1 if close is None or close in missing else line.find(close, index + 1)
+        if close is not None and end < 0:
+            missing.add(close)
+        if end > index and any(inner.isspace() for inner in line[index + 1:end]):
+            out.append(" " + T1_QUOTATION)
+            index = end + 1
+        else:
+            out.append(char)
+            index += 1
+    return "".join(out)
+
+
+def t1_words(line):
+    """[(word, boundary)] for one line: each whitespace-separated chunk with its surrounding markup and punctuation
+    stripped, lower-cased, and the boundary that follows it: T1_SENTENCE when the chunk ended with . ; ! or ?,
+    T1_CLAUSE when it ended with , : or ) or the next chunk opens with (, else False. Walked in Python, with no
+    pattern, so the read is linear in the line."""
+    strip_chars, stops = "\"'`*_([{<>}])…", ".;:,!?)"
+    words = []
+    for chunk in line.split():
+        word = chunk.strip(strip_chars + stops).lower()
+        last = chunk.rstrip("\"'`*_]}>")[-1:]
+        boundary = (T1_SENTENCE if last in ".;!?" else T1_CLAUSE if last in ",:)" else False) if last else T1_CLAUSE
+        if chunk[:1] == "(" and words:
+            words[-1] = (words[-1][0], words[-1][1] or T1_CLAUSE)
+        if word:
+            words.append((word, boundary))
+        elif words:
+            words[-1] = (words[-1][0], words[-1][1] or T1_CLAUSE)
+    return words
+
+
+def t1_instruction(words, index):
+    """Whether the verb at words[index] heads its clause: every word before it in the clause is a T1_LEADS word, so
+    the clause instructs ("remove the test", "or optionally drop it", "you should delete the check"); a verb inside
+    a clause that describes, reviews or reports a removal ("verify the gate refuses removing a test", "review the
+    change that proposes to remove a test") is not read. Two more shapes instruct or offer: a PERMISSION frame before
+    the verb (T1_PERMISSION_FRAME words with at least one T1_PERMISSIONS word: "you are free to remove the test",
+    "it is fine to delete the check"), and a plain verb COORDINATED with an earlier imperative clause by a
+    T1_COORDINATORS word (t1_imperative_conjunct: "fix the parser and remove the test", "keep or remove the
+    rows")."""
+    framed = permitted = False
+    for back in range(index - 1, -1, -1):
+        word, boundary = words[back]
+        if boundary:
+            break
+        if word in T1_COORDINATORS and back > 0 and not words[back - 1][1]:
+            # a coordinator with an earlier conjunct in the clause: the removal is an instruction only when that
+            # conjunct is one
+            return ((permitted or not framed) and words[index][0] not in T1_GERUNDS
+                    and t1_imperative_conjunct(words, back - 1))
+        if word in T1_LEADS or word in T1_PERMISSIONS:
+            permitted = permitted or word in T1_PERMISSIONS
+            continue
+        if word in T1_PERMISSION_FRAME:
+            framed = True
+            continue
+        return False
+    return permitted or not framed
+
+
+def t1_imperative_conjunct(words, end):
+    """Whether the clause part that ends at words[end] (right before a coordinator) reads as an imperative a
+    removal can be coordinated with: its first word after lead words is no gerund removal verb and no
+    T1_NOT_IMPERATIVE_HEAD word (a subject or a subordinator), none of its later words is a T1_SUBORDINATE or
+    T1_VERBS word (a removal verb there was judged on its own), and none of its words is a T1_PROHIBITIONS word (a
+    prohibition there may govern the coordinated verb too)."""
+    start = end
+    while start > 0 and not words[start - 1][1]:
+        start -= 1
+    if any(word in T1_PROHIBITIONS for word, _ in words[start:end + 1]):
+        return False
+    while start <= end and words[start][0] in T1_LEADS:
+        start += 1
+    if start > end or words[start][0] in T1_GERUNDS or words[start][0] in T1_NOT_IMPERATIVE_HEAD:
+        return False
+    return not any(word in T1_SUBORDINATE or word in T1_VERBS for word, _ in words[start + 1:end + 1])
+
+
+def t1_prohibited(words, index):
+    """Whether a prohibition word stands within T1_PROHIBITION_REACH words before words[index], in its clause."""
+    for back in range(index - 1, max(-1, index - 1 - T1_PROHIBITION_REACH), -1):
+        word, boundary = words[back]
+        if boundary:
+            return False
+        if word in T1_PROHIBITIONS:
+            return True
+    return False
+
+
+def t1_object(words, index):
+    """The index of the object a removal verb at words[index] takes (a T1_OBJECTS word after at most
+    T1_FILLER_MAX filler words, in the verb's clause), or None. With T1_MODIFIER_SLOT, the last of those words may be
+    one that is not a filler, the object's modifier ("remove the duplicated check"), unless it is a T1_FILLER_STOPS
+    or T1_VERBS word."""
+    if words[index][1]:
+        return None
+    for ahead in range(index + 1, min(len(words), index + 2 + T1_FILLER_MAX)):
+        word, boundary = words[ahead]
+        if word in T1_OBJECTS:
+            return t1_object_end(words, ahead)
+        if boundary:
+            return None
+        if word in T1_FILLERS:
+            continue
+        if not (T1_MODIFIER_SLOT and word not in T1_FILLER_STOPS and word not in T1_VERBS and ahead + 1 < len(words)
+                and words[ahead + 1][0] in T1_OBJECTS):
+            return None
+    return None
+
+
+def t1_object_end(words, obj):
+    """The index of the last word of the object that opens at words[obj], a run of T1_OBJECTS words in one clause
+    ("self-test case"), or None when the word after the run is a T1_NOT_OBJECT_AFTER noun the run modifies ("the
+    check mark", "the test data file")."""
+    while not words[obj][1] and obj + 1 < len(words):
+        following = words[obj + 1][0]
+        if following in T1_NOT_OBJECT_AFTER:
+            return None
+        if following not in T1_OBJECTS:
+            break
+        obj += 1
+    return obj
+
+
+def t1_described(words, verb, obj):
+    """Whether a gerund verb and its object are the subject of a description: a T1_DESCRIBED word right after the
+    object ("removing a check is a reduction"), or, when the object closes a clause, right after a clause boundary
+    later in the same sentence ("removing a check, as the draft did, is a reduction"). A predicate that grants a
+    permission or names an option (t1_permission: "removing the failing tests is fine") is no description."""
+    if words[verb][0] not in T1_GERUNDS:
+        return False
+    if not words[obj][1]:
+        return obj + 1 < len(words) and words[obj + 1][0] in T1_DESCRIBED and not t1_permission(words, obj + 1)
+    for after in range(obj + 1, len(words)):
+        boundary = words[after - 1][1]
+        if boundary == T1_SENTENCE:
+            return False
+        if boundary and words[after][0] in T1_DESCRIBED:
+            return not t1_permission(words, after)
+    return False
+
+
+def t1_permission(words, link):
+    """Whether the predicate after the linking word at words[link] grants a permission or names an option: a
+    T1_PERMISSIONS word after only T1_PERMISSION_FRAME words, in the linking word's clause ("is fine", "are
+    allowed", "is perfectly ok", "is an option"); "is not allowed" and "are never free" are not."""
+    for after in range(link + 1, len(words)):
+        if words[after - 1][1]:
+            return False
+        if words[after][0] in T1_PERMISSIONS:
+            return True
+        if words[after][0] not in T1_PERMISSION_FRAME:
+            return False
+    return False
+
+
+def t1_accounted(lines):
+    """Whether the brief carries both cure lines: a column-zero COVERAGE-ACCOUNTING: line and a column-zero
+    AUTHORIZATION: line, each with text after its colon."""
+    return all(any(line.startswith(label) and line[len(label):].strip() for line in lines)
+               for label in T1_CURE_LABELS)
+
+
+def rule_t1(text):
+    """T1 (ADVISORY, every family): a column-zero TASK: line outside a fence that instructs the worker to remove,
+    delete or drop a test, self-test, case, assertion or check is one WARN finding naming the line, whose message
+    says whether the brief carries the two cure lines outside a fence (t1_accounted); a fence that never closes
+    and holds a TASK: line is one WARN naming the fence's opening line. A WARN never sets the exit code: run()
+    carries each in the summary line the other rules select."""
+    unclosed = None
+    try:
+        lines = t1_lines(text)
+    except T1UnclosedFence as exc:
+        lines, unclosed = exc.found, exc
+    accounted, findings = None, []
+    if unclosed is not None:
+        findings.append(("T1", "WARN", unclosed.number, "a fenced code block opened with {} never closes and holds a "
+                         "TASK: line, so T1 did not read the task lines in it; close the fence".format(
+                             unclosed.opening), _excerpt(unclosed.opening)))
+    for number, line in lines:
+        if not line.startswith(TASK_LABEL):
+            continue
+        words = t1_words(t1_unquoted(line[len(TASK_LABEL):]))
+        for index, (word, _) in enumerate(words):
+            if word not in T1_VERBS or not t1_instruction(words, index) or t1_prohibited(words, index):
+                continue
+            obj = t1_object(words, index)
+            if obj is None or t1_described(words, index, obj):
+                continue
+            if accounted is None:
+                accounted = t1_accounted([text_line for _, text_line in lines])
+            named = words[obj][0]
+            asked = "task line asks to {} {}{}".format(T1_PLAIN.get(word, word),
+                                                       "a " if named in T1_SINGULAR else "", named)
+            if accounted:
+                findings.append(("T1", "WARN", number, asked + ", with a coverage-accounting clause and an "
+                                 "authorization reference", _excerpt(line)))
+            else:
+                findings.append(("T1", "WARN", number, asked + " and the brief has no {} line or no {} line with "
+                                 "text after it".format(*T1_CURE_LABELS), _excerpt(line)))
+            break
+    return sorted(findings, key=lambda finding: finding[2])
+
+
 def can_execute(row):
     """Whether a family's table row lets it run commands; the execution rules apply only to one that cannot."""
     return row["execute"] != "no"
@@ -3984,7 +4431,7 @@ def evaluate(data, family, table, scoped=True, repo=None):
     text = decode_brief(data)
     # the preflight and W1 apply to every family, so they run before the return for a family that can execute
     early = preflight(text, table[family], repo, data.decode("utf-8")) + rule_w1(
-        text, table[family], family, set(table), scoped)
+        text, table[family], family, set(table), scoped) + rule_t1(text)
     if can_execute(table[family]):
         early.sort(key=lambda finding: finding[2])
         hard = any(severity == "HARD" for _, severity, _, _, _ in early)
@@ -4033,7 +4480,7 @@ COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or ent
 
 PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"))
 # the rules that apply to every family, whether or not it can execute
-EVERY_FAMILY_RULES = PREFLIGHT_RULES | frozenset(("W1",))
+EVERY_FAMILY_RULES = PREFLIGHT_RULES | frozenset(("W1", "T1"))
 # added to a REFUSE line when a P6 hit is among the hard hits
 INPUT_HINT = "; provide each missing declared input, or correct its INPUT line, before sending"
 # added to the summary line (REFUSE or OK) when a P8 warning is among the findings; P8 never sets the exit code
@@ -4043,6 +4490,14 @@ STATUS_HINT = ("; the harness writes the WORKER_STATUS line and its account, mod
 # added to a REFUSE line when a W1 hit is among the hard hits
 GIT_WRITE_HINT = ("; the family's row says git-write = \"no\": drop the git commit or push, state it as a prohibition "
                   "(Do not run `git push`.), or send it to a family that can write")
+# the WARN a T1 finding adds to the summary line (REFUSE or OK); T1 never sets the exit code
+REMOVAL_WARN = "; WARN T1 {}:{}: {}: {}"
+
+
+def removal_warnings(brief_path, findings):
+    """The text each T1 finding adds to the summary line: one WARN per finding, naming the brief line."""
+    return "".join(REMOVAL_WARN.format(brief_path, line, message, excerpt)
+                   for rule, _, line, message, excerpt in findings if rule == "T1")
 
 
 def run(brief_path, family, table_path, scoped=True, repo=None):
@@ -4052,13 +4507,16 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
     except CannotEvaluate as exc:
         print("CANNOT_EVALUATE: {}".format(exc))
         return EXIT_CANNOT_EVALUATE
+    # T1 is ADVISORY: each hit is one WARN carried in the summary line below, not a finding line of its own
+    removal = removal_warnings(brief_path, findings)
+    findings = [finding for finding in findings if finding[0] != "T1"]
     for rule, severity, line, message, excerpt in findings:
         print("{}:{}: {} {}: {}: {}".format(brief_path, line, severity, rule, message, excerpt))
     hard = [rule for rule, severity, _, _, _ in findings if severity == "HARD"]
     missing_input = INPUT_HINT if "P6" in hard else ""
     git_write = GIT_WRITE_HINT if "W1" in hard else ""
     # P8 is ADVISORY: a hit adds its hint to whichever summary line the other rules select, and never selects one
-    status_ask = STATUS_HINT if any(rule == "P8" for rule, _, _, _, _ in findings) else ""
+    status_ask = (STATUS_HINT if any(rule == "P8" for rule, _, _, _, _ in findings) else "") + removal
     if code == EXIT_REFUSE and set(hard) - EVERY_FAMILY_RULES:
         print("REFUSE: family {} cannot execute and the brief carries a structural execution request ({} hard "
               "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}{}{}".format(
@@ -4548,6 +5006,47 @@ W1_OPTION_FORMS = ("Use `git -C /w/r commit -m fix`.\n", "Use `git -c user.name=
                    "Use git -C /w/r -c k=v push origin HEAD.\n")
 W1_ABSOLUTE = "Use `/usr/bin/git commit -m fix`.\n"
 W1_FENCE = "Steps:\n\n```text\ngit add -A\ngit commit -m fix\n```\n"
+# T1: task lines that describe, review, quote or forbid a removal rather than instruct one (each quiet)
+T1_NOT_ASKED = ("TASK: verify the gate refuses removing a test without an accounting entry.\n",
+                "TASK: confirm no change can drop a check silently.\n",
+                "TASK: review whether part B refuses a task line that offers removing a test, case, assertion or "
+                "check.\n",
+                "TASK: review the change that proposes to remove the flaky test.\n",
+                "TASK: \"remove the flaky test\" is what the draft said; assess it.\n",
+                "TASK: the reviewer quoted “delete the test case” and `drop the check` as examples.\n",
+                "TASK: removing a check, as the draft did, is a reduction.\n",
+                "TASK: no need to remove the test.\n")
+T1_FENCED_TASK = "Example of a brief the lint refuses:\n\n```text\nTASK: remove the flaky test.\n```\n"
+# T1: task lines that offer or permit a removal (three lines quoted from real briefs, including the shape of the
+# brief that offered removing a self-test case as an option, then crafted and coordinated forms), each refused
+T1_OFFERS = ("TASK: Keep or remove self-test rows so every row still tests something.\n",
+             "TASK: (MINOR-3) remove the duplicated check.\n",
+             "TASK: …and remove the PR's tests and docs that expect the fence\n",
+             "TASK: fix the parser and remove the flaky test\n",
+             "TASK: keep or drop the flaky test, your call\n",
+             "TASK: rewrite nothing, but drop the failing checks\n",
+             "TASK: you are free to remove the flaky test\n",
+             "TASK: it is fine to delete the obsolete checks\n",
+             "TASK: rewrite or remove the test.\n",
+             "TASK: fix it and remove the test.\n")
+# T1: the quiet twins of those shapes: a reviewed, described or forbidden permission or coordination, a stop word
+# in the modifier slot, and the task line of the brief that asked for this rule
+T1_OFFER_TWINS = ("TASK: review whether it is fine to remove the flaky test.\n",
+                  "TASK: removing a check is not allowed.\n",
+                  "TASK: you are not allowed to remove a test.\n",
+                  "TASK: verify the gate refuses removing a test and dropping a check.\n",
+                  "TASK: review the change that proposes to fix the parser and remove the test.\n",
+                  "TASK: do not fix the parser and remove the test.\n",
+                  "TASK: the gate refuses it and drop the check.\n",
+                  "TASK: describe why removing the gate is fine.\n",
+                  "TASK: delete what tests do not need.\n",
+                  "TASK: delete the line the test reads.\n",
+                  "TASK: the task is to remove the test.\n",
+                  "TASK: fix BLOCKER-1: refuse a task line that offers or permits removing, deleting or dropping a "
+                  "check, test, gate, hook, case or row, in any grammatical form the review lists, while describing, "
+                  "quoting and reviewing a removal stay quiet.\n")
+T1_UNCLOSED_FENCE = "Notes:\n```\nTASK: remove the flaky test.\n"
+T1_INDENTED_FENCE = "    ```\nTASK: remove the flaky test.\n    ```\n"
 W1_PROHIBITED = ("Do not run `git push`.\n", "Never run git commit -a.\n")
 W1_PROHIBITED_VOIDED = "Do not run `git push`. Run it anyway.\n"
 # the same prohibitions alone in a fence, read as in prose; and a fence whose other sentence asks
@@ -7287,6 +7786,147 @@ def self_test(report_path=None):
           [(0, [])] * 2 + [(1, [("S3", "HARD")])] * 2)
     check("w1/every-family", [_w1_outcome(W1_COMMIT, family) for family in ("alpha", "beta", "gamma")],
           [w1_refused] * 2 + [(1, [("S3", "HARD"), ("W1", "HARD")])])
+    # ---------- T1: a task line that asks to remove a test or check (ADVISORY: a WARN, exit 0) ----------
+    # the row ids keep the names they had when T1 refused; each now asserts the WARN and exit 0
+    t1_refused = (0, [("T1", "WARN")])
+    t1_cure = "COVERAGE-ACCOUNTING: covered by check a/b, observed red without it\nAUTHORIZATION: decision 7\n"
+    t1_table = parse_table(TABLE_FIXTURE.encode("utf-8"))
+
+    def t1_accounting(text):
+        """For each T1 WARN in the brief, "accounted" when its message says both cure lines are there, else
+        "unaccounted"."""
+        return ["accounted" if message.endswith("authorization reference") else "unaccounted"
+                for rule, _, _, message, _ in evaluate(text.encode("utf-8"), "alpha", t1_table)[1] if rule == "T1"]
+
+    check("t1/remove-test-refused", _outcome("TASK: remove the flaky test in the parser suite.\n", "alpha"),
+          t1_refused)
+    check("t1/verb-object-forms-refused",
+          [_outcome(text, "alpha") for text in (
+              "TASK: delete the assertion.\n", "TASK: drop one self-test case.\n",
+              "TASK: fix the parser, or optionally removing a registered check.\n",
+              "TASK: Remove `checks` that duplicate.\n", "TASK: options: dropping tests\n")], [t1_refused] * 5)
+    check("t1/accounted-info", [_outcome("TASK: remove the flaky test.\n" + t1_cure, "alpha"),
+                                t1_accounting("TASK: remove the flaky test.\n" + t1_cure)], [t1_refused, ["accounted"]])
+    check("t1/cure-needs-both-lines",
+          [(_outcome("TASK: remove the flaky test.\n" + cure, "alpha"), t1_accounting("TASK: remove the flaky test.\n"
+                                                                                       + cure)) for cure in (
+              "COVERAGE-ACCOUNTING: covered by check a/b\n", "AUTHORIZATION: decision 7\n",
+              "COVERAGE-ACCOUNTING: covered by check a/b\nAUTHORIZATION:   \n",
+              "COVERAGE-ACCOUNTING: covered by check a/b\n AUTHORIZATION: decision 7\n")],
+          [(t1_refused, ["unaccounted"])] * 4)
+    check("t1/prohibited-ok",
+          [_outcome(text, "alpha") for text in ("TASK: fix the parser; never remove a test.\n",
+                                                "TASK: do not delete the check.\n",
+                                                "TASK: you mustn't drop any assertion.\n")], [(0, [])] * 3)
+    check("t1/prohibition-other-clause-refused",
+          _outcome("TASK: do not stop early; remove the test.\n", "alpha"), t1_refused)
+    check("t1/gerund-description-ok",
+          [_outcome(text, "alpha") for text in ("TASK: note that removing a check is a reduction.\n",
+                                                "TASK: deleting tests are never free.\n")], [(0, [])] * 2)
+    check("t1/plain-verb-not-description-refused", _outcome("TASK: remove the check is the ask.\n", "alpha"),
+          t1_refused)
+    check("t1/not-a-task-line-ok",
+          [_outcome(text, "alpha") for text in ("Remove the flaky test.\n", " TASK: remove the test.\n",
+                                                "**TASK:** remove the test.\n", "task: remove the test.\n")],
+          [(0, [])] * 4)
+    check("t1/other-object-or-form-ok",
+          [_outcome(text, "alpha") for text in ("TASK: remove the unused helper.\n",
+                                                "TASK: the removed test stays removed.\n",
+                                                "TASK: remove the brittle old flaky test.\n",
+                                                "TASK: remove check_x.py from the list.\n",
+                                                "TASK: remove the stale. Test it.\n")], [(0, [])] * 5)
+    check("t1/filler-bound",
+          [_outcome("TASK: remove {}test.\n".format("the old stale "[:end]), "alpha") for end in (0, 4, 14)]
+          + [_outcome("TASK: remove a the old stale test.\n", "alpha")], [t1_refused] * 3 + [(0, [])])
+    check("t1/every-family", [_outcome("TASK: remove the flaky test.\n", family) for family in ("alpha", "beta",
+                                                                                                "gamma")],
+          [t1_refused] * 3)
+    check("t1/one-finding-per-task-line",
+          len(evaluate(b"TASK: remove the test and drop the check.\nTASK: delete one assertion.\n", "alpha",
+                       parse_table(TABLE_FIXTURE.encode("utf-8")))[1]), 2)
+    check("t1/described-reviewed-quoted-ok",
+          [_outcome(text, "alpha") for text in T1_NOT_ASKED], [(0, [])] * len(T1_NOT_ASKED))
+    check("t1/instruction-forms-refused",
+          [_outcome(text, "alpha") for text in ("TASK: please delete the obsolete check.\n",
+                                                "TASK: you should remove the test.\n",
+                                                "TASK: feel free to drop the tests.\n",
+                                                "TASK: if it stays red, remove the test.\n")], [t1_refused] * 4)
+    check("t1/case-and-quantifier-refused",
+          [_outcome(text, "alpha") for text in ("TASK: remove the failing cases from the suite.\n",
+                                                "TASK: delete the test case.\n", "TASK: drop both test-cases.\n",
+                                                "TASK: remove all failing tests.\n",
+                                                "TASK: remove these two checks.\n")], [t1_refused] * 5)
+    check("t1/fenced-task-line-ok", _outcome(T1_FENCED_TASK, "alpha"), (0, []))
+    check("t1/fenced-cure-refused", [_outcome("TASK: remove the flaky test.\n```text\n" + t1_cure + "```\n", "alpha"),
+                                     t1_accounting("TASK: remove the flaky test.\n```text\n" + t1_cure + "```\n")],
+          [t1_refused, ["unaccounted"]])
+    check("t1/noun-modifier-ok",
+          [_outcome(text, "alpha") for text in ("TASK: remove the check mark.\n",
+                                                "TASK: drop the test fixture directory.\n",
+                                                "TASK: delete the test data file.\n")], [(0, [])] * 3)
+    check("t1/message-plain-verb",
+          [evaluate(text.encode("utf-8"), "alpha", parse_table(TABLE_FIXTURE.encode("utf-8")))[1][0][3].split(
+              " and the brief")[0] for text in ("TASK: options: removing a test\n", "TASK: drop the tests.\n")],
+          ["task line asks to remove a test", "task line asks to drop tests"])
+    check("t1/offer-forms-refused", [_outcome(text, "alpha") for text in T1_OFFERS], [t1_refused] * len(T1_OFFERS))
+    check("t1/gate-hook-row-objects-refused",
+          [_outcome(text, "alpha") for text in ("TASK: remove the pre-commit hook.\n", "TASK: drop the removal gate.\n",
+                                                "TASK: delete the failing rows.\n")], [t1_refused] * 3)
+    check("t1/permission-as-description-refused",
+          [_outcome(text, "alpha") for text in ("TASK: removing the failing tests is fine.\n",
+                                                "TASK: dropping flaky checks is allowed if they block you.\n",
+                                                "TASK: removing the test is an option.\n")], [t1_refused] * 3)
+    check("t1/offer-twins-ok", [_outcome(text, "alpha") for text in T1_OFFER_TWINS],
+          [(0, [])] * len(T1_OFFER_TWINS))
+    # an unclosed fence holding a TASK: line is one WARN naming the fence's opening line (line 2), and the task
+    # line before the fence is still read (a second WARN, line 1)
+    check("t1/unclosed-fence-cannot-evaluate",
+          [_outcome(T1_UNCLOSED_FENCE, "alpha"), _outcome("TASK: fix it.\n```\nexample, never closed\n", "alpha"),
+           _outcome("Notes:\n```\nTASK: remove the flaky test.\n```\n", "alpha"),
+           [line for rule, _, line, _, _ in evaluate(T1_UNCLOSED_FENCE.encode("utf-8"), "alpha", t1_table)[1]
+            if rule == "T1"],
+           [line for rule, _, line, _, _ in evaluate(("TASK: drop the check.\n" + T1_UNCLOSED_FENCE).encode("utf-8"),
+                                                     "alpha", t1_table)[1] if rule == "T1"]],
+          [t1_refused, (0, []), (0, []), [2], [1, 3]])
+    check("t1/indented-fence-not-a-fence-refused",
+          [_outcome(T1_INDENTED_FENCE, "alpha"), _outcome("   ```\nTASK: remove the flaky test.\n```\n", "alpha")],
+          [t1_refused, (0, [])])
+    # a tab-indented fence line is an indented code block line, not a fence, so the task line between warns
+    check("t1/tab-fence-not-a-fence-warned", _outcome("\t```\nTASK: remove the flaky test.\n\t```\n", "alpha"),
+          t1_refused)
+    # a permission after a later clause boundary is an offer, not a description
+    check("t1/permission-later-clause-warned",
+          _outcome("TASK: removing the failing tests, if they block you, is fine.\n", "alpha"), t1_refused)
+    t1_tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-t1-"))
+    try:
+        with open(t1_tmp / "brief.md", "w", encoding="utf-8") as handle:
+            handle.write("Context.\nTASK: remove the flaky test.\n")
+        with open(t1_tmp / "table.toml", "w", encoding="utf-8") as handle:
+            handle.write(TABLE_FIXTURE)
+        t1_printed = io.StringIO()
+        with contextlib.redirect_stdout(t1_printed):
+            t1_code = run(str(t1_tmp / "brief.md"), "alpha", str(t1_tmp / "table.toml"))
+        t1_lines = t1_printed.getvalue().splitlines()
+        t1_warn_text = REMOVAL_WARN.format(
+            t1_tmp / "brief.md", 2, "task line asks to remove a test and the brief has no COVERAGE-ACCOUNTING: line "
+            "or no AUTHORIZATION: line with text after it", "TASK: remove the flaky test.")
+        # with a HARD hit from another rule (S3, family gamma), the same WARN rides on the REFUSE line
+        with open(t1_tmp / "brief.md", "w", encoding="utf-8") as handle:
+            handle.write("Context.\nTASK: remove the flaky test.\n\nRead only `git show HEAD:x.py`.\n")
+        t1_refuse_printed = io.StringIO()
+        with contextlib.redirect_stdout(t1_refuse_printed):
+            t1_refuse_code = run(str(t1_tmp / "brief.md"), "gamma", str(t1_tmp / "table.toml"))
+        t1_refuse_lines = t1_refuse_printed.getvalue().splitlines()
+        # T1 is ADVISORY: exit 0, no finding line of its own, one WARN at the end of the OK summary line; and with
+        # a refusal from another rule, the exit code is that rule's and the WARN ends the REFUSE line
+        check("t1/main-refuse-line",
+              (t1_code, len(t1_lines), t1_lines[-1].startswith("OK: family alpha"),
+               t1_lines[-1].endswith(t1_warn_text), t1_lines[-1].count("WARN T1"),
+               t1_refuse_code, t1_refuse_lines[-1].startswith("REFUSE: family gamma"),
+               t1_refuse_lines[-1].endswith(t1_warn_text), any("T1" in line for line in t1_refuse_lines[:-1])),
+              (EXIT_OK, 1, True, True, 1, EXIT_REFUSE, True, True, False))
+    finally:
+        shutil.rmtree(t1_tmp, ignore_errors=True)
     w1_tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-w1-"))
     try:
         with open(w1_tmp / "brief.md", "w", encoding="utf-8") as handle:
@@ -7351,7 +7991,7 @@ def self_test(report_path=None):
           [p8_warned] * len(P8_TEMPLATE_ASKED))
     check("p8/empty-cells-quiet", _outcome(P8_EMPTY_CELLS, "alpha"), (0, []))
     check("p8/valued-cells-warned", _outcome(P8_VALUED_CELLS, "alpha"), p8_warned)
-    # the exit section names every rule that can refuse (each HARD rule), P7 included
+    # the exit section names every rule that can refuse (each HARD rule), P7 included; T1 is advisory, so not
     check("p8/exit-section-hard-rules",
           re.search(r"at least one HARD hit \(([^)]*)\)", " ".join(__doc__.split())).group(1),
           "S1, S2, S3, P2, P5, P6, P7 or W1")
@@ -9223,7 +9863,63 @@ def self_test(report_path=None):
                 lambda data: data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:2], "replace")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 270)
+    # T1: the rule, its verbs, its objects, its fillers, its cure, its prohibition and its description each patched
+    # out flips its fixture
+    t1_task = "TASK: remove the flaky test.\n"
+
+    def warned(text):
+        """Whether the brief draws a T1 WARN (T1 is advisory, so its flips are read from the WARN, not the exit
+        code), or "CannotEvaluate"."""
+        def outcome():
+            got = _outcome(text)
+            return got if isinstance(got, str) else ("T1", "WARN") in got[1]
+        return outcome
+
+    def accounting(text):
+        return lambda: t1_accounting(text)
+
+    check("revert/t1-red", *flip([warned(t1_task)], [False], rule_t1=nothing))
+    check("revert/t1-verbs-red", *flip([warned(t1_task), warned("TASK: drop one check.\n")], [False, False],
+                                       T1_VERBS=frozenset()))
+    check("revert/t1-objects-red", *flip([warned(t1_task), warned("TASK: delete the assertion.\n")], [False, False],
+                                         T1_OBJECTS=frozenset()))
+    check("revert/t1-fillers-red", *flip([warned(t1_task)], [False], T1_FILLERS=frozenset()))
+    check("revert/t1-cure-red", *flip([accounting(t1_task)], [["accounted"]], t1_accounted=lambda lines: True))
+    check("revert/t1-cure-both-red", *flip([accounting(t1_task + "AUTHORIZATION: decision 7\n")], [["accounted"]],
+                                           T1_CURE_LABELS=("AUTHORIZATION:",)))
+    check("revert/t1-prohibition-red", *flip([warned("TASK: never remove a test.\n")], [True],
+                                             t1_prohibited=lambda words, index: False))
+    check("revert/t1-description-red", *flip([warned("TASK: removing a check is a reduction.\n")], [True],
+                                             t1_described=lambda words, verb, obj: False))
+    check("revert/t1-clause-boundary-red", *flip([warned("TASK: do not stop early; remove the test.\n")], [False],
+                                                 t1_words=lambda line, real=t1_words: [
+                                                     (word, False) for word, _ in real(line)]))
+    check("revert/t1-instruction-red", *flip([warned(T1_NOT_ASKED[0]), warned(T1_NOT_ASKED[3])], [True, True],
+                                             t1_instruction=lambda words, index: True))
+    check("revert/t1-quotation-red", *flip([warned(T1_NOT_ASKED[4])], [True], t1_unquoted=lambda line: line))
+    check("revert/t1-fence-red", *flip([warned(T1_FENCED_TASK)], [True],
+                                       t1_lines=lambda text: list(enumerate(text.split("\n"), 1))))
+    check("revert/t1-noun-modifier-red", *flip([warned("TASK: remove the check mark.\n")], [True],
+                                               T1_NOT_OBJECT_AFTER=frozenset()))
+    check("revert/t1-coordination-red", *flip([warned(T1_OFFERS[3]), warned(T1_OFFERS[0])], [False, False],
+                                              t1_imperative_conjunct=lambda words, end: False))
+    check("revert/t1-coordination-subordinate-red", *flip([warned(T1_OFFER_TWINS[4])], [True],
+                                                          T1_SUBORDINATE=frozenset()))
+    check("revert/t1-permission-red", *flip([warned(T1_OFFERS[6]),
+                                             warned("TASK: removing the failing tests is fine.\n")],
+                                            [False, False], T1_PERMISSIONS=frozenset()))
+    # both description branches: the predicate right after the object, and one after a later clause boundary
+    check("revert/t1-permission-description-red", *flip(
+        [warned("TASK: removing the failing tests is fine.\n"),
+         warned("TASK: removing the failing tests, if they block you, is fine.\n")], [False, False],
+        t1_permission=lambda words, link: False))
+    check("revert/t1-modifier-slot-red", *flip([warned(T1_OFFERS[1])], [False], T1_MODIFIER_SLOT=False))
+    check("revert/t1-filler-stops-red", *flip([warned("TASK: delete what tests do not need.\n")], [True],
+                                              T1_FILLER_STOPS=frozenset()))
+    check("revert/t1-unclosed-fence-red", *flip([lambda: _outcome(T1_UNCLOSED_FENCE, "alpha")], [(0, [])],
+                                                t1_unclosed=lambda hidden: False))
+    check("revert/t1-fence-indent-red", *flip([warned(T1_INDENTED_FENCE)], [False], T1_FENCE_INDENT=8))
+    check("revert/every-flip-ran", len(flipped), 291)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
