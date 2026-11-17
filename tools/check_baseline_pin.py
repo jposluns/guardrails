@@ -517,10 +517,12 @@ def _last_line(data):
 
 
 def _fetch_hint(ref):
-    """How to get a full ref name this clone lacks: the fetch for a remote-tracking name, else a generic line."""
+    """How to get a full ref name this clone lacks: for a remote-tracking name, the fetch whose explicit destination
+    refspec creates exactly that ref (a bare git fetch origin main updates only FETCH_HEAD when the clone's fetch
+    refspec does not cover main, as in a single-branch clone of another branch), else a generic line."""
     parts = ref.split("/", 3)
     if len(parts) == 4 and parts[:2] == ["refs", "remotes"] and parts[2] and parts[3]:
-        return "fetch it with `git fetch {} {}`".format(parts[2], parts[3])
+        return "fetch it with `git fetch {} {}:{}`".format(parts[2], parts[3], ref)
     return "create or fetch that ref"
 
 
@@ -955,7 +957,7 @@ def _coupling_cases():
                                                               local=True)
     check("couple/local-base-absent-cannot-evaluate", got == 2
           and "CANNOT EVALUATE: base: refs/remotes/origin/main does not exist in this clone" in report
-          and "git fetch origin main" in report and "PASS" not in report, (got, report))
+          and "`git fetch origin main:refs/remotes/origin/main`" in report and "PASS" not in report, (got, report))
 
     # A short --local-base name is cannot-evaluate, never resolved: git takes origin/main through a tag or a local
     # branch of that name before refs/remotes/origin/main. refs/remotes/origin/main names the base commit, the

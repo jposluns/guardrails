@@ -123,11 +123,28 @@ run_gate "baseline-pin-selftest" python3 -I -B tools/check_selftest_execution.py
 # --local-base refs/remotes/origin/main runs the base-coupling leg against the fork point of HEAD and
 # origin/main, the base check_version_monotonicity.py derives by default. The full ref name is required: a tag
 # or local branch named origin/main would win over the short name. This runner never fetches (it does not
-# touch the network) and passes the flag unconditionally, because the runner grammar check_ci_parity.py holds
-# admits no conditional git probe; so a clone without refs/remotes/origin/main fails this gate as
-# cannot-evaluate (exit 2), with a message naming the fetch (git fetch origin main), never a pass. A broken
-# loose ref, a broken packed-refs line, a dangling symbolic ref and any other git failure are cannot-evaluate.
-run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py --local-base refs/remotes/origin/main
+# touch the network). It passes the flag only when git show-ref --verify --quiet refs/remotes/origin/main
+# exits 0 with nothing on stderr; the gate then reads that ref itself, and a broken loose ref, a broken
+# packed-refs line, a dangling symbolic ref and any other git failure there are cannot-evaluate. A clean
+# absence (exit 1, nothing on stderr) prints one NOTE line that the base comparison did not run and how to
+# create the ref, then runs the gate without the flag (the gate's own no-base NOTE follows). Any other probe
+# outcome (output on stderr, or an exit other than 0 or 1) is never read as absence: it fails the run under
+# the baseline-pin name. check_ci_parity.py admits this block only as its exact reviewed text
+# (BASELINE_PROBE_BLOCK).
+baseline_probe_err=$(git show-ref --verify --quiet refs/remotes/origin/main 2>&1 >/dev/null)
+baseline_probe_rc=$?
+if [ "$baseline_probe_rc" -eq 0 ] && [ -z "$baseline_probe_err" ]; then
+  run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py --local-base refs/remotes/origin/main
+elif [ "$baseline_probe_rc" -eq 1 ] && [ -z "$baseline_probe_err" ]; then
+  echo "NOTE: baseline-pin base comparison did NOT RUN: this clone has no refs/remotes/origin/main; create it with git fetch origin main:refs/remotes/origin/main"
+  run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py
+else
+  echo "--- baseline-pin ---"
+  failed=1
+  failed_names="${failed_names:+${failed_names}, }baseline-pin"
+  echo "GATE FAILED: baseline-pin (git show-ref --verify --quiet refs/remotes/origin/main exit ${baseline_probe_rc}, stderr: ${baseline_probe_err})"
+  echo
+fi
 run_gate "palette-aiqt" python3 -I -B .baseline/check_palette.py --site aiqt --palettes site/draft/assets/baseline/palettes.css
 run_gate "palette-opfiles" python3 -I -B .baseline/check_palette.py --site opfiles --palettes opf/site/draft/assets/baseline/palettes.css
 run_gate "security-txt-selftest" python3 -I -B tools/check_selftest_execution.py --suite security-txt-selftest
