@@ -717,6 +717,15 @@ CONFIG_EXCLUSIONS = {
             " and as the direct self-test launch CONFIG_DIRECT_SELFTESTS keeps, so each poisoned"
             " lane still enters that self-test's own entry point without any launcher sanitizing"
             " the environment first.",
+        ("tools/check_review_labels.py",):
+            "A bare launch is the real gate over this checkout, not a self-test: it diffs this"
+            " checkout's working tree against its merge base with the protected branch, so its result"
+            " depends on the checkout's history, refs and uncommitted edits rather than on the lane (a"
+            " shallow checkout, or one with no derivable protected branch, cannot evaluate, exit 2, by"
+            " design); its self-test stays in this roster twice: as the review-labels-selftest suite step,"
+            " whose launcher sanitizes the child environment, and as the direct self-test launch"
+            " CONFIG_DIRECT_SELFTESTS keeps, so each poisoned lane still enters that self-test's own"
+            " entry point without any launcher sanitizing the environment first.",
         ("tools/ci_site_scope.py",):
             "A bare launch is a usage error by design, not a self-test: the tool runs only with a"
             " mode flag, so with none it prints its usage and exits 2 (cannot evaluate) in every"
@@ -758,6 +767,7 @@ CONFIG_EXCLUSIONS = {
 # (its suite no longer in any roster, or its launch missing from the built roster) refuses the roster.
 CONFIG_DIRECT_SELFTESTS = {
     "internal-names-selftest": ("tools/check_internal_names.py", "--self-test"),
+    "review-labels-selftest": ("tools/check_review_labels.py", "--self-test"),
 }
 
 

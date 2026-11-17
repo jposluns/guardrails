@@ -317,10 +317,14 @@ def require_excluded_files(root, excluded):
 # --- git ---------------------------------------------------------------------------------------------
 def _git_env():
     """The caller's environment with every GIT_ variable dropped (no repository, index or config
-    redirection), the system config skipped, and an offline, non-interactive, lock-free posture with
-    replace refs ignored, so a grafted parent cannot move the merge base."""
+    redirection), the system config skipped, the global config pinned to the null device and HOME and
+    XDG_CONFIG_HOME pointed there too (so neither the caller's ~/.gitconfig, its XDG git config nor the
+    attributes or ignore files they default to are read: a caller-configured core.fsmonitor never runs,
+    and a caller's safe.directory trust no longer applies), and an offline, non-interactive, lock-free
+    posture with replace refs ignored, so a grafted parent cannot move the merge base."""
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0",
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, HOME=os.devnull,
+               XDG_CONFIG_HOME=os.devnull, GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0",
                GIT_OPTIONAL_LOCKS="0", GIT_NO_REPLACE_OBJECTS="1")
     return env
 
@@ -865,7 +869,8 @@ def _self_test():
           "files are not judged and every other file is; a moved or reordered line is not charged while "
           "an edited line and an extra copy are; a text file declared binary, a genuine binary and "
           "look-alike characters are read; textconv, an external diff, a submodule log, a GIT_DIR "
-          "redirect and a replace ref are held off; git output off its shape is refused; a clean main, a "
+          "redirect, a replace ref and a caller's home configuration and fsmonitor are held off; "
+          "git output off its shape is refused; a clean main, a "
           "clone of main and a branch behind main pass with a NOTE and an uncommitted label there is "
           "refused; a clone of a feature-branch checkout is judged against origin/main at the branch "
           "tip, one commit past it and several past it, and hides the branch's label once origin/HEAD's "
@@ -1679,6 +1684,51 @@ def _hardening_rows(tmp, labels):
             os.environ.pop("GIT_DIR", None)
         else:
             os.environ["GIT_DIR"] = saved
+    _caller_config_rows(tmp, repo)
+
+
+def _caller_config_rows(tmp, repo):
+    """A poisoned caller home is not read: with HOME's .gitconfig naming an fsmonitor hook that logs each
+    call and XDG_CONFIG_HOME's git/config malformed, the working-tree diff still reads the label and the
+    hook never runs; honouring the caller's home either way is refused (the malformed file) or runs the
+    hook (the fsmonitor)."""
+    home, xdg, clean = Path(tmp) / "caller-home", Path(tmp) / "caller-xdg", Path(tmp) / "caller-clean"
+    log, hook = Path(tmp) / "caller-fsmonitor.log", Path(tmp) / "caller-fsmonitor.sh"
+    for directory in (home, xdg / "git", clean):
+        os.makedirs(directory)
+    with open(hook, "w", encoding="utf-8") as handle:
+        handle.write("#!/bin/sh\necho invoked >> '{}'\nexit 1\n".format(log))
+    os.chmod(hook, 0o755)
+    _write(home, ".gitconfig", "[core]\n\tfsmonitor = {}\n".format(hook))
+    _write(xdg / "git", "config", "[core\n")
+    honoured = _git_env
+
+    def env_with_caller_home():
+        # The scrub before the pin: every GIT_ variable still dropped, the caller's HOME and
+        # XDG_CONFIG_HOME kept.
+        env = honoured()
+        env.pop("GIT_CONFIG_GLOBAL", None)
+        env.update(HOME=os.environ["HOME"], XDG_CONFIG_HOME=os.environ["XDG_CONFIG_HOME"])
+        return env
+    saved = {key: os.environ.get(key) for key in ("HOME", "XDG_CONFIG_HOME")}
+    os.environ["HOME"], os.environ["XDG_CONFIG_HOME"] = str(home), str(xdg)
+    try:
+        code, out = _gate(repo)
+        check("refuse/caller-home-and-fsmonitor-unused",
+              code == 1 and "  notes.txt:1: backlog-id" in out and not log.exists(), out)
+        with _patched(_git_env=env_with_caller_home):
+            code, out = _gate(repo)
+        check("flip/caller-xdg-config-honoured", code == 2, out)
+        os.environ["XDG_CONFIG_HOME"] = str(clean)
+        with _patched(_git_env=env_with_caller_home):
+            code, out = _gate(repo)
+        check("flip/caller-fsmonitor-honoured", log.exists(), out)
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _replace_ref_rows(tmp, labels):
