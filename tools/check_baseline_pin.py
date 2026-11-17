@@ -464,9 +464,13 @@ def _check_ref(base):
 
 
 def _git_base_read(root, args):
-    """A finished base read `git <args>` in root; CannotEvaluate when git could not run."""
+    """A finished base read `git <args>` in root; CannotEvaluate when git could not run. The three `-c` pairs in
+    option position switch off automatic gc and maintenance (tools/_git_fixture_env.py _NO_AUTO_MAINTENANCE, the
+    posture of _staged_git in tools/check_no_dashes.py), so the maintenance-pin scan reads this launch as pinned
+    whatever subcommand args carries."""
     try:
-        return subprocess.run(["git", "--no-replace-objects", "-C", str(root)] + args,
+        return subprocess.run(["git", "--no-replace-objects", "-C", str(root), "-c", "gc.auto=0",
+                               "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"] + args,
                               capture_output=True, env=_git_env(), timeout=GIT_TIMEOUT, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise CannotEvaluate("base: git {} could not run ({})".format(" ".join(args), exc)) from None
