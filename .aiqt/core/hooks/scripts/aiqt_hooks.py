@@ -6468,6 +6468,9 @@ _CMTIDN_XARGS_FILE_RE = re.compile(r"-[A-Za-z0-9]*a|--a(?:r(?:g(?:-(?:f(?:i(?:l(
 # A command separator in the operator characters between two words, other than ( and ): a newline, ;, a |
 # that does not end a >| redirection operator, or a & that is not part of a redirection operator.
 _CMTIDN_PLAIN_SEPARATOR_RE = re.compile(r"[\n;]|(?<!>)\||(?<![<>])&(?!>)")
+# A process substitution <( that the operator characters before a word open, its body starting with blanks,
+# newlines or a further ( (<(echo X), <( (echo X) ), <((echo X)), or <( and a newline before echo X).
+_CMTIDN_SUBST_OPEN_RE = re.compile(r"<\([ \t\n(]*\Z")
 # The characters at which _cmtidn_config_string_ai splits a command string into simple commands.
 _CMTIDN_STRING_SEGMENT_RE = re.compile(r"[\n;&|()]+")
 # An identity variable or GIT_CONFIG_VALUE_<n> name in an assignment form (=, += or :=), for the += join rule:
@@ -6512,7 +6515,8 @@ def _cmtidn_unread_route_ai(command):
     _CMTIDN_SET_UNREAD_RE dropped:
     (a) an xargs word whose argument-file option (_CMTIDN_XARGS_FILE_RE: -a, a cluster ending in a, --arg-file
     or a prefix of it, attached or detached) is given a process substitution (xargs -a <(echo X) git config
-    user.name, xargs --arg-file=<(...) ...): the words of that simple command outside the substitution, the
+    user.name, xargs --arg-file=<(...) ...), whose body may start with blanks, newlines or a further (
+    (_CMTIDN_SUBST_OPEN_RE: xargs -a <( (echo X) ) ...): the words of that simple command outside the substitution, the
     option word dropped, are judged by the xargs stdin rule (_cmtidn_stdin_identity_ai), which denies when
     xargs runs a git config that sets a user, author or committer name or email key and the command names an
     AI identity anywhere, the substitution included, since xargs adds the words it reads from that file;
@@ -6526,7 +6530,10 @@ def _cmtidn_unread_route_ai(command):
     names an AI identity (EMAIL=noreply@anthr; EMAIL+=opic.com, GIT_AUTHOR_NAME=Cla GIT_AUTHOR_NAME+=ude); a
     GIT_CONFIG_VALUE_<n> counts only when a GIT_CONFIG_KEY_<n> assignment of the same n names such a key, and
     a part that holds an expansion (_CMTIDN_EXPANSION_RE) stops the join for that name, since the raw-text rule
-    judges such a value as one the text does not spell.
+    judges such a value as one the text does not spell. A git identity variable is joined twice, once with its
+    name in any case and once as spelled, and either join can deny. A ${NAME:=VALUE} or ${NAME=VALUE} part sets
+    the value up to its first }. Every word that holds an assignment form counts as one, quoted text and an
+    operand of another command included, so such a word between two parts restarts the join of its name.
     A simple command ends at a newline, ;, | or & outside the substitution. Not read: any other route, which
     the residue lists. Bounded as _cmtidn_identity_set_ai is: a command longer than _CMTIDN_READ_LIMIT is not
     read here, and each word is searched a fixed number of times. Routes (a) and (b) need a config word and
@@ -6550,20 +6557,28 @@ def _cmtidn_unread_route_ai(command):
     inside = None  # (a) the depth outside the argument-file process substitution while it is open
     wrapper = False  # (b) a -c wrapper word was read in this simple command
     string_next = False  # (b) the next word is the wrapper's command string
-    joined = {}  # (c) name -> the end of the joined spelled value so far (_CMTIDN_JOIN_TAIL characters), or
-    # None once a part is not spelled
+    joined = {}  # (c) a name as spelled, or ("any case", NAME) for a git identity variable -> the end of the
+    # joined spelled value so far (_CMTIDN_JOIN_TAIL characters), or None once a part is not spelled
     keys = set()  # (c) the n of each GIT_CONFIG_KEY_<n> assignment that names an identity key
     values = []  # (c) (name, joined value) for each GIT_CONFIG_VALUE_<n> join that names an AI identity
     for k, (word, _doubtful) in enumerate(words):
         gap = gaps[k]
-        for ch in gap:
+        cut = 0  # (a) where the part of the gap outside the argument-file process substitution starts
+        for pos, ch in enumerate(gap):
             if ch == "(":
                 depth += 1
             elif ch == ")" and depth:
                 depth -= 1
-        if inside is not None and depth <= inside:
-            inside = None  # the argument-file process substitution has closed
-        if inside is None and _CMTIDN_PLAIN_SEPARATOR_RE.search(gap):
+                if inside is not None and depth <= inside:
+                    inside = None  # the argument-file process substitution has closed
+                    cut = pos + 1  # a newline or ; before its ) is inside it, not a separator
+        # (a) the gap opens a process substitution as the value of an xargs argument-file option, with no
+        # separator before the <(; a newline after it is inside the substitution, not a separator
+        opener = (_CMTIDN_SUBST_OPEN_RE.search(gap, cut) if named is not None and inside is None and xargs and outer
+                  else None)
+        subst = (opener is not None and _CMTIDN_XARGS_FILE_RE.fullmatch(outer[-1]) is not None
+                 and _CMTIDN_PLAIN_SEPARATOR_RE.search(gap, cut, opener.start()) is None)
+        if inside is None and not subst and _CMTIDN_PLAIN_SEPARATOR_RE.search(gap, cut):
             if file_subst and outer:
                 # The AI name was sought once above; the xargs stdin rule searches only that name here.
                 hit = _cmtidn_stdin_identity_ai(outer, named.group(0))
@@ -6571,11 +6586,10 @@ def _cmtidn_unread_route_ai(command):
                     return "xargs reading an argument file from a process substitution: " + hit
             outer, xargs, file_subst, wrapper, string_next = [], False, False, False, False
         bare = _CMTIDN_SET_UNREAD_RE.sub("", word)
-        if (named is not None and inside is None and xargs and gap.rstrip(" \t").endswith("<(") and outer
-                and _CMTIDN_XARGS_FILE_RE.fullmatch(outer[-1])):
+        if subst:
             outer.pop()  # the option's value is the substitution, so the option word is not an argument
             file_subst = True
-            inside = depth - 1
+            inside = depth - gap.count("(", opener.start())  # the depth outside the <( and any ( after it
         if inside is None:
             outer.append(bare)
             xargs = xargs or bare.rsplit("/", 1)[-1] == "xargs"
@@ -6616,24 +6630,34 @@ def _cmtidn_unread_route_ai(command):
             name = m.group(1) if m.group(1) == "EMAIL" else m.group(1).upper()
             raw = word[at[m.end()]:]
             value = dropped[m.end():]
-            if _CMTIDN_EXPANSION_RE.search(raw):
-                joined[name] = None
-                continue
-            if m.group(2) != "+=" or name not in joined:
-                joined[name] = value[-_CMTIDN_JOIN_TAIL:]
-                continue
-            if joined[name] is None:
-                continue
-            before = joined[name]
-            window = before + value
-            joined[name] = window[-_CMTIDN_JOIN_TAIL:]
-            ai = AI_IDENTITY_RE.search(window, 1 if len(before) == _CMTIDN_JOIN_TAIL else 0)
-            if ai is None:
-                continue
-            if not name.startswith("GIT_CONFIG_VALUE_"):
-                return ("identity assignments of {!r} joined by += into a value that names an AI identity ({!r})"
-                        .format(name, ai.group(0)))
-            values.append((name, ai))
+            if m.start() and dropped[m.start() - 1] == "{":
+                value = value.split("}", 1)[0]  # ${NAME:=VALUE} or ${NAME=VALUE}: the value ends at its }
+            spelled = _CMTIDN_EXPANSION_RE.search(raw) is None
+            # A git identity variable is joined under its name in any case, as before, and under its name as
+            # spelled too, so an assignment of the same name in another case between two parts does not restart
+            # the join of that spelling (GIT_AUTHOR_NAME=Cla; git_author_name=x; GIT_AUTHOR_NAME+=ude); EMAIL and
+            # GIT_CONFIG_VALUE_<n> are read only as spelled, so each has one join.
+            joins = ((name,) if name == "EMAIL" or name.startswith("GIT_CONFIG_VALUE_")
+                     else (("any case", name), m.group(1)))
+            for key in joins:
+                if not spelled:
+                    joined[key] = None
+                    continue
+                if m.group(2) != "+=" or key not in joined:
+                    joined[key] = value[-_CMTIDN_JOIN_TAIL:]
+                    continue
+                if joined[key] is None:
+                    continue
+                before = joined[key]
+                window = before + value
+                joined[key] = window[-_CMTIDN_JOIN_TAIL:]
+                ai = AI_IDENTITY_RE.search(window, 1 if len(before) == _CMTIDN_JOIN_TAIL else 0)
+                if ai is None:
+                    continue
+                if not name.startswith("GIT_CONFIG_VALUE_"):
+                    return ("identity assignments of {!r} joined by += into a value that names an AI identity ({!r})"
+                            .format(name, ai.group(0)))
+                values.append((name, ai))
     if file_subst and outer:
         hit = _cmtidn_stdin_identity_ai(outer, named.group(0))
         if hit is not None:

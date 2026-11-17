@@ -31374,6 +31374,46 @@ def _main_isolated(monitor):
                 ("(ci-idc-pj5) an AI EMAIL joined from three spelled assignments by += denies",
                  "EMAIL=x; EMAIL+=@ant; EMAIL+=hropic.com; git commit -m x")):
             ciexpect(_ci_label, _ci_cmd, "deny")
+        # The same routes in spellings the rule did not read: a process substitution whose body starts with a
+        # subshell or a newline (ci-idc-af7 to af9; the newline before its ) is inside it, not a separator), a join
+        # that starts in a ${NAME:=VALUE} default (ci-idc-pj6, whose value ends at its }), and a join with an
+        # assignment of the same name in another case between its parts (ci-idc-pj7, pj8), which no longer
+        # restarts the join of the name as spelled. Each deny vector allowed before this change; the controls set
+        # the maintainer's identity the same ways, and af-c7 names CLAUDE.md beside a process substitution feeding
+        # git add.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-af7) xargs -a of a process substitution whose body is a subshell, feeding git config "
+                 "user.name, denies", "xargs -a <( (echo Claude) ) git config user.name"),
+                ("(ci-idc-af8) xargs -a of a process substitution with an unspaced subshell body, feeding git config "
+                 "user.name, denies", "xargs -a <((echo Claude)) git config user.name"),
+                ("(ci-idc-af9) xargs -a of a process substitution whose body starts on a new line, feeding git config "
+                 "user.name, denies", "xargs -a <(\necho Claude\n) git config user.name"),
+                ("(ci-idc-pj6) an AI EMAIL joined by += onto a ${EMAIL:=...} default denies",
+                 ": ${EMAIL:=noreply@anthr}; EMAIL+=opic.com; git commit -m x"),
+                ("(ci-idc-pj7) an AI GIT_AUTHOR_NAME joined by += past a lower-case assignment of the name denies",
+                 "GIT_AUTHOR_NAME=Cla; git_author_name=x; GIT_AUTHOR_NAME+=ude; export GIT_AUTHOR_NAME; "
+                 "git commit -m x"),
+                ("(ci-idc-pj8) an AI GIT_AUTHOR_NAME joined by += past a mixed-case += of the name denies",
+                 "GIT_AUTHOR_NAME=Cla; Git_Author_Name+=zz; GIT_AUTHOR_NAME+=ude; export GIT_AUTHOR_NAME; "
+                 "git commit -m x")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-af-c5) the maintainer's user.name in an xargs -a subshell process substitution allows",
+                 "xargs -a <( (echo 'Jeff Posluns') ) git config user.name"),
+                ("(ci-idc-af-c6) the maintainer's user.email in an xargs -a unspaced subshell process substitution "
+                 "allows", "xargs -a <((echo jeff@posluns.ca)) git config user.email"),
+                ("(ci-idc-af-c7) xargs -a of a process substitution starting on a new line feeding git add, before a "
+                 "CLAUDE.md commit, allows",
+                 "xargs -a <(\ngit ls-files .claude\n) git add; git commit -m 'regen CLAUDE.md'"),
+                ("(ci-idc-pj-c6) the maintainer's EMAIL joined by += onto a ${EMAIL:=...} default allows",
+                 ": ${EMAIL:=jeff@posluns}; EMAIL+=.ca; git commit -m x"),
+                ("(ci-idc-pj-c7) the maintainer's GIT_AUTHOR_NAME joined past a lower-case assignment beside a .claude/ "
+                 "message allows", "GIT_AUTHOR_NAME=Jeff; git_author_name=x; GIT_AUTHOR_NAME+=' Posluns'; "
+                 "export GIT_AUTHOR_NAME; git commit -m 'rules: regenerate .claude/rules'"),
+                ("(ci-idc-pj-c8) the maintainer's GIT_AUTHOR_NAME joined past a mixed-case += beside a CLAUDE.md "
+                 "message allows", "GIT_AUTHOR_NAME=Jeff; Git_Author_Name+=zz; GIT_AUTHOR_NAME+=' Posluns'; "
+                 "export GIT_AUTHOR_NAME; git commit -m 'docs: CLAUDE.md'")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
         for _ci_label, _ci_cmd in (
                 ("(ci-idc-af-c1) the maintainer's user.name in an xargs -a process substitution allows",
                  "xargs -a <(echo 'Jeff Posluns') git config user.name"),
