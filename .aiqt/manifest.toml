@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "a070b8568e5b30fb0784e0e7502808e3eb01d9108571a63a8e3de13f50fdb619"
+tree-sha256 = "031634c1981bb9087cb32491d22c649016ce86096d37283f65d28e9ac2bb65b5"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4417,8 +4417,8 @@ sha256 = "62cba7c3a3a459fbd31a27c52bc7ab11a792bd52189db8ba826e27c0327fd55b"
 
 [[sources]]
 path = "tools/check_review_labels.py"
-bytes = 103844
-sha256 = "a543baebdafac1982ed695b4cc22e8d9c2915cba4ec480794e1f6efa34c27ec4"
+bytes = 103861
+sha256 = "86c96076b3c56039ef6c9a1abbac682ebd9cb656a2b138cef20bc7d59cb6f766"
 
 [[sources]]
 path = "tools/check_rule_placement.py"

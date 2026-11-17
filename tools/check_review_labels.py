@@ -1514,7 +1514,7 @@ def _text_rows(tmp, labels):
         ("refuse/round-tab-number", "# fixed in " + rd + "\t5", "round-number"),
         ("refuse/fullwidth-digit", "# fixed in " + rd + " \N{FULLWIDTH DIGIT FIVE}", "round-number"),
         ("refuse/no-break-space", "# fixed in " + rd + " 5", "round-number"),
-        ("refuse/zero-width-space", "# tracked as " + "FI" + "X-​12", "backlog-id"),
+        ("refuse/zero-width-space", "# tracked as " + "FI" + "X-\N{ZERO WIDTH SPACE}12", "backlog-id"),
         ("refuse/cyrillic-o", "# fixed in r\N{CYRILLIC SMALL LETTER O}und 5", "round-number"),
         ("refuse/greek-omicron", "# fixed in r\N{GREEK SMALL LETTER OMICRON}und 5", "round-number"),
         ("refuse/cyrillic-capital-i", "# tracked as F\N{CYRILLIC CAPITAL LETTER BYELORUSSIAN-UKRAINIAN I}"
