@@ -106,7 +106,7 @@
 #                        delta, 135529 + 775 = 136304, leaving the 370 units that remain of the headroom
 #                        recorded in the 2026-10-29 entry, within the maintainer's authorization of 2026-11-08
 #                        for raises up to 148000.
-#                        Raised 136304 -> 138132 on 2026-11-17 under the maintainer's recorded decision of
+#                        Raised 136304 -> 138223 on 2026-11-17 under the maintainer's recorded decision of
 #                        2026-10-31 to raise the ratchet by exactly the measured delta, when
 #                        standing-constraints-persist gained its sentences that an upper limit whose value the
 #                        operator or a governing rule has set, not the assistant under the bounded-consumption
@@ -116,21 +116,22 @@
 #                        its refusal holds only that action, that a reservation is settled only to the use that
 #                        store records, never to a use the assistant reports, that an action with no known
 #                        bound is withheld until the setter or a cap in the limit's own unit bounds it, that a
-#                        host mechanism counts as that check and cap only if it reads the limit and count from
-#                        that store and refuses or ends the action when that aggregate count reaches the limit,
-#                        refusing preferably, as ending it can leave partial effects, and that where the host
-#                        provides no such check or store the limit still binds (cnstpr.6 to cnstpr.15):
-#                        measured PACK 136292 at the PR base 504f422d -> 138120 (+1828 units); rule files
-#                        119669 -> 121497; managed block 360 and file headers 16263 unchanged. The ratchet
-#                        rises by the measured delta, 136304 + 1828 = 138132, keeping the 12 units the ratchet
-#                        already stood above PACK, within the maintainer's authorization of 2026-11-08 for
-#                        raises up to 148000.
-#   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
+#                        host mechanism counts as that check only if it admits only an action whose greatest
+#                        possible use keeps the count within the limit, and as that cap only if it ends the
+#                        action at the limit, which can leave partial effects the assistant reports, that a
+#                        limit the setter configures in the host, metered by it, counts as such a store, and
+#                        that where the host provides no such check or store the limit still binds (cnstpr.6
+#                        to cnstpr.16): measured PACK 136292 at the PR base 504f422d -> 138211 (+1919 units);
+#                        rule files 119669 -> 121588; managed block 360 and file headers 16263 unchanged. The
+#                        ratchet rises by the measured delta, 136304 + 1919 = 138223, keeping the 12 units the
+#                        ratchet already stood above PACK, within the maintainer's authorization of 2026-11-08
+#                        for raises up to 148000.
+#   ceiling             a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 138132
+ratchet = 138223
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"

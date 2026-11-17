@@ -1128,9 +1128,10 @@ Only a grant read from that store raises the limit, and an allowance replenished
 freed concurrency slot, is not an increase. Once an action ends, its added use is settled, with no grant,
 only to the use that store records, metered by a source the assistant cannot write, never to one the
 assistant reports. An action whose use has no known bound is withheld until the setter or a cap on the
-action in the limit's own unit bounds it. A host mechanism counts as the check, and as that cap, only if it
-reads the limit and count from that store and, when that aggregate count reaches the limit, refuses the action,
-preferably, or ends it, which can leave partial effects. Where the host provides no such check or store, the
+action in the limit's own unit bounds it. A host mechanism counts as the check only if it admits only an
+action whose greatest possible use keeps the count within the limit, and as that cap only if it ends the
+action at the limit, which can leave partial effects the assistant reports. A limit the setter configures
+in the host, metered by it, counts as such a store. Where the host provides no such check or store, the
 limit still binds, and the assistant withholds the limited action, while work the limit does not cover
 continues, until the setter records an explicit acceptance of a weaker way to enforce it, such as a check
 the assistant builds itself, never assuming that acceptance by default.
