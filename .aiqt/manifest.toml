@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "1adde38c1f0fbe1607fd4f14c343b0e36fc2a78d2f3d12acf358a0ee195e3683"
+tree-sha256 = "2c4eef0f0af746b35d25ca30e98e99c56241f59fb0faf25d08e28124c172dfdf"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -72,8 +72,8 @@ sha256 = "5f94c26beb7336bb2d365e17ee093d9f97cd0382ccf33345751a522e81436af7"
 
 [[sources]]
 path = ".aiqt/core/gates/byte-canon.toml"
-bytes = 2474
-sha256 = "139ab3b1f79cb49d8f777a38afd6c72037c6250fdb3a852e198ca31aca6e58ed"
+bytes = 2764
+sha256 = "d2357e20fbeb5223eab747803bbe9189a21b93a452504bc2180b07de5ad0243e"
 
 [[sources]]
 path = ".aiqt/core/gates/canon-vectors/vectors.toml"
@@ -157,8 +157,8 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 
 [[sources]]
 path = ".aiqt/core/renderers.toml"
-bytes = 3119
-sha256 = "ddee30d2b2a8135b34ceffb27396c1b21903c9871a034a95108ff8d85bdc2003"
+bytes = 3159
+sha256 = "9110f9afbc22264c0e6a9b69a7b3411d9c3489c7e342a746245aedced4e4a713"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -847,8 +847,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 16126
-sha256 = "bfd0fff7e478f6c44138f9a6fe17d72bab581798bc352f86a00822b239617a10"
+bytes = 16408
+sha256 = "98d9bb6faa9189d145eecef82d29db3e842bcebb71328528a677376d0c7e01c5"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2317,8 +2317,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 54195
-sha256 = "633db175882147f6a69e7c1e792b4411e85eed1de37a47b8641b33e7da205a7e"
+bytes = 54257
+sha256 = "5b48f48272f3226aa6e9d435675515492cab62152a16e7277077cba69c05011d"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2432,8 +2432,8 @@ sha256 = "5c81eaadad18449e83fdace43265502839990b8a7de5c5fb113e6d9a9e17c10c"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 19008
-sha256 = "3f15d329d8b74333aaa9f8b5967f84d2419bb3260756715de215fb5335c5e26b"
+bytes = 19856
+sha256 = "7c615232d28a05bd4eb7057ef2de935f3dc0a1b718e748d4b087d81167e244d1"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -3551,6 +3551,11 @@ bytes = 2741501
 sha256 = "9d4b7facced4adf36bd45a1a1fbf81ac21baaf2e37c4663e14ede9fd5ef9050c"
 
 [[sources]]
+path = "plugin/aiqt-guardrails-hooks/skills/aiqt/SKILL.md"
+bytes = 16540
+sha256 = "02833e4ed8c6d11f75f9e8511a524927f4d64859e4003c59f325706d000297bc"
+
+[[sources]]
 path = "roadmap.toml"
 bytes = 1653
 sha256 = "eed28e3d08b59144830726add09d7e4c0ac93664aacea57ad1a47d32e1cb30cd"
@@ -4357,8 +4362,8 @@ sha256 = "3aba6654e5757854a967398ac9e512d9b614b6b6c2012fba0d76eae55685ebff"
 
 [[sources]]
 path = "tools/check_portability.py"
-bytes = 210299
-sha256 = "19f67b226034b74ec9c7e5499c2f02f8e96b3ed53c29bbec5b0ab3e7ef832c4f"
+bytes = 212204
+sha256 = "6229ec6bfa80b9ca3b5e3ea031c73a7b259f9a88227022b74aa924ab96d88361"
 
 [[sources]]
 path = "tools/check_python_floor.py"
@@ -4497,8 +4502,8 @@ sha256 = "b0fa40d1f94ac44b818660015db141d889882c48c31f3576994f9083dc1e8bcc"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 110563
-sha256 = "858faa2927c04767054e19e135868cde53390623a8beb3994d98baf41691aba2"
+bytes = 121325
+sha256 = "d18a9e9315aba031be6cc81329f64a7bf5a5a8e7319326ec0053c8b4fda2f7df"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -4572,8 +4577,8 @@ sha256 = "e3deb7d09eb5872fc676b3b8e17d7018944fd8d3cac45855845b9265b8b11e11"
 
 [[sources]]
 path = "tools/gen_hooks.py"
-bytes = 302093
-sha256 = "305e0d00a71b12d37dc52f7346122bd604581e47edf83f872c83fe61ee35eeb9"
+bytes = 302291
+sha256 = "e17351f6c5d0ea95b1af0dec25bf03ae30bd948c99a679db8fa185e5c8c27b0f"
 
 [[sources]]
 path = "tools/gen_manifest.py"
@@ -4622,8 +4627,8 @@ sha256 = "2f19dc1e1f6bac53f5afebb6b1857889467c249b29d566954a89e25687f884c3"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 190389
-sha256 = "456a08a36fb05ffea23633141236fd6082d217bfcb9dd62cab04a62534529ce9"
+bytes = 217295
+sha256 = "7e84f4a1704f8954c9d782f510db976097016fa4db720c9d3132098800a8f759"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"
@@ -6402,6 +6407,12 @@ artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
 sha256 = "8bb018ac7a04b63e721a3c5fa9582993898725a3306a00ff7ab6fe5a6c72b813"
+
+[[artifacts]]
+artifact-id = "skill:plugin/aiqt-guardrails-hooks/skills/aiqt/SKILL.md"
+path = "plugin/aiqt-guardrails-hooks/skills/aiqt/SKILL.md"
+kind = "file"
+sha256 = "02833e4ed8c6d11f75f9e8511a524927f4d64859e4003c59f325706d000297bc"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"

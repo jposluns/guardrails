@@ -177,14 +177,19 @@ BINARY_ALLOW = {"site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.
 ATTRIBUTION_SOURCE_URL = "https://github.com/jposluns/guardrails"
 ATTRIBUTION_EXEMPT_FILES = {
     "site/downloads/aiqt/SKILL.md",           # the generated skill body the download zip carries
+    "plugin/aiqt-guardrails-hooks/skills/aiqt/SKILL.md",  # the same SKILL.md, carried by the hooks plugin
     "site/downloads/aiqt-instructions.txt",   # the same body wrapped for platforms with no Skills feature
 }
 
 # The generated SKILL.md carries, directly under its `# AIQT™` H1, a visible metadata header block whose
 # `Author: <name>` line is a SECOND legitimate occurrence of the operator name (distinct from the GD-56
 # footer attribution line). It is exempted with the SAME narrow, line-anchored, single-placement discipline
-# as the footer line, and ONLY in SKILL.md (this rel), never in the instructions fallback or anywhere else.
+# as the footer line, and ONLY in the two byte-identical SKILL.md copies (SKILL_MD_RELS: the one the zip
+# carries and the one the hooks plugin carries, both written by tools/gen_skill.py from one render), never in
+# the instructions fallback or anywhere else.
 SKILL_MD_REL = "site/downloads/aiqt/SKILL.md"
+PLUGIN_SKILL_MD_REL = "plugin/aiqt-guardrails-hooks/skills/aiqt/SKILL.md"
+SKILL_MD_RELS = frozenset({SKILL_MD_REL, PLUGIN_SKILL_MD_REL})
 
 
 def attribution_line(name):
@@ -481,9 +486,9 @@ def scan_text(rel, text, ident_forms, ident_maxn, term_grams, maxn, attribution=
             # still trips C1 below; and the wrong placement is itself a finding.
             findings.append("{}: exempt attribution artefact must carry exactly one standalone GD-56 "
                             "attribution line, found {} (portability C1)".format(rel, count))
-    if header_line and rel == SKILL_MD_REL:
+    if header_line and rel in SKILL_MD_RELS:
         # The SKILL.md header `Author: <name>` line, masked with the SAME line-anchored, single-placement
-        # discipline as the attribution line above and ONLY in SKILL.md: on exactly one standalone match
+        # discipline as the attribution line above and ONLY in the SKILL.md copies: on exactly one standalone match
         # the operator name in the header block clears; a missing, wrapped, near-variant, or duplicated
         # line leaves the identity to trip C1 and raises a placement finding.
         h_blanked, h_count = mask_attribution_line(masked, header_line)
@@ -2878,6 +2883,24 @@ def _self_test_main_isolated(_vectors=True, _mkdtemp=None, _symlink=None, _which
     if not [f for f in scan_text(exempt_rel, hdr + "\n", ident_forms, ident_maxn, term_grams, maxn,
                                  attribution=attr, header_line=hdr) if "portability C1" in f]:
         failures.append("GD-56 author-header: the header line was exempted outside SKILL.md (scope too broad)")
+    # The hooks plugin's SKILL.md copy (byte-identical to the one above) carries the same two exempt lines:
+    # (P1) one standalone Author line plus one attribution line masks clean there, while the same lines in
+    # another plugin file still trip C1; (P2) a duplicated Author line there raises the placement finding.
+    if PLUGIN_SKILL_MD_REL not in ATTRIBUTION_EXEMPT_FILES or PLUGIN_SKILL_MD_REL not in SKILL_MD_RELS:
+        failures.append("GD-56 plugin skill: {} must be in both exemption sets".format(PLUGIN_SKILL_MD_REL))
+
+    def _plugin_c1(rel_, txt):
+        return [f for f in scan_text(rel_, txt, ident_forms, ident_maxn, term_grams, maxn,
+                                     attribution=attr, header_line=hdr) if "portability C1" in f]
+    if _plugin_c1(PLUGIN_SKILL_MD_REL, "# AIQT\n\n" + hdr + "  \n" + attr + "\ncontent\n"):
+        failures.append("GD-56 plugin skill: the Author and attribution lines in the plugin SKILL.md were not "
+                        "masked clean")
+    if not _plugin_c1("plugin/aiqt-guardrails-hooks/skills/aiqt/other.md", hdr + "\n" + attr + "\n"):
+        failures.append("GD-56 plugin skill: the exempt lines were exempted in another plugin file "
+                        "(scope too broad)")
+    dup_hdr = hdr + "\n" + hdr + "\n" + attr + "\n"
+    if not any("author-header" in f for f in _plugin_c1(PLUGIN_SKILL_MD_REL, dup_hdr)):
+        failures.append("GD-56 plugin skill: a duplicated Author line did not raise the placement finding")
 
     # Personal-handle check (round-1 QA finding 2): an @-prefixed operator handle in shipped content is
     # flagged, while the bare owner segment inside a legitimate source URL (the attribution URL and a normal

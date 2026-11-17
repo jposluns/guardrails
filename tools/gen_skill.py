@@ -18,6 +18,17 @@ Outputs (all under the reserved site/downloads/aiqt/ subtree, plus the standalon
   site/downloads/aiqt-instructions.txt  the same body wrapped in the no-Skills-feature preamble
   site/downloads/aiqt-skill.zip       the public download, packed deterministically from that SKILL.md
   site/downloads/aiqt-skill-1.0.6.zip the version-numbered copy the site links to (byte-identical alias)
+  plugin/aiqt-guardrails-hooks/skills/aiqt/SKILL.md  the same SKILL.md, carried by the hooks plugin
+                                      (written from the same render; the reserved skills/ subtree is
+                                      orphan-scanned like site/downloads/aiqt/, and --check also requires
+                                      it to equal the SKILL.md member of the on-disk zip byte for byte).
+                                      Only where the hooks plugin is installed: the plugin root
+                                      plugin/aiqt-guardrails-hooks/ is present, probed as gen_hooks probes
+                                      it. This generator never creates the plugin root, so an adopter
+                                      who installs the skill without the opt-in plugin gets no plugin copy,
+                                      and skills/ is orphan-scanned only where the plugin root is present.
+                                      A symlink at plugin/ or at the plugin root is refused without telling
+                                      the adopter to remove it: neither directory is this generator's.
 
 Latest only, allow-listed: only the current skill version is served, and the top
 level of site/downloads admits ONLY declared outputs: this generator's (aiqt-instructions.txt,
@@ -101,7 +112,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402
-from _standards import dir_or_absent, dir_present  # noqa: E402
+from _standards import dir_chain_or_absent, dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
 # The canonical apex ordering. It MUST appear verbatim in the apex rule body (prjint1), so the skill's
@@ -116,6 +127,20 @@ AIQT_FACET_ORDER = {"ACCUR": 0, "INTEG": 1, "QUALI": 2, "TRUST": 3, "PROGR": 4}
 
 # Output locations, as relative parts joined under the repo root (or a --self-test temp root).
 RESERVED_PARTS = ("site", "downloads", "aiqt")            # 100% generated: orphan-scanned in full
+# The hooks plugin carries the chat skill too, byte-identical to the SKILL.md the zip carries: the same
+# rendered string is written to both places, and --check ties the plugin copy to the zip's SKILL.md member.
+# The plugin's skills/ directory is a second reserved subtree, owned by this generator (gen_hooks owns only
+# hooks/, .claude-plugin/plugin.json, LICENSE and NOTICE in the plugin root and never touches skills/), and
+# orphan-scanned in full: its only entries are the aiqt/ directory and aiqt/SKILL.md.
+# The plugin is opt-in, so the plugin copy is an output ONLY where the plugin is installed: the plugin root
+# (PLUGIN_ROOT_PARTS) is present, judged by dir_chain_or_absent, the probe gen_hooks.run applies to the same
+# root and conformance.check_c5 uses to decide the plugin is installed. This generator never creates the plugin
+# root, so it never turns an adopter's absent plugin into a partial one that C5 would read as installed. (The
+# hooks source cannot decide it: .aiqt/core/hooks/manifest.toml is a required input here, so it is present
+# wherever this generator builds.)
+PLUGIN_SKILLS_PARTS = ("plugin", "aiqt-guardrails-hooks", "skills")  # 100% generated: orphan-scanned in full
+PLUGIN_ROOT_PARTS = PLUGIN_SKILLS_PARTS[:-1]                # gen_hooks.PLUGIN_ROOT_PARTS (self-test 13 pins it)
+PLUGIN_SKILL_IN_TREE = ("aiqt", "SKILL.md")                # the one output inside it
 INSTRUCTIONS_PARTS = ("site", "downloads", "aiqt-instructions.txt")  # a standalone named output
 ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named BINARY output: the stable
 # "latest" alias, kept byte-identical to the version-numbered copy so a direct link never breaks across
@@ -324,6 +349,10 @@ GENSRC_OUTPUTS = (
                  ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
     {"target": "site/downloads/aiqt-instructions.txt", "kind": "file",
+     "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
+                 ".aiqt/core/hooks/manifest.toml"),
+     "regenerate": "python3 tools/gen_skill.py"},
+    {"target": "plugin/aiqt-guardrails-hooks/skills/", "kind": "tree",
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
                  ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_skill.py"},
@@ -731,8 +760,21 @@ def latest_only_problems(root_fd, current_versioned, require_current):
     return problems
 
 
+# The directories above the plugin's skills/ subtree (plugin/ and plugin/aiqt-guardrails-hooks/) are not this
+# generator's: plugin/ is the adopter's, and the plugin root is gen_hooks'. A refusal at one of them never says to
+# remove it.
+_PLUGIN_ANCESTORS = frozenset("/".join(PLUGIN_ROOT_PARTS[:i]) for i in range(1, len(PLUGIN_ROOT_PARTS) + 1))
+
+
 def _refusal(rel_posix, comp_posix, kind):
-    """The shared fail-closed refusal for a component that is a symlink or not the expected kind."""
+    """The shared fail-closed refusal for a component that is a symlink or not the expected kind. At a plugin
+    ancestor directory (_PLUGIN_ANCESTORS), which this generator does not own, it says to make the entry a real
+    directory, never to remove it."""
+    if comp_posix in _PLUGIN_ANCESTORS:
+        return OSError("refusing {0}: {1} is a symlink or not a directory, so it is not written or read through; "
+                       "{1} is part of the hooks plugin's install path, not an output of this generator, so never "
+                       "git rm it: make it a real directory (for a symlink, the directory it points to), and "
+                       "rerun".format(rel_posix, comp_posix))
     return OSError("refusing {}: {} is a symlink or not a {}, so it is not written or read through "
                    "({}, and rerun)".format(rel_posix, comp_posix, kind, _remove_hint(comp_posix)))
 
@@ -1192,15 +1234,37 @@ def run_gen(root, check):
         # (exit 1), each naming the entry and how to remove it. The reserved dir is opened from the root
         # descriptor with O_NOFOLLOW on every component (a symlinked reserved dir or parent is refused, exit
         # 2), and os.fwalk lists it relative to that descriptor without following a link.
+        # The plugin's reserved skills/ subtree is scanned the same way: its only entries are the aiqt/
+        # directory and aiqt/SKILL.md (none at all when there is no build, the absent-corpus transition).
+        # The plugin copy is an output only where the hooks plugin is installed (PLUGIN_ROOT_PARTS): the plugin
+        # root is probed with dir_chain_or_absent, as gen_hooks.run probes it, so a root that is there but cannot
+        # be read as a directory is refused (exit 2) and an absent root means no plugin copy is written or
+        # required, and the plugin root is never created.
+        # The skills/ scan runs only where the plugin root is installed: with no root there is no skills/ under
+        # it to scan, and the scan's O_NOFOLLOW walk would otherwise refuse an adopter's own plugin/ that is a
+        # symlink to a directory inside the root, a tree that holds no hooks plugin (conformance and gen_hooks
+        # read it as no plugin, and self-test row 13l pins it).
+        plugin_root = root.joinpath(*PLUGIN_ROOT_PARTS)
+        plugin_installed, problem = dir_chain_or_absent(plugin_root, root)
+        if problem is not None:
+            raise NotADirectoryError("{} {} (cannot evaluate)".format(plugin_root, problem))
+        plugin_skill = root.joinpath(*PLUGIN_SKILLS_PARTS, *PLUGIN_SKILL_IN_TREE)
+        plugin_allowed = ({PLUGIN_SKILL_IN_TREE[0], "/".join(PLUGIN_SKILL_IN_TREE)}
+                          if reserved_map and plugin_installed else set())
+        scanned = [(RESERVED_PARTS, reserved_map)]
+        if plugin_installed:
+            scanned.append((PLUGIN_SKILLS_PARTS, plugin_allowed))
         orphans = []
-        rfd = _open_dir_fd(root_fd, RESERVED_PARTS, "/".join(RESERVED_PARTS))
-        if rfd is not None:
+        for parts, allowed in scanned:
+            rfd = _open_dir_fd(root_fd, parts, "/".join(parts))
+            if rfd is None:
+                continue
             try:
                 for dirpath, dirs, filenames, _dfd in os.fwalk(".", onerror=_raise, dir_fd=rfd):
                     for fn in sorted(dirs) + sorted(filenames):
                         rel = os.path.normpath(os.path.join(dirpath, fn)).replace(os.sep, "/")
-                        if rel not in reserved_map:
-                            orp = (reserved_dir / rel).relative_to(root).as_posix()
+                        if rel not in allowed:
+                            orp = root.joinpath(*parts, rel).relative_to(root).as_posix()
                             orphans.append("orphan {} (not a generated output; {})".format(
                                 orp, _remove_hint(orp)))
             finally:
@@ -1216,9 +1280,14 @@ def run_gen(root, check):
         # first write, never after another output was already rewritten. Named binary outputs (the download
         # zips) reconcile on bytes, so a stale or hand-swapped archive is caught by the same drift gate as the
         # text surfaces.
+        # The plugin copy is the SAME rendered SKILL.md string as the reserved copy, so the two are
+        # byte-identical by construction. No plugin installed, no plugin copy.
+        plugin_out = ([(plugin_skill, reserved_map["SKILL.md"], False)]
+                      if reserved_map and plugin_installed else [])
         outputs = ([(path, content, False) for path, content in standalone]
                    + [(path, content, True) for path, content in binary]
-                   + [(reserved_dir / name, content, False) for name, content in sorted(reserved_map.items())])
+                   + [(reserved_dir / name, content, False) for name, content in sorted(reserved_map.items())]
+                   + plugin_out)
         currents = [_read_output(root_fd, root, path, is_binary, single_link=True)
                     for path, _content, is_binary in outputs]
         for (path, content, _is_binary), current in zip(outputs, currents):
@@ -1226,6 +1295,37 @@ def run_gen(root, check):
                 drift.append(path.relative_to(root).as_posix())
                 if not check:
                     _write_output(root_fd, root, path, content)
+        # Pair identity (--check only): the plugin copy on disk must equal, byte for byte, the SKILL.md member
+        # of each download zip on disk (the SKILL.md inside the separate skill zip) and the reserved
+        # site/downloads/aiqt/SKILL.md on disk. Each is also compared with the fresh render above, so this leg
+        # is a second, independent statement of the one requirement: any byte of difference between the plugin
+        # copy and the zip copy is drift (exit 1), whichever side moved.
+        if check and plugin_out:
+            by_path = {path: current for (path, _c, _b), current in zip(outputs, currents)}
+            plugin_rel = plugin_skill.relative_to(root).as_posix()
+            plugin_now = by_path[plugin_skill]
+            plugin_bytes = None if plugin_now is None else plugin_now.encode("utf-8")
+            others = [(root.joinpath(*parts), True) for parts in (ZIP_VERSIONED_PARTS, ZIP_PARTS)]
+            others.append((reserved_dir / "SKILL.md", False))
+            for path, is_zip in others:
+                rel = path.relative_to(root).as_posix()
+                now = by_path.get(path)
+                if is_zip:
+                    member = None
+                    if now is not None:
+                        try:
+                            with zipfile.ZipFile(io.BytesIO(now)) as zf:
+                                member = zf.read(ZIP_MEMBER)
+                        except (zipfile.BadZipFile, KeyError, ValueError, RuntimeError, NotImplementedError,
+                                EOFError, zlib.error):
+                            member = None
+                    other, label = member, "the {} member of {}".format(ZIP_MEMBER, rel)
+                else:
+                    other, label = (None if now is None else now.encode("utf-8")), rel
+                if plugin_bytes is None or other is None or plugin_bytes != other:
+                    drift.append("pair: {} must be byte-identical to {} ({})".format(
+                        plugin_rel, label, "missing or unreadable" if plugin_bytes is None or other is None
+                        else "bytes differ"))
         # Evidence currency (--check only; the page is hand-authored, so a normal run cannot fix it):
         # docs/evidence.md must mention 'served from the' EXACTLY ONCE, in the one plain canonical sentence
         # naming the declared skill version (_EVIDENCE_MENTION). A missing page is drift, named;
@@ -1328,7 +1428,14 @@ def main():
 #  12. the published download contract holds: both zip names, exactly LICENSE and SKILL.md at the archive
 #      root, their pinned metadata, identical bytes under both names, and whole-archive bytes equal to an
 #      independent packer; an extra, prefixed, reordered or changed member, a changed timestamp, compression,
-#      creator or mode, and differing aliases each turn it red.
+#      creator or mode, and differing aliases each turn it red,
+#  13. the hooks plugin copy (plugin/aiqt-guardrails-hooks/skills/aiqt/SKILL.md) is written from the same render,
+#      equals the reserved SKILL.md and the zip's SKILL.md member, and is drift when missing, changed by one
+#      byte, CRLF, or when a zip's SKILL.md member differs from it (the pair); an extra entry under skills/ is
+#      named and never deleted; a symlink, hard link or FIFO there is refused (exit 2, nothing written); with
+#      no corpus the plugin copy is named an orphan, never deleted; all of this only where the plugin root is
+#      present: with no plugin root no plugin/ is created and --check is clean, adding the root makes the copy
+#      required, and a plugin root that is not a directory is refused (exit 2, nothing written).
 
 # The published skill download contract. Packaging work that moves the generated skill (for example into a
 # plugin directory) must keep it, so it is pinned here as literals, never read back from ZIP_MEMBER,
@@ -3050,6 +3157,273 @@ def self_test_main():
         if code != 1 or ZIP_VERSIONED_PARTS[-1] not in out:
             failures.append("differing stable and version-numbered downloads expected --check exit 1 naming "
                             "{}, got {}\n{}".format(ZIP_VERSIONED_PARTS[-1], code, out))
+
+        # 13. The hooks plugin carries the chat skill, byte-identical to the SKILL.md the zip carries. The path
+        #     is pinned as a literal (never read back from PLUGIN_SKILLS_PARTS), so moving it turns this red.
+        plugin_rel = "plugin/aiqt-guardrails-hooks/skills/aiqt/SKILL.md"
+        if "/".join(PLUGIN_SKILLS_PARTS + PLUGIN_SKILL_IN_TREE) != plugin_rel:
+            failures.append("the plugin skill path is {!r}, expected {!r}".format(
+                "/".join(PLUGIN_SKILLS_PARTS + PLUGIN_SKILL_IN_TREE), plugin_rel))
+        reserved_entry = [o for o in GENSRC_OUTPUTS if o["target"] == "site/downloads/aiqt/"]
+        plugin_entry = [o for o in GENSRC_OUTPUTS if o["target"] == "plugin/aiqt-guardrails-hooks/skills/"]
+        if (len(plugin_entry) != 1 or plugin_entry[0]["kind"] != "tree" or len(reserved_entry) != 1
+                or plugin_entry[0]["sources"] != reserved_entry[0]["sources"]):
+            failures.append("GENSRC_OUTPUTS must declare plugin/aiqt-guardrails-hooks/skills/ once, as a tree "
+                            "with the same sources as site/downloads/aiqt/")
+        import gen_hooks  # noqa: PLC0415  (lazy: gen_hooks imports this module at load)
+        plugin_root_rel = "plugin/aiqt-guardrails-hooks"
+        if "/".join(PLUGIN_ROOT_PARTS) != plugin_root_rel or PLUGIN_ROOT_PARTS != tuple(gen_hooks.PLUGIN_ROOT_PARTS):
+            failures.append("13: PLUGIN_ROOT_PARTS is {!r}, expected {!r}, equal to gen_hooks.PLUGIN_ROOT_PARTS "
+                            "{!r}".format(PLUGIN_ROOT_PARTS, plugin_root_rel, gen_hooks.PLUGIN_ROOT_PARTS))
+
+        def plugin_tree(name):
+            # A tree with the hooks plugin installed: the plugin root is present (the rest of the plugin is
+            # gen_hooks' and is not needed here). A clean generate that writes no plugin copy is a named failure,
+            # and the expected bytes are planted so the later rows still run and fail by name, not by traceback.
+            t = tmp / ("plugin-skill-" + name)
+            t.mkdir()
+            _write_fixture(t, good_src)
+            t.joinpath(*PLUGIN_ROOT_PARTS).mkdir(parents=True)
+            c, o = capture(t, False)
+            if c != 0:
+                failures.append("13 {}: clean generate expected exit 0, got {}\n{}".format(name, c, o))
+            md = t / plugin_rel
+            if not md.is_file():
+                failures.append("13 {}: a clean generate with the plugin installed wrote no {}".format(
+                    name, plugin_rel))
+                reserved_md = t.joinpath(*RESERVED_PARTS, "SKILL.md")
+                md.parent.mkdir(parents=True, exist_ok=True)
+                md.write_bytes(reserved_md.read_bytes() if reserved_md.is_file() else b"")
+            return t, md
+
+        # 13a. A clean generate writes the plugin copy, equal to the reserved SKILL.md and to the zip's SKILL.md
+        #      member; --check is clean. Deleting it is drift naming it; a write run restores it.
+        ps, ps_md = plugin_tree("clean")
+        want = ps.joinpath(*RESERVED_PARTS, "SKILL.md").read_bytes()
+        with zipfile.ZipFile(ps.joinpath(*ZIP_VERSIONED_PARTS)) as zf_:
+            zip_member = zf_.read("SKILL.md")
+        if not ps_md.exists() or ps_md.read_bytes() != want or want != zip_member:
+            failures.append("13a: the plugin copy must exist and equal the reserved SKILL.md and the zip member")
+        code, out = capture(ps, True)
+        if code != 0:
+            failures.append("13a: clean --check expected exit 0, got {}\n{}".format(code, out))
+        # missing_ok: a copy already gone is a named failure above, never a FileNotFoundError traceback here.
+        ps_md.unlink(missing_ok=True)
+        code, out = capture(ps, True)
+        if code != 1 or plugin_rel not in out:
+            failures.append("13a: a missing plugin copy expected --check exit 1 naming it, got {}\n{}".format(
+                code, out))
+        code, out = capture(ps, False)
+        code2, out2 = capture(ps, True)
+        if code != 0 or code2 != 0 or not ps_md.exists() or ps_md.read_bytes() != want:
+            failures.append("13a: a write run must restore the plugin copy (exit 0, then --check 0), got {} and "
+                            "{}\n{}{}".format(code, code2, out, out2))
+
+        # 13b/13c. One changed byte, or CRLF line ends, in the plugin copy is drift naming it and the pair; the
+        #          flip (restored bytes) is clean.
+        for label, mutate in (("13b one changed byte", lambda b: bytes([b[0] ^ 0x01]) + b[1:]),
+                              ("13c CRLF line ends", lambda b: b.replace(b"\n", b"\r\n"))):
+            ps_md.write_bytes(mutate(want))
+            code, out = capture(ps, True)
+            if code != 1 or plugin_rel not in out or "pair: " not in out:
+                failures.append("{}: expected --check exit 1 naming {} and the pair, got {}\n{}".format(
+                    label, plugin_rel, code, out))
+            ps_md.write_bytes(want)
+            code, out = capture(ps, True)
+            if code != 0:
+                failures.append("{}: restored bytes expected --check exit 0, got {}\n{}".format(label, code, out))
+
+        # 13d. An extra entry under skills/ is never deleted: --check exit 1 and a normal run exit 2, each naming
+        #      it; the flip (entry removed) is clean.
+        for extra in ("aiqt/LICENSE", "aiqt/references/x.md", "other/SKILL.md"):
+            ex = ps.joinpath(*PLUGIN_SKILLS_PARTS) / extra
+            ex.parent.mkdir(parents=True, exist_ok=True)
+            ex.write_bytes(b"extra\n")
+            code, out = capture(ps, True)
+            code2, out2 = capture(ps, False)
+            if (code != 1 or code2 != 2 or "orphan plugin/aiqt-guardrails-hooks/skills/" not in out
+                    or "orphan" not in out2 or not ex.exists()):
+                failures.append("13d {}: expected --check 1 and a normal run 2 naming the orphan and keeping it, "
+                                "got {} and {}\n{}{}".format(extra, code, code2, out, out2))
+            ex.unlink()
+            if ex.parent.name != "aiqt":
+                ex.parent.rmdir()
+            code, out = capture(ps, True)
+            if code != 0:
+                failures.append("13d {}: removed entry expected --check exit 0, got {}\n{}".format(extra, code, out))
+
+        # 13e. A symlink at the plugin SKILL.md or at skills/ is refused (exit 2), the outside file unchanged.
+        outside = tmp / "plugin-skill-outside.md"
+        outside.write_bytes(b"outside\n")
+        ps_md.unlink()
+        os.symlink(str(outside), str(ps_md))
+        for check_ in (True, False):
+            code, out = capture(ps, check_)
+            if code != 2 or outside.read_bytes() != b"outside\n":
+                failures.append("13e: a symlinked plugin copy expected exit 2 (check={}) with the outside file "
+                                "unchanged, got {}\n{}".format(check_, code, out))
+        ps_md.unlink()
+        capture(ps, False)
+        sk, sk_link = plugin_tree("symdir")
+        skills_dir = sk.joinpath(*PLUGIN_SKILLS_PARTS)
+        shutil.move(str(skills_dir), str(tmp / "plugin-skill-moved-skills"))
+        os.symlink(str(tmp / "plugin-skill-moved-skills"), str(skills_dir))
+        code, out = capture(sk, False)
+        if code != 2:
+            failures.append("13e: a symlinked skills/ directory expected exit 2, got {}\n{}".format(code, out))
+        os.unlink(str(skills_dir))
+        code, out = capture(sk, False)
+        code2, out2 = capture(sk, True)
+        if code != 0 or code2 != 0:
+            failures.append("13e: a real skills/ directory expected exit 0 then --check 0, got {} and {}\n{}{}"
+                            .format(code, code2, out, out2))
+
+        # 13f. A hard-linked plugin copy is refused in both modes and never written through.
+        hl, hl_md = plugin_tree("hardlink")
+        twin = tmp / "plugin-skill-twin.md"
+        os.link(str(hl_md), str(twin))
+        for check_ in (True, False):
+            code, out = capture(hl, check_)
+            if code != 2 or "hard links" not in out:
+                failures.append("13f: a hard-linked plugin copy expected exit 2 (check={}), got {}\n{}".format(
+                    check_, code, out))
+        twin.unlink()
+        code, out = capture(hl, True)
+        if code != 0:
+            failures.append("13f: a broken link expected --check exit 0, got {}\n{}".format(code, out))
+
+        # 13g. Pair identity with the zip: a zip whose SKILL.md member differs from the plugin copy (both zip
+        #      names, so the aliases stay identical) is drift naming the pair; the flip (regenerated) is clean.
+        pz, pz_md = plugin_tree("pair")
+        pz_skill = pz.joinpath(*RESERVED_PARTS, "SKILL.md").read_bytes()
+        pz_licence = pz.joinpath(*LICENSE_PARTS).read_bytes()
+        bad_zip = _contract_pack([(_CONTRACT_MEMBERS[0], pz_licence, {}),
+                                  (_CONTRACT_MEMBERS[1], pz_skill + b"zip-only edit\n", {})])
+        for parts in (ZIP_PARTS, ZIP_VERSIONED_PARTS):
+            pz.joinpath(*parts).write_bytes(bad_zip)
+        code, out = capture(pz, True)
+        if code != 1 or "pair: {} must be byte-identical to the SKILL.md member of".format(plugin_rel) not in out:
+            failures.append("13g: a zip SKILL.md member differing from the plugin copy expected --check exit 1 "
+                            "naming the pair, got {}\n{}".format(code, out))
+        code, out = capture(pz, False)
+        code2, out2 = capture(pz, True)
+        if code != 0 or code2 != 0:
+            failures.append("13g: a regenerated pair expected exit 0 then --check 0, got {} and {}\n{}{}".format(
+                code, code2, out, out2))
+
+        # 13h. A FIFO at the plugin copy plus another drifted output exits 2 having written nothing.
+        pf, pf_md = plugin_tree("fifo")
+        pf_md.unlink()
+        os.mkfifo(str(pf_md))
+        inst = pf.joinpath(*INSTRUCTIONS_PARTS)
+        inst.write_text("drifted\n", encoding="utf-8")
+        code, out = capture(pf, False)
+        if code != 2 or inst.read_text(encoding="utf-8") != "drifted\n":
+            failures.append("13h: a FIFO at the plugin copy plus a drifted output expected exit 2 writing nothing, "
+                            "got {}\n{}".format(code, out))
+        pf_md.unlink()
+        code, out = capture(pf, False)
+        if code != 0:
+            failures.append("13h: the FIFO removed expected a write run exit 0, got {}\n{}".format(code, out))
+
+        # 13i. With no rules corpus (the absent-corpus transition) the plugin copy is named an orphan, never
+        #      deleted; restoring the corpus is clean.
+        pa, pa_md = plugin_tree("absent")
+        corpus_ = pa.joinpath(*CORPUS_PARTS)
+        shutil.move(str(corpus_), str(tmp / "plugin-skill-absent-corpus"))
+        code, out = capture(pa, False)
+        if code != 2 or "orphan " + plugin_rel not in out or not pa_md.exists():
+            failures.append("13i: no corpus expected a normal run exit 2 naming the plugin copy an orphan and "
+                            "keeping it, got {}\n{}".format(code, out))
+        shutil.move(str(tmp / "plugin-skill-absent-corpus"), str(corpus_))
+        code, out = capture(pa, True)
+        if code != 0:
+            failures.append("13i: the corpus restored expected --check exit 0, got {}\n{}".format(code, out))
+
+        # 13j. The plugin is opt-in. With no plugin root (an adopter who installs the skill without the plugin)
+        #      a generate exits 0 and creates no plugin/ at all, and --check is clean without a plugin copy. The
+        #      flip: once the plugin root is present the copy is required (--check exit 1 naming it), and a write
+        #      run creates it (exit 0, then --check 0). Rows 13a to 13i are the plugin-present case.
+        na = tmp / "plugin-skill-no-plugin"
+        na.mkdir()
+        _write_fixture(na, good_src)
+        code, out = capture(na, False)
+        code2, out2 = capture(na, True)
+        created = os.path.lexists(str(na / "plugin"))
+        if code != 0 or code2 != 0 or created:
+            failures.append("13j: no plugin root expected a generate exit 0 creating no plugin/ and --check 0, got "
+                            "{} and {} (plugin/ {})\n{}{}".format(code, code2, "created" if created else "absent",
+                                                                  out, out2))
+        # exist_ok: a plugin root the generate wrongly created is the named failure above, never a traceback here.
+        na.joinpath(*PLUGIN_ROOT_PARTS).mkdir(parents=True, exist_ok=True)
+        code, out = capture(na, True)
+        if code != 1 or plugin_rel not in out:
+            failures.append("13j: the plugin root present expected --check exit 1 naming {}, got {}\n{}".format(
+                plugin_rel, code, out))
+        code, out = capture(na, False)
+        code2, out2 = capture(na, True)
+        if code != 0 or code2 != 0 or not (na / plugin_rel).is_file():
+            failures.append("13j: the plugin root present expected a write run exit 0 creating {} and --check 0, "
+                            "got {} and {}\n{}{}".format(plugin_rel, code, code2, out, out2))
+
+        # 13k. A plugin root that is there but cannot be read as a directory (a regular file) is refused in both
+        #      modes (exit 2), never read as an absent plugin, and a drifted output beside it is not rewritten.
+        #      The refusal must be the plugin-root probe's own, naming the root as not a directory (cannot
+        #      evaluate): the later skills/ orphan scan also refuses this tree, with a different message, so exit 2
+        #      alone would pass with the probe's refusal removed.
+        nf = tmp / "plugin-skill-root-file"
+        nf.mkdir()
+        _write_fixture(nf, good_src)
+        code, out = capture(nf, False)
+        if code != 0:
+            failures.append("13k: clean generate expected exit 0, got {}\n{}".format(code, out))
+        if os.path.lexists(str(nf / "plugin")):
+            # A generate that created plugin/ is a named failure (as in 13j), cleared so this row still runs.
+            failures.append("13k: a clean generate with no plugin root created plugin/")
+            shutil.rmtree(str(nf / "plugin"))
+        nf.joinpath(*PLUGIN_ROOT_PARTS[:-1]).mkdir(parents=True)
+        nf.joinpath(*PLUGIN_ROOT_PARTS).write_bytes(b"not a directory\n")
+        nf_inst = nf.joinpath(*INSTRUCTIONS_PARTS)
+        nf_inst.write_text("drifted\n", encoding="utf-8")
+        nf_refusal = "{} is not a directory (cannot evaluate)".format(nf.joinpath(*PLUGIN_ROOT_PARTS))
+        for check_ in (True, False):
+            code, out = capture(nf, check_)
+            if code != 2 or nf_refusal not in out or nf_inst.read_text(encoding="utf-8") != "drifted\n":
+                failures.append("13k: a plugin root that is a regular file expected exit 2 (check={}) with the "
+                                "plugin-root refusal {!r}, writing nothing, got {}\n{}".format(
+                                    check_, nf_refusal, code, out))
+
+        # 13l. As 13j, with the adopter's own plugin/ a symlink to a directory inside the root that holds no hooks
+        #      plugin: a generate and --check each exit 0, nothing is created under the link's target and the link
+        #      is kept (the skills/ orphan scan runs only where the plugin root is installed; red if it runs on
+        #      this tree, whose O_NOFOLLOW walk refuses the link). The flip: once the hooks plugin root is present
+        #      through that link, the link is refused in both modes (exit 2, every component is opened with
+        #      O_NOFOLLOW), and the refusal says never to git rm it and never names plugin/ for git rm or rm.
+        nl = tmp / "plugin-skill-linked-plugin"
+        nl.mkdir()
+        _write_fixture(nl, good_src)
+        nl_target = nl / "vendor-plugins"
+        nl_target.mkdir()
+        nl_link = nl / PLUGIN_ROOT_PARTS[0]
+        os.symlink(nl_target.name, str(nl_link))
+        code, out = capture(nl, False)
+        code2, out2 = capture(nl, True)
+        nl_listing = sorted(os.listdir(str(nl_target)))
+        if code != 0 or code2 != 0 or nl_listing or not os.path.islink(str(nl_link)):
+            failures.append("13l: plugin/ symlinked to a directory inside the root with no plugin root expected a "
+                            "generate exit 0 and --check 0, creating nothing under it and keeping the link, got {} "
+                            "and {} (target holds {!r}, link {})\n{}{}".format(
+                                code, code2, nl_listing, "kept" if os.path.islink(str(nl_link)) else "gone",
+                                out, out2))
+        nl_hooks = nl_target / PLUGIN_ROOT_PARTS[-1]
+        nl_hooks.mkdir(exist_ok=True)
+        for check_ in (True, False):
+            code, out = capture(nl, check_)
+            if (code != 2 or "never git rm it" not in out or "rm {}".format(PLUGIN_ROOT_PARTS[0]) in out
+                    or os.listdir(str(nl_hooks))):
+                failures.append("13l: the plugin root present through a symlinked plugin/ expected exit 2 (check={}) "
+                                "saying never to git rm it, never naming plugin/ for removal, writing nothing, got "
+                                "{}\n{}".format(check_, code, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -3094,7 +3468,15 @@ def self_test_main():
           "aliases, and whole-archive bytes equal to an independent packing), and an extra, prefixed, "
           "reordered or changed member, a changed timestamp, compression, creator, mode or file type bits, "
           "an encrypted member, an unsupported compression method, and differing aliases each break it; a "
-          "regeneration or fresh generate that fails is named by its exit code even when it wrote nothing.")
+          "regeneration or fresh generate that fails is named by its exit code even when it wrote nothing; the "
+          "hooks plugin copy of SKILL.md is written from the same render and equals the reserved SKILL.md and "
+          "the zip member, and a missing, one-byte-changed or CRLF copy, a zip member that differs from it, an "
+          "extra entry under skills/ (kept), a symlinked copy or skills/ directory, a hard-linked copy, a FIFO "
+          "copy beside a drifted output and an absent corpus are each caught, with nothing deleted; the plugin "
+          "copy is written and required only where the plugin root is present (no plugin root: no plugin/ "
+          "created, --check clean), and a plugin root that is not a directory is refused; a plugin/ symlinked to "
+          "a directory inside the root with no plugin root is clean (exit 0, nothing created, the link kept), "
+          "and with the plugin root present through it is refused without naming plugin/ for removal.")
     return 0
 
 
