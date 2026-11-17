@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "7786c3e64e317ada0f44dfaee1e6d76dd4bf8764f0826127eaeda85b8b5a2a2f"
+tree-sha256 = "be8db0c64f965adafa606502c5d1cd584696c4c640d7a5fe1a667e7bb446e8ee"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4272,8 +4272,8 @@ sha256 = "7de00bde82268e3d13fe503a84ccbcbc1042cb96e9d91df6cd0781bee044b841"
 
 [[sources]]
 path = "tools/check_hook_coverage.py"
-bytes = 57990
-sha256 = "c1e16336d5b611ee9c43d3a0fe1be42d77171605346b865fc126bb2c8f9269bc"
+bytes = 67732
+sha256 = "e1e5d3e448c21e27b0e13d45617600ad921ee5d9765cff707267e2eda24976f7"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"
@@ -4727,8 +4727,8 @@ sha256 = "13fe112b30171fc85d2dd4bdf49a040978547f75d4cc023202378859533f6f2c"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 259600
-sha256 = "dc3a67c071e37b1924a9f19588bf4ab6d1e4b7b1e23252ef3b7d8d862c4f9d03"
+bytes = 260182
+sha256 = "3a1f44873440d0e2dcec1640f8ddc677e3500652f0cb4f97f1c6e3aec47f0415"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

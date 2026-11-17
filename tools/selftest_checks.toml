@@ -6234,6 +6234,8 @@ expected-check-ids = [
   "pass/present-in-both-files",
   "pass/disable-all-hooks-false",
   "pass/decl-registry-other-top-keys",
+  "pass/launch-path-search-only-dir",
+  "pass/launch-path-search-only-dir/red-when-reverted",
   # a named miss (exit 1)
   "missing/no-settings-file",
   "missing/no-claude-dir-exit-1",
@@ -6251,6 +6253,8 @@ expected-check-ids = [
   # a declared command containing CLAUDE_PROJECT_DIR is named on a WARN line, exit unchanged
   "warn/declared-command-names-project-dir",
   "warn/declared-command-names-project-dir/red-when-reverted",
+  "warn/declared-command-names-project-dir-bad-settings",
+  "warn/declared-command-names-project-dir-bad-settings/red-when-reverted",
   # disableAllHooks true in either project settings file, each file named (exit 1)
   "fail/disable-all-hooks/settings.json",
   "fail/disable-all-hooks/settings.json/red-when-reverted",
@@ -6278,6 +6282,8 @@ expected-check-ids = [
   "bound/size-at",
   "bound/size-over",
   "refuse/unreadable-settings",
+  "bound/read-cap",
+  "bound/read-cap/red-when-reverted",
   "refuse/hooks-not-object",
   "refuse/event-not-list",
   "refuse/group-not-object",
@@ -6353,4 +6359,10 @@ expected-check-ids = [
   "cli/extra-argument-exit-2",
   "cli/extra-argument-exit-2/red-when-reverted",
   "cli/unrecognized-arguments-exit-2",
+  "cli/unencodable-output-escaped/utf-8",
+  "cli/unencodable-output-escaped/utf-8/red-when-reverted",
+  "cli/unencodable-output-escaped/ascii",
+  "cli/unencodable-output-escaped/ascii/red-when-reverted",
+  "cli/unexpected-exception-exit-2",
+  "cli/unexpected-exception-exit-2/red-when-reverted",
 ]

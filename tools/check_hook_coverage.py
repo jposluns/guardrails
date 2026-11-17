@@ -14,7 +14,9 @@ A session started from a directory whose project settings do not register the de
 without them, and a check registered in the scope that failed to load cannot report its own absence. This
 gate therefore runs OUTSIDE the session: the orchestrator runs it before it starts one. Both paths are
 given on the command line and must be absolute; nothing is discovered from the working directory, because
-the failure being caught is a wrong working directory.
+the failure being caught is a wrong working directory. That the client reads project settings from the
+launch directory itself, and not from an ancestor such as the git top level, is inferred, not documented in
+this repository (see RESIDUALS).
 
 The declaration (--require) is a JSON object, a registry file such as the orchestration registry included,
 whose "required_hooks" key holds a non-empty list of entries; the gate reads only that key and ignores every
@@ -30,9 +32,12 @@ not an object, is malformed (exit 2), never read as absent.
 
 Exit 0: every required entry is present and neither settings file sets disableAllHooks to true. Exit 1: at
 least one is missing, each missing entry named on its own MISSING line, or a settings file sets
-disableAllHooks to true, each such file named on its own DISABLED line. A declared command that contains
-CLAUDE_PROJECT_DIR is named on its own WARN line, whatever the exit code; the warning never changes it.
-Exit 2 (fail closed, never a pass):
+disableAllHooks to true, each such file named on its own DISABLED line. Once the declaration has been read,
+a declared command that contains CLAUDE_PROJECT_DIR is named on its own WARN line, whatever the exit code
+(settings that cannot be read or parsed included); the warning never changes it. A character the output
+stream's encoding cannot carry (a non-UTF-8 locale, or a path byte that is not UTF-8) is written as a
+backslash escape, never raised.
+Exit 2 (fail closed, never a pass): any unexpected exception, reported on one CANNOT EVALUATE line;
 a relative launch directory or declaration path; a launch directory or declaration reached through a
 symbolic link anywhere on its path (each directory on the path is opened from the root one component at a
 time without following a link, and the final file with O_NOFOLLOW, so pass paths with every link resolved;
@@ -54,6 +59,13 @@ RESIDUALS (what this gate does not establish):
   are resolved or merged, settings keys other than hooks and disableAllHooks that change whether hooks
   run, and edits made between this check and the launch (a write can still change the settings after the
   gate passes).
+- That project settings come from the launch directory itself is inferred, not documented here; a client
+  that resolved the project root to an ancestor, such as the git top level, would make a launch from a
+  subdirectory holding its own .claude a false pass.
+- The declaration is trusted as given, so it must be held at an orchestrator-controlled path independent of
+  the launch directory (a declaration inside the directory being judged, such as a checkout's own registry,
+  is judged against itself, and a wrong checkout with its own registry and settings passes), and the
+  registry's local-over-committed precedence is not applied: only the file named by --require is read.
 - It reads the two project settings files as a union (an entry in either counts); that the client merges
   the two files' hooks that way is inferred, not documented here. That disableAllHooks set to true switches
   hooks off is also inferred, not documented here; the gate fails on it (exit 1, the safe direction).
@@ -114,6 +126,13 @@ _O_PATH = getattr(os, "O_PATH", 0)
 # What _load_json_file returns for an absent file, distinct from every parsed JSON value (JSON null
 # included); the self-test reverts it to None to show the null-settings rows turn red.
 _ABSENT = object()
+# The error handler stdout and stderr are given before main runs, so a character the locale's encoding cannot
+# carry is escaped rather than raised; the self-test reverts it to "strict" to show the unencodable-output row
+# turns red.
+_OUTPUT_ERRORS = "backslashreplace"
+# The exceptions _main_guarded turns into exit 2 with one CANNOT EVALUATE line; the self-test reverts it to ()
+# to show the unexpected-exception row turns red.
+_UNEXPECTED = (Exception,)
 
 
 class CannotEvaluate(Exception):
@@ -270,13 +289,19 @@ def _open_file(name, dir_fd, where):
         raise CannotEvaluate("{}: cannot open ({})".format(where, exc)) from None
 
 
+def _read_limit(total):
+    """How many more bytes _read_fd may ask for after total: never past MAX_BYTES + 1 in all, so an oversized
+    file is refused without being read whole."""
+    return MAX_BYTES + 1 - total
+
+
 def _read_fd(fd, where):
     """The bytes of an open descriptor, at most MAX_BYTES + 1 of them; a non-regular file is refused unread."""
     try:
         _check_regular(os.fstat(fd).st_mode, where)
         chunks, total = [], 0
         while total <= MAX_BYTES:
-            chunk = os.read(fd, MAX_BYTES + 1 - total)
+            chunk = os.read(fd, _read_limit(total))
             if not chunk:
                 break
             chunks.append(chunk)
@@ -433,11 +458,14 @@ def evaluate(launch_dir, require):
     """(exit code, stdout lines, stderr lines) for one launch directory and one declaration."""
     try:
         required = load_declaration(require)
-        found, disabled = load_settings(launch_dir)
     except CannotEvaluate as exc:
         return 2, [], ["CANNOT EVALUATE: " + str(exc)]
-    missing = missing_entries(required, found)
     warnings = _project_dir_warnings(required)
+    try:
+        found, disabled = load_settings(launch_dir)
+    except CannotEvaluate as exc:
+        return 2, warnings, ["CANNOT EVALUATE: " + str(exc)]
+    missing = missing_entries(required, found)
     if missing or disabled:
         out = warnings + ["DISABLED: {} sets {} to true".format(where, DISABLE_KEY) for where in disabled]
         out.extend("MISSING: event={!r} matcher={!r} command={!r}".format(*entry) for entry in missing)
@@ -613,6 +641,14 @@ def _swap(name, value):
             saved, globals()["_JSON_ERRORS"] = globals()["_JSON_ERRORS"], value
         case "_check_gate_arity":
             saved, globals()["_check_gate_arity"] = globals()["_check_gate_arity"], value
+        case "_O_PATH":
+            saved, globals()["_O_PATH"] = globals()["_O_PATH"], value
+        case "_read_limit":
+            saved, globals()["_read_limit"] = globals()["_read_limit"], value
+        case "_OUTPUT_ERRORS":
+            saved, globals()["_OUTPUT_ERRORS"] = globals()["_OUTPUT_ERRORS"], value
+        case "_UNEXPECTED":
+            saved, globals()["_UNEXPECTED"] = globals()["_UNEXPECTED"], value
         case _:
             raise KeyError(name)
     return saved
@@ -741,6 +777,17 @@ def _self_test():
     check("warn/declared-command-names-project-dir", got == (0, True), got)
     check("warn/declared-command-names-project-dir/red-when-reverted", mutant != (0, True), mutant)
 
+    # The same WARN line when the settings cannot be parsed (exit 2): the warning is computed once the
+    # declaration is read, before the settings are.
+    def _project_dir_bad_settings():
+        code, out, err = _result(_Case(decl=_decl([project_dir_guard, GUARD_B])).settings('{"hooks": {'))
+        warned = [line for line in out if line.startswith("WARN: ")]
+        return (code, len(warned) == 1 and repr(project_dir_guard[2]) in warned[0] and len(err) == 1
+                and err[0].startswith("CANNOT EVALUATE: "))
+    got, mutant = _run(_project_dir_bad_settings, revert=("_project_dir_warnings", lambda required: []))
+    check("warn/declared-command-names-project-dir-bad-settings", got == (2, True), got)
+    check("warn/declared-command-names-project-dir-bad-settings/red-when-reverted", mutant != (2, True), mutant)
+
     # Row 9. Malformed JSON, non-UTF-8, symlinked file, FIFO (returns without hanging), oversized file.
     got, _m = _run(lambda: _code(_Case().settings('{"hooks": {')))
     check("refuse/malformed-json", got == 2, got)
@@ -843,6 +890,28 @@ def _self_test():
     finally:
         os.read = real_read
     check("refuse/unreadable-settings", got == 2, got)
+
+    # The read stops at MAX_BYTES + 1 bytes, so an oversized file is refused without being read whole. With
+    # the limit reverted the size check still refuses, so the row counts the bytes read (the declaration's
+    # included).
+    def _read_capped():
+        case = _Case().settings(json.dumps(good) + " " * (4 * MAX_BYTES))
+        allowed = case.require.stat().st_size + MAX_BYTES + 1
+        counted = [0]
+
+        def _counting_read(fd, size):
+            chunk = real_read(fd, size)
+            counted[0] += len(chunk)
+            return chunk
+        os.read = _counting_read
+        try:
+            code = _code(case)
+        finally:
+            os.read = real_read
+        return code, counted[0] == allowed
+    got, mutant = _run(_read_capped, revert=("_read_limit", lambda total: 8 * MAX_BYTES))
+    check("bound/read-cap", got == (2, True), got)
+    check("bound/read-cap/red-when-reverted", mutant != (2, True), mutant)
 
     # Row 10. hooks or a group with the wrong type: exit 2, never a pass or a plain miss.
     for name, body in (
@@ -961,6 +1030,33 @@ def _self_test():
     got, mutant = _run(_launch_link(1), revert=("_open_dir_nofollow", _lenient_open_dir))
     check("refuse/launch-dir-symlinked-ancestor", got == 2, got)
     check("refuse/launch-dir-symlinked-ancestor/red-when-reverted", mutant != 2, mutant)
+
+    # A directory on the launch path that can be searched but not listed (mode 0711) is walked with O_PATH.
+    # A read open of it is refused here with EACCES, as the kernel refuses it to a reader other than root, so
+    # with O_PATH reverted the walk is refused (exit 2) whatever account runs the self-test.
+    def _search_only_walk():
+        case = _Case()
+        search_only = case.base / "search-only"
+        launch = search_only / "launch"
+        _write(launch / SETTINGS_DIR / "settings.json", good)
+        real_open = os.open
+        o_path = getattr(os, "O_PATH", 0)
+
+        def _open(path, flags, mode=0o777, *, dir_fd=None):
+            if path == search_only.name and not flags & o_path:
+                raise PermissionError(13, "read open of a search-only directory refused by the self-test", path)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+        search_only.chmod(0o711)
+        os.open = _open
+        try:
+            return case.run(launch=str(launch))[0]
+        finally:
+            os.open = real_open
+            search_only.chmod(0o755)
+            case.close()
+    got, mutant = _run(_search_only_walk, revert=("_O_PATH", 0))
+    check("pass/launch-path-search-only-dir", got == 0, got)
+    check("pass/launch-path-search-only-dir/red-when-reverted", mutant != 0, mutant)
 
     def _decl_link_ancestor():
         case = _Case().settings(good)
@@ -1089,6 +1185,49 @@ def _self_test():
                                          ["--execution-report", "relative/report"])]
     check("cli/unrecognized-arguments-exit-2", got == [2] * 7, got)
 
+    # Output the stream's encoding cannot carry: a launch path holding a byte that is not UTF-8, under a
+    # UTF-8 locale and under a non-UTF-8 (ASCII) one. The gate still passes, each such character written as a
+    # backslash escape. The process locale is not switched: stdout and stderr are replaced by strict streams
+    # in that encoding, as the locale would set them.
+    def _unencodable(encoding):
+        case = _Case()
+        launch = case.base / "launch-é-\udcff"
+        _write(launch / SETTINGS_DIR / "settings.json", good)
+        try:
+            code, out, err = _main_streams(["--launch-dir", str(launch), "--require", str(case.require)], encoding)
+        finally:
+            case.close()
+        return code, bool(out) and out[-1].startswith("PASS: ") and "\\udcff" in out[-1] and not err
+    for encoding, row, red_row in (
+            ("utf-8", "cli/unencodable-output-escaped/utf-8",
+             "cli/unencodable-output-escaped/utf-8/red-when-reverted"),
+            ("ascii", "cli/unencodable-output-escaped/ascii",
+             "cli/unencodable-output-escaped/ascii/red-when-reverted")):
+        got, mutant = _run(lambda encoding=encoding: _guarded(lambda: _unencodable(encoding)),
+                           revert=("_OUTPUT_ERRORS", "strict"))
+        check(row, got == (0, True), got)
+        check(red_row, mutant != (0, True), mutant)
+
+    # An unexpected exception (os.fstat raising something other than OSError here) exits 2 with one CANNOT
+    # EVALUATE line, never the exit 1 that names a miss; with _UNEXPECTED reverted it propagates.
+    def _unexpected():
+        case = _Case().settings(good)
+        real_fstat = os.fstat
+
+        def _fstat(fd):
+            raise RuntimeError("fstat failed\nin the self-test")
+        os.fstat = _fstat
+        try:
+            code, out, err = _main_streams(["--launch-dir", str(case.launch), "--require", str(case.require)],
+                                           "utf-8")
+        finally:
+            os.fstat = real_fstat
+            case.close()
+        return code, not out and len(err) == 1 and err[0].startswith("CANNOT EVALUATE: unexpected RuntimeError")
+    got, mutant = _run(lambda: _guarded(_unexpected), revert=("_UNEXPECTED", ()))
+    check("cli/unexpected-exception-exit-2", got == (2, True), got)
+    check("cli/unexpected-exception-exit-2/red-when-reverted", mutant != (2, True), mutant)
+
     if FAILURES:
         print("SELF-TEST FAIL: check_hook_coverage {} of {} check(s) failed".format(len(FAILURES), len(EXECUTED)))
         for failure in FAILURES:
@@ -1100,8 +1239,10 @@ def _self_test():
           "file are a named failure; malformed, duplicate-key, NaN, null, non-UTF-8, symlinked, FIFO, "
           "non-regular, oversized, unreadable and wrong-typed settings, a relative, symlinked or "
           "non-directory launch directory and an empty, keyless, unknown-entry-key, wrong-typed, "
-          "non-project-scope, relative, symlinked, unreadable or absent declaration exit 2; each mutation row "
-          "is red with its check reverted)".format(len(EXECUTED)))
+          "non-project-scope, relative, symlinked, unreadable or absent declaration exit 2; a launch path "
+          "through a search-only directory passes, a read stops at MAX_BYTES + 1 bytes, the WARN line "
+          "survives unparsable settings, unencodable output is escaped and an unexpected exception exits 2; "
+          "each mutation row is red with its check reverted)".format(len(EXECUTED)))
     return 0
 
 
@@ -1124,6 +1265,24 @@ def _main_exit(argv):
             return main()
     finally:
         sys.argv = saved
+
+
+def _main_streams(argv, encoding):
+    """(exit code, stdout lines, stderr lines) of _main_guarded() for the argument list argv, with stdout and
+    stderr replaced by strict text streams in encoding, as a locale whose encoding it is would set them."""
+    import io
+    saved = sys.argv, sys.stdout, sys.stderr
+    out = io.TextIOWrapper(io.BytesIO(), encoding=encoding, errors="strict", newline="\n")
+    err = io.TextIOWrapper(io.BytesIO(), encoding=encoding, errors="strict", newline="\n")
+    sys.argv, sys.stdout, sys.stderr = [saved[0][0]] + list(argv), out, err
+    try:
+        code = _main_guarded()
+        out.flush()
+        err.flush()
+    finally:
+        sys.argv, sys.stdout, sys.stderr = saved
+    return (code, out.buffer.getvalue().decode(encoding).splitlines(),
+            err.buffer.getvalue().decode(encoding).splitlines())
 
 
 def _check_gate_arity(argv):
@@ -1163,7 +1322,24 @@ def main():
     return run_gate(*gate)
 
 
+def _main_guarded():
+    """main()'s exit code, with stdout and stderr set to escape any character their encoding cannot carry;
+    any unexpected exception (_UNEXPECTED) exits 2 with one CANNOT EVALUATE line, never the exit 1 that
+    names a miss."""
+    try:
+        for stream in (sys.stdout, sys.stderr):
+            reconfigure = getattr(stream, "reconfigure", None)
+            if reconfigure is not None:
+                reconfigure(errors=_OUTPUT_ERRORS)
+        return main()
+    except _UNEXPECTED as exc:
+        # ascii() keeps the message on one line and in characters any stream's encoding can carry.
+        print("CANNOT EVALUATE: unexpected {} ({!a}); fail closed".format(type(exc).__name__, str(exc)),
+              file=sys.stderr)
+        return 2
+
+
 if __name__ == "__main__":
-    _code = main()
+    _exit_code = _main_guarded()
     _finalizer = sys.modules.get("_selftest_exit_report")
-    (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)
+    (sys.exit if _finalizer is None else _finalizer.exit_with)(_exit_code)
