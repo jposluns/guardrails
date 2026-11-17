@@ -31355,6 +31355,56 @@ def _main_isolated(monitor):
                 ("(ci-idc-n9) a --config-env pair after a case pattern inside a quoted $(...) body denies",
                  _ci_case + "V='Claude Code' git --config-env=author.name=V commit -m x")):
             ciexpect(_ci_label, _ci_cmd, "deny")
+        # A brace group inside a bash 5.3 ${ cmd; } or ${| cmd; } command substitution closes the ${ body early
+        # in the raw reader but not in bash, which puts every later quote out of step and splits a later value
+        # before its AI part (ci-idc-n10 to n14 are the review's five shapes; n15 to n17 the tab, newline and |
+        # spellings). Each row allowed before this change.
+        _ci_funsub = "X=\"${ { :; }; echo \"'\"; }\"; "
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-n10) an AI GIT_AUTHOR_NAME default after a brace group inside a quoted ${ cmd; } body "
+                 "denies", _ci_funsub + "set -a; : ${GIT_AUTHOR_NAME:='Bot Claude'}; git commit -m x"),
+                ("(ci-idc-n11) an AI EMAIL default after a brace group inside a quoted ${ cmd; } body denies",
+                 _ci_funsub + "set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-n12) an AI GIT_CONFIG_PARAMETERS pair after a brace group inside a quoted ${ cmd; } body "
+                 "denies", _ci_funsub + "GIT_CONFIG_PARAMETERS=\"'author.name'='x Claude'\" git commit -m x"),
+                ("(ci-idc-n13) a --config-env pair after a brace group inside a quoted ${ cmd; } body denies",
+                 _ci_funsub + "V='Claude Code' git --config-env=author.name=V commit -m x"),
+                ("(ci-idc-n14) an AI GIT_CONFIG_VALUE_0 after a brace group inside a quoted ${ cmd; } body denies",
+                 _ci_funsub + "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0='x Claude' "
+                 "git commit -m x"),
+                ("(ci-idc-n15) an AI EMAIL default after a brace group inside a quoted ${<tab>cmd; } body denies",
+                 "X=\"${\t{ :; }; echo \"'\"; }\"; set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-n16) an AI EMAIL default after a brace group inside a quoted ${<newline>cmd; } body "
+                 "denies",
+                 "X=\"${\n{ :; }; echo \"'\"; }\"; set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-n17) an AI EMAIL default after a brace group inside a quoted ${| cmd; } body denies",
+                 "X=\"${| { :; }; REPLY=\"'\"; }\"; set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        # bash runs a command substitution held in an indexed array subscript of a variable's value wherever it
+        # evaluates an arithmetic expression, so each such place makes the text inexact and a human EMAIL beside
+        # an AI product name denies (the disclosed over-deny; the same EMAIL with no such place is ci-idc-p5).
+        # Each row allowed before this change.
+        _ci_human = "EMAIL=alice@example.com git commit -m 'fix the claude adapter'"
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-a1) an indexed array subscript makes the text inexact (over-deny)",
+                 "a[0]=1; " + _ci_human),
+                ("(ci-idc-a2) a [[ arithmetic comparison makes the text inexact (over-deny)",
+                 "[[ 1 -eq 1 ]] && " + _ci_human),
+                ("(ci-idc-a3) a $[...] arithmetic expansion makes the text inexact (over-deny)",
+                 "Y=$[1]; " + _ci_human),
+                ("(ci-idc-a4) a (( arithmetic command makes the text inexact (over-deny)",
+                 "((n=1)); " + _ci_human),
+                ("(ci-idc-a5) a for (( loop makes the text inexact (over-deny)",
+                 "for ((i=0;i<1;i++)); do " + _ci_human + "; done"),
+                ("(ci-idc-a6) a let word makes the text inexact (over-deny)",
+                 "let n=1; " + _ci_human),
+                ("(ci-idc-a7) a declare integer attribute makes the text inexact (over-deny)",
+                 "declare -i n=1; " + _ci_human),
+                ("(ci-idc-a8) a ${NAME:OFFSET} substring expansion makes the text inexact (over-deny)",
+                 "Y=${N:1}; " + _ci_human),
+                ("(ci-idc-a9) a ${!NAME} indirect expansion makes the text inexact (over-deny)",
+                 "Y=${!V}; " + _ci_human)):
+            ciexpect(_ci_label, _ci_cmd, "deny")
         for _ci_label, _ci_cmd in (
                 ("(ci-idc-e-c1) a human EMAIL with a backslash before a newline and no AI name allows",
                  "EMAIL=alice@example.com git commit -m 'fix the \\\nadapter'"),
