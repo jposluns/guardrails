@@ -2195,8 +2195,10 @@ def _member_bound_checks(roster):
     entry, not the default (red when that entry is removed or changed).
     config/member-bound-reaches-run: _run_config_member hands the bound it looks up to
     _run_bounded (a stub patched into the engine module records it; nothing is launched), for
-    every override and for one non-member argv that keeps the default (red when the lookup is
-    bypassed).
+    every override that differs from the default and for one non-member argv that keeps the
+    default (red when the lookup is bypassed). The tools/gen_rules.py --self-test override equals
+    the default, so a bypassed lookup would hand the same bound and could not be told apart; it is
+    left out here, and config/member-bound-table pins its value.
     config/member-roster-figures: the frozen sizing account (SIZING_ACCOUNT_ROSTER,
     SIZING_ACCOUNT_TIMED, SIZING_MEASURED and SIZING_MALFORMED_MEASURED in the engine) still
     applies to the live roster (_roster_figures reports no problem), keeps its sizes, and keeps

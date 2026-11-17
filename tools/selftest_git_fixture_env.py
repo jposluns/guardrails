@@ -1428,7 +1428,8 @@ def _config_poison_fixture(base):
 # opf/tools/_opf_adopt_apply.py --self-test entry, whose MEASURED figures are later config-lane
 # runs of that member beside two runs of the hooks member (its own comment), fed to the SIZING
 # formula and capped, and the tools/gen_rules.py --self-test entry, whose MEASURED figures are
-# standalone runs (its own comment), fed to the SIZING formula.
+# standalone runs and one later config-lane run of that member alone (its own comment), the lane
+# run fed to the SIZING formula.
 #
 # CONFIG_MEMBER_BOUND_DEFAULT is a DELIBERATE SHORTER DEADLINE, not a bound sized above every
 # member's own end-to-end budget. Budgets the members grant themselves, READ FROM SOURCE (not
@@ -1452,8 +1453,9 @@ def _config_poison_fixture(base):
 # tools/selftest_aiqt_hooks.py entry and the opf/tools/_opf_adopt_apply.py --self-test entry is
 # sized from config-lane runs MEASURED on this host, see SIZING; those six are set above their
 # members' worst cases READ FROM SOURCE, see their shared comment, the
-# child-status-coverage-selftest and gen_rules.py entries from standalone runs, see their own
-# comments, the check_release_cut.py entry from standalone runs with a stated margin,
+# child-status-coverage-selftest entry from standalone runs and the gen_rules.py entry from a
+# later config-lane run by the SIZING formula, see their own comments, the check_release_cut.py
+# entry from standalone runs with a stated margin,
 # deliberately below the worst case over named terms that its own comment gives, the
 # selftest_aiqt_hooks.py entry from later config-lane runs by the SIZING formula, capped at 5700 s
 # since the formula gives more than 5766 s, see its own comment, and the _opf_adopt_apply.py entry
@@ -1462,7 +1464,7 @@ def _config_poison_fixture(base):
 # its opf-adopt-apply-selftest leg, see its own comment); each other entry stays a deliberate
 # shorter deadline relative to the member's self-granted budget, yet each formula-sized entry is
 # sized above the member's measured runs (lane runs, or standalone runs for the
-# child-status-coverage-selftest and gen_rules.py entries) so that the member finishes under the
+# child-status-coverage-selftest entry) so that the member finishes under the
 # load the SIZING factor covers, but for the two capped entries, selftest_aiqt_hooks.py and
 # _opf_adopt_apply.py, which cover less (their own comments); reaching a bound stays
 # cannot-evaluate, attributed to the bound, never a FAIL of that member and never a pass, because
@@ -1835,7 +1837,7 @@ CONFIG_MEMBER_BOUNDS = {
     # the slowest measured run (3900 / 1469.7 = 2.654), not the formula's 20 / 3, so this entry
     # covers less load growth than the formula-sized entries do; reaching it stays cannot-evaluate.
     ("opf/tools/_opf_adopt_apply.py", "--self-test"): 3900,
-    # Sized outside SIZING, by its formula (no config-lane time of this member is known). The
+    # Sized outside SIZING, by its formula, from one config-lane run taken after the account. The
     # account names no time for this member: it is not among the nine the account names, and
     # whether it is among the 75 it reports, unnamed, as 62.42 s or less is not known; that account
     # predates the generator class check (tools/gen_rules.py, _gen_argv_class_check_failures) this
@@ -1846,13 +1848,22 @@ CONFIG_MEMBER_BOUNDS = {
     # MEASURED (2026-11-17, 16:32:59 to 16:40:51 UTC, 96-CPU host, load5 about 29.0 to 30.5,
     # standalone, plain): three runs of `python3 -I -B tools/gen_rules.py --self-test`, one after
     # another, took 159.09 s, 154.92 s and 157.68 s wall; each exited 0. That load sat well below
-    # the host's CPU count, so these runs saw less contention than SIZING's 24-CPU lane runs did.
-    # Its time under a lane's four-worker pool is not measured, so these standalone times are fed
-    # to the formula as the child-status coverage entry's are.
-    # ESTIMATED: 159.09 * 20 / 3 = 1060.6, so 1200 s. The slowest measured run is below 180 s, so
-    # the formula gives the default itself: this entry records that the bound is sized from a
-    # measurement, and it does not lengthen the deadline. The 232 s REPORTED run would size it at
-    # 1800 s; a lane time of this member above 180 s needs a larger entry by the same formula.
+    # the host's CPU count, so these runs saw less contention than SIZING's 24-CPU lane runs did
+    # (INFERRED, not measured: it follows from SIZING's load model; no contention was measured).
+    # These standalone times are not fed to the formula; the lane run below is.
+    # MEASURED (2026-11-17, 17:47:58 to 17:50:42 UTC, 96-CPU host, load5 38.11 at the start and
+    # 35.18 at the end, 35.18 to 38.11 sampled every 10 s, plain, the bound lifted to 3600 s): the
+    # suite's own _config_results over this one member (so one pool worker busy), under the
+    # combined lane's injected configuration built by the suite's own _config_poison_fixture, took
+    # 163.69 s (the member's own run 163.62 s); it exited 0 with no hook, fsmonitor or exposure
+    # record. No other lane's configuration was measured for this member, nor its time beside
+    # other members in a lane's four-worker pool. That run's load5 also sat below the host's CPU
+    # count, so it may have seen less contention than SIZING's 24-CPU lane runs did (INFERRED, not
+    # measured).
+    # ESTIMATED: 163.69 * 20 / 3 = 1091.3, so 1200 s. The slowest measured lane time is below
+    # 180 s, so the formula gives the default itself: this entry records that the bound is sized
+    # from a measurement, and it does not lengthen the deadline. The 232 s REPORTED run would size
+    # it at 1800 s; a lane time of this member over 180 s needs a larger entry by the same formula.
     ("tools/gen_rules.py", "--self-test"): 1200,
 }
 # The sizing account's frozen facts (see SIZING above); _roster_figures derives the live figures
@@ -2026,8 +2037,8 @@ SIZING_LATER_MEASURED = {
         "Config-lane runs under the system lane's setup (2026-11-14, 1469.7 s and 1467.2 s):"
         " see this member's CONFIG_MEMBER_BOUNDS comment."),
     ("tools/gen_rules.py", "--self-test"): (
-        "Standalone runs only (2026-11-17, slowest 159.09 s), no config-lane time known: see"
-        " this member's CONFIG_MEMBER_BOUNDS comment."),
+        "Combined config-lane run (2026-11-17, 163.69 s) and standalone runs (slowest 159.09 s):"
+        " see this member's CONFIG_MEMBER_BOUNDS comment."),
 }
 # After the process-group kill: the bounded drain of output still held by a descendant that left
 # the group (setsid or setpgid), the bounded reap of the leader, and the bounded wait for the group
