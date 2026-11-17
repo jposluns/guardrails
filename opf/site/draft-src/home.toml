@@ -47,10 +47,11 @@ OPFiles keeps each record in a fixed, machine-written form and generates the rea
 it; a check, set as a required step, fails the moment the 2 disagree. The standard forbids reusing \
 a record's number or deleting a record. <a href=\"https://aiqt.ai\" target=\"_blank\" \
 rel=\"noopener noreferrer\">AIQT Guardrails<span class=\"vh\"> (opens in a new tab)</span></a> \
-includes OPFiles to give AI assistants a better structure of information to reference, so they can \
-make the best and most appropriate decisions. An AIQT adoption sets OPFiles up by default, and you \
-can adopt OPFiles on its own. It is <a href=\"$BASE/license/\">open source under the Apache \
-License 2.0</a>, except vendored third-party material, which remains under its own terms. \
+includes OPFiles so that AI assistants have structured records to reference when they make \
+decisions, instead of chat logs and hand-edited notes. An AIQT adoption sets OPFiles up by \
+default, and you can adopt OPFiles on its own. It is <a href=\"$BASE/license/\">open source under \
+the Apache License 2.0</a>, except vendored third-party material, which remains under its own \
+terms. \
 $OPF_STATUS"""
 
 [[body]]
