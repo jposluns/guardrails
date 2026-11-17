@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "b71ad7b303cc822f1fd3523a1fcf6cdf1c35246be3b17da870f75f527bb35830"
+tree-sha256 = "41c3b9cdfb4ae95b99dc29edd0147c6046c24efaf02d59b4abe2fd48db3e2b8c"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4437,8 +4437,8 @@ sha256 = "6d32c57b8ae951e3b5d8af009ce00836f8383a8857664845c1b59b86c4e67c3d"
 
 [[sources]]
 path = "tools/check_selftest_removal.py"
-bytes = 54872
-sha256 = "4f64de4e2bd54ceb499ec29de8ce38d2ff743563f52a6b8f3ff5921b92baba0e"
+bytes = 55021
+sha256 = "5612f80c4dcae095fab45ac7fa4873381868961c54656da4e72d22bd2629a605"
 
 [[sources]]
 path = "tools/check_shell_function_standins.py"
@@ -4732,8 +4732,8 @@ sha256 = "5218fd5dd347aa7f25cebbbce29bff5d48d94b8ffdd219e678ddd8ccc75ffc0d"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 488978
-sha256 = "abdb4452c106497e0442cf244296c84abb3bdde194a44b57a3e7eb45e81b4c6b"
+bytes = 489892
+sha256 = "371ed2c4e1fac891e6a5a934125eba2fea02b5d5c367da4ba119941847887488"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"
@@ -4772,8 +4772,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 29274
-sha256 = "eea91496cb44396153ca9c8c352d023bb93e1a757e4d2fd5a3466c9c22d51c3a"
+bytes = 29411
+sha256 = "94d08fdf4f4ebd3d125c62ac83bf95c9a69563654634c8b7c5e2d5bda9a6374c"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"

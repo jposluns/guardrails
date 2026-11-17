@@ -721,12 +721,14 @@ def _repo_cases(tmp):
         check("repo/registry-absent-at-head-cannot-evaluate", _run_quiet(repo) == EXIT_CANNOT_EVALUATE)
         _git(repo, env, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
         check("repo/base-underivable-cannot-evaluate", _run_quiet(repo) == EXIT_CANNOT_EVALUATE)
+        # in the fixture environment too, so no git call of the self-test reads the caller's home, XDG or
+        # system configuration
+        plain = Path(tmp) / "plain"
+        os.makedirs(plain)
+        check("repo/not-a-repository-cannot-evaluate", _run_quiet(plain) == EXIT_CANNOT_EVALUATE)
     finally:
         os.environ.clear()
         os.environ.update(saved)
-    plain = Path(tmp) / "plain"
-    os.makedirs(plain)
-    check("repo/not-a-repository-cannot-evaluate", _run_quiet(plain) == EXIT_CANNOT_EVALUATE)
 
 
 def self_test():
