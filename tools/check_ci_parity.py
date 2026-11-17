@@ -993,7 +993,8 @@ ALLOWLIST = (
             "protected line the change merges into. The local runner has "
             "no test merge: it passes --local-base refs/remotes/origin/main "
             "only when the gate's --probe-local-base exits 0 silently, runs "
-            "the gate without a base when the probe reports a genuine "
+            "the gate without a base and fails the run (unless "
+            "BASELINE_PIN_ALLOW_NO_BASE=1) when the probe reports a genuine "
             "absence, and fails the run on any other probe outcome."
         ),
         "backlog": "GD-123",
@@ -1013,7 +1014,8 @@ ALLOWLIST = (
             "job. The local runner has no push event: it passes "
             "--local-base refs/remotes/origin/main only when the gate's "
             "--probe-local-base exits 0 silently, runs the gate without a "
-            "base when the probe reports a genuine absence, and fails the "
+            "base and fails the run (unless BASELINE_PIN_ALLOW_NO_BASE=1) "
+            "when the probe reports a genuine absence, and fails the "
             "run on any other probe outcome."
         ),
         "backlog": "GD-123",
@@ -1027,7 +1029,8 @@ ALLOWLIST = (
             "unprobed, that 1 commit's change. The local runner passes "
             "--local-base refs/remotes/origin/main only when the gate's "
             "--probe-local-base exits 0 silently, runs the gate without a "
-            "base when the probe reports a genuine absence, and fails the "
+            "base and fails the run (unless BASELINE_PIN_ALLOW_NO_BASE=1) "
+            "when the probe reports a genuine absence, and fails the "
             "run on any other probe outcome."
         ),
         "backlog": "GD-123",
@@ -1036,15 +1039,16 @@ ALLOWLIST = (
         "side": "local-only",
         "identity": "tools/check_baseline_pin.py --local-base refs/remotes/origin/main",
         "reason": (
-            "When check_baseline_pin.py --probe-local-base "
-            "refs/remotes/origin/main, the gate's own --local-base reads "
-            "under its scrubbed git environment, exits 0 silently, the "
-            "local runner compares HEAD's pins with those at the fork point "
-            "of HEAD and that full ref (the git merge-base form of "
-            "check_version_monotonicity.py's default base, which reads the "
-            "shadowable short name origin/main instead). CI instead passes "
-            "a --base derived from the event, the exact commit the change "
-            "starts from."
+            "The local runner first runs check_baseline_pin.py "
+            "--probe-local-base refs/remotes/origin/main, which takes the "
+            "gate's own --local-base reads under its scrubbed git "
+            "environment. When that probe exits 0 silently, the runner "
+            "passes --local-base refs/remotes/origin/main, comparing HEAD's "
+            "pins with those at the fork point of HEAD and that full ref "
+            "(the git merge-base form of check_version_monotonicity.py's "
+            "default base, which reads the shadowable short name "
+            "origin/main instead). CI instead passes a --base derived from "
+            "the event, the exact commit the change starts from."
         ),
         "backlog": "GD-123",
     },
@@ -1060,8 +1064,10 @@ ALLOWLIST = (
             "store exit 2), the local runner prints a NOTE that the base "
             "comparison did "
             "not run and how to create the ref (git fetch origin "
-            "main:refs/remotes/origin/main) and runs the gate without a "
-            "base; any other probe outcome fails the run. The parity grammar "
+            "main:refs/remotes/origin/main), runs the gate without a "
+            "base and fails the run, unless the documented opt-out "
+            "BASELINE_PIN_ALLOW_NO_BASE=1 is set in its environment; any "
+            "other probe outcome fails the run. The parity grammar "
             "admits this bare gate line only as the absent branch of that "
             "exact probe block (BASELINE_PROBE_BLOCK), refuses a bare "
             "baseline-pin gate line anywhere else under any label, and the "
@@ -1799,10 +1805,12 @@ RUNNER_SCAFFOLD_LINES = frozenset({
 # both failure-state initializers). The probe is the gate's own --probe-local-base
 # (the --local-base reads under its scrubbed git environment: 0 usable, 1 only for a
 # ref the clone genuinely lacks, 2 for anything else). The block passes --local-base
-# only when it exits 0 with nothing on stderr; exit 1 with nothing on stderr prints
-# one NOTE line and runs the gate without the flag; every other outcome fails the run
-# under the baseline-pin name, through the same failed and failed_names updates
-# run_gate() makes. Its two run_gate lines are parity members; the probe launch line
+# only when it exits 0 with nothing on stderr (the probe function's trailing "." on
+# stderr, removed after the capture, keeps a stderr of only line feeds from reading as
+# nothing); exit 1 with nothing on stderr prints one NOTE line, runs the gate without
+# the flag and fails the run under the baseline-pin name unless BASELINE_PROBE_OPT_OUT
+# is exactly 1; every other outcome fails the run under the baseline-pin name. Each
+# failure goes through the same failed and failed_names updates run_gate() makes. Its two run_gate lines are parity members; the probe launch line
 # (BASELINE_PROBE_LAUNCH, inside the block's baseline_probe function) is not a gate, and
 # every line of the block other than the two run_gate lines is validated by this
 # membership alone, so a block that differs in any line is classified line by line and
@@ -1821,6 +1829,9 @@ BASELINE_PROBE_NOTE = (
     "NOTE: baseline-pin base comparison did NOT RUN: this clone has no "
     "refs/remotes/origin/main; create it with git fetch origin "
     "main:refs/remotes/origin/main")
+# The one documented opt-out of the absent branch's failure: set to exactly 1 in the
+# runner's environment, a genuine absence runs the gate bare without failing the run.
+BASELINE_PROBE_OPT_OUT = "BASELINE_PIN_ALLOW_NO_BASE"
 # The probe launch, a plain command in the baseline_probe function body, so its python3
 # sits in a command-word position tools/check_python_launcher_isolation.py resolves; the
 # command substitution after the function calls only the function.
@@ -1828,14 +1839,26 @@ BASELINE_PROBE_LAUNCH = "python3 " + BASELINE_PROBE_ARGS
 BASELINE_PROBE_BLOCK = (
     "baseline_probe() {",
     BASELINE_PROBE_LAUNCH,
+    "local baseline_probe_status=$?",
+    "printf '.' >&2",
+    'return "$baseline_probe_status"',
     "}",
     "baseline_probe_err=$(baseline_probe 2>&1 >/dev/null)",
     "baseline_probe_rc=$?",
+    "baseline_probe_err=${baseline_probe_err%.}",
     'if [ "$baseline_probe_rc" -eq 0 ] && [ -z "$baseline_probe_err" ]; then',
     BASELINE_PROBE_GATE,
     'elif [ "$baseline_probe_rc" -eq 1 ] && [ -z "$baseline_probe_err" ]; then',
     'echo "' + BASELINE_PROBE_NOTE + '"',
     BASELINE_PROBE_ABSENT_GATE,
+    'if [ "${' + BASELINE_PROBE_OPT_OUT + ':-}" != "1" ]; then',
+    "failed=1",
+    'failed_names="${failed_names:+${failed_names}, }baseline-pin"',
+    'echo "GATE FAILED: baseline-pin (the base comparison did NOT RUN; fetch the '
+    'ref as the NOTE above says, or set ' + BASELINE_PROBE_OPT_OUT + '=1 to accept '
+    'a run without it)"',
+    "echo",
+    "fi",
     "else",
     'echo "--- baseline-pin ---"',
     "failed=1",
@@ -5283,14 +5306,16 @@ def _prepare_stubs(root):
     return bin_dir, functions
 
 
-def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0, probe=None):
+def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0, probe=None,
+                     opt_out=None):
     """Run text as tools/run_all_checks.sh in a scratch tree; return (rc, stdout lines, calls).
 
     stubs is the shared (bin directory, BASH_ENV file) pair from _prepare_stubs; nothing
     this writes is executed. probe, when given, is (exit status, stderr text) for the
     baseline-pin probe stand-in, whose calls and every git call are then appended to
     calls after the gate calls; otherwise the probe exits 0 silently, git exits 0
-    silently, and neither is recorded.
+    silently, and neither is recorded. opt_out, when given, is the value of
+    BASELINE_PROBE_OPT_OUT in the runner's environment (unset otherwise).
     """
     import os
     import shutil
@@ -5322,6 +5347,8 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0, probe=None):
             git_log.write_text("", encoding="utf-8")
             env.update(stub_probe_rc=str(probe[0]), stub_probe_err=probe[1],
                        stub_probe_log=str(git_log), stub_git_log=str(git_log))
+        if opt_out is not None:
+            env[BASELINE_PROBE_OPT_OUT] = opt_out
         proc = subprocess.run(
             [bash, "--noprofile", "--norc", str(runner)],
             cwd=tmp, env=env, stdin=subprocess.DEVNULL,
@@ -5709,14 +5736,29 @@ def _scenario_problems(scenario, outcome, expected_calls, expected_headers):
 BASELINE_PROBE_SCENARIOS = (
     ("present", 0, "", "python3 -I -B tools/check_baseline_pin.py --local-base "
      "refs/remotes/origin/main", True),
-    ("absent", 1, "", "python3 -I -B tools/check_baseline_pin.py", True),
+    ("absent", 1, "", "python3 -I -B tools/check_baseline_pin.py", False),
     ("cannot evaluate (a broken or dangling ref)", 2,
      "CANNOT EVALUATE: base: refs/remotes/origin/main does not resolve\n", None, False),
     ("probe exit 2 silent", 2, "", None, False),
     ("absent with stderr", 1, "error: x\n", None, False),
     ("present with stderr", 0, "warning: x\n", None, False),
+    ("absent with only line feeds on stderr", 1, "\n\n", None, False),
+    ("present with only a line feed on stderr", 0, "\n", None, False),
     ("probe exit 127 with stderr", 127, "python3: command not found\n", None, False),
     ("probe exit 3 silent", 3, "", None, False),
+)
+# The same outcomes with the opt-out set (BASELINE_PROBE_OPT_OUT=1): only the genuine
+# absence changes, to a pass after the NOTE and the bare gate; a value other than 1
+# is no opt-out. Each row is (label, exit status, stderr text, opt-out value, the
+# baseline-pin call expected or None, whether the run passes).
+BASELINE_PROBE_OPT_OUT_SCENARIOS = (
+    ("absent, opted out", 1, "", "1", "python3 -I -B tools/check_baseline_pin.py", True),
+    ("absent, opt-out set to yes", 1, "", "yes", "python3 -I -B tools/check_baseline_pin.py",
+     False),
+    ("cannot evaluate, opted out", 2,
+     "CANNOT EVALUATE: base: refs/remotes/origin/main does not resolve\n", "1", None, False),
+    ("absent with stderr, opted out", 1, "error: x\n", "1", None, False),
+    ("absent with only line feeds on stderr, opted out", 1, "\n", "1", None, False),
 )
 BASELINE_PROBE_CALL = "python3 " + BASELINE_PROBE_ARGS
 
@@ -5726,19 +5768,24 @@ def baseline_probe_problems(text):
     probe (every gate stub passing); return the problems, empty when each outcome is
     handled. The probe must run exactly once, as BASELINE_PROBE_CALL, and no git command
     may run. Exit 0 with nothing on stderr passes --local-base; exit 1 with nothing on
-    stderr prints BASELINE_PROBE_NOTE exactly once and runs the gate bare; every other
-    outcome runs no baseline-pin gate call, names baseline-pin as failed and fails the
-    run."""
+    stderr prints BASELINE_PROBE_NOTE exactly once, runs the gate bare and names
+    baseline-pin as failed and fails the run unless BASELINE_PROBE_OPT_OUT is exactly 1
+    (BASELINE_PROBE_OPT_OUT_SCENARIOS); every other outcome runs no baseline-pin gate
+    call, names baseline-pin as failed and fails the run, opt-out or not. A stderr of
+    only line feeds is output on stderr."""
     import tempfile
 
     problems = []
+    scenarios = ([(label, status, err, None, want_call, passes)
+                  for label, status, err, want_call, passes in BASELINE_PROBE_SCENARIOS]
+                 + list(BASELINE_PROBE_OPT_OUT_SCENARIOS))
     with tempfile.TemporaryDirectory(prefix="ci-parity-probe-") as shared:
         stubs = _prepare_stubs(Path(shared))
         try:
-            for label, status, err, want_call, passes in BASELINE_PROBE_SCENARIOS:
+            for label, status, err, opt_out, want_call, passes in scenarios:
                 try:
                     rc, lines, calls = _run_runner_copy(
-                        text, stubs, probe=(status, err))
+                        text, stubs, probe=(status, err), opt_out=opt_out)
                 except Exception as exc:  # no bash, a scratch-tree error, or a timeout
                     problems.append("{}: runner copy did not complete: {!r}".format(
                         label, exc))
@@ -5756,8 +5803,7 @@ def baseline_probe_problems(text):
                         label, pin_calls))
                 notes = [line for line in lines if line.startswith(
                     "NOTE: baseline-pin base comparison")]
-                if notes != ([BASELINE_PROBE_NOTE] if status == 1 and not err and passes
-                             else []):
+                if notes != ([BASELINE_PROBE_NOTE] if status == 1 and not err else []):
                     problems.append("{}: NOTE lines {!r}".format(label, notes))
                 if rc != (0 if passes else 1):
                     problems.append("{}: exit {}".format(label, rc))
@@ -10760,11 +10806,14 @@ def self_test():
     # 47: the local runner's baseline-pin probe, the gate's own --probe-local-base. The
     # live runner passes --local-base only on a silent exit 0, prints the NOTE (whose
     # fetch creates exactly refs/remotes/origin/main) and runs the gate bare only on a
-    # silent exit 1, and fails the run on every other outcome; the grammar admits the
-    # block as its exact reviewed text and refuses each edited copy. Each mutant is one
-    # change reverted or weakened and must be caught at runtime: the unconditional flag,
-    # the git show-ref probe restored, any silent non-zero exit read as absence, stderr
-    # ignored on either branch, and the old fetch hint.
+    # silent exit 1 (failing the run there unless the opt-out is exactly 1), and fails
+    # the run on every other outcome; the grammar admits the block as its exact reviewed
+    # text and refuses each edited copy. Each mutant is one change reverted or weakened
+    # and must be caught at runtime: the unconditional flag, the git show-ref probe
+    # restored, any silent non-zero exit read as absence, stderr ignored on either
+    # branch, the old fetch hint, an absence that passes without the opt-out or with any
+    # opt-out value, and a stderr of only line feeds read as silent. The block-position
+    # and duplicate-block guards each have a mutant of their own below.
     count += 1
     probe_runner, probe_diagnostic = read_runner_text(LOCAL_PATH, LOCAL_SOURCE)
     if probe_diagnostic is not None:
@@ -10795,6 +10844,14 @@ def self_test():
              (present_test, 'if [ "$baseline_probe_rc" -eq 0 ]; then')),
             ("fetch hint without its destination refspec",
              (hint, "create it with git fetch origin main")),
+            ("absence passes without the opt-out",
+             ('if [ "${' + BASELINE_PROBE_OPT_OUT + ':-}" != "1" ]; then',
+              'if [ -n "${' + BASELINE_PROBE_OPT_OUT + ':-}" ]; then')),
+            ("any opt-out value accepted",
+             ('if [ "${' + BASELINE_PROBE_OPT_OUT + ':-}" != "1" ]; then',
+              'if [ -z "${' + BASELINE_PROBE_OPT_OUT + ':-}" ]; then')),
+            ("stderr of only line feeds read as silent",
+             ("printf '.' >&2\n", ":\n")),
         )
         for label, edit in probe_mutants:
             if edit is None:
@@ -10832,6 +10889,35 @@ def self_test():
                            for _name, command, _status, _failing
                            in _naming_scenarios(mutant)[3:]):
                     failures.append("47 naming scenarios skipped the " + label)
+            # The block-position guard: the exact block, moved whole, is refused above
+            # the run_gate() definition and the failure-state initializers, and inside
+            # an if frame (its own failure branch), on the guard's own message; the
+            # duplicate guard refuses a second exact copy after the first. Each
+            # message comes from that guard alone, so reverting the guard fails this.
+            block = probe_runner[start:after]
+            rest = probe_runner[:start] + probe_runner[after:]
+            top = rest.find("failed=0\n")
+            branch = rest.find("    gitleaks_rc=$?\n")
+            position = ("the reviewed baseline-pin probe block is admitted only at top "
+                        "level after the run_gate() definition")
+            for label, mutant in (
+                    ("block above the run_gate() definition and initializers",
+                     None if top == -1 else rest[:top] + block + rest[top:]),
+                    ("block inside the gitleaks failure branch",
+                     None if branch == -1 else rest[:branch] + block + rest[branch:])):
+                if mutant is None or mutant.count(block) != 1:
+                    failures.append("47 fixture drift: " + label)
+                    continue
+                messages = [(diagnostic.code, diagnostic.message)
+                            for diagnostic in extract_local(mutant).diagnostics]
+                if not any(code == "baseline-probe-position" and message.startswith(position)
+                           for code, message in messages):
+                    failures.append("47 position guard admitted the " + label)
+            duplicated = probe_runner[:after] + block + probe_runner[after:]
+            if not any(diagnostic.code == "baseline-probe-position"
+                       and "occurs 2 times" in diagnostic.message
+                       for diagnostic in extract_local(duplicated).diagnostics):
+                failures.append("47 duplicate guard admitted a second copy of the block")
 
     if failures:
         print("SELF-TEST FAIL:")
