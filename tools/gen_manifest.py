@@ -874,6 +874,7 @@ def main():
             i += 1
             continue
         print("error: unrecognized option {!r}; fail closed".format(tok), file=sys.stderr)
+        print("usage: gen_manifest.py [--check] [--root DIR] | --self-test", file=sys.stderr)
         return 2
     if "--self-test" in args:
         return self_test_main()

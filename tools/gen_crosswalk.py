@@ -55,7 +55,7 @@ import stat
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import linked_dir_failures, repo_root, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile, unknown_args_refused  # noqa: E402
 
 try:
     import tomllib
@@ -577,6 +577,10 @@ def _opt(args, name):
 
 def main():
     args = sys.argv[1:]
+    if unknown_args_refused(args, "gen_crosswalk.py [--check] | --legacy-root DIR [--out DIR] "
+                            "[--successor-inventory FILE] | --self-test",
+                            valued=("--legacy-root", "--out", "--successor-inventory")):
+        return 2
     if "--self-test" in args:
         return self_test()
     if "--legacy-root" in args:

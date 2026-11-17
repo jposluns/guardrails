@@ -769,6 +769,111 @@ def _argv_guard_failures(namespace, prog, run_name="run"):
     return failures
 
 
+# The class check: EVERY tools/gen_*.py, enumerated at run time, refuses each _GEN_ARGV_CLASS_CASES argv with exit
+# 2 and its usage line on stderr. Each generator runs as __main__ in a child whose audit hook ends the child (exit
+# 97) at its first write, delete, directory creation or child process, before the operation happens, so a
+# generator whose guard is reverted shows as exit 97 (or a non-2 exit) and never changes the tree.
+_GEN_ARGV_CLASS_CASES = (["--chek"], ["--check", "--chek"], ["--self-test", "--chek"], ["--help"], ["check"])
+_GEN_ARGV_CHILD = """import contextlib, io, json, os, runpy, sys
+_MUTATING = frozenset(("os.chflags", "os.chmod", "os.chown", "os.exec", "os.fork", "os.forkpty", "os.kill",
+                       "os.killpg", "os.lchflags", "os.link", "os.mkdir", "os.posix_spawn", "os.remove",
+                       "os.removexattr", "os.rename", "os.rmdir", "os.setxattr", "os.spawn", "os.symlink",
+                       "os.system", "os.truncate", "os.utime", "shutil.chown", "shutil.copyfile", "shutil.copymode",
+                       "shutil.copystat", "shutil.copytree", "shutil.make_archive", "shutil.move", "shutil.rmtree",
+                       "subprocess.Popen", "tempfile.mkdtemp", "tempfile.mkstemp"))
+_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+def _hook(event, args):
+    if event == "open":
+        mode, flags = args[1], args[2]
+        writes = isinstance(flags, int) and flags & _WRITE_FLAGS
+        if not (writes or (isinstance(mode, str) and set(mode) & set("wax+"))):
+            return
+    elif event not in _MUTATING:
+        return
+    os.write(2, ("blocked: " + event + "\\n").encode())
+    os._exit(97)
+script, cases = sys.argv[1], json.loads(sys.argv[2])
+sys.addaudithook(_hook)
+for argv in cases:
+    sys.argv = [script] + argv
+    err = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        try:
+            runpy.run_path(script, run_name="__main__")
+            code = "returned without exiting"
+        except SystemExit as exc:
+            code = exc.code
+    print(json.dumps([argv, code, err.getvalue()]), flush=True)
+"""
+
+
+def _gen_argv_class_failures(tools):
+    """One failure line per tools/gen_*.py in the directory tools that does not refuse every
+    _GEN_ARGV_CLASS_CASES argv with exit 2 and exactly one `usage: <its name>` line on stderr."""
+    import json
+    import subprocess
+    failures = []
+    for path in sorted(Path(tools).glob("gen_*.py")):
+        try:
+            done = subprocess.run([sys.executable, "-I", "-B", "-c", _GEN_ARGV_CHILD, str(path),
+                                   json.dumps(_GEN_ARGV_CLASS_CASES)], capture_output=True, timeout=300)
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append("{}: the unknown-option child did not run: {}".format(path.name, exc))
+            continue
+        try:
+            rows = [json.loads(line) for line in done.stdout.decode("utf-8").splitlines()]
+        except ValueError as exc:
+            rows = [["(unreadable child output)", repr(exc), ""]]
+        seen = {tuple(argv): (code, err) for argv, code, err in rows if isinstance(argv, list)}
+        for argv in _GEN_ARGV_CLASS_CASES:
+            code, err = seen.get(tuple(argv), ("no result (child exit {})".format(done.returncode), ""))
+            if code != 2 or err.count("usage: " + path.name) != 1:
+                failures.append("{} {}: expected exit 2 with one usage line on stderr and nothing written; got "
+                                "exit {}, stderr {!r}, child stderr {!r}".format(
+                                    path.name, " ".join(argv), code, err[-200:], done.stderr[-200:]))
+        if done.returncode != 0:
+            failures.append("{}: the unknown-option child exited {} (97 is a blocked write, delete or child "
+                            "process); stderr {!r}".format(path.name, done.returncode, done.stderr[-300:]))
+    return failures
+
+
+# Controls for the class check over a private tools directory: a generator that ignores its arguments and writes
+# must be reported, with its write blocked, and one that refuses them must not be.
+_GEN_ARGV_WRITER = ("import sys\nfrom pathlib import Path\n"
+                    "Path(__file__).with_name('written.txt').write_text('x')\nsys.exit(0)\n")
+_GEN_ARGV_REFUSER = ("import sys\nif sys.argv[1:]:\n    print('usage: gen_refuser.py', file=sys.stderr)\n"
+                     "    sys.exit(2)\n")
+
+
+def _gen_argv_class_check_failures():
+    """The class check over the real tools/ directory, after its controls discriminate."""
+    import shutil
+    import tempfile
+    failures = []
+    tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-argv-selftest-"))
+    try:
+        (tmp / "writer").mkdir()
+        (tmp / "writer" / "gen_writer.py").write_text(_GEN_ARGV_WRITER, encoding="utf-8")
+        (tmp / "refuser").mkdir()
+        (tmp / "refuser" / "gen_refuser.py").write_text(_GEN_ARGV_REFUSER, encoding="utf-8")
+        writer = _gen_argv_class_failures(tmp / "writer")
+        if not writer or (tmp / "writer" / "written.txt").exists():
+            failures.append("class-check control: a generator that ignores its arguments and writes must be "
+                            "reported with its write blocked; got {} failure line(s), written.txt {}".format(
+                                len(writer), "present" if (tmp / "writer" / "written.txt").exists() else "absent"))
+        refuser = _gen_argv_class_failures(tmp / "refuser")
+        if refuser:
+            failures.append("class-check control: a generator that refuses its arguments must pass; got "
+                            "{}".format(refuser))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    tools = Path(__file__).resolve().parent
+    if not (tools / "gen_rules.py").is_file():
+        failures.append("class check: tools/gen_rules.py is not in the enumerated directory {}".format(tools))
+    failures.extend(_gen_argv_class_failures(tools))
+    return failures
+
+
 # One focused invariant (the sibling generators' idiom): an invalid-UTF-8 GENERATED TARGET fails closed
 # (exit 2) rather than a raw UnicodeDecodeError traceback. The reconcile loop reads each desired target as
 # UTF-8 (the drift compare), so a non-UTF-8 target must be caught by the widened (OSError, UnicodeError)
@@ -2138,6 +2243,9 @@ def self_test_main():
 
     # An unknown option is exit 2 with the usage line and runs nothing (red when main()'s guard is reverted).
     failures.extend(_argv_guard_failures(globals(), "gen_rules.py"))
+    # Every tools/gen_*.py refuses an unknown option with exit 2 and its usage line, writing nothing (red when any
+    # one generator's guard is reverted).
+    failures.extend(_gen_argv_class_check_failures())
 
     if failures:
         print("SELF-TEST FAIL:")
@@ -2155,7 +2263,7 @@ def self_test_main():
           "and goes red under the ASCII-only revert; {} parse-level revert(s) each go red; {} adopter-mode "
           "case(s) pass the placement gate and are refused by the pack reader, {} more are refused by both, "
           "and {} adopter-mode revert(s) each go red; an unknown option is exit 2 with the usage line and runs "
-          "nothing; {}.".format(
+          "nothing, here and in every tools/gen_*.py; {}.".format(
               len(_MAP_KEYS_CONDITIONS), ", ".join(_MAP_KEYS_CONDITIONS),
               len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1, len(_PARSE_REVERTS), len(_ADOPTER_MODE_CASES),
               len(_ADOPTER_MODE_REFUSALS), len(_ADOPTER_MODE_REVERTS),

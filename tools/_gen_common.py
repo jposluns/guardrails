@@ -80,6 +80,26 @@ def is_external_url(href):
     return not (host == site or host.endswith("." + site))
 
 
+def unknown_args_refused(argv, usage, flags=("--check", "--self-test"), valued=()):
+    """The unknown-option guard a tools/gen_*.py main() runs before any dispatch. Every token of argv must be one of
+    flags, or one of valued followed by its value. Otherwise print an error line and `usage: <usage>` to stderr
+    and return True, having read and written nothing, so the caller returns exit 2: a misspelled --chek, a stray
+    --help or a positional never falls through to a write-mode run. Return False when every token is defined."""
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in valued and i + 1 < len(argv):
+            i += 2
+            continue
+        if tok not in flags:
+            print("error: {} {!r}; fail closed".format(
+                "option needs a value:" if tok in valued else "unrecognized option", tok), file=sys.stderr)
+            print("usage: " + usage, file=sys.stderr)
+            return True
+        i += 1
+    return False
+
+
 def repo_root(start=None):
     p = Path(start or __file__).resolve()
     for anc in [p, *p.parents]:

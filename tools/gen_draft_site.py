@@ -4729,6 +4729,7 @@ def _self_test():
 def main(argv):
     if argv not in ([], ["--check"], ["--self-test"]):
         print("error: unrecognized arguments {!r}; fail closed".format(argv), file=sys.stderr)
+        print("usage: gen_draft_site.py [--check | --self-test]", file=sys.stderr)
         return 2
     if argv == ["--self-test"]:
         return _self_test()

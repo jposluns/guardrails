@@ -121,7 +121,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
     os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import repo_root, reconcile, unknown_args_refused  # noqa: E402
 
 # The gensrc registry declaration. Only the pilot page is generated today; later PRs add the other
 # docs/*.md -> site/*.html pairs, each as its own row, so the registry lists every generated page
@@ -1473,6 +1473,8 @@ def _self_test():
 
 
 if __name__ == "__main__":
+    if unknown_args_refused(sys.argv[1:], "gen_site.py [--check | --self-test]"):
+        sys.exit(2)
     if "--self-test" in sys.argv[1:]:
         sys.exit(_self_test())
     sys.exit(main(sys.argv[1:]))
