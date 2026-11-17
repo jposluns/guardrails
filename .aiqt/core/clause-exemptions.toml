@@ -108,6 +108,11 @@ text = "a view that declares itself a curated selection makes no such claim."
 reason = "Scope carve-out bounding grdinp.12 (a view that declares itself a curated selection makes no coverage claim); a permission, not an obligation."
 
 [[exempt]]
+corpus-id = "grdinp"
+text = "Otherwise an entry the writer accepted is refused only when the\ngate next reads it, and then blocks every later run of that gate until it is removed."
+reason = "Rationale for grdinp.16; no obligation of its own."
+
+[[exempt]]
 corpus-id = "estsep"
 text = "This does not forbid estimates, forecasts, or a combined figure whose composition is stated, such as a\nmeasured 40 plus an estimated 25 reported as roughly 65."
 reason = "Scope carve-out naming what estsep.1 permits; a permission, not an obligation."
