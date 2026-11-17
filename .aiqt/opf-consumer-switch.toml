@@ -396,6 +396,12 @@ disposition = "not-a-reader"
 reason = "It names the hook library's file to generate the plugin's hook copy; the scan finds no record name, registry key or record-path flag in it."
 
 [[reader]]
+path = "tools/gen_reference_facts.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook script's plugin path only as a launcher argument inside the plugin hooks.json fixture its self-test writes, and never loads that file; its live run reads the two READMEs it renders blocks into, the manifest-derived count sources and the committed plugin hooks.json, none of them a project record, and the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
 path = "tools/gen_secret_patterns.py"
 records = ["none"]
 disposition = "not-a-reader"

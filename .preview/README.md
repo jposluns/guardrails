@@ -1,6 +1,7 @@
 # Hooks preview
 
-This directory is a preview channel for AIQT Guardrails hooks that are not yet part of the pack's plugin.
+This directory is a preview channel for AIQT Guardrails hooks that are not yet part of the pack's plugin
+(`future-stamp-write.py` now also has a counterpart in the plugin; see the section Also in the pack's plugin below).
 Each hook is one self-contained Python file that you can download, check, test, and switch on in Claude
 Code by hand. This page is written so that you can hand it to your AI coding assistant and ask it to
 install a hook for you: every step below is a command it can run, and every check tells it when to stop.
@@ -179,6 +180,23 @@ the authority, and the summary further down this page only points to it.
   decided only inside the grammar: `env` with any argument, an assignment prefix, a command word holding
   an expansion, and any output redirection whose target is not the unquoted word `/dev/null` count as a
   change; an input redirection and a descriptor duplication or close (`<f`, `>&2`, `>&-`) write nothing.
+
+## Also in the pack's plugin
+
+Since plugin version 0.6.0, the pack's Claude Code plugin, `aiqt-guardrails-hooks`, carries the control of
+`future-stamp-write.py` as a handler of its own hook dispatcher, `future_stamp_write` in
+`.aiqt/core/hooks/scripts/aiqt_hooks.py`. The file here stays published unchanged, and it behaves
+differently from the plugin's handler:
+
+- The plugin's `future_stamp_write` never denies. A write that would record a future-dated timestamp into a
+  declared store gets one warning line (a `systemMessage` of at most 100 characters), and the call goes
+  ahead. The `future-stamp-write.py` here denies that write.
+- The plugin's handler has no worker skip and reads no `ORCH_` spelling: it reads only `AIQT_STORE_ROOT`.
+  The file here keeps the worker skip and the `ORCH_` fallback.
+
+Install one form of this hook, not both. If you use the plugin, remove any `settings.json` entry you made
+from this page for `future-stamp-write.py`; otherwise a future-dated store write is both warned on and
+denied.
 
 ## Integrity
 
@@ -791,8 +809,9 @@ and checks helper-session calls.
 ## Status and retirement
 
 This is a preview channel. When a hook here becomes part of the pack's plugin, it is removed from this
-directory and its row is replaced by a pointer to where it now lives. When every hook has moved, this
-directory is removed.
+directory and its row is replaced by a pointer to where it now lives, with one exception so far:
+`future-stamp-write.py` stays published here beside the plugin's handler, as the section Also in the
+pack's plugin describes. When every hook has moved, this directory is removed.
 
 A change to any hook here ships with new checksums on this page and a matching SHA256SUMS, all in the
 same change.

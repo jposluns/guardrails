@@ -18,6 +18,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   commit_msg_subst    PreToolUse  sectvl  deny shell substitution in a git commit argument
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
+  future_stamp_write  PreToolUse  tstamp  WARN (never deny) on a future-dated time written into a declared store
 
 Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
 as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
@@ -188,7 +189,8 @@ DELIBERATE decision where the platform documents exit 2 as the block (the orches
 manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
-A note-only PreToolUse mode (NOTE_ONLY_PRETOOL_MODES), which never blocks a call, takes the Stop handlers'
+A note-only PreToolUse mode (NOTE_ONLY_PRETOOL_MODES), which never blocks a call on its own failure (its only
+blocking results are a miswired event and a deny the adopter explicitly opted into), takes the Stop handlers'
 posture on every one of these error paths instead: a non-blocking systemMessage warning on exit 0.
 A handler result whose exit code is not 0 or 2, or whose stderr text is neither a str nor None, is a
 handler crash with that same posture, and an exception's text in a diagnostic is built so that its own
@@ -255,10 +257,10 @@ import sys
 
 # PYTHON-FLOOR guard (the hook form of tools/check_python_floor.py). It runs before HANDLER_EVENT exists, so
 # it carries its own literal of the fail-open modes, which selftest_aiqt_hooks.py holds equal to the
-# HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS plus the NOTE_ONLY_PRETOOL_MODES. On an older
-# interpreter that can start this file such a mode WARNS on exit 0 and never blocks (a Stop block here would
-# re-fire with no cap); every other mode, any other PreToolUse mode and an unknown mode alike, fails closed
-# with exit 2, as main() does on its own error paths.
+# HANDLER_EVENT entries whose event is in FAIL_OPEN_EVENTS (the warn-only PreToolUse class included) plus the
+# NOTE_ONLY_PRETOOL_MODES. On an older interpreter that can start this file such a mode WARNS on exit 0 and
+# never blocks (a Stop block here would re-fire with no cap); every other mode, any other PreToolUse mode
+# and an unknown mode alike, fails closed with exit 2, as main() does on its own error paths.
 # Both forms' exits hold under the output condition the module docstring states.
 # An older interpreter that cannot start this file never reaches the guard and fails with Python's own error
 # first, and that exit has the event's normal meaning: one that accepts -I but cannot compile this file
@@ -278,9 +280,10 @@ import sys
 # streams: with a sys.stderr whose write works but whose flush fails, `raise SystemExit` here ended
 # as the interpreter's own exit 120 instead of the refusal exit. Nothing runs before this guard, so
 # os._exit discards no other buffered output; the warning itself is flushed before the exit.
-FLOOR_FAIL_OPEN_MODES = ("clock_inject_failure", "clock_inject_post", "diff_wall_stop", "inline_errexit",
-                         "orch_dispatch_ledger", "orch_lease_heartbeat_post", "orch_lease_heartbeat_stop",
-                         "orch_prompt_stamp", "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle")
+FLOOR_FAIL_OPEN_MODES = ("clock_inject_failure", "clock_inject_post", "console_prefix_pretool",
+                         "diff_wall_stop", "future_stamp_write", "inline_errexit", "orch_dispatch_ledger",
+                         "orch_lease_heartbeat_post", "orch_lease_heartbeat_stop", "orch_prompt_stamp",
+                         "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle")
 
 if tuple(sys.version_info[:2]) < (3, 14):
     import os
@@ -338,13 +341,21 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 # PostToolUse recorder error must surface as a warning, not a tool failure. Doc-confirmed 2026-08-29.
 # PostToolUseFailure (its tool has already run and failed) follows PostToolUse by this pack's choice, so
 # an error in its context-only clock reading warns; that line is not doc-confirmed.
+# A PreToolUse handler that is WARN-ONLY by design (a bake-stage warn whose code has no deny path:
+# future_stamp_write) is classed in HANDLER_EVENT by this marker, not by PRETOOL, and the marker is one of
+# FAIL_OPEN_EVENTS: main() then gives it the fail-open ERROR posture from the argv mode alone (a non-blocking
+# warning on exit 0, never exit 2, and no PreToolUse deadline), like the other fail-open events. It is a
+# posture class, never a hook event name: the manifest still registers such a handler on PreToolUse.
+PRETOOL_WARN_ONLY = "PreToolUse (warn-only)"
 FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSubmit", "PostToolUse",
-                                  "PostToolUseFailure")
-# PreToolUse modes that never block a call: every result is an allow or an allow with a note, and only a
-# miswired event hard-blocks. main() gives each one the fail-open posture of a FAIL_OPEN_EVENTS mode on every
-# error path, and keeps its PreToolUse deadline, which then warns on exit 0 instead of failing closed.
-# tools/gen_hooks.py reads this tuple: such a mode's control must declare the manifest default "warn".
-NOTE_ONLY_PRETOOL_MODES = ("inline_errexit",)
+                                  "PostToolUseFailure", PRETOOL_WARN_ONLY)
+# PreToolUse modes that never block a call on their own: every result is an allow or an allow with a note,
+# and only a miswired event hard-blocks, or a deny the adopter explicitly opted into
+# (console_prefix_pretool under AIQT_CONSOLE_PREFIX_POSTURE=deny). main() gives each one the fail-open
+# posture of a FAIL_OPEN_EVENTS mode on every error path, and keeps its PreToolUse deadline, which then
+# warns on exit 0 instead of failing closed. tools/gen_hooks.py reads this tuple: such a mode's control
+# must declare the manifest default "warn".
+NOTE_ONLY_PRETOOL_MODES = ("inline_errexit", "console_prefix_pretool")
 # The platform stops a hook command at the timeout tools/gen_hooks.py writes into hooks.json (its
 # TIMEOUT); HOOK_TIMEOUT_SECONDS mirrors that value, and gen_hooks refuses to render (exit 2) when the two
 # differ, so both numbers come from that one source. main() gives every PreToolUse mode that is not
@@ -390,7 +401,7 @@ NOTE_CONSTRUCTORS = (
     "_expbnd_target_ask", "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
     "_orch_ask_attended", "_orch_oos_unreadable_input_note", "_orch_stop_family")
 DENY_CONSTRUCTORS = (
-    "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
+    "_deny", "_abspth_check_required", "_abspth_check_search_root", "_clean_ignored_deny", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_unreadable_command", "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
@@ -9562,10 +9573,13 @@ def _tree_is_clean(repo):
     file from the guard and thereby win a silent allow for reset --hard / checkout -f / clean -f. The '-c'
     override and the explicit '--untracked-files=all' both defeat the config; either alone would suffice, and
     carrying both keeps the intent legible. The probe never asks for ignored files, so an ignored file is
-    invisible to it, and a '!!' line in its answer is malformed (above), never clean. A forced checkout or
-    'clean -x' CAN overwrite/remove an ignored file, but probing --ignored would ASK on every repo carrying
-    build artifacts, so ignored-file loss on those forms is a DISCLOSED residual the recovery layer backstops
-    (every non-dry-run clean already ASKS regardless).
+    invisible to it, and a '!!' line in its answer is malformed (above), never clean. Probing --ignored here
+    would treat every repo carrying build artifacts as dirty, so this probe stays blind to ignored files and
+    the recovery snapshot (git add --all) never holds one either. Every non-dry-run clean (with or without
+    -x or -X: a negated -e pattern un-ignores a file too) is therefore judged before this probe by its own
+    read-only listings (_clean_ignored_refusal) and DENIED unless they show it removes no file that the
+    standard ignore sources ignore. A forced checkout that overwrites an ignored file remains a DISCLOSED
+    residual: this probe does not see that file and no snapshot holds it.
     Deliberately coarse: ANY tracked change or untracked file anywhere makes the tree not-provably-clean.
     Offline, read-only, 5s timeout; the guard never mutates the repo. GIT_OPTIONAL_LOCKS=0 keeps this probe
     from refreshing/writing the real `.git/index`, and EVERY ambient GIT_*-prefixed var is scrubbed via
@@ -9932,26 +9946,560 @@ def _reset_ancestry_deny(refusal, alts):
         "reset to the merge base instead.")
 
 
-# git clean options that CONSUME the following token (so its value must not be read as a flag): '-e'/
-# '--exclude PAT'. The '--exclude=PAT' inline shape carries its value in the same token, consuming none.
-_CLEAN_ARG_OPTS = frozenset(("-e", "--exclude"))
+# IGNORED FILES AND git clean. The recovery snapshot is built with `git add --all`, which skips ignored
+# files, and the clean-tree probe never lists them, so a clean that removes an ignored file can neither be
+# proven harmless by that probe nor recovered from a snapshot. -x and -X are not the only way a clean
+# reaches one: an -e/--exclude pattern sits in the highest-precedence exclude group, so a negated one
+# ('!*.local') un-ignores a file and a clean WITHOUT -x then removes it. Every non-dry-run clean is
+# therefore judged by two read-only listings, under the scrubbed git environment with fsmonitor and hooks
+# off: what the clean would remove (git clean --dry-run with the same options and pathspecs), and which
+# untracked files are ignored under the repository's standard ignore sources (.gitignore files,
+# info/exclude and core.excludesFile) read with no command-level override (git ls-files --others --ignored
+# --exclude-standard --directory with the same pathspecs). Both listings run with the directory the command
+# runs in as git's working directory, resolved PHYSICALLY (os.path.realpath) as the kernel and git resolve
+# it, so a symlinked session directory or a relative -C through one names the directory git enters. When
+# git clean would remove that directory whole it keeps the directory, prints 'Would refuse to remove
+# current working directory' and removes all of its contents: that line is read as removal of the whole
+# directory (_CLEAN_CWD_LINE). git prints every name relative to that physical directory, so every entry of
+# both listings is compared as one absolute path, normalized against the physical directory and never a
+# symlink (_clean_entry_path): './x' and 'x/' are the same directory, and '../x/' is the real parent's x.
+# The clean is DENIED when any entry it would remove is, holds or lies inside an ignored entry, when it is
+# doubly forced (-ff) and a directory it would remove, the directory it runs in included, holds a nested
+# repository at any depth (whose ignored files neither listing shows; a bounded walk, _clean_nested_repo,
+# that denies when it cannot finish), and when either listing cannot be taken or read
+# (fail closed), as is a clean whose options cannot be read with certainty or whose repository view or
+# ignore sources the probe cannot reproduce (_clean_command_view names the global options and leading
+# assignments that make it so; every other one keeps the listing verdict). On a split-index repository the
+# listings read a private copy of the git dir's index files outside it (_clean_private_gitdir), so they
+# write nothing under it. A clean whose listings show it removes no ignored file and no nested repository
+# keeps the outcome it had before these listings existed. The flag letters below are git clean's: -d, -f (counted), -i, -n, -q, -x, -X,
+# and -e, which takes the rest of its cluster or the next token as its value; its long options, each also
+# accepted as a unique abbreviation, are --force, --dry-run, --quiet, --interactive and --exclude (value
+# '=VAL' or the next token), with the --no- forms of the first four. -x and -X have no long form. Whether a
+# clean is a dry run is read only by _clean_parse_options, so an abbreviated --exclude (--e, --exc) consumes
+# its value as git does and a '-n' that is that value is no dry run.
+_CLEAN_SHORT_FLAGS = frozenset("dfinqxX")
+_CLEAN_LONG_OPTS = ("force", "dry-run", "quiet", "interactive", "exclude",
+                    "no-force", "no-dry-run", "no-quiet", "no-interactive")
+# The dry-run line naming a nested repository a clean without a second -f skips (nothing removed).
+_CLEAN_SKIP_LINE = b"Would skip repository "
+# The dry-run line git prints when the directory it runs in is one the clean would remove whole: git keeps
+# that directory itself but removes everything in it (remove_dirs in builtin/clean.c), and the entries it
+# then prints are relative to it ('./x', a directory shown without a trailing slash). The listings read it
+# as removal of all of that directory's contents.
+_CLEAN_CWD_LINE = b"Would refuse to remove current working directory"
+# The one wall-clock bound shared by both listings of a clean. It sits well under PRETOOL_BUDGET_SECONDS
+# (8 seconds), so a slow listing ends here with its own reason before the hook deadline, leaving that
+# budget room for the clean-tree probe and the snapshot that follow.
+_CLEAN_PROBE_SECONDS = 3.0
+# The C escapes git uses in a quoted path (quote_c_style), besides a three-digit octal byte.
+_CLEAN_C_ESCAPES = {ord("a"): 7, ord("b"): 8, ord("f"): 12, ord("n"): 10, ord("r"): 13, ord("t"): 9,
+                    ord("v"): 11, ord('"'): 34, ord("\\"): 92}
 
 
-def _clean_is_dry_run(pre):
-    """True when a git clean option region (already split before any '--') is a genuine DRY RUN
-    (-n/--dry-run) that removes nothing. ULTRA-CONSERVATIVE about the arg-consuming '-e'/'--exclude': when
-    one is present the guard CANNOT reliably tell a real '-n' flag from an exclude PATTERN token that merely
-    looks like '-n' (git clean -f -e '*.keep' -n, or the adversarial git clean -f -e -n where '-n' is the
-    pattern), so it does NOT trust '-n' at all and returns False, routing the clean to its unconditional ASK.
-    A '-n'/'--dry-run' with no arg-consuming option present still reports a dry run and allows."""
-    for t in pre:
-        if t in _CLEAN_ARG_OPTS or t.startswith("--exclude="):
-            return False  # a separate/inline arg-consuming exclude: do not trust '-n'
-        if t.startswith("-") and not t.startswith("--") and "e" in t[1:]:
-            return False  # an ATTACHED short exclude ('-en' is '-e' with value 'n'): '-n' not trustworthy
-    if _has_long_prefix(pre, "no-dry-run"):
-        return False  # the negation (prefix-matched, e.g. '--no-dry-r') turns the dry run back on
-    return "--dry-run" in pre or _has_short(pre, "n")
+def _clean_parse_options(args):
+    """Read a git clean argument list as git does, for the ignored-file probe. None when a token cannot be
+    read with certainty (an unknown or ambiguous option, a value given to a flag, an exclude with no value),
+    else (force, d, x, big_x, excludes, pathspecs, dry_run): force counts -f/--force (--no-force resets it),
+    excludes holds each -e/--exclude value in order, pathspecs holds each bare operand, then each token after
+    the option boundary, and dry_run is the last of -n/--dry-run (on) and --no-dry-run (off), as git's option
+    parser leaves it. -q and -i and their long and negated forms are read and dropped: -q would silence the
+    listing, and without -i it lists everything an interactive clean could select."""
+    pre, post, _had_sep = _split_pre_post(args)
+    force, d, x, big_x, dry_run = 0, False, False, False, False
+    excludes, paths = [], []
+    i = 0
+    while i < len(pre):
+        tok = pre[i]
+        i += 1
+        if tok.startswith("--"):
+            name, eq, val = tok[2:].partition("=")
+            found = [o for o in _CLEAN_LONG_OPTS if name and o.startswith(name)]
+            opt = name if name in _CLEAN_LONG_OPTS else (found[0] if len(found) == 1 else None)
+            if opt is None:
+                return None  # an unknown or ambiguous long option
+            if opt == "exclude":
+                if not eq:
+                    if i >= len(pre):
+                        return None
+                    val = pre[i]
+                    i += 1
+                excludes.append(val)
+            elif eq:
+                return None  # a flag given a value, which git refuses
+            elif opt == "force":
+                force += 1
+            elif opt == "no-force":
+                force = 0
+            elif opt in ("dry-run", "no-dry-run"):
+                dry_run = opt == "dry-run"
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            body = tok[1:]
+            for j, ch in enumerate(body):
+                if ch == "e":
+                    val = body[j + 1:]
+                    if not val:
+                        if i >= len(pre):
+                            return None
+                        val = pre[i]
+                        i += 1
+                    excludes.append(val)
+                    break  # the rest of the cluster is the exclude value
+                if ch not in _CLEAN_SHORT_FLAGS:
+                    return None
+                force += ch == "f"
+                d = d or ch == "d"
+                x = x or ch == "x"
+                big_x = big_x or ch == "X"
+                dry_run = dry_run or ch == "n"
+            continue
+        paths.append(tok)
+    return force, d, x, big_x, excludes, paths + post, dry_run
+
+
+def _clean_probe_listing(repo, argv, deadline, env_extra=None, global_opts=()):
+    """The stdout (bytes) of the read-only 'git <global_opts> <argv>' run in repo, or None when it cannot be
+    launched, exits nonzero, or does not finish by `deadline` (a time.monotonic value). It runs under the
+    scrubbed git environment of the clean-tree probe (_isolate_git_env, GIT_OPTIONAL_LOCKS=0) with the C
+    locale, so a dry run's 'Would remove' lines are untranslated, with no stdin, and with core.fsmonitor and
+    hooks off (core.hooksPath=/dev/null), so the probe runs no configured monitor or hook program;
+    core.quotePath is off so only a name holding a control byte, a double quote or a backslash is C-quoted.
+    None of these settings is an ignore source, so the listing reads the same ignore rules the command does.
+    `env_extra` is set after the scrub (the private git dir of _clean_private_gitdir), and `global_opts` are
+    the command's own pathspec-reading global options (_CLEAN_PATHSPEC_GLOBALS). git is started with repo
+    as its process working directory as well as its -C target, so the directory git clean treats as the
+    current one (the one it refuses to remove, startup_info->original_cwd, read before any -C) is repo and
+    never the hook's own working directory; a dry run therefore lists the same entries wherever the hook
+    runs. repo is resolved physically (os.path.realpath), never lexically: a run directory such as
+    '<symlink>/..' (a relative -C from a symlinked session directory) names the directory the kernel, and
+    so git, enters, not the one a lexical '..' would reach."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return None
+    try:
+        where = os.path.realpath(repo)
+        env = _isolate_git_env(dict(os.environ))
+        env["GIT_OPTIONAL_LOCKS"] = "0"
+        env["LC_ALL"] = "C"
+        env.pop("LANGUAGE", None)
+        env.update(env_extra or {})
+        result = subprocess.run(
+            ["git", "-C", where, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+             "-c", "core.quotePath=false"] + list(global_opts) + argv,
+            capture_output=True, timeout=left, env=env, stdin=subprocess.DEVNULL, cwd=where)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _clean_private_gitdir(repo, deadline):
+    """(env_extra, tmpdir) under which the listings of a clean in repo write nothing under its git dir, or
+    None when that cannot be set up (the caller fails closed). git refreshes the modification time of the
+    shared index each time it reads a split index (core.splitIndex; read_index_from in read-cache.c), so on
+    a git dir holding any sharedindex.* file the listings run against a private copy outside it: a
+    temporary directory (tempfile.mkdtemp) holding copies of HEAD, index, every sharedindex.* and
+    config.worktree, plus a 'commondir' file naming the real common dir, the layout git reads for a linked
+    worktree (gitrepository-layout(5)). Objects, refs, config and info/exclude are read from that common
+    dir, so the copy reads the same tracked set and ignore rules; GIT_WORK_TREE names the same toplevel,
+    so the pathspecs and the prefix of repo are unchanged. Any other git dir needs no copy: ({}, None)."""
+    out = _clean_probe_listing(repo, ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir",
+                                      "--show-toplevel"], deadline)
+    if out is None:
+        return None
+    lines = out.split(b"\n")
+    if len(lines) != 4 or lines[3] or not all(os.path.isabs(p) for p in lines[:3]):
+        return None
+    gd, common, top = lines[:3]
+    try:
+        names = os.listdir(gd)
+    except OSError:
+        return None
+    if not any(n.startswith(b"sharedindex.") for n in names):
+        return {}, None
+    tmp = None
+    try:
+        tmp = tempfile.mkdtemp(prefix="aiqt-clean-")
+        tmp_b = os.fsencode(tmp)
+        for n in names:
+            if n in (b"HEAD", b"index", b"config.worktree") or n.startswith(b"sharedindex."):
+                src = os.path.join(gd, n)
+                if os.path.isfile(src):
+                    shutil.copyfile(src, os.path.join(tmp_b, n))
+        with open(os.path.join(tmp_b, b"commondir"), "wb") as fh:
+            fh.write(common + b"\n")
+    except (OSError, ValueError, shutil.Error):
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+        return None
+    return {"GIT_DIR": tmp, "GIT_WORK_TREE": os.fsdecode(top)}, tmp
+
+
+# The most entries the nested-repository walk of one clean reads before it gives up (and denies).
+_CLEAN_NESTED_WALK_LIMIT = 20000
+
+
+def _clean_nested_repo(top, deadline):
+    """True when the directory top (bytes) a doubly forced clean would remove holds a nested repository at
+    any depth (an entry named .git, a directory or a gitfile, in top or in any directory below it), False
+    when a full walk finds none, and None when the walk cannot finish: an entry cannot be read, more than
+    _CLEAN_NESTED_WALK_LIMIT entries are met, or `deadline` passes. Symbolic links are not followed (git
+    clean removes a link, never its target). git clean -ff removes such a repository with its ignored and
+    untracked files, which neither listing shows, so the caller denies on True and on None."""
+    stack = [top]
+    seen = 0
+    while stack:
+        if time.monotonic() > deadline:
+            return None
+        here = stack.pop()
+        try:
+            with os.scandir(here) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > _CLEAN_NESTED_WALK_LIMIT:
+                        return None
+                    if entry.name == b".git":
+                        return True
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+        except OSError:
+            return None
+    return False
+
+
+def _clean_unquote(name):
+    """The raw bytes of one path as git clean prints it: unchanged when unquoted, else decoded from git's
+    C-style quoting; None when a quoted name is malformed (the listing cannot then be trusted)."""
+    if not name.startswith(b'"'):
+        return name
+    if len(name) < 2 or not name.endswith(b'"'):
+        return None
+    body = name[1:-1]
+    out = bytearray()
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == 0x22:
+            return None  # an unescaped quote inside a quoted name
+        if ch != 0x5C:
+            out.append(ch)
+            i += 1
+            continue
+        nxt = body[i + 1] if i + 1 < len(body) else None
+        if nxt in _CLEAN_C_ESCAPES:
+            out.append(_CLEAN_C_ESCAPES[nxt])
+            i += 2
+            continue
+        digits = body[i + 1:i + 4]
+        if len(digits) != 3 or any(not 0x30 <= b <= 0x37 for b in digits) or int(digits, 8) > 255:
+            return None
+        out.append(int(digits, 8))
+        i += 4
+    return bytes(out)
+
+
+def _clean_entry_path(base, name):
+    """The absolute, lexically normalized path (bytes) of `name` as a listing prints it relative to the
+    directory `base` (bytes) both listings run in, ending in a slash when it names a directory: a name
+    printed with a trailing slash, '.', or a path lstat reads as a directory (git clean prints a directory it
+    removes from inside a kept current directory with no slash, './x'). Both listings are compared in this
+    one form, so './s.local', 's.local' and 'sub/../s.local' name the same entry. `base` MUST be the
+    PHYSICAL directory (os.path.realpath) git ran in: git prints each name relative to its physical working
+    directory (getcwd), so a '..' in a name climbs that directory's real parent, and lexical normalization
+    is exact only against a base that holds no symbolic link. Against a symlinked base it would name another
+    directory (the parent of the link), and the ignored match and the nested-repository walk would judge
+    that directory instead."""
+    full = os.path.normpath(os.path.join(base, name))
+    is_dir = name.endswith(b"/") or os.path.basename(name) in (b".", b"..")
+    if not is_dir:
+        try:
+            is_dir = stat.S_ISDIR(os.lstat(full).st_mode)
+        except OSError:
+            is_dir = False
+    return full + b"/" if is_dir and not full.endswith(b"/") else full
+
+
+def _clean_hits_ignored(entry, ignored, ignored_sorted):
+    """True when a path the clean would remove is an ignored entry, lies inside an ignored directory, or is
+    a directory holding one (ls-files --directory lists a wholly ignored directory once, with a slash). All
+    three arguments hold paths in the form of _clean_entry_path."""
+    if entry in ignored:
+        return True
+    parts = entry.rstrip(b"/").split(b"/")
+    for k in range(1, len(parts)):
+        if b"/".join(parts[:k]) + b"/" in ignored:
+            return True
+    if entry.endswith(b"/"):
+        at = bisect.bisect_left(ignored_sorted, entry)
+        if at < len(ignored_sorted) and ignored_sorted[at].startswith(entry):
+            return True
+    return False
+
+
+def _clean_entries_text(entries):
+    """'N entr(y|ies): 'a', 'b', 'c'(, and more)' for the entries a clean deny names."""
+    shown = ", ".join(repr(e.decode("utf-8", "backslashreplace")) for e in entries[:3])
+    return "{} entr{}: {}{}".format(len(entries), "y" if len(entries) == 1 else "ies", shown,
+                                    ", and more" if len(entries) > 3 else "")
+
+
+def _clean_ignored_refusal(args, repo, cannot=None, global_opts=()):
+    """None when this non-dry-run git clean, with or without -x or -X, provably removes no IGNORED file and
+    no nested repository, else a clause saying why that cannot be shown (see the block comment above
+    _CLEAN_SHORT_FLAGS). `repo` is the directory both listings read (the directory git runs the command in,
+    as the caller resolved it); `cannot`, when set, says why no read-only listing can reproduce what the
+    command would see (a repository view or ignore source the command itself can change); `global_opts` are
+    the command's own pathspec-reading global options, handed to both listings."""
+    parsed = _clean_parse_options(args)
+    if parsed is None:
+        return "its options cannot be read with certainty, so which files it would remove cannot be shown"
+    force, d, x, big_x, excludes, paths, _dry = parsed
+    if cannot is not None or repo is None:
+        return "{}, and no read-only listing taken now can show which files it would remove".format(
+            cannot or "the directory it runs in cannot be established")
+    try:
+        # The physical directory git runs in, resolved once: git reports every listed name relative to it
+        # (see _clean_entry_path), so a symlinked run directory is never normalized lexically.
+        repo = os.path.realpath(repo)
+    except (OSError, ValueError):
+        return ("the directory it runs in cannot be resolved to a physical path, so no read-only listing "
+                "taken now can show which files it would remove")
+    deadline = time.monotonic() + _CLEAN_PROBE_SECONDS
+    private = _clean_private_gitdir(repo, deadline)
+    if private is None:
+        return ("the read-only listings could not be set up to read its repository without writing under its "
+                "git dir (git rev-parse failed or did not finish within {:g} seconds, or the private copy of a "
+                "split index could not be made)".format(_CLEAN_PROBE_SECONDS))
+    env_extra, tmp = private
+    try:
+        return _clean_listings_refusal(repo, force, d, x, big_x, excludes, paths, deadline, env_extra,
+                                       global_opts)
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _clean_listings_refusal(repo, force, d, x, big_x, excludes, paths, deadline, env_extra, global_opts):
+    """The listing half of _clean_ignored_refusal: None or the clause saying why the clean is denied."""
+    opts = (["-f"] * force + (["-d"] if d else []) + (["-x"] if x else []) + (["-X"] if big_x else [])
+            + ["--exclude=" + e for e in excludes])
+    listed = _clean_probe_listing(repo, ["clean", "--dry-run"] + opts + ["--"] + paths, deadline, env_extra,
+                                  global_opts)
+    if listed is None:
+        return ("its read-only dry run (git clean -n with the same options and pathspecs) failed, exited "
+                "nonzero or did not finish within {:g} seconds".format(_CLEAN_PROBE_SECONDS))
+    # Physical, as git's own working directory is (never os.path.abspath): a '..' in a listed name climbs
+    # the real parent of the run directory, not the parent of a symlink that names it (_clean_entry_path).
+    base = os.fsencode(os.path.realpath(repo))
+    removed = []  # (name as git printed it, its _clean_entry_path form)
+    for line in listed.split(b"\n"):
+        if not line or line.startswith(_CLEAN_SKIP_LINE):
+            continue
+        if line == _CLEAN_CWD_LINE:
+            # git keeps the directory it runs in but removes all of its contents: judge that whole directory.
+            removed.append((b"./ (all contents of the directory it runs in)", _clean_entry_path(base, b".")))
+            continue
+        name = _clean_unquote(line[len(b"Would remove "):]) if line.startswith(b"Would remove ") else None
+        if not name:
+            return "its read-only dry run printed a line that cannot be read ({!r})".format(
+                line.decode("utf-8", "backslashreplace"))
+        removed.append((name, _clean_entry_path(base, name)))
+    if not removed:
+        return None
+    ignored_out = _clean_probe_listing(
+        repo, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--"] + paths,
+        deadline, env_extra, global_opts)
+    if ignored_out is None:
+        return ("the read-only listing of its ignored files (git ls-files --others --ignored "
+                "--exclude-standard with the same pathspecs) failed, exited nonzero or did not finish within "
+                "{:g} seconds".format(_CLEAN_PROBE_SECONDS))
+    ignored = frozenset(_clean_entry_path(base, p) for p in ignored_out.split(b"\0") if p)
+    ignored_sorted = sorted(ignored)
+    gone = [name for name, path in removed if _clean_hits_ignored(path, ignored, ignored_sorted)]
+    if gone:
+        return "its read-only listings show it would remove ignored content ({})".format(
+            _clean_entries_text(gone))
+    if force > 1:
+        nested, unwalked, walked = [], [], []
+        for e, path in sorted(removed, key=lambda item: item[1]):
+            if not path.endswith(b"/") or any(path.startswith(w) for w in walked):
+                continue  # a file, or a directory inside one already walked
+            walked.append(path)
+            found = _clean_nested_repo(path, deadline)
+            if found is None:
+                unwalked.append(e)
+                break
+            if found:
+                nested.append(e)
+        if unwalked:
+            return ("it is doubly forced (-ff), which removes a nested repository with its ignored files, and "
+                    "the walk for one below the directory it would remove ({}) met an unreadable entry, more "
+                    "than {} entries or the {:g}-second bound".format(
+                        _clean_entries_text(unwalked), _CLEAN_NESTED_WALK_LIMIT, _CLEAN_PROBE_SECONDS))
+        if nested:
+            return ("it is doubly forced (-ff) and would remove a directory holding a nested repository, whose "
+                    "ignored files neither listing shows ({})".format(_clean_entries_text(nested)))
+    return None
+
+
+def _clean_ignored_deny(why, alts):
+    """The prsunc deny for a git clean that can remove ignored files or a nested repository
+    (_clean_ignored_refusal); `why` is the refusal clause."""
+    return _deny(
+        "AIQT rule prsunc (preserve-uncommitted-work): this git clean may remove IGNORED files (through -x, "
+        "-X, an -e/--exclude pattern that un-ignores them, or ignore rules the command itself changes) or a "
+        "nested repository, and the recovery snapshot holds neither (it is built with git add --all, which "
+        "skips ignored files and never takes in the files of a nested repository). It is denied rather "
+        "than run because {}. To proceed, list what it would remove with 'git clean -n' and the same options "
+        "and pathspecs, move or commit what must be kept, and run the clean alone, without -x, -X, a negated "
+        "exclude, a second -f or a config or environment override. {}".format(why, alts),
+        "AIQT guardrail: denied a git clean that may remove ignored files or a nested repository no recovery "
+        "snapshot holds (rule prsunc); list them with git clean -n and the same options, keep what matters, "
+        "then run it alone.")
+
+
+# WHAT A PRISTINE git clean's OWN GLOBAL OPTIONS AND LEADING ASSIGNMENTS DO TO ITS LISTINGS. Each is read
+# from git(1), git-config(1), gitignore(5) and git-clean(1); only those that can change the ignore sources,
+# the matching of ignore patterns or the worktree and repository the listings read deny the clean:
+#   - a configuration variable set by -c <name>=<value> or --config-env=<name>=<envvar> whose name is
+#     core.excludesFile (an ignore source, gitignore(5)), core.ignoreCase (case-insensitive matching of
+#     ignore patterns), core.worktree or core.bare (the worktree git acts on), or include.path or
+#     includeIf.<condition>.path (they load a file that may set any of these). Section and variable names
+#     are case-insensitive in git, so the name is compared lowercased; any other name (x.y=z) passes.
+#   - a leading HOME or XDG_CONFIG_HOME (they place the global configuration file and the default
+#     excludes file $XDG_CONFIG_HOME/git/ignore), PATH (it can select another git, with another system
+#     configuration), an LD_* or DYLD_* loader variable, or any GIT_* variable other than GIT_DIR,
+#     GIT_WORK_TREE and the cosmetic ones (_COSMETIC_GIT_VARS): GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM,
+#     GIT_CONFIG_NOSYSTEM, GIT_CONFIG_COUNT/KEY/VALUE, GIT_CONFIG_PARAMETERS, GIT_INDEX_FILE, GIT_COMMON_DIR
+#     and the rest can each change the configuration, the tracked set or the info/exclude file read.
+#   - --git-dir, --work-tree, --bare, GIT_DIR or GIT_WORK_TREE, unless git, asked read-only
+#     (_segment_git_target), resolves exactly the git dir and toplevel a plain git run from the directory
+#     the command runs in discovers (_discovered_git_target): a worktree rooted elsewhere reads other
+#     .gitignore files and another tracked set. git_discard's existing redirect resolution decides these
+#     commands first (_redirect_snapshot_plan and the --git-dir and --work-tree denies), so this check sees
+#     only what that resolution confirmed.
+# The pathspec options (--literal-pathspecs, --glob-pathspecs, --noglob-pathspecs, --icase-pathspecs)
+# change only which paths the clean's pathspecs match, so both listings are taken with them. -p,
+# --paginate, -P, --no-pager, --no-replace-objects, --no-lazy-fetch, --no-advice, --no-optional-locks,
+# --namespace, --attr-source, --shallow-file, --exec-path and --super-prefix touch no ignore source and no
+# worktree, and the print-and-exit options run no clean. Any other option is one git(1) does not document:
+# when git itself rejects it as an unknown option the command runs nothing, and otherwise the clean denies.
+_CLEAN_IGNORE_CONFIG_KEYS = frozenset(("core.excludesfile", "core.ignorecase", "core.worktree", "core.bare"))
+_CLEAN_PATHSPEC_GLOBALS = frozenset(("--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
+                                     "--icase-pathspecs"))
+_CLEAN_INERT_GLOBALS = frozenset((
+    "-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--no-lazy-fetch", "--no-advice",
+    "--no-optional-locks", "--namespace", "--attr-source", "--shallow-file", "--exec-path", "--super-prefix",
+    "--version", "-v", "--help", "-h", "--html-path", "--man-path", "--info-path"))
+_CLEAN_IGNORE_ENV_NAMES = frozenset(("HOME", "XDG_CONFIG_HOME", "PATH"))
+
+
+def _clean_config_name_bad(name):
+    """True when the git configuration variable `name` (from -c or --config-env) can change an ignore
+    source, the matching of ignore patterns or the worktree (see the block comment above)."""
+    low = name.lower()
+    return low in _CLEAN_IGNORE_CONFIG_KEYS or low == "include.path" or (
+        low.startswith("includeif.") and low.endswith(".path"))
+
+
+def _git_rejects_global_option(option, deadline):
+    """True when git itself refuses `option` as an unknown global option (it prints 'unknown option: ' and
+    exits 129 before running any subcommand), read with 'git <option> version' under the probe's scrubbed
+    environment; False when git accepts it or the answer cannot be read."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return False
+    try:
+        env = _isolate_git_env(dict(os.environ))
+        env["LC_ALL"] = "C"
+        env.pop("LANGUAGE", None)
+        result = subprocess.run(["git", option, "version"], capture_output=True, timeout=left, env=env,
+                                stdin=subprocess.DEVNULL)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 129 and result.stderr.startswith(b"unknown option: ")
+
+
+def _clean_command_view(tokens, cwd):
+    """How the read-only listings of the pristine git clean `tokens` reproduce what it would see:
+    ('probe', directory, global_opts) when listings run in that directory with those pathspec options read
+    what the command reads; ('cannot', why, None) when a leading assignment or global option can change its
+    ignore sources or its worktree (see the block comment above); ('inert', why, None) when git rejects one
+    of its global options outright, so the command runs nothing. The caller has already applied the existing
+    redirect resolution and its denies; an ambient GIT_* override is the caller's own 'cannot'."""
+    cw = _command_word_index(tokens)
+    for tok in tokens[:cw]:
+        if _REMOVED_DISCARD_PREFIX_RE.fullmatch(tok) or _GIT_TARGET_ASSIGN_RE.match(tok):
+            continue
+        name = tok.split("=", 1)[0].rstrip("+")
+        if (name in _CLEAN_IGNORE_ENV_NAMES or name.startswith(("LD_", "DYLD_"))
+                or (name.startswith("GIT_") and name not in _COSMETIC_GIT_VARS)):
+            return ("cannot", "its leading assignment {!r} can change the configuration, the ignore sources "
+                              "or the repository it reads".format(name), None)
+    global_opts = []
+    deadline = time.monotonic() + _CLEAN_PROBE_SECONDS
+    i = cw + 1
+    n = len(tokens)
+    while i < n and tokens[i].startswith("-"):
+        tok = tokens[i]
+        opt, eq, val = tok.partition("=")
+        if "=" not in tok and tok in _GIT_ARG_OPTS:
+            val = tokens[i + 1] if i + 1 < n else ""
+            i += 2
+        else:
+            i += 1
+        if opt == "-c" and not eq:
+            if _clean_config_name_bad(val.split("=", 1)[0]):
+                return ("cannot", "its git global option '-c {}' sets a configuration variable that can "
+                                  "change its ignore sources or its worktree".format(val.split("=", 1)[0]), None)
+        elif opt == "--config-env":
+            if _clean_config_name_bad(val.rpartition("=")[0] if "=" in val else val):
+                return ("cannot", "its git global option '--config-env {}' sets a configuration variable that "
+                                  "can change its ignore sources or its worktree".format(val), None)
+        elif opt in ("-C", "--git-dir", "--work-tree", "--bare"):
+            continue
+        elif opt in _CLEAN_PATHSPEC_GLOBALS and not eq:
+            global_opts.append(opt)
+        elif opt in _CLEAN_INERT_GLOBALS or opt == "--list-cmds":
+            continue
+        elif _git_rejects_global_option(tok, deadline):
+            return ("inert", "git rejects its global option {!r} as unknown, so it runs nothing".format(tok),
+                    None)
+        else:
+            return ("cannot", "its git global option {!r} is not one this guard reads".format(tok), None)
+    c_dir = _segment_c_dir(tokens, cwd)
+    if c_dir is None:
+        return ("cannot", "the directory it runs in cannot be established (no session working directory, "
+                          "or a -C with no value)", None)
+    if _segment_has_path_redirect(tokens):
+        tgt = _segment_git_target(tokens, cwd)
+        own = _discovered_git_target(c_dir)
+        if tgt is None or own is None or tgt != own:
+            return ("cannot", "its --git-dir, --work-tree, --bare, GIT_DIR or GIT_WORK_TREE redirect makes git "
+                              "act on {}, not on the git dir and toplevel a plain git run from {} finds".format(
+                                  "a git dir and worktree git could not report read-only" if tgt is None
+                                  else "the git dir {} with the worktree {}".format(tgt[0], tgt[1]), c_dir),
+                    None)
+    return ("probe", c_dir, tuple(global_opts))
+
+
+def _clean_pristine_refusal(tokens, args, cwd, ambient_override):
+    """_clean_ignored_refusal for the pristine single git clean `tokens` (subcommand arguments `args`), run
+    in the directory _clean_command_view resolves from the session directory `cwd`; None when git rejects
+    one of its global options (it runs nothing) or the listings show it removes no ignored file and no
+    nested repository. A non-cosmetic ambient GIT_* variable shapes the view the command acts on but is
+    scrubbed from the listings, so it leaves them unable to show what the clean would remove."""
+    if ambient_override:
+        return _clean_ignored_refusal(
+            args, None, "a non-cosmetic ambient GIT_* variable shapes the repository view it acts on")
+    state, value, global_opts = _clean_command_view(tokens, cwd)
+    if state == "inert":
+        return None
+    if state == "cannot":
+        return _clean_ignored_refusal(args, None, value)
+    return _clean_ignored_refusal(args, value, None, global_opts)
 
 
 # git branch long options that CONSUME the following token as a REQUIRED separated value, so that value is
@@ -10014,10 +10562,12 @@ def _branch_parse_options(pre):
 def _discard_role(sub, args):
     """Classify a git segment's subcommand into (role, kind); see the block comment above. clean, stash,
     and branch do not use the tracked-tree probe: a real 'git clean' removes UNTRACKED files (a different,
-    unrecoverable asset the tracked-change probe does not see), so ANY non-dry-run clean ASKS
-    unconditionally (this also closes the clean.requireForce / -q / -i / clustered-flag edges, since the
-    guard no longer tries to model whether the clean would fire); stash drop/clear ASK, and a force branch
-    delete/move/copy/reset ASKS (an unforced create/list/-d keeps its allow)."""
+    unrecoverable asset the tracked-change probe does not see), so ANY non-dry-run clean gets the 'ask'
+    role (this also closes the clean.requireForce / -q / -i / clustered-flag edges, since the role does not
+    model whether the clean would fire); git_discard then judges it by its read-only listings
+    (_clean_ignored_refusal) and, when they pass, by the recovery snapshot. A dry run (-n/--dry-run, read
+    only by _clean_parse_options, as git reads it) removes nothing and allows. stash drop/clear
+    ASK, and a force branch delete/move/copy/reset ASKS (an unforced create/list/-d keeps its allow)."""
     if sub == "checkout":
         return _checkout_role(args)
     if sub == "switch":
@@ -10029,15 +10579,15 @@ def _discard_role(sub, args):
     if sub == "rm":
         return _rm_role(args)
     if sub == "clean":
-        # Judge dry-run on the option region BEFORE any '--' (blocker 3): an operand after '--' (git clean
-        # -f -- -nasty is a file literally named -nasty) must NOT be read as the '-n' dry-run flag, or a real
-        # force-clean is misclassified as a harmless dry run and silently allowed. _clean_is_dry_run also
-        # refuses to trust '-n' when an arg-consuming clean option ('-e'/'--exclude') is present, since '-n'
-        # may be that option's value rather than the dry-run flag.
-        pre, _post, _had_sep = _split_pre_post(args)
-        if _clean_is_dry_run(pre):
-            return ("allow", None)  # a dry run removes nothing
-        return ("ask", "git clean (removes untracked files, which cannot be recovered)")
+        # A dry run is decided ONLY by the full option reader, _clean_parse_options, which reads the option
+        # region before any '--' (git clean -f -- -nasty removes a file literally named -nasty) and consumes
+        # each -e/--exclude value as git does, an abbreviated long option (--e, --exc, --exclud) included, so
+        # a '-n' that is an exclude value is never read as the dry-run flag. An option list it cannot read with
+        # certainty (None) is no dry run: the clean takes the 'ask' role and its listings deny it.
+        parsed = _clean_parse_options(args)
+        if parsed is not None and parsed[6]:
+            return ("allow", None)  # read as git reads it (exclude values consumed), a dry run: removes nothing
+        return ("ask", "git clean (removes untracked files)")
     if sub == "stash":
         first = next((a for a in args if not a.startswith("-")), None)
         if first in ("drop", "clear"):
@@ -10541,7 +11091,10 @@ def _pristine_single_bare_git(command, segments):
 # system, or command-scope) program during the
 # snapshot, whose effects are OUTSIDE this guard's control, so the inert guarantee is BOUNDED, not
 # categorical: a clean/process filter runs on `git add --all` (the CHECK-IN / clean direction, NOT smudge -
-# smudge would run only on a restore/checkout), an fsmonitor hook runs on the `git status` probe, a
+# smudge would run only on a restore/checkout), an fsmonitor hook runs on the `git status` probe, and so
+# does a clean/process filter whenever that probe re-reads a tracked file's content to compare it with the
+# index (seen for files committed moments before the probe), so a configured clean filter runs even on a
+# clean that takes no snapshot, a
 # reference-transaction hook AND a post-index-change hook can run on the temp-index write, and a
 # reference-transaction hook runs on `git update-ref`. Because a clean filter can TRANSFORM worktree bytes
 # before they enter the snapshot, the snapshot is NOT guaranteed byte-exact on a filtered repo. Further, a
@@ -10556,7 +11109,9 @@ def _pristine_single_bare_git(command, segments):
 # a would-be ALLOW is DOWNGRADED to ASK, and an already-ASK/DENY decision is left as-is with the failure
 # surfaced in its reason. HONEST LIMITATION: the snapshot cannot capture what the probe cannot see (content
 # hidden by assume-unchanged/skip-worktree marks or submodule.<name>.ignore), nor ignored files (git add
-# --all excludes them), so a discard of that content is not recoverable here.
+# --all excludes them), so a discard of that content is not recoverable here; every non-dry-run git clean
+# is therefore denied unless its own read-only listings show it removes no ignored file
+# (_clean_ignored_refusal).
 _SNAPSHOTTABLE_VERBS = frozenset(("checkout", "switch", "restore", "reset", "rm", "clean"))
 # The lossy git verbs the form-classifier can reason about (the recognized-verb set). A command the raw scan
 # flags as in-scope whose resolved subcommand is outside this set (e.g. 'checkout-index', 'read-tree',
@@ -11010,9 +11565,11 @@ def _discard_recovery_result(kind, detail, snap, note=""):
             "AIQT guardrail: denied an unrecoverable git discard - no recovery snapshot could be created "
             "(rule prsunc); commit or stash first, then retry.")
     if snap is not None and snap[0] == "ok":
+        # _recovery_pointer itself opens with 'A pre-command recovery snapshot was saved', so the note says it
+        # once.
         return _allow_note(
-            "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. A pre-command recovery snapshot "
-            "was saved, so it is allowed. {}".format(kind, detail, _recovery_pointer(snap[1])) + note)
+            "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. It is allowed. {}".format(
+                kind, detail, _recovery_pointer(snap[1])) + note)
     return _allow_note(
         "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. This guard could not auto-snapshot "
         "it (a ref-level or branch asset a working-tree snapshot cannot capture, which is typically "
@@ -12203,8 +12760,13 @@ def _discard_positive_grammar(command, cwd):
       subs            - the snapshottable subcommands seen (the recovery-ledger verb label)
       reset_checks    - (directory or None, args, moved) of every accepted git reset that moves HEAD to one
                         commit (_reset_commit_operand); moved says an earlier segment is a recognized lossy
-                        verb, which may already have moved HEAD before the reset runs"""
-    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set(), "reset_checks": []}
+                        verb, which may already have moved HEAD before the reset runs
+      clean_checks    - (directory, args, moved) of every accepted non-dry-run git clean, for the
+                        ignored-file probe (_clean_ignored_refusal); moved says an earlier segment is a
+                        recognized lossy verb, which may change the tree or its ignore rules before the
+                        clean runs"""
+    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set(), "reset_checks": [],
+           "clean_checks": []}
     items, bad = _discard_grammar_lex(command)
     if bad is None:
         segments, bad = _discard_grammar_segments(items)
@@ -12247,6 +12809,8 @@ def _discard_positive_grammar(command, cwd):
             r_dir, r_sub, r_args = _discard_grammar_git_target(words, eff)
             if r_sub == "reset" and _reset_commit_operand(r_args) is not None:
                 out["reset_checks"].append((r_dir, r_args, lossy_segs > 0))
+            if r_sub == "clean" and _act == "snapshot":
+                out["clean_checks"].append((r_dir, r_args, lossy_segs > 0))
             if _act is not None:
                 lossy_segs += 1  # every action but None marks a recognized-lossy-verb segment
             if _act == "snapshot":
@@ -12618,7 +13182,12 @@ def git_discard(data):
     still act on the unknown cwd. See the recovery block comment above
     _SNAPSHOTTABLE_VERBS. The snapshot cannot capture what the probe cannot see (assume-unchanged/skip-worktree
     marks, submodule.<name>.ignore) or ignored files (git add --all excludes them), so a discard of that
-    content is not recoverable here."""
+    content is not recoverable here. Every non-dry-run git clean, with or without -x or -X, is therefore
+    DENIED, on the pristine and the compound path alike and before any snapshot, unless its read-only
+    listings (git clean -n with the same options and pathspecs, and git ls-files --others --ignored
+    --exclude-standard with the same pathspecs, scrubbed git environment, fsmonitor and hooks off, one
+    bounded timeout) show it removes no ignored file; a listing that fails or times out denies, and so does
+    a clean whose ignore sources the command itself can change (_clean_ignored_refusal)."""
     if data.get("hook_event_name") != PRETOOL:
         # A mis-wired event is a broken install: loud (unreachable given the generator's event whitelist).
         return _hard_block("aiqt_hooks: git_discard wired to unexpected event {!r}; failing closed"
@@ -12783,6 +13352,24 @@ def git_discard(data):
             r_refusal = _reset_ancestry_refusal(r_args, r_dir, r_cannot)
             if r_refusal is not None:
                 return _reset_ancestry_deny(r_refusal, _DISCARD_ALTS)
+        # Every accepted non-dry-run clean, with or without -x or -X, is denied unless its read-only listings
+        # in the directory the grammar resolved for it show it removes no ignored file, before any
+        # snapshot: the snapshot never holds an ignored file. An earlier lossy segment may change the tree
+        # or its ignore rules before the clean runs (a checkout, restore, reset, stash, rm or clean of a
+        # .gitignore, an info/exclude file or the configured excludes file), and an ambient GIT_* variable
+        # may change the view the command sees, so either one leaves the listings unable to show what the
+        # clean would remove, and it denies. The grammar admits no assignment word and no git global
+        # option but -C, so no -c, --config-env, HOME, XDG_CONFIG_HOME or GIT_* override reaches here.
+        for c_dir, c_args, c_moved in walk["clean_checks"]:
+            c_cannot = None
+            if c_moved:
+                c_cannot = ("an earlier segment of this command may change the tree or its ignore rules (a "
+                            ".gitignore, info/exclude or the configured excludes file) before the clean runs")
+            elif _ambient_repo_view_override():
+                c_cannot = "a non-cosmetic ambient GIT_* variable shapes the repository view it acts on"
+            c_why = _clean_ignored_refusal(c_args, c_dir, c_cannot)
+            if c_why is not None:
+                return _clean_ignored_deny(c_why, _DISCARD_ALTS)
         np_verb = next(iter(sorted(walk["subs"])), "discard")
         # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo
         # whose stash cannot be preserved), so a resolved stash removal never notes a recovery that omits
@@ -12863,6 +13450,15 @@ def git_discard(data):
         if st_bad is not None:
             st_reason, st_banner = _DISCARD_GRAMMAR_DENY_TEXTS["stashro"]
             return _deny(st_reason.format(st_bad, alts), st_banner)
+
+    # Every non-dry-run clean, with or without -x or -X, is denied unless its read-only listings show it
+    # removes no ignored file and no nested repository (_clean_pristine_refusal), decided before any
+    # snapshot on both the redirect branch and the plain path below, AFTER the existing resolution of the
+    # command's global options and leading assignments on that branch: the clean-tree probe never lists an
+    # ignored file (so an ignored-only tree reads as provably clean) and the recovery snapshot never holds
+    # one, so neither the provably-clean allow nor a snapshot-then-allow could recover what such a clean
+    # removes. Only an option or assignment that can change the ignore sources or the worktree the listings
+    # read denies (_clean_command_view); the listings run in the directory that resolution confirmed.
 
     # FAIL-SAFE (structural completion): the command's repository view cannot be proven to be the
     # session cwd when EITHER cause is present. (1) A NON-COSMETIC ambient GIT_* var: the probe scrubs it,
@@ -13107,6 +13703,12 @@ def git_discard(data):
                 .format(kind or "a git work-losing verb", alts),
                 "AIQT guardrail: denied a view-overridden git discard with no session directory to snapshot "
                 "(rule prsunc); run it from the target repo, or commit or stash first.")
+        # A non-dry-run clean is judged by its read-only listings here, after the redirect resolution and
+        # its denies above and before any snapshot below (see the comment above the FAIL-SAFE branch).
+        if sub == "clean" and role != "allow":
+            cx_why = _clean_pristine_refusal(pristine, args, cwd_base, ambient_override)
+            if cx_why is not None:
+                return _clean_ignored_deny(cx_why, alts)
         # The floor base (pre_base, set only beside a redirect git resolved to another repository) is probed
         # and snapshotted first, exactly as the base itself was before git was asked, and the repository git
         # resolved is probed and snapshotted next. A successful floor snapshot is named in the outcome below,
@@ -13195,6 +13797,12 @@ def git_discard(data):
     base = cwd if isinstance(cwd, str) and cwd else None
     resolvable = base is not None and _segment_dir_simple(pristine)
     snapshottable = sub in _SNAPSHOTTABLE_VERBS
+    # A non-dry-run clean on this plain path is judged by its read-only listings before any snapshot (see
+    # the comment above the FAIL-SAFE branch).
+    if sub == "clean" and role != "allow":
+        cx_why = _clean_pristine_refusal(pristine, args, base, False)
+        if cx_why is not None:
+            return _clean_ignored_deny(cx_why, alts)
 
     # THE RECOVERY LAYER. For a subcommand a discard could use to destroy worktree or untracked content
     # (checkout/switch/restore/reset/rm/clean), when the worktree is resolvable and the tree is NOT provably
@@ -13262,7 +13870,18 @@ def git_discard(data):
                     "snapshot (rule prsunc); re-issue from the target repo, or commit or stash first.")
             # resolvable + not provably clean: a snapshot was taken above; fold its outcome in (ok ->
             # allow-note, fail -> deny), so a clean with no recovery point never silently allows.
-            return _discard_recovery_result(kind, "removes untracked files, which cannot be recovered", snap, note)
+            # The note says what the snapshot can hold and no more: git add --all takes in untracked files
+            # (as a configured clean filter outputs them), never an ignored file, the files of a nested
+            # repository or an empty directory. When no snapshot could be made the deny names none as saved:
+            # its NOTE says why, so the clause before it says only what a snapshot would have had to hold.
+            if snap is not None and snap[0] == "ok":
+                c_detail = ("can be undone only from the recovery snapshot, which holds the untracked files git "
+                            "add --all takes in (as a configured clean filter outputs them) and never an ignored "
+                            "file, the files of a nested repository or an empty directory")
+            else:
+                c_detail = ("can be undone only from a pre-command recovery snapshot of the untracked files git "
+                            "add --all takes in")
+            return _discard_recovery_result(kind, c_detail, snap, note)
         if sub == "stash":
             # 'git stash drop'/'clear' is NOT reflog-recoverable after the fact (it deletes
             # the stash reflog entry, orphaning the stash commit), so a worktree snapshot cannot protect it.
@@ -37663,6 +38282,3269 @@ def write_scope_guard(data):
                         .format(tool_name, slice_name))                                      # row 21
 
 
+# --- future_stamp_write (PreToolUse, warn only) ----------------------------------------------------------
+# It was a standalone script in the hand-installed preview channel; here it is a dispatcher handler (the
+# .preview/ copy stays published as it is, with its own older behaviour, and is not rendered into the
+# plugin). Every module-level name of the former script carries a _fsw_/_FSW_/_Fsw prefix here, so none
+# collides with the rest of this module.
+
+_FSW_UTC = datetime.timezone.utc
+_FSW_US = 1_000_000
+_FSW_FUTURE_SLACK_US = 60 * _FSW_US
+_FSW_EXISTING_MAX_BYTES = 4 << 20
+_FSW_MAX_REPORTED = 20
+_FSW_EPOCH = datetime.datetime(1970, 1, 1)
+_FSW_EPOCH_UTC = _FSW_EPOCH.replace(tzinfo=_FSW_UTC)
+_FSW_ONE_US = datetime.timedelta(microseconds=1)
+
+# Duplicated verbatim in stamp-truth-stop.py; the self-test asserts the two copies are identical.
+_FSW_SCHED_KEYWORDS = ("due", "deadline", "expir", "until", "next", "scheduled", "not before", "not-before", "eta",
+                  "planned", "target date", "target:", "by ", "through", "valid")
+_FSW_SCHED_GAP_TOKENS = 3
+_FSW_TIME_GRAMMAR = r"(?<!\d)(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?"
+_FSW_ZONE_GRAMMAR = r"(?:[ ]?(Z)|[ ]?([+-]\d{2}(?::?\d{2})?)|[ ](UTC|GMT|[A-Z]{2,6}))(?![A-Za-z0-9])"
+
+# A keyword matches as a WHOLE word (an optional plural `s`, then no further letter or digit), so
+# "validated", "throughput", "duet", or "etag" exempt nothing; only a listed STEM matches as a prefix ("expir"
+# covers expires, expiry, expiration).
+_FSW_SCHED_STEMS = ("expir",)
+_FSW_SCHED_RE = re.compile(r"(?<![a-z0-9])(?:" + "|".join(
+    re.escape(k) + (r"[a-z]*" if k in _FSW_SCHED_STEMS else r"(?:s(?![a-z0-9]))?(?![a-z0-9])" if k[-1].isalnum() else "")
+    for k in _FSW_SCHED_KEYWORDS) + ")", re.IGNORECASE)  # a keyword ending in a space or `:` already ends a word
+_FSW_TOKEN_RE = re.compile(r"\S+")
+_FSW_WORDCH_RE = re.compile(r"[A-Za-z0-9]")
+_FSW_STAMP_RE = re.compile(_FSW_TIME_GRAMMAR + "(?:" + _FSW_ZONE_GRAMMAR + r")?(?![\d:])")
+# Two UTC time forms that cannot be a clock reading, flagged with no clock comparison. Both follow the stamp
+# grammar above: an optional date part (YYYY-MM-DD then T or a space), HH:MM, optional :SS and fraction, and
+# a zone of the zone grammar that names UTC (_FSW_NC_UTC_ZONE: Z attached or after one space; a numeric
+# offset whose digits are all zero, +00, +0000, +00:00 or the same with -, attached or after one space; or,
+# after one space, UTC or GMT); _fsw_literal_us reads exactly these zones as UTC, which the fsw-nc-zone-derived
+# row of tools/selftest_aiqt_hooks.py holds. Another zone (an offset with a nonzero digit, a local abbreviation, a word such as AM) is not
+# read, so a prose time stays out. (1) APPROX: such a token with about, around, approximately or circa (any
+# letter case, a whole word: no letter, digit or underscore right before it; then blanks) or a tilde right
+# before it (a tilde right after a letter, digit or underscore is a range or a word, as in 00:00Z~00:33Z, and
+# opens no form). (2) PLACEHOLDER: the same shape where a digit slot, the fraction's included, holds x, X or ?
+# (02:1xZ, 0x:xx UTC, 2026-11-xxT00:33Z, 02:33:0x.5Z); a token with no such slot is an ordinary stamp and is
+# not read here. An exact-looking invented time is outside both forms.
+_FSW_NC_UTC_ZONE = r"(?:[ ]?Z|[ ]?[+-]00(?::?00)?(?!:?[0-9])|[ ](?:UTC|GMT))(?![A-Za-z0-9])"
+_FSW_NC_TIME = r"(?:[0-9]{4}-[0-9]{2}-[0-9]{2}[T ])?[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,9})?)?"
+_FSW_APPROX_RE = re.compile(r"(?<![A-Za-z0-9_])(?:(?i:about|around|approximately|circa)[ \t]+|~[ \t]*)"
+                            + _FSW_NC_TIME + _FSW_NC_UTC_ZONE)
+_FSW_NC_SLOT = "[0-9xX?]"
+_FSW_PLACEHOLDER_RE = re.compile(
+    r"(?<![0-9A-Za-z:?])(?:{d}{{4}}-{d}{{2}}-{d}{{2}}[T ])?{d}{{2}}:{d}{{2}}(?::{d}{{2}}(?:\.{d}{{1,9}})?)?".format(
+        d=_FSW_NC_SLOT) + _FSW_NC_UTC_ZONE)
+_FSW_PLACEHOLDER_CHARS = frozenset("xX?")
+_FSW_NC_ZONE_HINTS = ("Z", "UTC", "GMT", "00")  # every UTC zone above holds one of these
+
+
+class _FswNonClock(str):
+    """A flagged token that cannot be a clock reading (an APPROX or PLACEHOLDER form), as its exact text, so
+    the warning can name it apart from a future-dated literal."""
+
+
+def _fsw_nonclock_tokens(line):
+    """[(start, token)] for every APPROX or PLACEHOLDER token on one line, in line order. Linear. A line with
+    no `:` or no UTC zone hint (_FSW_NC_ZONE_HINTS) holds no such token and is not scanned."""
+    if ":" not in line or not any(h in line for h in _FSW_NC_ZONE_HINTS):
+        return []
+    found = [(m.start(), m.group(0)) for m in _FSW_APPROX_RE.finditer(line)]
+    found += [(m.start(), m.group(0)) for m in _FSW_PLACEHOLDER_RE.finditer(line)
+              if not _FSW_PLACEHOLDER_CHARS.isdisjoint(m.group(0))]
+    return sorted(found)
+_FSW_TOKEN_BEFORE = r"(?<![A-Za-z0-9_.~/-])"
+_FSW_TOKEN_AFTER = r"(?![^/\s'\"`;|&<>()])"
+# Any non-ASCII character right after `date` makes another command word, so it is never read as date.
+_FSW_DATE_CMD_RE = re.compile(r"[ \t]*(?:(?:(?:/usr)?/bin/)?env[ \t]+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^ \t`()]*[ \t]+){0,4}"
+                          r"(?:(?:/usr)?/bin/)?date(?![A-Za-z0-9_-]|[^\x00-\x7f])")
+_FSW_DATE_LOOKAHEAD = 256
+# Duplicated verbatim in stamp-truth-stop.py (code and quote exemption); the self-test asserts they are identical.
+_FSW_BTICK_RE = re.compile(r"`+")
+_FSW_FENCE_RE = re.compile(r"`{3,}|~{3,}")
+
+
+# ---- store paths ----
+
+class _FswStoreCtx:
+    """Store-root matching computed ONCE per evaluation (rather than re-reading the environment, re-testing the
+    lease file with a stat, and rebuilding the token pattern for every target word): the roots, one compiled
+    store-path token pattern, and memos for word tests, relative-path resolution, and directory tests."""
+    __slots__ = ("roots", "token_re", "names_memo", "under_memo", "isdir_memo")
+
+    def __init__(self):
+        self.roots = _fsw_store_roots_uncached()
+        pats = [_FSW_TOKEN_BEFORE + re.escape(r.rstrip("/") or "/") + _FSW_TOKEN_AFTER for r in self.roots]
+        self.token_re = re.compile("|".join(pats)) if pats else None
+        self.names_memo, self.under_memo, self.isdir_memo = {}, {}, {}
+
+    def names(self, text):
+        got = self.names_memo.get(text)
+        if got is None:
+            got = self.names_memo[text] = self.token_re is not None and self.token_re.search(text) is not None
+        return got
+
+    def under(self, p):
+        """True when the normalized absolute path `p` lies under a store root (the under_store() test)."""
+        got = self.under_memo.get(p)
+        if got is None:
+            got = any(p == r or p.startswith(r.rstrip("/") + "/") for r in self.roots)
+            self.under_memo[p] = got
+        return got
+
+    def isdir(self, p):
+        got = self.isdir_memo.get(p)
+        if got is None:
+            got = self.isdir_memo[p] = os.path.isdir(p)
+        return got
+
+
+_FSW_ACTIVE = None  # the _StoreCtx of the evaluation in progress (set by evaluate()), else None
+
+
+def _fsw_store_ctx():
+    return _FSW_ACTIVE if _FSW_ACTIVE is not None else _FswStoreCtx()
+
+
+def _fsw_store_roots():
+    """The configured store roots (env AIQT_STORE_ROOT; there is no default); see the docstring.
+    Within one evaluation the value is computed once (_StoreCtx)."""
+    if _FSW_ACTIVE is not None:
+        return _FSW_ACTIVE.roots
+    return _fsw_store_roots_uncached()
+
+
+def _fsw_store_roots_uncached():
+    env = _fsw_cfg("STORE_ROOT")
+    if env:
+        return [os.path.normpath(r) for r in env.split(os.pathsep) if r and os.path.isabs(r)]
+    return []
+
+
+def _fsw_under_store(path, cwd=None):
+    if not isinstance(path, str) or not path:
+        return False
+    if not os.path.isabs(path):
+        if not cwd:
+            return False
+        path = os.path.join(cwd, path)
+    return _fsw_store_ctx().under(os.path.normpath(path))
+
+
+def _fsw_names_store_path(cmd):
+    """True when the command text contains an explicit store path token (lexical; see the docstring)."""
+    return _fsw_store_ctx().names(cmd)
+
+
+# ---- literals ----
+
+def _fsw_naive_us(y, mo, d, hh, mi, ss, us):
+    return (datetime.datetime(y, mo, d, hh, mi, ss, us) - _FSW_EPOCH) // _FSW_ONE_US
+
+
+def _fsw_local_us(y, mo, d, hh, mi, ss, abbr=None):
+    """Epoch us for a local wall time; with `abbr`, only a reading whose zone abbreviation matches."""
+    found = []
+    for isdst in (0, 1):  # explicit isdst: deterministic, independent of earlier mktime calls
+        try:
+            ts = time.mktime((y, mo, d, hh, mi, ss, 0, 0, isdst))
+            lt = time.localtime(ts)
+        except (OverflowError, ValueError, OSError):
+            continue
+        if (lt.tm_year, lt.tm_mon, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec) != (y, mo, d, hh, mi, ss):
+            continue
+        if abbr is None or lt.tm_zone == abbr:
+            found.append(int(ts))
+    return min(found) * _FSW_US if found else None
+
+
+def _fsw_literal_us(m):
+    """Earliest plausible epoch us for a matched literal, or None (invalid, overflow, or unknown zone)."""
+    try:
+        y, mo, d, hh, mi = (int(m.group(i)) for i in range(1, 6))
+        ss = int(m.group(6) or 0)
+        us = int(((m.group(7) or "") + "000000")[:6])
+        z, off, abbr = m.group(8), m.group(9), m.group(10)
+        naive = _fsw_naive_us(y, mo, d, hh, mi, ss, us)
+        if z or abbr in ("UTC", "GMT"):
+            return naive
+        if off:
+            digits = off[1:].replace(":", "")
+            hours, mins = int(digits[:2]), int(digits[2:] or 0)
+            if hours > 18 or mins > 59:
+                return None
+            delta = (hours * 3600 + mins * 60) * _FSW_US
+            return naive - delta if off[0] == "+" else naive + delta
+        loc = _fsw_local_us(y, mo, d, hh, mi, ss, abbr)
+        if abbr:
+            return None if loc is None else loc + us
+        return None if loc is None else min(naive, loc + us)
+    except (OverflowError, ValueError, OSError, TypeError):
+        return None
+
+
+def _fsw_sched_exempter(line):
+    """A predicate pos -> True when a scheduling keyword ends at most SCHED_GAP_TOKENS word tokens before
+    position `pos` of `line` (a word token holds a letter or digit; punctuation-only tokens such as `:` or `[`,
+    and the token containing `pos`, are not counted). Linear: keyword ends and tokens are found once per line.
+    Duplicated verbatim in a companion hook; a repository gate asserts the two copies are identical."""
+    ends = [k.end() for k in _FSW_SCHED_RE.finditer(line)]
+    if not ends:
+        return lambda pos: False
+    toks = [(t.start(), t.end()) for t in _FSW_TOKEN_RE.finditer(line) if _FSW_WORDCH_RE.search(t.group())]
+    starts, tends = [s for s, _ in toks], [e for _, e in toks]
+
+    def exempt(pos):
+        k = bisect.bisect_right(ends, pos) - 1
+        if k < 0:
+            return False
+        between = bisect.bisect_right(tends, pos) - bisect.bisect_left(starts, ends[k])
+        return between <= _FSW_SCHED_GAP_TOKENS
+    return exempt
+
+
+def _fsw_code_lines(lines):
+    """Indexes of lines inside a MATCHED fenced code block (fence lines included); an unclosed fence is text."""
+    code, open_i, fch, flen = set(), None, "", 0
+    for i, ln in enumerate(lines):
+        s = ln.strip(" \t")
+        if open_i is None:
+            m = _FSW_FENCE_RE.match(s)
+            if m and not (s[0] == "`" and "`" in s[m.end():]):
+                open_i, fch, flen = i, s[0], m.end()
+        elif s and len(s) >= flen and s == fch * len(s):
+            code.update(range(open_i, i + 1))
+            open_i = None
+    return code
+
+
+def _fsw_code_spans(line):
+    """Sorted [start, end) inline code spans on one line: a backtick run closed by the next run of the same
+    length (runs of other lengths inside are content); an unclosed run opens nothing. Linear."""
+    spans, open_len, open_start = [], 0, 0
+    for r in _FSW_BTICK_RE.finditer(line):
+        n = r.end() - r.start()
+        if not open_len:
+            open_len, open_start = n, r.start()
+        elif n == open_len:
+            spans.append((open_start, r.end()))
+            open_len = 0
+    return spans
+
+
+def _fsw_in_spans(spans, pos):
+    k = bisect.bisect_right(spans, (pos, float("inf"))) - 1
+    return k >= 0 and pos < spans[k][1]
+
+
+def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_exempt=None, spans=None,
+                        nc_spans=None, nc_quoted=False):
+    """Future literals on one line not immediately preceded by a scheduling keyword. `in_subst(pos)` is true
+    for a literal starting at absolute position base+pos that lies inside a date substitution; `cache` maps
+    a literal to its converted value so a repeated literal is converted once; `extra_exempt(pos)`, when
+    given, is an ADDITIONAL exemption for a literal starting at line position pos (the table-header rule);
+    `spans`, when given, are the line's inline code spans, and a literal starting inside one is exempt. An
+    APPROX or PLACEHOLDER token (_fsw_nonclock_tokens) on the line is returned too, as a _FswNonClock, with no
+    clock comparison and under the same exemptions; `nc_spans` (code spans) and `nc_quoted` (the whole line is
+    quoted text: a blockquote or fenced line) exempt such tokens only, as the Bash route reads them."""
+    found, seen, sched = [], set(), None
+    cache = {} if cache is None else cache
+    for m in _FSW_STAMP_RE.finditer(line):
+        lit = m.group(0)
+        if lit in seen or (in_subst is not None and in_subst(base + m.start())) \
+                or (spans and _fsw_in_spans(spans, m.start())):
+            continue
+        if lit not in cache:
+            cache[lit] = _fsw_literal_us(m)
+        got = cache[lit]
+        if got is None or got - now_us <= _FSW_FUTURE_SLACK_US:
+            continue
+        if sched is None:
+            sched = _fsw_sched_exempter(line)
+        if not sched(m.start()) and not (extra_exempt is not None and extra_exempt(m.start())):
+            seen.add(lit)
+            found.append(lit)
+    for pos, tok in (() if nc_quoted else _fsw_nonclock_tokens(line)):
+        if tok in seen or (in_subst is not None and in_subst(base + pos)) or (spans and _fsw_in_spans(spans, pos)) \
+                or (nc_spans and _fsw_in_spans(nc_spans, pos)):
+            continue
+        if sched is None:
+            sched = _fsw_sched_exempter(line)
+        if not sched(pos) and not (extra_exempt is not None and extra_exempt(pos)):
+            seen.add(tok)
+            found.append(_FswNonClock(tok))
+    return found
+
+
+# a GFM delimiter row (whole stripped line): cells of optional colon, 1+ hyphens, optional colon
+_FSW_DELIM_ROW_RE = re.compile(r"\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?")
+
+
+def _fsw_pipes(line):
+    """Positions of the unescaped `|` characters of `line` (a `\\|` does not split a cell). Linear."""
+    return [i for i, c in enumerate(line) if c == "|" and (i == 0 or line[i - 1] != "\\")]
+
+
+def _fsw_leading_pipe(line, pipes):
+    """1 when the first unescaped pipe of `line` has only whitespace before it (a leading pipe), else 0."""
+    return 1 if pipes and not line[:pipes[0]].strip() else 0
+
+
+def _fsw_table_cells(line, pipes):
+    """The cell texts of a table line split on its unescaped pipes (`pipes`, non-empty): a leading pipe opens
+    the first cell and a trailing pipe closes the last, so neither adds an empty cell."""
+    bounds = [-1] + pipes + [len(line)]
+    cells = [line[bounds[k] + 1:bounds[k + 1]] for k in range(len(bounds) - 1)]
+    if not line[pipes[-1] + 1:].strip():
+        cells.pop()
+    return cells[_fsw_leading_pipe(line, pipes):]
+
+
+def _fsw_delim_cell_count(s):
+    """The cell count of a stripped GFM delimiter row (it must contain a pipe), else None."""
+    if "|" not in s or not _FSW_DELIM_ROW_RE.fullmatch(s):
+        return None
+    s = s[1:] if s.startswith("|") else s
+    s = s[:-1] if s.endswith("|") else s
+    return s.count("|") + 1
+
+
+def _fsw_row_exempter(line, pipes, sched_cols):
+    """A predicate pos -> True when position `pos` of table row `line` lies in a column whose header cell
+    carries a scheduling keyword (column k: k unescaped pipes, not counting a leading one, precede pos)."""
+    lead = _fsw_leading_pipe(line, pipes)
+
+    def exempt(pos):
+        return (bisect.bisect_right(pipes, pos) - lead) in sched_cols
+    return exempt
+
+
+_FSW_BLOCK_START_RE = re.compile(r"(?:[-*+]|[0-9]+[.)]|#{1,6})(?:[ \t]|$)|>|```|~~~")
+
+
+def _fsw_ends_table(line, pipes):
+    """True when `line` cannot continue the table it follows: it is blank or starts a new block (a list
+    marker, an ATX heading (`#` to `######` then whitespace or the line end), a `>` blockquote, or a code
+    fence). A pipe-free line continues the table as a one-cell row (GFM), so `pipes` does not decide it; a
+    leading pipe is optional on a row whatever the header had (GFM)."""
+    s = line.strip()
+    return not s or bool(_FSW_BLOCK_START_RE.match(s))
+
+
+def _fsw_table_walk(text, tables=True, ids=None):
+    """Yield (line, ctx, extra) for every line of `text`, linearly. ctx is an integer id of the table context
+    (header line, delimiter row) for a row of a markdown table (see the docstring's GFM forms), assigned once
+    per distinct context through `ids` (a dict shared across scans, so equal contexts get equal ids and a row
+    key never compares the header text again), and None for any other line (a header and a delimiter row
+    included); extra is the row's header-keyword exempter, or None (always None for a pipe-free row, which
+    keeps the table open but gets no header exemption). With tables False, every line is
+    (line, None, None)."""
+    ids = {} if ids is None else ids
+    prev, ctx, sched = None, None, None  # prev: (line, pipes) of a possible header; ctx, sched: table
+    for line in text.splitlines():
+        if not tables:
+            yield line, None, None
+            continue
+        pipes = _fsw_pipes(line)
+        if ctx is not None:
+            if not _fsw_ends_table(line, pipes):
+                # only a row with an unescaped pipe gets the header exemption; a pipe-free row keeps the
+                # table open (GFM) but is checked as an ordinary line
+                yield line, ctx, (_fsw_row_exempter(line, pipes, sched) if sched and pipes else None)
+                continue
+            ctx = None  # a new block (see _ends_table) ends the table
+        if prev is not None:
+            ncols = _fsw_delim_cell_count(line.strip())
+            if ncols is not None:
+                hcells = _fsw_table_cells(*prev)
+                if ncols == len(hcells):
+                    ctx = ids.setdefault((prev[0], line), len(ids))
+                    sched = {k for k, c in enumerate(hcells) if _FSW_SCHED_RE.search(c.strip())}
+                    prev = None
+                    yield line, None, None
+                    continue
+        prev = (line, pipes) if pipes else None
+        yield line, None, None
+
+
+def _fsw_future_in_changed_lines(new, old, now_us, tables=True, fences=True):
+    """Future observed-time literals on whole lines of `new` that are not unchanged carry-overs from `old`.
+    With `tables`, markdown-table context is tracked over EVERY line of `new` (carry-overs included, though
+    they are not checked), so a row's literal is also exempt when its column's header cell holds a keyword;
+    and a row is a carry-over only under the same header and delimiter it had in `old`. Quoted text is not
+    an observed-time record: a `>` blockquote line and a literal inside an inline code span are exempt, and
+    with `fences` so is every line of a MATCHED fenced code block of `new` (the Stop hook's rules)."""
+    ids = {}  # table context -> integer id, shared by both scans (a row key never re-compares a header)
+    # a carry-over is keyed by fence membership too, so a line an edit moves out of a code block is checked
+    old_code = _fsw_code_lines((old or "").splitlines()) if fences else set()
+    carry = collections.Counter((ctx, i in old_code, line)
+                                for i, (line, ctx, _x) in enumerate(_fsw_table_walk(old or "", tables, ids)))
+    bad, seen, cache = [], set(), {}
+    code = _fsw_code_lines((new or "").splitlines()) if fences else set()
+    for i, (line, ctx, extra) in enumerate(_fsw_table_walk(new or "", tables, ids)):  # one item per line of new
+        key = (ctx, i in code, line)
+        if carry[key] > 0:
+            carry[key] -= 1
+            continue
+        if i in code or line.lstrip().startswith(">"):
+            continue
+        spans = _fsw_code_spans(line) if "`" in line else None
+        for lit in _fsw_future_on_line(line, now_us, cache=cache, extra_exempt=extra, spans=spans):
+            if lit not in seen:
+                seen.add(lit)
+                bad.append(lit)
+    return bad
+
+
+def _fsw_read_existing(path, limit):
+    """(text, whole): the text of at most `limit` bytes of a REGULAR file, and whether that is the WHOLE file.
+    An absent file is ("", True); a file over `limit`, unreadable, or not regular (FIFO, device) has whole
+    False (with "" for the last two)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
+        return "", True
+    except (OSError, TypeError, ValueError):
+        return "", False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return "", False
+        chunks, got = [], 0
+        while got <= limit:
+            b = os.read(fd, min(1 << 16, limit + 1 - got))
+            if not b:
+                break
+            chunks.append(b)
+            got += len(b)
+        data = b"".join(chunks)
+        return data[:limit].decode("utf-8", "replace"), got <= limit
+    except OSError:
+        return "", False
+    finally:
+        os.close(fd)
+
+
+def _fsw_apply_edits(original, edits):
+    """The file text after applying [(old, new, replace_all)] in order, or None when an edit cannot apply."""
+    text = original
+    for old, new, every in edits:
+        if old == "":
+            if text != "":
+                return None
+            text = new
+        elif old not in text:
+            return None
+        else:
+            text = text.replace(old, new) if every else text.replace(old, new, 1)
+    return text
+
+
+# ---- shell (lexical only) ----
+
+_FSW_DS_TOP_RE = re.compile(r"[\\$`\"'()]")  # the characters date_spans() acts on outside quotes
+_FSW_DS_DQ_RE = re.compile(r'[\\$`"]')  # ... inside double quotes
+_FSW_DS_ANSI_RE = re.compile(r"[\\']")  # ... inside $'...'
+
+
+def _fsw_date_spans(cmd, budget=None):
+    """Sorted, merged [start, end) spans of `$(date ...)` and backtick `date ...` substitutions. ONE linear,
+    quote-aware pass: each frame on the stack (the top level, a `$(`, a plain `(`, or a backtick) keeps its own
+    quote state; inside single quotes (or $'...', which honours backslash escapes) nothing is special; inside
+    double quotes only `$(` and backticks open frames and a parenthesis is literal. A span is recorded only
+    when its frame closes, so an unmatched opener or an unterminated quote starts no span. The `date` test
+    looks ahead a bounded DATE_LOOKAHEAD characters. The pass jumps straight to the next character
+    that can matter in the current quote state (a regex search), not one character per step; `budget`, when
+    given, is charged one unit per step (_Exhausted when it runs out)."""
+    def is_date(j):
+        return _FSW_DATE_CMD_RE.match(cmd[j:j + _FSW_DATE_LOOKAHEAD]) is not None
+
+    # frame: [kind, start, dated, quote]; kind in "top", "$(", "(", "`"; quote in None, "'", "$'", '"'
+    spans, stack, i, n = [], [["top", 0, False, None]], 0, len(cmd)
+    steps = 0
+    while i < n:
+        steps += 1
+        top = stack[-1]
+        q = top[3]
+        if q == "'":
+            j = cmd.find("'", i)
+            if j < 0:
+                break
+            top[3], i = None, j + 1
+            continue
+        if q == "$'":
+            m = _FSW_DS_ANSI_RE.search(cmd, i)
+            if m is None:
+                break
+            i = m.start()
+            if cmd[i] == "\\":
+                i += 2
+                continue
+            top[3], i = None, i + 1
+            continue
+        m = (_FSW_DS_DQ_RE if q == '"' else _FSW_DS_TOP_RE).search(cmd, i)
+        if m is None:
+            break
+        i = m.start()
+        c = cmd[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "$" and cmd.startswith("$(", i):
+            stack.append(["$(", i, is_date(i + 2), None])
+            i += 2
+            continue
+        if c == "`":
+            if top[0] == "`":
+                stack.pop()
+                if top[2]:
+                    spans.append((top[1], i + 1))
+            else:
+                stack.append(["`", i, is_date(i + 1), None])
+            i += 1
+            continue
+        if q == '"':
+            if c == '"':
+                top[3] = None
+        elif c == "'":
+            top[3] = "'"
+        elif c == '"':
+            top[3] = '"'
+        elif c == "$" and cmd.startswith("$'", i):
+            top[3] = "$'"
+            i += 2
+            continue
+        elif c == "(":
+            stack.append(["(", i, False, None])
+        elif c == ")" and top[0] in ("$(", "("):
+            stack.pop()
+            if top[2]:
+                spans.append((top[1], i + 1))
+        i += 1
+    if budget is not None:
+        budget.spend(steps)
+    spans.sort()
+    merged = []
+    for s, e in spans:
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return merged
+
+
+_FSW_WRITE_COMMANDS = frozenset(("tee", "cp", "mv", "install", "dd", "truncate", "ed", "ex"))
+_FSW_INPLACE_COMMANDS = frozenset(("sed", "perl"))
+_FSW_INPLACE_OPT_RE = re.compile(r"-[A-Za-z0-9]*i")  # the short forms; a `--` word goes through _resolve_long
+_FSW_FD_DUP_RE = re.compile(r"[0-9]+-?|-")
+_FSW_SHELL_SEPARATORS = ";|&\n"
+_FSW_CMD_PREFIX_WORDS = frozenset(("{", "then", "do", "else", "!", "if", "elif", "while", "until"))  # the next word is again in command position
+# bash's `time` reserved word keeps command position too, and so do its options `-p` then `--`, or `--` alone
+# (observed in bash 5.3: `time -p -- [[ a > b ]]` is a conditional; `time -p -p` and `time -x` run a command)
+_FSW_TIME_OPTS = {1: {"-p": 2, "--": 0}, 2: {"--": 0}}  # time state -> option word -> next time state
+# Prefix commands that run the command named after them: name -> (options that take a SEPARATE argument,
+# count of leading positional operands before the command). Their other options are skipped.
+_FSW_PREFIX_COMMANDS = {
+    "sudo": (frozenset(("-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-T", "-U", "--user", "--group", "--host",
+                        "--prompt", "--close-from", "--chdir", "--role", "--type", "--command-timeout",
+                        "--other-user")), 0),
+    "doas": (frozenset(("-u", "-C")), 0),
+    "env": (frozenset(("-u", "-C", "-S", "--unset", "--chdir", "--split-string")), 0),
+    "command": (frozenset(), 0), "builtin": (frozenset(), 0), "exec": (frozenset(("-a",)), 0),
+    "nohup": (frozenset(), 0), "time": (frozenset(("-f", "-o", "--format", "--output")), 0),
+    "nice": (frozenset(("-n", "--adjustment")), 0),
+    "ionice": (frozenset(("-c", "-n", "-p", "-P", "-u", "--class", "--classdata")), 0),
+    "stdbuf": (frozenset(("-i", "-o", "-e", "--input", "--output", "--error")), 0),
+    "timeout": (frozenset(("-s", "-k", "--signal", "--kill-after")), 1),
+    "chroot": (frozenset(("--userspec", "--groups")), 1),
+    "flock": (frozenset(("-w", "-E", "--timeout", "--conflict-exit-code")), 1),
+    "xargs": (frozenset(("-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s", "--arg-file", "--delimiter",
+                         "--max-args", "--max-procs", "--max-chars", "--eof", "--max-lines")), 0),
+}
+_FSW_EXEC_WORDS = frozenset(("-exec", "-execdir", "-ok", "-okdir"))  # find: the next word is a command
+_FSW_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=.*", re.S)
+
+
+class _FswExhausted(Exception):
+    """The Bash analysis spent its work budget (BASH_WORK_BUDGET); the hook then fails open."""
+
+
+class _FswBudget:
+    """A counter of Bash analysis steps (tokenizer iterations, heredoc lines, tokens and units walked),
+    shared by one evaluation and its nested shell -c analyses; spend() raises _Exhausted when it runs out."""
+    __slots__ = ("left",)
+
+    def __init__(self, steps):
+        self.left = steps
+
+    def spend(self, steps):
+        self.left -= steps
+        if self.left < 0:
+            raise _FswExhausted()
+
+
+class _FswTokens:
+    """What _tokenize() returns. streams: the token streams (as _shell_tokens() returns them, the
+    top-level stream last); poss: per stream, a (start, end) raw offset pair per token ((-1, -1) for a separator
+    the tokenizer inserts itself); spans: per stream, the raw (start, end) of its frame; heredocs: (operator
+    offset, body start, body end) per here-document body; comments: the raw (start, end) of each comment."""
+    __slots__ = ("streams", "poss", "spans", "heredocs", "comments")
+
+    def __init__(self, streams, poss, spans, heredocs, comments):
+        self.streams, self.poss, self.spans, self.heredocs, self.comments = streams, poss, spans, heredocs, comments
+
+
+_FSW_HD_SPECIAL_RE = re.compile(r"\\|\$\(|`")  # what runs in an unquoted here-document body
+_FSW_PLAIN_RUN_RE = re.compile(r"[^\s\\'\"`$<>()|&;#]+")  # word characters with no shell meaning
+_FSW_PLAIN_SPECIAL = frozenset("\\'\"`$<>()|&;#")
+_FSW_DQ_RUN_RE = re.compile(r'[^"\\`$]+')  # double-quoted text with no shell meaning
+_FSW_BLANK_RUN_RE = re.compile(r"[^\S\n]+")  # whitespace other than a newline
+# the words flush() must inspect (every other word takes the fast path)
+_FSW_FLUSH_WORDS = frozenset(("case", "esac", "[[", "for", "function", "time")) | _FSW_CMD_PREFIX_WORDS
+# one SIMPLE token after optional blanks, as the tokenizer's regex fast path takes it: a plain word (ended
+# by whitespace, an operator, or the end), `>>`, `>|`, or `>` (not `>&`), a plain `<`, or a separator; group 5
+# takes any other character, which ends the run (so a finditer from any offset never skips text)
+_FSW_FAST_TOK_RE = re.compile(r"[^\S\n]*(?:([^\s\\'\"`$<>()|&;#]+)(?=[\s;|&<>()]|\Z)|(>>|>\||>(?!&))|(<(?![<>(&]))"
+                          r"|([;|\n]|&(?!>))|(.))", re.S)
+
+
+def _fsw_frame(kind, cmdpos, start, arith_cmd=False):
+    """A tokenizer frame (see _tokenize): [kind, toks, word chars, has word, in double quotes, paren depth, open
+    cases, word quoted, command position, inside [[, function header state, time state, arithmetic command or
+    `for` seen, word start, token positions, pending here-documents, awaiting a here-document delimiter, frame
+    start]."""
+    return [kind, [], [], False, False, 0, 0, False, cmdpos, False, 0, 0, arith_cmd, 0, [], [], None, start]
+
+
+def _fsw_shell_tokens(cmd):
+    """The token STREAMS of `cmd` (see _tokenize), or None when it cannot be parsed."""
+    t = _fsw_tokenize(cmd)
+    return None if t is None else t.streams
+
+
+def _fsw_tokenize(cmd, budget=None):
+    """Lexical shell token STREAMS of `cmd` in ONE linear pass: a list holding the top-level stream and one
+    stream per `$(...)` or backtick substitution, each a list of ("w", dequoted word), ("s",) for a separator
+    (`;`, `|`, `&`, `(`, `)`, a newline), ("r", dup) for an output redirection (dup True for the `>&`
+    form, whose operand may name a descriptor), and ("i",) for an input redirection (`<`, `<<<`, `<<`, `<<-`,
+    `<&`; the next word is its operand). `<>` is an output redirection; the `<` of a `<(` process substitution
+    is dropped. Inside a `[[ ... ]]` conditional (a `[[` word in command position up to its closing `]]`),
+    everything is operand text: `<` and `>` are string comparisons and `(`, `)`, `|`, `&`, and `;` are
+    grouping, logical, or regex operand text, all emitting nothing and splitting no word, a newline only
+    ends a word, and a `#` is word text, never a comment (a `<(` or `>(` there opens a process substitution,
+    a frame like a `$(...)`; quoting and substitutions work as outside). The conditional closes only at a
+    `]]` that starts a word (after unquoted whitespace) and is followed by whitespace, `;`, `&`, `|`, `<`,
+    `>`, `)`, the end, or (in a backtick frame) that frame's closing backtick, never at a `]]` glued to
+    preceding text; a `[[` word ended by a metacharacter
+    (`[[(-f x) ]]`) opens it with that metacharacter as conditional text; the closing `]]` word is
+    followed by a separator (bash takes a `do`, `then`, or `{` after it with or without a `;` first). A
+    conditional still open when its frame ends (at the end of input, at a closing backtick, or at an
+    unterminated quote; a `)` inside it is operand text, so a `$(...)` never closes over it) makes the whole
+    result None, never a silent pass (there is no loose re-read, so a grouping `)` glued to `]]`,
+    `[[ ( -n x )]]`, which bash does close, leaves the conditional open here and the command unparseable). This
+    never applies to `[ ... ]` or `test`, where an unquoted `>` is a real redirection. A substitution, unquoted or inside double quotes, is its own
+    frame with its own quoting context (as in date_spans()), its body a separate stream, and it leaves a `$`
+    placeholder in the enclosing word. Single quotes and $'...' make everything literal; double quotes make
+    every operator literal except a substitution opener; a backslash escapes the next character; an unquoted
+    `#` at a word start comments out the rest of its line. Inside a `$(...)`, an unquoted `case` word in
+    command position opens a case construct until its unquoted `esac` in command position, and while one is
+    open a `)` is a pattern terminator (a separator), not the end of the substitution. Command position is
+    the first word of the substitution or the first word after a separator, `(`, `)`, or a reserved word
+    (`{`, `then`, `do`, `else`, `!`, `if`, `elif`, `while`, `until`) that is itself in command position, so a
+    `case` argument (`rg case <file>`, `rg then case <file>`) is not a keyword. The `time` reserved word in
+    command position, and after it `-p` then `--` or `--` alone, also keep command position (`if time [[`).
+    A function header restores command position at its body: after `function NAME` (with or without `()`),
+    the body's opening `{` keeps it (a `(` or `()` is a separator anyway, as is the newline of `NAME ()`
+    followed by `{` on the next line), and after `function NAME` with no `()` the body word is itself in
+    command position (bash takes any compound command there: `((`, `[[`, `(`, `{`, `if`, `while`, `until`,
+    `for`, `case`), so the header words themselves are never command words. A `((` in
+    command position (or right after a `for` in command position) opens an arithmetic command, and `$((` an
+    arithmetic expansion, each through its matching `))` (nested parentheses counted, adapted from the
+    block-truncated-reads hook's _arith_end): it contributes a `$` placeholder word to the enclosing stream,
+    a `(` ends any word before it first (so `if((`, `while((`, `until((`, `elif((`, and `!((` keep their
+    reserved word's command position), a closed arithmetic command (a `for ((...))` header or a plain
+    `((...))`, not a `$((` expansion) is followed by a separator (bash takes its `do`, `then`, or `{` with or
+    without a `;` first, so the body stays in command position), and inside it `<`, `>`, `<<`, `>>`, separators, and `#` are arithmetic text that emits nothing, while a
+    `$(...)` or backtick substitution inside it is still its own scanned stream. A `)` at the arithmetic's
+    own level not followed by `)` (bash then re-reads the text as nested groups) returns None. Returns None
+    for an unterminated quote, substitution, arithmetic, or `[[` conditional (in any frame).
+    The pass also records where each token lies in `cmd` (the raw offsets the analysis attributes
+    literals and writes by), each substitution frame's span, each comment, and each here-document body: at
+    the newline ending a line that holds `<<` or `<<-` operators, their bodies run through their delimiter
+    lines, and they are never tokenized as commands: when every such delimiter was quoted (no expansion in the
+    body), or the bodies hold no `$(` and no backtick, they are skipped, and otherwise only the substitutions
+    in them are tokenized (body mode, see bodies()), as bash expands them. Runs of characters with no shell
+    meaning are consumed
+    in one step. With `budget` (a _Budget) the pass raises _Exhausted once it has taken that many steps."""
+    # frame: see _frame(); kind in "top", "$(", "`", or "((" (an arithmetic command or expansion, whose own text
+    # emits no tokens and is never appended as a stream; paren depth counts its nested parentheses)
+    streams, poss, spans, heredocs, comments = [], [], [], [], []
+    stack, i, n = [_fsw_frame("top", True, 0)], 0, len(cmd)
+    limit = budget.left + 1 if budget is not None else 1 << 62
+    steps = 0
+
+    def flush(f, closing=False):  # closing: this word is the `]]` that closes a [[ ... ]] conditional
+        if f[3]:
+            w = "".join(f[2])
+            f[1].append(("w", w))
+            f[14].append((f[13], i))
+            if f[16] is not None:  # the delimiter word of a pending here-document
+                f[15].append((w, f[16][0], f[7], f[16][1]))
+                f[16] = None
+            if not f[9] and not f[10] and not f[11] and w not in _FSW_FLUSH_WORDS:
+                f[8] = f[12] = False  # the common case, an ordinary word, decided without the chain below
+                f[2], f[3], f[7] = [], False, False
+                return
+            nonlocal steps
+            steps += 2  # the full chain below
+            if f[0] == "$(" and not f[7] and f[8]:
+                if w == "case":
+                    f[6] += 1
+                elif w == "esac" and f[6]:
+                    f[6] -= 1
+            closed = False  # this word is the `]]` that closes a [[ ... ]] conditional command
+            if f[9]:  # the main loop decides where the conditional closes, never the word alone
+                closed = closing
+                f[9] = False if closing else f[9]
+            elif not f[7] and f[8] and w == "[[":
+                f[9] = i  # where it opened (never 0: the `[[` precedes i), so the flag is always truthy
+            pos = f[8] and not f[7]
+            f[12] = pos and w == "for"  # `for ((` opens an arithmetic header
+            if f[10] == 1:  # the function name: the body, a compound command, follows in command position, so
+                f[8], f[10] = True, 2  # a `((`, `[[`, `(`, `for ((`, or `case` there opens its construct
+            elif f[10] == 2:  # the function body opens: `{`, `if`, `while`, `until` keep command position
+                f[8], f[10] = pos and w in _FSW_CMD_PREFIX_WORDS, 0
+            elif pos and w == "function":
+                f[8], f[10], f[11] = False, 1, 0
+            elif pos and w in _FSW_TIME_OPTS.get(f[11], ()):
+                f[11] = _FSW_TIME_OPTS[f[11]][w]  # an option of the time reserved word; the position is kept
+            else:
+                f[11] = 1 if pos and w == "time" else 0
+                f[8] = pos and (w in _FSW_CMD_PREFIX_WORDS or w == "time")  # only a reserved word keeps the position
+            if closed:  # as after a closed arithmetic command: the `do`, `then`, or `{` after `]]`, with or
+                sep(f, i, True)  # without a `;` or newline first, is again in command position, here and in the stream
+        f[2], f[3], f[7] = [], False, False
+
+    def sep(f, at, synthetic=False):
+        f[1].append(("s",))
+        f[14].append((at, at) if synthetic else (at, at + 1))  # an inserted separator is zero-width
+        f[8], f[10], f[11], f[12] = True, 0, 0, False
+        f[16] = None  # a separator before a here-document's delimiter word: bash rejects it; no body
+
+    def bodies(f, start):
+        """Record the bodies of the here-documents pending in frame `f`, which start at `start` (just
+        past the newline ending their operator's line), each through its delimiter line (tabs stripped first
+        for `<<-`), or to the end of input when none follows. When EVERY pending delimiter was quoted the bodies
+        are literal text in bash (no expansion), and when the bodies hold no `$(` and no backtick nothing in them
+        can run a command, so in either case tokenizing resumes after the last delimiter line; otherwise the
+        bodies are scanned in BODY MODE (an "hd" frame through their end), where only a `$(`, `$((`, or backtick
+        substitution is tokenized (as its own stream) and a backslash escapes the next character, as bash expands
+        an unquoted here-document. Returns where to resume."""
+        nonlocal steps
+        at, skip = start, all(quoted for _w, _strip, quoted, _op in f[15])
+        for delim, strip, _quoted, op in f[15]:
+            body = at
+            while True:
+                steps += 1
+                e = cmd.find("\n", at)
+                end = n if e < 0 else e
+                line = cmd[at:end]
+                if (line.lstrip("\t") if strip else line) == delim:
+                    heredocs.append((op, body, at))
+                    at = n if e < 0 else e + 1
+                    break
+                if e < 0:
+                    heredocs.append((op, body, n))
+                    at = n
+                    break
+                at = e + 1
+        f[15] = []
+        if steps >= limit:
+            raise _FswExhausted()
+        if skip or ("$(" not in cmd[start:at] and "`" not in cmd[start:at]):
+            return at
+        body = _fsw_frame("hd", False, start)
+        body[5] = at  # the end of the bodies
+        stack.append(body)
+        return start
+
+    while i < n:
+        steps += 3  # a character-loop step costs about three times a token taken by the regex fast path
+        if steps >= limit:
+            raise _FswExhausted()
+        f, c = stack[-1], cmd[i]
+        if f[0] == "hd":  # here-document body mode (see bodies()): only substitutions run
+            m = _FSW_HD_SPECIAL_RE.search(cmd, i, f[5])
+            if m is None:
+                stack.pop()
+                i = f[5]
+                continue
+            i = m.start()
+            c = cmd[i]
+            if c == "\\":
+                i += 2
+                continue
+        # runs of characters with no shell meaning are consumed whole (identical results, far fewer steps)
+        if f[4]:
+            if c not in '"\\`$':
+                m = _FSW_DQ_RUN_RE.match(cmd, i)
+                f[2].append(m.group())
+                i = m.end()
+                continue
+        elif not f[9] and f[0] not in ("((", "hd"):
+            if not f[3] and f[16] is None and not f[10] and not f[11]:
+                # a run of SIMPLE tokens (a plain word that is none of _FLUSH_WORDS, `;`, `|`, `&`, a
+                # newline unless a here-document is pending, `>`, `>>`, `>|`, or a plain `<`, each after optional
+                # blanks) is tokenized by anchored regex matches, exactly as the character loop below would
+                toks, tpos, f8, f12, pend, at = f[1], f[14], f[8], f[12], f[15], i
+                for t in _FSW_FAST_TOK_RE.finditer(cmd, i):  # every position matches: a group 5 match stops the run
+                    g = t.lastindex
+                    if g == 1:
+                        w = t.group(1)
+                        if w in _FSW_FLUSH_WORDS:
+                            break
+                        toks.append(("w", w))
+                        tpos.append((t.start(1), t.end()))
+                        f8 = f12 = False
+                    elif g == 4:
+                        a = t.start(4)
+                        if pend and cmd[a] == "\n":
+                            break
+                        toks.append(("s",))
+                        tpos.append((a, a + 1))
+                        f8, f12 = True, False
+                    elif g == 2:
+                        toks.append(("r", False))
+                        tpos.append((t.start(2), t.end()))
+                    elif g == 3:
+                        a = t.start(3)
+                        toks.append(("i",))
+                        tpos.append((a, a + 1))
+                    else:
+                        break
+                    steps += 1
+                    at = t.end()
+                if at != i:  # some token was taken: resume after it (else the loop below handles cmd[i])
+                    f[8], f[12], i = f8, f12, at
+                    if steps >= limit:
+                        raise _FswExhausted()
+                    continue
+            if c not in _FSW_PLAIN_SPECIAL:
+                if c.isspace():
+                    if c != "\n":
+                        flush(f)
+                        i = _FSW_BLANK_RUN_RE.match(cmd, i).end()
+                        continue
+                else:
+                    m = _FSW_PLAIN_RUN_RE.match(cmd, i)
+                    if not f[3]:
+                        f[13] = i
+                    f[2].append(m.group())
+                    f[3] = True
+                    i = m.end()
+                    continue
+        if c == "\\":
+            if i + 1 < n and cmd[i + 1] != "\n":
+                if not f[3]:
+                    f[13] = i
+                f[2].append(cmd[i + 1])
+                f[3] = f[7] = True
+            i += 2
+            continue
+        if c == "`" and f[0] == "`":
+            flush(f)
+            if f[9]:  # a conditional still open when its backtick frame closes: unparseable
+                return None
+            streams.append(f[1])
+            poss.append(f[14])
+            spans.append((f[17], i + 1))
+            stack.pop()
+            i += 1
+            continue
+        if c == "$" and cmd.startswith("$((", i):  # an arithmetic expansion: its value joins the enclosing word
+            if not f[3]:
+                f[13] = i
+            f[2].append("$")
+            f[3] = f[7] = True
+            steps += _FSW_STREAM_COST
+            stack.append(_fsw_frame("((", False, i))
+            i += 3
+            continue
+        if c == "`" or (c == "$" and cmd.startswith("$(", i)):
+            if not f[3]:
+                f[13] = i
+            f[2].append("$")  # the substitution's value, in the enclosing word
+            f[3] = f[7] = True
+            steps += _FSW_STREAM_COST
+            stack.append(_fsw_frame(c if c == "`" else "$(", True, i))
+            i += 1 if c == "`" else 2
+            continue
+        if f[4]:
+            if c == '"':
+                f[4] = False
+            else:
+                f[2].append(c)
+            i += 1
+            continue
+        if c == "'" or (c == "$" and cmd.startswith("$'", i)):
+            if not f[3]:
+                f[13] = i
+            if c == "'":  # the quoted text is taken whole, not one character per step
+                j = cmd.find("'", i + 1)
+                if j < 0:
+                    return None
+                f[2].append(cmd[i + 1:j])
+            else:  # $'...': a backslash escapes the next character (it is kept, the backslash dropped)
+                i += 1
+                j = i + 1
+                while True:
+                    steps += 1
+                    m = _FSW_DS_ANSI_RE.search(cmd, j)
+                    if m is None:
+                        return None
+                    k = m.start()
+                    f[2].append(cmd[j:k])
+                    if cmd[k] == "'":
+                        j = k
+                        break
+                    if k + 1 >= n:
+                        return None
+                    f[2].append(cmd[k + 1])
+                    j = k + 2
+            f[3], f[7], i = True, True, j + 1
+            continue
+        if c == '"':
+            if not f[3]:
+                f[13] = i
+            f[3] = f[4] = f[7] = True
+            i += 1
+            continue
+        if f[9]:  # inside [[ ... ]]: everything up to the closing `]]` is operand text
+            if c in "<>" and cmd.startswith("(", i + 1):  # a process substitution: its body is its own
+                flush(f)  # scanned stream, as a `$(...)` is, and its value joins the word
+                f[13] = i
+                f[2].append("$")
+                f[3] = f[7] = True
+                steps += _FSW_STREAM_COST
+                stack.append(_fsw_frame("$(", True, i))
+                i += 2
+                continue
+            if cmd.startswith("]]", i) and (i + 2 >= n or cmd[i + 2].isspace() or cmd[i + 2] in ";&|<>)" or (
+                    cmd[i + 2] == "`" and f[0] == "`")) and not f[3] and cmd[i - 1].isspace():
+                flush(f)  # the `]]` word closes the conditional: it starts a word (after unquoted whitespace;
+                f[2], f[3], f[7], f[13] = ["]", "]"], True, False, i  # a glued `)]]` never closes) and
+                flush(f, True)  # a metacharacter, the end, or the closing backtick of this backtick frame
+                i += 2  # follows it; the next word is again in command position, with or without a `;` first
+                continue
+            if c.isspace():  # a newline too: bash takes one only after `[[`, `&&`, `||`, `(`, or `!`, never as a
+                flush(f)  # separator
+            elif c not in "<>()|&;":  # comparison, grouping, logical, and regex operand text emit nothing: never
+                if not f[3]:  # a redirection, a separator, or a command boundary (a `;`, a lone `&`, or a lone
+                    f[13] = i  # `|` outside a regex operand is a bash syntax error here); a `#` is word text
+                f[2].append(c)
+                f[3] = True
+            i += 1
+            continue
+        if f[0] == "((":  # arithmetic text: `<`, `>`, `<<`, `>>`, separators, and `#` are operators, not shell syntax
+            if c == "(":
+                f[5] += 1
+            elif c == ")":
+                if f[5]:
+                    f[5] -= 1
+                elif cmd.startswith("))", i):
+                    stack.pop()  # an arithmetic frame is not an executable stream
+                    i += 2
+                    if f[12]:  # a closed arithmetic COMMAND (a `for ((...))` header or a plain `((...))`, never
+                        flush(stack[-1])  # a `$((` expansion, whose value joins the word): the `do`, `then`,
+                        sep(stack[-1], i, True)  # or `{` after it, with or without a `;` or newline first, is again in
+                    continue  # command position, in the tokenizer state and, through a separator, in the stream
+                else:  # bash then re-reads the `((` as nested groups: not emulated, fails toward writing
+                    return None
+            i += 1
+            continue
+        if c in "<>()|&":
+            flush(f)  # a metacharacter ends the word before it (`if((`, `while((`, `!((` first end their reserved
+            if f[9]:  # word); a `[[` ended so opens the conditional: re-read this character as
+                continue  # conditional text, never as a separator or a redirection (`[[(-f x) ]]`)
+        if c == "(" and cmd.startswith("((", i) and (f[8] or f[12]):
+            if not f[3]:
+                f[13] = i
+            f[2].append("$")  # an arithmetic command (or a `for ((` header): one opaque word
+            f[3] = f[7] = True
+            steps += _FSW_STREAM_COST
+            stack.append(_fsw_frame("((", False, i, True))
+            i += 2
+            continue
+        if c == "#" and not f[3]:  # (inside [[ ... ]] a `#` never reaches here: it is operand text)
+            nl = cmd.find("\n", i)
+            comments.append((i, n if nl < 0 else nl))  # recorded, so a literal there feeds no write
+            i = n if nl < 0 else nl
+            continue
+        if c == ">" or (c == "&" and cmd.startswith("&>", i)):
+            flush(f)
+            at, amp = i, c == "&"
+            i += 2 if amp else 1
+            dup = False
+            if i < n and cmd[i] in ">|":
+                i += 1
+            elif not amp and i < n and cmd[i] == "&":
+                i += 1
+                dup = True
+            f[1].append(("r", dup))
+            f[14].append((at, i))
+            continue
+        if c == ")" and f[0] == "$(" and f[5] == 0:
+            flush(f)
+            if f[6]:  # a case pattern terminator inside the substitution, not its closing paren
+                sep(f, i)
+                i += 1
+                continue
+            streams.append(f[1])
+            poss.append(f[14])
+            spans.append((f[17], i + 1))
+            stack.pop()
+            i += 1
+            continue
+        if c in "()":
+            if f[0] == "$(":
+                f[5] += 1 if c == "(" else -1
+            flush(f)
+            sep(f, i)
+            i += 1
+            continue
+        if c in _FSW_SHELL_SEPARATORS:
+            flush(f)
+            sep(f, i)
+            if c == "\n" and f[15]:  # here-document bodies start after this newline
+                i = bodies(f, i + 1)
+                continue
+            i += 1
+            continue
+        if c == "<":
+            flush(f)
+            if cmd.startswith("<>", i) or cmd.startswith("<(", i):  # `<>` is read-write, an output
+                i += 1  # redirection (the `>` branch emits it); `<(` opens a process substitution group
+                continue
+            at = i
+            heredoc = cmd.startswith("<<", i) and not cmd.startswith("<<<", i)
+            strip = cmd.startswith("<<-", i)
+            i += 3 if cmd.startswith(("<<<", "<<-"), i) else 2 if cmd.startswith(("<<", "<&"), i) else 1
+            f[1].append(("i",))
+            f[14].append((at, i))
+            if heredoc:
+                f[16] = (strip, at)  # the next word is the here-document's delimiter
+            continue
+        if c.isspace():
+            flush(f)
+            i += 1
+            continue
+        if not f[3]:
+            f[13] = i
+        f[2].append(c)
+        f[3] = True
+        i += 1
+    if budget is not None:
+        budget.spend(steps)
+    if len(stack) > 1 and stack[-1][0] == "hd":  # a here-document body that ran to the end of the input
+        stack.pop()
+    if len(stack) > 1 or stack[0][4]:
+        return None
+    flush(stack[0])
+    if stack[0][9]:  # a conditional still open at the end of input: unparseable, never a silent pass
+        return None
+    streams.append(stack[0][1])
+    poss.append(stack[0][14])
+    spans.append((0, n))
+    return _FswTokens(streams, poss, spans, heredocs, comments)
+
+
+def _fsw_bash_writes(cmd):
+    """True when the command text shows a WRITE indicator (lexical; see the docstring) in ANY of its token
+    streams (the top level or any substitution body, each with independent state): an unquoted output
+    redirection (`>`, `>>`, `>|`, `&>`, `N>`, `<>`) whose target is not /dev/null and not a `>&` descriptor
+    duplication; or, in command position of any simple command, a word (its basename) among WRITE_COMMANDS,
+    or sed or perl followed in the same simple command by an in-place option (`-i`, a letter-and-digit short cluster
+    holding i such as `-pi`, `-i.bak`, or `-0777pi`, or `--in-place`). An unterminated quote or
+    substitution, or a redirection with no target, fails toward writing (True)."""
+    streams = _fsw_shell_tokens(cmd)
+    return True if streams is None else any(_fsw_stream_writes(toks) for toks in streams)
+
+
+def _fsw_bash_store_write(cmd, cwd=None):
+    """True when a write in the command TARGETS a store path: a redirection target, a tee operand, a
+    sed -i or perl -i operand, a cp, mv, or install destination (the -t or --target-directory argument, else the
+    last operand), a dd of= operand, or a truncate, ed, or ex operand, each tested with the same lexical store
+    path token rule as names_store_path(). A PARSED target that is a store path establishes the store
+    write by itself (an attached `cp -t<store dir>` spelling included, which the raw command text does not show
+    as a standalone store path token); only a command that cannot be parsed, or a write whose target is unknown
+    (a redirection with no operand, a `$` target, an xargs-run write), falls back to the raw test and counts as
+    a store write when the command text names a store path anywhere (the fail-toward-writing direction). A
+    relative target is resolved against `cwd` and any cd before it, and a literal shell -c string's writes
+    count (see _analyze); a command that spends BASH_WORK_BUDGET is reported as no store write (fail open)."""
+    start = frozenset((os.path.normpath(cwd) if isinstance(cwd, str) and os.path.isabs(cwd) else None,))
+    try:
+        return _fsw_analyze(cmd, start, _fsw_store_ctx(), _FswBudget(_FSW_BASH_WORK_BUDGET)).store
+    except _FswExhausted:
+        return False
+
+
+# How each modeled write command's options take arguments, so an option's argument (a sed script
+# file, a truncate reference file, an install mode) is consumed before the destination operands are collected
+# and is never read as a write target. Per command: "req", short letters taking a REQUIRED argument (the rest of
+# the cluster, else the next word); "opt", short letters taking an OPTIONAL argument only when attached (the
+# rest of the cluster, which they end); "run", short letters followed by an attached run the regex matches
+# (perl's -0777, -l0, -C), after which the cluster continues; "long", long options taking a REQUIRED argument
+# (`--opt value` or `--opt=value`; any other long option takes none, or only an attached `=value`); "target",
+# the letters and long options whose argument IS a write target; "script", the letters and long options that
+# supply the program, or None for a command with no program operand (a sed or perl given none of them takes its
+# FIRST operand as the program, not as a file); "text", the letters and long options whose argument
+# is SCRIPT TEXT the tool runs (a sed expression, an ex command, a perl program), and "text_prog", whether the
+# dropped program operand is script text too (sed's, never perl's, which names a program FILE): script text
+# that names a store path makes the write's target UNKNOWN (a sed `w` command or `s///w` flag, or an ex `w!`,
+# can write that path), while an option argument that names a FILE (sed -f, truncate -r, perl -I) stays
+# consumed; "stop", option parsing ends at the FIRST operand, as the real tool does, so every later
+# word is an operand; "all", the letters and long options under which EVERY operand (and every
+# target-directory argument) is written: mv's --exchange swaps each source with its destination, and install's
+# -d or --directory creates every operand as a directory (an existing one has its mode set); "optsep",
+# long options whose optional argument one implementation takes only attached (`--opt=value`: GNU
+# install's --context) and another also takes as the SEPARATE next word when that word is `-` or does not
+# start with `-` (uutils install 0.8.0, this host's install), so that word is kept as an operand AND the
+# destination is also computed without it (the union of both readings); "exit", long options on
+# which the tool exits at once, touching no file and running no program, when they are met while options are
+# still parsed (perl's --help and --version; an attached `=value` is unrecognized; also --help and
+# --version of cp, mv, install, tee, truncate, ed, and sed, which permute, so either stops them wherever it
+# stands before `--`; "exit_eq", the tool also rejects an attached `=value` before writing anything, observed
+# on this host with GNU cp and mv 9.7, GNU sed 4.9, GNU ed 1.22.4, and uutils install, tee, and truncate 0.8.0;
+# ex is not given them, since vim opens a -w script-out file before it reaches --version). Observed on this host:
+# perl 5.40.1 stops at its first operand (`perl -pi -e
+# CODE X -I S` edits X, fails to open `-I`, and edits S); GNU sed 4.9, GNU cp and mv 9.7, GNU ed 1.22.4, vim 9.1
+# as ex, and uutils 0.8.0 install, truncate, and tee all permute (an option after an operand is still an
+# option); GNU sed, cp, and mv stop at the first operand only under POSIXLY_CORRECT (not modeled; disclosed).
+_FSW_EXITS = ("--help", "--version")  # long options on which the tool exits at once, writing nothing
+_FSW_OPTION_SPECS = {
+    "cp": {"req": "St", "long": ("--suffix", "--target-directory", "--sparse", "--no-preserve"),
+           "target": ("t", "--target-directory"), "exit": _FSW_EXITS, "exit_eq": True},
+    "mv": {"req": "St", "long": ("--suffix", "--target-directory"), "target": ("t", "--target-directory"),
+           "all": ("--exchange",), "exit": _FSW_EXITS, "exit_eq": True},
+    "install": {"req": "mogSt", "long": ("--mode", "--owner", "--group", "--suffix", "--target-directory",
+                                         "--strip-program"), "target": ("t", "--target-directory"),
+                "all": ("d", "--directory"), "optsep": ("--context",), "exit": _FSW_EXITS, "exit_eq": True},
+    "tee": {"exit": _FSW_EXITS, "exit_eq": True},
+    "truncate": {"req": "rs", "long": ("--reference", "--size"), "exit": _FSW_EXITS, "exit_eq": True},
+    "ed": {"req": "p", "long": ("--prompt",), "exit": _FSW_EXITS, "exit_eq": True},
+    # ex (vim in Ex mode): -i names the viminfo file and -w/-W a script-out file, both written, so both are targets
+    "ex": {"req": "cSuUiTtwW", "long": ("--cmd", "--startuptime", "--log"),
+           "target": ("i", "w", "W", "--startuptime", "--log"), "text": ("c", "--cmd")},
+    "sed": {"req": "efl", "opt": "i", "long": ("--expression", "--file", "--line-length"),
+            "script": ("e", "f", "--expression", "--file"), "text": ("e", "--expression"), "text_prog": True,
+            "exit": _FSW_EXITS, "exit_eq": True},
+    "perl": {"req": "eEIMm", "opt": "ixDF",
+             "run": {"0": re.compile(r"[xX][0-9A-Fa-f]*|[0-7]*"), "l": re.compile(r"[0-7]*"),
+                     "C": re.compile(r"[0-9]+|[IOESioDALa]*"), "d": re.compile(r"t?(?::.*)?"),
+                     "V": re.compile(r"(?::.*)?")},
+             "script": ("e", "E"), "text": ("e", "E"), "stop": True, "exit": _FSW_EXITS},
+}
+_FSW_DEST_COMMANDS = frozenset(("cp", "mv", "install"))  # the destination is the -t argument, else the last operand
+
+# Every long option each modeled command accepts, so an abbreviated spelling resolves as the real tool
+# resolves it (a MISS before: `sed --expr='s/x/<future>/w <store file>' log` and `sed --in s/x/<future>/ <store
+# file>` wrote the store unseen). Observed on this host: GNU sed 4.9, GNU cp and mv 9.7, and GNU ed 1.22.4
+# (getopt_long, or ed's own parser) and uutils 0.8.0 install, tee, and truncate (clap, inferring long names)
+# accept any UNAMBIGUOUS prefix, a prefix of several aliases of ONE option counting once (`sed --z`, `sed
+# --q`), and reject an ambiguous one (`sed --f`: --file or --follow-symlinks; `cp --s`; `ed --s`); vim 9.1 as ex
+# accepts only an exact long option (`--cm` and `--cmdx` are errors, and `--CMD` is not --cmd); perl 5.40.1
+# accepts exactly two, --help and --version, each only exact and without `=value` (`perl --vers`,
+# `perl --version=1`, and `perl --in` are unrecognized switches), and exits at once on either. The sets are the
+# tools' --help lists plus the hidden spellings observed (sed --binary and --zero-terminated, cp --path) and
+# ex's modeled --startuptime and --log. ed's --script is its -s, not an alias of --quiet (-q).
+# A sweep checked every long option here, and each modeled command's short letters, for separate-word
+# consumption against the real tools on this host (the tool run with the option followed by a word, and
+# whether that word was then used as an operand); every recorded arity matched except uutils install's
+# --context, now modeled ("optsep").
+_FSW_LONG_OPTIONS = {
+    "sed": ("--binary", "--debug", "--expression", "--file", "--follow-symlinks", "--help", "--in-place",
+            "--line-length", "--null-data", "--posix", "--quiet", "--regexp-extended", "--sandbox", "--separate",
+            "--silent", "--unbuffered", "--version", "--zero-terminated"),
+    "cp": ("--archive", "--attributes-only", "--backup", "--context", "--copy-contents", "--debug", "--dereference",
+           "--force", "--help", "--interactive", "--keep-directory-symlink", "--link", "--no-clobber",
+           "--no-dereference", "--no-preserve", "--no-target-directory", "--one-file-system", "--parents", "--path",
+           "--preserve", "--recursive", "--reflink", "--remove-destination", "--sparse", "--strip-trailing-slashes",
+           "--suffix", "--symbolic-link", "--target-directory", "--update", "--verbose", "--version"),
+    "mv": ("--backup", "--context", "--debug", "--exchange", "--force", "--help", "--interactive", "--no-clobber",
+           "--no-copy", "--no-target-directory", "--strip-trailing-slashes", "--suffix", "--target-directory",
+           "--update", "--verbose", "--version"),
+    "install": ("--backup", "--compare", "--context", "--directory", "--group", "--help", "--mode",
+                "--no-target-directory", "--owner", "--preserve-context", "--preserve-timestamps", "--strip",
+                "--strip-program", "--suffix", "--target-directory", "--unprivileged", "--verbose", "--version"),
+    "tee": ("--append", "--help", "--ignore-interrupts", "--output-error", "--version"),
+    "truncate": ("--help", "--io-blocks", "--no-create", "--reference", "--size", "--version"),
+    "ed": ("--extended-regexp", "--help", "--loose-exit-status", "--prompt", "--quiet", "--restricted", "--script",
+           "--silent", "--strip-trailing-cr", "--traditional", "--unsafe-names", "--verbose", "--version"),
+    "ex": ("--clean", "--cmd", "--help", "--log", "--noplugin", "--not-a-term", "--startuptime", "--ttyfail",
+           "--version"),
+    "perl": ("--help", "--version"),
+}
+_FSW_LONG_ALIASES = {  # (command, alias): the option it names, so a prefix of both is not ambiguous
+    ("sed", "--silent"): "--quiet", ("sed", "--zero-terminated"): "--null-data", ("cp", "--path"): "--parents",
+    ("ed", "--silent"): "--quiet"}
+_FSW_ABBREV_COMMANDS = frozenset(("sed", "cp", "mv", "install", "tee", "truncate", "ed"))
+_FSW_STRICT_LONG_COMMANDS = frozenset(("sed", "perl", "ex"))  # an unresolvable `--` word: the target is UNKNOWN
+
+
+def _fsw_resolve_long(kind, name):
+    """The long option `name` (a `--` word up to any `=`) stands for on command `kind`, or None when it
+    is UNRECOGNIZED or AMBIGUOUS. An exact known name is itself; on a command whose tool accepts abbreviations
+    (_ABBREV_COMMANDS) a prefix of exactly one known option, or of several aliases of one option, is that
+    option (its canonical name when it is an alias's); any other word is None. A command with no recorded set
+    returns `name` unchanged."""
+    known = _FSW_LONG_OPTIONS.get(kind)
+    if known is None:
+        return name
+    if name in known:
+        return _FSW_LONG_ALIASES.get((kind, name), name)
+    if kind not in _FSW_ABBREV_COMMANDS or len(name) < 3:
+        return None
+    options = {_FSW_LONG_ALIASES.get((kind, n), n) for n in known if n.startswith(name)}
+    return options.pop() if len(options) == 1 else None
+
+
+def _fsw_is_inplace_opt(kind, w):
+    """True when the argument word `w` of sed or perl `kind` is an in-place option: a short cluster
+    _INPLACE_OPT_RE matches, or a `--` word resolving to sed's --in-place (`--in-place`, `--in`, `--in=.bak`)."""
+    if w.startswith("--"):
+        return _fsw_resolve_long(kind, w.partition("=")[0]) == "--in-place"
+    return bool(_FSW_INPLACE_OPT_RE.match(w))
+
+# The GNU sed program grammar the read-only classifier accepts (observed with GNU sed 4.9). Commands
+# taking no argument, commands taking an optional number, and the command-ending characters.
+_FSW_SED_PLAIN = frozenset("=dDgGhHnNpPxzF")
+_FSW_SED_NUMBERED = frozenset("lqQ")
+_FSW_SED_S_FLAGS = frozenset("gpiImM0123456789")
+
+
+def _fsw_sed_program_cannot_write(prog):
+    """True only when the sed program `prog` (its -e pieces joined by newlines, as sed joins them) is
+    parsed with CONFIDENCE and holds no command that can write a file or run one: no `w` or `W` command, no `e`
+    command, and no `w` or `e` flag on an `s` command (GNU sed opens a `w` file while parsing, so any `w` counts,
+    wherever the program later fails). Anything this conservative parser does not recognize with confidence
+    returns False (the caller then keeps the script-text UNKNOWN target): a `$` anywhere (shell text the tokenizer
+    left unexpanded, or a substitution placeholder, could expand into a command), a backslash or newline inside
+    a bracket expression, a newline inside a regex, an a, i, or c text line ending in a backslash or an
+    `a\\text` one-liner, a label holding anything unusual, a second `!`, unbalanced braces, an unknown command
+    or `s` flag, or trailing characters after a command. Grammar followed (observed with GNU sed 4.9): an
+    address is a number (with `~step`), `/re/`, or `\\cREc` (`$` is refused, above), a regex address taking I or
+    M flags, and an optional second address after `,` (also `+N` or `~N`), then optional spaces and one `!`;
+    in a regex a backslash escapes the next character and a bracket expression protects the delimiter; the `s`
+    replacement and the `y` operands are delimited by backslash escapes only; `s` flags may be separated by
+    spaces; a, i, and c text, and r, R, w, and W file names run to the end of the line; `b`, `t`, `T`, `:`, and
+    `v` labels end at `;` or whitespace; `#` starts a comment to the end of the line; a command ends at `;`, a
+    newline, `}`, `#`, or the end."""
+    if "$" in prog:
+        return False
+    n, i, depth = len(prog), 0, 0
+
+    def spaces(j):
+        while j < n and prog[j] in " \t":
+            j += 1
+        return j
+
+    def regex_end(j, delim):
+        """Index just past the closing `delim` of a regex starting at j, or -1 (not parsed with confidence)."""
+        while j < n:
+            c = prog[j]
+            if c == "\n":
+                return -1
+            if c == "\\":
+                if j + 1 >= n or prog[j + 1] == "\n":
+                    return -1
+                j += 2
+            elif c == "[":
+                k = j + 1
+                if k < n and prog[k] == "^":
+                    k += 1
+                if k < n and prog[k] == "]":
+                    k += 1
+                while k < n and prog[k] != "]":
+                    if prog[k] in "\\\n":
+                        return -1
+                    if prog[k] == "[" and k + 1 < n and prog[k + 1] in ":=.":
+                        close = prog.find(prog[k + 1] + "]", k + 2)
+                        if close < 0 or "\n" in prog[k:close] or "\\" in prog[k:close]:
+                            return -1
+                        k = close + 2
+                    else:
+                        k += 1
+                if k >= n:
+                    return -1
+                j = k + 1
+            elif c == delim:
+                return j + 1
+            else:
+                j += 1
+        return -1
+
+    def plain_end(j, delim):
+        """Index just past the closing `delim` of an s replacement or y operand (backslash escapes only)."""
+        while j < n:
+            c = prog[j]
+            if c == "\\":
+                if j + 1 >= n:
+                    return -1
+                j += 2
+            elif c == delim:
+                return j + 1
+            elif c == "\n":
+                return -1
+            else:
+                j += 1
+        return -1
+
+    def address(j):
+        """Index past one address at j (j itself when there is none), or -1."""
+        if j < n and prog[j].isdigit():
+            while j < n and prog[j].isdigit():
+                j += 1
+            if j < n and prog[j] == "~":
+                j += 1
+                if not (j < n and prog[j].isdigit()):
+                    return -1
+                while j < n and prog[j].isdigit():
+                    j += 1
+            return j
+        if j < n and prog[j] in "/\\":
+            if prog[j] == "\\":
+                if j + 1 >= n or prog[j + 1] in "\n\\":
+                    return -1
+                delim, j = prog[j + 1], j + 2
+            else:
+                delim, j = "/", j + 1
+            j = regex_end(j, delim)
+            while j >= 0 and j < n and prog[j] in "IM":
+                j += 1
+            return j
+        return j
+
+    def line_end(j):
+        k = prog.find("\n", j)
+        return n if k < 0 else k
+
+    def command_end(j):
+        """Index of the separator after a command (at j after optional spaces), or -1 when trailing text follows."""
+        j = spaces(j)
+        if j >= n or prog[j] in ";\n}#":
+            return j
+        return -1
+
+    while i < n:
+        i = spaces(i)
+        if i >= n:
+            break
+        c = prog[i]
+        if c in ";\n":
+            i += 1
+            continue
+        if c == "#":
+            i = line_end(i)
+            continue
+        if c == "}":
+            if depth == 0:
+                return False
+            depth -= 1
+            i = command_end(i + 1)
+            if i < 0:
+                return False
+            continue
+        j = address(i)
+        if j < 0:
+            return False
+        if j > i and j < n and prog[j] == ",":
+            if j + 1 < n and prog[j + 1] in "+~":
+                k = j + 2
+                if not (k < n and prog[k].isdigit()):
+                    return False
+                while k < n and prog[k].isdigit():
+                    k += 1
+                j = k
+            else:
+                k = address(j + 1)
+                if k <= j + 1:
+                    return False  # no second address after the `,` (a `$` one is refused above)
+                j = k
+        j = spaces(j)
+        if j < n and prog[j] == "!":
+            j = spaces(j + 1)
+            if j < n and prog[j] == "!":
+                return False  # GNU sed rejects multiple `!`s
+        if j >= n:
+            return False
+        c = prog[j]
+        if c in "wWe":
+            return False  # a command that writes a file or runs one
+        if c == "{":
+            depth += 1
+            i = j + 1
+            continue
+        if c in _FSW_SED_PLAIN:
+            i = command_end(j + 1)
+        elif c in _FSW_SED_NUMBERED:
+            k = spaces(j + 1)
+            while k < n and prog[k].isdigit():
+                k += 1
+            i = command_end(k)
+        elif c in "btTv:":
+            k = spaces(j + 1)
+            while k < n and prog[k] not in " \t;\n":
+                if prog[k] in "}#\\{":
+                    return False  # a label holding a brace, `#`, or backslash: not parsed with confidence
+                k += 1
+            if c == ":" and k == spaces(j + 1):
+                return False  # `:` needs a label
+            i = command_end(k)
+        elif c in "rR":
+            i = line_end(j + 1)  # the file name (read, never written) runs to the end of the line
+        elif c in "aic":
+            k = spaces(j + 1)
+            if k + 1 < n and prog[k] == "\\" and prog[k + 1] == "\n":
+                k += 2  # the classic `a\` form: the text is the next line
+            elif k < n and prog[k] in "\\\n":
+                return False  # an `a\text` one-liner or an empty text: not parsed with confidence
+            e = line_end(k)
+            if e > k and prog[e - 1] == "\\":
+                return False  # a text line ending in a backslash continues: not parsed with confidence
+            i = e
+        elif c in "sy":
+            if j + 1 >= n or prog[j + 1] in "\n\\":
+                return False
+            delim = prog[j + 1]
+            k = regex_end(j + 2, delim) if c == "s" else plain_end(j + 2, delim)
+            if k < 0:
+                return False
+            k = plain_end(k, delim)
+            if k < 0:
+                return False
+            if c == "s":
+                while k < n and prog[k] not in ";\n}#":
+                    if prog[k] in "we":
+                        return False  # an s///w or s///e flag (spaces may separate flags)
+                    if prog[k] not in _FSW_SED_S_FLAGS and prog[k] not in " \t":
+                        return False
+                    k += 1
+            i = command_end(k)
+        else:
+            return False  # an unknown command
+        if i < 0:
+            return False
+    return depth == 0
+
+
+def _fsw_write_targets(kind, words, inplace=True):
+    """The TARGET words of one write command `kind` given its argument `words`: the destination of
+    cp, mv, or install (every -t, -tDIR, --target-directory DIR, or --target-directory=DIR argument, else the
+    last operand); the of= operand of dd; and every operand (a word that is not an option, and every word
+    after `--`) of tee, truncate, ed, ex, and an in-place sed or perl, plus ex's written-file option arguments.
+    Every option argument the command's _OPTION_SPECS entry declares is consumed first (a short
+    cluster is walked letter by letter, as getopt does), so `sed -f <file>`, `sed -e <script>`, `truncate -r
+    <file>`, or `perl -I <dir>` never names a target, and a sed or perl given no -e/-f style option drops its
+    first operand, the program. For a command whose spec sets "stop" (perl), option parsing ends at
+    the FIRST operand, as the real tool's does, so a later option-looking word (`X -I S`) is an operand; and
+    None (an UNKNOWN target) when any SCRIPT TEXT argument ("text", or sed's dropped program) names a store
+    path, since that text can itself write the path (a sed `w` command or `s///w` flag, an ex `w!`). With
+    `inplace` False (a sed or perl with no in-place option, which edits no operand) the result is [] unless
+    such script text makes it None. Under an "all" option (mv --exchange, install -d or --directory)
+    every operand and every target-directory argument is a target; after install's bare --context the next
+    word, when it is `-` or does not start with `-`, may be its argument (uutils) or an operand (GNU), so the
+    destination candidates are the last operand under BOTH readings; and a perl --help or --version met while
+    options are parsed makes the command write nothing ([])."""
+    if kind == "dd":
+        return [w[3:] for w in words if w.startswith("of=")]
+    spec = _FSW_OPTION_SPECS.get(kind, {})
+    req, opt, run = spec.get("req", ""), spec.get("opt", ""), spec.get("run", {})
+    long_req, target, script = spec.get("long", ()), spec.get("target", ()), spec.get("script")
+    text, stop = spec.get("text", ()), spec.get("stop", False)
+    operands, dirs, ends, pending, scripted, texts = [], [], False, None, False, []
+    filescript = False  # a program option whose argument names a FILE (sed -f, --file) was given
+    posix = False  # sed's --posix, or an unambiguous abbreviation of it, was given
+    every_opts, optsep, exits = spec.get("all", ()), spec.get("optsep", ()), spec.get("exit", ())
+    every = False  # an "all" option was given: every operand is written
+    maybe, optional = set(), False  # operand indices an "optsep" option may have consumed
+    for w in words:
+        optional_next, optional = optional, False
+        if pending is not None:  # the separate argument word of the option `pending`
+            if pending in target:
+                dirs.append(w)
+            if pending in text:
+                texts.append(w)
+            pending = None
+        elif optional_next and not ends and (w == "-" or not w.startswith("-")):
+            maybe.add(len(operands))  # install --context's argument (uutils) or an operand (GNU)
+            operands.append(w)
+        elif ends or not w.startswith("-") or w == "-":
+            operands.append(w)
+            ends = ends or stop  # perl parses no option after its first operand
+        elif w == "--":
+            ends = True
+        elif w.startswith("--"):
+            name, eq, value = w.partition("=")
+            name = _fsw_resolve_long(kind, name)  # `--expr` is --expression, as the real tool reads it
+            if name is None:
+                if kind in _FSW_STRICT_LONG_COMMANDS:
+                    return None  # an ambiguous or unrecognized long option on sed, perl, or ex: target UNKNOWN
+                continue  # elsewhere the tool rejects it and writes nothing: an option with no argument
+            posix = posix or name == "--posix"
+            if name in exits:
+                # perl exits at once on --help or --version, and `=value` is an unknown switch;
+                # GNU cp, mv, sed, and ed and uutils install, tee, and truncate also exit at once on either (an
+                # abbreviation included), wherever it stands before `--`, and reject `=value` without writing
+                return None if eq and not spec.get("exit_eq") else []
+            every = every or name in every_opts
+            optional = name in optsep and not eq
+            if name in long_req:
+                scripted = scripted or (script is not None and name in script)
+                filescript = filescript or (script is not None and name in script and name not in text)
+                if not eq:
+                    pending = name
+                else:
+                    if name in target:
+                        dirs.append(value)
+                    if name in text:
+                        texts.append(value)
+        else:
+            j = 1
+            while j < len(w):
+                c = w[j]
+                every = every or c in every_opts
+                if c in req:
+                    scripted = scripted or (script is not None and c in script)
+                    filescript = filescript or (script is not None and c in script and c not in text)
+                    if j + 1 < len(w):
+                        if c in target:
+                            dirs.append(w[j + 1:])
+                        if c in text:
+                            texts.append(w[j + 1:])
+                    else:
+                        pending = c
+                    break
+                if c in opt:
+                    break  # an attached optional argument: the rest of the cluster
+                j = run[c].match(w, j + 1).end() if c in run else j + 1  # every run pattern matches empty
+    if script is not None and not scripted:
+        if operands and spec.get("text_prog"):
+            texts.append(operands[0])  # sed's program operand is script text; perl's names a program FILE
+        operands = operands[1:]  # no -e/-f style option: the first operand is the program, never a target
+    if any(_fsw_names_store_path(t) for t in texts):
+        # a sed with no in-place option whose program is parsed with confidence and holds no command
+        # that can write (no w, W, or e command, and no s///w or s///e flag) edits nothing, so a store path it
+        # merely MENTIONS (a search pattern) is no write target; any other script text naming a store path (an
+        # in-place sed, a program read from a -f file, a program not parsed with confidence, an ex -c command,
+        # a perl program) keeps the script-text UNKNOWN target
+        read_only = (kind == "sed" and not inplace and not filescript and not posix
+                     and _fsw_sed_program_cannot_write("\n".join(texts)))
+        if not read_only:
+            return None  # script text naming a store path can write it: the target is UNKNOWN
+    if not inplace:
+        return []
+    if kind in _FSW_DEST_COMMANDS:
+        if every:
+            return operands + dirs  # mv --exchange or install -d writes every operand
+        if dirs or not operands:
+            return dirs
+        # the last operand, and (after install's bare --context) the last one not possibly consumed
+        last = {len(operands) - 1} | {max((i for i in range(len(operands)) if i not in maybe), default=-1)}
+        return [operands[i] for i in sorted(last) if i >= 0]
+    return operands + dirs
+
+
+def _fsw_stream_writes(toks):
+    """True when one token stream of _shell_tokens shows a write indicator (see bash_writes). A WRITE_COMMANDS
+    word, and the sed or perl word an in-place option must follow, count only in COMMAND position: the
+    stream's first word, the first word after a separator, after a reserved word that keeps the position
+    (_CMD_PREFIX_WORDS), after VAR=value assignments, after an input or output redirection and its operand,
+    after a PREFIX_COMMANDS word with its options, option arguments, and leading operands, or, in a simple
+    command whose command word is find, after its -exec-style word (up to that command's terminating `;` or
+    `+` word), or at the body of a function header (`function NAME {`, or `function NAME if`, `while`, or
+    `until`; the `NAME() {` forms restore it through their `(` and `)` separators). A write inside a function body is thus detected whether or not the
+    function is ever called (the conservative direction). The output-redirection test is position-free."""
+    return bool(_fsw_stream_targets(toks))
+
+
+def _fsw_stream_targets(toks):
+    """The write indicators of one token stream (see _stream_writes, whose command-position rules this
+    applies), one entry per indicator: the list of that write's TARGET words (_write_targets for a
+    write command, possibly empty, as for a bare `tee`; the operand word for an output redirection), or None
+    when its target is unknown: a redirection with no operand, a target word holding a `$` expansion or a find
+    `{}` placeholder, or a write command run through xargs (which supplies more operands on stdin)."""
+    return [targets for targets, _k in _fsw_stream_write_detail(toks)]
+
+
+def _fsw_stream_write_detail(toks):
+    """_stream_targets() with each entry paired with the index in `toks` of the token that makes it
+    (the write command's word, or the redirection's operand or operator), so the analysis can tell which
+    simple command, and so which data, each write belongs to."""
+    out, cur = [], None  # cur: the simple command's write command, [kind, argument words, in-place option
+    # seen, run through xargs, token index]
+    via_xargs = False  # the simple command's prefix chain includes xargs
+
+    def finish():
+        if cur is not None:
+            in_place = cur[0] not in _FSW_INPLACE_COMMANDS or cur[2]
+            # a sed or perl with no in-place option edits no operand, but its script text can still
+            # write a named store path (a sed `w`), so it is a write of UNKNOWN target exactly when that text
+            # names one; otherwise it is no write at all
+            targets = _fsw_write_targets(cur[0], cur[1], in_place)
+            if targets is None:
+                out.append((None, cur[4]))
+            elif in_place:
+                out.append((None if cur[3] or any("$" in w or "{}" in w for w in targets) else targets, cur[4]))
+    inplace, target = False, None  # target: None, "in" (an input redirection awaiting its operand), or the dup
+    # flag of an output redirection awaiting its operand
+    cmdpos, prefix, optarg = True, None, False  # prefix: [options taking an argument, operands still to skip]
+    in_find, in_exec = False, False  # the simple command is find; inside one of its -exec-style commands
+    fdef = 0  # function header: 1 awaiting the name, 2 awaiting the body
+    for k, t in enumerate(toks):
+        if t[0] in ("r", "i"):
+            if target not in (None, "in"):
+                out.append((None, k))  # a redirection with no operand: its target is unknown
+            target = t[1] if t[0] == "r" else "in"
+            continue
+        if t[0] == "s":
+            if target not in (None, "in"):
+                out.append((None, k))
+            target = None
+            finish()
+            cur, via_xargs = None, False
+            inplace, cmdpos, prefix, optarg, in_find, in_exec, fdef = False, True, None, False, False, False, 0
+            continue
+        w = t[1]
+        if target == "in":
+            target = None  # the operand of an input redirection (a file, here-string, delimiter, or descriptor)
+            continue
+        if target is not None:
+            if w != "/dev/null" and not (target and _FSW_FD_DUP_RE.fullmatch(w)):
+                out.append((None if "$" in w else [w], k))  # the redirection's target (a `$` expansion: unknown)
+            target = None
+            continue
+        if cmdpos and w.isdigit() and k + 1 < len(toks) and toks[k + 1][0] in ("r", "i"):
+            continue  # the descriptor of an `N>` or `N<` redirection, not a command word
+        if fdef:
+            # the name; then the body's `{`, `if`, `while`, or `until` (a bash function body is any compound command)
+            fdef, cmdpos = (2, False) if fdef == 1 else (0, w in _FSW_CMD_PREFIX_WORDS)
+            continue
+        if cmdpos:
+            base = os.path.basename(w)  # computed only where it is used (a command word)
+            if prefix is not None:
+                if optarg:
+                    optarg = False
+                elif w.startswith("-") and w != "-":
+                    optarg = w in prefix[0]
+                elif prefix[1] > 0:
+                    prefix[1] -= 1
+                else:
+                    prefix = None
+            if prefix is None and not (_FSW_ASSIGN_RE.fullmatch(w) or w in _FSW_CMD_PREFIX_WORDS):
+                if w == "function":
+                    cmdpos, fdef = False, 1
+                    continue
+                if base in _FSW_PREFIX_COMMANDS:
+                    prefix = [_FSW_PREFIX_COMMANDS[base][0], _FSW_PREFIX_COMMANDS[base][1]]
+                    via_xargs = via_xargs or base == "xargs"
+                else:
+                    cmdpos, inplace = False, base in _FSW_INPLACE_COMMANDS
+                    if base in _FSW_WRITE_COMMANDS or inplace:
+                        finish()
+                        cur = [base, [], False, via_xargs, k]  # its argument words follow; targets read at its end
+                    if not in_exec:
+                        in_find = base == "find"
+        elif in_exec and w in (";", "+"):
+            finish()
+            cur = None
+            in_exec = inplace = False  # the end of a find -exec-style command; find's own arguments resume
+        elif in_find and not in_exec and w in _FSW_EXEC_WORDS:
+            cmdpos = in_exec = True
+        else:
+            if cur is not None:
+                cur[1].append(w)
+            if inplace and _fsw_is_inplace_opt(cur[0], w):
+                cur[2] = True
+    if target not in (None, "in"):
+        out.append((None, len(toks) - 1))
+    finish()
+    return out
+
+
+# ---- which data each write carries ----
+
+# The work budget of one Bash evaluation (tokenizer steps, here-document lines, tokens and units walked,
+# nested shell -c analyses included). A command that spends it is ALLOWED unchecked (fail open), so no input can
+# hold the hook past its latency bound; ordinary commands, and 64 KiB of ordinary text, stay well inside it.
+_FSW_BASH_WORK_BUDGET = 80_000
+_FSW_STREAM_COST = 8  # budget steps charged per substitution frame, in the tokenizer and again in the analysis
+_FSW_SHELL_C_COST = 30  # budget steps charged per nested shell -c analysis
+_FSW_SHELL_C_DEPTH = 3  # nesting depth to which literal bash/sh/dash/zsh -c strings are analysed
+_FSW_CWD_COST = 6  # budget steps charged per directory, BEFORE a cd is resolved from, or a target or staged
+#               word resolved against, each directory the command can be in, and per directory in a set union
+_FSW_MAX_CWDS = 32  # the most directories a command point can be in; a larger set spends the budget (fail open)
+# Commands that only read (their output goes to the caller, never into a file of their own choosing), so
+# a literal in a pipeline of these, with no redirection or write anywhere in it, feeds no write
+_FSW_READ_COMMANDS = frozenset((
+    "grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "wc", "ls", "stat", "file", "diff", "cmp", "echo",
+    "printf", "test", "[", "true", "false", ":", "date", "pwd", "basename", "dirname", "realpath", "readlink",
+    "cut", "tr", "jq", "nl", "od", "xxd", "md5sum", "sha1sum", "sha256sum", "cksum", "which"))
+_FSW_SHELLS = frozenset(("bash", "sh", "dash", "zsh"))
+_FSW_CD_COMMANDS = frozenset(("cd", "pushd", "popd"))
+_FSW_OPENERS = frozenset(("{", "if", "while", "until", "for", "select"))
+_FSW_CLOSER_OF = {"}": ("{",), "fi": ("if",), "done": ("while", "until", "for", "select"), "esac": ()}
+_FSW_CONTINUERS = frozenset(("then", "do", "else", "elif", "!"))
+_FSW_UNRELIABLE_WORDS = frozenset(("case", "function", "coproc"))
+_FSW_CD_HINT_RE = re.compile(r"(?<![^\s;&|()`{}])(?:cd|pushd|popd)(?![^\s;&|()`<>])")
+_FSW_SHELL_HINT_RE = re.compile(r"(?<![^\s;&|()`{}/])(?:bash|sh|dash|zsh)(?![^\s;&|()`<>])")
+
+
+def _fsw_is_pipe(b):
+    """True when the separator text `b` between two simple commands is a pipe (`|` or `|&`, possibly
+    with a subshell's parentheses or newlines after it), not a list operator (`;`, `&`, `&&`, `||`, a newline)."""
+    s = b.replace("(", "").replace(")", "")
+    if "~" in s:  # the separator the tokenizer inserted after `]]` or `))`: one command, not a list
+        s = s.replace("~", "")
+        if not s:
+            return True
+    if s.strip("\n"):
+        s = s.replace("\n", "")
+    return s in ("|", "|&")
+
+
+def _fsw_units(toks, pos, cmd):
+    """Split one token stream into its simple commands. Returns (units, bounds, tok_unit): units are
+    [first token, end token (exclusive), raw start, raw end] per simple command, bounds[k] the separator text
+    before unit k (bounds[len(units)] the text after the last; a separator the tokenizer inserted after a closed
+    `]]` or `))` reads `~`, joining its neighbours like a pipe), and tok_unit the unit index of every token (a
+    separator maps to the unit before it, or 0)."""
+    units, bounds, bnd, cur, tok_unit = [], [], [], None, []
+    for k, t in enumerate(toks):
+        if t[0] == "s":
+            if cur is not None:
+                units.append(cur)
+                cur = None
+            a, b = pos[k]
+            bnd.append(cmd[a] if b > a else "~")
+            tok_unit.append(max(len(units) - 1, 0))
+            continue
+        if cur is None:
+            bounds.append("".join(bnd))
+            bnd = []
+            cur = [k, k + 1, pos[k][0], pos[k][1]]
+        else:
+            cur[1] = k + 1
+            if pos[k][1] > cur[3]:
+                cur[3] = pos[k][1]
+        tok_unit.append(len(units))
+    if cur is not None:
+        units.append(cur)
+    bounds.append("".join(bnd))
+    return units, bounds, tok_unit
+
+
+def _fsw_unit_words(toks, a, b):
+    """The (token index, word) pairs of tokens a..b, less redirection operands and the descriptor
+    number of an `N>` or `N<` redirection."""
+    out, skip = [], False
+    for k in range(a, b):
+        t = toks[k]
+        if t[0] != "w":
+            skip = t[0] in ("r", "i")
+            continue
+        if skip:
+            skip = False
+            continue
+        if t[1].isdigit() and k + 1 < b and toks[k + 1][0] in ("r", "i"):
+            continue
+        out.append((k, t[1]))
+    return out
+
+
+def _fsw_classify(words, cmd, pos):
+    """(kind, rest) of one simple command whose leading reserved words are already removed: "empty" (no
+    command word), "assign" (assignments only), "exec" (a bare exec: its redirections apply to every later
+    command), "shell" (bash, sh, dash, or zsh; rest: its argument words), "cd" or "popd" (rest: the arguments),
+    "tee", "read" (a READ_COMMANDS word, printf without -v, `[[`, or an arithmetic command), or "other". Leading
+    assignments and PREFIX_COMMANDS with their options are passed over; xargs makes it "other"."""
+    j, nw = 0, len(words)
+    while j < nw and _FSW_ASSIGN_RE.fullmatch(words[j][1]):
+        j += 1
+    if not nw:
+        return "empty", None
+    if j == nw:
+        return "assign", None
+    saw_exec = False
+    while j < nw:
+        base = os.path.basename(words[j][1])
+        if base not in _FSW_PREFIX_COMMANDS:
+            break
+        if base == "xargs":
+            return "other", None
+        saw_exec = saw_exec or base == "exec"
+        opts, nops = _FSW_PREFIX_COMMANDS[base]
+        j += 1
+        while j < nw:
+            w = words[j][1]
+            if w.startswith("-") and w != "-":
+                j += 2 if w in opts else 1
+            elif base == "env" and _FSW_ASSIGN_RE.fullmatch(w):
+                j += 1
+            elif nops:
+                nops -= 1
+                j += 1
+            else:
+                break
+    if j >= nw:
+        return ("exec" if saw_exec else "empty"), None
+    k, w = words[j]
+    base, rest = os.path.basename(w), words[j + 1:]
+    if base in _FSW_SHELLS:
+        return "shell", rest
+    if base in _FSW_CD_COMMANDS:
+        return ("popd" if base == "popd" else "cd"), rest
+    if base == "tee":
+        return "tee", None
+    if w == "[[" or (w == "$" and cmd.startswith("((", pos[k][0])):
+        return "read", None
+    if base in _FSW_READ_COMMANDS and not (base == "printf" and any(x.startswith("-v") for _k, x in rest)):
+        return "read", None
+    return "other", None
+
+
+class _FswStructure:
+    """The compound structure of one token stream (see _structure())."""
+    __slots__ = ("kinds", "rest", "depth", "tainted", "opens", "closes", "unreliable")
+
+
+def _fsw_structure(toks, pos, units, bounds, cmd):
+    """Walk the simple commands of one stream, tracking compound commands: a `(` in a separator opens
+    a subshell and a `)` closes it; a leading `{`, `if`, `while`, `until`, `for`, or `select` opens a compound and
+    a leading `}`, `fi`, or `done` closes it (a `then`, `do`, `else`, `elif`, or `!` passes). A compound whose
+    output is redirected (a `>` after its closer) or piped onward TAINTS every simple command inside it: all their
+    literals are data of that write. Per unit it records its kind (_classify), depth, and whether it opened or
+    closed a compound; the stream is UNRELIABLE (no literal is then excluded as unrelated) when it holds a
+    `case`, a function definition (`function` or `NAME()`), `coproc`, a bare `exec`, or a closer that does not
+    match, or leaves a compound open."""
+    nu = len(units)
+    st = _FswStructure()
+    st.kinds, st.rest, st.depth = [None] * nu, [None] * nu, [0] * nu
+    st.opens, st.closes = [False] * nu, [False] * nu
+    diff, stack, unreliable = [0] * (nu + 2), [], False
+
+    def close(accept, first_ok, u_end, tainting):
+        nonlocal unreliable
+        if not stack or stack[-1][0] not in accept:
+            unreliable = True
+            return
+        _kind, first = stack.pop()
+        if tainting and first_ok:
+            diff[first] += 1
+            diff[u_end + 1] -= 1
+
+    for u in range(nu + 1):
+        b = bounds[u]
+        if "()" in b.replace(" ", ""):
+            unreliable = True  # a NAME() function header
+        for x, ch in enumerate(b):
+            if ch == "(":
+                stack.append(("(", u))
+            elif ch == ")":
+                after = b[x + 1:]
+                redirected = after == "" and u < nu and toks[units[u][0]][0] == "r"
+                close(("(",), True, u - 1 if not redirected else u, redirected or _fsw_is_pipe(after))
+        if u == nu:
+            break
+        a, e = units[u][0], units[u][1]
+        words = _fsw_unit_words(toks, a, e)
+        j = 0
+        while j < len(words):
+            w = words[j][1]
+            if w in _FSW_OPENERS:
+                stack.append((w, u))
+                st.opens[u] = True
+                j += 1
+                if w in ("for", "select"):
+                    st.kinds[u] = "header"  # its words (the list) are data of the loop body
+                    break
+            elif w in _FSW_CONTINUERS:
+                st.opens[u] = True
+                j += 1
+            elif w in _FSW_CLOSER_OF:
+                if w == "esac":
+                    unreliable = True
+                st.closes[u] = True
+                redirected = any(toks[k][0] == "r" for k in range(words[j][0] + 1, e))
+                close(_FSW_CLOSER_OF[w], True, u, redirected or _fsw_is_pipe(bounds[u + 1]))
+                j += 1
+            elif w in _FSW_UNRELIABLE_WORDS:
+                unreliable = True
+                j += 1
+            else:
+                break
+        st.depth[u] = len(stack)
+        if st.kinds[u] is None:
+            st.kinds[u], st.rest[u] = _fsw_classify(words[j:], cmd, pos)
+            if st.kinds[u] == "exec":
+                unreliable = True
+    if stack:
+        unreliable = True
+    run, st.tainted = 0, [False] * nu
+    for u in range(nu):
+        run += diff[u]
+        st.tainted[u] = run > 0
+    st.unreliable = unreliable
+    return st
+
+
+def _fsw_cd_target(kind, rest, cwds, ctx, budget=None):
+    """The directories a cd or pushd with arguments `rest` (word pairs) can leave, from each directory
+    in `cwds` (None: unknown): an existing directory named literally, else None (unknown); popd is unknown.
+    CWD_COST per directory of `cwds` is charged to `budget` BEFORE any is resolved."""
+    if budget is not None:
+        budget.spend(_FSW_CWD_COST * (len(cwds) + 1))
+    if kind != "cd":
+        return frozenset((None,))
+    args = [w for _k, w in rest]
+    while args and args[0] in ("-L", "-P", "-e", "-@", "-LP", "-PL", "-Pe"):
+        args.pop(0)
+    if args and args[0] == "--":
+        args.pop(0)
+    if len(args) != 1 or args[0] in ("-", "") or args[0].startswith("~") or "$" in args[0]:
+        return frozenset((None,))
+    d = args[0]
+    if not d.startswith("/") and not d.startswith(("./", "../")) and d not in (".", "..") \
+            and os.environ.get("CDPATH"):
+        return frozenset((None,))  # CDPATH may send a relative cd elsewhere
+    out = set()
+    for c in cwds:
+        if d.startswith("/"):
+            p = os.path.normpath(d)
+        elif c is None:
+            out.add(None)
+            continue
+        else:
+            p = os.path.normpath(os.path.join(c, d))
+        out.add(p if ctx.isdir(p) else None)
+    return frozenset(out)
+
+
+def _fsw_target_status(w, cwds, ctx, budget=None):
+    """Whether one write TARGET word is "store", "unknown", or "other". A word holding a store path token is a
+    store target (the original lexical rule); any other relative word is resolved against every
+    directory the command can be in at that point (`cwds`, from the payload cwd and any cd before it): under a store root from any of them is a
+    store target, and an unknown directory (None) or a `~` word makes it unknown. CWD_COST per
+    directory is charged to `budget` BEFORE the resolution."""
+    if budget is not None:
+        budget.spend(_FSW_CWD_COST * (len(cwds) + 1))
+    if ctx.names(w):
+        return "store"  # a store path token anywhere in the word (the original lexical rule)
+    if w.startswith("/"):
+        return "other"
+    if w.startswith("~"):
+        return "unknown"
+    unknown = False
+    for c in cwds:
+        if c is None:
+            unknown = True
+        elif ctx.under(os.path.normpath(os.path.join(c, w))):
+            return "store"
+    return "unknown" if unknown else "other"
+
+
+def _fsw_shell_c_string(rest):
+    """The token index of the command string of a shell run with -c (a short option cluster holding
+    c; `-o`, `-O`, `--rcfile`, and `--init-file` take a separate argument), or None."""
+    cflag, j = False, 0
+    while j < len(rest):
+        w = rest[j][1]
+        if w == "--":
+            j += 1
+            break
+        if w in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
+            j += 2
+            continue
+        if w.startswith("--"):
+            j += 1
+            continue
+        if len(w) > 1 and w[0] in "-+":
+            cflag = cflag or (w[0] == "-" and "c" in w[1:])
+            j += 1
+            continue
+        break
+    return rest[j][0] if cflag and j < len(rest) else None
+
+
+_FSW_SEARCH_ARG_OPTS = frozenset(("-f", "--file", "-m", "--max-count", "-A", "-B", "-C", "--after-context",
+                              "--before-context", "--context", "-d", "-D", "-g", "--glob", "-t", "--type", "-T",
+                              "--type-not", "-M", "--max-columns", "-j", "--threads", "--color", "--colors"))
+
+
+_FSW_SEARCH_QUIET_LONG = {"rg": frozenset(("--count", "--count-matches", "--quiet", "--files-with-matches",
+                                        "--files-without-match")),
+                      "grep": frozenset(("--count", "--quiet", "--silent", "--files-with-matches",
+                                         "--files-without-match"))}
+_FSW_SEARCH_QUIET_SHORT = {"rg": frozenset("cql"), "grep": frozenset("cqlL")}
+_FSW_SEARCH_ARG_SHORT = frozenset("efmABCdDgtTMj")  # a short option taking an argument: the rest of a cluster is it
+
+
+def _fsw_search_patterns(toks, pos=None, cmd=""):
+    """The token indices of the PATTERN words in a token stream made only of grep, egrep, fgrep, rg,
+    and wc commands (each unit's first word; no redirection, here-string, or here-document; no rg -r or
+    --replace, which prints the replacement text, and no grep --label, which prints its text), else an empty
+    set. A pattern is the argument of -e or --regexp (attached or separate), else the first operand; an option
+    listed in _SEARCH_ARG_OPTS takes the next word; anything else starting with `-` is taken as a flag.
+    A MATCHING search prints file text that holds its pattern (with -o, exactly the pattern), so a
+    pattern is returned only when its pipeline's output cannot hold it: the pipeline's LAST command is wc, or a
+    search with a count, quiet, or file-list option (-c, -q, -l, grep -L, or the long forms --count,
+    --count-matches, --quiet, --silent, --files-with-matches, --files-without-match; exact spellings only, an
+    abbreviation is not recognized, the conservative direction). `pos` and `cmd` give each separator's text (a
+    `|` joins a pipeline); without them every separator is taken as a list operator."""
+    out, j, n = set(), 0, len(toks)
+    pipeline, safe_last = set(), False  # the patterns of the current pipeline, and whether its last command hides them
+
+    def flush():
+        if safe_last:
+            out.update(pipeline)
+        pipeline.clear()
+    sep = ""
+    while j < n:
+        if toks[j][0] == "s":
+            a, b = pos[j] if pos is not None else (0, 0)
+            sep += cmd[a] if b > a else "~"
+            j += 1
+            continue
+        if sep and not (pos is not None and _fsw_is_pipe(sep)):
+            flush()  # a list operator (`;`, `&&`, `||`, `&`, a newline) or an unknown separator ends the pipeline
+        sep = ""
+        k = j
+        while k < n and toks[k][0] != "s":
+            if toks[k][0] != "w":
+                return set()  # a redirection or input of any kind
+            k += 1
+        words = [(x, toks[x][1]) for x in range(j, k)]
+        cw = os.path.basename(words[0][1])
+        if cw == "wc":
+            safe_last = True
+            j = k
+            continue
+        if cw not in ("grep", "egrep", "fgrep", "rg"):
+            return set()
+        fam = "rg" if cw == "rg" else "grep"
+        quiet = False
+        for _x, w in words[1:]:
+            if w == "--":
+                break
+            if w.startswith("--"):
+                quiet = quiet or w in _FSW_SEARCH_QUIET_LONG[fam]
+            elif w.startswith("-") and w != "-":
+                for ch in w[1:]:
+                    if ch in _FSW_SEARCH_QUIET_SHORT[fam]:
+                        quiet = True
+                    if ch in _FSW_SEARCH_ARG_SHORT:
+                        break
+        safe_last = quiet
+        seen_e, x, found = False, 1, None  # this search's patterns join `pipeline`, kept only if it hides them
+        while x < len(words):
+            idx, w = words[x]
+            if w.startswith("--label") or (cw == "rg" and (w.startswith("--replace") or (
+                    w.startswith("-") and not w.startswith("--") and "r" in w[1:]))):
+                return set()
+            if w == "--":
+                if not seen_e and x + 1 < len(words) and found is None:
+                    found = words[x + 1][0]
+                break
+            if w in ("-e", "--regexp"):
+                if x + 1 < len(words):
+                    pipeline.add(words[x + 1][0])
+                seen_e, x = True, x + 2
+                continue
+            if w.startswith("--regexp=") or (w.startswith("-e") and len(w) > 2 and not w.startswith("--")):
+                pipeline.add(idx)
+                seen_e, x = True, x + 1
+                continue
+            if w in _FSW_SEARCH_ARG_OPTS:
+                seen_e = seen_e or w in ("-f", "--file")
+                x += 2
+                continue
+            if w.startswith("-") and w != "-":
+                x += 1
+                continue
+            if found is None:
+                found = idx
+            x += 1
+        if found is not None and not seen_e:
+            pipeline.add(found)
+        j = k
+    flush()
+    return out
+
+
+def _fsw_literal_shell_string(raw):
+    """(text, offsets) of a shell -c command string whose raw word `raw` is ONE single-quoted string, or
+    ONE double-quoted string with no expansion (no unescaped `$`, backtick, or quote; a backslash before `$`, a
+    backtick, `"`, or a backslash yields that character and one before a newline removes both, as bash reads
+    it); offsets[i] is the offset within `raw` of text[i]. Anything else is None (left uninspected)."""
+    if len(raw) < 2 or raw[0] != raw[-1] or raw[0] not in "'\"":
+        return None
+    if raw[0] == "'":
+        body = raw[1:-1]
+        return None if "'" in body else (body, list(range(1, len(raw) - 1)))
+    text, offs, j, end = [], [], 1, len(raw) - 1
+    while j < end:
+        c = raw[j]
+        if c in '"$`':
+            return None
+        if c == "\\":
+            if j + 1 >= end:
+                return None  # the closing quote is escaped: not one string
+            nx = raw[j + 1]
+            if nx in '$`"\\':
+                text.append(nx)
+                offs.append(j + 1)
+                j += 2
+                continue
+            if nx == "\n":
+                j += 2
+                continue
+        text.append(c)
+        offs.append(j)
+        j += 1
+    return "".join(text), offs
+
+
+class _FswAnalysis:
+    """The result of _analyze(): `store`, whether the command writes a store path (a parsed store
+    target, or an unknown target in a command naming a store path); `counts(p)`, whether a literal starting at
+    offset p is data of a store write (see _analyze). For an enclosing analysis of a shell -c string:
+    `targets`, the (word, directories) pairs of its writes to KNOWN non-store files; `unknown`, whether it has a
+    write whose target is unknown; `words()`, the (word, directories) pairs of every word it holds (the files
+    its store write can read, for staging)."""
+    __slots__ = ("store", "counts", "targets", "unknown", "words")
+
+    def __init__(self, store, counts, targets=(), unknown=False, words=lambda: ()):
+        self.store, self.counts = store, counts
+        self.targets, self.unknown, self.words = targets, unknown, words
+
+
+def _fsw_span_index(spans, starts, p):
+    k = bisect.bisect_right(starts, p) - 1
+    return k if k >= 0 and p < spans[k][1] else -1
+
+
+def _fsw_analyze(cmd, cwds, ctx, budget, depth=0):
+    """Which store writes a Bash command makes, and which literals are their DATA. A literal counts
+    only for the write it can feed: the store write's own simple command (its arguments, its here-string, its
+    redirections), its here-document bodies, and the other commands of its pipeline (their output is its input),
+    or every command inside a compound command whose output is redirected or piped to it. A literal is NOT
+    counted when it lies in a comment (outside a here-document body), or in a pipeline of READ_COMMANDS with no
+    redirection and no write anywhere in it, standing outside any such compound (a search: `grep -F <literal>
+    <store file>; echo checked >> <store file>`), or in a pipeline whose only writes go to other known files that
+    no store-writing command then names (so `printf <literal> > x; cp x <store dir>` still counts: x flows into
+    the store). Every other literal counts, the conservative direction: an assignment, an unknown program, a
+    loop's word list, and anything in a command the analysis finds unreliable (see _structure) or cannot parse.
+    Relative write targets are resolved against `cwds`, the directories the command can be in (the payload cwd,
+    then each confidently understood cd or pushd: an existing directory named literally, replacing the set when
+    the cd runs unconditionally at the top of its stream, joining it otherwise; any other cd adds an unknown).
+    A bash, sh, dash, or zsh -c whose command string is a single- or double-quoted literal with no expansion is
+    analysed recursively (to SHELL_C_DEPTH) with the same directories; its store writes are the enclosing
+    command's, and literals inside the string are decided by that inner analysis. A `( ... )` subshell
+    scopes the directory set (restored at its `)`); directory work is charged to `budget` before it is done and
+    a set above MAX_CWDS spends it; a literal inside a shell -c string ALSO counts when the wrapper's output
+    reaches a store write (wrapper_counts), and the string's writes and, for a string with a store write, its
+    words join the enclosing staging walk."""
+    ds = _fsw_date_spans(cmd, budget)
+    ds_starts = [s for s, _ in ds]
+
+    def dated(p):
+        return _fsw_span_index(ds, ds_starts, p) >= 0
+
+    tk = _fsw_tokenize(cmd, budget)
+    if tk is None:  # unparseable: a store write when the text names a store path, and every literal counts
+        return _FswAnalysis(ctx.names(cmd), lambda p: not dated(p), unknown=True)
+    streams, poss, fspans = tk.streams, tk.poss, tk.spans
+    budget.spend(_FSW_STREAM_COST * len(streams))
+    top, ns = len(streams) - 1, len(streams)
+    infos = [None] * ns
+
+    def info(s):
+        if infos[s] is None:
+            budget.spend(len(streams[s]))
+            infos[s] = _fsw_units(streams[s], poss[s], cmd)
+        return infos[s]
+
+    structs = [None] * ns
+
+    def struct(s):
+        if structs[s] is None:
+            units, bounds, _tu = info(s)
+            budget.spend(3 * len(streams[s]) + 4 * len(units))
+            structs[s] = _fsw_structure(streams[s], poss[s], units, bounds, cmd)
+        return structs[s]
+
+    # the directories each simple command can run in (only a command that can change directory needs the walk)
+    unit_cwds = {}
+    if _FSW_CD_HINT_RE.search(cmd):
+        order = sorted(range(ns), key=lambda s: (fspans[s][0], -fspans[s][1], -s))
+        pstack, ustarts = [], {}
+        for s in order:
+            while pstack and fspans[pstack[-1]][1] <= fspans[s][0]:
+                pstack.pop()
+            if s == top or not pstack:
+                start = cwds
+            else:
+                par = pstack[-1]
+                if par not in ustarts:
+                    ustarts[par] = [u[2] for u in info(par)[0]]
+                pu = bisect.bisect_right(ustarts[par], fspans[s][0]) - 1
+                start = unit_cwds[par][pu] if pu >= 0 and unit_cwds.get(par) else cwds
+            units, bounds, _tu = info(s)
+            st = struct(s)
+            cur, out, saved = start, [], []
+            for u in range(len(units)):
+                if not st.unreliable:
+                    # a `( ... )` subshell SCOPES directory state: the set in force at its `(` is restored at its
+                    # `)` (so a subshell's cd never leaks into the parent); a `{ ... }` group does not scope, as in
+                    # bash. An unreliable stream keeps the join-only walk.
+                    for ch in bounds[u]:
+                        if ch == "(":
+                            saved.append(cur)
+                        elif ch == ")" and saved:
+                            cur = saved.pop()
+                out.append(cur)
+                if st.kinds[u] in ("cd", "popd"):
+                    new = _fsw_cd_target(st.kinds[u], st.rest[u], cur, ctx, budget)
+                    before = bounds[u].replace("(", "").replace(")", "")
+                    after = bounds[u + 1]
+                    # replaced only when the cd surely runs, in this shell, before what follows: at the depth of
+                    # its innermost enclosing subshell (0 at the top) inside no other compound, first in its
+                    # list (after nothing, `;`, or a newline, once any subshell parentheses are set aside), not
+                    # piped and not in the background; otherwise it may or may not have run, so both are kept
+                    sure = (not st.unreliable and st.depth[u] == len(saved) and (saved or not st.tainted[u])
+                            and set(before) <= {";", "\n"} and not _fsw_is_pipe(after) and after.strip("\n;") != "&")
+                    if not sure:
+                        budget.spend(_FSW_CWD_COST * (len(cur) + len(new)))  # the union, charged first
+                    cur = new if sure else cur | new
+                    if len(cur) > _FSW_MAX_CWDS:
+                        raise _FswExhausted()  # too many possible directories: fail open
+            unit_cwds[s] = out
+            pstack.append(s)
+
+    def cwd_of(s, k):  # the directories token k of stream s runs in
+        got = unit_cwds.get(s)
+        return got[info(s)[2][k]] if got else cwds
+
+    # every write: (stream, token index, status, known non-store target words, directories); a sub-stream's
+    # write belongs to the top-level simple command holding the substitution
+    writes, memo, fallback = [], {}, None
+    store_toks, store_pos = [], []  # the top-stream token indices, and the raw offsets, of store writes
+    for s in range(ns):
+        budget.spend(2 * len(streams[s]))  # the command-position walk costs about two fast-path tokens a token
+        det = _fsw_stream_write_detail(streams[s])
+        for targets, k in det:
+            dirs = cwd_of(s, min(k, len(streams[s]) - 1)) if unit_cwds else cwds
+            if targets is None:
+                status = "unknown"
+            else:
+                status = "other"
+                for w in targets:
+                    key = (w, dirs)
+                    got = memo.get(key)
+                    if got is None:
+                        got = memo[key] = _fsw_target_status(w, dirs, ctx, budget)
+                    if got == "store":
+                        status = "store"
+                        break
+                    if got == "unknown":
+                        status = "unknown"
+            if status == "unknown":
+                if fallback is None:
+                    fallback = ctx.names(cmd)
+                if fallback:
+                    status = "store"  # an unknown target in a command naming a store path counts as a store write
+            writes.append((s, k, status, targets if status == "other" else None, dirs))
+            if status == "store":
+                if s == top:
+                    store_toks.append(k)
+                else:
+                    store_pos.append(fspans[s][0])
+    # literal shell -c strings, analysed recursively
+    delegates = []
+    if depth < _FSW_SHELL_C_DEPTH and _FSW_SHELL_HINT_RE.search(cmd):
+        for s in range(ns):
+            if not any(t[0] == "w" and os.path.basename(t[1]) in _FSW_SHELLS for t in streams[s]):
+                continue
+            st, units = struct(s), info(s)[0]
+            for u in range(len(units)):
+                if st.kinds[u] != "shell":
+                    continue
+                k = _fsw_shell_c_string(st.rest[u])
+                if k is None:
+                    continue
+                a, b = poss[s][k]
+                got = _fsw_literal_shell_string(cmd[a:b])
+                if got is None:
+                    continue  # not one quoted literal with no expansion: left uninspected
+                inner, offs = got
+                budget.spend(_FSW_SHELL_C_COST)
+                sub = _fsw_analyze(inner, cwd_of(s, k), ctx, budget, depth + 1)
+                delegates.append((a + 1, b - 1, sub, [a + o for o in offs], s, k, a))
+                if sub.store:
+                    store_pos.append(a)
+    targets_out = [(w, dirs) for _fsw_s, _k, status, targets, dirs in writes if status == "other" for w in targets]
+    targets_out.extend(t for d in delegates for t in d[2].targets)
+    unknown_out = any(w[2] == "unknown" for w in writes) or any(d[2].unknown for d in delegates)
+
+    def words_out():
+        """The (word, directories) pairs of every word of this command (its streams and its literal
+        shell -c strings), for an enclosing staging walk."""
+        got = []
+        for s in range(ns):
+            budget.spend(len(streams[s]))
+            for k, t in enumerate(streams[s]):
+                if t[0] == "w":
+                    got.append((t[1], cwd_of(s, k) if unit_cwds else cwds))
+        for d in delegates:
+            got.extend(d[2].words())
+        return got
+    if not store_toks and not store_pos:
+        return _FswAnalysis(False, lambda p: False, targets_out, unknown_out, words_out)
+    delegates.sort(key=lambda d: d[0])
+    d_starts = [d[0] for d in delegates]
+    hd = sorted((a, b, op) for op, a, b in tk.heredocs if b > a)
+    hd_starts = [h[0] for h in hd]
+    cm, cm_starts = tk.comments, [c[0] for c in tk.comments]
+    store_toks.sort()
+    store_pos.sort()
+    ttoks, tposs = streams[top], poss[top]
+    tok_starts, sep_idx, unit_memo = [], [], {}  # built on first use; unit_memo: first token -> decision
+
+    def local_unit(q):
+        """The (first, end) token indices of the top-level simple command holding offset q, or None."""
+        if not tok_starts:
+            tok_starts.extend(ps[0] for ps in tposs)
+            sep_idx.extend(k for k, t in enumerate(ttoks) if t[0] == "s")
+            budget.spend(len(ttoks) // 4)
+        k = bisect.bisect_right(tok_starts, q) - 1
+        if k < 0 or ttoks[k][0] == "s" or q >= tposs[k][1]:
+            return None
+        x = bisect.bisect_left(sep_idx, k)
+        return (sep_idx[x - 1] + 1 if x else 0), (sep_idx[x] if x < len(sep_idx) else len(ttoks))
+
+    def local_store(a, b):
+        """True when the top-level simple command of tokens a..b holds a store write (its own, one inside a
+        substitution in it, or one in a literal shell -c string in it)."""
+        x = bisect.bisect_left(store_toks, a)
+        if x < len(store_toks) and store_toks[x] < b:
+            return True
+        budget.spend(b - a)
+        lo, hi = tposs[a][0], max(ps[1] for ps in tposs[a:b])
+        x = bisect.bisect_left(store_pos, lo)
+        return x < len(store_pos) and store_pos[x] < hi
+
+    lazy = {}
+
+    def pipelines():
+        """Per top-level pipeline: its class ("store", "read", "stage", or "other"), the known files a "stage"
+        pipeline writes, and the words each simple command names (for staging), computed once."""
+        if lazy:
+            return lazy
+        st = struct(top)
+        units, bounds, tok_unit = info(top)
+        nt = len(units)
+        tstarts = [u[2] for u in units]
+
+        def unit_at(p):
+            return max(bisect.bisect_right(tstarts, p) - 1, 0)
+        t_store, t_write, t_unknown = [False] * nt, [False] * nt, [False] * nt
+        t_targets = [[] for _ in range(nt)]
+        for s, k, status, targets, dirs in writes:
+            u = tok_unit[k] if s == top and k < len(tok_unit) else unit_at(fspans[s][0])
+            t_write[u] = True
+            if status == "store":
+                t_store[u] = True
+            elif status == "unknown":
+                t_unknown[u] = True
+            else:
+                t_targets[u].extend((w, dirs) for w in targets)
+        # the store writes of a literal shell -c string, kept apart per unit (d_store: the raw offsets
+        # of the delegated strings with a store write), and its other writes, which are the unit's writes too
+        own = list(t_store)
+        d_store, extra = [[] for _ in range(nt)], [[] for _ in range(nt)]
+        d_at = {d[6] for d in delegates if d[2].store}
+        for p in store_pos:
+            u = unit_at(p)
+            t_store[u] = True
+            if p in d_at:
+                d_store[u].append(p)
+            else:
+                own[u] = True
+        for d in delegates:
+            u = tok_unit[d[5]] if d[4] == top and d[5] < len(tok_unit) else unit_at(fspans[d[4]][0])
+            if d[2].targets or d[2].unknown:
+                t_write[u] = True
+            t_unknown[u] = t_unknown[u] or d[2].unknown
+            t_targets[u].extend(d[2].targets)
+            if d[2].store:
+                extra[u].extend(d[2].words())  # the files its store write can read: staged through
+        nonread = [False] * nt
+        words = [set() for _ in range(nt)]
+        for s in range(ns):
+            if s == top:
+                continue
+            u = unit_at(fspans[s][0])
+            sst = struct(s)
+            if sst.unreliable or any(kd not in ("read", "empty") for kd in sst.kinds):
+                nonread[u] = True
+            words[u].update(t[1] for t in streams[s] if t[0] == "w")
+        budget.spend(len(ttoks) + nt)  # charged before the walk below, not after it
+        pipe = [0] * nt
+        for u in range(1, nt):
+            pipe[u] = pipe[u - 1] if _fsw_is_pipe(bounds[u]) else u
+        members = {}
+        for u in range(nt):
+            members.setdefault(pipe[u], []).append(u)
+            words[u].update(t[1] for t in ttoks[units[u][0]:units[u][1]] if t[0] == "w")
+        # each pipeline's aggregates, computed ONCE (charged before the pass), so that excluding one unit (a
+        # shell -c wrapper, see wrapper_counts) takes constant time; rescanning the whole pipeline and rebuilding
+        # its separator text per wrapper would be work of wrappers x pipeline length the budget never sees.
+        # Per pipeline: whether it is not plain or holds a non-read substitution or an unknown write ("bad"), and
+        # how many of its units are not a non-writing read, are not a read or tee, and have a store write.
+        budget.spend(4 * nt + sum(map(len, bounds)) + len(store_pos) + sum(map(len, t_targets)))
+        agg = {}
+        for pid, us in members.items():
+            plain = (not any("(" in bounds[u] or ")" in bounds[u] or st.opens[u] for u in us[1:])
+                     and not any(st.closes[u] for u in us))
+            agg[pid] = (not plain or any(nonread[u] or t_unknown[u] for u in us),
+                        sum(1 for u in us if st.kinds[u] != "read" or t_write[u]),
+                        sum(1 for u in us if st.kinds[u] not in ("read", "tee")),
+                        sum(1 for u in us if t_store[u]))
+        # per unit, whether its delegated store writes hold two distinct strings, and its first (so that
+        # "a delegated store write other than this wrapper's" is a constant-time test)
+        d_multi = [bool(x) and any(y != x[0] for y in x) for x in d_store]
+
+        def klass(pid, as_read=-1):
+            """The class of pipeline `pid` apart from any store write in it, the unit `as_read` (a shell -c
+            wrapper whose string is judged by its own analysis, a member of the pipeline) taken as a read.
+            Computed from the pipeline's aggregates, adjusted for `as_read` in constant time."""
+            bad, n_read, n_stage, _n = agg[pid]
+            if bad:
+                return "other"
+            if as_read >= 0:  # its term: a read (whatever its kind) that writes nothing, and a read for staging
+                n_read -= (st.kinds[as_read] != "read" or t_write[as_read]) - t_write[as_read]
+                n_stage -= st.kinds[as_read] not in ("read", "tee")
+            if n_read == 0:
+                return "read"
+            if n_stage == 0:
+                return "stage"
+            return "other"
+        pclass, ptargets = {}, {}
+        for pid, us in members.items():
+            if not any(t_unknown[u] for u in us):  # the known files it writes: its data can flow on through them
+                ptargets[pid] = [t for u in us for t in t_targets[u]]
+            pclass[pid] = "store" if agg[pid][3] else klass(pid)
+        lazy.update(st=st, pipe=pipe, pclass=pclass, ptargets=ptargets, members=members, words=words, live=None,
+                    unit_at=unit_at, units=units, klass=klass, own=own, d_store=d_store, t_store=t_store,
+                    extra=extra, tok_unit=tok_unit, agg=agg, d_multi=d_multi)
+        return lazy
+
+    def resolved(w, dirs):
+        budget.spend(_FSW_CWD_COST * (len(dirs) + 1))  # charged before the resolution
+        out = {w}
+        if w.startswith("/"):
+            out.add(os.path.normpath(w))
+        elif not w.startswith("~") and "$" not in w:
+            out.update(os.path.normpath(os.path.join(c, w)) for c in dirs if c is not None)
+        return out
+
+    def live():
+        """The pipelines whose written files a store-writing pipeline names, directly or through a chain of
+        pipelines that each name a file the next one wrote (`echo <literal> > a; cp a b; mv b <store file>`): a
+        staging pipeline's literals reach the store through those files."""
+        pl = pipelines()
+        if pl["live"] is not None:
+            return pl["live"]
+        by_target = {}
+        for pid, targets in pl["ptargets"].items():
+            for w, dirs in targets:
+                for r in resolved(w, dirs):
+                    by_target.setdefault(r, set()).add(pid)
+        alive = {pid for pid, c in pl["pclass"].items() if c == "store"}
+        queue = list(alive)
+        while queue:
+            pid = queue.pop()
+            for u in pl["members"][pid]:
+                budget.spend(len(pl["words"][u]) + 1)
+                dirs = cwd_of(top, pl["units"][u][0])
+                # a literal shell -c string's store write names files too (`bash -c 'cp <staged file>
+                # <store file>'`), each resolved against the directories it runs in
+                for w, wd in [(w, dirs) for w in pl["words"][u]] + pl["extra"][u]:
+                    for r in resolved(w, wd):
+                        for q in by_target.get(r, ()):
+                            if q not in alive:
+                                alive.add(q)
+                                queue.append(q)
+        pl["live"] = alive
+        return alive
+
+    patterns = {}  # sub-stream -> the token indices of its search patterns (see search_pattern)
+    sub_order, sub_starts, sub_parent = [], [], {}
+
+    def search_pattern(p):
+        """True when offset p lies in the PATTERN word of a grep, egrep, fgrep, or rg inside a command
+        substitution whose every command is such a search or wc, reading no here-string, here-document, or
+        other input redirection and writing nothing (rg with a replacement, or grep with --label, excluded),
+        and whose pipeline ends in wc or a counting, quiet, or file-list search (see _search_patterns):
+        that output is a count, a status, or file names, never the pattern, so the pattern feeds no write
+        (`n=$(grep -cF <literal> <store file>); echo "n=$n" >> <store file>`). A matching search printing
+        lines prints text holding its pattern, so its pattern is not exempted."""
+        if ns < 2:
+            return False
+        if not sub_order:  # the substitution streams by start, each with its enclosing one (spans nest)
+            sub_order.extend(sorted(range(ns - 1), key=lambda x: (fspans[x][0], -fspans[x][1])))
+            sub_starts.extend(fspans[x][0] for x in sub_order)
+            stack = []
+            for x in sub_order:
+                while stack and fspans[stack[-1]][1] <= fspans[x][0]:
+                    stack.pop()
+                sub_parent[x] = stack[-1] if stack else None
+                stack.append(x)
+            budget.spend(ns)
+        j = bisect.bisect_right(sub_starts, p) - 1
+        best = sub_order[j] if j >= 0 else None
+        while best is not None and not fspans[best][0] <= p < fspans[best][1]:
+            best = sub_parent[best]
+        if best is None:
+            return False
+        if best not in patterns:
+            budget.spend(len(streams[best]))
+            patterns[best] = _fsw_search_patterns(streams[best], poss[best], cmd)
+        pats = patterns[best]
+        if not pats:
+            return False
+        k = bisect.bisect_right(poss[best], (p, float("inf"))) - 1
+        return k in pats and p < poss[best][k][1]
+
+    def counts(p):
+        if dated(p):
+            return False
+        k = _fsw_span_index(delegates, d_starts, p)
+        if k >= 0:
+            d = delegates[k]
+            offs = d[3]  # the outer offset of each inner character, ascending
+            if d[2].counts(bisect.bisect_left(offs, p)):
+                return True
+            # whatever the inner analysis decides, a literal in the string is also data of the WRAPPER
+            # command, as for echo: it counts when the wrapper's output reaches a store write
+            got = wrapper_memo.get(d[6])
+            if got is None:
+                got = wrapper_memo[d[6]] = wrapper_counts(d)
+            return got
+        k = _fsw_span_index(hd, hd_starts, p)
+        if k >= 0:
+            q = hd[k][2]  # a here-document body is data of the command holding its operator
+        elif _fsw_span_index(cm, cm_starts, p) >= 0:
+            return False  # a comment feeds no write
+        elif search_pattern(p):
+            return False  # a counting or quiet search's pattern in a substitution: its output cannot hold it
+        else:
+            q = p
+        loc = local_unit(q)
+        if loc is None:
+            return True
+        got = unit_memo.get(loc[0])
+        if got is None:
+            got = unit_memo[loc[0]] = unit_counts(q, *loc)
+        return got
+
+    wrapper_memo = {}
+
+    def wrapper_counts(d):
+        """Whether the output of the shell -c wrapper of delegate `d` reaches a store write: the
+        wrapper's own redirection or substitution writes a store path, another command of its pipeline writes
+        one, it lies in an unreliable stream or a compound whose output is redirected or piped, or its pipeline,
+        the wrapper taken as a read, is not a pure read (a staging one only when a store write names a file it
+        writes). The store writes of the string itself are judged by the inner analysis, so they are set aside
+        (a string with its own store write does not, by that alone, make every literal in it data)."""
+        pl = pipelines()
+        budget.spend(1)  # constant work per wrapper, from the pipeline aggregates (see pipelines)
+        s, k, a = d[4], d[5], d[6]
+        u = pl["tok_unit"][k] if s == top and k < len(pl["tok_unit"]) else pl["unit_at"](fspans[s][0])
+        if pl["st"].unreliable or pl["st"].tainted[u]:
+            return True
+        ds = pl["d_store"][u]
+        if pl["own"][u] or (ds and (pl["d_multi"][u] or ds[0] != a)):  # a delegated store write not this one's
+            return True
+        pid = pl["pipe"][u]
+        if pl["agg"][pid][3] - pl["t_store"][u] > 0:  # another unit of its pipeline has a store write
+            return True
+        cls = pl["klass"](pid, u)
+        if cls == "read":
+            return False
+        if cls == "stage":
+            return pid in live()
+        return True
+
+    def unit_counts(q, a, b):
+        """Whether the literals of the top-level simple command of tokens a..b (holding offset q) are data of a
+        store write (see _analyze)."""
+        if local_store(a, b):
+            return True
+        pl = pipelines()
+        u = pl["unit_at"](q)
+        if pl["st"].unreliable or pl["st"].tainted[u]:
+            return True
+        cls = pl["pclass"][pl["pipe"][u]]
+        if cls == "read":
+            return False
+        if cls == "stage":
+            return pl["pipe"][u] in live()
+        return True
+
+    return _FswAnalysis(True, counts, targets_out, unknown_out, words_out)
+
+
+def _fsw_bash_future(cmd, now_us, cwd=None):
+    """Future observed-time literals that are DATA of a Bash command's store write (else []; see _analyze).
+    `cwd` is the payload's working directory, against which relative write targets resolve. The analysis
+    runs under BASH_WORK_BUDGET; a command that spends it is allowed (fail open)."""
+    if _FSW_STAMP_RE.search(cmd) is None and (not any(h in cmd for h in _FSW_NC_ZONE_HINTS)
+                                              or not any(_fsw_nonclock_tokens(line) for line in cmd.split("\n"))):
+        return []  # no literal and no non-clock token: nothing to warn on, and the tokenizer need not run
+    start = frozenset((os.path.normpath(cwd) if isinstance(cwd, str) and os.path.isabs(cwd) else None,))
+    try:
+        an = _fsw_analyze(cmd, start, _fsw_store_ctx(), _FswBudget(_FSW_BASH_WORK_BUDGET))
+        if not an.store:
+            return []
+        bad, seen, cache, base = [], set(), {}, 0
+        lines = cmd.split("\n")
+        # the Write and Edit quoted-text exemptions (a `>` line, a matched fence, an inline code span), read
+        # lexically on the command's lines, exempt an APPROX or PLACEHOLDER token only: in shell text a
+        # backtick or a leading `>` can be syntax (a substitution, a redirection), so a future literal keeps
+        # no such exemption here (the residue discloses both directions)
+        code = _fsw_code_lines(lines) if "```" in cmd or "~~~" in cmd else ()
+        for i, line in enumerate(lines):
+            quoted = i in code or line.lstrip().startswith(">")
+            nc_spans = _fsw_code_spans(line) if "`" in line else None
+            for lit in _fsw_future_on_line(line, now_us, base, lambda p: not an.counts(p), cache,
+                                           nc_spans=nc_spans, nc_quoted=quoted):
+                if lit not in seen:
+                    seen.add(lit)
+                    bad.append(lit)
+            base += len(line) + 1
+        return bad
+    except _FswExhausted:
+        return []  # the work budget ran out: fail open, as for any input the hook cannot evaluate
+
+
+def _fsw_s(value):
+    return value if isinstance(value, str) else ""
+
+
+# every literal _STAMP_RE matches starts with this 16-character prefix, and none is longer than LITERAL_MAX_LEN:
+# 16, plus `:SS` (3), plus `.` and 9 fraction digits (10), plus a 7-character zone (` ABCDEF` or ` +HH:MM`)
+_FSW_LIT_PREFIX_RE = re.compile(r"(?=\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2})")
+_FSW_LITERAL_MIN_LEN, _FSW_LITERAL_MAX_LEN = 16, 36
+
+
+def _fsw_literal_substrings(text):
+    """The set of substrings of `text` that COULD equal a literal: from every position where the literal prefix
+    starts, each length from LITERAL_MIN_LEN to LITERAL_MAX_LEN. `lit in _literal_substrings(text)` is exactly
+    `lit in text` for any literal _STAMP_RE matched, in time linear in `text`, once per text, instead
+    of a full rescan of `text` per literal."""
+    held = set()
+    for m in _FSW_LIT_PREFIX_RE.finditer(text):
+        p = m.start()
+        held.update(text[p:p + n] for n in range(_FSW_LITERAL_MIN_LEN, min(_FSW_LITERAL_MAX_LEN, len(text) - p) + 1))
+    return held
+
+
+def _fsw_evaluate(payload, now):
+    """Return a list of offending future literals (empty = allow). `now` is an aware datetime. The
+    store roots are read once for the whole evaluation (_StoreCtx). With no store root configured the hook is
+    inert: nothing is evaluated and the call is allowed."""
+    global _FSW_ACTIVE
+    _FSW_ACTIVE = _FswStoreCtx()
+    try:
+        if not _FSW_ACTIVE.roots:
+            return []
+        return _fsw__evaluate(payload, now)
+    finally:
+        _FSW_ACTIVE = None
+
+
+def _fsw__evaluate(payload, now):
+    now_us = (now - _FSW_EPOCH_UTC) // _FSW_ONE_US
+    tool = payload.get("tool_name")
+    ti = payload.get("tool_input") or {}
+    if not isinstance(ti, dict):
+        return []
+    cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+    if tool in ("Write", "Edit", "MultiEdit"):
+        fp = ti.get("file_path")
+        if not _fsw_under_store(fp, cwd):
+            return []
+        if not os.path.isabs(fp):
+            fp = os.path.join(cwd, fp)
+        original, whole = _fsw_read_existing(fp, _FSW_EXISTING_MAX_BYTES)
+        if tool == "Write":
+            return _fsw_future_in_changed_lines(_fsw_s(ti.get("content")), original, now_us)
+        if tool == "Edit":
+            edits = [(_fsw_s(ti.get("old_string")), _fsw_s(ti.get("new_string")), ti.get("replace_all") is True)]
+        else:
+            edits = [(_fsw_s(e.get("old_string")), _fsw_s(e.get("new_string")), e.get("replace_all") is True)
+                     for e in (ti.get("edits") or []) if isinstance(e, dict)]
+        if whole:
+            result = _fsw_apply_edits(original, edits)
+            # an edit that cannot apply to the WHOLE file makes the tool itself fail: nothing is written
+            return [] if result is None else _fsw_future_in_changed_lines(result, original, now_us)
+        # not read whole (over the cap, unreadable, not regular): no reconstruction is possible, so each
+        # fragment is checked on its own lines with no table context; a time-only fragment here is a disclosed miss
+        # an UNREADABLE target (not read at all: "" with whole False, unlike an over-cap prefix) fails
+        # OPEN except for what the new content itself introduces: a literal already in the edit's old_string (text
+        # the file held) is not counted, so only a future literal the new_string brings in can deny
+        unreadable = original == ""
+        bad, seen = [], set()
+        for old, new, _every in edits:
+            held = None  # old's literal-shaped substrings, indexed once per edit (not `lit in old` per literal)
+            for lit in _fsw_future_in_changed_lines(new, old, now_us, tables=False, fences=False):
+                if unreadable and isinstance(lit, _FswNonClock):
+                    if lit in old:
+                        continue
+                elif unreadable:
+                    if held is None:
+                        held = _fsw_literal_substrings(old)
+                    if lit in held:
+                        continue
+                if lit not in seen:
+                    seen.add(lit)
+                    bad.append(lit)
+        return bad
+    if tool == "Bash":
+        cmd = ti.get("command")
+        return _fsw_bash_future(cmd, now_us, cwd) if isinstance(cmd, str) else []
+    return []
+
+
+_FSW_WARN_MAX = 100  # the warning is one line of at most this many characters
+
+
+def _fsw_warn_line(bad, now):
+    """The one-line warning for the future literals `bad`, at most WARN_MAX characters: the first literal, the
+    count of the others, the UTC clock to the minute, and a pointer to `date -u`. When it is too long the pointer,
+    then the clock reading, then the count are dropped, in that order; the first literal is never dropped, only
+    cut to fit with a trailing `...`. When the first entry is a _FswNonClock (an approximate or placeholder
+    time), the line names it as no clock reading and points at stamping by command substitution at write
+    time; there the count is dropped before that pointer."""
+    first = " ".join(str(bad[0]).split())
+    more = f" (+{len(bad) - 1} more)" if len(bad) > 1 else ""
+    if isinstance(bad[0], _FswNonClock):
+        head = "future-stamp-write: not a clock reading: "
+        tries = ((more, "", "; stamp with $(date -u +%FT%RZ)"), ("", "", "; stamp with $(date -u +%FT%RZ)"),
+                 ("", "", ""))
+    else:
+        head = "future-stamp-write: future stamp "
+        clock = "; now " + now.strftime("%Y-%m-%dT%H:%MZ")
+        tries = ((more, clock, "; run date -u"), (more, clock, ""), (more, "", ""), ("", "", ""))
+    for parts in tries:
+        line = head + first + "".join(parts)
+        if len(line) <= _FSW_WARN_MAX:
+            return line
+    return head + first[:_FSW_WARN_MAX - len(head) - 3] + "..."
+
+
+def _fsw_cfg(name, env=None):
+    """AIQT_<name>, or None when it is unset; no other spelling is read, and callers treat an empty value as
+    not configured."""
+    env = os.environ if env is None else env
+    return env.get("AIQT_" + name)
+
+
+def future_stamp_write(data):
+    """tstamp, PreToolUse (Write|Edit|MultiEdit|Bash), WARN ONLY (stage bake): warn on writing a FUTURE-dated
+    observed-time literal to a store.
+
+    THREAT MODEL. An ACCIDENTAL-DRIFT discipline guard: it catches the model composing times instead of reading
+    the clock and writing them into a store in its NORMAL record format. It is NOT an adversarial boundary: an
+    evasion that needs deliberately unusual construction (a variable, a glob, a literal built from parts, a
+    schedule word placed before the time) is a disclosed residual, not a defect. It fails OPEN on malformed input.
+
+    Motivated by an assistant composing timestamps from its own sense of time instead of reading the clock,
+    drifting up to 4h40m ahead, and persisting those invented times into its durable records
+    (timestamp-from-clock; records-first). An observed-time record (a heartbeat, a recorded-at) must come from
+    the clock, so one dated in the future is a composed value. A scheduled value (a deadline, a next run) is
+    legitimately future and is allowed.
+
+    Store roots. env AIQT_STORE_ROOT (no other spelling is read, see _cfg): one or more
+    absolute paths joined by os.pathsep; an empty or relative entry is ignored. There is NO default: when it is
+    unset, when it is set but empty, or when the
+    value names no absolute path, no store is configured and the hook is INERT (every call is
+    allowed). No store is derived from the project directory or the cwd. For Write/Edit/MultiEdit a relative
+    file_path is resolved against the payload cwd.
+
+    Write. Checked only when tool_input.file_path lies under a store root. The new content's lines are compared
+    with the existing file's lines as a MULTISET of whole lines: a new line identical to an existing line is an
+    unchanged carry-over and is exempt (as many times as it occurs there); every other line is checked whole. A
+    markdown table row is compared together with its table context (see the table-header exemption below).
+
+    Quoted text (Write, and Edit/MultiEdit; the preview Stop hook's rules, .preview/stamp-truth-stop.py, whose
+    helpers the fsw-parity row of tools/selftest_aiqt_hooks.py holds equal to these). Quoted text is not an observed-time record, so these are exempt:
+    a line whose stripped form starts with `>` (a blockquote); a literal starting inside an inline code span (a
+    backtick run closed by the next run of the same length on the same line; an unclosed run opens nothing);
+    and, on a reconstructed whole file only, every line of a MATCHED fenced code block (``` or ~~~, closed by a
+    fence of the same character at least as long; an UNCLOSED fence is not code, so its lines are checked). A
+    line's carry-over is keyed by its fence membership as well as its text, so an edit that moves an existing
+    line out of a code block (by deleting a fence, say) checks it. A bare field on its own line stays checked.
+
+    Non-clock times (all routes; the forms, their zones and the tilde and word-start rules are stated at
+    _FSW_NC_UTC_ZONE). An approximate (about, around, approximately, circa, a tilde) or placeholder (x, X, or ?
+    in a digit slot, the fraction included) UTC time token warns with no clock comparison, under the same
+    exemptions as a future literal. Bash reads the quoted-text rules above (a `>` line, a matched fence, an
+    inline code span) on the command's own lines, lexically, for these tokens ONLY: a future literal in Bash
+    text keeps no such exemption, because a backtick or a leading `>` there can be shell syntax (a
+    substitution, a redirection), so a token in a backtick substitution or on a line starting with a `>`
+    redirection is exempt (a disclosed miss) and a blockquote written by one echo line warns. Double quotes are
+    not quotation (a JSON value warns).
+
+    Edit and MultiEdit. Checked only under a store root. The COMPLETE resulting file is reconstructed by applying
+    the edits in tool order to the existing file content (old_string replaced once, or everywhere with
+    replace_all; an empty old_string creates an empty or absent file), and every line of the result that is not
+    an unchanged carry-over from the original (the same line multiset diff) is checked WHOLE, so a fragment edit
+    that repurposes a line (renaming `deadline` to `heartbeat`, or changing only the time on a heartbeat) is
+    seen on the full resulting line, and a scheduling keyword immediately preceding the literal on that line
+    still exempts it. The existing file is opened non-blocking, must be a regular file, and at most 4 MiB is
+    read. When the WHOLE file was read (or it is absent) and an edit cannot apply (an old_string not found), the
+    call is allowed: the tool itself fails and writes nothing. When the file was NOT read whole (over the 4 MiB
+    cap, unreadable, or not a regular file), whole-line reconstruction is impossible, so each edit's new_string
+    lines (less lines identical to its old_string lines) are checked, and the call is denied only when that
+    fragment itself carries a future literal with no immediately preceding keyword (blockquote lines and code
+    spans are exempt there too, but not fences, whose context the fragment cannot see); a time-only fragment (for
+    example `17:45` to `22:25`) in such a file is not caught (disclosed below). An UNREADABLE target (it could not
+    be opened or read, or is not a regular file, so nothing of it was read) fails OPEN except for what the new
+    content itself introduces: an Edit or MultiEdit literal that already appears in that edit's
+    old_string (text the file held) is not counted, and a Write's content is checked line by line as for an
+    absent file (with the file unread, all of it is new content). No shell expansion happens in
+    these tools, so every character is literal (a `$(...)` is text, not a substitution).
+
+    Bash. A lexical rule (quoting is followed to find write indicators, their targets, the data each write
+    carries, and date substitutions): DENY when a WRITE indicator's TARGET is a store path (a word holding a store
+    path token: a configured store root spelled absolutely, standing alone within the target word: not preceded
+    by a path character and followed
+    by `/`, whitespace, a quote, a shell operator, or the end; or a RELATIVE target that resolves
+    under a store root, see WHICH DIRECTORY below) AND a future-dated literal is DATA of that write (see
+    WHICH LITERALS below; formerly any literal anywhere in the command counted). Each
+    write is bound to its target, so a command TARGETS a store path only through: a redirection's operand; a
+    tee operand; an operand of an in-place sed or perl (not its program: a sed or perl given no -e, -E,
+    -f, --expression, or --file takes its first operand as the program); the destination of cp, mv, or install
+    (every -t, -tDIR, --target-directory DIR, or --target-directory=DIR argument, else the LAST operand); a dd of=
+    operand; a truncate, ed, or ex operand; or the file ex's -i, -w, -W, --startuptime, or --log writes.
+    Each command's option arguments are consumed before its operands are collected, walking a short cluster
+    letter by letter as getopt does, so an option's argument is never read as a target: sed's -e, -f, -l,
+    --expression, --file, --line-length; perl's -e, -E, -I, -M, -m (and its attached -i, -x, -D, -F, -0, -l, -C,
+    -d, -V forms); truncate's -r, -s, --reference, --size; ed's -p, --prompt; ex's -c, -S, -u, -U, -T, -t,
+    --cmd; cp's and mv's -S, --suffix (and cp's --sparse, --no-preserve); install's -m, -o, -g, -S, --mode,
+    --owner, --group, --suffix, --strip-program. Where the real tool stops parsing options at its
+    first operand, so does this model: perl does (observed with perl 5.40.1: `perl -pi -e CODE X -I S` edits X,
+    fails to open a file named `-I`, and edits S), so every word after perl's first operand is an operand; the
+    other modeled commands permute (observed with GNU sed 4.9, GNU cp and mv 9.7, GNU ed 1.22.4, vim 9.1 as ex,
+    and uutils install, truncate, and tee 0.8.0: an option after an operand is still an option). The model also
+    reads SCRIPT TEXT: a sed expression (-e, --expression, or the program operand of a sed given no -e or -f),
+    an ex command (-c, --cmd), or a perl program (-e, -E) that names a store path makes that write's target
+    UNKNOWN (the text itself can write the path: a sed `w` command or `s///w` flag, an ex `w!`, a perl `open`),
+    whether or not the sed or perl has an in-place option; an option argument that names a FILE (sed -f, perl
+    -I or its program file, truncate -r, ex -u) is still consumed and never a target. A sed with NO
+    in-place option whose program (its -e pieces, or its program operand; not a -f file) is parsed with
+    confidence and holds no command that can write (no `w`, `W`, or `e` command, no `s///w` or `s///e` flag) is
+    no write, even when its program MENTIONS a store path (`sed -n '\\|<store file> <future>|p' audit.log`); an
+    in-place sed, a -f program, --posix, or a program not parsed with confidence (any `$` in it included) keeps
+    the script-text UNKNOWN target, and ex -c and perl -e script text is unchanged. A long option is
+    resolved as the real tool resolves it before its argument is consumed: GNU sed, cp, and mv, GNU ed, and uutils
+    install, tee, and truncate (observed on this host) accept any UNAMBIGUOUS prefix of a long option, so
+    `--expr`, `--in`, `--po`, `--targ`, or `--suf` is read as `--expression`, `--in-place`, `--posix`,
+    `--target-directory`, or `--suffix` (aliases of one option, such as sed's `--quiet` and `--silent`, count
+    once); vim's ex accepts only its exact long options and perl none, so on sed, perl, or ex a `--` word that
+    is AMBIGUOUS or UNRECOGNIZED makes the write's target UNKNOWN, while on the other commands it is read as an
+    option with no argument (the tool rejects it and writes nothing). perl accepts exactly two long
+    options, `--help` and `--version` (exact, no abbreviation, no `=value`), and exits at once on either while its
+    options are still parsed, touching no file and running no program (observed with perl 5.40.1, even after
+    `-pi -e CODE`), so such a perl writes nothing; after perl's first operand either word is an operand as before.
+    mv's `--exchange` (or an unambiguous abbreviation such as `--exch`) swaps each source with its destination
+    (observed with GNU mv 9.7: `mv -T --exchange S T` replaces S with T's content), and install's `-d` or
+    `--directory` creates every operand as a directory (an existing file operand has its mode set), so under
+    either EVERY operand and every -t or --target-directory argument is a write target. install's `--context`
+    takes an OPTIONAL argument whose arity differs between implementations: GNU install takes it only attached
+    (`--context=CTX`), so the next word is an operand, while uutils install 0.8.0 (this host's install) also
+    consumes the SEPARATE next word when it is `-` or does not start with `-` (`install src <store file>
+    --context foo` writes the store file, `foo` being the context); the model takes the conservative union, keeping
+    that word as an operand and taking as destination candidates both the last operand and the last operand
+    other than that word. A sweep also checked every recorded long option, and each modeled command's short
+    letters, for separate-word consumption against the real tools on this host; every other recorded arity
+    matched. GNU cp, mv, sed, and ed and uutils install, tee, and truncate also exit at once on `--help` or
+    `--version` (or an unambiguous abbreviation), wherever it stands before `--`, since they permute, and reject an
+    attached `=value` before writing anything (observed on this host), so such a command writes nothing (after
+    `--` either word is an operand, and as the separate argument of an option, `cp -S --version`, it is that
+    argument); ex is not given this, since vim opens a -w script-out file before it reaches --version.
+
+    WHICH DIRECTORY. A relative write target (not starting with `/` or `~`) is resolved against every
+    directory the command can be in at that point: the payload's cwd, then each confidently understood `cd` or
+    `pushd` (one literal operand, after -L, -P, -e, -@, or `--`, naming an existing directory; with CDPATH set in
+    the hook's environment, a relative operand not starting with `./` or `../` is unknown). A cd that surely runs
+    before what follows (first in its list at the top level of its stream, outside any compound command, not piped,
+    not in the background) REPLACES the set; any other cd JOINS it; a cd to anything else (a variable, `-`, `~`,
+    a missing directory), and popd, adds an UNKNOWN directory. A target that resolves under a store root from any
+    directory in the set is a store target; with an unknown directory in the set it is UNKNOWN (it then counts only
+    when the command names a store path, as any unknown target). A substitution starts from the directories of the
+    command holding it, and a cd inside it applies only there; a `( ... )` subshell SCOPES the set: the
+    set in force at its `(` is restored at its `)`, so `(cd <store dir> && ls); printf ... > state.md` resolves
+    state.md in the parent's directory (the subshell's cd never leaks into the parent); inside the subshell a
+    cd first in its list, outside any other compound, replaces the set as at the top. A `{ ... }` group does not
+    scope, as in bash. A stream the walk finds unreliable keeps the join-only walk (no replacement, no scoping). At
+    most MAX_CWDS (32) directories are tracked per command point: a larger set spends the work budget (fail OPEN).
+
+    SHELL -c. bash, sh, dash, or zsh with -c (a short option cluster holding c; -o, -O, --rcfile, and
+    --init-file take an argument) whose command string is ONE single-quoted string, or ONE double-quoted string with
+    no unescaped `$`, backtick, or quote (a backslash before `$`, a backtick, `"`, or a backslash yields that
+    character and one before a newline removes both, as bash reads it), is analysed recursively (to SHELL_C_DEPTH,
+    3 levels) with the same directories: its store writes are the enclosing command's (so that command's pipeline
+    feeds them), and a literal inside the string counts when that inner analysis decides it does; it
+    ALSO counts, as for echo, when the WRAPPER's output reaches a store write: `bash -c 'echo heartbeat: <literal>'
+    >> <store file>` and `sh -c 'echo heartbeat: <literal>' | tee <store file>` are denied. The wrapper is then
+    judged like a read command whose data is the whole string: its own redirection or substitution writing a store
+    path, another store-writing command in its pipeline, an enclosing redirected or piped compound, an unreliable
+    command, or a pipeline that is not a pure read (a staging one only when a store write names a file it writes)
+    makes every literal in the string count, even one the string itself sends elsewhere (`bash -c 'echo
+    <literal> > /tmp/x' | tee <store file>` is denied: the conservative direction). The string's own writes to known
+    files are the wrapper's writes for staging, and the words of a string holding a store write are the words that
+    write names, so `printf <literal> > stage; bash -c 'cp stage <store file>'` counts the staged literal. KNOWN GAP
+    (disclosed, not modeled): a literal inside a shell -c string that is itself inside a command substitution
+    counts whenever the enclosing command is not a pure read (the conservative direction); and staging chains
+    running through several shell -c strings are followed only as far as the words and targets each one exposes.
+    Any other command string (a variable, an expansion, a concatenation of quotes) is not inspected, as before.
+
+    WHICH LITERALS. A future literal counts only when it is DATA of a store write: in the store write's
+    own simple command (its arguments, here-string, redirections, and substitutions), in a here-document body of
+    it, in another command of its pipeline, or anywhere inside a compound command (`{ ... }`, `( ... )`, if, while,
+    until, for, select) whose output is redirected or piped onward. A literal does NOT count when it lies in a
+    comment (outside a here-document body); in a top-level pipeline made only of READ_COMMANDS (grep, rg, cat,
+    head, tail, wc, ls, echo, printf without -v, test, `[[`, and the like) with no redirection or write anywhere in
+    it, not inside a compound whose output is redirected (`grep -F <literal> <store file>; echo checked >> <store
+    file>`, or `if grep -q <literal> <store file>; then echo found >> <store file>; fi`); in a pipeline of
+    READ_COMMANDS and tee whose writes all go to KNOWN files that no store-writing command names (`echo <literal> >
+    /tmp/log; echo checked >> <store file>` is allowed, while `printf <literal> > x; cp x <store dir>` counts, the
+    store write naming x, as a word or a resolved path, transitively through further staged files); or as the
+    PATTERN of a grep, egrep, fgrep, or rg inside a command substitution made only of such searches and wc, reading
+    no redirected input, whose pipeline's output CANNOT hold the pattern: the pipeline ends in wc or in a
+    search with a count, quiet, or file-list option (-c, -q, -l, grep -L, or an exact long form such as --count or
+    --files-with-matches), as in `n=$(grep -cF <literal> <store file>); echo "n=$n" >> <store file>`. A MATCHING
+    search that prints lines prints file text holding its pattern (with -o, exactly the pattern), so `echo "$(grep
+    -oF <literal> hits.log)" >> <store file>` counts (formerly every search pattern was exempt, stating wrongly that
+    a search never prints its pattern); rg -r or --replace and grep --label, which print their argument, are
+    excluded as before. Every other literal counts, the conservative direction: an assignment (`x=<literal>; echo "$x" >>
+    <store file>`), a command outside READ_COMMANDS, a for or select word list, and every literal of a command
+    holding a case, a function definition, coproc, a bare exec (its redirections apply to everything after it), or
+    a compound the walk cannot match, or of a command that cannot be parsed. BY DESIGN (not modeled): a write in a
+    branch that never runs is judged as written, so `if false; then <future store write>; fi`, or a write guarded by
+    a sentinel test (`[ -e <missing file> ] && <future store write>`), is denied.
+
+    WORK BUDGET. The Bash analysis runs under BASH_WORK_BUDGET (80,000) steps: a character-loop step of
+    the tokenizer counts 3, a token taken by its regex fast path 1, a reserved or special word it inspects in full
+    2 more, a here-document line 1, a substitution frame 8 in the tokenizer and 8 again in the analysis, the
+    command-position walk 2 per token, a nested shell -c 30, and the later walks (simple commands, compound
+    structure, pipelines, staging) 1 to 4 per token or command they visit. DIRECTORY work is charged too,
+    BEFORE it is done (it was formerly unbudgeted, so 64 KiB of `(cd <dir>);` repeats over 400 directories took
+    about 200 ms): CWD_COST (6) per directory in the set each cd is resolved from, each write target or staged word
+    is resolved against, and each set union joins, and a set above MAX_CWDS (32) spends the budget at once; a
+    budget step of directory work measured cheaper on this host than a tokenizer step. The shell -c WRAPPER
+    check is charged too: each pipeline's aggregates are computed ONCE, charged before the pass, and each wrapper then
+    costs one step (formerly each wrapper rescanned the whole pipeline, unbudgeted, so 64 KiB of 450 piped `sh -c`
+    wrappers took about 107 ms; that input now spends the budget). A command that spends it is
+    ALLOWED unchecked (fail OPEN, as for any input the hook cannot evaluate), so no input holds the hook past its
+    latency bound: 64 KiB of dense
+    trivial commands (about 10,900 repetitions of `: > x;`, about 0.67 tokens per byte) exhausts it in roughly 20 to 40
+    ms on this host and is allowed even when it ends in a future store write (an EXOTIC, disclosed miss), while
+    ordinary commands, including 64 KiB of prose, a quoted here-document, or a script of ordinary lines such as
+    `echo <text> >> <file>`, stay inside it. A read-only search, or a
+    write whose target lies elsewhere, is allowed even when the command also names a store path and a future
+    literal. A parsed target that is a
+    store path establishes the store write by itself (as `cp -t<store dir> x`, whose attached spelling the
+    raw command text does not show as a standalone token, is caught). A write whose target is UNKNOWN counts as
+    targeting the store (the fail-toward-writing direction) only when the command text names a store path
+    anywhere: an unparseable command, a redirection with no operand, a target word holding a `$` (a variable or a
+    substitution's value), a find `{}` placeholder, a write command run through xargs, which adds operands
+    from its input, or sed, ex, or perl script text that names a store path. A write indicator is, outside quotes
+    and `#` comments, an output redirection (`>`, `>>`, `>|`, `&>`, an fd-prefixed `N>`, or `<>`) whose target
+    is not /dev/null (an fd duplication is not one: a `>&` whose operand, after optional whitespace and after
+    dequoting, is a descriptor number, a number followed by `-`, or `-`, such as `2>&1`, `>&2`, `1>& 2`, or
+    `>&'2'`), or a word in COMMAND position whose basename is among tee, cp, mv, install, dd, truncate, ed, and
+    ex (command position: the first word of a token stream, the first word after a separator `;`, `|`, `&`, a
+    newline, `(`, or `)`, so also after `&&` and `||` and at the start of a `$(...)` or backtick body; the word
+    after a reserved word `{`, `then`, `do`, `else`, `!`, `if`, `elif`, `while`, `until`, the body of a
+    function header (`function NAME {`, `function NAME () {`, `NAME() {`, or `NAME ()` then `{` on the next
+    line: the body's opening `{` or `(` is in command position, and after `function NAME` with no `()` so is
+    any compound-command body, so `function NAME (( count > 0 ))` and `function NAME [[ ... > ... ]]` are an
+    arithmetic command and a conditional, and `function NAME while tee ...` runs tee; a write in a function body is detected
+    whether or not the function is ever called, the conservative direction), after VAR=value
+    assignments, or after a leading redirection and its operand, output (`N>`) or input (`<`, `N<`, `<<<`,
+    `<<`, `<<-`, `<&`); the command a prefix command runs, a prefix
+    being sudo, doas, env, command, builtin, exec, nohup, time, nice, ionice, stdbuf, timeout, chroot, flock, or
+    xargs, whose options are skipped, together with the separate argument of the options listed for it in
+    PREFIX_COMMANDS and its leading operands (the timeout duration, the chroot root, the flock file); and the
+    word after -exec, -execdir, -ok, or -okdir in a simple command whose command word is find, up to that
+    command's terminating `;` or `+` word), so `rg -e tee <store file>` and `printf '%s' -exec tee` are reads;
+    or, in command position, sed or perl with an in-place option (`-i`, a short cluster of letters
+    and digits holding i such as `-pi`, `-i.bak`, `-0777pi`, `-0pi`, or `-l0pi`, or sed's `--in-place` or an
+    unambiguous abbreviation of it such as `--in`) later in the same simple command; an unterminated quote, an unterminated substitution, or a redirection with no target
+    counts as a write. Inside a `[[ ... ]]` conditional (a `[[` word in command position up to its `]]`
+    word; command position here also survives bash's `time` reserved word and its `-p` then `--` or `--`
+    options, and `!`, so `if time [[ ... > ... ]]` and `! [[ ... ]]` are conditionals), everything up to
+    the closing `]]` is operand text: `<` and `>` are string comparisons, not redirections, `(`, `)`, `&&`,
+    `||`, a `;`, a newline, and the `(`, `)`, and `|` of a regex operand (`[[ $r =~ op=(cp|mv) ]]`) are not
+    separators, and a `#` is not a comment (`[[ $r =~ ^[[:space:]]*(#|$) ]]`), so no word in the conditional is
+    a command word (a `[[` touching a metacharacter, as in `[[(-f x) ]]`, opens it too, and that
+    metacharacter is conditional text); the conditional closes only at a `]]` that starts a word (after
+    unquoted whitespace) and is followed by whitespace, `;`, `&`, `|`, `<`, `>`, `)`, or the end of the command,
+    or, in a backtick substitution, by that substitution's closing backtick, so a quoted `']]'` and a `]]`
+    glued to preceding text (`x]]`, the regex word `(x)]]`, a grouping `)]]`) never close it; there is no
+    re-read: a conditional still open when its frame ends (the end of the command, a closing backtick, or an
+    unterminated quote) makes the command unparseable, counted as a write, so `[[ ( -n x )]] && echo ok`, which
+    bash closes at the glued `)]]`, is unparseable here (a disclosed residual below); a `$(...)`,
+    backtick, or `<(...)` or `>(...)` process substitution inside it is still scanned as its own command stream;
+    in `[ ... ]` and `test` an unquoted `>` is
+    a real output redirection and counts. After the closing `))` of an arithmetic command and the closing `]]`
+    of a conditional, the next word is in command position whether or not a `;` or newline comes first, so
+    `while (( n > 0 )) do tee ...` and `if [[ ... ]] then tee ...` run tee. Inside an arithmetic command `(( ... ))` (a `((` in command position,
+    or the header of `for (( ... ))`, including when the `((` touches its keyword as in `if((`) and an
+    arithmetic expansion `$(( ... ))`, up to the matching `))`, `<`,
+    `>`, `<<`, and `>>` are arithmetic operators, not redirections, and no word there is in command position,
+    so `if (( count > 0 ))` and `"$(( count > 0 ))"` are reads, and the body after a `for ((...))` header is
+    in command position whether or not a `;` precedes its `do`; a `$(...)` or backtick substitution inside the
+    arithmetic is still scanned as its own command stream, and a real redirection after the closing `))`
+    (`(( x )) > <store file>`) still counts. A `$(...)` or backtick substitution, unquoted OR inside double
+    quotes, is executable text: its body is scanned as its own independent command stream with its own quoting context (as
+    date_spans() does), so `x="$(printf ... | tee <store file>)"` shows the tee write. Inside a `$(...)`, an
+    unquoted `case` word in COMMAND POSITION (the first word of the substitution, or the first word after a
+    separator `;`, `|`, `&`, a newline, `(`, `)`, or after one of the reserved words `{`, `then`, `do`, `else`,
+    `!`, `if`, `elif`, `while`, `until` that is itself in command position) opens a case
+    construct until its unquoted `esac` in command position, and while one is open a `)` is a pattern
+    terminator, not the substitution's end, so `$(case x in x) printf ... > <store file>;; esac)` shows its
+    write, while a `case` argument (`x="$(rg case <store file>)"`) is an ordinary word. A command with no write
+    indicator (a read such as `grep` or `rg` over the store) is allowed. The future-dated
+    literal must not be inside a `$(date ...)` or backtick `date ...`
+    substitution (`date` optionally after `env`, VAR=value words, or /bin/ or /usr/bin/). Substitution spans are
+    found in ONE linear pass that follows shell quoting like the shell does: single quotes (and $'...' with its
+    backslash escapes) make everything literal, double quotes keep only `$(` and backticks active (a parenthesis
+    inside quotes is not a delimiter), and each substitution starts its own quoting context; an unmatched opener
+    or an unterminated quote starts no span, so the literals it would have covered are checked.
+
+    Literals and zones. YYYY-MM-DD[T or space]HH:MM(:SS(.fraction)?)? then an optional zone: Z (attached or after
+    one space); a numeric offset +HH, +HHMM, or +HH:MM, or with - (attached or after one space); or, after one
+    space, UTC, GMT, or a letter abbreviation of 2 to 6 capitals. This zone grammar and the scheduling keyword
+    list are duplicated in the preview Stop hook .preview/stamp-truth-stop.py; the fsw-parity row of
+    tools/selftest_aiqt_hooks.py holds the two copies equal. Z, UTC, and GMT are UTC; an offset is applied as written; a letter abbreviation
+    must be the process local zone's abbreviation for that wall time (both DST abbreviations are tried; the
+    earlier instant is taken if both match); any other abbreviation is an unknown zone and that literal is
+    SKIPPED, never guessed. A literal with NO zone is compared as local wall time AND as UTC, and counts as future
+    only if it is future under both readings, so an unzoned local time up to the zone's offset ahead of the clock
+    can pass (a disclosed miss west of UTC, where the UTC reading of a composed local time lies in the past). Each literal is converted in isolation in integer microseconds (an
+    overflowing or invalid literal is skipped without disabling the rest). A literal more than 60 seconds after
+    now is future.
+
+    Observed-time vs scheduled. A future literal is allowed when a scheduling keyword IMMEDIATELY precedes it on
+    its line (a whole line of the resulting file, or a line of the Bash command text): the keyword ends at most
+    SCHED_GAP_TOKENS (3) word tokens before the literal (a word token holds a letter or digit; `:` or `[` do not
+    count), as in "next_run: T", "due T", "deadline: T", "scheduled for T", "until T", "not before T", "by T".
+    Keywords (case-insensitive, each a whole word, optionally plural, except the stem `expir`, which covers
+    expires and expiry): due, deadline, expir, until, next, scheduled, not before, not-before, eta, planned, "target date",
+    "target:", `by ` (with its trailing space), and (the validity words, as in "valid through T")
+    through and valid. Each keyword matches as a WHOLE word, optionally plural (so "validated",
+    "throughput", "duet", or "etag" exempt nothing), except the stem `expir`. A keyword after the literal, or further back, does not exempt it.
+
+    Table-header exemption (Write, and Edit/MultiEdit on a reconstructed whole file only). A future literal in a
+    markdown table row is ALSO allowed when the header cell of its column carries a scheduling keyword (the same
+    keyword regex, on the stripped header cell text), so `| Item | Due |` over `|---|---|` over a row whose Due
+    cell holds a future time is allowed. This is additive: the keyword-on-line rule above is unchanged. Table
+    context is tracked over EVERY line of the resulting file, including unchanged carry-over lines that are not
+    themselves checked, so a new row under an existing header is exempt. The recognized forms follow GFM: a
+    header is a line holding at least one unescaped `|` (a leading pipe is optional), immediately followed by a
+    delimiter row (the whole stripped line is cells of an optional colon, ONE or more hyphens, and an optional
+    colon, pipe-separated, containing at least one pipe, leading and trailing pipes optional) with the same cell
+    count as the header. Each following line is a row of that table unless it ends the table: a line with no
+    unescaped pipe is still a row for continuation (GFM continues a table on a pipe-free line, so a later piped
+    row keeps its header exemption), but a pipe-free row NEVER receives a header-column exemption: it is checked
+    like an ordinary line, so only the keyword-on-its-own-line rule can exempt its literals; a blank line, or a line whose stripped
+    form starts with a list marker (`-`, `*`, or `+`, or digits then `.` or `)`), or an ATX heading (one to six `#`), each followed by
+    whitespace or the line end, a `>` blockquote, or a code fence (three backticks or tildes) ends it; a `#` not
+    forming an ATX heading (a row such as `#123 | ...`) does not. As in GFM, leading and trailing pipes are
+    optional on every line independently: a header with a leading pipe (`| Item | Due |`) may be followed by a
+    bare row (`release | ...`), and each row's columns are counted from its own leading pipe, if any.
+    Cells are split on unescaped `|` only (a `\\|` does not split, so it
+    does not shift columns); a leading pipe (only whitespace before it) opens the first cell and a trailing pipe
+    closes the last, so a literal lies in column k when k unescaped pipes (not counting a leading one) precede
+    it. The header line and the delimiter row are themselves checked normally, as ordinary lines. A row's
+    carry-over is keyed by its table context: a row line is an unchanged carry-over only when the same line
+    existed in the old file as a row under the SAME header line and delimiter row, so when an edit changes a
+    table's header or delimiter (repurposing a `Due` column as `Observed`, say), or moves a row into or out of
+    a table, EVERY row of that table is checked as changed, even rows identical to lines of the old file.
+    Each distinct (header, delimiter) context is given an integer id once, shared by the old- and new-file scans,
+    so a row's carry-over key never re-compares the header text (linear in rows, flat in header length).
+
+    Contract: WARN ONLY, as a dispatcher handler. HANDLER_EVENT classes it PRETOOL_WARN_ONLY, one of
+    FAIL_OPEN_EVENTS, so main() gives it the fail-open posture from the argv mode alone. Silent = _allow() (no
+    stdout, exit 0); a finding = _allow_note(<line>), ONE JSON object {"systemMessage": <line>} on stdout, exit
+    0, where <line> is a single line of at most 100 characters (see _fsw_warn_line). It never denies, blocks,
+    or asks: where this text says a write is "denied" or a "false deny", read "warned" or a "false warning".
+    Fail-OPEN (a silent pass) on any internal error and on input it cannot evaluate (a tool_input that is not
+    an object, a missing or non-string field): a DISCIPLINE guard, not a security boundary. The dispatcher's
+    own error paths keep that posture: a payload main() cannot read or parse, a payload that is not an object,
+    a handler crash, a bad argv, a child exit status the probe cannot read, a stdout that cannot be written,
+    and an interpreter that starts the dispatcher but is older than its Python floor each end with exit 0,
+    with a non-blocking systemMessage warning where main() or the floor guard writes one (so such an error
+    is surfaced, where the former standalone script stayed silent), never with exit 2. An interpreter that
+    cannot start the dispatcher fails first with Python's own exit, as the module docstring's PYTHON-FLOOR
+    note states for every mode. As a fail-open mode it runs with no PreToolUse deadline: the Bash work budget
+    below bounds the analysis, and a run past the hooks.json timeout (10 seconds while the manifest's
+    on-failure-render switch is off) is ended by the host, which the host documentation describes as
+    non-blocking (not verified here). There is no worker bypass: no environment variable skips the check,
+    and the handler writes nothing to stderr. The names this docstring uses are the former script's: read each
+    as its prefixed form in this module (date_spans() as _fsw_date_spans, BASH_WORK_BUDGET as
+    _FSW_BASH_WORK_BUDGET, _cfg as _fsw_cfg).
+    Subagent calls (a payload carrying agent_id or agent_type) are DELIBERATELY checked exactly like
+    main-session calls, with no skip: a subagent applies store writes on the main session's behalf, and a helper
+    can compose a timestamp that is then relayed into a record, so exempting it would open the very drift path
+    this hook guards.
+
+    RESIDUAL COVERAGE. Quoted text is trusted as quotation (a MISS,
+    disclosed): a composed stamp placed inside a quote or code span in a record (a `>` line, an inline code
+    span, or, on a whole file, a matched fenced block) is not caught; a later edit that removes the `>`, the
+    backticks, or the fence around it does expose it to the check. Only the ISO-like literal shape above is caught:
+    a compact sess-YYYYMMDDTHHMMSSZ id, an epoch number, a 12-hour or natural-language time, or a time split
+    across tokens is not. The keyword test is lexical: a keyword (as a whole word in a path, an identifier, or prose) within three
+    word tokens before a fabricated literal exempts it (for example "hb (next check) 2099-..."). The carry-over
+    test is a line multiset (a table row keyed by its header and delimiter), not an alignment: a line that
+    already existed elsewhere in the file, in the same table context, is exempt wherever it lands. Only the first 4 MiB of an existing file count: for a larger file a Write's carry-over
+    test sees only that prefix, and an Edit is checked on its fragment only, so a time-only fragment edit
+    (`17:45` to `22:25`) there is a MISS. The table-header exemption applies only to whole files: the fragment
+    path (an Edit on a file not read whole) and Bash get no table context, so a future literal in a table row
+    under a scheduling header cell is denied there unless a keyword immediately precedes it on its own line (a
+    disclosed false positive). Table continuation follows GFM's pipe rules but recognizes only a subset of its
+    block-interruption rules (a blank line, a list marker, an ATX heading, a blockquote, or a fence end the
+    table), and that mismatch errs in BOTH directions. A MISS: a line GFM would end the table on for another
+    reason (an HTML block or a thematic break, say) is treated as a row here, so a literal in its
+    scheduling-header column is exempt, as is every later non-blank line up to the next recognized block end. A
+    FALSE POSITIVE: a new table GFM would start after such an unrecognized block is not recognized (its header and
+    delimiter row read as rows of the old table), so its scheduling column gets no exemption; and a line this hook
+    treats as a block start where GFM would not (for example a list-marker shape GFM does not let interrupt the
+    table) ends the table early, so a later row loses its header exemption.
+    The header rule is lexical like the keyword rule: a keyword-bearing header cell
+    exempts every literal in its column of a row holding an unescaped pipe. A pipe-free row gets no header
+    exemption, so a bare scheduled value on its own pipe-free row under a scheduling header cell 0 (a GFM
+    one-cell row) is denied (a disclosed false positive); the remedy is a scheduling keyword immediately before
+    the value on that line, or a pipe that makes it a piped row. MISS (disclosed): because GFM keeps a table
+    open through pipe-free lines until a blank line, prose written directly under a table with no blank line
+    stays in it, and a later prose line that happens to hold an unescaped pipe (a shell pipe, say) is read as a
+    piped row, so text before its first pipe gets column 0's header exemption; leave a blank line after a
+    table. Bash is lexical by design. FALSE POSITIVES: a future literal in an assignment, a command
+    outside READ_COMMANDS, or a loop's word list counts for a store write anywhere in the same command (`ts=<future>;
+    echo ok >> <store file>` is denied), as does every literal of a command the structure walk finds unreliable (a
+    case, a function definition, coproc, a bare exec, an unmatched compound), and a write in a branch that never
+    runs is judged as written (by design, see WHICH LITERALS); a write whose target is UNKNOWN counts as a store write
+    when the command names a store path anywhere, so `rg <future> <store file> > /dev/shm/out-$(date +%s)` (a `$`
+    in the target), a `find /elsewhere ... -exec cp <store file> {} +` (the `{}` TARGET is unknown; a
+    `-exec cp {} /elsewhere` from a store dir is allowed, `{}` being cp's source), and an xargs-run write to /elsewhere are
+    denied (a here-document body is no longer read as command text: a quoted delimiter's body is skipped,
+    and an unquoted one is scanned only for the substitutions that run in it, so a `>` in a body is text, as bash
+    reads it), as is a command where an `i` in a sed or perl short cluster is really an option
+    argument rather than the in-place switch (`sed -ei...`, `perl -Mstrict`), or where a write-command name
+    lands in command position only lexically (the argument of `command -v`, say); likewise
+    a sed expression or program, an ex -c or --cmd command, or a perl -e or -E program that merely
+    MENTIONS a store path while writing elsewhere (`sed -i 's#<store dir>/a#b#' /dev/shm/x`, a pattern) makes
+    the target unknown and is denied (narrowed for sed only: a sed with no in-place option whose
+    program parses as holding no `w`, `W`, `e`, `s///w`, or `s///e` is allowed; a sed program the conservative
+    parser does not accept, for example one holding any `$` such as `\\|<store file>$|p`, a label or a/i/c text
+    it does not model, or a backslash inside a bracket expression, is still denied, and ex is NOT narrowed: an
+    ex -c or --cmd command naming a store path is denied even when it only prints or searches, such as `-c
+    'g#<store file>#p'`, because ex's command grammar, with `|` chaining, :global and :normal nesting, shell
+    escapes, and many abbreviated write commands, cannot be parsed here with confidence); under
+    install's bare `--context` the next word is ALSO a destination candidate, so where uutils consumes a store
+    path there as the context while the real destination lies elsewhere (`install src /elsewhere --context
+    <store dir>`) the command is denied, and `install -d` or `mv --exchange` naming a store path is denied
+    whenever the command also holds a future literal; and a perl `-i`
+    placed after perl's first operand (a file name to perl,
+    not the in-place switch) still arms in-place detection; rephrase or split the
+    command. MISSES: a write whose target reaches a store file by a spelling neither the store path token rule
+    nor the directory resolution follows (a relative path after a cd the model cannot follow, a
+    symlink, a variable, a glob); the directory resolution does resolve `cd <store dir> && echo <future> > state.md`,
+    formerly a miss; a write whose
+    option parsing differs from the modeled getopt subset: an option's separate argument the model does not list
+    is read as an operand (the abbreviated-long-option case, `cp src <store file> --suf .bak`, formerly
+    disclosed as a miss, is closed: `--suf` now resolves to `--suffix` and `.bak` is consumed; a long option
+    the recorded per-command set lacks, on a command other than sed, perl, or ex, still takes no argument here;
+    the arities recorded are those of the tools observed on this host, GNU sed, cp, mv, and ed and uutils
+    install, tee, and truncate, so another implementation whose option arity differs, beyond install's
+    `--context` modeled as the union above, is not modeled),
+    and POSIXLY_CORRECT in the environment is not modeled: under it GNU sed, cp, and mv stop at
+    their first operand (observed), so `sed -i s/a/b/ X -f <store file>` then edits the store file
+    while this model consumes it as the -f script file; a store write performed by a script the command names
+    as a FILE rather than carrying as text (a sed -f file, an ex -S or -u file, a perl program file or -M
+    module, each holding a `w` or an `open`), or by script text whose store path is spelled other than as a
+    store path token (relative, or through a variable); a write command
+    run through a wrapper not listed as a prefix (ssh, su -c, parallel, watch, or a shell -c string that is not
+    one quoted literal with no expansion: a literal one is inspected), named through
+    a variable or substitution (`$T`, `"$(command -v tee)"`), or placed after an option of a listed prefix that
+    takes a separate argument but is not listed for it (the argument is then read as the command, and the write
+    command after it is not in command position); a store path reached through a variable, a glob, a `cd` the
+    model cannot follow (see WHICH DIRECTORY), a symlink, or, in an absolute word, a `..` or doubled-slash
+    spelling; a future literal that reaches the store through a file the store write names only by a variable,
+    glob, or other spelling than the staging write's (that staging pipeline's literals are then not
+    counted); a write
+    through a program or script with no write indicator in the command text (`python -c`, `python3 script.py`,
+    `awk -i inplace`, `rsync`, `ln`, an editor, a heredoc-fed interpreter), or a script that writes internally;
+    a future literal inside a `$(date ...)` span in a quoted heredoc body or a
+    comment (text the shell never runs); a literal built from parts; and a write via another tool
+    (NotebookEdit). Only the configured store roots are covered: nothing is when AIQT_STORE_ROOT is unset
+    or empty; and a store the configuration does not name, or reaches by a different spelling, is not
+    covered. The
+    date-substitution scan reads a heredoc body (of either delimiter kind) like command text, so an apostrophe there can hide a
+    later `$(date ...)` span, which then fails toward denying. date_spans() is not case-aware: a case pattern
+    `)` inside a `$(date ...)` or enclosing substitution ends that span early, which only shrinks the exempt
+    span (fails toward denying); the write test's case tracking is a lexical command-position rule, not a
+    parse: it does not follow a backtick frame (where `)` never closes anyway), and exotic placements (a `case`
+    after a leading redirection or after an unlisted reserved word such as `coproc`, a pattern word spelled `case`
+    after `;;`, or a keyword produced by an alias or eval) are not emulated; such a construct can end the
+    substitution early and hide a write inside it (a MISS) or leave it unterminated (a false deny). A `((` or
+    `$((` whose text closes with a `)` at its own level that is not followed by `)` (bash then re-reads it as a
+    subshell group or a command substitution holding one, `$((rg -c x <store file>) )`) is not emulated and
+    counts as a write (a false deny; spell it `$( (...) )`); a `((` not in command position is not arithmetic
+    (the body word after `function NAME` is in command position, so `function NAME (( ... ))` is arithmetic),
+    so its `>` counts (bash rejects it as a syntax error anyway). A store write whose future timestamp falls
+    within three words of the shell keyword `until` (for example `until tee <store file> <<< '<future>'; do :;
+    done`) is not caught, because the scheduling-keyword exemption reads it as "until <date>"; this is an exotic
+    form and a disclosed miss. Inside `[[ ... ]]` a `#` is never read as a comment, while bash starts a comment
+    at a `#` that begins a word (after whitespace) there, legal only where bash then accepts a newline (right
+    after the opening `[[`, or after `&&`, `||`, `(`, or `!`); the comment's text is scanned as conditional
+    text, so a `]]` or a quote inside it can move where the conditional or a quoted string ends, which can add a
+    command word (a false deny) or hide a later write (an exotic, disclosed possible miss). A `]]` glued to a
+    grouping `)` closes the conditional in bash (`[[ ( a )]]`), but never here: a conditional closes only at a
+    word-initial `]]`. With no later word-initial `]]` in its frame the conditional is still open when the frame
+    ends (the end of input, a closing backtick, or an unterminated quote), so the command is unparseable and
+    counts as a write, denied only when it also names a store path and holds a future literal (an exotic,
+    disclosed false deny, for example `rg <future> <store file>; [[ ( -n x )]] && echo ok`). With a later
+    word-initial `]]` in the same frame the conditional is read as running on to it, and a write between the
+    two is not caught (exotic; a disclosed miss), for example
+    `[[ ( a )]] && tee <store file> <<< '<future>'; [[ x ]]`. Inside the conditional a `;`, a lone `&`, a lone
+    `|` outside a regex operand (`[[ a =~ | ]]` is legal), and a `]]}` word are bash syntax errors, read here as
+    operand text. A wrong host clock is enforced faithfully.
+
+    Self-test: tools/selftest_aiqt_hooks.py (the fsw-* rows and the fsw-unit-* checks, which carry the former
+    standalone self-test's vectors), with the deadline shape rows of future_stamp_write; fsw-parity compares
+    the code shared with .preview/stamp-truth-stop.py.
+    """
+    try:
+        now = datetime.datetime.now(_FSW_UTC)
+        bad = _fsw_evaluate(data, now)
+    except Exception:
+        return _allow()  # fail OPEN: an input it cannot evaluate, or an internal error, is a silent pass
+    if bad:
+        return _allow_note(_fsw_warn_line(bad, now))
+    return _allow()
 # --- host clock reading (tstamp) ----------------------------------------------------------------------
 # Two context-only bindings, one per post-tool event: clock_inject_post on PostToolUse (after a tool call
 # that ran and succeeded) and clock_inject_failure on PostToolUseFailure (after one that started and
@@ -37883,6 +41765,418 @@ def clock_inject_failure(data):
         "additionalContext": _clock_context("PostToolUseFailure")}}, None)
 
 
+# --- console prefix at the next tool call (console_prefix_pretool) -------------------------------------
+# A project that requires every console message to begin with a fixed prefix (a timestamp, say) can check it
+# at turn end, but text written between tool calls is then caught only once the turn is over. This mode runs
+# at the tool call that follows such text: it reads the bounded tail of the session transcript, walks back
+# from its end to the last tool result (or the prompt that began the turn), and checks each assistant text
+# block in that span against the adopter's pattern. It is inert unless the adopter sets the pattern.
+#
+# OPT-IN REGISTRATION: the plugin's hooks.json does NOT register this mode (its manifest control carries
+# registration = "opt-in"), so an adopter who has not turned it on starts no process for it and pays nothing.
+# An adopter turns it on with two settings in a Claude Code settings file (.claude/settings.json, or
+# .claude/settings.local.json for one person): an env block setting AIQT_CONSOLE_PREFIX_RE, and a PreToolUse
+# hooks entry with matcher ".*" whose command is python3 -I, then the absolute path of this dispatcher in the
+# installed plugin (hooks/scripts/aiqt_hooks.py under the plugin directory), then console_prefix_pretool, with
+# timeout 10. Registered without the pattern it is off and allows silently, but each tool call still starts one
+# python3 process for it.
+#
+# Adopter settings, read from the hook process environment (for example the env block of the Claude Code
+# settings file): AIQT_CONSOLE_PREFIX_RE, a Python regular expression matched at the start of each text block
+# with leading whitespace removed (unset or empty: the mode is off and allows silently; one that matches empty
+# text, or the start of every line of a fixed sample of unrelated text, is refused, since it would pass every
+# block); and AIQT_CONSOLE_PREFIX_POSTURE, "warn" (the default) or "deny". Any other posture value warns, and
+# the note names the value it did not accept. The transcript must lie in the platform transcript directory,
+# projects/ under CLAUDE_CONFIG_DIR when that is set, or under ~/.claude otherwise; a transcript_path anywhere
+# else is not read. That confinement is by path text (a hard link inside the directory is read).
+_CONSOLE_PREFIX_PATTERN_ENV = "AIQT_CONSOLE_PREFIX_RE"
+_CONSOLE_PREFIX_POSTURE_ENV = "AIQT_CONSOLE_PREFIX_POSTURE"
+_CONSOLE_PREFIX_CONFIG_ENV = "CLAUDE_CONFIG_DIR"
+# How the transcript is opened: read only, never blocking on a FIFO or device, never following a symlink in
+# the final path component, and not inherited by a child.
+_CONSOLE_PREFIX_OPEN_FLAGS = (os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+                              | getattr(os, "O_CLOEXEC", 0))
+# The most bytes read from the end of the transcript. A span longer than this is checked as far as the read
+# reaches, and the note says the start of the span was not reached.
+_CONSOLE_PREFIX_TAIL_BYTES = 1048576
+# The longest pattern accepted, and the most characters of a text block the pattern is matched against (it
+# is matched at the start only, so a longer block adds nothing but cost to a pattern that backtracks).
+_CONSOLE_PREFIX_PATTERN_MAX = 512
+_CONSOLE_PREFIX_MATCH_CHARS = 4096
+_CONSOLE_PREFIX_RESIDUAL = ("Text with no following tool call (the end of a turn) is left to a turn-end "
+                            "check.")
+
+
+class _ConsolePrefixUnreadable(Exception):
+    """The transcript tail could not be read as transcript records; its one argument says why."""
+
+
+def _console_prefix_is_off(raw):
+    """True when the adopter has not set a pattern: the mode is off and allows silently, reading nothing."""
+    return not raw
+
+
+def _console_prefix_config(environ):
+    """(pattern or None, posture, problem) from the adopter's environment: pattern None means the mode is
+    off; problem is None, or a sentence naming a setting that could not be used (a pattern that does not
+    compile, is too long or matches empty text, each of which means the check cannot be evaluated and is
+    reported with a note, whatever the posture; or a posture value other than warn or deny, which warns)."""
+    raw = environ.get(_CONSOLE_PREFIX_PATTERN_ENV, "")
+    if _console_prefix_is_off(raw):
+        return None, "warn", None
+    posture_raw = environ.get(_CONSOLE_PREFIX_POSTURE_ENV, "")
+    posture, problem = "warn", None
+    if posture_raw.strip().lower() == "deny":
+        posture = "deny"
+    elif posture_raw.strip().lower() not in ("", "warn"):
+        problem = "{} is {!r}, which is neither warn nor deny, so this check warns".format(
+            _CONSOLE_PREFIX_POSTURE_ENV, posture_raw[:80])
+    if len(raw) > _CONSOLE_PREFIX_PATTERN_MAX:
+        return None, posture, "{} is {} characters long, over the {}-character limit".format(
+            _CONSOLE_PREFIX_PATTERN_ENV, len(raw), _CONSOLE_PREFIX_PATTERN_MAX)
+    try:
+        pattern = re.compile(raw)
+    except (re.error, RecursionError, OverflowError, ValueError) as exc:
+        return None, posture, "{} does not compile ({})".format(_CONSOLE_PREFIX_PATTERN_ENV, _exception_text(exc))
+    if _console_prefix_matches_empty(pattern):
+        return None, posture, ("{} matches empty text, so it would pass every block; the check cannot be "
+                               "evaluated with it".format(_CONSOLE_PREFIX_PATTERN_ENV))
+    if _console_prefix_matches_arbitrary(pattern):
+        return None, posture, ("{} matches every one of {} unrelated sample lines, so it would pass any "
+                               "non-blank block; the check cannot be evaluated with it".format(
+                                   _CONSOLE_PREFIX_PATTERN_ENV, len(_CONSOLE_PREFIX_ARBITRARY_SAMPLES)))
+    return pattern, posture, problem
+
+
+def _console_prefix_matches_empty(pattern):
+    """True when the pattern matches at the start of empty text, so any block, stamped or not, would pass."""
+    return pattern.match("") is not None
+
+
+# Sample lines with no prefix, each starting with a different kind of character (lower and upper case
+# letters, a digit, an underscore, punctuation and markup, a non-ASCII letter, a CJK character and an emoji),
+# each at least two characters long. A pattern that matches the start of every one of them, such as ".",
+# "\S", "(?=.)" or "..", would pass any non-blank block, so it is refused like a pattern that matches empty
+# text. This is a sample, not a proof: Python patterns (lookarounds, backreferences) cannot be decided in
+# general, so a pattern that passes a whole class of text without matching every sample (for example "\b" or
+# "\w", which pass every block that starts with a word character) is still accepted.
+_CONSOLE_PREFIX_ARBITRARY_SAMPLES = (
+    "working on it", "Done.", "0 files changed", "_x", "!x", "[x", "(x", "#x", "-x", "*x", "`x", "\"x",
+    "'x", ">x", "|x", "/x", "~x", "été", "中文", "\U0001f600x")
+
+
+def _console_prefix_matches_arbitrary(pattern):
+    """True when the pattern matches the start of every sample line in _CONSOLE_PREFIX_ARBITRARY_SAMPLES, so
+    it would pass any non-blank block, stamped or not."""
+    return all(pattern.match(sample) is not None for sample in _CONSOLE_PREFIX_ARBITRARY_SAMPLES)
+
+
+def _console_prefix_read_tail(path, limit):
+    """(data, truncated): at most `limit` bytes from the end of the regular file at `path`, and whether the
+    read started after the first byte. Opened without following a final symlink and without blocking, so a
+    FIFO or device cannot hold the hook; anything but a regular file raises _ConsolePrefixUnreadable, and an
+    open or read failure raises OSError. The descriptor is closed exactly once on every path."""
+    fd = os.open(path, _CONSOLE_PREFIX_OPEN_FLAGS)
+    try:
+        info = os.fstat(fd)
+        if not _console_prefix_is_regular(info.st_mode):
+            raise _ConsolePrefixUnreadable("the transcript path is not a regular file")
+        start = max(0, info.st_size - limit)
+        os.lseek(fd, start, os.SEEK_SET)
+        chunks = []
+        left = limit
+        while left > 0:
+            chunk = os.read(fd, min(left, 65536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+        return b"".join(chunks), start > 0
+    finally:
+        os.close(fd)
+
+
+def _console_prefix_is_regular(mode):
+    """True for a regular file's st_mode: a FIFO, device or directory is never read as a transcript."""
+    return stat.S_ISREG(mode)
+
+
+def _console_prefix_lines(data, truncated):
+    """(lines, unfinished): the complete lines of the tail read, oldest first, and whether an unfinished last
+    line was set aside. When the read started inside the file its first line may be a fragment of a longer
+    record, so it is dropped. A last line with no newline after it that does not parse as JSON is a record
+    still being written: it is set aside, so the complete records before it are judged, and the caller's note
+    says it was not checked. A last line with no newline that does parse is a complete record and is kept."""
+    lines = data.split(b"\n")
+    if truncated:
+        lines = lines[1:]
+    unfinished = False
+    if lines and lines[-1].strip() and not data.endswith(b"\n"):
+        try:
+            json.loads(lines[-1])
+        except (ValueError, RecursionError):
+            lines = lines[:-1]
+            unfinished = True
+    return [line for line in lines if line.strip()], unfinished
+
+
+def _console_prefix_record(line):
+    """One transcript line parsed to a JSON object; _ConsolePrefixUnreadable on anything else."""
+    try:
+        record = json.loads(line)
+    except (ValueError, RecursionError) as exc:
+        raise _ConsolePrefixUnreadable("a transcript line is not JSON ({})".format(_exception_text(exc)))
+    if not isinstance(record, dict):
+        raise _ConsolePrefixUnreadable("a transcript line is {}, not a JSON object".format(_orch_json_kind(record)))
+    return record
+
+
+def _console_prefix_content(record):
+    """The message content of a user or assistant record: a list of blocks, or a string."""
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, (list, str)):
+        raise _ConsolePrefixUnreadable("a {} record carries no message content list or string".format(
+            record.get("type")))
+    return content
+
+
+def _console_prefix_is_boundary(record):
+    """True for a record that ends the span walking back: any user record that is not passed over first,
+    which is either a tool result or a prompt (a human prompt begins the turn, so text before it belongs to
+    an earlier turn)."""
+    return record.get("type") == "user"
+
+
+def _console_prefix_is_meta(record):
+    """True for a record the platform marks isMeta (injected context such as a command's output or a task
+    notification, not a prompt, a tool result or the model's own text): it neither ends the span nor counts,
+    the convention of the governance pack's turn-end reader (.preview/stamp-truth-stop.py)."""
+    return record.get("isMeta") is True
+
+
+def _console_prefix_is_api_error(record):
+    """True for a synthetic assistant record the platform writes for a failed API call (isApiErrorMessage,
+    "API Error: ..."): the model did not write it, so its text is not held to the prefix."""
+    return record.get("isApiErrorMessage") is True
+
+
+def _console_prefix_is_subagent_record(record):
+    """True for a sidechain (subagent) record. When the newest user or assistant record of the transcript is
+    one, the tool call being checked is a subagent's: the main agent's text is not the subagent's to fix, and
+    a subagent's text is returned to the main agent rather than shown in the console, so the call is not
+    checked."""
+    return record.get("isSidechain") is True
+
+
+def _console_prefix_boundary_checked(record):
+    """A boundary record must still carry readable content, so a record in another layout is noted as
+    unreadable rather than taken as the end of the span."""
+    _console_prefix_content(record)
+
+
+def _console_prefix_is_blank(text):
+    """True for a text block holding only whitespace: it carries no message, so it is not held to the
+    prefix."""
+    return not text.strip()
+
+
+def _console_prefix_span(lines):
+    """(texts, reached): the assistant text blocks written after the last boundary record, oldest first, and
+    whether the walk reached a boundary. When the newest user or assistant record is a sidechain record the
+    call is a subagent's: the walk stops there with no texts (nothing is checked). Records of other types,
+    sidechain and isMeta records, and API error records are passed over; a line that is not a JSON object, or
+    a user or assistant record with no readable content, raises _ConsolePrefixUnreadable."""
+    texts = []
+    newest = True
+    for line in reversed(lines):
+        record = _console_prefix_record(line)
+        if newest and record.get("type") in ("user", "assistant"):
+            newest = False
+            if _console_prefix_is_subagent_record(record):
+                return [], True
+        if record.get("isSidechain") is True or _console_prefix_is_meta(record):
+            continue
+        if _console_prefix_is_boundary(record):
+            _console_prefix_boundary_checked(record)
+            texts.reverse()
+            return texts, True
+        if record.get("type") != "assistant" or _console_prefix_is_api_error(record):
+            continue
+        content = _console_prefix_content(record)
+        blocks = [content] if isinstance(content, str) else [
+            block.get("text") for block in reversed(content)
+            if isinstance(block, dict) and block.get("type") == "text"]
+        for text in blocks:
+            _console_prefix_text_string(text)
+            if not _console_prefix_is_blank(text):
+                texts.append(text)
+    texts.reverse()
+    return texts, False
+
+
+def _console_prefix_text_string(text):
+    """_ConsolePrefixUnreadable unless an assistant text block's text is a string."""
+    if not isinstance(text, str):
+        raise _ConsolePrefixUnreadable("an assistant text block carries no text string")
+
+
+def _console_prefix_is_absolute(path):
+    """True when the payload's transcript_path is absolute, so it never resolves against the hook's cwd."""
+    return os.path.isabs(path)
+
+
+def _console_prefix_transcript_root(environ):
+    """The platform transcript directory, resolved: projects/ under CLAUDE_CONFIG_DIR when that is a non-empty
+    absolute path, else under ~/.claude. _ConsolePrefixUnreadable when neither can be established."""
+    base = environ.get(_CONSOLE_PREFIX_CONFIG_ENV, "")
+    if not (base and os.path.isabs(base) and "\x00" not in base):
+        home = os.path.expanduser("~")
+        if not os.path.isabs(home) or "\x00" in home:
+            raise _ConsolePrefixUnreadable("the platform transcript directory cannot be established (no "
+                                           "absolute {} or home directory)".format(_CONSOLE_PREFIX_CONFIG_ENV))
+        base = os.path.join(home, ".claude")
+    return _console_prefix_real_root(os.path.join(base, "projects"))
+
+
+def _console_prefix_real_root(path):
+    """The transcript directory with every symlink in it resolved, so a symlinked ~/.claude or
+    CLAUDE_CONFIG_DIR is compared in the same resolved form as the transcript's own directory."""
+    return os.path.realpath(path)
+
+
+def _console_prefix_names_file(name):
+    """True when the final component of transcript_path can name a file (not empty, '.' or '..')."""
+    return name not in ("", ".", "..")
+
+
+def _console_prefix_inside(root, candidate):
+    """True when candidate lies below root, compared by whole path components (a sibling such as
+    projects-evil/ is outside), and is not root itself."""
+    return os.path.commonpath([root, candidate]) == root and candidate != root
+
+
+def _console_prefix_confined(path, environ):
+    """The transcript path to open: its directory resolved (every symlink and '..' in it), joined to its final
+    component, which must lie inside the platform transcript directory; _ConsolePrefixUnreadable otherwise. The
+    final component is left unresolved, so the O_NOFOLLOW open still refuses a symlink there. RESIDUAL: the
+    confinement is by path text, resolved once before the open. A hard link inside the directory to a file
+    outside it is read, and a directory on the path swapped for a symlink between the resolution and the open
+    is followed (O_NOFOLLOW covers only the final component); both need write access to the user's transcript
+    directory."""
+    root = _console_prefix_transcript_root(environ)
+    head, name = os.path.split(path)
+    if not _console_prefix_names_file(name):
+        raise _ConsolePrefixUnreadable("the payload's transcript_path does not name a file")
+    candidate = os.path.join(os.path.realpath(head), name)
+    if not _console_prefix_inside(root, candidate):
+        raise _ConsolePrefixUnreadable("the payload's transcript_path lies outside the platform transcript "
+                                       "directory, so it was not read")
+    return candidate
+
+
+def _console_prefix_matches(pattern, text):
+    """True when the text block, leading whitespace removed, starts with the pattern."""
+    return pattern.match(text.lstrip()[:_CONSOLE_PREFIX_MATCH_CHARS]) is not None
+
+
+def _console_prefix_checked(texts):
+    """The text blocks the pattern is held to: every one in the span."""
+    return texts
+
+
+def console_prefix_pretool(data):
+    """tstamp, PreToolUse on every tool (matcher .*). NOTE-ONLY by default and OFF unless the adopter sets
+    AIQT_CONSOLE_PREFIX_RE: at each tool call it reads at most _CONSOLE_PREFIX_TAIL_BYTES from the end of the
+    payload's transcript_path, walks back to the last user record (a tool result, or the prompt that began
+    the turn), and checks that each non-blank assistant text block written since starts with the pattern.
+    An unprefixed block allows with a note naming how many blocks missed it and where the first one sits in
+    the span (never its text), or, where the adopter set AIQT_CONSOLE_PREFIX_POSTURE=deny, denies the tool call
+    with the same reason. OPT-IN REGISTRATION: the plugin's hooks.json does not register this mode; the adopter
+    registers it (see the comment above _CONSOLE_PREFIX_PATTERN_ENV), so it costs nothing until then.
+
+    The off switch is read first: with no pattern set it allows silently, whatever the payload, and reads
+    nothing. It never blocks on its own failure: a transcript_path that is missing, empty, not a string,
+    relative or outside the platform transcript directory, a transcript that cannot be opened, is a symlink
+    or is not a regular file, a tail holding no complete record, a line that is not a JSON object (except an
+    unfinished last line, which is set aside with a note so the complete records before it are judged), a
+    record with no readable content, and a pattern that does not compile, is too long, matches empty text or
+    matches every sample line of _CONSOLE_PREFIX_ARBITRARY_SAMPLES (".", "\\S" and "(?=.)" among them)
+    each allow with a note saying the check did not run or could not be evaluated, under either posture;
+    main() turns every error path and the deadline into a warning on exit 0 (NOTE_ONLY_PRETOOL_MODES). With
+    the pattern set, a payload naming another event hard-blocks, the sibling convention for a miswired hook.
+    The adopter's deny is the one other blocking result, a deliberate decision on a span it read in full or
+    in part.
+
+    HONEST RESIDUAL: text with no following tool call (the end of a turn) is never seen here and is left to
+    a turn-end check. Whether the platform has already written the current assistant message's text to the
+    transcript when PreToolUse fires is the platform's behaviour, not checked here. Text it has not yet
+    written is seen only if a later tool call of the same assistant message runs this check before any tool
+    result is written; once a tool result follows that text, the text lies before the boundary and is never
+    checked. The transcript format (JSON lines whose user and assistant records carry message.content) is
+    read as Claude Code writes it; another layout reads as unreadable and notes. Only text blocks count: text
+    inside a tool input, a thinking block, a sidechain record, an isMeta record and a synthetic API error
+    record (isApiErrorMessage) are not checked, and an isMeta user record does not end the span. When the
+    newest user or assistant record is a sidechain record the call is taken as a subagent's and allowed
+    silently, unchecked; which transcript_path the platform gives a subagent's hook, and whether its records
+    sit in the main transcript, is not verified here. The pattern refusal for text-agnostic patterns is a
+    sample check, so a pattern that passes a whole class of text ("\\b", "\\w") is still accepted. The read
+    is confined to the transcript directory by path text (see _console_prefix_confined): a hard link there to
+    an outside file is read. A span longer than the read window is checked as far as the window reaches, and
+    the note says so. The pattern runs on at most _CONSOLE_PREFIX_MATCH_CHARS characters of each block; a
+    pattern slow enough to pass the deadline ends in main()'s warning, never a block."""
+    pattern, posture, problem = _console_prefix_config(os.environ)
+    if pattern is None and problem is None:
+        return _allow()  # the adopter has not turned the check on: nothing is read and nothing blocks
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: console_prefix_pretool wired to unexpected event {!r}; failing "
+                           "closed".format(data.get("hook_event_name")))
+    if pattern is None:
+        return _allow_note("AIQT rule tstamp: the console prefix check did not run (cannot evaluate): {}."
+                           .format(problem))
+    path = data.get("transcript_path")
+    try:
+        if not isinstance(path, str) or not path or "\x00" in path or not _console_prefix_is_absolute(path):
+            raise _ConsolePrefixUnreadable("the payload's transcript_path is {}".format(
+                "missing" if "transcript_path" not in data else
+                "not an absolute path" if isinstance(path, str) and path and "\x00" not in path else
+                "empty" if path == "" else "not a usable string ({})".format(_orch_json_kind(path))))
+        path = _console_prefix_confined(path, os.environ)
+        tail, truncated = _console_prefix_read_tail(path, _CONSOLE_PREFIX_TAIL_BYTES)
+        lines, unfinished = _console_prefix_lines(tail, truncated)
+        if not lines and truncated:
+            raise _ConsolePrefixUnreadable("the last {} bytes of the transcript hold no complete record".format(
+                _CONSOLE_PREFIX_TAIL_BYTES))
+        texts, reached = _console_prefix_span(lines)
+    except (_ConsolePrefixUnreadable, OSError, MemoryError) as exc:
+        detail = exc.args[0] if isinstance(exc, _ConsolePrefixUnreadable) else _exception_text(exc)
+        return _allow_note("AIQT rule tstamp: the console prefix check did not run ({}); allowing the call. "
+                           "{}".format(detail, _CONSOLE_PREFIX_RESIDUAL))
+    checked = _console_prefix_checked(texts)
+    missed = [index for index, text in enumerate(checked, 1) if not _console_prefix_matches(pattern, text)]
+    partial = "" if reached or not truncated else (
+        " The start of the span lies before the last {} bytes of the transcript, so earlier text in it was "
+        "not checked.".format(_CONSOLE_PREFIX_TAIL_BYTES))
+    if unfinished:
+        partial += " The last transcript line was still being written and was not checked."
+    setting = "" if problem is None else " ({})".format(problem)
+    if not missed:
+        if partial:
+            return _allow_note("AIQT rule tstamp: console prefix check:{}{}".format(partial, setting))
+        if problem is not None:
+            return _allow_note("AIQT rule tstamp: console prefix check passed{}.".format(setting))
+        return _allow()
+    reason = ("AIQT rule tstamp: {} of {} assistant text block(s) written since the last tool result do not "
+              "start with the required console prefix (the {} pattern); the first is block {} of the span. "
+              "Start every console message with the prefix.{} {}".format(
+                  len(missed), len(checked), _CONSOLE_PREFIX_PATTERN_ENV, missed[0], partial,
+                  _CONSOLE_PREFIX_RESIDUAL))
+    if posture == "deny":
+        return _deny(reason, "AIQT guardrail: denied a tool call that followed console text without its "
+                             "required prefix (rule tstamp).")
+    return _allow_note(reason + setting)
+
+
 # --- dispatcher ---------------------------------------------------------------------------------------
 HANDLERS = {
     "diff_wall_stop": diff_wall_stop,
@@ -37916,8 +42210,10 @@ HANDLERS = {
     "orch_resume_barrier": orch_resume_barrier,
     "orch_lease_heartbeat_post": orch_lease_heartbeat_post,
     "orch_lease_heartbeat_stop": orch_lease_heartbeat_stop,
+    "future_stamp_write": future_stamp_write,
     "clock_inject_post": clock_inject_post,
     "clock_inject_failure": clock_inject_failure,
+    "console_prefix_pretool": console_prefix_pretool,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -37961,8 +42257,10 @@ HANDLER_EVENT = {
     "orch_resume_barrier": PRETOOL,
     "orch_lease_heartbeat_post": "PostToolUse",
     "orch_lease_heartbeat_stop": "Stop",
+    "future_stamp_write": PRETOOL_WARN_ONLY,
     "clock_inject_post": "PostToolUse",
     "clock_inject_failure": "PostToolUseFailure",
+    "console_prefix_pretool": PRETOOL,
 }
 
 
@@ -38389,9 +42687,10 @@ def _pending_alarm_message(handler_name, seconds):
 
 def _dispatcher_fail_open_warn(handler_name, detail):
     """A fail-open dispatcher-level error for a Stop/SubagentStop/SessionStart/TeammateIdle/
-    UserPromptSubmit/PostToolUse/PostToolUseFailure handler or a NOTE_ONLY_PRETOOL_MODES handler: a
-    non-blocking systemMessage on exit 0, so no error on these paths can wedge a session, trap a
-    teammate, block a human prompt, or turn a note-only check into a block. It prints and flushes
+    UserPromptSubmit/PostToolUse/PostToolUseFailure handler, a warn-only PreToolUse one (HANDLER_EVENT class
+    PRETOOL_WARN_ONLY) or a NOTE_ONLY_PRETOOL_MODES handler: a non-blocking systemMessage on exit 0, so no
+    error on these paths can wedge a session, trap a teammate, block a human prompt, block a warn-only tool
+    call, or turn a note-only check into a block. It prints and flushes
     the note and returns the exit code 0, so main returns it directly (a note constructor's call is
     only ever the direct value of a return). The flush keeps the note out of the buffer os._exit at the
     entry line would discard. A print or flush failure RAISES out of this leaf (the note-shape scan
@@ -38482,8 +42781,10 @@ def main(argv):
     # a Stop/SubagentStop handler: a hard exit-2 Stop path could re-fire on the forced continuation and
     # wedge the session (an error path keeps no loop bound and never consults the stop_hook_active
     # field of the payload), so a bad-argv Stop invocation WARNS on exit 0 like every other Stop error
-    # path. A bad-argv PreToolUse handler still fails closed (exit 2), except a note-only one
-    # (NOTE_ONLY_PRETOOL_MODES), which never blocks a call and so takes the fail-open posture throughout.
+    # path. A bad-argv PreToolUse handler still fails closed (exit 2), save a warn-only one (HANDLER_EVENT
+    # class PRETOOL_WARN_ONLY, one of FAIL_OPEN_EVENTS), which never blocks a call, or a note-only one
+    # (NOTE_ONLY_PRETOOL_MODES), which never blocks a call on its own failure; each takes the fail-open
+    # posture throughout.
     mode = argv[0] if argv else None
     if mode not in HANDLERS:
         _stderr_note("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))))
@@ -38492,10 +42793,11 @@ def main(argv):
     is_note_only = handler_name in NOTE_ONLY_PRETOOL_MODES
     is_fail_open = HANDLER_EVENT[handler_name] in FAIL_OPEN_EVENTS or is_note_only
     # Child exit status: with SIGCHLD ignored, a handler's failed git or other child would read as a
-    # success. A PreToolUse mode refuses (exit 2, its fail-closed posture), except a note-only one, which
-    # never blocks and so takes the fail-open branch. A fail-open mode must not exit 2 and must still run
-    # its handler (a stop guard's deliberate deny included), so it restores SIG_DFL for this one
-    # short-lived hook process, re-probes, and notes the restore; SIG_DFL is SIGCHLD's normal disposition,
+    # success. A PreToolUse mode refuses (exit 2, its fail-closed posture), except a warn-only one (classed
+    # PRETOOL_WARN_ONLY) or a note-only one, which never blocks and so takes the fail-open branch. A
+    # fail-open mode must not exit 2 and must still run its handler (a stop guard's deliberate deny
+    # included), so it restores SIG_DFL for this one short-lived hook process, re-probes, and notes the
+    # restore; SIG_DFL is SIGCHLD's normal disposition,
     # signal.signal also clears SA_NOCLDWAIT, and every spawn the fail-open handlers reach waits for its
     # child. If the re-probe still fails, it warns without running the handler.
     unobservable = _child_status_refusal()
@@ -38516,8 +42818,9 @@ def main(argv):
     if len(argv) != 1:
         detail = "expected exactly one mode argument, got {}".format(len(argv))
         if is_fail_open:
-            # A Stop handler's ERROR path never exits 2 (a deliberate deny does, via the orchestration
-            # stop guard), not even on a malformed invocation: WARN and exit 0. The warn print raising
+            # A fail-open handler's ERROR path (a Stop one's, or a warn-only PreToolUse one's) never exits 2
+            # (a deliberate deny does, via the orchestration stop guard), not even on a malformed
+            # invocation: WARN and exit 0. The warn print raising
             # (a stdout that cannot be written or flushed) loses the warning and keeps the 0.
             try:
                 return _dispatcher_fail_open_warn(handler_name, "bad invocation: {}".format(detail))
@@ -38550,15 +42853,16 @@ def main(argv):
                 # is named.
                 detail = _exception_text(exc)
                 if is_fail_open:
-                    # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so
-                    # no Stop payload (including a bare '{' or any garbage) can ever wedge the session. The
-                    # warn print raising (a stdout that cannot be written or flushed) loses the warning and
-                    # keeps the 0.
+                    # A fail-open handler's ERROR path never exits 2: surface a non-blocking warning and exit
+                    # 0, so no Stop payload (including a bare '{' or any garbage) can ever wedge the session
+                    # and no warn-only PreToolUse payload can block the call. The warn print raising (a
+                    # stdout that cannot be written or flushed) loses the warning and keeps the 0.
                     try:
                         return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(detail))
                     except BaseException:
                         return 0
-                # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
+                # A fail-closed PreToolUse hook that cannot read its payload cannot clear the action, so it
+                # fails CLOSED.
                 # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
                 _stderr_note("aiqt_hooks: unreadable hook payload ({}); failing closed".format(detail))
                 return 2
@@ -38574,15 +42878,16 @@ def main(argv):
                                     "stderr text")
             except Exception as exc:  # a handler crash is an unreadable result
                 if is_fail_open:
-                    # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws
-                    # on a pathological message): WARN and exit 0, never exit 2. The warn print raising (a
+                    # Same event-aware posture for a crash inside a fail-open handler (e.g. a Stop detector
+                    # that throws on a pathological message, or a warn-only PreToolUse check): WARN and exit
+                    # 0, never exit 2. The warn print raising (a
                     # stdout that cannot be written or flushed) loses the warning and keeps the 0.
                     try:
                         return _dispatcher_fail_open_warn(
                             handler_name, "handler crash: {}".format(_exception_text(exc)))
                     except BaseException:
                         return 0
-                # A PreToolUse handler crash fails closed (block), not pass.
+                # A fail-closed PreToolUse handler crash fails closed (block), not pass.
                 _stderr_note("aiqt_hooks: handler {} failed ({}); failing closed".format(
                     handler_name, _exception_text(exc)))
                 return 2
@@ -38590,8 +42895,8 @@ def main(argv):
         if exc.args[:1] != (window,):
             raise  # an enclosing window's deadline (an in-process caller's), not this call's
         if is_fail_open:
-            # Only a note-only PreToolUse mode is fail-open with a deadline: its check never blocks a call,
-            # so neither does its deadline. The warn print raising loses the warning and keeps the 0.
+            # Only a note-only PreToolUse mode is fail-open with a deadline: its check never blocks a call on
+            # its own failure, so neither does its deadline. The warn print raising loses the warning and keeps the 0.
             try:
                 return _dispatcher_fail_open_warn(handler_name, "no decision within its deadline")
             except BaseException:
