@@ -71,8 +71,9 @@ does not resolve to a readable commit (its object is missing, or it names a blob
 failure. The leg compares the base and HEAD endpoints only: a row
 changed in one commit of a range and restored by a later one is not seen. The leg reads each pin at the base (git
 ls-tree and cat-file, with replacement objects off, every GIT_ variable dropped but the config-isolation
-pins, and HOME and XDG_CONFIG_HOME set to os.devnull, under which no file exists, so no global or XDG git
-config is read) and compares the parsed tables, not the text, so a comment edit or a reordering is ignored. A pin whose
+pins, GIT_CONFIG_NOSYSTEM=1, so no system git config such as /etc/gitconfig is read, and HOME and
+XDG_CONFIG_HOME set to os.devnull, under which no file exists, so no global or XDG git config is read
+either) and compares the parsed tables, not the text, so a comment edit or a reordering is ignored. A pin whose
 version differs from its base version has moved, so its rows may change (a NOTE says the hand comparison
 against the published SHA256SUMS is due). Under an unchanged version, every row in both tables, keyed by its
 path within the copy root or its build-tool path, must keep its base digest; a changed digest is a finding
@@ -81,7 +82,8 @@ path by path, with each registered pin present at the base under the same versio
 registered pin at all (as after a change that renames every pin path) leaves nothing to compare against and is
 cannot-evaluate. The pin records no
 archive digest, so the version is the only pin key: a change that also moves the version passes. A REF that
-is empty, starts with "-" or holds ":", whitespace or a control character, a --base REF that does not resolve
+is empty, longer than MAX_BASE_REF (256) characters, starts with "-" or holds ":", whitespace or a control
+character, a --base REF that does not resolve
 to a commit, resolves with a git diagnostic or is not an ancestor of HEAD, a --local-base REF that is a short name, that the clone lacks or that
 git reports broken or dangling, a --local-base
 REF that exists but does not resolve to a readable commit, a --local-base merge-base that cannot be resolved, a base pin that is not a regular file, and a base
@@ -110,8 +112,8 @@ the clone genuinely lacks REF: the name read is a clean miss (exit 1, no output,
 for-each-ref lists every ref cleanly without it, and the ref store is shown readable and well formed (git reads
 some broken stores, such as a packed-refs that is a directory, as a clean miss). For that, git must report the
 files ref store (a reftable store, or a git that reports neither, is refused); in the common git directory,
-packed-refs must be absent or a regular, readable file of well-formed lines (an optional "# pack-refs with:"
-header first, then "<object id> <ref name>" lines, each optionally followed by a "^<object id>" peel line, every
+packed-refs must be absent or a regular, readable file of at most MAX_PACKED_REFS_BYTES (64 MiB; a larger one
+is refused, never read whole) of well-formed lines (an optional "# pack-refs with:" header first, then "<object id> <ref name>" lines, each optionally followed by a "^<object id>" peel line, every
 line ending in LF); refs must be a readable directory, not a symbolic link; each directory on REF's loose path
 that exists must be a readable directory, not a symbolic link; and REF's loose path itself must be absent or a
 readable directory, not a symbolic link (a ref namespace such as refs/remotes/origin/main/ holding
@@ -192,6 +194,8 @@ PER_WORKTREE_PREFIXES = ("refs/bisect/", "refs/worktree/", "refs/rewritten/")
 PACKED_HEADER = b"# pack-refs with:"
 PACKED_REF_RE = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64}) [\x21-\x7e\x80-\xff]+")
 PACKED_PEEL_RE = re.compile(rb"\^(?:[0-9a-f]{40}|[0-9a-f]{64})")
+# The most of packed-refs read (_packed_refs_problem); a larger file is refused, never read whole.
+MAX_PACKED_REFS_BYTES = 1 << 26
 
 
 class CannotEvaluate(Exception):
@@ -510,15 +514,16 @@ def _check_tool(root, rel, digest, findings, errors):
 def _git_env():
     """The process environment with every GIT_-prefixed variable dropped and only the config-isolation pins
     re-applied at the exact values the fixture scrub sets (the rule of git_authority_env() in
-    tools/check_mistakes_register.py), so no inherited variable can point a base read at another repository. HOME
-    and XDG_CONFIG_HOME are set to os.devnull, under which no file exists (git reads a config path that is not
+    tools/check_mistakes_register.py), so no inherited variable can point a base read at another repository.
+    GIT_CONFIG_NOSYSTEM is set to 1 whatever the caller inherits, so no system git config (such as /etc/gitconfig,
+    where core.warnAmbiguousRefs=false would silence the ambiguous-name diagnostic the --base read refuses) is read.
+    HOME and XDG_CONFIG_HOME are set to os.devnull, under which no file exists (git reads a config path that is not
     there as empty), so no global (~/.gitconfig) or XDG ($XDG_CONFIG_HOME/git/config) git config is read either; a
     checkout git trusts only through a safe.directory entry there is cannot-evaluate."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["HOME"] = os.devnull
     env["XDG_CONFIG_HOME"] = os.devnull
-    if os.environ.get("GIT_CONFIG_NOSYSTEM") == "1":
-        env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
     for pin in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
         if os.environ.get(pin) == os.devnull:
             env[pin] = os.devnull
@@ -614,8 +619,10 @@ def _git_line(root, args):
 
 
 def _packed_refs_problem(path):
-    """None when packed-refs at path is absent or a regular, readable file of well-formed lines; otherwise why not.
-    git reads a packed-refs it cannot open (a directory, an unreadable file) as holding no ref, silently."""
+    """None when packed-refs at path is absent or a regular, readable file of at most MAX_PACKED_REFS_BYTES of
+    well-formed lines; otherwise why not (a larger file is refused after reading at most MAX_PACKED_REFS_BYTES + 1
+    bytes, never read whole). git reads a packed-refs it cannot open (a directory, an unreadable file) as holding no
+    ref, silently."""
     try:
         info = os.lstat(path)
     except FileNotFoundError:
@@ -628,9 +635,11 @@ def _packed_refs_problem(path):
         with open(path, "rb") as handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 return "{} is not a regular file".format(path)
-            data = handle.read()
+            data = handle.read(MAX_PACKED_REFS_BYTES + 1)
     except OSError as exc:
         return "{} is unreadable ({})".format(path, exc)
+    if len(data) > MAX_PACKED_REFS_BYTES:
+        return "{} is larger than {} bytes".format(path, MAX_PACKED_REFS_BYTES)
     if data and not data.endswith(b"\n"):
         return "{} does not end in a line feed".format(path)
     after_ref = False
@@ -786,12 +795,10 @@ def probe_local_base(root, ref):
 
 def _base_pin(root, commit, pin_rel):
     """The pin at pin_rel as committed at commit, parsed, or None when that commit holds no such path;
-    CannotEvaluate when the entry is not a regular file, or is unreadable, oversized or malformed."""
-    try:
-        proc = subprocess.run(["git", "--no-replace-objects", "-C", str(root), "ls-tree", "-l", "-z", commit,
-                               "--", pin_rel], capture_output=True, env=_git_env(), timeout=GIT_TIMEOUT, check=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise CannotEvaluate("base: git ls-tree {} -- {} could not run ({})".format(commit, pin_rel, exc)) from None
+    CannotEvaluate when the entry is not a regular file, or is unreadable, oversized or malformed. Both git reads
+    go through _git_base_read, so the ls-tree entry shape and size-field guards are reachable by a stand-in; an
+    entry whose size field is over MAX_PIN_BYTES is refused before cat-file reads the blob."""
+    proc = _git_base_read(root, ["ls-tree", "-l", "-z", commit, "--", pin_rel])
     listing = _git_stdout(proc, "git ls-tree {} -- {}".format(commit, pin_rel))
     entries = [entry for entry in listing.split(b"\0") if entry]
     if not entries:
@@ -807,11 +814,10 @@ def _base_pin(root, commit, pin_rel):
     if not size.isdigit() or int(size) > MAX_PIN_BYTES:
         raise CannotEvaluate("{}: larger than {} bytes".format(where, MAX_PIN_BYTES))
     try:
-        proc = subprocess.run(["git", "--no-replace-objects", "-C", str(root), "cat-file", "blob",
-                               oid.decode("ascii")],
-                              capture_output=True, env=_git_env(), timeout=GIT_TIMEOUT, check=False)
-    except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
+        oid_text = oid.decode("ascii")
+    except UnicodeDecodeError as exc:
         raise CannotEvaluate("{}: git cat-file could not run ({})".format(where, exc)) from None
+    proc = _git_base_read(root, ["cat-file", "blob", oid_text])
     return parse_pin(_git_stdout(proc, "git cat-file blob for " + where), where)
 
 
@@ -1459,9 +1465,98 @@ def _coupling_cases():
           in report and "not a regular file (mode 120000)" in report and "PASS" not in report, (got, report))
     check("couple/base-pin-symlink-cannot-evaluate-flip", reverted == 0, (reverted, reverted_report))
 
-    # The git ls-tree entry shape and size-field guards in _base_pin have no row: real git does not print such a
-    # listing, and _base_pin launches git directly, so a stand-in would need an alias of subprocess.run, which
-    # tools/check_dangerous_api.py refuses.
+    # The git ls-tree entry shape and size-field guards in _base_pin, which real git does not reach with an exact
+    # pathspec: the base pin's ls-tree read is replaced by a stand-in listing built from the real one (2 entries,
+    # another name, no tab, 3 or 5 fields, a size field over MAX_PIN_BYTES or not a number), and every other read is
+    # real. HEAD changes a row under an unchanged version, so a guard that let the listing through would read the
+    # real base pin and report that row, never the refusal. Each misshapen listing is cannot-evaluate as unexpected
+    # git ls-tree output; each bad size field is cannot-evaluate as oversized before cat-file runs; the control
+    # (the real listing with its size field set to exactly MAX_PIN_BYTES) reads the blob and reports the row.
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+        _fixture(tmp)
+        _commit_all(tmp, "base", init=True)
+        _fixture(tmp, changed, _pin_text(changed))
+        _commit_all(tmp, "head")
+        real = original_read(tmp, ["ls-tree", "-l", "-z", "base", "--", PIN_REL]).stdout
+        fields, _tab, name = real[:-1].partition(b"\t")
+        mode, kind, oid, _size = fields.split()
+        three = b" ".join((mode, kind, oid))
+        entry = three + b" {}\t" + name + b"\0"
+        for row, listing, want in (
+                ("couple/base-ls-tree-two-entries-cannot-evaluate", real + real, "unexpected git ls-tree output"),
+                ("couple/base-ls-tree-other-name-cannot-evaluate", fields + b"\t.baseline/other-pin.toml\0",
+                 "unexpected git ls-tree output"),
+                ("couple/base-ls-tree-no-tab-cannot-evaluate", fields + b" " + name + b"\0",
+                 "unexpected git ls-tree output"),
+                ("couple/base-ls-tree-three-fields-cannot-evaluate", three + b"\t" + name + b"\0",
+                 "unexpected git ls-tree output"),
+                ("couple/base-ls-tree-five-fields-cannot-evaluate", fields + b" 1\t" + name + b"\0",
+                 "unexpected git ls-tree output"),
+                ("couple/base-ls-tree-size-over-bound-cannot-evaluate",
+                 entry.replace(b"{}", str(MAX_PIN_BYTES + 1).encode("ascii")),
+                 "larger than {} bytes".format(MAX_PIN_BYTES)),
+                ("couple/base-ls-tree-size-not-a-number-cannot-evaluate", entry.replace(b"{}", b"-"),
+                 "larger than {} bytes".format(MAX_PIN_BYTES)),
+                ("couple/base-ls-tree-size-at-bound-reads-blob",
+                 entry.replace(b"{}", str(MAX_PIN_BYTES).encode("ascii")), None)):
+            blob_reads = []
+
+            def _listing(root, args, _listing_bytes=listing, _blob_reads=blob_reads):
+                if args[:3] == ["ls-tree", "-l", "-z"]:
+                    return subprocess.CompletedProcess(args, 0, _listing_bytes, b"")
+                if args[:2] == ["cat-file", "blob"]:
+                    _blob_reads.append(args[2])
+                return original_read(root, args)
+
+            globals()["_git_base_read"] = _listing
+            try:
+                leg = coupling_findings(tmp, "base", FIXTURE_PINS)
+            except CannotEvaluate as exc:
+                leg = str(exc)
+            except Exception as exc:
+                leg = "unexpected {}: {}".format(type(exc).__name__, exc)
+            finally:
+                globals()["_git_base_read"] = original_read
+            if want is None:
+                ok = (isinstance(leg, tuple) and len(leg[0]) == 1 and blob_reads == [oid.decode("ascii")]
+                      and leg[0][0].startswith("{}: the row for baseline.css changed from ".format(PIN_REL)))
+            else:
+                ok = (isinstance(leg, str) and leg.startswith("{} at the base ".format(PIN_REL)) and want in leg
+                      and blob_reads == [])
+            check(row, ok, (leg, blob_reads))
+
+    # The REF length bound (_check_ref): a REF of exactly MAX_BASE_REF characters passes the shape check (git then
+    # resolves or refuses it), and one of MAX_BASE_REF + 1 characters, otherwise well formed, is cannot-evaluate as
+    # not a usable REF before any git read.
+    bounds = []
+    for ref_text in ("r" * MAX_BASE_REF, "r" * (MAX_BASE_REF + 1)):
+        try:
+            _check_ref(ref_text)
+            bounds.append(None)
+        except CannotEvaluate as exc:
+            bounds.append(str(exc))
+    check("couple/base-ref-length-bound", bounds[0] is None and bounds[1] is not None
+          and bounds[1].startswith("base: {!r} is not a usable REF".format("r" * (MAX_BASE_REF + 1))), bounds)
+
+    # The leg's git reads read no system git config: _git_env sets GIT_CONFIG_NOSYSTEM=1 whatever the caller
+    # inherits. A fixture cannot plant a system config file (GIT_CONFIG_SYSTEM is dropped with every other GIT_
+    # variable unless it names os.devnull), so this row reads the environment _git_env builds with the variable
+    # unset and set to 0 in this process, then restores it.
+    saved_nosystem = os.environ.get("GIT_CONFIG_NOSYSTEM")
+    nosystem = []
+    try:
+        for inherited in (None, "0"):
+            if inherited is None:
+                os.environ.pop("GIT_CONFIG_NOSYSTEM", None)
+            else:
+                os.environ["GIT_CONFIG_NOSYSTEM"] = inherited
+            nosystem.append(_git_env().get("GIT_CONFIG_NOSYSTEM"))
+    finally:
+        if saved_nosystem is None:
+            os.environ.pop("GIT_CONFIG_NOSYSTEM", None)
+        else:
+            os.environ["GIT_CONFIG_NOSYSTEM"] = saved_nosystem
+    check("couple/system-config-off", nosystem == ["1", "1"], nosystem)
 
     # git merge-base --is-ancestor exiting other than 0 or 1 (a stand-in exit 128 with a fatal line) is a failed read,
     # never an ancestor: HEAD holds the exact copy, so a read that took the base as an ancestor would pass.
@@ -1774,6 +1869,23 @@ def _probe_cases():
           and "GATE FAILED: baseline-pin (check_baseline_pin.py --probe-local-base {} exit 2, stderr: {}".format(
               ref, store) in report, (got, report))
 
+    # A genuine absence where the bare gate also fails (a copied file differs from its pin, so the scan fails): the
+    # runner reports both failures but names baseline-pin once in its failed-gate list, not once for the failing gate
+    # and again for the leg that did not run. The extracted block runs with the runner's FAILED GATES line before its
+    # exit.
+    listed = (None if block is None
+              else block.replace('exit "$failed"\n', 'echo "FAILED GATES: ${failed_names}"\nexit "$failed"\n'))
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+        _fixture(tmp)
+        _fixture(tmp, None, None, root=SECOND_ROOT, pin_rel=SECOND_PIN, attribution=False)
+        _commit_all(tmp, "base", init=True)
+        _fixture(tmp, changed)
+        probe = _probe_child(tmp, ref)
+        got, report = _runner_child(tmp, listed)
+    check("runner/absent-failing-gate-named-once", probe == (1, b"", b"") and got == 1
+          and "GATE FAILED: baseline-pin (exit 1)" in report and not_run in report
+          and "FAILED GATES: baseline-pin\n" in report, (probe, got, report))
+
     # The runner's own block on a clean checkout at the protected line (refs/remotes/origin/main names HEAD, both
     # registered pairs exact, nothing changed in the working tree): the probe finds the ref usable, the leg runs
     # against HEAD as the fork point, and the block exits 0. The same checkout with a digest row changed in the
@@ -1817,6 +1929,25 @@ def _probe_cases():
         os.mkdir(path)
         shapes.append(_packed_refs_problem(path) is not None)
     check("probe/packed-refs-shapes", all(shapes) and len(shapes) == 7, shapes)
+
+    # The packed-refs size bound: a well-formed packed-refs of exactly MAX_PACKED_REFS_BYTES passes, and the same
+    # bytes over the bound (the bound lowered by 1 for the read) are refused as larger, never read whole. The bound
+    # is lowered for the row so the fixture stays small.
+    original_bound = MAX_PACKED_REFS_BYTES
+    well_formed = PACKED_HEADER + b" peeled\n" + oid + b" refs/tags/v1\n"
+    sized = []
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+        path = Path(tmp) / "packed-refs"
+        with open(path, "xb") as handle:
+            handle.write(well_formed)
+        for bound in (len(well_formed), len(well_formed) - 1):
+            globals()["MAX_PACKED_REFS_BYTES"] = bound
+            try:
+                sized.append(_packed_refs_problem(path))
+            finally:
+                globals()["MAX_PACKED_REFS_BYTES"] = original_bound
+    check("probe/packed-refs-size-bound", len(sized) == 2 and sized[0] is None and sized[1] is not None
+          and sized[1].endswith("is larger than {} bytes".format(len(well_formed) - 1)), sized)
 
     # A reftable ref store is refused, never read as absence: git's report of the store is replaced by "reftable"
     # over a fixture that lacks the ref, so only that report differs from a genuine absence.
@@ -2488,8 +2619,12 @@ def _self_test():
           "name git reports ambiguous is cannot-evaluate (and passes with the leg reverted); --base HEAD^1, "
           "HEAD^ and a full commit id pass on a clean two-parent train merge; a base holding no registered pin "
           "(every pin path renamed) and a base pin that is a symbolic link are cannot-evaluate (and pass with the "
-          "leg reverted), as is a base read that prints an abbreviated commit id, a git merge-base --is-ancestor "
-          "read exiting 128, and a working-tree pin that is a symbolic link, in the leg itself; a child run "
+          "leg reverted), as is a base read that prints an abbreviated commit id, a base pin git ls-tree "
+          "listing of 2 entries, another name, no tab, or 3 or 5 fields, a size field over the pin bound or not a "
+          "number (refused before cat-file, while a size field at the bound reads the blob), a git merge-base "
+          "--is-ancestor read exiting 128, and a working-tree pin that is a symbolic link, in the leg itself; a REF "
+          "of 256 characters passes the REF shape check and one of 257 is refused; the leg's git environment sets "
+          "GIT_CONFIG_NOSYSTEM=1 whether the caller leaves it unset or sets it to 0; a child run "
           "with HOME and "
           "XDG_CONFIG_HOME naming malformed git config reads neither; a replaced "
           "base tree, a replaced base pin blob and a git replace --graft parent are ignored (a legacy "
@@ -2505,8 +2640,9 @@ def _self_test():
           "baseline-pin block, with real git, fails a changed row against a usable ref, a packed-refs "
           "that is a directory, a genuine absence and a clone holding only descendant refs (each with its fetch "
           "NOTE) and an uncommitted changed row at the "
-          "ref, and passes both absences under BASELINE_PIN_ALLOW_NO_BASE=1 and a clean checkout at the ref; "
-          "packed-refs shapes are checked "
+          "ref, names baseline-pin once in its failed-gate list when a genuine absence's bare gate also fails, "
+          "and passes both absences under BASELINE_PIN_ALLOW_NO_BASE=1 and a clean checkout at the ref; "
+          "packed-refs shapes and the packed-refs size bound are checked "
           "and a reftable ref store is refused, never read as absence, as are a per-worktree name that reads as "
           "absent, a symbolically linked and an unlistable directory on the ref's loose path, while a present "
           "per-worktree name is usable; a git that echoes --show-ref-format reads the files store when "

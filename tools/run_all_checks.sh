@@ -159,7 +159,10 @@ elif [ "$baseline_probe_rc" -eq 1 ] && [ -z "$baseline_probe_err" ]; then
   run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py
   if [ "${BASELINE_PIN_ALLOW_NO_BASE:-}" != "1" ]; then
     failed=1
-    failed_names="${failed_names:+${failed_names}, }baseline-pin"
+    # When the bare gate above failed, run_gate has already named baseline-pin last; name it only once.
+    if [ "${failed_names##*, }" != "baseline-pin" ]; then
+      failed_names="${failed_names:+${failed_names}, }baseline-pin"
+    fi
     echo "GATE FAILED: baseline-pin (the base comparison did NOT RUN; fetch the ref as the NOTE above says, or set BASELINE_PIN_ALLOW_NO_BASE=1 to accept a run without it)"
     echo
   fi

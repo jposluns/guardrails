@@ -1809,7 +1809,8 @@ RUNNER_SCAFFOLD_LINES = frozenset({
 # stderr, removed after the capture, keeps a stderr of only line feeds from reading as
 # nothing); exit 1 with nothing on stderr prints one NOTE line, runs the gate without
 # the flag and fails the run under the baseline-pin name unless BASELINE_PROBE_OPT_OUT
-# is exactly 1; every other outcome fails the run under the baseline-pin name. Each
+# is exactly 1 (naming baseline-pin only when the bare gate's own failure has not
+# already named it last); every other outcome fails the run under the baseline-pin name. Each
 # failure goes through the same failed and failed_names updates run_gate() makes. Its two run_gate lines are parity members; the probe launch line
 # (BASELINE_PROBE_LAUNCH, inside the block's baseline_probe function) is not a gate, and
 # every line of the block other than the two run_gate lines is validated by this
@@ -1853,7 +1854,9 @@ BASELINE_PROBE_BLOCK = (
     BASELINE_PROBE_ABSENT_GATE,
     'if [ "${' + BASELINE_PROBE_OPT_OUT + ':-}" != "1" ]; then',
     "failed=1",
+    'if [ "${failed_names##*, }" != "baseline-pin" ]; then',
     'failed_names="${failed_names:+${failed_names}, }baseline-pin"',
+    "fi",
     'echo "GATE FAILED: baseline-pin (the base comparison did NOT RUN; fetch the '
     'ref as the NOTE above says, or set ' + BASELINE_PROBE_OPT_OUT + '=1 to accept '
     'a run without it)"',
