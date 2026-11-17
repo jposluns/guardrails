@@ -5408,6 +5408,12 @@ expected-check-ids = [
   "couple/base-pin-malformed-cannot-evaluate",
   "couple/base-pin-malformed-cannot-evaluate-flip",
   "couple/no-base-not-evaluated",
+  "couple/base-not-ancestor-cannot-evaluate",
+  "couple/base-not-ancestor-cannot-evaluate-flip",
+  "couple/local-base-diverged-compares-fork-point",
+  "couple/local-base-row-modified-refused",
+  "couple/local-base-row-modified-refused-flip",
+  "couple/local-base-absent-not-run",
   "exit/codes-0-1-2",
   "live/real-tree-passes",
 ]

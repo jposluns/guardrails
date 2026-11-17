@@ -988,10 +988,10 @@ ALLOWLIST = (
         "side": "ci-only",
         "identity": "tools/check_baseline_pin.py --base HEAD^1",
         "reason": (
-            "On a pull_request the CI job checks out the test merge, whose "
-            "first parent HEAD^1 is the protected line the change merges "
-            "into; the local runner has no test merge and runs the gate "
-            "with no --base, which prints that the leg was not evaluated."
+            "On a pull_request the CI job checks out the test merge and "
+            "compares its pins with those at its first parent HEAD^1, the "
+            "protected line the change merges into; the local runner has "
+            "no test merge and passes --local-base origin/main instead."
         ),
         "backlog": "GD-123",
     },
@@ -999,10 +999,13 @@ ALLOWLIST = (
         "side": "ci-only",
         "identity": "tools/check_baseline_pin.py --base <ref:$PUSH_BEFORE>",
         "reason": (
-            "On a push the CI job passes the event's before OID, the "
-            "commit before the pushed range, so every commit of the range "
-            "is compared; the local runner has no push event and runs the "
-            "gate with no --base."
+            "On a push the CI job compares the pushed HEAD's pins with "
+            "those at the event's before OID, the exact commit before the "
+            "pushed range, which must be an ancestor of HEAD (a divergent "
+            "push is cannot-evaluate); only those 2 endpoints are "
+            "compared, so this is the range's net change, not each "
+            "commit's. The local runner has no push event and passes "
+            "--local-base origin/main instead."
         ),
         "backlog": "GD-123",
     },
@@ -1011,20 +1014,22 @@ ALLOWLIST = (
         "identity": "tools/check_baseline_pin.py --base HEAD^",
         "reason": (
             "A workflow_dispatch run has no pushed range, so the CI job "
-            "passes the previous commit HEAD^, unprobed; the local runner "
-            "runs the gate with no --base."
+            "compares HEAD's pins with those at its previous commit HEAD^, "
+            "unprobed, that 1 commit's change; the local runner passes "
+            "--local-base origin/main instead."
         ),
         "backlog": "GD-123",
     },
     {
         "side": "local-only",
-        "identity": "tools/check_baseline_pin.py",
+        "identity": "tools/check_baseline_pin.py --local-base origin/main",
         "reason": (
-            "A local clone need not carry a protected-line ref and the "
-            "runner derives no base, so the local runner runs the gate "
-            "with no --base and the gate prints a NOTE that the "
-            "base-coupling leg was not evaluated; CI always passes a "
-            "base derived from the event."
+            "The local runner compares HEAD's pins with those at the fork "
+            "point git merge-base HEAD origin/main, the base "
+            "check_version_monotonicity.py derives by default; a clone "
+            "without origin/main gets a NOTE that the base-coupling leg "
+            "did not run. CI instead passes a --base derived from the "
+            "event, the exact commit the change starts from."
         ),
         "backlog": "GD-123",
     },

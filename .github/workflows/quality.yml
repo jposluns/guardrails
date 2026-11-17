@@ -439,16 +439,19 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite baseline-pin-selftest
 
-      # The base-coupling leg compares each pin with the same pin at the commit this run's change
-      # starts from, which differs by trigger. A pull_request checks out the test merge, whose first
-      # parent HEAD^1 is the protected line it merges into. A push passes the event's before SHA, the
-      # commit before the pushed range (the PUSH_BEFORE the Release cut step passes too), so a row
-      # change in any commit of the range is compared, not only the last one. A workflow_dispatch run
-      # has no pushed range and passes the previous commit HEAD^. Every base is passed unprobed, so a
-      # base that does not resolve (a root HEAD included) is cannot-evaluate in the gate (exit 2),
-      # never a pass, and no branch runs the gate without --base. A push whose before SHA is missing
-      # or all zero (the ${PUSH_BEFORE//0/} test is empty for both) names no commit before the range,
-      # so the step prints why and fails closed (exit 1) before the gate runs.
+      # The base-coupling leg compares each pin at HEAD with the same pin at the exact commit --base
+      # names, which must be an ancestor of HEAD; it compares those 2 endpoints only, so a row changed
+      # in one commit and restored by a later one is not seen. A pull_request checks out the test
+      # merge and compares it with its first parent HEAD^1, the protected line it merges into. A push
+      # compares the pushed HEAD with the event's before SHA (the PUSH_BEFORE the Release cut step
+      # passes too), the net change of the pushed range; a before SHA that is not an ancestor of HEAD
+      # (a force or otherwise divergent push) is cannot-evaluate (exit 2), never compared with a common
+      # ancestor. A workflow_dispatch run compares HEAD with its previous commit HEAD^, that 1 commit's
+      # change. Every base is passed unprobed, so a base that does not resolve (a root HEAD included)
+      # is cannot-evaluate in the gate (exit 2), never a pass, and no branch runs the gate without
+      # --base. A push whose before SHA is missing or all zero (the ${PUSH_BEFORE//0/} test is empty
+      # for both) names no commit before the range, so the step prints why and fails closed (exit 1)
+      # before the gate runs.
       - name: Site baseline pin
         shell: bash
         env:

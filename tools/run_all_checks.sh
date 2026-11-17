@@ -120,11 +120,10 @@ run_gate "site-versions" python3 -I -B tools/check_site_versions.py
 run_gate "draft-site-selftest" python3 -I -B tools/gen_draft_site.py --self-test
 run_gate "draft-site-drift" python3 -I -B tools/gen_draft_site.py --check
 run_gate "baseline-pin-selftest" python3 -I -B tools/check_selftest_execution.py --suite baseline-pin-selftest
-# The base-coupling leg is not evaluated here: a local clone need not carry origin/main or any other
-# protected-line ref, and this runner's scaffold derives no base, so the gate runs with no --base and prints
-# a NOTE that the leg was not evaluated (never a silent pass). CI runs the leg against the event's base. To
-# run it locally against a ref you have fetched: python3 -I -B tools/check_baseline_pin.py --base REF.
-run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py
+# --local-base origin/main runs the base-coupling leg against the fork point, git merge-base HEAD origin/main,
+# the base check_version_monotonicity.py derives by default. A clone without origin/main gets a NOTE that the
+# leg did not run (never a silent pass); any other git failure is cannot-evaluate.
+run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py --local-base origin/main
 run_gate "palette-aiqt" python3 -I -B .baseline/check_palette.py --site aiqt --palettes site/draft/assets/baseline/palettes.css
 run_gate "palette-opfiles" python3 -I -B .baseline/check_palette.py --site opfiles --palettes opf/site/draft/assets/baseline/palettes.css
 run_gate "security-txt-selftest" python3 -I -B tools/check_selftest_execution.py --suite security-txt-selftest
