@@ -5275,7 +5275,7 @@ source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
 start-line = 13
 end-line = 15
 canonical-text = "A constraint the operator or a governing rule has set, such as an instruction to propose but not act\nwithout approval or to never touch a named resource, stays in force across context loss, including\nsummarization, compaction, truncation, and handoff to a new session."
-source-digest = "fed9364747f791441cd9d03d4aa97f7578885be4fd4bcca6daae511a41ab194b"
+source-digest = "fda022676da6d499dd6aa13938d7a616fbc08569859f327af5a7d19dec5b0f0f"
 layer = "core"
 
 [[clause]]
@@ -5285,7 +5285,7 @@ source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
 start-line = 15
 end-line = 16
 canonical-text = "The assistant re-establishes it from\nthe durable record;"
-source-digest = "fed9364747f791441cd9d03d4aa97f7578885be4fd4bcca6daae511a41ab194b"
+source-digest = "fda022676da6d499dd6aa13938d7a616fbc08569859f327af5a7d19dec5b0f0f"
 layer = "core"
 
 [[clause]]
@@ -5295,7 +5295,7 @@ source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
 start-line = 16
 end-line = 18
 canonical-text = "only the authority that set it can lift it, never context loss alone, and when the\nassistant cannot confirm whether it still applies, it holds and checks rather than proceeding as though it\nwere gone."
-source-digest = "fed9364747f791441cd9d03d4aa97f7578885be4fd4bcca6daae511a41ab194b"
+source-digest = "fda022676da6d499dd6aa13938d7a616fbc08569859f327af5a7d19dec5b0f0f"
 layer = "core"
 
 [[clause]]
@@ -5305,7 +5305,7 @@ source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
 start-line = 16
 end-line = 18
 canonical-text = "only the authority that set it can lift it, never context loss alone, and when the\nassistant cannot confirm whether it still applies, it holds and checks rather than proceeding as though it\nwere gone."
-source-digest = "fed9364747f791441cd9d03d4aa97f7578885be4fd4bcca6daae511a41ab194b"
+source-digest = "fda022676da6d499dd6aa13938d7a616fbc08569859f327af5a7d19dec5b0f0f"
 layer = "core"
 
 [[clause]]
@@ -5315,7 +5315,27 @@ source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
 start-line = 16
 end-line = 18
 canonical-text = "only the authority that set it can lift it, never context loss alone, and when the\nassistant cannot confirm whether it still applies, it holds and checks rather than proceeding as though it\nwere gone."
-source-digest = "fed9364747f791441cd9d03d4aa97f7578885be4fd4bcca6daae511a41ab194b"
+source-digest = "fda022676da6d499dd6aa13938d7a616fbc08569859f327af5a7d19dec5b0f0f"
+layer = "core"
+
+[[clause]]
+clause-id = "cnstpr.6"
+corpus-id = "cnstpr"
+source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
+start-line = 18
+end-line = 22
+canonical-text = "A numeric limit the operator or a governing rule has set, such as a cap on rounds, retries,\nspend, or concurrency, is enforced by a check at the point of the action it limits, never by a count kept\nby hand: the check reads the limit and the count against it from durable records, refuses the action\nonce the limit is reached or when either cannot be read, and admits more only on a grant from the\nauthority that set it;"
+source-digest = "fda022676da6d499dd6aa13938d7a616fbc08569859f327af5a7d19dec5b0f0f"
+layer = "core"
+
+[[clause]]
+clause-id = "cnstpr.7"
+corpus-id = "cnstpr"
+source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
+start-line = 22
+end-line = 22
+canonical-text = "the refusal holds only that action, and other work continues."
+source-digest = "fda022676da6d499dd6aa13938d7a616fbc08569859f327af5a7d19dec5b0f0f"
 layer = "core"
 
 [[clause]]

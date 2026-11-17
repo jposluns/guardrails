@@ -106,12 +106,22 @@
 #                        delta, 135529 + 775 = 136304, leaving the 370 units that remain of the headroom
 #                        recorded in the 2026-10-29 entry, within the maintainer's authorization of 2026-11-08
 #                        for raises up to 148000.
+#                        Raised 136304 -> 136786 on 2026-11-17 under the maintainer's recorded decision of
+#                        2026-10-31 to raise the ratchet by exactly the measured delta, when
+#                        standing-constraints-persist gained its sentence that a numeric limit the operator or a
+#                        governing rule has set is enforced by a check at the point of the action it limits,
+#                        reading the limit and the count from durable records, and that its refusal holds only
+#                        that action (cnstpr.6, cnstpr.7): measured PACK 136292 at the base 504f422d -> 136774
+#                        (+482 units); rule files 119669 -> 120151; managed block 360 and file headers 16263
+#                        unchanged. The ratchet rises by the measured delta, 136304 + 482 = 136786, keeping the
+#                        12 units the ratchet already stood above PACK, within the maintainer's authorization
+#                        of 2026-11-08 for raises up to 148000.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 136304
+ratchet = 136786
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
