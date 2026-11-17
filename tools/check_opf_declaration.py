@@ -66,7 +66,7 @@ out is a finding for having none. Where the reader cannot tell whether a comment
 A block a reader cannot see for another reason (a hidden element, a style, or a Markdown fence around it) is
 not detected.
 
-Its entry point first runs the child-status guard, an inline copy of opf/tools/_child_status.py that
+Its entry point first runs the child-status guard, an inline copy of tools/_child_status.py that
 tools/check_child_status_coverage.py pins to it: where this process cannot read a child's exit status (SIGCHLD
 ignored), it writes a refusal naming this gate and exits 2 before main() runs; otherwise it changes nothing.
 
@@ -2270,7 +2270,7 @@ def main(argv=None):
     return 2
 
 
-# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# The child-status guard: an inline copy of the canonical guard in tools/_child_status.py, which
 # tools/check_child_status_coverage.py pins this copy to by AST. Inline, not imported, because the self-test runs
 # copies of this file alone in scratch trees. The self-test launches children and reads their exit status, so
 # under an ignored SIGCHLD a failed child would read as a success; _entry() runs it first instead, before main().

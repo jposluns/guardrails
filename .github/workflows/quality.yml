@@ -225,7 +225,7 @@ jobs:
 
       - name: Child exit status observable (after the scope decision)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Site scope self-test
         shell: bash
@@ -247,7 +247,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Secrets (project scanner)
         shell: bash
@@ -340,7 +340,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Dashes
         shell: bash
@@ -507,7 +507,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: OPF homes contract self-test
         shell: bash
@@ -571,7 +571,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: OPF observe direct self-test
         shell: bash
@@ -647,7 +647,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: OPF render-drift gate self-test
         shell: bash
@@ -721,7 +721,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: OPF standalone-closure gate self-test
         shell: bash
@@ -747,7 +747,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: OPF standalone-closure gate self-test
         shell: bash
@@ -773,7 +773,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: OPF standalone-closure gate self-test
         shell: bash
@@ -799,7 +799,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: OPF standalone-closure gate self-test
         shell: bash
@@ -825,7 +825,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: OPF standalone-closure gate self-test
         shell: bash
@@ -851,7 +851,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: OPF standalone-closure gate self-test
         shell: bash
@@ -877,7 +877,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Corpus-core library self-test
         shell: bash
@@ -1035,7 +1035,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Rules self-test
         shell: bash
@@ -1212,7 +1212,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Selftest-execution gate self-test
         shell: bash
@@ -1289,7 +1289,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env core behaviour self-test (execution-reconciled)
         shell: bash
@@ -1354,7 +1354,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Python host pin self-test
         shell: bash
@@ -1386,7 +1386,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env core behaviour self-test (execution-reconciled, host patch)
         shell: bash
@@ -1414,7 +1414,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env combined config-injection lane, shard 1 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1442,7 +1442,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env combined config-injection lane, shard 2 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1470,7 +1470,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env combined config-injection lane, shard 3 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1498,7 +1498,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env combined config-injection lane, shard 4 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1526,7 +1526,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env combined config-injection lane, shard 5 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1554,7 +1554,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env combined config-injection lane, shard 6 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1582,7 +1582,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env combined config-injection lane, shard 7 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1610,7 +1610,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env combined config-injection lane, shard 8 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1638,7 +1638,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env combined config-injection lane, shard 9 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1666,7 +1666,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env combined config-injection lane, shard 10 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1694,7 +1694,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env combined config-injection lane, shard 11 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1722,7 +1722,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env combined config-injection lane, shard 12 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1750,7 +1750,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env malformed-config lane, shard 1 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1778,7 +1778,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env malformed-config lane, shard 2 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1806,7 +1806,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env malformed-config lane, shard 3 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1834,7 +1834,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env malformed-config lane, shard 4 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1862,7 +1862,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env malformed-config lane, shard 5 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1890,7 +1890,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env malformed-config lane, shard 6 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1918,7 +1918,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env malformed-config lane, shard 7 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1946,7 +1946,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env malformed-config lane, shard 8 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1974,7 +1974,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env malformed-config lane, shard 9 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -2002,7 +2002,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env malformed-config lane, shard 10 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -2030,7 +2030,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env malformed-config lane, shard 11 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -2058,7 +2058,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env malformed-config lane, shard 12 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -2086,7 +2086,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 1 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2114,7 +2114,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 2 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2142,7 +2142,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 3 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2170,7 +2170,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 4 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2198,7 +2198,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 5 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2226,7 +2226,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 6 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2254,7 +2254,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 7 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2282,7 +2282,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 8 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2310,7 +2310,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 9 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2338,7 +2338,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 10 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2366,7 +2366,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 11 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2394,7 +2394,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 12 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2422,7 +2422,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 13 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2450,7 +2450,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 14 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2478,7 +2478,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 15 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2506,7 +2506,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 16 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2534,7 +2534,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 17 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2562,7 +2562,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 18 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2590,7 +2590,7 @@ jobs:
 
       - name: Child exit status observable (after the host pin gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Git-fixture-env system-config lane, shard 19 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2612,7 +2612,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Record-drift self-test
         shell: bash
@@ -2873,7 +2873,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       - name: Byte canon self-test (vectors)
         shell: bash

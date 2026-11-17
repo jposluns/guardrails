@@ -5,8 +5,10 @@ disclosed direct-launch residual.
 
 With SIGCHLD ignored, the kernel reaps every child at exit and Python's subprocess module reports a failed child
 as exit 0; the ignore survives exec, so a gate started by an ignoring parent reads every failure as a pass. The
-canonical guard is opf/tools/_child_status.py (a disposition read, then a fork-and-wait probe; a refusal by name
-with exit 2). This gate holds where it runs:
+canonical guard is tools/_child_status.py (a disposition read, then a fork-and-wait probe; a refusal by name
+with exit 2). While opf/tools/run_all_checks.sh still launches its own copy, opf/tools/_child_status.py
+(LEGACY_PROBE_REL) is a self-guarded entry that must be byte-identical to the canonical file. This gate holds
+where it runs:
 
   1. live: the canonical guard runs in this process first, in every mode; a refusal exits 2 by name.
   2. copies: the inline copies in each CLI_COPIES entry (opf/tools/opf.py, tools/check_selftest_execution.py,
@@ -228,7 +230,11 @@ import check_python_floor  # noqa: E402  (the shipped-entrypoint listing)
 import check_selftest_execution  # noqa: E402  (the registry schema)
 
 ROOT = Path(__file__).resolve().parents[1]
-CANONICAL_REL = "opf/tools/_child_status.py"
+CANONICAL_REL = "tools/_child_status.py"
+# The OPF copy of the canonical guard, which opf/tools/run_all_checks.sh still launches as "$here/_child_status.py"
+# (RUNNER_PROBES[1]): until opf/ is removed it is a self-guarded entry (SELF_ENTRIES) and evaluate() requires it to
+# be byte-identical to CANONICAL_REL (legacy_identity_finding).
+LEGACY_PROBE_REL = "opf/tools/_child_status.py"
 COVERAGE_REL = "tools/" + Path(__file__).name
 CANONICAL_NAMES = ("_CHILD_STATUS_PROBE_CODE", "_child_status_refusal", "_child_status_refusal_exit")
 HOOK_NAMES = CANONICAL_NAMES[:2]
@@ -257,9 +263,9 @@ HOOK_TARGET = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py"
 # "args" is exactly HOOK_ARGS followed by one mode.
 HOOK_COMMAND = "python3"
 HOOK_ARGS = ["-I", HOOK_TARGET]
-# The entries that carry the pinned guard: the canonical file, this gate (leg 1 runs first in main), the CLI
-# copies, the _entry() copy, the --self-test-first copy and the two dispatcher copies.
-SELF_ENTRIES = frozenset((CANONICAL_REL, COVERAGE_REL)
+# The entries that carry the pinned guard: the canonical file and its OPF copy, this gate (leg 1 runs first in
+# main), the CLI copies, the _entry() copy, the --self-test-first copy and the two dispatcher copies.
+SELF_ENTRIES = frozenset((CANONICAL_REL, LEGACY_PROBE_REL, COVERAGE_REL)
                          + tuple(rel for rel, _name in CLI_COPIES + ENTRY_COPIES + SELF_TEST_FIRST_COPIES)
                          + HOOK_COPIES)
 CLI_ENTRY = 'sys.exit(_child_status_refusal_exit("{}") or main())'
@@ -332,7 +338,7 @@ HOST_PROBE_STEP = (("name", "Child exit status observable (after the host pin ga
                    ("run", "python3 -I -B " + CANONICAL_REL))
 # The scope job of that same workflow runs its fast-lane decision step between setup-python and the
 # probe: the decision must run before any step that runs the checkout's own code (the probe runs
-# opf/tools/_child_status.py from the checkout), and tools/check_ci_parity.py pins that job's whole
+# tools/_child_status.py from the checkout), and tools/check_ci_parity.py pins that job's whole
 # body (SCOPE_JOB) line for line, so the exact body is that pin's bound. Here the step is matched by
 # its key/value pairs (its env: block and run: block scalar read as nested values), in the scope job
 # of HOST_PATCH_WORKFLOW only, and the probe step right after it is then SCOPE_PROBE_STEP, the probe
@@ -716,6 +722,17 @@ def copy_findings(rel, tree, tmpl, names):
         elif ast.dump(nodes[0]) != tmpl[name]:
             out.append("{}: the inline copy of {} differs from {}".format(rel, name, CANONICAL_REL))
     return out
+
+
+def legacy_identity_finding(canonical, legacy):
+    """None when the OPF copy's bytes (LEGACY_PROBE_REL) equal the canonical file's; otherwise a finding naming the
+    first byte offset at which they differ (the shorter length when one is a prefix of the other)."""
+    if legacy == canonical:
+        return None
+    offset = next((index for index, (left, right) in enumerate(zip(canonical, legacy)) if left != right),
+                  min(len(canonical), len(legacy)))
+    return "{}: differs from {} at byte {}; the two copies must stay byte-identical while both exist".format(
+        LEGACY_PROBE_REL, CANONICAL_REL, offset)
 
 
 def cli_entry(name):
@@ -1439,9 +1456,12 @@ def evaluate(root, residual=None, direct_check=None):
     residual = DIRECT_LAUNCH_RESIDUAL if residual is None else residual
     direct_check = DIRECT_LAUNCH_CHECK if direct_check is None else direct_check
     findings, launched = [], set()
-    canonical = _parse(_read(root, CANONICAL_REL), CANONICAL_REL)
+    canonical_bytes = _read(root, CANONICAL_REL)
+    canonical = _parse(canonical_bytes, CANONICAL_REL)
     tmpl = template(canonical)
     finding = cli_entry_finding(CANONICAL_REL, canonical, Path(CANONICAL_REL).name, exact=False)
+    findings.extend([finding] if finding else [])
+    finding = legacy_identity_finding(canonical_bytes, _read(root, LEGACY_PROBE_REL))
     findings.extend([finding] if finding else [])
     findings.extend(cli_copy_findings(lambda rel: _parse(_read(root, rel), rel), tmpl))
     for rel, name in ENTRY_COPIES:
@@ -2121,6 +2141,11 @@ def _inputs():
         "hooks-unregistered": _swap(real[HOOKS_JSON_REL], '"absolute_paths"\n', '"no_such_mode"\n'),
         "hooks-echo": _hook_edit(real[HOOKS_JSON_REL], "command", lambda old: "echo"),
         "hooks-prepended": _hook_edit(real[HOOKS_JSON_REL], "args", lambda old: ["-c", "pass"] + old),
+        # The canonical probe's and its OPF copy's raw bytes, and the canonical bytes with one byte of the usage
+        # text changed: a drift outside the guard names and the entry line, which only the byte check sees.
+        "canonical-bytes": _read(ROOT, CANONICAL_REL), "legacy-bytes": _read(ROOT, LEGACY_PROBE_REL),
+        "legacy-drift": _swap(real[CANONICAL_REL], "usage: _child_status.py", "Usage: _child_status.py").encode(
+            "utf-8"),
     }
     texts.update((rel, real[rel]) for rel in SHELL_REAL)
     return trees, texts
@@ -2274,9 +2299,18 @@ def _vectors(module, trees, texts, canonical_tree):
 
     vectors = (
         ("copies/real-copies-identical", lambda: not copies("opf", m.CANONICAL_NAMES)
-         and not copies("selftest", m.CANONICAL_NAMES) and not copies("hook", m.HOOK_NAMES)),
+         and not copies("selftest", m.CANONICAL_NAMES) and not copies("hook", m.HOOK_NAMES)
+         and m.legacy_identity_finding(texts["canonical-bytes"], texts["legacy-bytes"]) is None),
         ("copies/drift-is-finding", lambda: any("_child_status_refusal differs" in finding
                                                 for finding in copies("opf-drift", m.CANONICAL_NAMES))),
+        # One changed byte of the OPF probe copy's usage text: the per-name AST checks and its entry line still
+        # pass, and only the byte check reports it, at that byte.
+        ("copies/legacy-one-byte-drift-is-finding", lambda: not m.copy_findings(
+            "legacy-drift", ast.parse(texts["legacy-drift"]), tmpl(), m.CANONICAL_NAMES)
+         and m.cli_entry_finding("legacy-drift", ast.parse(texts["legacy-drift"]), "_child_status.py",
+                                 exact=False) is None
+         and "at byte {};".format(texts["canonical-bytes"].index(b"usage: _child_status.py")) in (
+             m.legacy_identity_finding(texts["canonical-bytes"], texts["legacy-drift"]) or "")),
         ("copies/missing-copy-is-finding", lambda: any("bound 0 times" in finding
                                                        for finding in copies("selftest-missing", m.CANONICAL_NAMES))),
         ("copies/hook-drift-is-finding", lambda: any("_CHILD_STATUS_PROBE_CODE differs" in finding
@@ -2544,6 +2578,8 @@ def _vectors(module, trees, texts, canonical_tree):
 # id, exact source text, replacement, the vector that must then fail).
 MUTANTS = (
     ("copy-compare", "elif ast.dump(nodes[0]) != tmpl[name]:", "elif False:", "copies/drift-is-finding"),
+    ("legacy-identity", "    if legacy == canonical:\n        return None\n", "    return None\n",
+     "copies/legacy-one-byte-drift-is-finding"),
     ("copy-count", "        if len(bindings) != 1 or len(nodes) != 1:\n            out.append(",
      "        if False:\n            out.append(", "copies/missing-copy-is-finding"),
     ("copy-binding-count", "        bindings = _bindings(tree, name)\n",
@@ -3013,13 +3049,15 @@ def _behaviour(probe, base, verdict=None):
         + python + [str(ROOT / CANONICAL_REL)])
     out.append(("behaviour/python-reader-loses-refusal", verdict((got[:2] == (0, "0\n"), got)), got))
 
-    for check_id, rel, marker, tail_marker, rc_line in (
-            ("behaviour/runner-first-gate-fails", LOCAL_RUNNER, "GATE FAILED: child-status (exit 2)",
+    # Each runner's tree carries the probe that runner launches: the local runner the canonical file, the OPF
+    # runner its "$here/_child_status.py", the OPF copy.
+    for check_id, rel, probe_rel, marker, tail_marker, rc_line in (
+            ("behaviour/runner-first-gate-fails", LOCAL_RUNNER, CANONICAL_REL, "GATE FAILED: child-status (exit 2)",
              'if [ "$failed" -ne 0 ]; then', "RESULT: FAIL"),
-            ("behaviour/opf-runner-first-gate-fails", OPF_RUNNER, "GATE FAILED: child-status (exit 2)",
-             'if [ "$failed" -ne 0 ]; then', "OPF STANDALONE SUBSET: FAILED")):
+            ("behaviour/opf-runner-first-gate-fails", OPF_RUNNER, LEGACY_PROBE_REL,
+             "GATE FAILED: child-status (exit 2)", 'if [ "$failed" -ne 0 ]; then', "OPF STANDALONE SUBSET: FAILED")):
         tree = Path(base) / ("runner-" + check_id.rsplit("/", 1)[1])
-        _copy(CANONICAL_REL, tree)
+        _copy(probe_rel, tree)
         runner = _copy(rel, tree, _truncated_runner((ROOT / rel).read_text(encoding="utf-8"), tail_marker))
         ignored = via("ignore", ["bash", str(runner)], cwd=str(tree))
         default = via("default", ["bash", str(runner)], cwd=str(tree))
@@ -3229,6 +3267,7 @@ def self_test(lane, report_path=None):
         canonical_tree = trees["canonical"]
         vectors = _vectors(this, trees, texts, canonical_tree)
         for check_id, _kind in (("copies/real-copies-identical", 0), ("copies/drift-is-finding", 0),
+                                ("copies/legacy-one-byte-drift-is-finding", 0),
                                 ("copies/missing-copy-is-finding", 0), ("copies/hook-drift-is-finding", 0),
                                 ("copies/rebound-guard-is-finding", 0),
                                 ("entries/real-entries-pass", 0), ("entries/self-test-entry-shape", 0),

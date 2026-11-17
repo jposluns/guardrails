@@ -837,7 +837,7 @@ def main(argv=None):
     return run()
 
 
-# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# The child-status guard: an inline copy of the canonical guard in tools/_child_status.py, which
 # tools/check_child_status_coverage.py pins this copy to by AST. This gate reads the exit status of
 # gitleaks version, and its self-test launches this file and reads each exit status, so under an
 # ignored SIGCHLD it would read a failing child as a pass; it refuses at its entry line instead,

@@ -561,7 +561,7 @@ def self_test_main():
     return 0
 
 
-# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# The child-status guard: an inline copy of the canonical guard in tools/_child_status.py, which
 # tools/check_child_status_coverage.py pins this copy to by AST. The modules it imports hold child launch
 # and wait calls, which that gate's import scan counts, so under an ignored SIGCHLD a failing child they
 # start would read as a pass. This gate and its self-test start no child themselves; the guard runs at the

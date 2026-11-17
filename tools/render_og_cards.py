@@ -92,7 +92,7 @@ def main(argv=None):
     return code
 
 
-# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# The child-status guard: an inline copy of the canonical guard in tools/_child_status.py, which
 # tools/check_child_status_coverage.py pins this copy to by AST. This script reads the exit status of
 # the browser it launches, so under an ignored SIGCHLD it would read a failing render as a pass; it
 # refuses at its entry line instead, before main() runs.
