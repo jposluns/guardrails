@@ -1280,10 +1280,10 @@ def _coupling_cases():
     # --base HEAD is not an empty comparison: the leg reads the pins in the working tree, so a digest row changed
     # there under an unchanged version (not committed) fails, and passes with the leg reverted. On a clean tree it
     # compares nothing (every row equals itself) and passes; that limit is disclosed in the module docstring.
-    for name, flip, setup, code, text in (
-            ("couple/base-head-uncommitted-row-change-refused", "couple/base-head-uncommitted-row-change-refused-flip",
-             "row", 1, "FAIL: {}: the row for baseline.css changed from ".format(PIN_REL)),
-            ("couple/base-head-clean-passes", None, "clean", 0, "no digest row changed from the base HEAD")):
+    for name, setup, code, text in (
+            ("couple/base-head-uncommitted-row-change-refused", "row", 1,
+             "FAIL: {}: the row for baseline.css changed from ".format(PIN_REL)),
+            ("couple/base-head-clean-passes", "clean", 0, "no digest row changed from the base HEAD")):
         with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
             _fixture(tmp)
             _commit_all(tmp, "base", init=True)
@@ -1292,8 +1292,8 @@ def _coupling_cases():
             got, report = _coupling_gate(tmp, "HEAD", FIXTURE_PINS, False)
             reverted, reverted_report = _coupling_gate(tmp, "HEAD", FIXTURE_PINS, True)
         check(name, got == code and text in report and "CANNOT EVALUATE" not in report, (got, report))
-        if flip is not None:
-            check(flip, reverted == 0, (reverted, reverted_report))
+        if setup == "row":
+            check("couple/base-head-uncommitted-row-change-refused-flip", reverted == 0, (reverted, reverted_report))
 
     # A --base REF git resolves with a diagnostic on stderr is cannot-evaluate, as --local-base refuses one on its
     # name read: a tag base and a branch base naming different commits make git warn that the name is ambiguous
@@ -1332,13 +1332,13 @@ def _coupling_cases():
         parents = subprocess.run(["git", "-C", tmp, "rev-list", "--parents", "-n", "1", "HEAD"], check=True,
                                  capture_output=True, env=git_fixture_env(),
                                  timeout=GIT_TIMEOUT).stdout.decode("ascii").split()
-        forms = [(form, _coupling_gate(tmp, form, FIXTURE_PINS, False)) for form in ("HEAD^1", "HEAD^", full)]
-    for name, (form, (got, report)) in zip(("couple/ci-form-first-parent-clean-train-passes",
-                                            "couple/ci-form-parent-clean-train-passes",
-                                            "couple/ci-form-full-sha-clean-train-passes"), forms):
-        check(name, len(parents) == 3 and parents[1] == full and got == 0
-              and "no digest row changed from the base {} under".format(form) in report
-              and "CANNOT EVALUATE" not in report, (parents, full, form, got, report))
+        for name, form in (("couple/ci-form-first-parent-clean-train-passes", "HEAD^1"),
+                           ("couple/ci-form-parent-clean-train-passes", "HEAD^"),
+                           ("couple/ci-form-full-sha-clean-train-passes", full)):
+            got, report = _coupling_gate(tmp, form, FIXTURE_PINS, False)
+            check(name, len(parents) == 3 and parents[1] == full and got == 0
+                  and "no digest row changed from the base {} under".format(form) in report
+                  and "CANNOT EVALUATE" not in report, (parents, full, form, got, report))
 
     # Every base read runs with replacement objects off (--no-replace-objects). HEAD changes a row under an unchanged
     # version; a replacement of the base commit's tree or of the base pin's blob by HEAD's would make the base read
