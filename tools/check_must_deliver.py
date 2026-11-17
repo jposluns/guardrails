@@ -14,11 +14,14 @@ default is the merge base, not the origin/main tip, on purpose: it is the commit
 from, so the comparison sees only the list changes made on this branch, and a rule added to
 origin/main after the fork is not reported as dropped by a branch that has not merged it yet. A remote
 base is read as its fully qualified ref, never by short name: the default reads exactly
-refs/remotes/origin/main, and a --base naming a remote-tracking branch (refs/remotes/<REF> exists, or
-REF starts with a configured remote's name and a slash) reads exactly refs/remotes/<REF>, so a tag or
-a local branch of the same short name, which git's short-name search order prefers, cannot stand in
-for it (an absent remote-tracking ref is exit 2). A --base that is a full (40-hex or 64-hex) object id
-that exists is read as that commit, never looked up under refs/remotes/. A --base that is a bare
+refs/remotes/origin/main, and a --base naming a remote-tracking branch (REF starts with refs/remotes/,
+read as REF, or with a configured remote's name and a slash, read as refs/remotes/<REF>; nothing else
+names one) is read as exactly that ref, so a tag or a local branch of the same short name, which
+git's short-name search order prefers, cannot stand in for it (an absent remote-tracking ref is exit
+2). Any other --base (a full or abbreviated object id, HEAD, any other name or expression) is resolved
+as git resolves it, and is exit 2 as ambiguous when refs/remotes/<REF>, or refs/remotes/<name> for the
+name leading an expression, also exists, so a planted ref cannot stand in for it; a full object id
+whose object does not exist is exit 2. A --base that is a bare
 remote name (origin), alone or leading a revision expression (origin~1), and a revision expression
 whose leading name is a remote-tracking branch shadowed by refs/<name>, refs/tags/<name> or
 refs/heads/<name> (origin/main~1 with a tag origin/main), are exit 2: pass the remote-tracking
@@ -53,7 +56,8 @@ gate prints; review must judge the removal itself); the ratchet sees only what c
 is given, so it is as good as that base (a stale or wrong --base compares against the wrong list; an
 unshadowed revision expression such as origin/main~1 is still resolved by git's own short-name order,
 so a pseudo-ref file of its leading name directly under the git directory, which git tries first, is
-not checked; an abbreviated object id is resolved by git, which prefers a ref of the same name; and a
+not checked; an abbreviated object id is resolved by git, which prefers a ref of the same name outside
+refs/remotes/ (one under refs/remotes/ is refused as ambiguous); and a
 --base or expression led by a local branch or tag name, not a remote-tracking one, gets git's
 tag-before-branch order); a
 listed rule cut down to a stub still passes (content is not judged);
@@ -252,23 +256,46 @@ def _remotes(root):
 
 def _remote_tracking_ref(root, base):
     """refs/remotes/<base> (or base itself when it already starts with refs/remotes/) when base names a
-    remote-tracking branch, otherwise None. A full (40-hex or 64-hex) object id that exists is that
-    object, never a branch name, so a ref planted at refs/remotes/<id> cannot stand in for it. Otherwise
-    base names one when refs/remotes/<base> exists, or when it starts with a configured remote's name and
-    a slash; a revision expression that is not a valid ref name (origin/main~1) is not a branch name and
-    is left to resolve_base's short-name refusal and then git's own resolution."""
-    if (len(base) in (40, 64) and all(c in "0123456789abcdefABCDEF" for c in base)
-            and _git(root, ["cat-file", "-e", base]).returncode == 0):
+    remote-tracking branch, otherwise None. base names one ONLY when it starts with refs/remotes/ or with
+    a configured remote's name and a slash; a ref existing under refs/remotes/ never makes a name
+    remote-tracking, so a ref planted at refs/remotes/<name> cannot turn a full or abbreviated object id,
+    HEAD or any other name into one (resolve_base refuses such a name as ambiguous,
+    _ambiguous_base_refusal). A revision expression that is not a valid ref name (origin/main~1) is not
+    a branch name and is left to resolve_base's refusals and then git's own resolution."""
+    if base.startswith(REMOTE_REF_PREFIX):
+        full = base
+    elif any(base.startswith(r + "/") for r in _remotes(root)):
+        full = REMOTE_REF_PREFIX + base
+    else:
         return None
-    full = base if base.startswith(REMOTE_REF_PREFIX) else REMOTE_REF_PREFIX + base
-    if _git(root, ["check-ref-format", full]).returncode != 0:
-        return None
-    if full == base or _exact_ref_oid(root, full) is not None:
-        return full
-    return full if any(base.startswith(r + "/") for r in _remotes(root)) else None
+    return full if _git(root, ["check-ref-format", full]).returncode == 0 else None
 
 
 REV_OPERATORS = ("~", "^", ":", "@{")
+
+
+def _leading_name(base):
+    """The ref name leading base: base up to its first revision operator (origin/main of origin/main~1)."""
+    cut = min([i for i in (base.find(op) for op in REV_OPERATORS) if i >= 0] or [len(base)])
+    return base[:cut]
+
+
+def _ambiguous_base_refusal(root, base):
+    """Why base, which names no remote-tracking branch, is ambiguous, or None when it is not. Any such
+    value is resolved as git resolves it, and git's short-name search also tries refs/remotes/<name>
+    (and prefers a ref over an abbreviated object id), so when refs/remotes/<base>, or refs/remotes/<name>
+    for the name leading a revision expression when that name is not itself remote-tracking, exists,
+    that ref could stand in for the object id, HEAD or name meant: the base is refused (exit 2), never
+    resolved either way."""
+    for name in dict.fromkeys((base, _leading_name(base))):
+        if not name or _remote_tracking_ref(root, name) is not None:
+            continue  # a remote-tracking leading name is _short_name_refusal's to judge
+        full = REMOTE_REF_PREFIX + name
+        if _exact_ref_oid(root, full) is not None:
+            return "{} also exists, so {!r} is ambiguous (that ref could stand in for it); a " \
+                   "remote-tracking base is passed as <configured remote>/<branch> or " \
+                   "refs/remotes/<remote>/<branch>".format(full, name)
+    return None
 
 
 def _short_name_refusal(root, base):
@@ -307,11 +334,13 @@ def resolve_base(root, base):
     """(commit, label) of the comparison base: the explicit ref, or with base None the merge base of
     HEAD and refs/remotes/origin/main. A remote base is read as its fully qualified ref with show-ref
     --verify, so a tag or a local branch of the same short name (refs/tags/origin/main,
-    refs/heads/origin/main), which git's short-name search order prefers, cannot stand in for it. A full
-    object id that exists is read as that object. A bare remote name, and a revision expression whose
-    leading remote-tracking name is shadowed by a ref of the same short name, are refused
-    (_short_name_refusal). A base that does not resolve to one commit is a DemoError (exit 2), never
-    "nothing to compare"."""
+    refs/heads/origin/main), which git's short-name search order prefers, cannot stand in for it. Any
+    other base is resolved as git resolves it, except that one (or the name leading it) for which
+    refs/remotes/<name> also exists is refused as ambiguous (_ambiguous_base_refusal). A bare remote
+    name, and a revision expression whose leading remote-tracking name is shadowed by a ref of the same
+    short name, are refused (_short_name_refusal). A base that does not resolve to one commit (a full
+    object id whose object does not exist included) is a DemoError (exit 2), never "nothing to
+    compare"."""
     if base is None:
         full = REMOTE_REF_PREFIX + DEFAULT_BASE_REMOTE
         tip = _exact_ref_oid(root, full)
@@ -334,6 +363,9 @@ def resolve_base(root, base):
             raise DemoError("cannot resolve the comparison base {!r}: the remote-tracking ref {} does not "
                             "exist or is not a commit".format(base, full))
         return commit, "{} ({}, {})".format(base, full, commit[:12])
+    refusal = _ambiguous_base_refusal(root, base)
+    if refusal is not None:
+        raise DemoError("cannot resolve the comparison base {!r}: {}".format(base, refusal))
     refusal = _short_name_refusal(root, base)
     if refusal is not None:
         raise DemoError("cannot resolve the comparison base {!r} by short name: {}".format(base, refusal))
@@ -506,7 +538,7 @@ def main():
 #       offsets relative to the rule region, without the rules_start shift, passes);
 #   T13 the margin report: the unlisted-rule line, and a WARNING line under warn-margin-bytes that still
 #       exits 0 (a mutant whose warning exits non-zero, or margin off by one, fails).
-# The list ratchet (T14 to T29) runs gate() against temporary git repositories built with the same
+# The list ratchet (T14 to T32) runs gate() against temporary git repositories built with the same
 # helpers and committed through _git_fixture_env's hermetic environment, the whole self-test inside
 # fixture_git_lifecycle so the gate's own base reads see no caller git configuration either:
 #   T14 the base lists ruleaa and the working list drops it with no [[removal]] row: exit 1 naming ruleaa
@@ -528,8 +560,8 @@ def main():
 #   T21 the base lists ruleaa, a later commit (HEAD) drops it with no [[removal]] row and the working list
 #       matches HEAD: against the base, exit 1 naming ruleaa (a mutant that resolves --base but reads the
 #       list at HEAD sees no drop and passes);
-#   T22 refs/remotes/origin/main is the base listing ruleaa, and a local branch and then also a tag, each
-#       named origin/main, point at a later commit (HEAD) that drops it: with no --base and with --base
+#   T22 refs/remotes/origin/main is the base listing ruleaa under a configured remote origin, and a
+#       local branch and then also a tag, each named origin/main, point at a later commit (HEAD) that drops it: with no --base and with --base
 #       origin/main, exit 1 naming ruleaa and naming refs/remotes/origin/main (a mutant resolving the
 #       short name lets the branch or the tag stand in, sees no drop, and passes);
 #   T23 a base commit whose list is a symlink: exit 2 naming it not a regular file (a mutant without the
@@ -541,9 +573,10 @@ def main():
 #       as committed and the drop is exit 1 (a mutant that leaves replace objects on passes);
 #   T26 a --base value starting with - (-h, --git-dir=/nonexistent): each exit 2 naming it not a ref (a
 #       mutant accepting it hands it to git as an option and fails for another reason);
-#   T27 the base lists ruleaa, HEAD drops it, and a ref refs/remotes/<base id> points at HEAD: --base <base
-#       id> reads that commit and the drop is exit 1, labelled without refs/remotes/ (a mutant looking a
-#       full object id up under refs/remotes/ reads HEAD's list and passes);
+#   T27 the base lists ruleaa and HEAD drops it: --base <base id> is exit 1; with a ref
+#       refs/remotes/<base id> planted at HEAD, --base <base id> is exit 2 naming it ambiguous (a mutant
+#       looking a full object id up under refs/remotes/ reads HEAD's list and passes; the round 4 rule,
+#       reading the id as that commit, is exit 1 and fails too);
 #   T28 refs/remotes/origin/main (and origin/HEAD) is the base listing ruleaa under a configured remote
 #       origin, and HEAD drops it: --base origin/main~0 is exit 1 unshadowed; with a tag origin at HEAD,
 #       --base origin and origin~0 are exit 2 naming the bare remote name (a mutant without that refusal
@@ -552,7 +585,17 @@ def main():
 #       refusal lets the branch or tag stand in and passes);
 #   T29 the configured-remote fallback: origin is configured, refs/remotes/origin/gone is absent and a tag
 #       origin/gone points at a commit that drops ruleaa: --base origin/gone is exit 2 naming the absent
-#       remote-tracking ref (a mutant without the fallback resolves the tag and passes).
+#       remote-tracking ref (a mutant without the fallback resolves the tag and passes);
+#   T30 a full-length id whose object does not exist: exit 2 unplanted; with refs/remotes/<that id>
+#       planted at HEAD, which drops ruleaa, exit 2 naming it ambiguous (a mutant treating a name with a
+#       ref under refs/remotes/ as remote-tracking reads HEAD's list and passes);
+#   T31 HEAD lists ruleaa and the working list drops it: --base HEAD is exit 1; with refs/remotes/HEAD
+#       planted at a commit that drops ruleaa, --base HEAD is exit 2 naming it ambiguous (the same mutant
+#       reads the planted commit and passes);
+#   T32 an abbreviated id of the base, with HEAD dropping ruleaa: exit 1; with refs/remotes/<abbreviation>
+#       planted at HEAD, the abbreviation and <abbreviation>~0 are each exit 2 naming it ambiguous (the
+#       same mutant passes the first; one checking the whole value but not the name leading an
+#       expression lets git prefer the planted ref for the second and passes).
 
 import gen_first_pin_demo as gfpd  # noqa: E402  fixture helpers (_write_tree, _tuned) and CAP_BYTES
 
@@ -1049,6 +1092,7 @@ def _self_test_main_isolated():
         # point at HEAD, which drops it. The default base and --base origin/main must still read the
         # remote-tracking ref; git's short-name order would pick the tag, then the branch.
         t22, base22 = ratchet_fixture("t22")
+        fixture_git(t22, "remote", "add", "origin", str(tmp / "t22-nowhere"))
         fixture_git(t22, "update-ref", "refs/remotes/origin/main", base22)
         _decl(t22, [], raw=raw_decl(["prjint1"]))
         fixture_git(t22, "add", "-A")
@@ -1128,16 +1172,21 @@ def _self_test_main_isolated():
             fixture_git(root, "commit", "-q", "-m", "fixture head drops ruleaa")
             return fixture_git(root, "rev-parse", "HEAD")
 
-        # T27. A full object id is that commit: refs/remotes/<base id> pointing at HEAD (which drops
-        # ruleaa) must not stand in for it.
+        ambiguous = "is ambiguous"
+
+        # T27. A full object id is that commit; with refs/remotes/<base id> planted at HEAD (which drops
+        # ruleaa) the base is ambiguous and refused, so the planted ref never stands in for it.
         t27, base27 = ratchet_fixture("t27")
         head27 = drop_at_head(t27)
+        code, out = capture_gate(t27, base27)
+        if code != 1 or drop_msg not in out or "base {} ({})".format(base27, base27[:12]) not in out:
+            failures.append("T27: unplanted, --base <base id> must read that commit and the drop be exit 1, "
+                            "got {}\n{}".format(code, out))
         fixture_git(t27, "update-ref", REMOTE_REF_PREFIX + base27, head27)
         code, out = capture_gate(t27, base27)
-        if (code != 1 or drop_msg not in out or "base {} ({})".format(base27, base27[:12]) not in out
-                or "(" + REMOTE_REF_PREFIX in out):
-            failures.append("T27: with refs/remotes/<base id> planted, --base <base id> must read that commit "
-                            "and the drop be exit 1, got {}\n{}".format(code, out))
+        if code != 2 or ambiguous not in out or REMOTE_REF_PREFIX + base27 not in out:
+            failures.append("T27: with refs/remotes/<base id> planted, --base <base id> must be exit 2 naming "
+                            "it ambiguous, got {}\n{}".format(code, out))
 
         # T28. A bare remote name, and a revision expression whose leading remote-tracking name is
         # shadowed by a branch or tag of the same short name, are refused (exit 2).
@@ -1174,6 +1223,54 @@ def _self_test_main_isolated():
         if code != 2 or "the remote-tracking ref refs/remotes/origin/gone does not exist" not in out:
             failures.append("T29: with origin configured and refs/remotes/origin/gone absent, --base "
                             "origin/gone must be exit 2 naming the absent ref, got {}\n{}".format(code, out))
+
+        # T30. A full-length id whose object does not exist is exit 2, also with refs/remotes/<that id>
+        # planted at HEAD (which drops ruleaa).
+        t30, base30 = ratchet_fixture("t30")
+        missing30 = ("0123456789abcdef" * 4)[:len(base30)]
+        head30 = drop_at_head(t30)
+        if missing30 in (base30, head30):
+            failures.append("T30: the fixture's missing id {} names a fixture commit".format(missing30))
+        code, out = capture_gate(t30, missing30)
+        if code != 2 or "cannot resolve the comparison base" not in out:
+            failures.append("T30: --base <missing full id> must be exit 2, got {}\n{}".format(code, out))
+        fixture_git(t30, "update-ref", REMOTE_REF_PREFIX + missing30, head30)
+        code, out = capture_gate(t30, missing30)
+        if code != 2 or ambiguous not in out or REMOTE_REF_PREFIX + missing30 not in out:
+            failures.append("T30: with refs/remotes/<missing full id> planted, --base <missing full id> must "
+                            "be exit 2 naming it ambiguous, got {}\n{}".format(code, out))
+
+        # T31. HEAD (listing ruleaa) is read as git reads it; with refs/remotes/HEAD planted at a commit
+        # that drops ruleaa the base is ambiguous and refused.
+        t31, base31 = ratchet_fixture("t31")
+        drop31 = drop_at_head(t31)
+        fixture_git(t31, "reset", "-q", "--soft", base31)  # HEAD lists ruleaa; the working list drops it
+        code, out = capture_gate(t31, "HEAD")
+        if code != 1 or drop_msg not in out:
+            failures.append("T31: unplanted, --base HEAD must read HEAD and the drop be exit 1, got {}\n{}"
+                            .format(code, out))
+        fixture_git(t31, "update-ref", REMOTE_REF_PREFIX + "HEAD", drop31)
+        code, out = capture_gate(t31, "HEAD")
+        if code != 2 or ambiguous not in out or REMOTE_REF_PREFIX + "HEAD" not in out:
+            failures.append("T31: with refs/remotes/HEAD planted, --base HEAD must be exit 2 naming it "
+                            "ambiguous, got {}\n{}".format(code, out))
+
+        # T32. An abbreviated id of the base is read as git reads it; with refs/remotes/<abbreviation>
+        # planted at HEAD (which drops ruleaa) the abbreviation, alone or leading an expression, is
+        # ambiguous and refused.
+        t32, base32 = ratchet_fixture("t32")
+        head32 = drop_at_head(t32)
+        abbrev32 = base32[:12]
+        code, out = capture_gate(t32, abbrev32)
+        if code != 1 or drop_msg not in out:
+            failures.append("T32: unplanted, --base <abbreviated id> must read the base and the drop be "
+                            "exit 1, got {}\n{}".format(code, out))
+        fixture_git(t32, "update-ref", REMOTE_REF_PREFIX + abbrev32, head32)
+        for base in (abbrev32, abbrev32 + "~0"):
+            code, out = capture_gate(t32, base)
+            if code != 2 or ambiguous not in out or REMOTE_REF_PREFIX + abbrev32 not in out:
+                failures.append("T32: with refs/remotes/<abbreviated id> planted, --base {!r} must be exit 2 "
+                                "naming it ambiguous, got {}\n{}".format(base, code, out))
     except _FixtureError as exc:
         fixture_error = str(exc)
     finally:
@@ -1207,8 +1304,10 @@ def _self_test_main_isolated():
           "a declared removal passes and is printed, an addition passes, and a malformed removal row, an "
           "unresolvable or missing base and an absent or malformed base list fail closed (exit 2); a "
           "branch or tag shadowing origin/main, a GIT_DIR in the environment and a replace ref do not "
-          "change the base read, a full object id is read as that commit despite a refs/remotes/<id> ref, "
-          "and a symlinked base list, a --base starting with -, a bare remote name, an expression led by "
+          "change the base read, a full or abbreviated object id and HEAD are read as git reads them, "
+          "a full object id whose object does not exist fails closed, and a planted refs/remotes/<id>, "
+          "refs/remotes/<abbreviation> or refs/remotes/HEAD makes the base ambiguous (exit 2), never the "
+          "base read, and a symlinked base list, a --base starting with -, a bare remote name, an expression led by "
           "a shadowed remote-tracking name and an absent remote-tracking ref of a configured remote fail "
           "closed. "
           "{}".format(
