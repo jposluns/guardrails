@@ -5331,6 +5331,7 @@ expected-check-ids = [
   "diff/out-of-scope-not-reported",
   "diff/adopter-shape-on-added-line",
   "diff/head-inputs-not-working-tree",
+  "diff/replace-objects-ignored",
   "diff/user-config-no-prefix",
   "diff/user-config-colour",
   "diff/user-config-external-diff",

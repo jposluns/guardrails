@@ -979,22 +979,27 @@ def validate_tracker_shapes(shapes, budget=None):
         _run_adopter_matcher(shapes, [], budget)
 
 
-def _run_adopter_matcher(shapes, items, budget=None, argv=None):
+def _run_adopter_matcher(shapes, items, budget=None, stand_in=None):
     """Run the adopter-pattern phase in a terminable worker subprocess (this script, launched with -I
     and _ADOPTER_WORKER_FLAG, structured JSON on stdin and stdout, no shell): the worker compiles every
     shape, re-checks its fixtures and then matches `items` ([[relpath, [[line number, line], ...]], ...])
     and returns {relpath: {key: [line numbers]}} (a number repeats per match). The whole phase runs under
     one wall-clock `budget` (ADOPTER_MATCH_BUDGET_SECONDS by default); a timeout (the worker is killed),
     a nonzero worker exit, malformed worker output or a refusal the worker reports raises OSError.
-    `argv` lets the self-test stand a failing worker in for the real one. json is imported at module
-    top, before any sys.path change, so a sibling json.py can never shadow it here."""
+    `stand_in` (self-test only) is the path of a script run as `sys.executable -I <script>` in the real
+    worker's place, so the self-test can stand a failing worker in; it has its own launch, and both
+    launches spell a literal list argv headed by sys.executable. json is imported at module top, before
+    any sys.path change, so a sibling json.py can never shadow it here."""
     budget = ADOPTER_MATCH_BUDGET_SECONDS if budget is None else budget
-    argv = [sys.executable, "-I", "-B", str(Path(__file__).resolve()), _ADOPTER_WORKER_FLAG] \
-        if argv is None else list(argv)
     payload = json.dumps({"shapes": [{k: shape[k] for k in ("name", "key", "regex", "red", "green")}
                                      for shape in shapes], "items": items}).encode("utf-8")
     try:
-        proc = subprocess.run(argv, input=payload, capture_output=True, timeout=budget)
+        if stand_in is None:
+            proc = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()), _ADOPTER_WORKER_FLAG],
+                                  input=payload, capture_output=True, timeout=budget)
+        else:
+            proc = subprocess.run([sys.executable, "-I", str(stand_in)],
+                                  input=payload, capture_output=True, timeout=budget)
     except subprocess.TimeoutExpired:
         raise OSError("the adopter tracker shapes did not finish within the {}-second budget; the "
                       "worker was stopped (a slow adopter regex fails closed)".format(budget))
@@ -1083,12 +1088,14 @@ def _git_read(root, args):
     """One git read under tracked_files' discipline (GIT_* environment dropped, core.fsmonitor=false,
     protocol.allow=never, GIT_NO_LAZY_FETCH=1, a 120-second timeout) plus the three automatic-maintenance
     pins in option position (gc.auto=0, gc.autoDetach=false, maintenance.auto=false), the spelling the
-    maintenance-pin scan resolves for a funnel whose subcommand is a parameter; returns the
-    CompletedProcess and raises OSError when git cannot run or times out."""
+    maintenance-pin scan resolves for a funnel whose subcommand is a parameter, and --no-replace-objects
+    (a local refs/replace object can never stand in for a commit, tree or blob this check reads);
+    returns the CompletedProcess and raises OSError when git cannot run or times out."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_NO_LAZY_FETCH"] = "1"
     try:
-        return subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+        return subprocess.run(["git", "--no-replace-objects", "-C", str(root), "-c", "core.fsmonitor=false",
+                               "-c", "protocol.allow=never",
                                "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
                                *args], capture_output=True, timeout=120, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -2052,10 +2059,10 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
         check("adopter/config-limits-at-and-beyond",
               all(at is None and beyond is not None for at, beyond in limits.values()), limits)
 
-        def worker_refusal(shape, budget=None, argv=None, items=()):
+        def worker_refusal(shape, budget=None, stand_in=None, items=()):
             try:
                 _run_adopter_matcher(parse_tracker_config(config_text([shape]).encode("utf-8")),
-                                     list(items), budget, argv)
+                                     list(items), budget, stand_in)
             except OSError as exc:
                 return str(exc)
             return None
@@ -2086,8 +2093,8 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
         failing.write_text("raise SystemExit(4)\n", encoding="utf-8")
         garbled = lab / "garbled_worker.py"
         garbled.write_text("print('not json')\n", encoding="utf-8")
-        fail_exit = worker_refusal(sample, argv=[sys.executable, "-I", str(failing)])
-        fail_out = worker_refusal(sample, argv=[sys.executable, "-I", str(garbled)])
+        fail_exit = worker_refusal(sample, stand_in=failing)
+        fail_out = worker_refusal(sample, stand_in=garbled)
         check("adopter/worker-failure-refused",
               fail_exit is not None and "exited 4" in fail_exit
               and fail_out is not None and "malformed output" in fail_out, (fail_exit, fail_out))
@@ -2307,6 +2314,18 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
         disk_reported = {line.strip().split(" ")[0] for line in disk[1].splitlines() if line.startswith("  ")}
         check("diff/head-inputs-not-working-tree",
               built and disk[0] == rc == 1 and disk_reported == reported, (disk, rc))
+        # A local refs/replace object cannot stand in for what HEAD holds: replace docs/new.md's HEAD
+        # blob (label on line 2) with main's docs/page.md blob (no label on line 2) and the report is
+        # unchanged; without --no-replace-objects the replacement drops docs/new.md:2:.
+        replace_steps = len(steps)
+        git("replace", git("rev-parse", "HEAD:docs/new.md"), git("rev-parse", "main:docs/page.md"))
+        swapped = gate("--diff", "main")
+        git("replace", "-d", git("rev-parse", "HEAD:docs/new.md"))
+        swapped_reported = {line.strip().split(" ")[0] for line in swapped[1].splitlines()
+                            if line.startswith("  ")}
+        check("diff/replace-objects-ignored",
+              built and all(r == 0 for _c, r, _e in steps[replace_steps:]) and swapped[0] == rc == 1
+              and swapped_reported == reported and "docs/new.md:2:" in swapped_reported, (swapped, rc, steps))
         # Ordinary user or repository git configuration cannot change which lines count as added. Each
         # row sets one setting in the fixture repository and expects the same report; with
         # diff.interHunkContext the two changes of docs/move.md (lines 1 and 3) would otherwise share

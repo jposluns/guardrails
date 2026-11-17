@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "785e7bbc010e7f600474fc43385e22f21c3ee3551fe39ea9acf5d0a10e69b988"
+tree-sha256 = "311dc7623a69994bda83217c223cc770be431fab4d60a6cd0dfdb6fbc830ea3f"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4287,8 +4287,8 @@ sha256 = "57fe0345d8e1959e9ff8a5f22ae5271577d3485ffd8a116e68d3f2e14c2de010"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 328933
-sha256 = "fdb4b497e0b1aa013da76d1b49fe618fa636de2c954d95ab9870f845025529db"
+bytes = 330388
+sha256 = "1673a4bbcedd839ca975e80d60200ca535e74dbc36cc50b5036902b918ea1261"
 
 [[sources]]
 path = "tools/check_leaks.py"
@@ -4727,8 +4727,8 @@ sha256 = "aee862bd4e52599e3c44ca8c83359689d1e60541674785bfbf50bd663b92c43e"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 252316
-sha256 = "d4f0bf38bdb4699f791cb9501af215408e60642f8713272a3a901dc90113987e"
+bytes = 252350
+sha256 = "ac8a264f33886033385623652d51bc9241009a5d10b5785085af4ac09557de06"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
