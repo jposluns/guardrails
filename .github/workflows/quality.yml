@@ -439,9 +439,39 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite baseline-pin-selftest
 
+      # The base-coupling leg compares each pin at HEAD with the same pin at the exact commit --base
+      # names, which must be an ancestor of HEAD; it compares those 2 endpoints only, so a row changed
+      # in one commit and restored by a later one is not seen. A pull_request checks out the test
+      # merge and compares it with its first parent HEAD^1, the protected line it merges into. A push
+      # compares the pushed HEAD with the event's before SHA (the PUSH_BEFORE the Release cut step
+      # passes too), the net change of the pushed range; a before SHA that is not an ancestor of HEAD
+      # (a force or otherwise divergent push) is cannot-evaluate (exit 2), never compared with a common
+      # ancestor. A workflow_dispatch run compares HEAD with its previous commit HEAD^, that 1 commit's
+      # change. Every base is passed unprobed, so a base that does not resolve (a root HEAD included)
+      # is cannot-evaluate in the gate (exit 2), never a pass, and no branch runs the gate without
+      # --base. A push whose before SHA is missing or all zero (the ${PUSH_BEFORE//0/} test is empty
+      # for both) names no commit before the range, so the step prints why and fails closed (exit 1)
+      # before the gate runs.
       - name: Site baseline pin
         shell: bash
-        run: python3 -I -B tools/check_baseline_pin.py
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 -I -B tools/check_baseline_pin.py --base "HEAD^1"
+          else
+            if [ "$EVENT_NAME" = "push" ]; then
+              if [ -z "${PUSH_BEFORE//0/}" ]; then
+                echo "CANNOT EVALUATE: the push event names no commit before the pushed range (its before SHA is missing or all zero), so the baseline-pin base-coupling leg has no base; fail closed"
+                exit 1
+              fi
+              python3 -I -B tools/check_baseline_pin.py --base "$PUSH_BEFORE"
+            else
+              python3 -I -B tools/check_baseline_pin.py --base "HEAD^"
+            fi
+          fi
 
       - name: Site palette contrast (aiqt.ai draft)
         shell: bash
