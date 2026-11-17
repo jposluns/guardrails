@@ -31427,6 +31427,39 @@ def _main_isolated(monitor):
                 ("(ci-idc-a-c3) the maintainer's EMAIL beside a pathspec glob in .claude/rules allows",
                  "EMAIL=jeff@posluns.ca git add .claude/rules/[a-z]*.md")):
             ciexpect(_ci_label, _ci_cmd, "allow")
+        # Command position is read in one pass over the words (_cmtidn_arithmetic_word), so a let word behind time
+        # -p, command -p or a redirection, and a subscript behind quotes or a backslash in an operand of read or
+        # unset, make the text inexact, as do let in an operand of trap or sh -c, each allowed by the lexical
+        # command-start search (b1 to b3 are the review's three shapes, b4 and b5 its read and unset shapes); the
+        # maintainer's three commit shapes after a command separator still allow (a-c4 to a-c6), and so does a ;
+        # let inside a quoted message (a-c7), which the lexical search over-denied.
+        _ci_built = "printf -v X 'a%s\\44(git -c user.name=%s commit -m x)]' '[' Claude; "
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-b1) a let word behind time -p after a run-time-built subscript denies",
+                 _ci_built + "time -p let X"),
+                ("(ci-idc-b2) a let word behind command -p after a run-time-built subscript denies",
+                 _ci_built + "command -p let X"),
+                ("(ci-idc-b3) a let word behind a redirection after a run-time-built subscript denies",
+                 _ci_built + ">/dev/null let X"),
+                ("(ci-idc-b4) a quoted read operand followed by [ makes the text inexact (over-deny)",
+                 "read \"a\"[X] <<< 1; " + _ci_human),
+                ("(ci-idc-b5) a quoted unset word with a backslash-escaped subscript makes the text inexact "
+                 "(over-deny)", "\"unset\" a\\[X\\]; " + _ci_human),
+                ("(ci-idc-b6) a let word in a trap operand makes the text inexact (over-deny)",
+                 "trap 'let X' EXIT; " + _ci_human),
+                ("(ci-idc-b7) a let word in an sh -c operand makes the text inexact (over-deny)",
+                 "export X; bash -c 'let X'; " + _ci_human)):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-a-c4) the maintainer's EMAIL beside a [tag] message prefix after && allows",
+                 "cd . && EMAIL=jeff@posluns.ca git commit -m '[hooks] refresh CLAUDE.md'"),
+                ("(ci-idc-a-c5) the maintainer's EMAIL beside a message that starts with let after && allows",
+                 "cd . && EMAIL=jeff@posluns.ca git commit -m 'let CLAUDE.md name the rules'"),
+                ("(ci-idc-a-c6) the maintainer's EMAIL beside a pathspec glob in .claude/rules after && allows",
+                 "cd . && EMAIL=jeff@posluns.ca git add .claude/rules/[a-z]*.md"),
+                ("(ci-idc-a-c7) the maintainer's EMAIL beside a ; let inside a quoted message allows",
+                 "EMAIL=jeff@posluns.ca git commit -m 'fix x; let CLAUDE.md load'")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
         for _ci_label, _ci_cmd in (
                 ("(ci-idc-e-c1) a human EMAIL with a backslash before a newline and no AI name allows",
                  "EMAIL=alice@example.com git commit -m 'fix the \\\nadapter'"),
@@ -32528,6 +32561,30 @@ def _main_isolated(monitor):
                                         _ci_label, len(_ci_cmd), _ci_cap, _ci_wants, _ci_got, _ci_spent,
                                         _ci_reason[-200:],
                                         "; the longer command was not run" if _ci_size == 16 << 10 else ""))
+                    break
+        # The inexact-text search finds let, [[ and a [X]=v word in one pass over the words of the text
+        # (_cmtidn_arithmetic_word), where a lexical command-start search cost time quadratic in the text's length
+        # (on one shared host, in-process, about 2.2 s, 3.2 s and 0.5 s of the calling thread's CPU at 16,384
+        # characters for the three forms below, and 9.1 s for the first at 32,768 in the review, past the
+        # 8-second hook deadline). The bound is the CPU time the calling thread spends in the handler
+        # (_hook_cpu_timed) over 'echo x=! x=! ...', '! ! ...' and 'echo [ [ ...', each padded to 16,384 characters
+        # and to _CMTIDN_READ_LIMIT: 0.375 s and 3 s, the same bound per character, against at most about 0.09 s
+        # and 0.75 s measured (the fastest of three runs, 2026-11-17), a margin of about 4 times. Each command
+        # names no identity and allows. For each form the command at the limit runs only when the shorter one is
+        # within its bound, so a quadratic search fails in seconds.
+        for _ci_label, _ci_head, _ci_unit in (
+                ("(ci-idc-cpu1) 'echo x=! x=! ...'", "echo", " x=!"),
+                ("(ci-idc-cpu2) '! ! ...'", "", " !"),
+                ("(ci-idc-cpu3) 'echo [ [ ...' with no ]", "echo", " [")):
+            for _ci_size, _ci_cap in ((16 << 10, 0.375), (aiqt_hooks._CMTIDN_READ_LIMIT, 3.0)):
+                _ci_cmd = _ci_head + _ci_unit * ((_ci_size - len(_ci_head)) // len(_ci_unit))
+                _ci_cmd += " " * (_ci_size - len(_ci_cmd))
+                _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
+                if _ci_got != "allow" or _ci_spent > _ci_cap:
+                    failures.append("{} over {} characters expected allow within {} s of CPU time, got {} after "
+                                    "{:.2f} s{}".format(_ci_label, len(_ci_cmd), _ci_cap, _ci_got, _ci_spent,
+                                                        "; the longer command was not run"
+                                                        if _ci_size == 16 << 10 else ""))
                     break
         # Every co-author trailer name in a word is read, each with its own value of up to 160 characters, where the
         # reader read only the first trailer name of a word and the raw-string scan resumed its search after each

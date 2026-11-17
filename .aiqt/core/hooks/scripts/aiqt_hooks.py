@@ -5381,34 +5381,62 @@ _CMTIDN_SUBSTITUTION_RE = re.compile(r"\$\(|`|[<>]\(|\$\{[ \t\n|]")
 # a command substitution included, so a command runs that the text need not spell ($ and ( can come from
 # separate words: printf -v X '%s(cmd)' '$'; : "${X@P}").
 _CMTIDN_PROMPT_RE = re.compile(r"@P\}")
-# The start of a command word: the start of the text or a ; & | ( ) { newline, backquote or ! before it, then
-# any blanks, reserved words that start a command, builtin, command or eval words and assignment words (a quoted
-# value included), each followed by blanks.
-_CMTIDN_COMMAND_START = (r"(?:^|(?<=[;&|(){}\n`!]))[ \t]*(?:(?:if|then|else|elif|do|while|until|time|coproc|!"
-                         r"|builtin|command|eval|[A-Za-z_][A-Za-z_0-9]*(?:\[[^\]\n]*\])?\+?="
-                         r"(?:'[^']*'|\"[^\"]*\"|[^\s;&|()<>'\"])*)[ \t]+)*")
 # _CMTIDN_ARITHMETIC_RE: a place where bash evaluates an arithmetic expression (6.5 Shell Arithmetic), where a
 # variable whose value holds an indexed array subscript has that subscript expanded, a command substitution in
-# it included, so a command runs that the text need not spell. Each is sought in the shape bash reads it, not
-# as any [ or let word: an indexed array subscript, a name directly followed by [ with no letter, digit, _, /,
-# . or $ before the name (an assignment a[X]=v, an expansion ${a[X]}, ${#a[X]} or ${!a[X]}, a name operand of
-# unset, read, printf -v or test -v), so a [ right after a quote ('[hooks] ...'), a / or a . (the glob
-# .claude/rules/[a-z]*.md) is not one, nor is $a[X], which bash reads as $a followed by a glob; a [X]=v or
-# [X]+=v word of a compound array assignment (a=([X]=v)); a deprecated $[...] arithmetic expansion; a ((
-# arithmetic command or for (( loop (3.2.5.1, 3.2.5.2), which a $(( arithmetic expansion matches as well; a
-# let word (4.2), spelled through quotes or backslashes too ('let', l\et), or the [[ compound command, whose
-# -eq, -lt and the rest compare arithmetic expressions (6.4), each as a command word (_CMTIDN_COMMAND_START),
-# so let inside a quoted message ('let CLAUDE.md ...') is not one; a declare, typeset or local word with an
-# option cluster holding i (the integer attribute, 4.2); a ${NAME:OFFSET} substring expansion (3.5.3) and a
-# ${!NAME} indirect expansion (3.5.3), whose name may hold a subscript.
+# it included, so a command runs that the text need not spell, sought in the whole text where its shape does
+# not depend on command position: an indexed array subscript, a name directly followed by [ with no letter,
+# digit, _, /, . or $ before the name (an assignment a[X]=v, an expansion ${a[X]}, ${#a[X]} or ${!a[X]}, a name
+# operand of unset, read, printf -v or test -v), so a [ right after a quote ('[hooks] ...'), a / or a . (the glob
+# .claude/rules/[a-z]*.md) is not one, nor is $a[X], which bash reads as $a followed by a glob; a deprecated
+# $[...] arithmetic expansion; a (( arithmetic command or for (( loop (3.2.5.1, 3.2.5.2), which a $((
+# arithmetic expansion matches as well; a declare, typeset or local word with an option cluster holding i (the
+# integer attribute, 4.2); a ${NAME:OFFSET} substring expansion (3.5.3) and a ${!NAME} indirect expansion
+# (3.5.3), whose name may hold a subscript. Each alternative starts only where its first character stands and
+# scans no further than its own word, so the search takes time linear in the text. The places that depend on
+# command position (a let word, the [[ compound command, a [X]=v word of a compound array assignment, a name
+# directly followed by [ behind quotes or a backslash) are read by _cmtidn_arithmetic_word over the words of
+# _cmtidn_raw_words.
 _CMTIDN_ARITHMETIC_RE = re.compile(r"(?<![A-Za-z0-9_./$])[A-Za-z_][A-Za-z_0-9]*\["
-                                   r"|(?<![^\s(])\[[^\]\n]*\]\+?="
                                    r"|\$\[|\(\("
-                                   r"|" + _CMTIDN_COMMAND_START + r"(?:[\\'\"]*l[\\'\"]*e[\\'\"]*t[\\'\"]*|\[\[)"
-                                   r"(?![^\s;&|()<>])"
                                    r"|(?<![A-Za-z0-9_.-])(?:declare|typeset|local)(?:[ \t]+[-+][A-Za-z]+)*?"
                                    r"[ \t]+-[A-Za-z]*i"
                                    r"|\$\{(?:[A-Za-z_][A-Za-z_0-9]*|[0-9]+|[@*]):(?![-=+?])|\$\{!")
+# The words of _cmtidn_arithmetic_word. _CMTIDN_CMD_RESERVED: the reserved words after which the next word is
+# still in command position (bash 5.3, 3.2.5 Compound Commands and 3.2.3 Pipelines: time and its -p option, !,
+# coproc). _CMTIDN_CMD_PREFIXES: the words that run the command named after them, with their option words, as
+# the git command finder reads them (builtin, command -p, exec, nohup and the like), so the word after them is
+# in command position too. _CMTIDN_CMD_SHELL_TEXT: the words that run their operands as shell text (eval, trap
+# and a shell named as a command, sh -c '...'), whose every operand is searched for a let or [[ word or a
+# subscript anywhere in it (_CMTIDN_SHELL_TEXT_ARITHMETIC_RE). _CMTIDN_CMD_NAME_BUILTINS: the builtins that
+# take a variable name as an operand, whose operands are searched for a name directly followed by [ once their
+# quotes and backslashes are dropped (read "a"[X], unset a\[X\]).
+_CMTIDN_CMD_RESERVED = frozenset(("if", "then", "else", "elif", "do", "while", "until", "time", "coproc", "!",
+                                  "{", "}"))
+_CMTIDN_CMD_PREFIXES = frozenset(("builtin", "command", "exec", "nohup", "env", "nice", "sudo", "setsid", "stdbuf",
+                                  "xargs"))
+_CMTIDN_CMD_SHELL_TEXT = frozenset(("eval", "trap", "sh", "bash", "dash", "ksh", "zsh"))
+_CMTIDN_CMD_NAME_BUILTINS = frozenset(("read", "unset", "printf", "declare", "typeset", "local", "export",
+                                       "readonly", "mapfile", "readarray", "wait", "getopts", "test", "["))
+# An assignment word in command position (NAME=V or NAME+=V, as written: a quoted name is not an assignment).
+_CMTIDN_CMD_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\+?=")
+# A name directly followed by [ at the start of a word in command position (an assignment a[X]=v), sought in
+# the word with its quotes and backslashes dropped.
+_CMTIDN_CMD_SUBSCRIPT_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\[")
+# A name directly followed by [ anywhere in an operand of a builtin that takes a variable name, sought in the
+# operand with its quotes and backslashes dropped.
+_CMTIDN_NAME_SUBSCRIPT_RE = re.compile(r"(?<![A-Za-z0-9_./])[A-Za-z_][A-Za-z_0-9]*\[")
+# A [X]=v or [X]+=v word of a compound array assignment (a=([X]=v)), matched at the start of a word as written.
+_CMTIDN_COMPOUND_WORD_RE = re.compile(r"\[[^\]\n]*\]\+?=")
+# A let or [[ word, a name directly followed by [, or a [X]=v word, anywhere in a word that bash may read as
+# shell text again (an operand of eval, trap or sh -c) or that the lexical reading may misread (a doubtful word of
+# _cmtidn_raw_words), sought in the word with its quotes and backslashes dropped. The [X]=v alternative stops at
+# the next [, so each start scans no further than the next one and the search stays linear in the word.
+_CMTIDN_SHELL_TEXT_ARITHMETIC_RE = re.compile(r"(?<![^\s;&|(){}!])(?:let|\[\[)(?![^\s;&|()<>])"
+                                              r"|(?<![A-Za-z0-9_./])[A-Za-z_][A-Za-z_0-9]*\["
+                                              r"|(?<![^\s(])\[[^\]\n\[]*\]\+?=")
+# A command separator in the operator characters between two words: a newline, ;, (, ), a | that does not end a
+# >| redirection operator, or a & that is not part of a >&, <&, &> or &>> redirection operator.
+_CMTIDN_CMD_SEPARATOR_RE = re.compile(r"[\n;()]|(?<!>)\||(?<![<>])&(?!>)")
 
 
 def _cmtidn_inexact(command):
@@ -5423,8 +5451,10 @@ def _cmtidn_inexact(command):
     (_CMTIDN_SUBSTITUTION_RE: $(, a backquote, ${ , ${<tab>, ${<newline> or ${|, <( or >(), a ${NAME@P}
     prompt-string expansion (_CMTIDN_PROMPT_RE) or a place where bash evaluates an arithmetic expression, which
     runs a command substitution held in an array subscript of a variable's value (_CMTIDN_ARITHMETIC_RE: a name
-    directly followed by [, a [X]=v compound assignment word, $[, ((, let or [[ as a command word, a declare,
-    typeset or local integer attribute, a ${NAME:OFFSET} or ${!NAME} expansion). The value reader does not model
+    directly followed by [, $[, ((, a declare, typeset or local integer attribute, a ${NAME:OFFSET} or ${!NAME}
+    expansion; _cmtidn_arithmetic_word: let, [[ or a name directly followed by [ in command position, a
+    subscript in an operand of a builtin that takes a variable name, a [X]=v compound assignment word, and these
+    inside an operand of eval, trap or sh -c or a doubtful word). The value reader does not model
     what happens inside a substitution body (a quote there, a case pattern's ')', a backquote or a brace group in
     a ${ cmd; } body can each put it out of step with bash and split a later value before its AI part), nor a
     command run from a prompt string or an arithmetic expression, so each of these makes the text inexact. A
@@ -5451,12 +5481,72 @@ def _cmtidn_inexact(command):
         return "a command or process substitution"
     if _CMTIDN_PROMPT_RE.search(command):
         return "a prompt-string expansion"
-    if _CMTIDN_ARITHMETIC_RE.search(command):
+    if _CMTIDN_ARITHMETIC_RE.search(command) or _cmtidn_arithmetic_word(command):
         return "an arithmetic expression that can run a command through an array subscript"
     return None
 
 
-def _cmtidn_raw_words(text):
+def _cmtidn_arithmetic_word(command):
+    """True when a word of the raw text (_cmtidn_raw_words) is a place where bash evaluates an arithmetic
+    expression that depends on command position, read in one pass over the words. A word is in command position
+    when it is the first word of a simple command: after the start of the text or a command separator
+    (_CMTIDN_CMD_SEPARATOR_RE) or a { or } word, behind reserved words (_CMTIDN_CMD_RESERVED), assignment words,
+    redirections (a word after a redirection operator, and a file descriptor number written directly before one)
+    and prefix words with their option words (_CMTIDN_CMD_PREFIXES: command -p let, time -p let, >/dev/null
+    let). In that position a let word, a [[ word or a name directly followed by [ (a[X]=v), each read with its
+    quotes and backslashes dropped ('let', l\\et, "a"[X]=v), counts; so does a name directly followed by [ in an
+    operand of a builtin that takes a variable name (_CMTIDN_CMD_NAME_BUILTINS: read "a"[X], unset a\\[X\\],
+    printf -v, declare), a [X]=v word of a compound array assignment wherever it stands, and a let or [[ word,
+    a name directly followed by [ or a [X]=v word anywhere in an operand of a word that runs its operands as
+    shell text (_CMTIDN_CMD_SHELL_TEXT: eval 'let X', trap, sh -c) or in a doubtful word, one the lexical
+    reading may misread (_CMTIDN_SHELL_TEXT_ARITHMETIC_RE). A [ inside a quoted message ('[hooks] ...') or a
+    glob in a path operand (.claude/rules/[a-z]*.md) and a let inside a quoted message ('let CLAUDE.md ...') are
+    not one. Each word is searched a fixed number of times, so the pass takes time linear in the text."""
+    gaps = []
+    words = _cmtidn_raw_words(command, gaps)
+    position = True  # the next word is in command position
+    options = False  # a prefix word was read, so an option word keeps command position
+    shell_text = False  # the command word runs its operands as shell text
+    names = False  # the command word is a builtin that takes a variable name
+    for k, (word, doubtful) in enumerate(words):
+        gap = gaps[k]
+        if _CMTIDN_CMD_SEPARATOR_RE.search(gap) or word in ("{", "}"):
+            position, options, shell_text, names = True, False, False, False
+        bare = _CMTIDN_SET_UNREAD_RE.sub("", word)
+        if word.startswith("[") and _CMTIDN_COMPOUND_WORD_RE.match(word):
+            return True
+        if (doubtful or shell_text) and _CMTIDN_SHELL_TEXT_ARITHMETIC_RE.search(bare):
+            return True
+        if names and _CMTIDN_NAME_SUBSCRIPT_RE.search(bare):
+            return True
+        tail = gap.rstrip(" \t")
+        if tail.endswith(("<", ">", "<&", ">&", ">|")):
+            continue  # the target of a redirection keeps the command position as it was
+        if not position:
+            continue
+        after = gaps[k + 1] if k + 1 < len(gaps) else ""
+        if bare.isdigit() and after.startswith(("<", ">")):
+            continue  # a file descriptor number written directly before a redirection operator
+        if bare in ("let", "[[") or _CMTIDN_CMD_SUBSCRIPT_RE.match(bare):
+            return True
+        if bare in _CMTIDN_CMD_RESERVED:
+            options = bare == "time"
+            continue
+        if options and bare.startswith("-"):
+            continue
+        if _CMTIDN_CMD_ASSIGNMENT_RE.match(word):
+            continue
+        if bare in _CMTIDN_CMD_PREFIXES:
+            options = True
+            continue
+        name = bare.rsplit("/", 1)[-1]
+        position, options = False, False
+        shell_text = name in _CMTIDN_CMD_SHELL_TEXT
+        names = name in _CMTIDN_CMD_NAME_BUILTINS
+    return False
+
+
+def _cmtidn_raw_words(text, gaps=None):
     """The words of the raw text for the raw-text rule (_cmtidn_identity_set_ai), heredoc bodies, redirect words
     and here-strings included, read in one pass, each as (word, doubtful). A word ends at a space, a tab, a
     newline or a shell operator character (_CMTIDN_WORD_STOPS) that stands outside every single or double
@@ -5469,10 +5559,13 @@ def _cmtidn_raw_words(text):
     here-string), an ANSI-C quote $'...' (whose \\' bash keeps inside it), a single quote right inside a
     ${...} body that stands inside double quotes, or a ')' that closes no '(' outside every body (a case
     pattern inside $(...)). Each of these is read outside single and double quotes. The word reader
-    (find_ai_authorship) judges every command it can parse before this rule; this rule is its backstop."""
+    (find_ai_authorship) judges every command it can parse before this rule; this rule is its backstop. When
+    gaps is a list, the characters read between the end of the previous word (or the start of the text) and the
+    start of each word, blanks and operator characters, are appended to it, one string per word in order."""
     words = []
     stack = []  # the open contexts: "'", '"', "{" (a ${ body), "(" (a $( body or a ( inside one), "`"
     start = None
+    last = 0  # where the characters between the previous word and the next one start
     doubt = False  # a construct the lexical reading may misread has been passed
     groups = 0  # the '(' read outside every body and not yet closed
     i, n = 0, len(text)
@@ -5500,10 +5593,13 @@ def _cmtidn_raw_words(text):
             if start is not None:
                 words.append((text[start:i], doubt))
                 start = None
+                last = i
             i += 1
             continue
         if start is None:
             start = i
+            if gaps is not None:
+                gaps.append(text[last:i])
         if c == "\\":
             i += 2  # the escaped character is part of the word and opens nothing
             continue
