@@ -31442,6 +31442,58 @@ def _main_isolated(monitor):
                 ("(ci-idc-pj-c5) git add of .claude/ and a heredoc commit message in a command substitution allows",
                  "git add .claude/rules && git commit -m \"$(cat <<'EOF'\nrules: regenerate .claude/rules\nEOF\n)\"")):
             ciexpect(_ci_label, _ci_cmd, "allow")
+        # DISCLOSED RESIDUALS, pinned at their current allow: shapes of routes (a), (b) and (c) and of a subscript
+        # built at run time that a review found the residue described as denied. Each was run through the guard
+        # as a deny row first and was allowed, so the residue now names each one as not caught instead of claiming
+        # it (ci-idc-nc1 to nc16). ci-idc-ta1 to ta4 pin the trailer-alias route, a co-author trailer given as
+        # --trailer NAME: VALUE after trailer.NAME.key is set to Co-authored-by, which the residue also names as
+        # not caught. Every one of these was allowed at main as well. A guard change that denies one of them
+        # turns its row into a failure, so the row and the residue entry move together.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-nc1) route (a) after a leading 2> redirect word is not caught, allows",
+                 "2>/dev/null xargs -a <(echo Claude) git config user.name"),
+                ("(ci-idc-nc2) route (a) after a leading < redirect word is not caught, allows",
+                 "</dev/null xargs -a <(echo Claude) git config user.name"),
+                ("(ci-idc-nc3) route (a) with a redirect word between -a and the process substitution is not "
+                 "caught, allows", "xargs -a 2>/dev/null <(echo Claude) git config user.name"),
+                ("(ci-idc-nc4) route (b) with a redirect word between -c and the string is not caught, allows",
+                 "flock /tmp/l -c 2>/dev/null 'git config author.name Claude'"),
+                ("(ci-idc-nc5) route (b) with a redirect word between -c and a double-quoted string is not caught, "
+                 "allows", "flock /tmp/l -c 2>/dev/null \"git config author.name Claude\""),
+                ("(ci-idc-nc6) route (a) inside a $(...) body is not caught, allows",
+                 ": \"$(xargs -a <(echo Claude) git config user.name)\""),
+                ("(ci-idc-nc7) route (a) inside a backquote body is not caught, allows",
+                 ": \"`xargs -a <(echo Claude) git config user.name`\""),
+                ("(ci-idc-nc8) route (b) inside a $(...) body is not caught, allows",
+                 ": \"$(flock /tmp/l -c 'git config user.name Claude')\""),
+                ("(ci-idc-nc9) route (b) inside a backquote body is not caught, allows",
+                 ": \"`flock /tmp/l -c 'git config user.name Claude'`\""),
+                ("(ci-idc-nc10) route (c) inside a $(...) body is not caught, allows",
+                 ": \"$(EMAIL=noreply@anthr; EMAIL+=opic.com; git commit -m x)\""),
+                ("(ci-idc-nc11) route (c) inside a backquote body is not caught, allows",
+                 ": \"`EMAIL=noreply@anthr; EMAIL+=opic.com; git commit -m x`\""),
+                ("(ci-idc-nc12) route (c) from a ${EMAIL:=...} part followed by an expansion is not caught, allows",
+                 ": ${EMAIL:=noreply@anthr}$X; EMAIL+=opic.com; git commit -m x"),
+                ("(ci-idc-nc13) route (c) with a $ inside single quotes in the += part is not caught, allows",
+                 "EMAIL=noreply@anthr; EMAIL+='opic.com$x'; git commit -m x"),
+                ("(ci-idc-nc14) route (c) with a same-name decoy in a comment is not caught, allows",
+                 "EMAIL=noreply@anthr; # EMAIL=x\nEMAIL+=opic.com; git commit -m x"),
+                ("(ci-idc-nc15) route (c) with a same-name decoy in a quoted heredoc body is not caught, allows",
+                 "EMAIL=noreply@anthr; cat >/dev/null <<'E'\nEMAIL=x\nE\nEMAIL+=opic.com; git commit -m x"),
+                ("(ci-idc-nc16) a subscript built at run time in a test -v operand is not caught, allows",
+                 "z=(1); printf -v X '[%s(git -c user.name=%s commit -m x)]' '$' Claude; test -v z$X"),
+                ("(ci-idc-nc17) a subscript built at run time in an unset operand is not caught, allows",
+                 "z=(1); printf -v X '[%s(git -c user.name=%s commit -m x)]' '$' Claude; unset z$X"),
+                ("(ci-idc-ta1) a co-author trailer through a -c trailer alias is not caught, allows",
+                 "git -c trailer.co.key=Co-authored-by commit -m x --trailer 'co: Claude'"),
+                ("(ci-idc-ta2) a co-author trailer through an unquoted -c trailer alias value is not caught, allows",
+                 "git -c trailer.co.key=Co-authored-by commit -m x --trailer co:Claude"),
+                ("(ci-idc-ta3) a co-author trailer through a git config trailer alias is not caught, allows",
+                 "git config trailer.co.key Co-authored-by; git commit -m x --trailer 'co: Claude'"),
+                ("(ci-idc-ta4) a co-author trailer through a GIT_CONFIG_KEY_0 trailer alias is not caught, allows",
+                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=trailer.co.key GIT_CONFIG_VALUE_0=Co-authored-by "
+                 "git commit -m x --trailer 'co: Claude'")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
         # A command whose text holds a construct the value reader cannot read exactly (a backslash before a
         # newline, an xargs replacement string attached or detached, a braced placeholder, a parallel word, a word
         # that starts with an expansion) is judged by the AI-anywhere rule, not by its values
