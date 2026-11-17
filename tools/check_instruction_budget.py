@@ -248,7 +248,8 @@ push or a merge train carrying more than one) holds one appended entry per raise
 entry. Each appended line is `#`, exactly 24 spaces and printable ASCII text (U+0020 to U+007E, so a tab,
 a CR, NEL, a no-break or ideographic space, U+2028, U+2029 and every zero-width or bidi control is
 refused) with no trailing space, then LF. An entry opens with a line reading
-`Raised OLD -> NEW on YYYY-MM-DD` (numbers with no leading zero, NEW above OLD); every appended line
+`Raised OLD -> NEW on YYYY-MM-DD` (numbers with no leading zero, NEW above OLD; a number of more than
+19 digits is cannot-evaluate, exit 2); every appended line
 whose text opens with the word "raised", in any letter case, must be such an opening line. The first
 OLD is the base value, each later OLD is the NEW of the entry before it, and the last NEW is the
 candidate value. Each date is real, no earlier than the latest date written above the base's ceiling
@@ -262,7 +263,9 @@ one exception is a reviewed declaration, .aiqt/core/instruction-budget-exception
 holding exactly `base-sha256` and `head-sha256` (the SHA-256 of the exact base and candidate bytes of the
 budget source) and a non-blank `reason`; when both digests match, the other changed lines are reported as
 declared instead of failing, and a declaration bound to other bytes excuses nothing. A declaration never
-waives the entry rules or the validation of either side, and it records intent, not authorization: the
+waives the entry rules, the validation of either side, or what the candidate needs to serve as a later
+comparison's base (exactly one `#   ceiling` line and the ratchet written as exactly one `ratchet = N`
+line, one space each side of `=`), and it records intent, not authorization: the
 review of the change that adds it is the authorization. Nothing removes a declaration once its change has
 landed, so a later change recreating the same base and candidate bytes is excused again. The base is the
 one tools/check_release_cut.py binds for the event, read with that gate's hardened git: in pull_request
@@ -1382,6 +1385,10 @@ SHAPE_ENTRY_INDENT_WIDTH = 24
 SHAPE_ENTRY_LINE_RE = re.compile(r"#( +)([ -~]*)\n", re.ASCII)
 # An entry's first line. Its numbers are canonical: no leading zero, sign, or digit separator.
 SHAPE_NUMBER = r"[1-9][0-9]*"
+# The most digits an entry number may have before int() reads it: a TOML integer is 64-bit signed, so a
+# valid ratchet has at most 19 digits. A longer number is cannot-evaluate (exit 2), never a conversion
+# past CPython's int-string limit.
+SHAPE_NUMBER_MAX_DIGITS = 19
 SHAPE_ENTRY_FIRST_RE = re.compile(
     "Raised (" + SHAPE_NUMBER + ") -> (" + SHAPE_NUMBER + r") on ([0-9]{4}-[0-9]{2}-[0-9]{2})(?: [ -~]*)?",
     re.ASCII)
@@ -1467,7 +1474,8 @@ def _entry_findings(block, first, old, new, floor, today):
     any case, opens an entry and must read `Raised OLD -> NEW on YYYY-MM-DD` (SHAPE_ENTRY_FIRST_RE); entry
     by entry, OLD is `old` for the first and the previous entry's NEW after it, NEW exceeds OLD, and the
     last NEW is `new`. Each date is real, no earlier than `floor` (the base's latest date, None for no
-    bound) or an earlier entry's date, and no later than `today` plus SHAPE_DATE_SLACK_DAYS."""
+    bound) or an earlier entry's date, and no later than `today` plus SHAPE_DATE_SLACK_DAYS. GateError
+    (cannot evaluate) when an opening line's number has more than SHAPE_NUMBER_MAX_DIGITS digits."""
     if new <= old:
         return ["line {}: a history entry was added, but the ratchet was not raised ({} -> {})".format(
             first, old, new)] if block else []
@@ -1496,6 +1504,9 @@ def _entry_findings(block, first, old, new, floor, today):
                             "numbers): {!r}".format(number, line))
             chained = False
             continue
+        if max(len(match.group(1)), len(match.group(2))) > SHAPE_NUMBER_MAX_DIGITS:
+            raise GateError("line {}: an entry number has more than {} digits; cannot evaluate".format(
+                number, SHAPE_NUMBER_MAX_DIGITS))
         low, high, opened = int(match.group(1)), int(match.group(2)), number
         if chained and low != reach:
             findings.append("line {}: this entry raises from {}, but the ratchet stood at {} before it".format(
@@ -1555,7 +1566,9 @@ def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
     (_entry_findings); after a replacement there, the lines beyond the ones it pairs one for one. Every
     other changed line is a finding naming the line (_line_report), unless a declaration bound to these
     exact base and head bytes covers it; a declaration never waives the entry rules. A candidate without
-    exactly one `#   ceiling` line is compared whole and has no entry block."""
+    exactly one `#   ceiling` line is compared whole and has no entry block. A candidate without exactly
+    one `#   ceiling` line or exactly one `ratchet = N` line (SHAPE_RATCHET_RE) is a finding no declaration
+    waives, so an accepted candidate can always serve as a later comparison's base."""
     if today is None:
         today = datetime.datetime.now(datetime.timezone.utc).date()
     base_text, base_data = _shape_text(base_raw, "the base " + BUDGET_REL)
@@ -1588,8 +1601,18 @@ def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
         if new > old:
             findings.append("the raise {} -> {} has no entry block: the candidate has {} `{}` lines, not "
                             "one".format(old, new, len(anchors), SHAPE_CEILING_ANCHOR.strip()))
+        if new <= old:
+            findings.append("the candidate has {} `{}` lines, not the one a later comparison needs in its "
+                            "base".format(len(anchors), SHAPE_CEILING_ANCHOR.strip()))
     else:
         findings += _entry_findings(block, start + 1, old, new, _base_latest_date(base[:ceiling_at]), today)
+    # The candidate is a later comparison's base, so it keeps what a base needs here: the anchor count
+    # above, and the ratchet written as one canonical `ratchet = N` line (another TOML spelling of the same
+    # value would leave that comparison unable to evaluate). No declaration waives either.
+    canonical = sum(1 for line in head if SHAPE_RATCHET_RE.fullmatch(line))
+    if canonical != 1:
+        findings.append("the candidate has {} `ratchet = N` lines (`ratchet`, one space, `=`, one space, the "
+                        "number, LF), not the one a later comparison needs in its base".format(canonical))
     if new < old:
         notes.append("the ratchet was lowered {} -> {}; the shape is accepted, but whether the lowering keeps "
                      "the headroom the 2026-10-29 entry protects is for review".format(old, new))
@@ -3269,6 +3292,30 @@ def self_test(report_path=None):
               (shape(base_shape, version_bump, declare(base_shape, version_bump, reason="   ")),
                shape(base_shape, version_bump, declare(base_shape, version_bump) + 'extra = "x"\n')),
               ((2, []), (2, [])))
+        # The candidate is the next comparison's base. A declared change that keeps one `ratchet = N` line
+        # and one ceiling line is accepted, and an unchanged comparison on it passes; another TOML spelling
+        # of the ratchet, or a ceiling line doubled or removed without a raise, is a finding no declaration
+        # waives, because an unchanged comparison on that candidate could not be evaluated.
+        spelled = clean.replace("ratchet = 150\n", "ratchet=150\n")
+        check("shape/declared-then-unchanged-0",
+              (shape(base_shape, version_bump, declare(base_shape, version_bump)), shape(version_bump, version_bump)),
+              ((0, []), (0, [])))
+        check("shape/declared-ratchet-spelling-1",
+              (shape(base_shape, spelled, declare(base_shape, spelled)), shape(spelled, spelled)),
+              ((1, []), (2, [])))
+        unraised_anchors = [base_shape.replace(ceiling, ceiling + ceiling), base_shape.replace(ceiling, "")]
+        check("shape/declared-anchor-count-no-raise-1",
+              [(shape(base_shape, head, declare(base_shape, head)), shape(head, head)) for head in unraised_anchors],
+              [((1, []), (2, []))] * 2)
+        # An entry number of more than SHAPE_NUMBER_MAX_DIGITS digits is cannot-evaluate, never an uncaught
+        # conversion error (5000 digits pass CPython's default int-string limit); 19 digits are evaluated.
+        oversized = [raised(base_shape, opened(text=text)) for text in (
+            "Raised 100 -> 1" + "0" * 19 + " on {}", "Raised 1" + "0" * 19 + " -> 150 on {}",
+            "Raised 100 -> " + "9" * 5000 + " on {}")]
+        check("shape/entry-oversized-number-2",
+              ([shape(base_shape, head) for head in oversized],
+               shape(base_shape, raised(base_shape, opened(text="Raised 100 -> " + "9" * 19 + " on {}")))),
+              ([(2, [])] * 3, (1, ["5"])))
         check("shape/options-grammar",
               [shape_options(args) for args in (
                   [], ["--protected", "origin/main"], ["--base", "a1", "--protected", "origin/main"],
@@ -3295,6 +3342,19 @@ def self_test(report_path=None):
         check("revert/shape-anchor-count-red",
               [shape(base_shape, head, declare(base_shape, head), module=anchor_mutant)[0] for head in anchor_heads],
               [0, 0])
+        check("revert/shape-candidate-ratchet-line-red",
+              shape(base_shape, spelled, declare(base_shape, spelled), module=_mutant(
+                  tmp, "    if canonical != 1:\n", "    if False:\n"))[0], 0)
+        unraised_anchor_mutant = _mutant(
+            tmp, '        if new <= old:\n            findings.append("the candidate has {} `{}` lines',
+            '        if False:\n            findings.append("the candidate has {} `{}` lines')
+        check("revert/shape-candidate-anchor-count-red",
+              [shape(base_shape, head, declare(base_shape, head), module=unraised_anchor_mutant)[0]
+               for head in unraised_anchors], [0, 0])
+        check("revert/shape-entry-number-digits-red",
+              shape(base_shape, oversized[0], module=_mutant(
+                  tmp, "        if max(len(match.group(1)), len(match.group(2))) > SHAPE_NUMBER_MAX_DIGITS:\n",
+                  "        if False:\n"))[0], 1)
         check("revert/shape-unreadable-base-red",
               shape(None, clean, module=_mutant(tmp, '_shape_text(base_raw, "the base "',
                                                 '_shape_text(base_raw or head_raw, "the base "'))[0], 0)
@@ -3519,7 +3579,10 @@ def self_test(report_path=None):
           "entry chain that does not join the base and candidate values, an unreal, early or late date, "
           "a padded number, a wrong indent, a trailing blank, a non-ASCII blank, a second entry in any "
           "letter case, an entry without a raise, a missing or misplaced entry and a stale declaration "
-          "exit 1 naming the line, an absent or undecodable base and a blank declaration reason exit 2, "
+          "exit 1 naming the line, a declared candidate that a later comparison could not read as its base "
+          "(another ratchet spelling, a doubled or removed ceiling line) exit 1 while a declared one it can "
+          "read passes again unchanged, an absent or undecodable base, an entry number of more than 19 "
+          "digits and a blank declaration reason exit 2, "
           "and through git the HEAD, index and working-tree snapshots, a mode change and the event's "
           "base binding, a mode 100755 base exiting 2); execution set "
           "reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
