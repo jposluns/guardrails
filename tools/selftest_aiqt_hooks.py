@@ -16295,6 +16295,332 @@ def _main_isolated(monitor):
         expect("(br-a) branch -D allows with a note", "git branch -D other", "allow-note", cwd=rp)
         expect("(br-b) branch -d allows (git refuses unmerged)", "git branch -d other", "allow", cwd=rp)
 
+        # === clean -x/-X: ignored files the recovery snapshot never holds ====================
+        # git add --all (the snapshot) skips ignored files and the clean-tree probe never lists them, so a
+        # tree whose only uncommitted content is an ignored file read as provably clean and a clean -x/-X
+        # there was silently allowed with no snapshot; on a dirty tree it was allowed after a snapshot that
+        # lacked the ignored file. Such a clean now DENIES unless a read-only dry run (git clean -n with the
+        # same options) shows it removes no ignored file; a clean without -x/-X keeps its outcome. The hook
+        # launches the real git (resolved through PATH under the suite's fixture pins) only for the read-only
+        # dry run, inside these throwaway repos: no credentials, no remote, nothing written.
+        cx_repo = _init_repo(tmp / "cleanx-ignored")
+        (cx_repo / ".gitignore").write_text("*.local\n", encoding="utf-8")
+        _git(cx_repo, "add", ".gitignore")
+        _git(cx_repo, "commit", "-q", "-m", "ignore rule", env_identity=True)
+        (cx_repo / "secrets.local").write_text("kept\n", encoding="utf-8")
+        cx = str(cx_repo)
+        expect("(cx-a) clean -fdx on an ignored-only tree denies", "git clean -fdx", "deny", cwd=cx)
+        expect("(cx-b) clean -fX on an ignored-only tree denies", "git clean -fX", "deny", cwd=cx)
+        expect("(cx-c) clean -f -x -d on an ignored-only tree denies", "git clean -f -x -d", "deny", cwd=cx)
+        expect("(cx-d) clean --force -x on an ignored-only tree denies", "git clean --force -x", "deny", cwd=cx)
+        expect("(cx-e) compound clean -f -x -d && true on an ignored-only tree denies",
+               "git clean -f -x -d && true", "deny", cwd=cx)
+        expect("(cx-f) clean -fdx behind -C on an ignored-only tree denies",
+               "git -C {} clean -fdx".format(cx), "deny", cwd=cx)
+        expect("(cx-g) twin: clean -fd on the same tree allows as before", "git clean -fd", "allow", cwd=cx)
+        expect("(cx-h) twin: dry run clean -n -x on the same tree allows as before", "git clean -n -x", "allow",
+               cwd=cx)
+        expect("(cx-i) twin: an exclude value spelled -x is not the flag, allows as before",
+               "git clean -f -e -x", "allow", cwd=cx)
+        expect("(cx-j) twin: clean -fdx whose exclude keeps the only ignored file allows (dry run shows none)",
+               "git clean -fdx -e secrets.local", "allow", cwd=cx)
+        if not (cx_repo / "secrets.local").is_file():
+            failures.append("(cx-k) the ignored file must survive every probe above (each probe is a dry run)")
+        # A probe that fails denies (fail closed): -x with -X makes git itself refuse the dry run, and a
+        # dry-run helper that reports failure (None, as on a timeout) denies too.
+        expect("(cx-l) clean -fxX, whose dry run git refuses, denies", "git clean -fxX", "deny", cwd=cx)
+        _cx_saved_listing = aiqt_hooks._clean_probe_listing
+        aiqt_hooks._clean_probe_listing = lambda *_a, **_k: None
+        try:
+            expect("(cx-m) clean -fdx whose dry run fails or times out denies", "git clean -fdx", "deny",
+                   cwd=str(_init_repo(tmp / "cleanx-probefail")))
+        finally:
+            aiqt_hooks._clean_probe_listing = _cx_saved_listing
+        # The listing bound is a real deadline: with no time left the listing is never launched and the
+        # clean denies with the bounded-listing reason, not the hook deadline's.
+        _cx_saved_seconds = aiqt_hooks._CLEAN_PROBE_SECONDS
+        aiqt_hooks._CLEAN_PROBE_SECONDS = 0.0
+        try:
+            expect("(cx-m2) clean -fd whose listing deadline has passed denies", "git clean -fd", "deny", cwd=cx)
+        finally:
+            aiqt_hooks._CLEAN_PROBE_SECONDS = _cx_saved_seconds
+        if aiqt_hooks._CLEAN_PROBE_SECONDS >= aiqt_hooks.PRETOOL_BUDGET_SECONDS:
+            failures.append("(cx-m3) the clean listing bound must sit under the hook deadline")
+        # A negated -e/--exclude pattern un-ignores a file, so a clean WITHOUT -x removes it, and with -x
+        # it passed the old compare-with-and-without-x premise; every form denies on its listings.
+        expect("(cx-s) clean -f -x -e '!*.local' (negated exclude with -x) denies",
+               "git clean -f -x -e '!*.local'", "deny", cwd=cx)
+        expect("(cx-t) clean -f -d -x -e '!*.local' denies", "git clean -f -d -x -e '!*.local'", "deny", cwd=cx)
+        expect("(cx-u) clean -f -x -e '!secrets.local' denies", "git clean -f -x -e '!secrets.local'", "deny",
+               cwd=cx)
+        expect("(cx-v) clean -fx behind -C with a negated exclude denies",
+               "git -C {} clean -f -x -e '!*.local'".format(cx), "deny", cwd=cx)
+        expect("(cx-w) clean -f -e '!*.local' (no -x) denies", "git clean -f -e '!*.local'", "deny", cwd=cx)
+        expect("(cx-x) clean -f -d -e '!*.local' -e '!sub/' (no -x) denies",
+               "git clean -f -d -e '!*.local' -e '!sub/'", "deny", cwd=cx)
+        expect("(cx-y) compound clean -f -e '!*.local' && true denies", "git clean -f -e '!*.local' && true",
+               "deny", cwd=cx)
+        expect("(cx-z) clean --exclude '!*.local' -f (long spelling) denies",
+               "git clean --exclude '!*.local' -f", "deny", cwd=cx)
+        # A -c or --config-env option, or a leading HOME, XDG_CONFIG_HOME or GIT_* assignment, can remove an
+        # ignore source (a global excludes file here would be hidden), so a clean carrying one denies.
+        expect("(cx-c1) clean -f under -c core.excludesFile=/dev/null denies",
+               "git -c core.excludesFile=/dev/null clean -f", "deny", cwd=cx)
+        expect("(cx-c2) clean -f under a leading XDG_CONFIG_HOME assignment denies",
+               "XDG_CONFIG_HOME=/nonexistent git clean -f", "deny", cwd=cx)
+        expect("(cx-c3) clean -f under leading HOME and XDG_CONFIG_HOME assignments denies",
+               "HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent git clean -f", "deny", cwd=cx)
+        expect("(cx-c4) clean -f under --config-env denies", "git --config-env=core.excludesFile=NOPE clean -f",
+               "deny", cwd=cx)
+        # An earlier step that restores, checks out or cleans the ignore rules changes them before the clean.
+        expect("(cx-k2) checkout -- .gitignore && clean -f denies", "git checkout -- .gitignore && git clean -f",
+               "deny", cwd=cx)
+        expect("(cx-k3) restore .gitignore && clean -f denies", "git restore .gitignore && git clean -f", "deny",
+               cwd=cx)
+        expect("(cx-k1) clean -f .gitignore && clean -f denies", "git clean -f .gitignore && git clean -f", "deny",
+               cwd=cx)
+        expect("(cx-k4) clean -f .gitignore ; clean -f denies", "git clean -f .gitignore ; git clean -f", "deny",
+               cwd=cx)
+        # A dry run removes nothing, an exclude beside it included: git's option reader consumes each exclude
+        # value, so -n after the value is the flag (the quoted pattern makes the command non-pristine, so the
+        # closed allowlist grammar gives its noted allow), and a -n that IS the exclude value is no dry run.
+        expect("(cx-tw1) twin: dry run clean -n -e '!*.local' allows", "git clean -n -e '!*.local'",
+               "allow-note", cwd=cx)
+        expect("(cx-tw3) dry run clean -f -e secrets.local -n -x (the -n after the value) allows",
+               "git clean -f -e secrets.local -n -x", "allow", cwd=cx)
+        expect("(cx-tw4) twin: clean -f -e -n -x (the -n is the exclude value) denies",
+               "git clean -f -e -n -x", "deny", cwd=cx)
+        expect("(cx-tw5) twin: clean -n --no-dry-run -f -x (the last of the pair wins) denies",
+               "git clean -n --no-dry-run -f -x", "deny", cwd=cx)
+        # An abbreviated --exclude (--e, --ex, --exc, --exclud) consumes the next token as its pattern, as git
+        # reads it, so a '-n' or '--dry-run' there is the pattern and the clean is a real -x clean.
+        expect("(cx-e1) clean -fdx --exc -n (the -n is the abbreviated exclude's value) denies",
+               "git clean -fdx --exc -n", "deny", cwd=cx)
+        expect("(cx-e5) clean -fx --ex --dry-run (the --dry-run is the exclude's value) denies",
+               "git clean -fx --ex --dry-run", "deny", cwd=cx)
+        expect("(cx-e13) clean -fdx --exc --dry-run denies", "git clean -fdx --exc --dry-run", "deny", cwd=cx)
+        expect("(cx-e4) twin: clean -fdx --exclude -n (the full spelling) denies", "git clean -fdx --exclude -n",
+               "deny", cwd=cx)
+        expect("(cx-e6) twin: clean -fdx --ex=-n (the inline value) denies", "git clean -fdx --ex=-n", "deny",
+               cwd=cx)
+        expect("(cx-e7) twin: dry run clean -fdx --exc x -n (the -n after the value) allows",
+               "git clean -fdx --exc x -n", "allow", cwd=cx)
+        # Only a global option or leading assignment that can change the ignore sources or the worktree the
+        # listings read denies; the rest keep the listing verdict.
+        expect("(cx-g1) clean -fdx under --no-pager still denies on its listings",
+               "git --no-pager clean -fdx", "deny", cwd=cx)
+        expect("(cx-g2) clean -f under -c core.ignoreCase=true denies", "git -c core.ignoreCase=true clean -f",
+               "deny", cwd=cx)
+        expect("(cx-g3) clean -f under -c CORE.EXCLUDESFILE (any case) denies",
+               "git -c CORE.EXCLUDESFILE=/dev/null clean -f", "deny", cwd=cx)
+        expect("(cx-g4) clean -f under a leading GIT_CONFIG_GLOBAL denies",
+               "GIT_CONFIG_GLOBAL=/dev/null git clean -f", "deny", cwd=cx)
+        (cx_repo / "sub").mkdir(exist_ok=True)
+        expect("(cx-g5) clean -f whose --work-tree roots the worktree in a subdirectory denies",
+               "git --work-tree={}/sub clean -f".format(cx), "deny", cwd=cx)
+        if not (cx_repo / "secrets.local").is_file():
+            failures.append("(cx-k5) the ignored file must survive every listing above (each is read-only)")
+        # git C-quotes a name holding a control byte, a double quote or a backslash; a malformed quoting
+        # makes the listing untrusted.
+        for _cq_in, _cq_out in ((b"plain name", b"plain name"), (b'"a\\tb"', b"a\tb"),
+                                (b'"q\\"\\\\"', b'q"\\'), (b'"\\303\\251"', b"\xc3\xa9"),
+                                (b'"open', None), (b'"bad\\q"', None), (b'"x\\40"', None)):
+            if aiqt_hooks._clean_unquote(_cq_in) != _cq_out:
+                failures.append("(cx-q1) _clean_unquote({!r}) must be {!r}".format(_cq_in, _cq_out))
+        # A dirty tree: -x would remove the ignored file the snapshot lacks, so it denies (it was allowed
+        # with a note saying a snapshot was saved); the same clean without -x keeps its allow-note.
+        (cx_repo / "file.txt").write_text("committed line\nuncommitted fix\n", encoding="utf-8")
+        (cx_repo / "untracked.txt").write_text("junk\n", encoding="utf-8")
+        expect("(cx-n) clean -fdx on a dirty tree with an ignored file denies", "git clean -fdx", "deny", cwd=cx)
+        expect("(cx-o) compound clean -f -d -x && true on a dirty tree with an ignored file denies",
+               "git clean -f -d -x && true", "deny", cwd=cx)
+        expect("(cx-p) twin: clean -fd on the same dirty tree allows with a note as before", "git clean -fd",
+               "allow-note", cwd=cx)
+        # No ignored file in reach: -x removes nothing the plain clean would not, so today's outcome stands.
+        cx_plain = _init_repo(tmp / "cleanx-noignored")
+        (cx_plain / "untracked.txt").write_text("junk\n", encoding="utf-8")
+        expect("(cx-q) clean -fdx with no ignored file allows with a note as before", "git clean -fdx",
+               "allow-note", cwd=str(cx_plain))
+        expect("(cx-tw2) twin: clean -fd on a tree with only untracked non-ignored files allows with a note",
+               "git clean -fd", "allow-note", cwd=str(cx_plain))
+        expect("(cx-r) clean -fdx on a provably clean tree with no ignored file allows as before",
+               "git clean -fdx", "allow", cwd=str(_init_repo(tmp / "cleanx-clean")))
+        # With no ignored file in reach, a clean under an option or assignment that changes no ignore source
+        # keeps the outcome it had before the listings existed.
+        expect("(cx-f3a) LC_ALL=C clean -fd with no ignored file allows with a note as before",
+               "LC_ALL=C git clean -fd", "allow-note", cwd=str(cx_plain))
+        expect("(cx-f3b) clean -fd under -c x.y=z with no ignored file allows with a note as before",
+               "git -c x.y=z clean -fd", "allow-note", cwd=str(cx_plain))
+        expect("(cx-f3c) clean -fd under -P with no ignored file allows with a note as before",
+               "git -P clean -fd", "allow-note", cwd=str(cx_plain))
+        # A doubly forced clean removes a nested repository at any depth below a directory it removes, with
+        # the nested repository's ignored and untracked files; the snapshot holds none of them.
+        cx_nest = _init_repo(tmp / "cleanx-nested")
+        _init_repo(cx_nest / "a" / "x" / "b")
+        (cx_nest / "a" / "x" / "b" / "wip.txt").write_text("nested work\n", encoding="utf-8")
+        expect("(cx-n1) clean -ffd removing a/ that holds a/x/b/.git denies", "git clean -ffd", "deny",
+               cwd=str(cx_nest))
+        expect("(cx-n2) clean -f -f -d a/ (separate flags, a pathspec) denies", "git clean -f -f -d a/", "deny",
+               cwd=str(cx_nest))
+        expect("(cx-n3) twin: clean -fd (single -f keeps a nested repository) allows with a note",
+               "git clean -fd", "allow-note", cwd=str(cx_nest))
+        if not (cx_nest / "a" / "x" / "b" / "wip.txt").is_file():
+            failures.append("(cx-n4) the nested repository's file must survive every listing above")
+        cx_flat = _init_repo(tmp / "cleanx-flatdir")
+        (cx_flat / "a" / "x" / "y").mkdir(parents=True)
+        (cx_flat / "a" / "x" / "y" / "u.txt").write_text("junk\n", encoding="utf-8")
+        expect("(cx-n5) twin: clean -ffd of a directory holding no nested repository allows with a note",
+               "git clean -ffd", "allow-note", cwd=str(cx_flat))
+        _cx_saved_limit = getattr(aiqt_hooks, "_CLEAN_NESTED_WALK_LIMIT", None)
+        aiqt_hooks._CLEAN_NESTED_WALK_LIMIT = 0
+        try:
+            expect("(cx-n6) clean -ffd whose nested-repository walk hits its entry bound denies",
+                   "git clean -ffd", "deny", cwd=str(cx_flat))
+        finally:
+            if _cx_saved_limit is None:
+                del aiqt_hooks._CLEAN_NESTED_WALK_LIMIT
+            else:
+                aiqt_hooks._CLEAN_NESTED_WALK_LIMIT = _cx_saved_limit
+        if hasattr(os, "geteuid") and os.geteuid() != 0:
+            (cx_flat / "a" / "x").chmod(0)
+            try:
+                expect("(cx-n7) clean -ffd whose nested-repository walk meets an unreadable entry denies",
+                       "git clean -ffd", "deny", cwd=str(cx_flat))
+            finally:
+                (cx_flat / "a" / "x").chmod(0o755)
+        # On a split-index repository git refreshes the shared index's mtime on every index read; the
+        # listings read a private copy outside .git, so nothing under .git changes.
+        cx_split = _init_repo(tmp / "cleanx-split")
+        _git(cx_split, "config", "core.splitIndex", "true")
+        _git(cx_split, "update-index", "--split-index")
+        (cx_split / ".gitignore").write_text("*.local\n", encoding="utf-8")
+        (cx_split / "secrets.local").write_text("kept\n", encoding="utf-8")
+        _cx_gd = cx_split / ".git"
+        _cx_old = time.time() - 3 * 86400
+        for _cx_p in _cx_gd.iterdir():
+            if _cx_p.name.startswith("sharedindex."):
+                os.utime(_cx_p, (_cx_old, _cx_old))
+        _cx_before = {p.name: p.stat().st_mtime_ns for p in _cx_gd.iterdir() if p.is_file()}
+        expect("(cx-si1) clean -fdx on a split-index repository with an ignored file denies",
+               "git clean -fdx", "deny", cwd=str(cx_split))
+        _cx_after = {p.name: p.stat().st_mtime_ns for p in _cx_gd.iterdir() if p.is_file()}
+        if not any(n.startswith("sharedindex.") for n in _cx_before) or _cx_before != _cx_after:
+            failures.append("(cx-si2) the listings must write nothing under .git on a split-index repository: "
+                            "changed {}".format(sorted(n for n in set(_cx_before) | set(_cx_after)
+                                                       if _cx_before.get(n) != _cx_after.get(n))))
+        # Run from inside an untracked directory it would remove whole, git clean keeps that directory,
+        # prints 'Would refuse to remove current working directory' and removes all of its contents, listed
+        # as './x' (a directory with no trailing slash). The listings run in that directory (this suite's own
+        # working directory is elsewhere), read that line as removal of the whole directory and compare
+        # './s.local' with the ignored 's.local'.
+        cx_cwn = _init_repo(tmp / "cleanx-cwd-nested")
+        _init_repo(cx_cwn / "a" / "x" / "y" / "b")
+        (cx_cwn / "a" / "x" / "y" / "b" / "wip.txt").write_text("nested work\n", encoding="utf-8")
+        (cx_cwn / "a" / "top.txt").write_text("junk\n", encoding="utf-8")
+        expect("(cx-cw-n6) clean -ffd run from inside untracked a/ holding a/x/y/b/.git denies",
+               "git clean -ffd", "deny", cwd=str(cx_cwn / "a"))
+        # The same clean with the hook process itself started in a/ (the listings once ran in the hook's own
+        # working directory; started in a/, git printed the refuse line and './'-prefixed entries that neither
+        # the ignored match nor the nested-repository walk read).
+        _cx_here = os.getcwd()
+        os.chdir(str(cx_cwn / "a"))
+        try:
+            expect("(cx-cw-n6b) clean -ffd from inside a/ with the hook process also in a/ denies",
+                   "git clean -ffd", "deny", cwd=str(cx_cwn / "a"))
+        finally:
+            os.chdir(_cx_here)
+        expect("(cx-cw-n7) twin: clean -ffd x run from inside a/ denies", "git clean -ffd x", "deny",
+               cwd=str(cx_cwn / "a"))
+        expect("(cx-cw-n8) twin: clean -fd run from inside a/ (single -f keeps the nested repository) allows "
+               "with a note", "git clean -fd", "allow-note", cwd=str(cx_cwn / "a"))
+        if not (cx_cwn / "a" / "x" / "y" / "b" / "wip.txt").is_file():
+            failures.append("(cx-cw-n9) the nested repository's file must survive every listing above")
+        cx_cwi = _init_repo(tmp / "cleanx-cwd-ignored")
+        (cx_cwi / ".gitignore").write_text("*.local\n", encoding="utf-8")
+        _git(cx_cwi, "add", ".gitignore")
+        _git(cx_cwi, "commit", "-q", "-m", "ignore rule", env_identity=True)
+        (cx_cwi / "u").mkdir()
+        (cx_cwi / "u" / "a.txt").write_text("junk\n", encoding="utf-8")
+        (cx_cwi / "u" / "s.local").write_text("kept\n", encoding="utf-8")
+        expect("(cx-cw-c1) clean -fdx run from inside untracked u/ holding the ignored u/s.local denies",
+               "git clean -fdx", "deny", cwd=str(cx_cwi / "u"))
+        expect("(cx-cw-c3) twin: clean -fX run from inside u/ denies", "git clean -fX", "deny",
+               cwd=str(cx_cwi / "u"))
+        expect("(cx-cw-c4) twin: clean -fd run from inside u/ (the ignored file stays) allows with a note",
+               "git clean -fd", "allow-note", cwd=str(cx_cwi / "u"))
+        if not (cx_cwi / "u" / "s.local").is_file():
+            failures.append("(cx-cw-c5) the ignored file must survive every listing above")
+        cx_cwp = _init_repo(tmp / "cleanx-cwd-plain")
+        (cx_cwp / "u" / "d").mkdir(parents=True)
+        (cx_cwp / "u" / "a.txt").write_text("junk\n", encoding="utf-8")
+        (cx_cwp / "u" / "d" / "b.txt").write_text("junk\n", encoding="utf-8")
+        expect("(cx-cw-p1) twin: clean -ffd run from inside u/ holding no ignored file and no nested "
+               "repository allows with a note", "git clean -ffd", "allow-note", cwd=str(cx_cwp / "u"))
+        # A symlinked run directory: git runs in the PHYSICAL directory and prints '../x/' relative to it, so
+        # the listings resolve the run directory with os.path.realpath; normalized lexically against the link,
+        # '..' named the link's parent, where a decoy x/ holding no repository let a doubly forced clean of
+        # the real a/x (a nested repository with an ignored file) through with a note. L is a committed
+        # symlink to a/b (a/b/keep.txt is tracked, so a/b itself is never removed), and outside/L points at
+        # a/b from outside the repository.
+        cx_sl = _init_repo(tmp / "cleanx-symlink")
+        (cx_sl / "a" / "b").mkdir(parents=True)
+        (cx_sl / "a" / "b" / "keep.txt").write_text("kept\n", encoding="utf-8")
+        os.symlink("a/b", str(cx_sl / "L"))
+        _git(cx_sl, "add", "a/b/keep.txt", "L")
+        _git(cx_sl, "commit", "-q", "-m", "symlinked run directory", env_identity=True)
+        _init_repo(cx_sl / "a" / "x")
+        (cx_sl / "a" / "x" / ".gitignore").write_text("*.zz\n", encoding="utf-8")
+        (cx_sl / "a" / "x" / "wip.txt").write_text("nested work\n", encoding="utf-8")
+        (cx_sl / "a" / "x" / "s.zz").write_text("nested ignored\n", encoding="utf-8")
+        (cx_sl / "x").mkdir()
+        (cx_sl / "x" / "junk.txt").write_text("decoy\n", encoding="utf-8")
+        cx_slo = tmp / "cleanx-symlink-outside"
+        (cx_slo / "x").mkdir(parents=True)
+        (cx_slo / "x" / "junk.txt").write_text("decoy\n", encoding="utf-8")
+        os.symlink(str(cx_sl / "a" / "b"), str(cx_slo / "L"))
+        expect("(cx-sl-s1) clean -ffd .. run from a symlink outside the repository to a/b denies",
+               "git clean -ffd ..", "deny", cwd=str(cx_slo / "L"))
+        expect("(cx-sl-s4) clean -ffd .. run from the committed symlink L to a/b denies", "git clean -ffd ..",
+               "deny", cwd=str(cx_sl / "L"))
+        expect("(cx-sl-s5) clean -ffdx .. run from the committed symlink L to a/b denies", "git clean -ffdx ..",
+               "deny", cwd=str(cx_sl / "L"))
+        expect("(cx-sl-s6) twin: clean -ffdx .. run from the real a/b denies", "git clean -ffdx ..", "deny",
+               cwd=str(cx_sl / "a" / "b"))
+        expect("(cx-sl-s7) clean -ffd x under a relative -C .. from the symlink L denies",
+               "git -C .. clean -ffd x", "deny", cwd=str(cx_sl / "L"))
+        expect("(cx-sl-s7r) twin: clean -ffd x under -C .. from the real a/b denies", "git -C .. clean -ffd x",
+               "deny", cwd=str(cx_sl / "a" / "b"))
+        expect("(cx-sl-s8) twin: clean -fd .. from the symlink L (single -f keeps the nested repository) allows "
+               "with a note", "git clean -fd ..", "allow-note", cwd=str(cx_sl / "L"))
+        if not ((cx_sl / "a" / "x" / "wip.txt").is_file() and (cx_sl / "a" / "x" / "s.zz").is_file()
+                and (cx_sl / "x" / "junk.txt").is_file()):
+            failures.append("(cx-sl-s9) the nested repository's files and the decoy must survive every listing "
+                            "above")
+        # The clean's note names the saved snapshot once (the pointer sentence opens with it), and the deny on
+        # a failed snapshot never says the clean can be undone from a snapshot it then reports as not made.
+        cx_txt = _init_repo(tmp / "cleanx-text")
+        (cx_txt / "untracked.txt").write_text("junk\n", encoding="utf-8")
+        _cx_code, _cx_obj, _ = handler({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                        "tool_input": {"command": "git clean -fd"}, "cwd": str(cx_txt)})
+        _cx_msg = _cx_obj.get("systemMessage", "") if isinstance(_cx_obj, dict) else ""
+        if _cx_msg.count("A pre-command recovery snapshot was saved") != 1 or "It is allowed." not in _cx_msg:
+            failures.append("(cx-t1) the clean allow note must name the saved snapshot exactly once: {!r}".format(
+                _cx_msg))
+        _cx_orig_rec = aiqt_hooks._record_recovery
+        aiqt_hooks._record_recovery = lambda repo, verb: ("fail", "forced snapshot failure (self-test)")
+        try:
+            _cx_code, _cx_obj, _ = handler({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                            "tool_input": {"command": "git clean -fd"}, "cwd": str(cx_txt)})
+        finally:
+            aiqt_hooks._record_recovery = _cx_orig_rec
+        _cx_hso = _cx_obj.get("hookSpecificOutput", {}) if isinstance(_cx_obj, dict) else {}
+        _cx_why = _cx_hso.get("permissionDecisionReason", "")
+        if (_cx_hso.get("permissionDecision") != "deny"
+                or "NOTE: no pre-command recovery snapshot could be created" not in _cx_why
+                or "the recovery snapshot, which holds" in _cx_why):
+            failures.append("(cx-t2) a clean whose snapshot fails must deny without claiming a snapshot holds "
+                            "its files: {!r}".format(_cx_why))
+
         # === round-19 Fix A: an UNPARSEABLE 'git branch' ASKS regardless of any delete flag ====
         # The raw fallback (a tokenizer ValueError) now treats ANY raw 'git' + 'branch' as lossy: it does NOT parse
         # branch flags, so an unparseable 'git branch -d -f topic <heredoc>' / '-df' / '--del --for' can no
@@ -17472,10 +17798,15 @@ def _main_isolated(monitor):
             (("clean", ["-nfd"]), "allow"),
             (("clean", ["-d"]), "ask"),
             (("clean", ["-f", "--", "-nasty"]), "ask"),   # blocker 3: -nasty after -- is not the -n flag
-            (("clean", ["-f", "-e", "*.keep", "-n"]), "ask"),  # fix 2: -e consumes; '-n' not trusted as dry-run
+            (("clean", ["-f", "-e", "*.keep", "-n"]), "allow"),  # -e consumes '*.keep'; the later '-n' is the dry run
             (("clean", ["-f", "-e", "-n"]), "ask"),       # fix 2: '-n' is the exclude PATTERN, not dry-run
-            (("clean", ["--exclude=x", "-n"]), "ask"),    # fix 2: an --exclude= present -> do not trust '-n'
+            (("clean", ["-fen"]), "ask"),                 # '-fen' is -f plus -e with the value 'n': no dry run
+            (("clean", ["--exclude=x", "-n"]), "allow"),  # the inline exclude consumes nothing: '-n' is the dry run
+            (("clean", ["-n", "-e", "x", "--no-dry-run"]), "ask"),  # the last of -n/--no-dry-run wins
             (("clean", ["-n"]), "allow"),                 # a plain dry run with no arg-consuming option allows
+            (("clean", ["-fdx", "--exc", "-n"]), "ask"),  # an abbreviated --exclude consumes '-n': no dry run
+            (("clean", ["-fdx", "--e", "--dry-run"]), "ask"),  # '--e' is --exclude, its value '--dry-run'
+            (("clean", ["-fdx", "--exc", "x", "-n"]), "allow"),  # twin: the '-n' after the value is the dry run
             (("stash", ["drop"]), "ask"),
             (("stash", ["pop"]), "allow"),
             (("stash", ["export", "--to-ref", "refs/heads/topic"]), "ask"),  # F-95: export overwrites a ref
