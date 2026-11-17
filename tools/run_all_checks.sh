@@ -120,18 +120,20 @@ run_gate "site-versions" python3 -I -B tools/check_site_versions.py
 run_gate "draft-site-selftest" python3 -I -B tools/gen_draft_site.py --self-test
 run_gate "draft-site-drift" python3 -I -B tools/gen_draft_site.py --check
 run_gate "baseline-pin-selftest" python3 -I -B tools/check_selftest_execution.py --suite baseline-pin-selftest
-# --local-base refs/remotes/origin/main runs the base-coupling leg against the fork point of HEAD and
-# origin/main, the base check_version_monotonicity.py derives by default. The full ref name is required: a tag
-# or local branch named origin/main would win over the short name. This runner never fetches (it does not
-# touch the network). It passes the flag only when git show-ref --verify --quiet refs/remotes/origin/main
-# exits 0 with nothing on stderr; the gate then reads that ref itself, and a broken loose ref, a broken
-# packed-refs line, a dangling symbolic ref and any other git failure there are cannot-evaluate. A clean
-# absence (exit 1, nothing on stderr) prints one NOTE line that the base comparison did not run and how to
-# create the ref, then runs the gate without the flag (the gate's own no-base NOTE follows). Any other probe
-# outcome (output on stderr, or an exit other than 0 or 1) is never read as absence: it fails the run under
-# the baseline-pin name. check_ci_parity.py admits this block only as its exact reviewed text
-# (BASELINE_PROBE_BLOCK).
-baseline_probe_err=$(git show-ref --verify --quiet refs/remotes/origin/main 2>&1 >/dev/null)
+# --local-base refs/remotes/origin/main runs the base-coupling leg against the fork point of HEAD and the
+# commit that exact ref points at (the git merge-base form of check_version_monotonicity.py's default base,
+# which reads the short name origin/main instead). The full ref name is required: a tag or local branch named
+# origin/main would win over the short name. This runner never fetches (it does not touch the network). The
+# decision is the gate's own: check_baseline_pin.py --probe-local-base runs the same --local-base reads under
+# the same scrubbed git environment (no inherited GIT_DIR or other GIT_ variable selects the repository) and
+# exits 0 when the ref is usable, 1 with nothing on stderr only when the clone genuinely lacks it, and 2 for
+# anything else (a broken loose ref, a broken packed-refs line, a dangling symbolic ref, an unreadable object,
+# any other git failure). The flag is passed only on exit 0 with nothing on stderr. Exit 1 with nothing on
+# stderr prints one NOTE line that the base comparison did not run and how to create the ref, then runs the
+# gate without the flag (the gate's own no-base NOTE follows). Any other outcome (output on stderr, or an
+# exit other than 0 or 1) is never read as absence: it fails the run under the baseline-pin name.
+# check_ci_parity.py admits this block only as its exact reviewed text (BASELINE_PROBE_BLOCK).
+baseline_probe_err=$(python3 -I -B tools/check_baseline_pin.py --probe-local-base refs/remotes/origin/main 2>&1 >/dev/null)
 baseline_probe_rc=$?
 if [ "$baseline_probe_rc" -eq 0 ] && [ -z "$baseline_probe_err" ]; then
   run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py --local-base refs/remotes/origin/main
@@ -142,7 +144,7 @@ else
   echo "--- baseline-pin ---"
   failed=1
   failed_names="${failed_names:+${failed_names}, }baseline-pin"
-  echo "GATE FAILED: baseline-pin (git show-ref --verify --quiet refs/remotes/origin/main exit ${baseline_probe_rc}, stderr: ${baseline_probe_err})"
+  echo "GATE FAILED: baseline-pin (check_baseline_pin.py --probe-local-base refs/remotes/origin/main exit ${baseline_probe_rc}, stderr: ${baseline_probe_err})"
   echo
 fi
 run_gate "palette-aiqt" python3 -I -B .baseline/check_palette.py --site aiqt --palettes site/draft/assets/baseline/palettes.css

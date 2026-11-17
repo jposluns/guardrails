@@ -6,6 +6,10 @@
   check_baseline_pin.py --local-base REF   the same, plus that leg against the fork point of HEAD and the full
                                            ref name REF (refs/remotes/origin/main); a REF the clone lacks or a
                                            short name is cannot-evaluate
+  check_baseline_pin.py --probe-local-base REF
+                                           the local runner's probe: the --local-base reads of REF alone, exit 0
+                                           when they succeed, 1 (nothing written) when the clone genuinely lacks
+                                           REF, 2 (a CANNOT EVALUATE line on stderr) for anything else
   check_baseline_pin.py --self-test        assert every refusal and a pass over tempdir fixtures
   check_baseline_pin.py [--self-test] --execution-report ABS_PATH
 
@@ -47,8 +51,9 @@ the change that edits a copied file can edit its digest row too. The anchor that
 registered pin as committed at the base. With --base REF the base is exactly the commit REF names, which must
 be an ancestor of HEAD (git merge-base --is-ancestor); a REF that is not, such as the before SHA of a force or
 otherwise divergent push, is cannot-evaluate, never replaced by a common ancestor. With --local-base REF (the
-local runner's form) the base is the fork point of HEAD and the commit REF points at, derived the way
-check_version_monotonicity.py derives its default base. REF must be a full ref name (refs/remotes/origin/main):
+local runner's form) the base is the fork point of HEAD and the commit REF points at (git merge-base, the form of
+check_version_monotonicity.py's default base, which reads the short name origin/main instead, so where a tag or a
+local branch shadows that short name the two bases can differ). REF must be a full ref name (refs/remotes/origin/main):
 git resolves a short name such as origin/main through a tag or a local branch of that name before
 refs/remotes/, so the base could be the change itself, and a short name is cannot-evaluate. The name is read
 once (git rev-parse --verify --quiet REF, without a peel), git for-each-ref over every ref must list exactly that
@@ -71,6 +76,15 @@ to a commit or is not an ancestor of HEAD, a --local-base REF that is a short na
 git reports broken or dangling, a --local-base
 REF that exists but does not resolve to a readable commit, a --local-base merge-base that cannot be resolved, a base pin that is not a regular file, and a base
 pin that is oversized or malformed are cannot-evaluate (exit 2), never a pass. With neither flag the leg is not evaluated, and the run says so on a NOTE line.
+
+--probe-local-base REF runs only those --local-base reads (_local_base_commit, under the same scrubbed git
+environment) and scans nothing, so tools/run_all_checks.sh decides whether to pass --local-base by this gate's
+own reading rather than a second one. It exits 0, writing nothing, when REF resolves to a usable fork point, and 1,
+writing nothing, only when the clone genuinely lacks REF: the name read is a clean miss (exit 1, no output, nothing
+on stderr) and git for-each-ref lists every ref cleanly without it. Anything else exits 2 with one CANNOT EVALUATE
+line on stderr: an unsafe or short name, a broken loose ref, a broken packed-refs line, a dangling symbolic ref, a
+full name git resolves only through another ref (a local branch refs/heads/REF), an object that is missing or not
+a commit, a merge-base that does not resolve, and any other git failure.
 
 The entry line runs an inline copy of the canonical child-status guard (opf/tools/_child_status.py) before
 main(), since the leg reads git's exit statuses.
@@ -137,6 +151,12 @@ MAX_BASE_REF = 256
 class CannotEvaluate(Exception):
     """An input that cannot be judged: a missing, unreadable, oversized or malformed pin or attribution file,
     or an unreadable file."""
+
+
+class RefAbsent(CannotEvaluate):
+    """A --local-base full ref name this clone genuinely lacks: its name read was a clean miss (exit 1, no output,
+    nothing on stderr) and git for-each-ref listed every ref cleanly without it. Still cannot-evaluate for the
+    gate; only --probe-local-base reads it as absence (exit 1)."""
 
 
 def _safe_rel(value):
@@ -527,9 +547,9 @@ def _fetch_hint(ref):
 
 
 def _local_base_commit(root, ref):
-    """The fork point `git merge-base HEAD <commit>` (as check_version_monotonicity.py derives its default base),
-    where <commit> is the commit the full ref name ref points at. ref must be a full ref name (refs/remotes/origin/main,
-    not origin/main): git resolves a short name through a tag or a local branch of that name before
+    """The fork point `git merge-base HEAD <commit>` (the form of check_version_monotonicity.py's default base, which
+    reads the shadowable short name origin/main instead), where <commit> is the commit the full ref name ref points
+    at. ref must be a full ref name (refs/remotes/origin/main, not origin/main): git resolves a short name through a tag or a local branch of that name before
     refs/remotes/, so the base could be the change itself. The name is read once (git rev-parse --verify --quiet
     ref, without a peel), git for-each-ref over every ref must list exactly that name (git otherwise takes a full
     name it lacks through refs/heads/<ref>), and the peel and the merge-base read the commit id, never the name
@@ -537,13 +557,16 @@ def _local_base_commit(root, ref):
     how to fetch it), when either read reports any diagnostic (a broken loose ref, a dangling symbolic ref, or a
     broken packed-refs line, which git may skip silently in the name read), when ref exists but does not resolve
     to a readable commit (its object is missing, or it names a blob or a tree), or when any git read fails
-    otherwise. The name is read first because the peeled read exits 1 with no output for a missing object too."""
+    otherwise. The name is read first because the peeled read exits 1 with no output for a missing object too. The
+    absent ref is RefAbsent only when the name read was a clean miss (exit 1, no output, nothing on stderr); a full
+    name git resolved through another ref (refs/heads/<ref>) gives the same message as a plain CannotEvaluate."""
     _check_ref(ref)
     if not ref.startswith("refs/"):
         raise CannotEvaluate("base: --local-base {} is not a full ref name; git resolves a short name through a tag "
                              "or a local branch of that name before refs/remotes/, so it can name the change itself. "
                              "Pass the full name, such as refs/remotes/{}".format(ref, ref))
     proc = _git_base_read(root, ["rev-parse", "--verify", "--quiet", ref])
+    clean_miss = proc.returncode == 1 and not proc.stdout and not proc.stderr
     if proc.returncode == 1 and not proc.stdout:
         if proc.stderr:
             raise CannotEvaluate("base: {} does not resolve, and git rev-parse --verify {} reported a diagnostic, so "
@@ -555,10 +578,11 @@ def _local_base_commit(root, ref):
                              "with a diagnostic, so it cannot be read as absent (a broken ref): {}".format(
                                  ref, refs.returncode, _last_line(refs.stderr)))
     if ref.encode("utf-8") not in refs.stdout.split(b"\n"):
-        raise CannotEvaluate("base: {} does not exist in this clone, so the base-coupling leg cannot run and a digest "
-                             "row changed under an unchanged version would not be refused; {} and rerun, or run "
-                             "without --local-base for the check without that leg".format(ref, _fetch_hint(ref)))
-    named = _commit_id(proc, "git rev-parse --verify " + ref)
+        raise (RefAbsent if clean_miss else CannotEvaluate)(
+            "base: {} does not exist in this clone, so the base-coupling leg cannot run and a digest "
+            "row changed under an unchanged version would not be refused; {} and rerun, or run "
+            "without --local-base for the check without that leg".format(ref, _fetch_hint(ref)))
+    named = _commit_id(proc,"git rev-parse --verify " + ref)
     proc = _git_base_read(root, ["rev-parse", "--verify", "--quiet", named + "^{commit}"])
     if proc.returncode != 0:
         raise CannotEvaluate("base: {} exists in this clone but does not resolve to a readable commit (its object "
@@ -566,6 +590,26 @@ def _local_base_commit(root, ref):
                                  ref, named, named, proc.returncode))
     commit = _commit_id(proc, "git rev-parse --verify " + named + "^{commit}")
     return _commit_id(_git_base_read(root, ["merge-base", "HEAD", commit]), "git merge-base HEAD " + commit)
+
+
+def probe_local_base(root, ref):
+    """--probe-local-base: the exit code of the --local-base reads of ref over root (_local_base_commit, under the
+    same _git_env scrub), so the local runner passes --local-base by this gate's own decision. 0 when ref resolves
+    to a usable fork point; 1 only when this clone genuinely lacks ref (RefAbsent); 2, with one CANNOT EVALUATE line
+    on stderr, for anything else, an unexpected exception included. Nothing is written on stdout, and nothing on
+    stderr for 0 or 1."""
+    try:
+        _local_base_commit(root, ref)
+    except RefAbsent:
+        return 1
+    except CannotEvaluate as exc:
+        print("CANNOT EVALUATE: " + str(exc), file=sys.stderr)
+        return 2
+    except Exception as exc:
+        print("CANNOT EVALUATE: base: the --probe-local-base read of {!r} failed unexpectedly ({}: {})".format(
+            ref, type(exc).__name__, exc), file=sys.stderr)
+        return 2
+    return 0
 
 
 def _base_pin(root, commit, pin_rel):
@@ -1071,6 +1115,83 @@ def _coupling_cases():
           and "FAIL: {}: the row for baseline.css changed from ".format(PIN_REL) in report, (got, report))
 
 
+def _probe_child(tmp, ref, env=None):
+    """(exit code, stdout, stderr) of a copy of this file in the fixture tree tmp, run as a child with
+    --probe-local-base ref (so ROOT is the fixture, and the command line, exit code and streams are the ones the
+    local runner reads); env is the child's environment, this process's when None."""
+    script = Path(tmp) / "tools" / Path(__file__).name
+    if not script.exists():
+        os.makedirs(script.parent, exist_ok=True)
+        with open(Path(__file__).resolve(), "rb") as source, open(script, "xb") as target:
+            target.write(source.read())
+    try:
+        child = subprocess.run([sys.executable, "-I", "-B", str(script), "--probe-local-base", ref],
+                               capture_output=True, env=dict(os.environ) if env is None else env,
+                               timeout=GIT_TIMEOUT, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, b"", repr(exc).encode("utf-8")
+    return child.returncode, child.stdout, child.stderr
+
+
+def _probe_cases():
+    """--probe-local-base over 2-commit fixture repositories (HEAD changes a row under an unchanged version, so a
+    probe that read a broken ref as absent would let the local runner skip the leg and pass). It exits 0 silently
+    for a usable ref, 1 silently only for a ref the clone genuinely lacks, and 2 with one CANNOT EVALUATE line for
+    a broken loose ref, a broken packed-refs line, a dangling symbolic ref, a full name git resolves only through a
+    local branch refs/heads/REF and a short name. Run after _coupling_cases, whose scrub of this process's git
+    environment the children inherit."""
+    changed = dict(FIXTURE_FILES, **{"baseline.css": b"body{ }\n"})
+    ref = "refs/remotes/origin/main"
+    broken = "CANNOT EVALUATE: base: {} does not resolve, and git ".format(ref)
+    for name, setup, probed, want, prefix in (
+            ("probe/present-exits-0", "present", ref, 0, None),
+            ("probe/absent-exits-1-silent", "absent", ref, 1, None),
+            ("probe/broken-loose-ref-exits-2", "loose", ref, 2, broken),
+            ("probe/broken-packed-ref-exits-2", "packed", ref, 2, broken),
+            ("probe/dangling-symref-exits-2", "dangling", ref, 2, broken),
+            ("probe/full-name-branch-shadow-exits-2", "shadow", ref, 2,
+             "CANNOT EVALUATE: base: {} does not exist in this clone".format(ref)),
+            ("probe/short-name-exits-2", "present", "origin/main", 2,
+             "CANNOT EVALUATE: base: --local-base origin/main is not a full ref name")):
+        with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+            _fixture(tmp)
+            _commit_all(tmp, "base", init=True)
+            _fixture(tmp, changed, _pin_text(changed))
+            _commit_all(tmp, "head")
+            gitdir = Path(tmp) / ".git"
+            written = not (gitdir / "packed-refs").exists()
+            if setup == "present":
+                _git_fixture(tmp, "update-ref", ref, "base")
+            elif setup == "shadow":
+                _git_fixture(tmp, "update-ref", "refs/heads/" + ref, "HEAD")
+            elif setup == "packed":
+                with open(gitdir / "packed-refs", "xb") as handle:
+                    handle.write(b"1" * 40 + b" " + ref.encode("ascii") + b"\r\n")
+            elif setup in ("loose", "dangling"):
+                os.makedirs(gitdir / "refs" / "remotes" / "origin", exist_ok=True)
+                with open(gitdir / "refs" / "remotes" / "origin" / "main", "xb") as handle:
+                    handle.write(b"broken\n" if setup == "loose" else b"ref: refs/remotes/origin/nowhere\n")
+            got, out, err = _probe_child(tmp, probed)
+        text = err.decode("utf-8", "replace")
+        check(name, written and got == want and out == b"" and (
+            err == b"" if prefix is None else text.startswith(prefix) and text.count("\n") == 1),
+              (written, got, out, err))
+
+    # Under an ambient GIT_DIR naming a decoy repository that lacks the ref, the probe still reads the fixture's
+    # own refs (_git_env drops it): the fixture holds the ref, so the answer is 0. A probe that kept GIT_DIR, as
+    # git show-ref in the runner did, would read the decoy and report a clean absence (1).
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp, \
+            tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-decoy-") as decoy:
+        for tree in (tmp, decoy):
+            _fixture(tree)
+            _commit_all(tree, "base", init=True)
+        _fixture(tmp, changed, _pin_text(changed))
+        _commit_all(tmp, "head")
+        _git_fixture(tmp, "update-ref", ref, "base")
+        got, out, err = _probe_child(tmp, ref, env=dict(os.environ, GIT_DIR=str(Path(decoy) / ".git")))
+    check("probe/ambient-git-dir-decoy-exits-0", got == 0 and out == b"" and err == b"", (got, out, err))
+
+
 def _self_test():
     findings, errors = _scan_case()
     check("pass/fixture-exact", findings == [] and errors == [], (findings, errors))
@@ -1482,6 +1603,7 @@ def _self_test():
           and errors[0].startswith(ATTRIBUTION_REL + ":") and errors[0].endswith("but it is 1"), (findings, errors))
 
     _coupling_cases()
+    _probe_cases()
 
     # The gate's own report lines go to a buffer: a self-test run writes nothing to its error stream.
     with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp, \
@@ -1526,10 +1648,14 @@ def _self_test():
           "malformed base pin are cannot-evaluate and pass with the leg reverted; --local-base compares the "
           "fork point (a changed row fails and passes with the leg reverted, a diverged ref is compared at "
           "the fork point), and a full ref name the clone lacks, a short name shadowed by a tag or a local "
-          "branch, a full name reachable only through a local branch, and a ref whose commit object is "
-          "missing or that names a blob are cannot-evaluate; a child run under an ambient GIT_DIR naming a "
-          "decoy repository reads its own base; without --base the leg is "
-          "reported as not evaluated; the exit codes are 0, 1 and 2; "
+          "branch, a full name reachable only through a local branch, a ref whose commit object is "
+          "missing or that names a blob, a broken loose ref, a broken packed-refs line and a dangling "
+          "symbolic ref are cannot-evaluate; a child run under an ambient GIT_DIR naming a "
+          "decoy repository reads its own base; --probe-local-base exits 0 silently for a usable ref, 1 "
+          "silently for an absent one, 2 with one CANNOT EVALUATE line for a broken loose ref, a broken "
+          "packed-refs line, a dangling symbolic ref, a full name reachable only through a local branch and "
+          "a short name, and 0 under an ambient GIT_DIR naming a decoy repository that lacks the ref; "
+          "without --base the leg is reported as not evaluated; the exit codes are 0, 1 and 2; "
           "the live tree passes)".format(len(EXECUTED)))
     return 0
 
@@ -1547,11 +1673,14 @@ def main(argv=None):
     if len(argv) >= 2 and argv[-2] == "--execution-report" and os.path.isabs(argv[-1]) \
             and argv[:-2] in ([], ["--self-test"]):
         report_path, argv = argv[-1], ["--self-test"]
-    # The base-coupling leg: --base REF or --local-base REF, alone (the REF itself is checked where it is used).
+    # The base-coupling leg: --base REF or --local-base REF, alone, or the local runner's --probe-local-base REF
+    # (the REF itself is checked where it is used).
     if len(argv) == 2 and argv[0] == "--base":
         return run_gate(ROOT, base=argv[1])
     if len(argv) == 2 and argv[0] == "--local-base":
         return run_gate(ROOT, local_base=argv[1])
+    if len(argv) == 2 and argv[0] == "--probe-local-base":
+        return probe_local_base(ROOT, argv[1])
     if argv not in ([], ["--self-test"]):
         print("error: unrecognized arguments {!r}; fail closed".format(argv), file=sys.stderr)
         return 2
