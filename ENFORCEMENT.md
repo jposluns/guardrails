@@ -14,8 +14,8 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Gate-linked (class c only), partial | 8 |
 | Hook-linked | 18 |
 | Hook-linked, partial | 5 |
-| Preview only | 1 |
-| Preview only, partial | 1 |
+| Preview only | 2 |
+| Preview only, partial | 0 |
 | Pending | 0 |
 | No control | 91 |
 
@@ -100,7 +100,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Records first | `recfst` | Hook-linked | `hook:orch-ask-unattended`, class b; `hook:orch-dispatch-ledger`, class c |
 | Close each session on green | `sescls` | No control | No shipped control cites this rule. |
 | Resume from the durable handoff | `sesres` | Hook-linked | `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
-| A standing constraint persists across context loss | `cnstpr` | Preview only, partial | `hook:constraint-reread` (preview channel, installed by hand), class b |
+| A standing constraint persists across context loss | `cnstpr` | Preview only | `hook:constraint-reread` (preview channel, installed by hand), class b |
 | Trust recovery and escalation | `trstre` | No control | No shipped control cites this rule. |
 | Autonomy steps down after a confirmed trust loss | `trsrcv` | No control | No shipped control cites this rule. |
 | Decision classification before enacting | `deccls` | No control | No shipped control cites this rule. |
