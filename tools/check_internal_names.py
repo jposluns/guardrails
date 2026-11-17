@@ -1082,8 +1082,9 @@ def _adopter_match_worker():
 # nothing; a rename within the shipped set still reports only its added lines. It fails closed
 # (exit 2) when BASE or HEAD cannot be read as a commit, the repository is shallow, there is no or more
 # than one merge base, git fails or times out, its output is malformed, a shipped path is absent from or
-# not a regular file in HEAD, a text-suffix blob is not UTF-8, or the HEAD configuration or baseline is
-# invalid (even when no line was added). It never fetches and never falls back to an empty diff. It is
+# not a regular file in HEAD, a text-suffix blob is not UTF-8, the HEAD configuration or baseline is
+# invalid (even when no line was added), or a manifest present at the merge base is not a regular file,
+# not UTF-8 or not a usable inventory. It never fetches and never falls back to an empty diff. It is
 # an extra check: it compares no count, and a clean result does not mean the full gate passes.
 _REGULAR_MODES = ("100644", "100755")
 _HUNK_HEADER = re.compile(rb"@@ -([0-9]+)(?:,([0-9]+))? \+([0-9]+)(?:,([0-9]+))? @@")

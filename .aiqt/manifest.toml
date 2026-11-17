@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "a4add336688914fa7cd753cf8823b8606576b559a3bc250fd9acebc725f9e146"
+tree-sha256 = "967a4d5306277f0d3e2f5993165f7df09178a4620d4110f11b68dd2aacdedffc"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -2492,8 +2492,8 @@ sha256 = "078f99515f07b0c521d07122393a0b562e9e064e153bafa2325ca5cd98363fe1"
 
 [[sources]]
 path = "docs/tracker-labels.md"
-bytes = 8376
-sha256 = "f031f02567c6d5eae959c07ca3031718467c9685068580531f46d7635191b6af"
+bytes = 8559
+sha256 = "6e147804ce01fb673141febe33ffcd376137fc60f6dd4427b37ed13d0b875d82"
 
 [[sources]]
 path = "opf/VERSION"
@@ -4092,8 +4092,8 @@ sha256 = "60d56244cf05535c7c4a5cd04750f8f9f1815cf0d6708474de5c6f8e7e43b79a"
 
 [[sources]]
 path = "site/tracker-labels.html"
-bytes = 12105
-sha256 = "b057c1ee2ff7d97dada0a667fd44c45dc09562bd34959c7af04e8a157e0043a4"
+bytes = 12288
+sha256 = "de5e89c3b0154ecbf05c7711c9169e35937eb8221db335bc94d86edd6bcfe762"
 
 [[sources]]
 path = "tools/_adapter_compose.py"
@@ -4287,8 +4287,8 @@ sha256 = "57fe0345d8e1959e9ff8a5f22ae5271577d3485ffd8a116e68d3f2e14c2de010"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 333862
-sha256 = "09a9bebb048086dac10d65197ae1502cf40bd504c3255cf1994cae264cc6e379"
+bytes = 333961
+sha256 = "a11d088fa186c5e732c1dfe4f4377901a177d1e49d4bc730f79af7f8069ecf15"
 
 [[sources]]
 path = "tools/check_leaks.py"
