@@ -191,6 +191,8 @@ run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check
 run_gate "versions"        python3 -I -B tools/check_versions.py
 run_gate "release-cut-selftest" python3 -I -B tools/check_release_cut.py --self-test --red-on-revert
 run_gate "release-cut"          python3 -I -B tools/check_release_cut.py
+run_gate "selftest-removal-selftest" python3 -I -B tools/check_selftest_execution.py --suite selftest-removal-selftest
+run_gate "selftest-removal"     python3 -I -B tools/check_selftest_removal.py
 run_gate "version-monotonicity-selftest" python3 -I -B tools/check_version_monotonicity.py --self-test
 run_gate "version-monotonicity" python3 -I -B tools/check_version_monotonicity.py
 run_gate "branch-root-selftest" python3 -I -B tools/check_branch_root.py --self-test

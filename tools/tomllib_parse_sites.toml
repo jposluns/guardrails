@@ -1247,6 +1247,14 @@ class = "EXEMPT"
 reason = "test-code"
 
 [[site]]
+path = "tools/check_selftest_removal.py"
+function = "_live_twin"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
 path = "tools/check_standards_currency.py"
 function = "self_test_main"
 form = "alias"

@@ -967,6 +967,31 @@ ALLOWLIST = (
     },
     {
         "side": "ci-only",
+        "identity": (
+            "tools/check_selftest_removal.py --protected <ref:origin/${GITHUB_REF_NAME}> "
+            "--base <ref:$PUSH_BEFORE>"
+        ),
+        "reason": (
+            "The push CI job supplies its runtime-derived origin ref and the "
+            "event's before OID, the base the release-cut derivation this gate "
+            "imports requires on a push. The bare leg runs locally and in "
+            "pull_request CI, where GITHUB_BASE_REF binds the merge parent."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
+        "identity": "tools/check_selftest_removal.py --protected <ref:origin/${GITHUB_REF_NAME}>",
+        "reason": (
+            "A workflow_dispatch or schedule run has no pushed range, so the CI "
+            "job supplies only its runtime-derived origin ref and the gate "
+            "compares the checked-out tip with its first parent. The bare leg "
+            "runs locally."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
         "identity": "tools/check_version_monotonicity.py --base <ref:origin/${GITHUB_BASE_REF}>",
         "reason": (
             "CI derives the comparison base from trusted event and repository "
