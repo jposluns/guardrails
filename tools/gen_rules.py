@@ -812,14 +812,25 @@ def _valued_option_failures():
 # one the hook does not see, lands in the copy, never in the developer's working tree.
 # Plain form: in the copy each generator also runs as `python3 tools/<name> --chek` (the form the gensrc regenerate
 # commands use: no -I, no -B, no hook) and must refuse it with exit 2 and stderr only the refusal. After each
-# generator's runs the copy's `git status --ignored` must show nothing new outside __pycache__/, so the plain form
-# also writes nothing but Python's own bytecode cache, which the imports write before the guard runs (gitignored).
+# generator's runs the copy's `git status --ignored` must show nothing new but .pyc files directly in a
+# __pycache__/ directory, so the plain form also writes nothing but Python's own bytecode cache, which the imports
+# write before the guard runs (gitignored).
+# Stale tree: the copy's generated files are current, so a generator that writes only on a difference (most go
+# through reconcile) would write nothing even if it wrote before its guard. So, in the copy, the refusal cases and
+# the plain form each run on a tree made stale on purpose: every file under each target the copy's
+# .aiqt/gensrc.json names for that generator (its entry's regenerate command `python3 tools/<name>`) gains a stale
+# line at its end and after each line holding BEGIN (inside a marked block, for a block target), and after the
+# run it must still hold exactly those bytes; the originals are then restored. So a write on difference before the
+# guard is blocked by the hook (the refusal cases), or rewrites the altered file (the plain form), and is
+# reported. A generator the registry names no target for is reported, since its refusal ran on no stale target.
 # Residuals, not covered:
 # - the check reads the committed tree: an uncommitted change to a generator is checked once it is committed, and
 #   a stale generated file committed at HEAD can still fail it (the --check gates fail that commit as well);
-# - on a current tree, a generator that writes only on a difference passes the no-argument case if it runs its
-#   check mode there, and passes the --check case if it ignores --check and runs its write mode, since neither
-#   mode writes on a current tree;
+# - the no-argument and --check cases run on the current (restored) tree: there a generator that writes only on a
+#   difference passes the no-argument case if it runs its check mode, and passes the --check case if it ignores
+#   --check and runs its write mode, since neither mode writes on a current tree;
+# - the stale tree alters only the files the registry declares: a write before the guard to a file the registry
+#   does not name, or to a block whose opening marker line does not hold BEGIN, is still not made to fire;
 # - a write made inside C code without an audit event (for example the database file sqlite3 creates, os.mknod,
 #   posix.mkfifo, which the os.mkfifo wrapper does not reach, or an extension module's own I/O) is not seen by the
 #   hook, and the status comparison sees it only when it changes a file in the copy: such a write of identical
@@ -917,15 +928,29 @@ def _gen_argv_class_failures(tools, repo=None):
     _GEN_ARGV_CLASS_CASES argv with exit 2 and a stderr that is only the refusal (see _gen_argv_refusal), or whose
     no-argument run does not reach a write, or whose --check run is refused, writes or does not exit 0 or 1. With
     repo, a throwaway git repository holding tools as repo/tools, the children run in repo, each generator also runs
-    in the plain form `python3 tools/<name> --chek` there, and a change to repo that `git status --ignored` shows
-    after a generator's runs, outside __pycache__/, is reported (see _gen_argv_plain_failures)."""
+    in the plain form `python3 tools/<name> --chek` there, a change to repo that `git status --ignored` shows
+    after a generator's runs, other than a .pyc file in a __pycache__/ directory, is reported (see
+    _gen_argv_plain_failures), and the refusal cases and the plain form run on a tree made stale on purpose (see
+    _gen_argv_stale)."""
     failures = []
     cwd = repo if repo is not None else tools
     changed = _gen_argv_status(repo) if repo is not None else None
     if isinstance(changed, str):
         return [changed]
+    registry = _gen_argv_registry(repo) if repo is not None else None
+    if isinstance(registry, str):
+        return [registry]
     for path in sorted(Path(tools).glob("gen_*.py")):
+        targets = () if registry is None else registry.get(path.name, ())
+        if registry is not None and not targets:
+            failures.append("{}: {} names no target it regenerates, so its refusal cases ran on no stale "
+                            "target".format(path.name, _GEN_ARGV_REGISTRY))
+        stale = _gen_argv_stale(repo, targets) if targets else {}
+        if isinstance(stale, str):
+            failures.append(stale)
+            stale = {}
         got = _gen_argv_child(path, _GEN_ARGV_CLASS_CASES, False, cwd)
+        restored = _gen_argv_restore(stale, repo, "{} (refusal cases)".format(path.name))
         if isinstance(got, str):
             failures.append(got)
         else:
@@ -940,6 +965,7 @@ def _gen_argv_class_failures(tools, repo=None):
             if returncode != 0:
                 failures.append("{}: the unknown-option child exited {} (97 is a blocked write, delete or child "
                                 "process); stderr {!r}".format(path.name, returncode, child_err[-300:]))
+        failures.extend(restored)
         # No argument: write mode, shown by the hook ending the child at a write rather than a process event, or,
         # for a generator that writes only on a difference, exit 0 with nothing blocked and no refusal.
         got = _gen_argv_child(path, [[]], True, cwd)
@@ -969,7 +995,87 @@ def _gen_argv_class_failures(tools, repo=None):
                                 "stderr {!r}, child stderr {!r}".format(path.name, returncode, code, err[-200:],
                                                                         child_err[-200:]))
         if repo is not None:
-            failures.extend(_gen_argv_plain_failures(path, repo, changed))
+            failures.extend(_gen_argv_plain_failures(path, repo, changed, targets))
+    return failures
+
+
+# The registry the stale tree reads, and the line _gen_argv_stale adds to each file it alters.
+_GEN_ARGV_REGISTRY = ".aiqt/gensrc.json"
+_GEN_ARGV_STALE_LINE = b"stale: the gen_rules class check altered this generated file\n"
+
+
+def _gen_argv_registry(repo):
+    """{generator file name: [target, ...]} from repo's .aiqt/gensrc.json, each entry filed under the generator
+    its regenerate command names (`python3 tools/<name>`); None when repo has no registry; a failure line when it
+    cannot be read."""
+    import json
+    path = Path(repo) / _GEN_ARGV_REGISTRY
+    if not os.path.lexists(path):
+        return None
+    registry = {}
+    try:
+        for entry in json.loads(path.read_text(encoding="utf-8"))["generated"]:
+            words = entry["regenerate"].split()
+            if len(words) >= 2 and words[1].startswith("tools/") and isinstance(entry["target"], str):
+                registry.setdefault(words[1][len("tools/"):], []).append(entry["target"])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return "class check: cannot read {} in the copy: {!r}".format(_GEN_ARGV_REGISTRY, exc)
+    return registry
+
+
+def _gen_argv_stale(repo, targets):
+    """Make the targets (repo-relative registry targets: a file, or a tree ending in /) stale in repo: every regular
+    file there (a symlink is left alone; a missing target is already stale) gains _GEN_ARGV_STALE_LINE after each
+    line holding BEGIN, so a marked block differs, and at its end, so a whole file differs. Return {file: (original
+    bytes, altered bytes)} for _gen_argv_restore, or a failure line when a file could not be altered (those already
+    altered are restored first)."""
+    stale = {}
+    try:
+        for rel in targets:
+            top = Path(repo) / rel.rstrip("/")
+            if top.is_dir() and not top.is_symlink():
+                files = sorted(Path(base) / name for base, _dirs, names in os.walk(top) for name in names)
+            else:
+                files = [top]
+            for path in files:
+                if path.is_symlink() or not path.is_file() or path in stale:
+                    continue
+                data = path.read_bytes()
+                out = []
+                for line in data.splitlines(keepends=True):
+                    out.append(line if line.endswith(b"\n") else line + b"\n")
+                    if b"BEGIN" in line:
+                        out.append(_GEN_ARGV_STALE_LINE)
+                altered = b"".join(out) + _GEN_ARGV_STALE_LINE
+                stale[path] = (data, altered)
+                path.write_bytes(altered)
+    except OSError as exc:
+        problems = _gen_argv_restore(stale, repo, "class check")
+        return "class check: could not make {} stale in the copy: {}{}".format(
+            ", ".join(targets), exc, "; " + "; ".join(problems) if problems else "")
+    return stale
+
+
+def _gen_argv_restore(stale, repo, label):
+    """Restore every file _gen_argv_stale altered to its original bytes. Return one failure line per file that no
+    longer held its altered bytes (the run under label rewrote, removed or replaced it) or could not be restored."""
+    failures = []
+    for path, (data, altered) in stale.items():
+        rel = path.relative_to(repo).as_posix()
+        try:
+            held = None if path.is_symlink() or not path.is_file() else path.read_bytes()
+        except OSError as exc:
+            held = "unreadable ({})".format(exc)
+        if held != altered:
+            failures.append("{}: the run changed the generated file {}, which the class check had made stale (a "
+                            "write before the argument guard)".format(label, rel))
+        try:
+            if path.is_symlink() or (os.path.lexists(path) and not path.is_file()):
+                failures.append("{}: cannot restore {}: it is no longer a regular file".format(label, rel))
+                continue
+            path.write_bytes(data)
+        except OSError as exc:
+            failures.append("{}: cannot restore {}: {}".format(label, rel, exc))
     return failures
 
 
@@ -993,15 +1099,21 @@ def _gen_argv_status(repo):
     return {entry for entry in done.stdout.decode("utf-8", "replace").split("\0") if entry}
 
 
-def _gen_argv_plain_failures(path, repo, changed):
+def _gen_argv_plain_failures(path, repo, changed, targets=()):
     """The plain-form case for the generator path in the throwaway repository repo: `python3 tools/<name> --chek`
-    with repo as the working directory, no -I, no -B and no hook, must exit 2 with stderr only the refusal; then
-    every entry `git status --ignored` shows in repo that is not in the set changed and lies outside __pycache__/
-    is reported as written by this generator's runs. changed gains the entries seen."""
+    with repo as the working directory, no -I, no -B and no hook, must exit 2 with stderr only the refusal, on a
+    tree whose registry targets (targets) are made stale for the run and must still be stale after it
+    (_gen_argv_stale, _gen_argv_restore); then every entry `git status --ignored` shows in repo that is not in the
+    set changed and is not a .pyc file directly in a __pycache__/ directory is reported as written by this
+    generator's runs. changed gains the entries seen."""
     import subprocess
     from _git_fixture_env import git_fixture_env
     failures = []
     rel = path.relative_to(repo).as_posix()
+    stale = _gen_argv_stale(repo, targets) if targets else {}
+    if isinstance(stale, str):
+        failures.append(stale)
+        stale = {}
     try:
         done = subprocess.run([sys.executable, rel, "--chek"], capture_output=True, timeout=300, cwd=str(repo),
                               env=git_fixture_env())
@@ -1011,15 +1123,23 @@ def _gen_argv_plain_failures(path, repo, changed):
                             "got exit {}, stderr {!r}".format(path.name, rel, done.returncode, err[-200:]))
     except (OSError, subprocess.SubprocessError) as exc:
         failures.append("{}: the plain-form run did not run: {}".format(path.name, exc))
+    failures.extend(_gen_argv_restore(stale, repo, "{} --chek (plain form)".format(path.name)))
     now = _gen_argv_status(repo)
     if isinstance(now, str):
         return failures + [now]
-    new = sorted(entry for entry in now - changed if "__pycache__" not in entry[3:].split("/"))
+    new = sorted(entry for entry in now - changed if not _gen_argv_bytecode(entry[3:]))
     changed |= now
     if new:
-        failures.append("{}: its runs changed the copy (git status entries outside __pycache__/): {!r}".format(
-            path.name, new[:10]))
+        failures.append("{}: its runs changed the copy (git status entries other than .pyc files in "
+                        "__pycache__/): {!r}".format(path.name, new[:10]))
     return failures
+
+
+def _gen_argv_bytecode(rel):
+    """True when the repo-relative path rel is Python's bytecode cache: a .pyc file directly in a __pycache__/
+    directory. Any other file, under __pycache__/ or not, is a change the status comparison reports."""
+    parts = rel.split("/")
+    return len(parts) >= 2 and parts[-2] == "__pycache__" and parts[-1].endswith(".pyc")
 
 
 def _gen_argv_head_copy(root, dest):
@@ -1098,6 +1218,21 @@ _GEN_ARGV_PLAIN_WRITER = ("import sys\nfrom pathlib import Path\n"
                           "if not sys.flags.isolated:\n"
                           "    Path(__file__).with_name('written.txt').write_text('x')\n"
                           + _GEN_ARGV_MODES.format(name="gen_plainwriter.py", writes="not sys.argv[1:]"))
+# Writes its registry target out.txt only when it differs, as reconcile does: gen_lateguard.py before its argument
+# guard (on a current tree that write never fires; on the stale tree it must be reported), gen_earlyguard.py after
+# it (it must pass on the stale tree).
+_GEN_ARGV_RECONCILE = ("out = Path(__file__).resolve().parent.parent / 'out.txt'\n"
+                       "if out.read_bytes() != b'generated\\n':\n"
+                       "    out.write_bytes(b'generated\\n')\n")
+_GEN_ARGV_GUARD = ("if sys.argv[1:] not in ([], ['--check']):\n"
+                   "    print('usage: {name} [--check]', file=sys.stderr)\n"
+                   "    sys.exit(2)\n")
+_GEN_ARGV_LATE_GUARD = ("import sys\nfrom pathlib import Path\n" + _GEN_ARGV_RECONCILE
+                        + _GEN_ARGV_GUARD.format(name="gen_lateguard.py") + "sys.exit(0)\n")
+_GEN_ARGV_EARLY_GUARD = ("import sys\nfrom pathlib import Path\n" + _GEN_ARGV_GUARD.format(name="gen_earlyguard.py")
+                         + "if not sys.argv[1:]:\n"
+                         + "".join("    " + line + "\n" for line in _GEN_ARGV_RECONCILE.splitlines())
+                         + "sys.exit(0)\n")
 
 
 def _gen_argv_class_check_failures():
@@ -1162,6 +1297,30 @@ def _gen_argv_class_check_failures():
             if problem or ((len(got) != 1 or not reported) if want else got):
                 failures.append("class-check control: in a git repository, {} must {}; got {}".format(
                     name, "be reported only for its plain-form write" if want else "pass", got))
+        # In a git repository whose registry declares out.txt, current at the commit: a generator that writes it on
+        # a difference before its argument guard must be reported for the refusal cases (the write blocked) and for
+        # the plain form (the stale file rewritten), with out.txt back as committed; one that does so only after
+        # its guard must pass.
+        for name, source, want in (("gen_lateguard.py", _GEN_ARGV_LATE_GUARD, True),
+                                   ("gen_earlyguard.py", _GEN_ARGV_EARLY_GUARD, False)):
+            repo = tmp / ("repo-" + name[:-3])
+            (repo / "tools").mkdir(parents=True)
+            (repo / ".aiqt").mkdir()
+            (repo / "tools" / name).write_text(source, encoding="utf-8")
+            (repo / "out.txt").write_bytes(b"generated\n")
+            (repo / _GEN_ARGV_REGISTRY).write_text(
+                '{"generated": [{"kind": "file", "regenerate": "python3 tools/' + name + '", "sources": ["tools/"], '
+                '"target": "out.txt"}], "version": 1}\n', encoding="utf-8")
+            problem = _gen_argv_commit(repo)
+            got = [problem] if problem else _gen_argv_class_failures(repo / "tools", repo)
+            blocked = any(line.startswith(name + " --chek: ") and "blocked: open" in line for line in got)
+            rewrote = any(line.startswith(name + " --chek (plain form): the run changed the generated file "
+                                          "out.txt") for line in got)
+            intact = (repo / "out.txt").read_bytes() == b"generated\n"
+            if problem or not intact or ((not blocked or not rewrote) if want else got):
+                failures.append("class-check control: on a stale tree, {} must {}; got {}, out.txt {}".format(
+                    name, "be reported for its write before the argument guard, blocked in the refusal cases and "
+                    "seen in the plain form" if want else "pass", got, "as committed" if intact else "changed"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     # The real generators run only in a throwaway copy of the committed tree, never in the working tree.
@@ -1175,6 +1334,9 @@ def _gen_argv_class_check_failures():
             tools = copy / "tools"
             if not (tools / "gen_rules.py").is_file():
                 failures.append("class check: tools/gen_rules.py is not in the enumerated directory {}".format(tools))
+            if not (copy / _GEN_ARGV_REGISTRY).is_file():
+                failures.append("class check: the copy holds no {}, so no refusal case ran on a stale tree".format(
+                    _GEN_ARGV_REGISTRY))
             failures.extend(_gen_argv_class_failures(tools, copy))
     finally:
         shutil.rmtree(copy_tmp, ignore_errors=True)

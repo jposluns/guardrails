@@ -767,9 +767,11 @@ def _discover_md(docs_root, root):
 
 def main(argv):
     # The unknown-option guard runs here as well as in the __main__ block, so an in-process caller that passes an
-    # unknown option is refused too, never run as a write.
+    # unknown option is refused too, never run as a write; --self-test is dispatched here too, never run as a write.
     if unknown_args_refused(argv, _USAGE):
         return 2
+    if "--self-test" in argv:
+        return _self_test()
     check = "--check" in argv
     root = repo_root()
     docs_root = root / DOCS_DIR
