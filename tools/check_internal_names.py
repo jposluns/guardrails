@@ -2175,10 +2175,13 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
 
         label = "rou" + "nd-7"
         body = "".join("body line {}\n".format(i) for i in range(1, 21))
-        write("docs/page.md", "one\ntwo {}\nthree\n".format(label))
+        # Line 1 of docs/page.md and of the edited rename's source carries a label and stays unchanged
+        # context, so reporting every line of a changed file (or of an edited rename's destination)
+        # turns the added-line and edited-rename rows red.
+        write("docs/page.md", "one {0}\ntwo {0}\nthree\n".format(label))
         write("docs/move.md", "a {}\nb\nc\n".format(label))
         write("docs/old-name.md", "x {}\n".format(label) + body)
-        write("docs/edit-name.md", body)
+        write("docs/edit-name.md", "e {}\n".format(label) + body)
         write("docs/crlf.md", b"c1\r\nc2\r\n")
         write("notes/out.md", "z\n")
         first = ["docs/crlf.md", "docs/edit-name.md", "docs/move.md", "docs/old-name.md", "docs/page.md"]
@@ -2188,16 +2191,18 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
         git("commit", "-q", "-m", "fork point")
         git("switch", "-q", "-c", "feature")
         git("switch", "-q", "main")
-        write("docs/page.md", "one\nthree\n")
+        write("docs/page.md", "one {}\nthree\n".format(label))
         git("commit", "-q", "-a", "-m", "main drops a line")
         git("switch", "-q", "feature")
-        write("docs/page.md", "one\ntwo {0}\nthree\nfour {0}\nper plan section 2\n".format(label))
+        write("docs/page.md", "one {0}\ntwo {0}\nthree\nfour {0}\nper plan section 2\n".format(label))
         write("docs/move.md", "a\nb\nc {}\n".format(label))
         git("mv", "docs/old-name.md", "docs/new-name.md")
         git("mv", "docs/edit-name.md", "docs/edit-dest.md")
-        write("docs/edit-dest.md", body + "r {}\n".format(label))
+        write("docs/edit-dest.md", "e {}\n".format(label) + body + "r {}\n".format(label))
         write("docs/new.md", "n1\nn2 {}\n".format(label))
-        write("docs/crlf.md", "c1\r\nc2\r\nc3 {}".format(label).encode("utf-8"))
+        # A lone carriage return inside the added last line (which has no final LF): git counts lines by
+        # LF only, so str.splitlines() would split it and miss the label on line 3.
+        write("docs/crlf.md", "c1\r\nc2\r\nc3\rc4 {}".format(label).encode("utf-8"))
         write("notes/out.md", "z {}\n".format(label))
         write(".aiqt/tracker-labels.toml", config_text([sample]))
         write(".aiqt/manifest.toml", manifest_for(["docs/crlf.md", "docs/edit-dest.md", "docs/move.md",
@@ -2229,8 +2234,8 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
         check("diff/merge-base-not-base-tip", lacks("docs/page.md:2:"), detail)
         check("diff/new-file-all-lines", has("docs/new.md:2:"), detail)
         check("diff/pure-rename-silent", lacks("docs/new-name.md:1:"), detail)
-        check("diff/edited-rename-destination-only", has("docs/edit-dest.md:21:")
-              and not any(item.startswith("docs/edit-dest.md:") and item != "docs/edit-dest.md:21:"
+        check("diff/edited-rename-destination-only", has("docs/edit-dest.md:22:")
+              and not any(item.startswith("docs/edit-dest.md:") and item != "docs/edit-dest.md:22:"
                           for item in reported), detail)
         check("diff/equal-count-relocation-reported", has("docs/move.md:3:") and lacks("docs/move.md:1:"),
               detail)
@@ -2246,6 +2251,7 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
                            ("unknown-base", ("--diff", "no-such-revision"))):
             refused[name] = gate(*args)
         check("diff/cli-refusals-exit-2", all(r[0] == 2 for r in refused.values())
+              and "not a usable revision operand" in refused["option-operand"][2]
               and "cannot be read as a commit" in refused["unknown-base"][2], refused)
         lone = git("commit-tree", git("rev-parse", "HEAD^{tree}"), "-m", "unrelated root")
         git("branch", "lone", lone)

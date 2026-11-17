@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "1adde38c1f0fbe1607fd4f14c343b0e36fc2a78d2f3d12acf358a0ee195e3683"
+tree-sha256 = "2ed38784bbd087142495e0f6c46ed6dc0e65a34fc2ac454cb22ee0845545f355"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 605072
-sha256 = "88c3a2efba1d3cb3cd2779222b904ca7a19927c46cf75fa848bd020e503558e9"
+bytes = 606668
+sha256 = "f7a4a0f12cb9f70cb30bf36e14b21560f3c81ca065eec7cbe3783867a25959f0"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -132,8 +132,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 27683
-sha256 = "0f568d66a51f0f6b0d05b2d86e10a4a005be332cd3568224bcce423d2421ea9a"
+bytes = 28058
+sha256 = "184562f6804f84ab6c9c394dab584968abb1293287eecd1d04d5ba2cda95c008"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -2317,8 +2317,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 54195
-sha256 = "633db175882147f6a69e7c1e792b4411e85eed1de37a47b8641b33e7da205a7e"
+bytes = 54230
+sha256 = "de4b0bd8f04c9589404961f6c5b285c42f654fffe88bb7dae0fef24f930433c1"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2489,6 +2489,11 @@ sha256 = "2ec973b2d55be8e79832d41c436d132381597612ca875e7d5fb1ca9a63823aeb"
 path = "docs/evidence.md"
 bytes = 5394
 sha256 = "078f99515f07b0c521d07122393a0b562e9e064e153bafa2325ca5cd98363fe1"
+
+[[sources]]
+path = "docs/tracker-labels.md"
+bytes = 5124
+sha256 = "f300b2717d8010f8edfdc3d5ca2123bc1a295f80629dfedc9fe82fdc409f20d5"
 
 [[sources]]
 path = "opf/VERSION"
@@ -4277,8 +4282,8 @@ sha256 = "57fe0345d8e1959e9ff8a5f22ae5271577d3485ffd8a116e68d3f2e14c2de010"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 272641
-sha256 = "35b5204aa132289248fb7adaa3ea0757c516467f1d5324139c1b18c0fe7d56d0"
+bytes = 321958
+sha256 = "7a831f696ee8d57da8806da1678ee82d7789fb227b313841d12683d20d4209a8"
 
 [[sources]]
 path = "tools/check_leaks.py"
@@ -4717,8 +4722,8 @@ sha256 = "aee862bd4e52599e3c44ca8c83359689d1e60541674785bfbf50bd663b92c43e"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 250551
-sha256 = "59215781946f17dd12b44bdb94cec3379e43b49a4325399846246c237c5f0499"
+bytes = 252020
+sha256 = "6f39fafa119acd9927918b6d43965eadfd40299ce28efb0124496ed0e5d4889e"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

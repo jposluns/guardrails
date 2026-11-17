@@ -76,6 +76,10 @@ reason = "Repository-local licence-qualification gate configuration (the declare
 path = ".aiqt/opf-consumer-switch.toml"
 reason = "Repository-local switch list of this repository's own record readers under tools/, read by tools/check_record_readers.py; tracked, not shipped, like .aiqt/newtab.toml. An adopter has no such tools; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 
+[[exclusion]]
+path = ".aiqt/tracker-labels.toml"
+reason = "Repository-local adopter tracker-label shape configuration read by tools/check_internal_names.py (docs/tracker-labels.md); tracked, not shipped. Adopters own their roots (an absent file applies no extra shape), like .aiqt/newtab.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
+
 # The authoring-only roster (tools/gen_hooks.py AUTHORING_ONLY_REL): tracked here, never shipped. gen_manifest
 # refuses either path a release class, requires both tracked together under these exact literals, and allows
 # this one exclusion over a gensrc-registered kind=file target; every other gensrc target stays refused.
