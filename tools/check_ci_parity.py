@@ -991,7 +991,8 @@ ALLOWLIST = (
             "On a pull_request the CI job checks out the test merge and "
             "compares its pins with those at its first parent HEAD^1, the "
             "protected line the change merges into; the local runner has "
-            "no test merge and passes --local-base origin/main instead."
+            "no test merge and passes --local-base refs/remotes/origin/main "
+            "instead."
         ),
         "backlog": "GD-123",
     },
@@ -1005,7 +1006,7 @@ ALLOWLIST = (
             "push is cannot-evaluate); only those 2 endpoints are "
             "compared, so this is the range's net change, not each "
             "commit's. The local runner has no push event and passes "
-            "--local-base origin/main instead."
+            "--local-base refs/remotes/origin/main instead."
         ),
         "backlog": "GD-123",
     },
@@ -1016,20 +1017,21 @@ ALLOWLIST = (
             "A workflow_dispatch run has no pushed range, so the CI job "
             "compares HEAD's pins with those at its previous commit HEAD^, "
             "unprobed, that 1 commit's change; the local runner passes "
-            "--local-base origin/main instead."
+            "--local-base refs/remotes/origin/main instead."
         ),
         "backlog": "GD-123",
     },
     {
         "side": "local-only",
-        "identity": "tools/check_baseline_pin.py --local-base origin/main",
+        "identity": "tools/check_baseline_pin.py --local-base refs/remotes/origin/main",
         "reason": (
             "The local runner compares HEAD's pins with those at the fork "
-            "point git merge-base HEAD origin/main, the base "
-            "check_version_monotonicity.py derives by default; a clone "
-            "without origin/main gets a NOTE that the base-coupling leg "
-            "did not run. CI instead passes a --base derived from the "
-            "event, the exact commit the change starts from."
+            "point of HEAD and the full ref refs/remotes/origin/main, the "
+            "base check_version_monotonicity.py derives by default; a "
+            "clone without that ref fails the gate as cannot-evaluate "
+            "(fetch it with git fetch origin main). CI instead passes a "
+            "--base derived from the event, the exact commit the change "
+            "starts from."
         ),
         "backlog": "GD-123",
     },

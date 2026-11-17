@@ -120,12 +120,14 @@ run_gate "site-versions" python3 -I -B tools/check_site_versions.py
 run_gate "draft-site-selftest" python3 -I -B tools/gen_draft_site.py --self-test
 run_gate "draft-site-drift" python3 -I -B tools/gen_draft_site.py --check
 run_gate "baseline-pin-selftest" python3 -I -B tools/check_selftest_execution.py --suite baseline-pin-selftest
-# --local-base origin/main runs the base-coupling leg against the fork point, git merge-base HEAD origin/main,
-# the base check_version_monotonicity.py derives by default. A clone without origin/main, where git reports
-# nothing on stderr for the name or for its refs, gets a NOTE that the leg did not run (never a silent pass); a
-# broken loose ref, a broken packed-refs line, a dangling symbolic ref, any other git diagnostic and any other
-# git failure are cannot-evaluate.
-run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py --local-base origin/main
+# --local-base refs/remotes/origin/main runs the base-coupling leg against the fork point of HEAD and
+# origin/main, the base check_version_monotonicity.py derives by default. The full ref name is required: a tag
+# or local branch named origin/main would win over the short name. This runner never fetches (it does not
+# touch the network) and passes the flag unconditionally, because the runner grammar check_ci_parity.py holds
+# admits no conditional git probe; so a clone without refs/remotes/origin/main fails this gate as
+# cannot-evaluate (exit 2), with a message naming the fetch (git fetch origin main), never a pass. A broken
+# loose ref, a broken packed-refs line, a dangling symbolic ref and any other git failure are cannot-evaluate.
+run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py --local-base refs/remotes/origin/main
 run_gate "palette-aiqt" python3 -I -B .baseline/check_palette.py --site aiqt --palettes site/draft/assets/baseline/palettes.css
 run_gate "palette-opfiles" python3 -I -B .baseline/check_palette.py --site opfiles --palettes opf/site/draft/assets/baseline/palettes.css
 run_gate "security-txt-selftest" python3 -I -B tools/check_selftest_execution.py --suite security-txt-selftest
