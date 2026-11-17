@@ -449,6 +449,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/audit_reference.py",
     "tools/check_applies.py",
     "tools/check_artifact_checksums.py",
+    "tools/check_baseline_pin.py",
     "tools/check_branch_root.py",
     "tools/check_brief_capability.py",
     "tools/check_byte_canon.py",

@@ -990,8 +990,19 @@ ALLOWLIST = (
         "reason": (
             "On a pull_request the CI job checks out the test merge, whose "
             "first parent HEAD^1 is the protected line the change merges "
-            "into; the local runner has no test merge and passes "
-            "origin/main instead."
+            "into; the local runner has no test merge and runs the gate "
+            "with no --base, which prints that the leg was not evaluated."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
+        "identity": "tools/check_baseline_pin.py --base <ref:$PUSH_BEFORE>",
+        "reason": (
+            "On a push the CI job passes the event's before OID, the "
+            "commit before the pushed range, so every commit of the range "
+            "is compared; the local runner has no push event and runs the "
+            "gate with no --base."
         ),
         "backlog": "GD-123",
     },
@@ -999,30 +1010,21 @@ ALLOWLIST = (
         "side": "ci-only",
         "identity": "tools/check_baseline_pin.py --base HEAD^",
         "reason": (
-            "On a push or workflow_dispatch run the CI job passes the "
-            "previous commit HEAD^ when it resolves; the local runner "
-            "passes origin/main instead."
-        ),
-        "backlog": "GD-123",
-    },
-    {
-        "side": "ci-only",
-        "identity": "tools/check_baseline_pin.py",
-        "reason": (
-            "The CI else-branch, taken only when HEAD^ does not resolve, "
-            "prints a NOTE and runs the gate with no --base, so the pin "
-            "and copy legs still run; the local runner always passes a "
-            "base."
+            "A workflow_dispatch run has no pushed range, so the CI job "
+            "passes the previous commit HEAD^, unprobed; the local runner "
+            "runs the gate with no --base."
         ),
         "backlog": "GD-123",
     },
     {
         "side": "local-only",
-        "identity": "tools/check_baseline_pin.py --base origin/main",
+        "identity": "tools/check_baseline_pin.py",
         "reason": (
-            "The local runner compares against origin/main, the protected "
-            "line, as check_version_monotonicity.py takes its default "
-            "base; CI derives its base from the event (HEAD^1 or HEAD^)."
+            "A local clone need not carry a protected-line ref and the "
+            "runner derives no base, so the local runner runs the gate "
+            "with no --base and the gate prints a NOTE that the "
+            "base-coupling leg was not evaluated; CI always passes a "
+            "base derived from the event."
         ),
         "backlog": "GD-123",
     },
