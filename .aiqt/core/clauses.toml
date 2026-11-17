@@ -5275,7 +5275,7 @@ source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
 start-line = 13
 end-line = 15
 canonical-text = "A constraint the operator or a governing rule has set, such as an instruction to propose but not act\nwithout approval or to never touch a named resource, stays in force across context loss, including\nsummarization, compaction, truncation, and handoff to a new session."
-source-digest = "5851bac8315dba98e4a1d107c390590cddf06baca4bddd6caa574a6e797d515c"
+source-digest = "96489881d0f39abca99f1264505d9d202edc713486aeba9e7ba896f7a39a4da7"
 layer = "core"
 
 [[clause]]
@@ -5285,7 +5285,7 @@ source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
 start-line = 15
 end-line = 16
 canonical-text = "The assistant re-establishes it from\nthe durable record;"
-source-digest = "5851bac8315dba98e4a1d107c390590cddf06baca4bddd6caa574a6e797d515c"
+source-digest = "96489881d0f39abca99f1264505d9d202edc713486aeba9e7ba896f7a39a4da7"
 layer = "core"
 
 [[clause]]
@@ -5295,7 +5295,7 @@ source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
 start-line = 16
 end-line = 18
 canonical-text = "only the authority that set it can lift it, never context loss alone, and when the\nassistant cannot confirm whether it still applies, it holds and checks rather than proceeding as though it\nwere gone."
-source-digest = "5851bac8315dba98e4a1d107c390590cddf06baca4bddd6caa574a6e797d515c"
+source-digest = "96489881d0f39abca99f1264505d9d202edc713486aeba9e7ba896f7a39a4da7"
 layer = "core"
 
 [[clause]]
@@ -5305,7 +5305,7 @@ source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
 start-line = 16
 end-line = 18
 canonical-text = "only the authority that set it can lift it, never context loss alone, and when the\nassistant cannot confirm whether it still applies, it holds and checks rather than proceeding as though it\nwere gone."
-source-digest = "5851bac8315dba98e4a1d107c390590cddf06baca4bddd6caa574a6e797d515c"
+source-digest = "96489881d0f39abca99f1264505d9d202edc713486aeba9e7ba896f7a39a4da7"
 layer = "core"
 
 [[clause]]
@@ -5315,7 +5315,7 @@ source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
 start-line = 16
 end-line = 18
 canonical-text = "only the authority that set it can lift it, never context loss alone, and when the\nassistant cannot confirm whether it still applies, it holds and checks rather than proceeding as though it\nwere gone."
-source-digest = "5851bac8315dba98e4a1d107c390590cddf06baca4bddd6caa574a6e797d515c"
+source-digest = "96489881d0f39abca99f1264505d9d202edc713486aeba9e7ba896f7a39a4da7"
 layer = "core"
 
 [[clause]]
@@ -5323,49 +5323,89 @@ clause-id = "cnstpr.6"
 corpus-id = "cnstpr"
 source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
 start-line = 18
+end-line = 20
+canonical-text = "An upper limit the operator or a governing rule has set, such as a ceiling on rounds, retries,\nspend, or concurrency, is enforced by a check at the point of the action it limits, never by a count kept\nby hand."
+source-digest = "96489881d0f39abca99f1264505d9d202edc713486aeba9e7ba896f7a39a4da7"
+layer = "core"
+
+[[clause]]
+clause-id = "cnstpr.11"
+corpus-id = "cnstpr"
+source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
+start-line = 20
+end-line = 21
+canonical-text = "The check reads the limit and the count from a store that the limit's setter (the operator, or\nthe maintainer for a rule) names and the assistant cannot write."
+source-digest = "96489881d0f39abca99f1264505d9d202edc713486aeba9e7ba896f7a39a4da7"
+layer = "core"
+
+[[clause]]
+clause-id = "cnstpr.12"
+corpus-id = "cnstpr"
+source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
+start-line = 21
 end-line = 23
-canonical-text = "An upper limit the operator or a governing rule has set, such as a ceiling on rounds, retries,\nspend, or concurrency, is enforced by a check at the point of the action it limits, never by a count kept\nby hand: the check reads the limit and the count from a store the limit's setter (the operator, or the\nmaintainer for a rule) names and the assistant cannot write, and admits an action only when both records\ncan be read and its greatest possible use would not take the count past the limit, adding that use to\nthe count in the same atomic step;"
-source-digest = "5851bac8315dba98e4a1d107c390590cddf06baca4bddd6caa574a6e797d515c"
+canonical-text = "It admits an action only when it can read\nboth records and the action's greatest possible use would not take the count past the limit, and it adds\nthat use to the count in the same atomic step."
+source-digest = "96489881d0f39abca99f1264505d9d202edc713486aeba9e7ba896f7a39a4da7"
+layer = "core"
+
+[[clause]]
+clause-id = "cnstpr.13"
+corpus-id = "cnstpr"
+source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
+start-line = 23
+end-line = 25
+canonical-text = "The check validates that greatest possible use against the\naction itself, as the guard-input-soundness rule (grdinp) requires of a value a guard is handed rather\nthan measures."
+source-digest = "96489881d0f39abca99f1264505d9d202edc713486aeba9e7ba896f7a39a4da7"
 layer = "core"
 
 [[clause]]
 clause-id = "cnstpr.7"
 corpus-id = "cnstpr"
 source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
-start-line = 23
-end-line = 24
-canonical-text = "a refusal holds only that action, and work the limit does not cover\ncontinues."
-source-digest = "5851bac8315dba98e4a1d107c390590cddf06baca4bddd6caa574a6e797d515c"
-layer = "core"
-
-[[clause]]
-clause-id = "cnstpr.8"
-corpus-id = "cnstpr"
-source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
-start-line = 27
-end-line = 30
-canonical-text = "Where the host provides no such check or store, the\nlimit still binds, and the assistant withholds the limited action, while work the limit does not cover\ncontinues, until the setter records an explicit acceptance of a weaker way to enforce it, such as a check\nthe assistant builds itself, never assuming that acceptance by default."
-source-digest = "5851bac8315dba98e4a1d107c390590cddf06baca4bddd6caa574a6e797d515c"
+start-line = 25
+end-line = 25
+canonical-text = "A refusal holds only that action, and work the limit does not cover continues."
+source-digest = "96489881d0f39abca99f1264505d9d202edc713486aeba9e7ba896f7a39a4da7"
 layer = "core"
 
 [[clause]]
 clause-id = "cnstpr.9"
 corpus-id = "cnstpr"
 source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
-start-line = 24
-end-line = 25
-canonical-text = "Only a grant read from that store raises the limit, and an allowance replenished within the\nlimit, such as a freed concurrency slot, is not an increase;"
-source-digest = "5851bac8315dba98e4a1d107c390590cddf06baca4bddd6caa574a6e797d515c"
+start-line = 25
+end-line = 27
+canonical-text = "Only a grant\nread from that store raises the limit, and an allowance replenished within the limit, such as a freed\nconcurrency slot, is not an increase."
+source-digest = "96489881d0f39abca99f1264505d9d202edc713486aeba9e7ba896f7a39a4da7"
 layer = "core"
 
 [[clause]]
 clause-id = "cnstpr.10"
 corpus-id = "cnstpr"
 source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
-start-line = 25
-end-line = 27
-canonical-text = "settling the use added for an action to the\nuse actually recorded once the action ends needs no grant either, and an action with no known upper\nbound is withheld until the setter gives it one."
-source-digest = "5851bac8315dba98e4a1d107c390590cddf06baca4bddd6caa574a6e797d515c"
+start-line = 27
+end-line = 29
+canonical-text = "Once an action ends, the use the check added for it is settled, with\nno grant, only to the use that same store records for it, metered by a source the assistant cannot write,\nand never to a use the assistant reports."
+source-digest = "96489881d0f39abca99f1264505d9d202edc713486aeba9e7ba896f7a39a4da7"
+layer = "core"
+
+[[clause]]
+clause-id = "cnstpr.14"
+corpus-id = "cnstpr"
+source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
+start-line = 29
+end-line = 31
+canonical-text = "An action with no known upper bound on its use is withheld until\nit is given one, by the setter or by a bound placed on the action itself, such as a timeout or a spend\ncap."
+source-digest = "96489881d0f39abca99f1264505d9d202edc713486aeba9e7ba896f7a39a4da7"
+layer = "core"
+
+[[clause]]
+clause-id = "cnstpr.8"
+corpus-id = "cnstpr"
+source-path = ".aiqt/core/rules/trust-standing-constraints-persist.md"
+start-line = 31
+end-line = 34
+canonical-text = "Where the host provides no such check or store, the\nlimit still binds, and the assistant withholds the limited action, while work the limit does not cover\ncontinues, until the setter records an explicit acceptance of a weaker way to enforce it, such as a check\nthe assistant builds itself, never assuming that acceptance by default."
+source-digest = "96489881d0f39abca99f1264505d9d202edc713486aeba9e7ba896f7a39a4da7"
 layer = "core"
 
 [[clause]]
