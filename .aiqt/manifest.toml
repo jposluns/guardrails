@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "b47d3f26e4a5a2b3551628e016d38cfd3696fab851b536dbd43d9708249fdc43"
+tree-sha256 = "a369e6cc08d2449996d6e90d13da1f6a70fe3b50e82c9b5b9195d615ed09c3d8"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -157,8 +157,8 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 
 [[sources]]
 path = ".aiqt/core/renderers.toml"
-bytes = 3194
-sha256 = "f460f34cc1d8843cbb0f6ce98e4265f8fd70cce30b48fa104ee6046753a253b5"
+bytes = 3368
+sha256 = "d66a692f0245408ba7039719321926575e5f80beb8200b0ee55a9298a64d43bc"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -4607,8 +4607,8 @@ sha256 = "261656f81c19a24605113a0afb39d242f23e0b005ce08561a5ef1a8370c5929c"
 
 [[sources]]
 path = "tools/gen_rules.py"
-bytes = 155596
-sha256 = "e2fcdc15fb981f783e262b56fdac8df8006dd0138bb7d6d92d2e2fcd3ad783d1"
+bytes = 165927
+sha256 = "18f7c8d1aa4f023ea073ebfa16b0a5825accb0117314a5992894a322ed9739de"
 
 [[sources]]
 path = "tools/gen_secret_patterns.py"

@@ -795,19 +795,37 @@ def _valued_option_failures():
 # rename, link, directory creation, os.mkfifo (which raises no audit event of its own, so the child wraps it to
 # raise one) or a child process, so a generator whose guard is reverted shows as exit 97 (or a non-2 exit).
 # The same check then confirms the defined modes still run, each in its own child under the same hook, which here
-# lets one child process through: a `git ... ls-files` listing, which reads the index and writes nothing. With no
+# lets one child process through: the exact git index read the generators make, `git -C <dir>`, then only the
+# pins `-c core.fsmonitor=false` and `-c protocol.allow=never`, then `ls-files` with only -z, --cached and --stage
+# before an optional `--` and its pathspecs, launched as git with no GIT_* variable in its environment but
+# GIT_NO_LAZY_FETCH; that read writes nothing. Any other git command is blocked. With no
 # argument the generator must reach write mode, shown as the hook ending the child at a write (not at a process
 # event), or, where a write is not expected because the generator writes only on a difference and the tree is
 # current, as exit 0 with nothing blocked and no refusal; with --check it must exit 0 or 1, not refused and with
 # nothing blocked. So a generator that exits 2 with an `error:` line and a usage line whatever its arguments, which
 # the refusal shape alone would pass, is reported.
+# The check over the real generators is hermetic: they run only inside a throwaway git repository that
+# _gen_argv_head_copy builds from `git archive HEAD` (extracted, then git init, add and commit there), each child
+# with the copy as its working directory and an environment holding no GIT_* variable of the caller
+# (_git_fixture_env.git_fixture_env). An uncommitted or stale file in the developer's working tree therefore cannot
+# fail the check, and a generator's write that resolves its path from its own location or working directory, even
+# one the hook does not see, lands in the copy, never in the developer's working tree.
+# Plain form: in the copy each generator also runs as `python3 tools/<name> --chek` (the form the gensrc regenerate
+# commands use: no -I, no -B, no hook) and must refuse it with exit 2 and stderr only the refusal. After each
+# generator's runs the copy's `git status --ignored` must show nothing new outside __pycache__/, so the plain form
+# also writes nothing but Python's own bytecode cache, which the imports write before the guard runs (gitignored).
 # Residuals, not covered:
-# - on a current tree, a generator that writes only on a difference and ran its check mode for no argument would
-#   pass the no-argument case, since neither mode writes there;
+# - the check reads the committed tree: an uncommitted change to a generator is checked once it is committed, and
+#   a stale generated file committed at HEAD can still fail it (the --check gates fail that commit as well);
+# - on a current tree, a generator that writes only on a difference passes the no-argument case if it runs its
+#   check mode there, and passes the --check case if it ignores --check and runs its write mode, since neither
+#   mode writes on a current tree;
 # - a write made inside C code without an audit event (for example the database file sqlite3 creates, os.mknod,
 #   posix.mkfifo, which the os.mkfifo wrapper does not reach, or an extension module's own I/O) is not seen by the
-#   hook, so such a write before the refusal, or in --check mode, would pass this check; so would a write made by
-#   the allowed git child;
+#   hook, and the status comparison sees it only when it changes a file in the copy: such a write of identical
+#   bytes, or one to a path outside the copy, would pass this check; so would such a write by the allowed git read;
+# - the copy needs a git that archives HEAD with no caller configuration, so a checkout trusted only through the
+#   caller's own safe.directory setting cannot be copied; the check then reports that it built no copy;
 # - only files matching gen_*.py directly in tools/ are enumerated, so a generator nested in a subdirectory or
 #   named otherwise is not checked.
 _GEN_ARGV_CLASS_CASES = (["--chek"], ["--check", "--chek"], ["--self-test", "--chek"], ["--help"], ["check"],
@@ -830,9 +848,25 @@ _MUTATING = frozenset(("os.chflags", "os.chmod", "os.chown", "os.exec", "os.fork
 _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
 script, cases, accept = sys.argv[1], json.loads(sys.argv[2]), sys.argv[3] == "accept"
 def _git_listing(args):
-    argv = args[1] if len(args) > 1 else None
-    return (accept and isinstance(argv, (list, tuple)) and len(argv) > 1
-            and os.path.basename(os.fsdecode(argv[0])) == "git" and "ls-files" in argv)
+    if not accept or len(args) < 4 or not isinstance(args[1], (list, tuple)):
+        return False
+    try:
+        exe = None if args[0] is None else os.fsdecode(args[0])
+        argv = [os.fsdecode(a) for a in args[1]]
+        env = [os.fsdecode(k) for k in (os.environ if args[3] is None else args[3])]
+    except TypeError:
+        return False
+    if (exe is not None and os.path.basename(exe) != "git") or len(argv) < 4 or os.path.basename(argv[0]) != "git":
+        return False
+    if argv[1] != "-C" or any(k.startswith("GIT_") and k != "GIT_NO_LAZY_FETCH" for k in env):
+        return False
+    i = 3
+    while argv[i:i + 1] == ["-c"] and argv[i + 1:i + 2] in (["core.fsmonitor=false"], ["protocol.allow=never"]):
+        i += 2
+    if argv[i:i + 1] != ["ls-files"]:
+        return False
+    rest = argv[i + 1:]
+    return all(tok in ("-z", "--cached", "--stage") for tok in (rest[:rest.index("--")] if "--" in rest else rest))
 def _hook(event, args):
     if event == "open":
         mode, flags = args[1], args[2]
@@ -857,14 +891,17 @@ for argv in cases:
 """
 
 
-def _gen_argv_child(path, cases, accept):
-    """Run _GEN_ARGV_CHILD over path for cases: (child exit, {argv tuple: (exit, stderr)}, child stderr text), or
-    a failure line when the child did not run."""
+def _gen_argv_child(path, cases, accept, cwd):
+    """Run _GEN_ARGV_CHILD over path for cases in the directory cwd, with no GIT_* variable of the caller in its
+    environment: (child exit, {argv tuple: (exit, stderr)}, child stderr text), or a failure line when the child did
+    not run."""
     import json
     import subprocess
+    from _git_fixture_env import git_fixture_env
     try:
         done = subprocess.run([sys.executable, "-I", "-B", "-c", _GEN_ARGV_CHILD, str(path), json.dumps(cases),
-                               "accept" if accept else "refuse"], capture_output=True, timeout=300)
+                               "accept" if accept else "refuse"], capture_output=True, timeout=300, cwd=str(cwd),
+                              env=git_fixture_env())
     except (OSError, subprocess.SubprocessError) as exc:
         return "{}: the argument child did not run: {}".format(path.name, exc)
     try:
@@ -875,30 +912,37 @@ def _gen_argv_child(path, cases, accept):
     return done.returncode, seen, done.stderr.decode("utf-8", "replace")
 
 
-def _gen_argv_class_failures(tools):
+def _gen_argv_class_failures(tools, repo=None):
     """One failure line per tools/gen_*.py in the directory tools that does not refuse every
     _GEN_ARGV_CLASS_CASES argv with exit 2 and a stderr that is only the refusal (see _gen_argv_refusal), or whose
-    no-argument run does not reach a write, or whose --check run is refused, writes or does not exit 0 or 1."""
+    no-argument run does not reach a write, or whose --check run is refused, writes or does not exit 0 or 1. With
+    repo, a throwaway git repository holding tools as repo/tools, the children run in repo, each generator also runs
+    in the plain form `python3 tools/<name> --chek` there, and a change to repo that `git status --ignored` shows
+    after a generator's runs, outside __pycache__/, is reported (see _gen_argv_plain_failures)."""
     failures = []
+    cwd = repo if repo is not None else tools
+    changed = _gen_argv_status(repo) if repo is not None else None
+    if isinstance(changed, str):
+        return [changed]
     for path in sorted(Path(tools).glob("gen_*.py")):
-        got = _gen_argv_child(path, _GEN_ARGV_CLASS_CASES, False)
+        got = _gen_argv_child(path, _GEN_ARGV_CLASS_CASES, False, cwd)
         if isinstance(got, str):
             failures.append(got)
-            continue
-        returncode, seen, child_err = got
-        for argv in _GEN_ARGV_CLASS_CASES:
-            code, err = seen.get(tuple(argv), ("no result (child exit {})".format(returncode), ""))
-            if code != 2 or not _gen_argv_refusal(err, path.name):
-                failures.append("{} {}: expected exit 2 with stderr only the refusal (an optional error: line, "
-                                "then a last line starting usage: {}) and nothing written; got exit {}, stderr "
-                                "{!r}, child stderr {!r}".format(path.name, " ".join(argv), path.name, code,
-                                                                 err[-200:], child_err[-200:]))
-        if returncode != 0:
-            failures.append("{}: the unknown-option child exited {} (97 is a blocked write, delete or child "
-                            "process); stderr {!r}".format(path.name, returncode, child_err[-300:]))
+        else:
+            returncode, seen, child_err = got
+            for argv in _GEN_ARGV_CLASS_CASES:
+                code, err = seen.get(tuple(argv), ("no result (child exit {})".format(returncode), ""))
+                if code != 2 or not _gen_argv_refusal(err, path.name):
+                    failures.append("{} {}: expected exit 2 with stderr only the refusal (an optional error: line, "
+                                    "then a last line starting usage: {}) and nothing written; got exit {}, stderr "
+                                    "{!r}, child stderr {!r}".format(path.name, " ".join(argv), path.name, code,
+                                                                     err[-200:], child_err[-200:]))
+            if returncode != 0:
+                failures.append("{}: the unknown-option child exited {} (97 is a blocked write, delete or child "
+                                "process); stderr {!r}".format(path.name, returncode, child_err[-300:]))
         # No argument: write mode, shown by the hook ending the child at a write rather than a process event, or,
         # for a generator that writes only on a difference, exit 0 with nothing blocked and no refusal.
-        got = _gen_argv_child(path, [[]], True)
+        got = _gen_argv_child(path, [[]], True, cwd)
         if isinstance(got, str):
             failures.append(got)
         else:
@@ -913,7 +957,7 @@ def _gen_argv_class_failures(tools):
                                 "exit {}, stderr {!r}, child stderr {!r}".format(
                                     path.name, returncode, blocked, code, err[-200:], child_err[-200:]))
         # --check: check mode, exit 0 or 1 with nothing blocked and no refusal.
-        got = _gen_argv_child(path, [["--check"]], True)
+        got = _gen_argv_child(path, [["--check"]], True, cwd)
         if isinstance(got, str):
             failures.append(got)
         else:
@@ -924,7 +968,92 @@ def _gen_argv_class_failures(tools):
                                 "got child exit {} (97 is a blocked write, delete or child process), exit {}, "
                                 "stderr {!r}, child stderr {!r}".format(path.name, returncode, code, err[-200:],
                                                                         child_err[-200:]))
+        if repo is not None:
+            failures.extend(_gen_argv_plain_failures(path, repo, changed))
     return failures
+
+
+def _gen_argv_git(cwd, *args):
+    """Run git in cwd with the fixture environment (_git_fixture_env.git_fixture_env: no GIT_* variable of the
+    caller, a scratch HOME, global and system configuration pinned to os.devnull) and pinned options."""
+    import subprocess
+    from _git_fixture_env import git_fixture_env
+    return subprocess.run(["git", "-C", str(cwd), "-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null",
+                           "-c", "user.name=aiqt-selftest", "-c", "user.email=selftest@invalid",
+                           "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", *args],
+                          capture_output=True, timeout=300, env=git_fixture_env())
+
+
+def _gen_argv_status(repo):
+    """The set of `git status --porcelain -z --ignored --untracked-files=all` entries of repo, or a failure line."""
+    done = _gen_argv_git(repo, "status", "--porcelain", "-z", "--ignored", "--untracked-files=all")
+    if done.returncode != 0:
+        return "class check: git status failed in the copy (exit {}): {!r}".format(
+            done.returncode, done.stderr.decode("utf-8", "replace")[-300:])
+    return {entry for entry in done.stdout.decode("utf-8", "replace").split("\0") if entry}
+
+
+def _gen_argv_plain_failures(path, repo, changed):
+    """The plain-form case for the generator path in the throwaway repository repo: `python3 tools/<name> --chek`
+    with repo as the working directory, no -I, no -B and no hook, must exit 2 with stderr only the refusal; then
+    every entry `git status --ignored` shows in repo that is not in the set changed and lies outside __pycache__/
+    is reported as written by this generator's runs. changed gains the entries seen."""
+    import subprocess
+    from _git_fixture_env import git_fixture_env
+    failures = []
+    rel = path.relative_to(repo).as_posix()
+    try:
+        done = subprocess.run([sys.executable, rel, "--chek"], capture_output=True, timeout=300, cwd=str(repo),
+                              env=git_fixture_env())
+        err = done.stderr.decode("utf-8", "replace")
+        if done.returncode != 2 or not _gen_argv_refusal(err, path.name):
+            failures.append("{} --chek (plain form python3 {} --chek): expected exit 2 with stderr only the refusal; "
+                            "got exit {}, stderr {!r}".format(path.name, rel, done.returncode, err[-200:]))
+    except (OSError, subprocess.SubprocessError) as exc:
+        failures.append("{}: the plain-form run did not run: {}".format(path.name, exc))
+    now = _gen_argv_status(repo)
+    if isinstance(now, str):
+        return failures + [now]
+    new = sorted(entry for entry in now - changed if "__pycache__" not in entry[3:].split("/"))
+    changed |= now
+    if new:
+        failures.append("{}: its runs changed the copy (git status entries outside __pycache__/): {!r}".format(
+            path.name, new[:10]))
+    return failures
+
+
+def _gen_argv_head_copy(root, dest):
+    """Build at dest (which must not exist) a throwaway git repository holding the committed tree of root's HEAD:
+    `git archive HEAD` of root, extracted into dest, then git init, add and commit there. Return None, or a
+    failure line when the copy could not be built."""
+    import tarfile
+    dest.mkdir()
+    tar = dest.parent / (dest.name + ".tar")
+    done = _gen_argv_git(root, "archive", "--format=tar", "-o", str(tar), "HEAD")
+    if done.returncode != 0:
+        return "class check: built no copy, git archive HEAD of {} failed (exit {}): {!r}".format(
+            root, done.returncode, done.stderr.decode("utf-8", "replace")[-300:])
+    try:
+        with tarfile.open(str(tar), mode="r:") as archive:
+            if hasattr(tarfile, "data_filter"):
+                archive.extractall(str(dest), filter="data")
+            else:
+                archive.extractall(str(dest))
+    except (OSError, tarfile.TarError) as exc:
+        return "class check: built no copy, extracting the HEAD archive failed: {}".format(exc)
+    finally:
+        tar.unlink()
+    return _gen_argv_commit(dest)
+
+
+def _gen_argv_commit(dest):
+    """git init, add (every file, ignored ones too) and commit in dest: None, or a failure line."""
+    for args in (("init", "-q"), ("add", "-A", "-f"), ("commit", "-q", "-m", "class check copy")):
+        done = _gen_argv_git(dest, *args)
+        if done.returncode != 0:
+            return "class check: built no copy, git {} failed in {} (exit {}): {!r}".format(
+                args[0], dest, done.returncode, done.stderr.decode("utf-8", "replace")[-300:])
+    return None
 
 
 def _gen_argv_refusal(err, name):
@@ -963,6 +1092,12 @@ _GEN_ARGV_MODES = ("import sys\nfrom pathlib import Path\n"
                    "sys.exit(0)\n")
 _GEN_ARGV_REFUSER = _GEN_ARGV_MODES.format(name="gen_refuser.py", writes="not sys.argv[1:]")
 _GEN_ARGV_CHECK_WRITER = _GEN_ARGV_MODES.format(name="gen_checkwriter.py", writes="True")
+# Under the hook (an isolated -I child) this behaves as the refuser; in the plain form it first writes, a stand-in
+# for a write the hook does not see, which only the status comparison can report.
+_GEN_ARGV_PLAIN_WRITER = ("import sys\nfrom pathlib import Path\n"
+                          "if not sys.flags.isolated:\n"
+                          "    Path(__file__).with_name('written.txt').write_text('x')\n"
+                          + _GEN_ARGV_MODES.format(name="gen_plainwriter.py", writes="not sys.argv[1:]"))
 
 
 def _gen_argv_class_check_failures():
@@ -1013,12 +1148,36 @@ def _gen_argv_class_check_failures():
             failures.append("class-check control: a generator that refuses unknown options, writes with no argument "
                             "and only checks under --check must pass with its write blocked; got {}, written.txt "
                             "{}".format(refuser, "present" if (tmp / "refuser" / "written.txt").exists() else "absent"))
+        # In a throwaway git repository: the same refuser must pass the plain form and the status comparison, and
+        # one that behaves so under the hook but writes in the plain form (a write the hook would not see) must be
+        # reported for the change.
+        for name, source, want in (("gen_refuser.py", _GEN_ARGV_REFUSER, False),
+                                   ("gen_plainwriter.py", _GEN_ARGV_PLAIN_WRITER, True)):
+            repo = tmp / ("repo-" + name[:-3])
+            (repo / "tools").mkdir(parents=True)
+            (repo / "tools" / name).write_text(source, encoding="utf-8")
+            problem = _gen_argv_commit(repo)
+            got = [problem] if problem else _gen_argv_class_failures(repo / "tools", repo)
+            reported = any(" changed the copy " in line for line in got)
+            if problem or ((len(got) != 1 or not reported) if want else got):
+                failures.append("class-check control: in a git repository, {} must {}; got {}".format(
+                    name, "be reported only for its plain-form write" if want else "pass", got))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    tools = Path(__file__).resolve().parent
-    if not (tools / "gen_rules.py").is_file():
-        failures.append("class check: tools/gen_rules.py is not in the enumerated directory {}".format(tools))
-    failures.extend(_gen_argv_class_failures(tools))
+    # The real generators run only in a throwaway copy of the committed tree, never in the working tree.
+    copy_tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-argv-copy-"))
+    try:
+        copy = copy_tmp / "tree"
+        problem = _gen_argv_head_copy(Path(__file__).resolve().parent.parent, copy)
+        if problem:
+            failures.append(problem)
+        else:
+            tools = copy / "tools"
+            if not (tools / "gen_rules.py").is_file():
+                failures.append("class check: tools/gen_rules.py is not in the enumerated directory {}".format(tools))
+            failures.extend(_gen_argv_class_failures(tools, copy))
+    finally:
+        shutil.rmtree(copy_tmp, ignore_errors=True)
     return failures
 
 
@@ -2393,8 +2552,9 @@ def self_test_main():
     failures.extend(_argv_guard_failures(globals(), "gen_rules.py"))
     # A valued option never takes a following flag as its value (--root --chek is refused, not run).
     failures.extend(_valued_option_failures())
-    # Every tools/gen_*.py refuses an unknown option with exit 2 and its usage line, writing nothing (red when any
-    # one generator's guard is reverted), and still runs write mode with no argument and check mode under --check.
+    # Every committed tools/gen_*.py refuses an unknown option with exit 2 and its usage line, writing nothing (red
+    # when any one committed generator's guard is reverted), and still runs write mode with no argument and check
+    # mode under --check; it runs in a throwaway copy of HEAD, never in the working tree.
     failures.extend(_gen_argv_class_check_failures())
 
     if failures:
