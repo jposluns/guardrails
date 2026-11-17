@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "be8db0c64f965adafa606502c5d1cd584696c4c640d7a5fe1a667e7bb446e8ee"
+tree-sha256 = "180c76d39fbf2885c09bb465a402706332490cc375b78cd556dac6ed1b1780c4"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 608000
-sha256 = "a1e5154cb4322b60d64103c0710d1f145fc162e6d16136dd72d9269158618790"
+bytes = 609449
+sha256 = "a67e3fac11d435628a333384f43551ca5b4e10b99cc19007345e770506ebc519"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -4272,8 +4272,8 @@ sha256 = "7de00bde82268e3d13fe503a84ccbcbc1042cb96e9d91df6cd0781bee044b841"
 
 [[sources]]
 path = "tools/check_hook_coverage.py"
-bytes = 67732
-sha256 = "e1e5d3e448c21e27b0e13d45617600ad921ee5d9765cff707267e2eda24976f7"
+bytes = 71747
+sha256 = "82fc43392d1393e5b65213d604798ca973c7f4c60924a9383ccc9232d3a5fe0a"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"
@@ -4727,8 +4727,8 @@ sha256 = "13fe112b30171fc85d2dd4bdf49a040978547f75d4cc023202378859533f6f2c"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 260182
-sha256 = "3a1f44873440d0e2dcec1640f8ddc677e3500652f0cb4f97f1c6e3aec47f0415"
+bytes = 260372
+sha256 = "1adf641bc4240c6a78772fc30b742a6c79cd25f240028f5a58d6f3a32670eafc"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

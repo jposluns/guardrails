@@ -33,8 +33,10 @@ not an object, is malformed (exit 2), never read as absent.
 Exit 0: every required entry is present and neither settings file sets disableAllHooks to true. Exit 1: at
 least one is missing, each missing entry named on its own MISSING line, or a settings file sets
 disableAllHooks to true, each such file named on its own DISABLED line. Once the declaration has been read,
-a declared command that contains CLAUDE_PROJECT_DIR is named on its own WARN line, whatever the exit code
-(settings that cannot be read or parsed included); the warning never changes it. A character the output
+a declared command that contains CLAUDE_PROJECT_DIR is named on its own WARN line whether the run then
+passes, misses or cannot evaluate the settings (settings that cannot be read or parsed included); the
+warning never changes the exit code. An unexpected exception is the one exception: it prints only its
+CANNOT EVALUATE line, with no WARN line, even after the declaration has been read. A character the output
 stream's encoding cannot carry (a non-UTF-8 locale, or a path byte that is not UTF-8) is written as a
 backslash escape, never raised.
 Exit 2 (fail closed, never a pass): any unexpected exception, reported on one CANNOT EVALUATE line;
@@ -43,7 +45,8 @@ symbolic link anywhere on its path (each directory on the path is opened from th
 time without following a link, and the final file with O_NOFOLLOW, so pass paths with every link resolved;
 a directory on the path that cannot be searched, or where the platform has no O_PATH cannot be read, also
 exits 2); a launch directory that is absent or not a directory; a .claude that is a symbolic link or not a
-directory; a settings file or declaration that is a symbolic link, not a regular file (a FIFO is opened
+directory (.claude is opened the way each directory on the path is, so a .claude that can be searched but
+not listed, mode 0111 say, is read, and where the platform has no O_PATH it exits 2); a settings file or declaration that is a symbolic link, not a regular file (a FIFO is opened
 non-blocking and refused without a read), unreadable, larger than MAX_BYTES, not UTF-8 (decoded strictly),
 not JSON (a duplicated object key or a NaN, Infinity or -Infinity constant included; a number literal too
 large for a float, such as 1e999, is not refused and reads as infinity) or not a JSON object; a hooks
@@ -66,6 +69,13 @@ RESIDUALS (what this gate does not establish):
   the launch directory (a declaration inside the directory being judged, such as a checkout's own registry,
   is judged against itself, and a wrong checkout with its own registry and settings passes), and the
   registry's local-over-committed precedence is not applied: only the file named by --require is read.
+  That rule is stated here, not enforced: the gate does not check where the declaration lies, so a
+  declaration inside the launch directory is read like any other.
+- It reads with the account that runs it: a settings file that account can read but the session's account
+  cannot (a file of another owner with mode 0600, or one an ACL denies) passes, though the client presumably
+  cannot load it, so run the gate as the session's account. It type-checks only hooks and disableAllHooks,
+  so a file that is valid JSON but that the client rejects for a schema error in another key passes. Both
+  are inferred, not documented here.
 - It reads the two project settings files as a union (an entry in either counts); that the client merges
   the two files' hooks that way is inferred, not documented here. That disableAllHooks set to true switches
   hooks off is also inferred, not documented here; the gate fails on it (exit 1, the safe direction).
@@ -119,10 +129,13 @@ _OPEN_FLAGS_BASE = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
 # The flags every directory open carries; the self-test reverts it (O_DIRECTORY dropped) to show the
 # not-a-directory rows turn red.
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | os.O_CLOEXEC
-# The path walk opens each directory with O_PATH where the platform has it (Linux), so a directory the
-# reader may search but not list (mode 0711, say) can still be walked; elsewhere it falls back to a read
-# open, which refuses (exit 2) such a directory.
+# The path walk, and the open of .claude, open each directory with O_PATH where the platform has it (Linux),
+# so a directory the reader may search but not list (mode 0711 or 0111, say) can still be walked and its
+# settings read; elsewhere it falls back to a read open, which refuses (exit 2) such a directory.
 _O_PATH = getattr(os, "O_PATH", 0)
+# The matcher a settings group with no matcher key reads as; the self-test reverts it to "*" to show the
+# no-matcher row turns red.
+_GROUP_MATCHER_DEFAULT = ""
 # What _load_json_file returns for an absent file, distinct from every parsed JSON value (JSON null
 # included); the self-test reverts it to None to show the null-settings rows turn red.
 _ABSENT = object()
@@ -395,7 +408,7 @@ def _settings_entries(doc, where):
             gat = "{}[{}]".format(at, gindex)
             if not _expect(group, dict, gat):
                 continue
-            matcher = group.get("matcher", "")
+            matcher = group.get("matcher", _GROUP_MATCHER_DEFAULT)
             if not _expect(matcher, str, gat + ".matcher"):
                 continue
             inner = group.get("hooks", [])
@@ -421,7 +434,7 @@ def load_settings(launch_dir):
     lfd = _open_dir_nofollow(launch_dir, "launch directory")
     try:
         try:
-            cfd = os.open(SETTINGS_DIR, _DIR_FLAGS | _NOFOLLOW, dir_fd=lfd)
+            cfd = os.open(SETTINGS_DIR, _DIR_FLAGS | _O_PATH | _NOFOLLOW, dir_fd=lfd)
         except FileNotFoundError:
             return [], []
         except OSError as exc:
@@ -649,6 +662,8 @@ def _swap(name, value):
             saved, globals()["_OUTPUT_ERRORS"] = globals()["_OUTPUT_ERRORS"], value
         case "_UNEXPECTED":
             saved, globals()["_UNEXPECTED"] = globals()["_UNEXPECTED"], value
+        case "_GROUP_MATCHER_DEFAULT":
+            saved, globals()["_GROUP_MATCHER_DEFAULT"] = globals()["_GROUP_MATCHER_DEFAULT"], value
         case _:
             raise KeyError(name)
     return saved
@@ -762,6 +777,15 @@ def _self_test():
     check("pass/present-twice", got == 0, got)
     got, _m = _run(lambda: _code(_Case().settings(good).settings(good, name="settings.local.json")))
     check("pass/present-in-both-files", got == 0, got)
+    # Row 8b. A settings group with no matcher key reads as the empty matcher, so a declared "" matcher is
+    # present there; with that default reverted to "*" the entry reads as missing (exit 1).
+    empty_matcher = (GUARD_A[0], "", GUARD_A[2])
+    got, mutant = _run(
+        lambda: _code(_Case(decl=_decl([empty_matcher])).settings(
+            {"hooks": {GUARD_A[0]: [{"hooks": [{"type": "command", "command": GUARD_A[2]}]}]}})),
+        revert=("_GROUP_MATCHER_DEFAULT", "*"))
+    check("pass/group-no-matcher-is-empty-matcher", got == 0, got)
+    check("pass/group-no-matcher-is-empty-matcher/red-when-reverted", mutant != 0, mutant)
 
     # Row 8a. A declared command containing CLAUDE_PROJECT_DIR is named on a WARN line and the exit code is
     # unchanged (the gate does not check that the command can run at the launch directory).
@@ -881,15 +905,25 @@ def _self_test():
 
     real_read = os.read
 
-    def _read_denied(fd, size):
-        raise PermissionError(13, "read refused by the self-test")
-    case = _Case().settings(good)
-    os.read = _read_denied
-    try:
-        got = _code(case)
-    finally:
-        os.read = real_read
-    check("refuse/unreadable-settings", got == 2, got)
+    # Only a read of settings.json is refused (the declaration is read first and must be read), so the row
+    # asserts that the refusal names the settings file.
+    def _unreadable_settings():
+        case = _Case().settings(good)
+        target = os.stat(case.launch / SETTINGS_DIR / "settings.json")
+
+        def _read_denied(fd, size):
+            found = os.fstat(fd)
+            if (found.st_dev, found.st_ino) == (target.st_dev, target.st_ino):
+                raise PermissionError(13, "read refused by the self-test")
+            return real_read(fd, size)
+        os.read = _read_denied
+        try:
+            code, _out, err = _result(case)
+        finally:
+            os.read = real_read
+        return code, len(err) == 1 and "/{}/settings.json: unreadable".format(SETTINGS_DIR) in err[0]
+    got, _m = _run(_unreadable_settings)
+    check("refuse/unreadable-settings", got == (2, True), got)
 
     # The read stops at MAX_BYTES + 1 bytes, so an oversized file is refused without being read whole. With
     # the limit reverted the size check still refuses, so the row counts the bytes read (the declaration's
@@ -1057,6 +1091,32 @@ def _self_test():
     got, mutant = _run(_search_only_walk, revert=("_O_PATH", 0))
     check("pass/launch-path-search-only-dir", got == 0, got)
     check("pass/launch-path-search-only-dir/red-when-reverted", mutant != 0, mutant)
+
+    # A .claude that can be searched but not listed (mode 0111) holding readable settings is opened with
+    # O_PATH, as the walk opens each directory on the path, and read. A read open of it is refused here with
+    # EACCES, as the kernel refuses it to a reader other than root, so with O_PATH reverted the run is refused
+    # (exit 2) whatever account runs the self-test.
+    def _search_only_claude():
+        case = _Case().settings(good)
+        claude = case.launch / SETTINGS_DIR
+        real_open = os.open
+        o_path = getattr(os, "O_PATH", 0)
+
+        def _open(path, flags, mode=0o777, *, dir_fd=None):
+            if path == SETTINGS_DIR and not flags & o_path:
+                raise PermissionError(13, "read open of a search-only directory refused by the self-test", path)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+        claude.chmod(0o111)
+        os.open = _open
+        try:
+            return case.run()[0]
+        finally:
+            os.open = real_open
+            claude.chmod(0o755)
+            case.close()
+    got, mutant = _run(_search_only_claude, revert=("_O_PATH", 0))
+    check("pass/claude-dir-search-only", got == 0, got)
+    check("pass/claude-dir-search-only/red-when-reverted", mutant != 0, mutant)
 
     def _decl_link_ancestor():
         case = _Case().settings(good)
@@ -1240,7 +1300,8 @@ def _self_test():
           "non-regular, oversized, unreadable and wrong-typed settings, a relative, symlinked or "
           "non-directory launch directory and an empty, keyless, unknown-entry-key, wrong-typed, "
           "non-project-scope, relative, symlinked, unreadable or absent declaration exit 2; a launch path "
-          "through a search-only directory passes, a read stops at MAX_BYTES + 1 bytes, the WARN line "
+          "through a search-only directory and a search-only .claude pass, a group with no matcher reads as "
+          "the empty matcher, a read stops at MAX_BYTES + 1 bytes, the WARN line "
           "survives unparsable settings, unencodable output is escaped and an unexpected exception exits 2; "
           "each mutation row is red with its check reverted)".format(len(EXECUTED)))
     return 0

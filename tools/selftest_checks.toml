@@ -6236,6 +6236,10 @@ expected-check-ids = [
   "pass/decl-registry-other-top-keys",
   "pass/launch-path-search-only-dir",
   "pass/launch-path-search-only-dir/red-when-reverted",
+  "pass/claude-dir-search-only",
+  "pass/claude-dir-search-only/red-when-reverted",
+  "pass/group-no-matcher-is-empty-matcher",
+  "pass/group-no-matcher-is-empty-matcher/red-when-reverted",
   # a named miss (exit 1)
   "missing/no-settings-file",
   "missing/no-claude-dir-exit-1",
