@@ -990,9 +990,11 @@ ALLOWLIST = (
         "reason": (
             "On a pull_request the CI job checks out the test merge and "
             "compares its pins with those at its first parent HEAD^1, the "
-            "protected line the change merges into; the local runner has "
-            "no test merge and passes --local-base refs/remotes/origin/main "
-            "instead."
+            "protected line the change merges into. The local runner has "
+            "no test merge: it passes --local-base refs/remotes/origin/main "
+            "only when the gate's --probe-local-base exits 0 silently, runs "
+            "the gate without a base when the probe reports a genuine "
+            "absence, and fails the run on any other probe outcome."
         ),
         "backlog": "GD-123",
     },
@@ -1005,8 +1007,11 @@ ALLOWLIST = (
             "pushed range, which must be an ancestor of HEAD (a divergent "
             "push is cannot-evaluate); only those 2 endpoints are "
             "compared, so this is the range's net change, not each "
-            "commit's. The local runner has no push event and passes "
-            "--local-base refs/remotes/origin/main instead."
+            "commit's. The local runner has no push event: it passes "
+            "--local-base refs/remotes/origin/main only when the gate's "
+            "--probe-local-base exits 0 silently, runs the gate without a "
+            "base when the probe reports a genuine absence, and fails the "
+            "run on any other probe outcome."
         ),
         "backlog": "GD-123",
     },
@@ -1016,8 +1021,11 @@ ALLOWLIST = (
         "reason": (
             "A workflow_dispatch run has no pushed range, so the CI job "
             "compares HEAD's pins with those at its previous commit HEAD^, "
-            "unprobed, that 1 commit's change; the local runner passes "
-            "--local-base refs/remotes/origin/main instead."
+            "unprobed, that 1 commit's change. The local runner passes "
+            "--local-base refs/remotes/origin/main only when the gate's "
+            "--probe-local-base exits 0 silently, runs the gate without a "
+            "base when the probe reports a genuine absence, and fails the "
+            "run on any other probe outcome."
         ),
         "backlog": "GD-123",
     },
@@ -1042,9 +1050,12 @@ ALLOWLIST = (
         "identity": "tools/check_baseline_pin.py",
         "reason": (
             "When that probe exits 1 with nothing on stderr, which it does "
-            "only when the clone genuinely lacks the ref (a broken loose "
-            "ref, a broken packed-refs line or a dangling symbolic ref exits "
-            "2), the local runner prints a NOTE that the base comparison did "
+            "only when the clone genuinely lacks the ref and its ref store "
+            "is shown readable and well formed (a broken loose ref, a "
+            "broken packed-refs line, a dangling symbolic ref, a "
+            "packed-refs that is not a regular readable file and a reftable "
+            "store exit 2), the local runner prints a NOTE that the base "
+            "comparison did "
             "not run and how to create the ref (git fetch origin "
             "main:refs/remotes/origin/main) and runs the gate without a "
             "base; any other probe outcome fails the run. CI never runs the "
@@ -1834,6 +1845,26 @@ def _baseline_probe_lines(executable):
     return tuple(number for number, code in
                  executable[starts[0]:starts[0] + width]), 1
 
+
+def _baseline_absent_lines(text):
+    """The line numbers of BASELINE_PROBE_ABSENT_GATE inside the one exact
+    BASELINE_PROBE_BLOCK of runner text (empty when the block is not there exactly
+    once), so a bare baseline-pin gate line anywhere else is never skipped as the
+    block's absent branch."""
+    executable = [(number, _strip_comment(raw).strip())
+                  for number, raw in enumerate(text.splitlines(), 1)]
+    executable = [(number, code) for number, code in executable if code]
+    numbers, _count = _baseline_probe_lines(executable)
+    codes = dict(executable)
+    return frozenset(number for number in numbers
+                     if codes[number] == BASELINE_PROBE_ABSENT_GATE)
+
+
+def _baseline_absent_identity():
+    """The normalized parity identity of BASELINE_PROBE_ABSENT_GATE, the gate without
+    a base, which only the block's absent branch may run."""
+    return normalize(_tokenize(BASELINE_PROBE_ABSENT_GATE).value[2:]).value
+
 # Exact executable suffixes that may contain exits. The standalone roster adapter
 # validates and removes its final exit 0 and directory binding before extraction.
 TERMINAL_SUMMARIES = (
@@ -2380,7 +2411,15 @@ def extract_local(text):
                 ))
                 continue
             normalized = normalize(tokens[2:])
-            if normalized.ok:
+            if normalized.ok and normalized.value == _baseline_absent_identity():
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "baseline-probe-position",
+                    "the baseline-pin gate without a base is admitted only as "
+                    "the absent branch of the reviewed baseline-pin probe block",
+                ))
+            elif normalized.ok:
                 _add_member(
                     members, origins, line_number, normalized.value)
             else:
@@ -5533,9 +5572,10 @@ def cdpath_problems(text, relative):
 def _naming_scenarios(text):
     """Build the runtime scenarios; the module docstring discloses residual masks."""
     registered = []
-    for raw in text.splitlines():
-        if raw.strip() == BASELINE_PROBE_ABSENT_GATE:
-            continue  # the probe's absent branch; the probe stand-in reports the ref usable
+    absent_lines = _baseline_absent_lines(text)
+    for number, raw in enumerate(text.splitlines(), 1):
+        if number in absent_lines:
+            continue  # the probe block's absent branch; the probe stand-in reports the ref usable
         tokens = shlex.split(raw, comments=True)
         if tokens[:1] == ["run_gate"] and len(tokens) >= 3:
             registered.append((tokens[1], " ".join(tokens[3:])))
@@ -5564,9 +5604,10 @@ def runner_naming_problems(text, first_only=False):
 
     roster = []
     registered = []
-    for raw in text.splitlines():
-        if raw.strip() == BASELINE_PROBE_ABSENT_GATE:
-            continue  # the probe's absent branch; the probe stand-in reports the ref usable
+    absent_lines = _baseline_absent_lines(text)
+    for number, raw in enumerate(text.splitlines(), 1):
+        if number in absent_lines:
+            continue  # the probe block's absent branch; the probe stand-in reports the ref usable
         tokens = shlex.split(raw, comments=True)
         if tokens[:1] == ["run_gate"] and len(tokens) >= 3:
             name, command = tokens[1], tokens[2:]
@@ -6939,9 +6980,10 @@ def self_test():
                       if line.startswith("run_gate ")]
         # The roster the sweep runs: every run_gate line, the probe's present branch
         # included (the probe stand-in reports the ref usable), its absent branch not.
-        roster_lines = [line for line in live_runner.splitlines()
+        live_absent_lines = _baseline_absent_lines(live_runner)
+        roster_lines = [line for number, line in enumerate(live_runner.splitlines(), 1)
                         if line.lstrip().startswith("run_gate ")
-                        and line.strip() != BASELINE_PROBE_ABSENT_GATE]
+                        and number not in live_absent_lines]
         registered_names = {shlex.split(line, comments=True)[1] for line in roster_lines}
         registered_commands = {
             " ".join(shlex.split(line, comments=True)[3:]) for line in roster_lines}
@@ -10751,6 +10793,26 @@ def self_test():
                     failures.append("47 grammar admitted the edited block: " + label)
             if not baseline_probe_problems(mutant):
                 failures.append("47 runtime mutant was not caught: " + label)
+        # The gate without a base is admitted only inside the block: the same line, or
+        # the same invocation under another label, after the block's fi is refused by
+        # the grammar, and the naming scenarios skip only the block's own line.
+        if start == -1 or end == -1:
+            failures.append("47 fixture drift: bare gate outside the block")
+        else:
+            after = end + len("\nfi\n")
+            for label, line in (
+                    ("bare gate line after the block", BASELINE_PROBE_ABSENT_GATE),
+                    ("bare gate under another label after the block",
+                     'run_gate "pin-bare" python3 -I -B tools/check_baseline_pin.py')):
+                mutant = probe_runner[:after] + line + "\n" + probe_runner[after:]
+                codes = {diagnostic.code
+                         for diagnostic in extract_local(mutant).diagnostics}
+                if "baseline-probe-position" not in codes:
+                    failures.append("47 grammar admitted the " + label)
+                if not any(command == "-I -B tools/check_baseline_pin.py"
+                           for _name, command, _status, _failing
+                           in _naming_scenarios(mutant)[3:]):
+                    failures.append("47 naming scenarios skipped the " + label)
 
     if failures:
         print("SELF-TEST FAIL:")

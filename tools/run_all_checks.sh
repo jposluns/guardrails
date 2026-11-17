@@ -126,9 +126,10 @@ run_gate "baseline-pin-selftest" python3 -I -B tools/check_selftest_execution.py
 # origin/main would win over the short name. This runner never fetches (it does not touch the network). The
 # decision is the gate's own: check_baseline_pin.py --probe-local-base runs the same --local-base reads under
 # the same scrubbed git environment (no inherited GIT_DIR or other GIT_ variable selects the repository) and
-# exits 0 when the ref is usable, 1 with nothing on stderr only when the clone genuinely lacks it, and 2 for
-# anything else (a broken loose ref, a broken packed-refs line, a dangling symbolic ref, an unreadable object,
-# any other git failure). The flag is passed only on exit 0 with nothing on stderr. Exit 1 with nothing on
+# exits 0 when the ref is usable, 1 with nothing on stderr only when the clone genuinely lacks it and its ref
+# store is shown readable and well formed, and 2 for anything else (a broken loose ref, a broken packed-refs
+# line, a dangling symbolic ref, a packed-refs that is a directory or otherwise not a regular readable file, a
+# reftable ref store, an unreadable object, any other git failure); --local-base takes the same decision. The flag is passed only on exit 0 with nothing on stderr. Exit 1 with nothing on
 # stderr prints one NOTE line that the base comparison did not run and how to create the ref, then runs the
 # gate without the flag (the gate's own no-base NOTE follows). Any other outcome (output on stderr, or an
 # exit other than 0 or 1) is never read as absence: it fails the run under the baseline-pin name.
