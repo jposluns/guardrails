@@ -11,13 +11,13 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Gate-linked (class a) | 8 |
 | Gate-linked (class a), partial | 0 |
 | Gate-linked (class c only) | 1 |
-| Gate-linked (class c only), partial | 9 |
+| Gate-linked (class c only), partial | 8 |
 | Hook-linked | 18 |
 | Hook-linked, partial | 5 |
 | Preview only | 2 |
 | Preview only, partial | 0 |
 | Pending | 0 |
-| No control | 90 |
+| No control | 91 |
 
 ## Rules
 
@@ -122,7 +122,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Fail closed in security-relevant paths | `secfcl` | No control | No shipped control cites this rule. |
 | Validate federated identity and token flows | `secfid` | No control | No shipped control cites this rule. |
 | Validate and contain uploaded files | `secupl` | No control | No shipped control cites this rule. |
-| Guardrail configuration is integrity-protected | `secgci` | Gate-linked (class c only), partial | `gate:hook-coverage`, class c |
+| Guardrail configuration is integrity-protected | `secgci` | No control | No shipped control cites this rule. |
 | Human authorization for consequential actions | `sechau` | No control | No shipped control cites this rule. |
 | Validate external input at the boundary | `secinp` | Gate-linked (class c only), partial | `gate:dangerous-api`, class c |
 | Trust between agents is earned, not inherited | `secagt` | No control | No shipped control cites this rule. |
@@ -443,20 +443,6 @@ Technical limits (from the enforcement ledger):
 
 ```
 A byte-identity drift gate over the artefact tools/gen_gensrc.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.
-```
-
-### `gate:hook-coverage`
-
-- Platform: `ci`
-- Default: `block`
-- Entry point: `tools/check_hook_coverage.py`
-- Class: `c`
-- Channel: `repository gate`
-
-Technical limits (from the enforcement ledger):
-
-```
-A pre-launch gate the orchestrator runs before it starts a session: given an absolute launch directory and an absolute declaration file whose required_hooks key lists the required hooks (scope, event, matcher and command; any other top-level key, as in a registry file, is ignored), it reads only that directory's .claude/settings.json and .claude/settings.local.json and exits 1, naming each one, when a required entry is not registered there with the exact event, matcher and command, or when either file sets disableAllHooks to true, so a guard set narrowed or switched off by the launch directory is surfaced before the session runs rather than silently exercised. A relative or non-directory path, a launch directory or declaration reached through a symbolic link anywhere on its path, a symlinked, non-regular, unreadable, oversized, non-UTF-8 or malformed file (a settings file holding JSON null or another non-object value included), a wrong-typed hooks structure or disableAllHooks, and a declaration with no required_hooks key, an empty or non-list required_hooks, an entry with an unknown, missing or wrong-typed key, or a non-project scope fail closed (exit 2). It covers a recognizable SUBSET (class c, partial): it predicts loading from files on disk and never observes what the client loaded, so command-line settings flags, managed policy, user-scope settings, plugin enablement, workspace trust, client-version differences in how settings scopes are resolved or merged, settings keys other than hooks and disableAllHooks that change whether hooks run, and an edit made between the check and the launch are outside its view; that the client merges the two project files' hooks as a union, and that disableAllHooks set to true switches hooks off, are inferred, not documented here; it protects only launches that call it, so a session started by hand is not seen, and no launcher this repository ships calls it yet, so it protects no launch until an orchestrator's own launch path runs it; exact string matching fails an equivalent but differently spelt hook (the safe direction); and the repository holds no launch directory to judge, so CI runs only its self-test. It covers no other clause of the rule: a weakening change to the guardrail configuration itself is not judged here.
 ```
 
 ### `gate:hooks-drift`

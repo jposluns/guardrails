@@ -30,7 +30,9 @@ not an object, is malformed (exit 2), never read as absent.
 
 Exit 0: every required entry is present and neither settings file sets disableAllHooks to true. Exit 1: at
 least one is missing, each missing entry named on its own MISSING line, or a settings file sets
-disableAllHooks to true, each such file named on its own DISABLED line. Exit 2 (fail closed, never a pass):
+disableAllHooks to true, each such file named on its own DISABLED line. A declared command that contains
+CLAUDE_PROJECT_DIR is named on its own WARN line, whatever the exit code; the warning never changes it.
+Exit 2 (fail closed, never a pass):
 a relative launch directory or declaration path; a launch directory or declaration reached through a
 symbolic link anywhere on its path (each directory on the path is opened from the root one component at a
 time without following a link, and the final file with O_NOFOLLOW, so pass paths with every link resolved;
@@ -60,6 +62,10 @@ RESIDUALS (what this gate does not establish):
   it.
 - Exact string matching fails a launch whose hook command or matcher is equivalent but spelt differently;
   that errs on the safe side (exit 1, never a false pass).
+- It does not check that a registered command can run at the launch directory: a script missing under
+  the project directory, a missing interpreter, a timeout or an error exit all still pass. It only prints a
+  WARN line, with the exit code unchanged, when a declared command contains CLAUDE_PROJECT_DIR, a path
+  it never resolves.
 - A declared scope other than "project" exits 2, because user and managed settings sources are outside
   what this repository documents.
 """
@@ -90,6 +96,10 @@ DECL_KEY = "required_hooks"
 DECL_ENTRY_KEYS = frozenset({"scope", "event", "matcher", "command"})
 SUPPORTED_SCOPES = frozenset({"project"})
 DISABLE_KEY = "disableAllHooks"
+PROJECT_DIR_VAR = "CLAUDE_PROJECT_DIR"
+# The exceptions a JSON parse can raise on bad input; the self-test reverts it to (ValueError,) to show the
+# deep-nesting row turns red.
+_JSON_ERRORS = (ValueError, RecursionError)
 # The flags every settings and declaration open carries: never follow a final symbolic link, never block on
 # a FIFO, never leak the descriptor. The self-test reverts _NOFOLLOW to show the symlink row turns red.
 _NOFOLLOW = os.O_NOFOLLOW
@@ -147,6 +157,25 @@ def _check_decl_keys(keys, allowed, where):
     missing = sorted(allowed - set(keys))
     if unknown or missing:
         raise CannotEvaluate("{}: unknown key(s) {} and missing key(s) {}".format(where, unknown, missing))
+
+
+def _check_decl_doc(doc, where):
+    _expect(doc, dict, where)
+
+
+def _check_decl_entry(entry, where):
+    _expect(entry, dict, where)
+
+
+def _is_command_hook(hook):
+    return hook.get("type") == "command"
+
+
+def _project_dir_warnings(required):
+    """A WARN line for each declared command that contains PROJECT_DIR_VAR (never a change to the exit)."""
+    return ["WARN: declared command {!r} contains {}; this gate does not check that it can run at the launch "
+            "directory".format(command, PROJECT_DIR_VAR) for _event, _matcher, command in required
+            if PROJECT_DIR_VAR in command]
 
 
 def _check_decl_scope(scope, where):
@@ -225,7 +254,7 @@ def _json_constant(name):
 def _parse_json(text, where):
     try:
         return json.loads(text, object_pairs_hook=_json_pairs, parse_constant=_json_constant)
-    except (ValueError, RecursionError) as exc:
+    except _JSON_ERRORS as exc:
         raise CannotEvaluate("{}: not valid JSON ({})".format(where, exc)) from None
 
 
@@ -306,7 +335,7 @@ def load_declaration(path):
         doc = _load_json_file(name, dfd, where, absent_ok=False)
     finally:
         os.close(dfd)
-    _expect(doc, dict, where)
+    _check_decl_doc(doc, where)
     _check_decl_has_key(doc, where)
     entries = doc[DECL_KEY]
     _check_decl_list(entries, where)
@@ -314,7 +343,7 @@ def load_declaration(path):
     required = []
     for index, entry in enumerate(entries):
         at = "{}: {}[{}]".format(where, DECL_KEY, index)
-        _expect(entry, dict, at)
+        _check_decl_entry(entry, at)
         _check_decl_keys(entry.keys(), DECL_ENTRY_KEYS, at)
         _check_decl_value_types(entry, at)
         _check_decl_scope(entry.get("scope"), at)
@@ -352,7 +381,7 @@ def _settings_entries(doc, where):
                 if not _expect(hook, dict, hat):
                     continue
                 _check_hook_type(hook.get("type"), hat + ".type")
-                if hook.get("type") != "command":
+                if not _is_command_hook(hook):
                     continue
                 if not _expect(hook.get("command"), str, hat + ".command"):
                     continue
@@ -408,8 +437,9 @@ def evaluate(launch_dir, require):
     except CannotEvaluate as exc:
         return 2, [], ["CANNOT EVALUATE: " + str(exc)]
     missing = missing_entries(required, found)
+    warnings = _project_dir_warnings(required)
     if missing or disabled:
-        out = ["DISABLED: {} sets {} to true".format(where, DISABLE_KEY) for where in disabled]
+        out = warnings + ["DISABLED: {} sets {} to true".format(where, DISABLE_KEY) for where in disabled]
         out.extend("MISSING: event={!r} matcher={!r} command={!r}".format(*entry) for entry in missing)
         if disabled:
             out.append("FAIL: {} project settings file{} at {} set{} {} to true".format(
@@ -419,7 +449,7 @@ def evaluate(launch_dir, require):
             out.append("FAIL: {} of {} required hook entr{} missing from the project settings at {}"
                        .format(len(missing), len(required), "y" if len(required) == 1 else "ies", launch_dir))
         return 1, out, []
-    return 0, ["PASS: all {} required hook entr{} present in the project settings at {}".format(
+    return 0, warnings + ["PASS: all {} required hook entr{} present in the project settings at {}".format(
         len(required), "y" if len(required) == 1 else "ies", launch_dir)], []
 
 
@@ -571,6 +601,18 @@ def _swap(name, value):
             saved, globals()["_check_decl_keys"] = globals()["_check_decl_keys"], value
         case "_check_decl_scope":
             saved, globals()["_check_decl_scope"] = globals()["_check_decl_scope"], value
+        case "_check_decl_doc":
+            saved, globals()["_check_decl_doc"] = globals()["_check_decl_doc"], value
+        case "_check_decl_entry":
+            saved, globals()["_check_decl_entry"] = globals()["_check_decl_entry"], value
+        case "_is_command_hook":
+            saved, globals()["_is_command_hook"] = globals()["_is_command_hook"], value
+        case "_project_dir_warnings":
+            saved, globals()["_project_dir_warnings"] = globals()["_project_dir_warnings"], value
+        case "_JSON_ERRORS":
+            saved, globals()["_JSON_ERRORS"] = globals()["_JSON_ERRORS"], value
+        case "_check_gate_arity":
+            saved, globals()["_check_gate_arity"] = globals()["_check_gate_arity"], value
         case _:
             raise KeyError(name)
     return saved
@@ -587,6 +629,13 @@ def _reverted(name, replacement, thunk):
 
 def _lenient_expect(value, kind, where):
     return not isinstance(value, bool) and isinstance(value, kind)
+
+
+def _unknown_keys_only(keys, allowed, where):
+    """_check_decl_keys with its missing-key half reverted: only an unknown key is refused."""
+    unknown = sorted(set(keys) - allowed)
+    if unknown:
+        raise CannotEvaluate("{}: unknown key(s) {}".format(where, unknown))
 
 
 def _run(make, revert=None):
@@ -654,6 +703,15 @@ def _self_test():
         revert=("_same_event", lambda declared, found: True))
     check("missing/wrong-event", got == 1, got)
     check("missing/wrong-event/red-when-reverted", mutant != 1, mutant)
+    # Row 6a. The exact required command carried by a hook whose type is not "command" (a prompt hook) is not
+    # a registration: without the command-type filter it would count and the run would pass.
+    got, mutant = _run(
+        lambda: _code(_Case().settings({"hooks": {"PreToolUse": [
+            {"matcher": GUARD_A[1], "hooks": [{"type": "prompt", "command": GUARD_A[2]}]},
+            {"matcher": GUARD_B[1], "hooks": [{"type": "command", "command": GUARD_B[2]}]}]}})),
+        revert=("_is_command_hook", lambda hook: True))
+    check("missing/prompt-hook-not-a-command", got == 1, got)
+    check("missing/prompt-hook-not-a-command/red-when-reverted", mutant != 1, mutant)
 
     # Row 7. Entry present only in settings.local.json.
     got, mutant = _run(
@@ -668,6 +726,20 @@ def _self_test():
     check("pass/present-twice", got == 0, got)
     got, _m = _run(lambda: _code(_Case().settings(good).settings(good, name="settings.local.json")))
     check("pass/present-in-both-files", got == 0, got)
+
+    # Row 8a. A declared command containing CLAUDE_PROJECT_DIR is named on a WARN line and the exit code is
+    # unchanged (the gate does not check that the command can run at the launch directory).
+    project_dir_guard = ("PreToolUse", "Bash", 'python3 -I "$CLAUDE_PROJECT_DIR"/guard/a.py')
+
+    def _project_dir_result():
+        code, out, _err = _result(_Case(decl=_decl([project_dir_guard, GUARD_B])).settings(
+            _settings([project_dir_guard, GUARD_B])))
+        warned = [line for line in out if line.startswith("WARN: ")]
+        return (code, len(warned) == 1 and repr(project_dir_guard[2]) in warned[0]
+                and out[-1].startswith("PASS: "))
+    got, mutant = _run(_project_dir_result, revert=("_project_dir_warnings", lambda required: []))
+    check("warn/declared-command-names-project-dir", got == (0, True), got)
+    check("warn/declared-command-names-project-dir/red-when-reverted", mutant != (0, True), mutant)
 
     # Row 9. Malformed JSON, non-UTF-8, symlinked file, FIFO (returns without hanging), oversized file.
     got, _m = _run(lambda: _code(_Case().settings('{"hooks": {')))
@@ -804,6 +876,13 @@ def _self_test():
                        revert=("_json_constant", float))
     check("refuse/nan-constant", got == 2, got)
     check("refuse/nan-constant/red-when-reverted", mutant != 2, mutant)
+    # Deeply nested JSON exhausts the parser's recursion: refused (exit 2); without the RecursionError catch
+    # the gate crashes instead.
+    deep = "[" * 100000 + "]" * 100000
+    got, mutant = _run(lambda: _guarded(lambda: _code(_Case().settings(deep))),
+                       revert=("_JSON_ERRORS", (ValueError,)))
+    check("refuse/deep-nesting", got == 2, got)
+    check("refuse/deep-nesting/red-when-reverted", mutant != 2, mutant)
 
     # Row 10a. A settings file holding JSON null (or any other non-object) is malformed, never absent: alone
     # (not a plain miss) and beside a file with every required entry (not a pass).
@@ -943,6 +1022,25 @@ def _self_test():
                        revert=("_check_decl_keys", lambda keys, allowed, where: None))
     check("refuse/decl-unknown-entry-key", got == 2, got)
     check("refuse/decl-unknown-entry-key/red-when-reverted", mutant != 2, mutant)
+    # An entry with no matcher key, against a group with no matcher: refused (exit 2); with only the
+    # missing-key half of the key check reverted, both read as the empty matcher and the run passes.
+    no_matcher = {"required_hooks": [{"scope": "project", "event": GUARD_A[0], "command": GUARD_A[2]}]}
+    got, mutant = _run(
+        lambda: _code(_Case(decl=no_matcher).settings(
+            {"hooks": {GUARD_A[0]: [{"hooks": [{"type": "command", "command": GUARD_A[2]}]}]}})),
+        revert=("_check_decl_keys", _unknown_keys_only))
+    check("refuse/decl-missing-entry-key", got == 2, got)
+    check("refuse/decl-missing-entry-key/red-when-reverted", mutant != 2, mutant)
+    # A declaration document or entry that is not an object: refused (exit 2); with its object check
+    # reverted the gate crashes instead.
+    got, mutant = _run(lambda: _guarded(lambda: _code(_Case(decl=[DECL_KEY]).settings(good))),
+                       revert=("_check_decl_doc", lambda doc, where: None))
+    check("refuse/decl-not-object", got == 2, got)
+    check("refuse/decl-not-object/red-when-reverted", mutant != 2, mutant)
+    got, mutant = _run(lambda: _guarded(lambda: _code(_Case(decl={DECL_KEY: [7]}).settings(good))),
+                       revert=("_check_decl_entry", lambda entry, where: None))
+    check("refuse/decl-entry-not-object", got == 2, got)
+    check("refuse/decl-entry-not-object/red-when-reverted", mutant != 2, mutant)
     for name, red_name, scope in (("refuse/decl-scope-user", "refuse/decl-scope-user/red-when-reverted", "user"),
                                   ("refuse/decl-scope-managed", "refuse/decl-scope-managed/red-when-reverted",
                                    "managed"),
@@ -976,9 +1074,15 @@ def _self_test():
     try:
         got = [_main_exit(["--launch-dir", str(case.launch), "--require", str(case.require)]),
                _main_exit(["--require", str(case.require), "--launch-dir", str(case.launch)])]
+        # A trailing argument after a gate form whose paths exist: refused (exit 2); without the arity
+        # check the extra argument is ignored and the run passes.
+        extra = ["--launch-dir", str(case.launch), "--require", str(case.require), "--extra"]
+        extra_got, extra_mutant = _run(lambda: _main_exit(extra), revert=("_check_gate_arity", lambda argv: True))
     finally:
         case.close()
     check("cli/gate-form-passes", got == [0, 0], got)
+    check("cli/extra-argument-exit-2", extra_got == 2, extra_got)
+    check("cli/extra-argument-exit-2/red-when-reverted", extra_mutant != 2, extra_mutant)
     got = [_main_exit(argv) for argv in ([], ["--bogus"], ["--self-test", "--bogus"],
                                          ["--launch-dir", "/x"], ["--launch-dir", "/x", "--launch-dir", "/y"],
                                          ["--launch-dir", "/x", "--require", "/y", "--extra"],
@@ -1022,9 +1126,13 @@ def _main_exit(argv):
         sys.argv = saved
 
 
+def _check_gate_arity(argv):
+    return len(argv) == 4
+
+
 def _gate_args(argv):
     """(launch_dir, require) from exactly --launch-dir X and --require Y in either order, else None."""
-    if len(argv) != 4:
+    if not _check_gate_arity(argv):
         return None
     pairs = {argv[0]: argv[1], argv[2]: argv[3]}
     if set(pairs) != {"--launch-dir", "--require"}:

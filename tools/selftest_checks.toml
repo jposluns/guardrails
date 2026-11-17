@@ -6245,7 +6245,12 @@ expected-check-ids = [
   "missing/command-differs-one-char/red-when-reverted",
   "missing/wrong-event",
   "missing/wrong-event/red-when-reverted",
+  "missing/prompt-hook-not-a-command",
+  "missing/prompt-hook-not-a-command/red-when-reverted",
   "missing/decl-registry-other-top-keys",
+  # a declared command containing CLAUDE_PROJECT_DIR is named on a WARN line, exit unchanged
+  "warn/declared-command-names-project-dir",
+  "warn/declared-command-names-project-dir/red-when-reverted",
   # disableAllHooks true in either project settings file, each file named (exit 1)
   "fail/disable-all-hooks/settings.json",
   "fail/disable-all-hooks/settings.json/red-when-reverted",
@@ -6286,6 +6291,8 @@ expected-check-ids = [
   "refuse/hook-type-not-string/red-when-reverted",
   "refuse/nan-constant",
   "refuse/nan-constant/red-when-reverted",
+  "refuse/deep-nesting",
+  "refuse/deep-nesting/red-when-reverted",
   "refuse/settings-null",
   "refuse/settings-null/red-when-reverted",
   "refuse/settings-local-null-beside-good",
@@ -6321,6 +6328,12 @@ expected-check-ids = [
   "refuse/decl-empty-command/red-when-reverted",
   "refuse/decl-unknown-entry-key",
   "refuse/decl-unknown-entry-key/red-when-reverted",
+  "refuse/decl-missing-entry-key",
+  "refuse/decl-missing-entry-key/red-when-reverted",
+  "refuse/decl-not-object",
+  "refuse/decl-not-object/red-when-reverted",
+  "refuse/decl-entry-not-object",
+  "refuse/decl-entry-not-object/red-when-reverted",
   "refuse/decl-scope-user",
   "refuse/decl-scope-user/red-when-reverted",
   "refuse/decl-scope-managed",
@@ -6337,5 +6350,7 @@ expected-check-ids = [
   "refuse/decl-absent",
   # the command line
   "cli/gate-form-passes",
+  "cli/extra-argument-exit-2",
+  "cli/extra-argument-exit-2/red-when-reverted",
   "cli/unrecognized-arguments-exit-2",
 ]
