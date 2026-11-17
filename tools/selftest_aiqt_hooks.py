@@ -31287,6 +31287,48 @@ def _main_isolated(monitor):
                 ("(ci-idc-r-c1) xargs -I{} git add of .claude/ files allows",
                  "git ls-files .claude | xargs -I{} git add {}")):
             ciexpect(_ci_label, _ci_cmd, "allow")
+        # A command whose text holds a construct the value reader cannot read exactly (a backslash before a
+        # newline, an xargs replacement string attached or detached, a braced placeholder, a parallel word, a word
+        # that starts with an expansion) is judged by the AI-anywhere rule, not by its values
+        # (_cmtidn_inexact). Each deny vector allowed before this change; the controls set a human identity
+        # through such a construct in a command that names no AI.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-e1) an AI EMAIL default after an escaped backslash before a newline denies",
+                 "echo a\\\\\n'q'; set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-e2) an AI GIT_AUTHOR_NAME default after an escaped backslash before a newline denies",
+                 "echo a\\\\\n'q'; set -a; : ${GIT_AUTHOR_NAME:='Bot Claude'}; git commit -m x"),
+                ("(ci-idc-e3) a --config-env pair after an escaped backslash before a newline denies",
+                 "echo a\\\\\n'q'; V='Claude Code' git --config-env=author.name=V commit -m x"),
+                ("(ci-idc-e4) an attached xargs replacement string ending in I as an author.name value denies",
+                 "echo Claude | xargs -IHI git -c author.name=HI commit -m x"),
+                ("(ci-idc-e5) an xargs -0 cluster replacement string ending in I as an author.name value denies",
+                 "echo Claude | xargs -0IHI git -c author.name=HI commit -m x"),
+                ("(ci-idc-e6) an attached xargs replacement string ending in I as an EMAIL value denies",
+                 "echo noreply@anthropic.com | xargs -IXI env EMAIL=XI git commit -m x"),
+                ("(ci-idc-e7) an xargs placeholder as a GIT_CONFIG_KEY_0 value beside an AI value denies",
+                 "printf author.%s name | xargs -I{} env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0={} "
+                 "GIT_CONFIG_VALUE_0=Claude git commit -m x"),
+                ("(ci-idc-e8) an xargs -I replacement string as a GIT_CONFIG_KEY_0 value beside an AI value denies",
+                 "printf author.%s name | xargs -I KEY env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=KEY "
+                 "GIT_CONFIG_VALUE_0=Claude git commit -m x"),
+                ("(ci-idc-e9) an xargs -d placeholder as a GIT_CONFIG_PARAMETERS value beside an AI name denies",
+                 "printf \"'author.name'='%s'\" Claude | xargs -d '\\n' -I{} env GIT_CONFIG_PARAMETERS={} "
+                 "git commit -m x"),
+                ("(ci-idc-e10) an xargs -0 placeholder as a GIT_CONFIG_PARAMETERS value beside an AI name denies",
+                 "printf \"'author.name'='%s'\" Claude | xargs -0 -I{} env GIT_CONFIG_PARAMETERS={} git commit -m x"),
+                ("(ci-idc-e11) xargs run through a variable with a replacement string as an author.name value denies",
+                 "X=xargs; echo Claude | $X -I NAME git -c author.name=NAME commit -m x"),
+                ("(ci-idc-e12) a parallel {1} placeholder as an author.name value beside an AI name denies",
+                 "parallel git -c author.name={1} commit -m x ::: Claude"),
+                ("(ci-idc-e13) a GIT_CONFIG_PARAMETERS value held in a variable beside an AI product name denies",
+                 "GIT_CONFIG_PARAMETERS=\"$P\" git commit -m 'fix the claude adapter'")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-e-c1) a human EMAIL with a backslash before a newline and no AI name allows",
+                 "EMAIL=alice@example.com git commit -m 'fix the \\\nadapter'"),
+                ("(ci-idc-e-c2) an attached xargs replacement string with a human value on its input allows",
+                 "echo Alice | xargs -IHI git -c author.name=HI commit -m x")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
         # The raw-text rule finds only that the text names an identity assignment form and an AI identity, so its
         # deny says that and that it fails closed, never that a git command sets an AI identity: on a command
         # that runs no git (ci-idc-m1), one that may set a human identity by a value its text does not spell

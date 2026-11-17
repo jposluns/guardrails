@@ -5354,6 +5354,52 @@ _CMTIDN_XARGS_REPLACE_RE = re.compile(r"(?s)^(?:-[A-Za-z0-9]*I(.*)|-i(.+)|--repl
 # How many replacement strings the raw-text rule keeps, so each value is searched a fixed number of times; past
 # it, every identity value counts as one the text does not spell (a safe-direction over-deny).
 _CMTIDN_PLACES_MAX = 16
+# Every name that the raw-text rule reads as setting an identity when it is assigned: the identity names
+# (_CMTIDN_IDENTITY_SET_RE) and a GIT_CONFIG_KEY_<n>, GIT_CONFIG_VALUE_<n> or GIT_CONFIG_PARAMETERS name in an
+# assignment or default-value form, sought in the whole text by the AI-anywhere fallback (_cmtidn_inexact).
+_CMTIDN_ANY_SET_RE = re.compile(_CMTIDN_IDENTITY_SET_RE.pattern + r"|(?<![A-Za-z0-9_])GIT_CONFIG_(?:KEY_[0-9]+|"
+                                r"VALUE_[0-9]+|PARAMETERS)[+:]?=")
+# A GIT_CONFIG_PARAMETERS name in an assignment or default-value form, whose value git reads as NAME=VALUE pairs.
+_CMTIDN_PARAMETERS_SET_RE = re.compile(r"(?<![A-Za-z0-9_])GIT_CONFIG_PARAMETERS[+:]?=")
+# A braced word part that a program fills in at run time or that bash expands into more than one word: a {}
+# or {1} placeholder (find -exec, xargs -I{}, GNU parallel {1}, {.}, {/}) or a brace expansion ({a,b}, {1..3}),
+# not a ${...} body.
+_CMTIDN_BRACE_RE = re.compile(r"(?<![$\\])\{[^\s{}]*\}")
+# A word that starts with an expansion, once its leading quote characters are dropped (a command run through a
+# variable, X=xargs; $X -I NAME ...), so the text does not spell the program it may run.
+_CMTIDN_EXPANSION_WORD_RE = re.compile(r"^[\"']*(?:`|\$[A-Za-z_0-9{(@*#?!$-])")
+# A program that fills a replacement string into its command from its input or operands (GNU parallel and its
+# sem alias, and the ::: and :::: operand separators of parallel).
+_CMTIDN_FILLERS = frozenset(("parallel", "sem", ":::", "::::", ":::+", "::::+"))
+
+
+def _cmtidn_inexact(command):
+    """The first construct in the raw command text that the value reader of _cmtidn_identity_set_ai cannot read
+    exactly, as a short label, else None: a backslash right before a newline (which the reader drops, though an
+    escaped backslash before it keeps the newline and shifts every later quote), an xargs replacement string,
+    attached or detached (an xargs word followed by an option word whose short cluster holds I or i, or a
+    --r... long option, a prefix of --replace), a braced placeholder or brace expansion (_CMTIDN_BRACE_RE: {},
+    {1}, {a,b}), a GNU parallel or sem word or its ::: separator (_CMTIDN_FILLERS), or a word that starts with an
+    expansion (_CMTIDN_EXPANSION_WORD_RE: $X -I NAME ..., where the variable may name xargs). A construct is
+    sought lexically in the words of _cmtidn_raw_words, so one inside a quoted string or a heredoc body counts as
+    well (a safe-direction over-deny)."""
+    if "\\\n" in command:
+        return "a backslash before a newline"
+    xargs = False
+    for word, _doubtful in _cmtidn_raw_words(command):
+        bare = _CMTIDN_SET_UNREAD_RE.sub("", word)
+        base = bare.rsplit("/", 1)[-1]
+        if xargs and ((bare.startswith("-") and not bare.startswith("--") and ("I" in bare or "i" in bare))
+                      or bare.startswith("--r")):
+            return "an xargs replacement string ({!r})".format(bare[:40])
+        xargs = xargs or base == "xargs"
+        if base in _CMTIDN_FILLERS:
+            return "a parallel replacement string ({!r})".format(bare[:40])
+        if _CMTIDN_BRACE_RE.search(word):
+            return "a braced placeholder or brace expansion ({!r})".format(word[:40])
+        if _CMTIDN_EXPANSION_WORD_RE.match(word):
+            return "a word that starts with an expansion ({!r})".format(word[:40])
+    return None
 
 
 def _cmtidn_raw_words(text):
@@ -5486,12 +5532,28 @@ def _cmtidn_identity_set_ai(command):
     user.email=me@example.com commit -m 'regenerate .claude/rules'). The cost is a disclosed over-deny of
     text that only quotes an assignment of an AI value (a commit message that holds EMAIL=X@anthropic.com, an
     echo, a quoted heredoc that writes such text), and of a command that names an AI beside an assignment of
-    an unspelled value. Bounded: a command longer than _CMTIDN_READ_LIMIT is not searched here, since the
+    an unspelled value. A command whose text holds a construct the value reader cannot read exactly
+    (_cmtidn_inexact: a backslash before a newline, an xargs or parallel replacement string, a braced
+    placeholder or brace expansion, a word that starts with an expansion) is not judged by its values: any
+    identity name or GIT_CONFIG_KEY_<n>, GIT_CONFIG_VALUE_<n> or GIT_CONFIG_PARAMETERS name in an assignment form
+    there denies when the command names an AI identity anywhere, as written or once those characters are
+    dropped. Bounded: a command longer than _CMTIDN_READ_LIMIT is not searched here, since the
     too-long fallback already denies one that names an AI and holds any of these names
     (_commit_identity_fallback); the words are read in one pass and each word is searched a fixed number of
     times."""
     if len(command) > _CMTIDN_READ_LIMIT:
         return None
+    inexact = _cmtidn_inexact(command)
+    if inexact is not None:
+        # The value reader cannot read this text exactly, so the AI-anywhere rule decides: any identity name or
+        # GIT_CONFIG_KEY_<n>, GIT_CONFIG_VALUE_<n> or GIT_CONFIG_PARAMETERS name in an assignment form, beside an
+        # AI identity anywhere, denies (a safe-direction over-deny of a human identity beside an AI product name).
+        text = _CMTIDN_SET_UNREAD_RE.sub("", command.replace("\\\n", ""))
+        named = _CMTIDN_ANY_SET_RE.search(command) or _CMTIDN_ANY_SET_RE.search(text)
+        ai = named and (AI_IDENTITY_RE.search(command) or AI_IDENTITY_RE.search(text))
+        if ai:
+            return ("identity assignment {!r} in a command whose text holds {}, which the value reader cannot read "
+                    "exactly, and that names an AI identity ({!r})".format(named.group(0), inexact, ai.group(0)))
     unspelled = None  # an identity assignment whose value the text does not spell
     config_key = None  # a GIT_CONFIG_KEY_<n> assignment that names an identity key or holds an expansion
     config_values = []
@@ -5526,6 +5588,10 @@ def _cmtidn_identity_set_ai(command):
                 config_key = name
         config_values.extend((name, raw, dropped, doubtful) for name, raw, dropped
                              in _cmtidn_assigned_values(word, _CMTIDN_CONFIG_VALUE_SET_RE))
+        for name, raw, dropped in _cmtidn_assigned_values(word, _CMTIDN_PARAMETERS_SET_RE):
+            if unspelled is None and (doubtful or many or _CMTIDN_EXPANSION_RE.search(raw)
+                                      or any(p and p in dropped for p in places)):
+                unspelled = name
         previous = bare
     if config_key is not None:
         for name, raw, dropped, doubtful in config_values:
