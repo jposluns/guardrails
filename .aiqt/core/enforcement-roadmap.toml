@@ -414,8 +414,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "secgci"
-status = "none"
-mechanisms = []
+status = "partial"
+mechanisms = ["gate:hook-coverage"]
 
 [[rule]]
 corpus-id = "sechau"

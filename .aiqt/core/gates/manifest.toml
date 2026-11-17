@@ -470,6 +470,15 @@ class = "a"
 residue = "It holds every rule listed in .aiqt/core/must-deliver.toml whole inside the first check_release_build.CAP_BYTES bytes of AGENTS.md, recomputing the spans with gen_first_pin_demo.measure (AGENTS.md must be byte-identical to a fresh composition first, offsets are absolute UTF-8 bytes, and the cap is read from the consumer at call time), and fails closed (exit 2) on an absent, unreadable, symlinked, non-UTF-8, malformed or empty list, a listed id with no measured span, or a prefix it cannot measure. Within that surface a listed rule ending past the cap is always caught. It does not catch a rule removed from the list itself, which only review can judge; it does not judge a listed rule's content, so a rule cut down to a stub still passes; it measures the repository file against the configured cap, not any platform's actual truncation behaviour or an instruction budget other files may share; and it assumes the checked-out AGENTS.md keeps the LF line endings .gitattributes pins, so a client that rewrites them to CRLF inflates what a reader there receives unseen."
 
 [[gate]]
+id = "hook-coverage"
+script = "tools/check_hook_coverage.py"
+rules = ["secgci"]
+platform = "ci"
+default = "block"
+class = "c"
+residue = "A pre-launch gate the orchestrator runs before it starts a session: given an absolute launch directory and an absolute declaration of required hooks (scope, event, matcher and command), it reads only that directory's .claude/settings.json and .claude/settings.local.json and exits 1, naming each one, when a required entry is not registered there with the exact event, matcher and command, so a guard set narrowed by the launch directory is surfaced before the session runs rather than silently exercised. A relative or non-directory path, a symlinked, non-regular, unreadable, oversized, non-UTF-8 or malformed file, a wrong-typed hooks structure, and an empty, unknown-key or non-project-scope declaration fail closed (exit 2). It covers a recognizable SUBSET (class c, partial): it predicts loading from files on disk and never observes what the client loaded, so command-line settings flags, managed policy, user-scope settings, plugin enablement, workspace trust, client-version differences in how settings scopes are resolved or merged, settings keys other than hooks that change whether hooks run, and an edit made between the check and the launch are outside its view; that the client merges the two project files' hooks as a union is inferred, not documented here; it protects only launches that call it, so a session started by hand is not seen; exact string matching fails an equivalent but differently spelt hook (the safe direction); and the repository holds no launch directory to judge, so CI runs only its self-test. It covers no other clause of the rule: a weakening change to the guardrail configuration itself is not judged here."
+
+[[gate]]
 id = "brief-capability"
 script = "tools/check_brief_capability.py"
 rules = []
