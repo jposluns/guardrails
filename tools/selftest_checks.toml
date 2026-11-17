@@ -5438,6 +5438,7 @@ expected-check-ids = [
   "runner/packed-refs-directory-fails",
   "probe/packed-refs-shapes",
   "probe/reftable-store-refused",
+  "probe/unexpected-exception-exits-2",
   "probe/ambient-git-dir-decoy-exits-0",
   "exit/codes-0-1-2",
   "live/real-tree-passes",

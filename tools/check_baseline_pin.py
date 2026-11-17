@@ -660,8 +660,8 @@ def _ref_store_problem(root, ref):
 def _local_base_commit(root, ref):
     """The fork point `git merge-base HEAD <commit>` (the form of check_version_monotonicity.py's default base, which
     reads the shadowable short name origin/main instead), where <commit> is the commit the full ref name ref points
-    at. ref must be a full ref name (refs/remotes/origin/main, not origin/main): git resolves a short name through a tag or a local branch of that name before
-    refs/remotes/, so the base could be the change itself. The name is read once (git rev-parse --verify --quiet
+    at. ref must be a full ref name (refs/remotes/origin/main, not origin/main): git resolves a short name through
+    a tag or a local branch of that name before refs/remotes/, so the base could be the change itself. The name is read once (git rev-parse --verify --quiet
     ref, without a peel), git for-each-ref over every ref must list exactly that name (git otherwise takes a full
     name it lacks through refs/heads/<ref>), and the peel and the merge-base read the commit id, never the name
     again. CannotEvaluate when ref is unsafe or not a full ref name, when ref does not exist in this clone (with
@@ -701,7 +701,7 @@ def _local_base_commit(root, ref):
             raise CannotEvaluate("base: {} does not resolve, and this clone's ref store could not be shown readable "
                                  "and well formed, so it cannot be read as absent: {}".format(ref, problem))
         raise RefAbsent(absent)
-    named = _commit_id(proc,"git rev-parse --verify " + ref)
+    named = _commit_id(proc, "git rev-parse --verify " + ref)
     proc = _git_base_read(root, ["rev-parse", "--verify", "--quiet", named + "^{commit}"])
     if proc.returncode != 0:
         raise CannotEvaluate("base: {} exists in this clone but does not resolve to a readable commit (its object "
@@ -1266,14 +1266,14 @@ def _probe_child(tmp, ref, env=None, option="--probe-local-base"):
 
 def _runner_block():
     """The local runner's baseline-pin block, extracted from tools/run_all_checks.sh as committed (the run_gate()
-    definition and the block from its probe line through its fi), as a bash script that starts with the runner's
-    shell options and failure-state initializers and exits with the runner's failed flag; None when the runner
-    does not hold those lines."""
+    definition and the block from its baseline_probe() definition through its fi), as a bash script that starts
+    with the runner's shell options and failure-state initializers and exits with the runner's failed flag; None
+    when the runner does not hold those lines."""
     try:
         lines = (ROOT / "tools" / "run_all_checks.sh").read_text(encoding="utf-8").splitlines(keepends=True)
         define = lines.index("run_gate() {\n")
         define_end = lines.index("}\n", define)
-        start = [index for index, line in enumerate(lines) if line.startswith("baseline_probe_err=$(")]
+        start = [index for index, line in enumerate(lines) if line == "baseline_probe() {\n"]
         end = lines.index("fi\n", start[0])
     except (OSError, UnicodeDecodeError, ValueError, IndexError):
         return None
@@ -1437,6 +1437,30 @@ def _probe_cases():
             globals()["_git_base_read"] = original
     check("probe/reftable-store-refused", control[0] == "absent" and decision[0] == "cannot"
           and "reftable" in decision[1], (control, decision))
+
+    # An unexpected exception in the --local-base reads is cannot-evaluate, never absence: the probe exits 2 with one
+    # CANNOT EVALUATE line naming it, and --local-base exits 2 on that same line. A decision that mapped it to absence
+    # would let the local runner skip the leg and pass.
+    original_commit = _local_base_commit
+
+    def _raises(_root, _ref):
+        raise RuntimeError("injected")
+
+    with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+        _fixture(tmp)
+        _commit_all(tmp, "base", init=True)
+        globals()["_local_base_commit"] = _raises
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+                probed = probe_local_base(tmp, ref)
+            explicit = _coupling_gate(tmp, ref, FIXTURE_PINS, False, local=True)
+        finally:
+            globals()["_local_base_commit"] = original_commit
+    line = "CANNOT EVALUATE: base: the --local-base read of {!r} failed unexpectedly (RuntimeError: injected)".format(
+        ref)
+    check("probe/unexpected-exception-exits-2", probed == 2 and out.getvalue() == ""
+          and err.getvalue() == line + "\n" and explicit[0] == 2 and line in explicit[1],
+          (probed, out.getvalue(), err.getvalue(), explicit))
 
     # Under an ambient GIT_DIR naming a decoy repository that lacks the ref, the probe still reads the fixture's
     # own refs (_git_env drops it): the fixture holds the ref, so the answer is 0. A probe that kept GIT_DIR, as
@@ -1920,7 +1944,8 @@ def _self_test():
           "--local-base agrees with the probe on every one of those fixtures; the runner's extracted "
           "baseline-pin block, with real git, fails a changed row against a usable ref and a packed-refs "
           "that is a directory, and passes a genuine absence with its NOTE; packed-refs shapes are checked "
-          "and a reftable ref store is refused, never read as absence; "
+          "and a reftable ref store is refused, never read as absence; an unexpected exception in the "
+          "--local-base reads makes the probe and --local-base exit 2 on one CANNOT EVALUATE line; "
           "without --base the leg is reported as not evaluated; the exit codes are 0, 1 and 2; "
           "the live tree passes)".format(len(EXECUTED)))
     return 0

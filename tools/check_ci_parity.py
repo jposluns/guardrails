@@ -1007,7 +1007,10 @@ ALLOWLIST = (
             "pushed range, which must be an ancestor of HEAD (a divergent "
             "push is cannot-evaluate); only those 2 endpoints are "
             "compared, so this is the range's net change, not each "
-            "commit's. The local runner has no push event: it passes "
+            "commit's. A push whose before SHA is missing or all zero "
+            "never reaches the gate: the step prints a CANNOT EVALUATE "
+            "line and exits 1 (not the gate's exit 2), which fails the "
+            "job. The local runner has no push event: it passes "
             "--local-base refs/remotes/origin/main only when the gate's "
             "--probe-local-base exits 0 silently, runs the gate without a "
             "base when the probe reports a genuine absence, and fails the "
@@ -1058,8 +1061,12 @@ ALLOWLIST = (
             "comparison did "
             "not run and how to create the ref (git fetch origin "
             "main:refs/remotes/origin/main) and runs the gate without a "
-            "base; any other probe outcome fails the run. CI never runs the "
-            "gate without --base."
+            "base; any other probe outcome fails the run. The parity grammar "
+            "admits this bare gate line only as the absent branch of that "
+            "exact probe block (BASELINE_PROBE_BLOCK), refuses a bare "
+            "baseline-pin gate line anywhere else under any label, and the "
+            "naming scenarios skip only that block's own line. CI never "
+            "runs the gate without --base."
         ),
         "backlog": "GD-123",
     },
@@ -1795,12 +1802,13 @@ RUNNER_SCAFFOLD_LINES = frozenset({
 # only when it exits 0 with nothing on stderr; exit 1 with nothing on stderr prints
 # one NOTE line and runs the gate without the flag; every other outcome fails the run
 # under the baseline-pin name, through the same failed and failed_names updates
-# run_gate() makes. Its two run_gate lines are parity members; the probe line is not a
-# gate, and every line of the block other than the two run_gate lines is validated by
-# this membership alone, so a block that differs in any line is classified line by
-# line and refused. baseline_probe_problems runs the block under a probe stand-in for
-# each probe outcome. The probe line's tools path (BASELINE_PROBE_SCRIPT) is recorded
-# as accounted for on that line, so the shadow check passes it without a member.
+# run_gate() makes. Its two run_gate lines are parity members; the probe launch line
+# (BASELINE_PROBE_LAUNCH, inside the block's baseline_probe function) is not a gate, and
+# every line of the block other than the two run_gate lines is validated by this
+# membership alone, so a block that differs in any line is classified line by line and
+# refused. baseline_probe_problems runs the block under a probe stand-in for each probe
+# outcome. The launch line's tools path (BASELINE_PROBE_SCRIPT) is recorded as
+# accounted for on that line, so the shadow check passes it without a member.
 BASELINE_PROBE_SCRIPT = "tools/check_baseline_pin.py"
 BASELINE_PROBE_ARGS = (
     "-I -B " + BASELINE_PROBE_SCRIPT + " --probe-local-base refs/remotes/origin/main")
@@ -1813,8 +1821,15 @@ BASELINE_PROBE_NOTE = (
     "NOTE: baseline-pin base comparison did NOT RUN: this clone has no "
     "refs/remotes/origin/main; create it with git fetch origin "
     "main:refs/remotes/origin/main")
+# The probe launch, a plain command in the baseline_probe function body, so its python3
+# sits in a command-word position tools/check_python_launcher_isolation.py resolves; the
+# command substitution after the function calls only the function.
+BASELINE_PROBE_LAUNCH = "python3 " + BASELINE_PROBE_ARGS
 BASELINE_PROBE_BLOCK = (
-    "baseline_probe_err=$(python3 " + BASELINE_PROBE_ARGS + " 2>&1 >/dev/null)",
+    "baseline_probe() {",
+    BASELINE_PROBE_LAUNCH,
+    "}",
+    "baseline_probe_err=$(baseline_probe 2>&1 >/dev/null)",
     "baseline_probe_rc=$?",
     'if [ "$baseline_probe_rc" -eq 0 ] && [ -z "$baseline_probe_err" ]; then',
     BASELINE_PROBE_GATE,
@@ -2211,10 +2226,11 @@ def extract_local(text):
             # frame here. Its first line must sit at top level after the run_gate()
             # definition and both failure-state initializers, where its failed and
             # ${failed_names} updates and its run_gate calls are well-defined under
-            # set -u. Its two run_gate lines are parity members. Its first line runs
-            # the gate's --probe-local-base, which is not a gate: its tools path is
-            # accounted for on that line without becoming a member.
-            if line_number == probe_lines[0]:
+            # set -u. Its two run_gate lines are parity members. Its launch line
+            # (BASELINE_PROBE_LAUNCH) runs the gate's --probe-local-base, which is not
+            # a gate: its tools path is accounted for on that line without becoming a
+            # member.
+            if stripped == BASELINE_PROBE_LAUNCH:
                 origins.setdefault(line_number, set()).add(BASELINE_PROBE_SCRIPT)
             if (line_number == probe_lines[0]
                     and (if_stack or not function_defined
@@ -7720,6 +7736,9 @@ def self_test():
             ("_cdpath_outcome", "read_text"): 1,
             ("_cdpath_outcome", "splitlines"): 1,
             ("_naming_scenarios", "splitlines"): 1,
+            # Splits runner text read_runner_text already returned, to find the
+            # absent-branch line of the one exact baseline-pin probe block.
+            ("_baseline_absent_lines", "splitlines"): 1,
             # Splits runner text read_runner_text already returned, to run
             # its pass summary echo and every line after it.
             ("_passing_status", "splitlines"): 1,
@@ -10756,7 +10775,7 @@ def self_test():
             failures.append("47 live runner: {}".format(live_probe))
         if extract_local(probe_runner).diagnostics:
             failures.append("47 live runner refused by the grammar")
-        start = probe_runner.find("baseline_probe_err=$(")
+        start = probe_runner.find("baseline_probe() {\n")
         end = probe_runner.find("\nfi\n", start)
         absent_test = ('elif [ "$baseline_probe_rc" -eq 1 ] && '
                        '[ -z "$baseline_probe_err" ]; then')

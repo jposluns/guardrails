@@ -133,8 +133,14 @@ run_gate "baseline-pin-selftest" python3 -I -B tools/check_selftest_execution.py
 # stderr prints one NOTE line that the base comparison did not run and how to create the ref, then runs the
 # gate without the flag (the gate's own no-base NOTE follows). Any other outcome (output on stderr, or an
 # exit other than 0 or 1) is never read as absence: it fails the run under the baseline-pin name.
+# The probe runs as a plain command inside the baseline_probe function, so its python3 sits in a command-word
+# position check_python_launcher_isolation.py resolves; the command substitution calls only the function, keeps
+# the probe's stderr, discards its stdout and leaves the probe's exit status in $?.
 # check_ci_parity.py admits this block only as its exact reviewed text (BASELINE_PROBE_BLOCK).
-baseline_probe_err=$(python3 -I -B tools/check_baseline_pin.py --probe-local-base refs/remotes/origin/main 2>&1 >/dev/null)
+baseline_probe() {
+  python3 -I -B tools/check_baseline_pin.py --probe-local-base refs/remotes/origin/main
+}
+baseline_probe_err=$(baseline_probe 2>&1 >/dev/null)
 baseline_probe_rc=$?
 if [ "$baseline_probe_rc" -eq 0 ] && [ -z "$baseline_probe_err" ]; then
   run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py --local-base refs/remotes/origin/main
