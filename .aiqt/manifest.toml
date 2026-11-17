@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "8094154625d0fdc8724fb91163d282de40beec3814232a25894b9e34c9588332"
+tree-sha256 = "25d21acd424d918158707d4d17df425785d9e24958ba9dcf94a7a5c975fcad27"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -2712,8 +2712,8 @@ sha256 = "88a07c6cee4af960ba877aff2a9b35529ef154ed98c20707bc7ef49d221665a5"
 
 [[sources]]
 path = "opf/site/draft-src/home.toml"
-bytes = 2449
-sha256 = "450bd45de1be2170f78c25d2baf687cc8078e0fafb62959c9fee13ba4b84565d"
+bytes = 2565
+sha256 = "e732cc3656fb8821c77b142ee36c643cfe38ed82c102e29758382455d8bf1fcb"
 
 [[sources]]
 path = "opf/site/draft-src/license.toml"
@@ -3017,8 +3017,8 @@ sha256 = "cf4c9991c31707fa7bb3fd48c28518aca06cacd1d5d34c9cc52b97b6ebac38af"
 
 [[sources]]
 path = "opf/site/index.html"
-bytes = 9897
-sha256 = "b45e169eb8ad2c1b6c7a07bbd41ad521f11b113f5214dd402b186a78d6556ed8"
+bytes = 9991
+sha256 = "8c73f3757ff31cd0e22bd36b1174b38e10b8101d7521acd6a08785bf85e20b8c"
 
 [[sources]]
 path = "opf/site/license/index.html"
