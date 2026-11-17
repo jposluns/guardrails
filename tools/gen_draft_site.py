@@ -59,8 +59,12 @@ title, n and small; every `html` key (region, value, clauses item, note, callout
 lead, prose, pullquote, record item, srcview item); clause title; section, family and subhead heading;
 family verified, intro, after and steps; entry heading, claim, limitation and evidence; table and register
 head cells and row cells; steps and list items; figure caption; srcview gen and heading; code and srcview
-note. Code text, code file labels, srcview labels and figure node text are escaped as before. Every
-rendered page then passes the link guard (_LinkGuard), which refuses raw markup that breaks the link rules.
+note. Code text, code file labels, srcview labels and figure node text are escaped as before. Inline markup
+may use only the elements of tools/_site_markup.py INLINE_ELEMENTS (the names the data files use; no svg or
+math, no raw-text element), no markup construct html.parser and a browser can end at different places (only
+ordinary comments), and must end at a token boundary; anything else is refused with the page named. Every
+rendered page then passes the link guard (_LinkGuard), which refuses raw markup that breaks the link rules,
+an element outside the page allowlist or such a construct.
 """
 import sys
 
@@ -77,13 +81,14 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import html as _html
+import json
 import os
 import re
 import shutil
 import stat
 import tempfile
 import tomllib
-from html.parser import HTMLParser
+from html.parser import HTMLParser, attrfind_tolerant, tagfind_tolerant
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -91,6 +96,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _standards import load_manifests, ManifestError  # noqa: E402
+import _site_markup  # noqa: E402  (the element allowlist inline markup, the link guard and check_site share)
 import gen_mappings  # noqa: E402  (the one mappings rendering source: rows, registry and wording)
 import gen_rules  # noqa: E402  (the one frontmatter parser and corpus loader)
 from gen_agents import sort_key  # noqa: E402  (canonical AIQT priority order for the rules)
@@ -120,6 +126,24 @@ SCHEME_BUTTON = (
     '12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>'
     '<span class="vh">Dark mode</span></button>')
 
+# The registry declaration (read statically by tools/gen_gensrc.py). Each page's sources are the inputs its
+# bytes derive from: the generator and the page's data file, plus VERSION and changelog.toml for a page whose
+# data renders the document control strip (_c_control), STATUS_SOURCE for a page whose data carries the
+# $OPF_STATUS token, and HOOKS_SOURCE for a page whose data carries the $HOOK_COUNT token. The kind "block"
+# entries are the STATUS_LINES files, of which this generator owns only the status line; page_targets() keeps
+# them out of the page set. Two STATUS_LINES files have no entry (_STATUS_LINES_UNREGISTERED). The mappings
+# page also declares the modules whose functions render its bodies (_mappings_data and the _mappings_by_*
+# renderers): tools/gen_mappings.py (rows, registry and wording), tools/gen_rules.py (the rule corpus loader),
+# tools/_standards.py (the manifest loader) and tools/gen_agents.py (the rule order), with the 2 data folders
+# they read (_MAPPINGS_SOURCES). The self-test rows under "gensrc/" hold these sources to the built pages
+# (VERSION, changelog.toml and STATUS_SOURCE through the rendered text a page carries; HOOKS_SOURCE and
+# _MAPPINGS_SOURCES through the pages whose data carries the token or the mappings component, _data_carriers,
+# each set held to the pages whose bytes change with that input, and _MAPPINGS_SOURCES itself to the inputs
+# _mappings_inputs derives from the renderers' code) and to STATUS_LINES. Not declared, a disclosed
+# residual: every page's navigation (_nav) shows a nav item only when a sibling page is built at that item's
+# path, so a page's bytes can change when a sibling data file under the same draft-src/ folder is added,
+# removed, or its path field changes. Directory sources here name content inputs (as .aiqt/standards/ does),
+# and naming each sibling folder would make every page depend on every other page's data.
 GENSRC_OUTPUTS = (
     {"target": "site/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/home.toml", ".aiqt/core/hooks/manifest.toml"),
@@ -141,26 +165,27 @@ GENSRC_OUTPUTS = (
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/install/details/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/install-details.toml",
-                 ".aiqt/core/hooks/manifest.toml"),
+                 ".aiqt/core/hooks/manifest.toml", "VERSION", "changelog.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/license/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/license.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/mappings/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/mappings.toml",
-                 ".aiqt/standards/", ".aiqt/core/rules/"),
+                 ".aiqt/standards/", ".aiqt/core/rules/", "VERSION", "changelog.toml",
+                 "tools/gen_mappings.py", "tools/gen_rules.py", "tools/_standards.py", "tools/gen_agents.py"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/rules/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "site/draft-src/rules.toml"),
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/rules.toml", "VERSION", "changelog.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/standard/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "site/draft-src/standard.toml"),
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/standard.toml", "VERSION", "changelog.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/teams/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/teams.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/home.toml"),
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/home.toml", "opf/tools/opf.py"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/404.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/404.toml"),
@@ -169,7 +194,7 @@ GENSRC_OUTPUTS = (
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/adopt.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/core-files/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/core-files.toml"),
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/core-files.toml", "opf/tools/opf.py"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/draft/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/draft.toml"),
@@ -186,7 +211,16 @@ GENSRC_OUTPUTS = (
     {"target": "opf/site/standard/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/standard.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "opf/site/llms.txt", "kind": "block",
+     "sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
 )
+
+
+def page_targets(entries=GENSRC_OUTPUTS):
+    """The target of every page entry (kind "file") of a declaration: the set build() must produce and the
+    page folders stray_outputs() lists. The kind "block" STATUS_LINES entries are not pages."""
+    return frozenset(entry["target"] for entry in entries if entry["kind"] == "file")
 
 # The 6 project sites in rainbow order (specification section 1): key, name word, domain, footer slice.
 FAMILY = (
@@ -255,6 +289,10 @@ class RefusedPage(Exception):
     """A built page or a page data file breaks a rule; nothing is written."""
 
 
+class InlineMarkupRefused(RefusedPage):
+    """Inline markup breaks the inline rules (_inline_https); render_page names the page it came from."""
+
+
 def _url(site, path=""):
     return site["base"] + path
 
@@ -309,10 +347,23 @@ def _attr(value):
     return _html.escape(value, quote=True)
 
 
+_HTTPS = "https://"
+
+
+def _https(href):
+    """href with an https scheme written in any ASCII letter case ("HTTPS://", "Https://") rewritten as
+    "https://", so every page writes the scheme in lower case (decision D15, 2026-11-15); any other value is
+    returned unchanged."""
+    if isinstance(href, str) and href[:len(_HTTPS)].isascii() and href[:len(_HTTPS)].lower() == _HTTPS:
+        return _HTTPS + href[len(_HTTPS):]
+    return href
+
+
 def _external(href, label):
-    """A new-tab anchor: href is a raw URL, escaped here as an attribute value; label is markup."""
+    """A new-tab anchor: href is a raw URL, its https scheme written in lower case (_https) and escaped here
+    as an attribute value; label is markup."""
     return ('<a href="{}" target="_blank" rel="noopener noreferrer">{}<span class="vh"> (opens in a new tab)'
-            '</span></a>').format(_attr(href), label)
+            '</span></a>').format(_attr(_https(href)), label)
 
 
 def _brand(site):
@@ -459,18 +510,22 @@ def _internal_href(site, href, where):
 
 
 def _any_link(site, href, text, where):
-    """An anchor for an internal site-relative href, or a new-tab anchor for an https URL."""
+    """An anchor for an internal site-relative href, or a new-tab anchor for an https URL (its scheme in any
+    letter case, written in lower case)."""
+    href = _https(href)
     if isinstance(href, str) and href.startswith("https://"):
         return _external(href, text)
     return '<a href="{}">{}</a>'.format(_attr(_internal_href(site, href, where)), text)
 
 
-def _inline(site, value):
+def _inline(site, value, cell=False):
     """An inline HTML value with the $BASE/ token rendered as the site's base path, the $OPF_STATUS
     token rendered as the reference CLI status note (status_note) and the $HOOK_COUNT token rendered as
     the Claude Code hook count (hook_count) of the site's "tree" (the tree build() is given; ROOT when the site
-    names none). A value that still carries a $BASE/ token once expanded (such as $BASE$BASE//x) is refused
-    here, so the refusal names an inline HTML value as its source."""
+    names none), and the https scheme of each link attribute written in lower case (_inline_https, D15).
+    `cell` true is a table's raw cell (a whole td element), which may also use td. A value that still
+    carries a $BASE/ token once expanded (such as $BASE$BASE//x) is refused here, so the refusal names an
+    inline HTML value as its source."""
     if "$OPF_STATUS" in value:
         value = value.replace("$OPF_STATUS", status_note())
     if "$HOOK_COUNT" in value:
@@ -479,18 +534,22 @@ def _inline(site, value):
     if "$BASE/" in expanded:
         raise RefusedPage("unexpanded $BASE/ token left in an inline HTML value once expanded: {!r}".format(
             value))
-    return expanded
+    return _inline_https(expanded, cell)
 
 
 # The Claude Code hook count the pages state: the [[hook]] entries of the hooks manifest whose platform is
-# "claude-code" (the predicate tools/check_reference_facts.py counts for the README), rendered wherever the
-# $HOOK_COUNT token appears, so a hook added to or removed from the manifest drifts the pages that state it.
+# "claude-code" and whose registration is not "opt-in" (the predicate tools/check_reference_facts.py counts for
+# the README; gen_hooks leaves an opt-in control out of the plugin's hooks.json, so the plugin does not register
+# it), rendered wherever the $HOOK_COUNT token appears, so a hook added to or removed from the manifest drifts
+# the pages that state it. The self-test row hooks/live-count-matches-registration holds the live count to the
+# number of launchers the committed plugin hooks.json registers.
+HOOKS_JSON = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
 HOOKS_SOURCE = ".aiqt/core/hooks/manifest.toml"
 
 
 def hook_count(root=ROOT):
-    """The number of [[hook]] entries in the hooks manifest under root whose platform is "claude-code".
-    RefusedPage when the manifest cannot be read, when it is larger than MAX_PAGE_BYTES (the read stops
+    """The number of [[hook]] entries in the hooks manifest under root whose platform is "claude-code" and
+    whose registration is not "opt-in". RefusedPage when the manifest cannot be read, when it is larger than MAX_PAGE_BYTES (the read stops
     one byte past that bound), when it is not UTF-8 or not valid TOML, when its hook key is not an array
     of tables each with a string platform, or when it holds no Claude Code hook. Before the open, each
     directory on the manifest's path below root is checked with lstat, from root down, and refused unless
@@ -537,9 +596,12 @@ def hook_count(root=ROOT):
         raise RefusedPage("{}: cannot parse ({}: {})".format(HOOKS_SOURCE, type(exc).__name__, exc)) from exc
     hooks = doc.get("hook")
     if not isinstance(hooks, list) or not all(
-            isinstance(hook, dict) and isinstance(hook.get("platform"), str) for hook in hooks):
-        raise RefusedPage("{}: hook is not an array of tables each with a string platform".format(HOOKS_SOURCE))
-    count = sum(1 for hook in hooks if hook["platform"] == "claude-code")
+            isinstance(hook, dict) and isinstance(hook.get("platform"), str)
+            and isinstance(hook.get("registration", "plugin"), str) for hook in hooks):
+        raise RefusedPage("{}: hook is not an array of tables each with a string platform (and a string "
+                          "registration where one is given)".format(HOOKS_SOURCE))
+    count = sum(1 for hook in hooks
+                if hook["platform"] == "claude-code" and hook.get("registration", "plugin") != "opt-in")
     if not count:
         raise RefusedPage("{}: no hook has platform \"claude-code\"".format(HOOKS_SOURCE))
     return count
@@ -749,7 +811,7 @@ def _c_control(site, doc, where):
         raise RefusedPage("{}: the document control strip belongs to aiqt.ai only".format(where))
     spec = _need(doc, where, ("component", "document", "source_text", "source_href"),
                  ("licence_text", "licence_href"))
-    source_href = _text(spec, where, "source_href")
+    source_href = _https(_text(spec, where, "source_href"))
     if not source_href.startswith("https://"):
         raise RefusedPage("{}: source_href must be an https URL".format(where))
     version, status = _version_and_status()
@@ -825,7 +887,7 @@ def _table_html(site, spec, where):
             if cell.startswith("<td"):
                 if not cell.endswith("</td>"):
                     raise RefusedPage("{}: row {}: a raw cell must be a whole td element".format(where, number))
-                cells.append(_inline(site, cell))
+                cells.append(_inline(site, cell, cell=True))
             else:
                 cells.append("<td>{}</td>".format(_inline(site, cell)))
         body.append("<tr>{}</tr>".format("".join(cells)))
@@ -1425,14 +1487,24 @@ def _body_html(site, page):
 # exactly data-cfasync="false" then src, with the scheme src the shell chose, wherever on the page it
 # appears; the guard does not check that it sits in the head, which render_page's order provides and the
 # shell self-test asserts); every URL attribute
-# (LINK_URL_ATTRS) is an https URL, a #fragment, a path under the site's base or one of its kept live
-# paths, with no backslash, whitespace or control character, no protocol-relative "//" start and no "." or
-# ".." segment, raw or percent-encoded (%2e, either case); and every a or area whose href is https carries
+# (LINK_URL_ATTRS) is an https URL whose scheme is written as literal lower-case "https://" (decision D15;
+# not in another case and not through a character reference), a #fragment, a path under the site's base
+# or one of its kept live paths, with no backslash, whitespace or control character, no protocol-relative
+# "//" start and no "." or ".." segment, raw or percent-encoded (%2e, either case); and every a or area whose href is https carries
 # target="_blank", rel with noopener and noreferrer, and the "(opens in a new tab)" hint in its text or
-# aria-label. Residual: the guard judges the markup as Python's html.parser tokenizes it, so a malformed
-# construct a browser repairs differently is outside it; it reads no stylesheet (inline styles are refused
-# separately) and treats a URL-shaped value in any attribute not listed here as text; and it does not
-# check that an allowed target exists.
+# aria-label. Each markup construct html.parser and a browser can end at different places is a finding
+# wherever it sits on the page (_site_markup.split_constructs: any "<!" but an ordinary comment and
+# "<!doctype html>", any "<?", any "</" not followed by an ASCII letter; an ordinary comment's text is
+# scanned too, so a "<!--" inside an attribute value cannot hide a later construct), a literal "<" or ">"
+# inside a start tag is a finding (an attribute value writes it as "&lt;" or "&gt;"), attribute names
+# are folded to lower case in ASCII only, as a browser folds them, and every element is held to the
+# template's element allowlist in its context (_site_markup: no math, no raw-text element outside the head,
+# the head ended by text as in a browser, and inside svg only the shell's own svg elements), the definition
+# tools/check_site.py's Page also reads.
+# Residual: the guard judges the markup as
+# Python's html.parser tokenizes it, so a malformed construct a browser repairs differently is outside it;
+# it reads no stylesheet (inline styles are refused separately) and treats a URL-shaped value in any
+# attribute not listed here as text; and it does not check that an allowed target exists.
 LINK_REFUSED_TAGS = frozenset((
     "script", "iframe", "frame", "frameset", "base", "form", "object", "embed", "applet", "portal",
     "animate", "set", "animatemotion", "animatetransform", "handler", "foreignobject"))
@@ -1442,6 +1514,149 @@ LINK_URL_ATTRS = frozenset((
     "lowsrc", "dynsrc"))
 NEWTAB_HINT = "(opens in a new tab)"
 _URL_BAD_CHAR_RE = re.compile(r"[\x00-\x20\x7f\\]")
+# The markup constructs html.parser and a browser can end at different places (_site_markup.split_constructs).
+# html.parser (3.14) reads "<![CDATA[" as a CDATA section that ends at "]]>" where a browser, in HTML content,
+# ends "<![" at the first ">"; some patch releases open a comment at "<!-->" and "<!--->" and keep it open to the
+# next "-->" where a browser ends each at once as an empty comment (others end it at once as a browser does).
+# Markup after such a construct can be live in a browser and hidden from html.parser. Each construct is found by
+# the lexical scan, not by the parser, so the finding does not depend on the release. Rather than list the differences one at a time, a page may hold only the constructs
+# both read alike: ordinary comments and "<!doctype html>". Inline markup holding any other is refused
+# (_inline_https), and the link guard and refusals_for report each one wherever it appears on a page (also
+# where both read it as text, such as inside an attribute value).
+_ASCII_LOWER = {code: code + 32 for code in range(ord("A"), ord("Z") + 1)}
+
+
+def _ascii_lower(text):
+    """`text` with only the ASCII letters A to Z folded to a to z, as a browser folds an attribute name.
+    str.lower folds more: it maps KELVIN SIGN (U+212A) to "k", so "bacKground" would read as
+    "background", a name a browser does not see there."""
+    return text.translate(_ASCII_LOWER)
+
+
+def _start_tag_values(parser, tag, attrs):
+    """For the start tag `parser` (an html.parser.HTMLParser) has just handed to handle_starttag as `tag` and
+    `attrs`: the tag's source text (get_starttag_text); for each attribute in order, the (start, end) span of
+    its value as written in that text (inside its quotes, character references undecoded), or None for an
+    attribute with no value; and each attribute's name as written, folded to lower case in ASCII only
+    (_ascii_lower), the name a browser reads. The text is re-read with the tokenizer's own patterns
+    (tagfind_tolerant, attrfind_tolerant) the way parse_starttag reads it; ValueError when that re-reading
+    does not give the same tag, attribute names, value presence and value, so a caller refuses the tag rather
+    than guess where a value sits. A value is compared after html.unescape decodes its span. html.parser
+    decodes an attribute value by the attribute rule (a named reference with no ";" before "=", a letter or a
+    digit stays as written, as in a browser) while html.unescape decodes every one, so a value holding such a
+    reference ("?a=1&copy=2") does not compare equal and its tag is refused: fail closed, never accepted on
+    a guess."""
+    text = parser.get_starttag_text()
+    match = tagfind_tolerant.match(text, 1) if isinstance(text, str) and text.startswith("<") else None
+    if match is None or match.group(1).lower() != tag:
+        raise ValueError("start tag {!r} does not re-read as <{}>".format(text, tag))
+    spans, k = [], match.end()
+    while k < len(text):
+        found = attrfind_tolerant.match(text, k)
+        if not found:
+            break
+        if not found.group(2):
+            spans.append((found.group(1), None))
+        else:
+            start, end = found.span(3)
+            raw = found.group(3)
+            if raw[:1] == "'" == raw[-1:] or raw[:1] == '"' == raw[-1:]:
+                start, end = start + 1, end - 1
+            spans.append((found.group(1), (start, end)))
+        k = found.end()
+    if text[k:].strip() not in (">", "/>") \
+            or [name.lower() for name, _span in spans] != [name for name, _v in attrs]:
+        raise ValueError("start tag {!r} does not re-read to its attributes".format(text))
+    for (_name, span), (_n, value) in zip(spans, attrs):
+        if (span is None) != (value is None) or (
+                span is not None and _html.unescape(text[span[0]:span[1]]) != value):
+            raise ValueError("start tag {!r} does not re-read to its attribute values".format(text))
+    return text, [span for _name, span in spans], [_ascii_lower(name) for name, _span in spans]
+
+
+class _InlineLinkValues(HTMLParser):
+    """The (start, end) offset in `source` of each link attribute value (LINK_URL_ATTRS) written in a start
+    tag of `source`, as html.parser tokenizes it (the tokenizer the link guard uses), and each start tag whose
+    values cannot be placed in the source exactly (`unplaced`). `cell` true reads a table's raw cell."""
+
+    def __init__(self, source, cell=False):
+        super().__init__(convert_charrefs=True)
+        self.source = source
+        # getpos() counts lines at each LF only, as html.parser's updatepos does.
+        self._line_starts = [0] + [index + 1 for index, char in enumerate(source) if char == "\n"]
+        self.values = []
+        self.unplaced = []
+        # Each tag outside the inline element allowlist (_site_markup.INLINE_ELEMENTS, or CELL_ELEMENTS for a
+        # table's raw cell), as its finding.
+        self.rule = _site_markup.ElementRule(page=False, cell=cell)
+        self.outside = []
+
+    def handle_endtag(self, tag):
+        problem = self.rule.end(tag)
+        if problem is not None:
+            self.outside.append(problem)
+
+    def handle_starttag(self, tag, attrs):
+        problem = self.rule.start(tag, self.get_starttag_text())
+        if problem is not None:
+            self.outside.append(problem)
+        line, column = self.getpos()
+        offset = self._line_starts[line - 1] + column
+        try:
+            text, spans, names = _start_tag_values(self, tag, attrs)
+        except ValueError:
+            self.unplaced.append(self.get_starttag_text())
+            return
+        if self.source[offset:offset + len(text)] != text:
+            self.unplaced.append(text)
+            return
+        for name, span in zip(names, spans):
+            if name in LINK_URL_ATTRS and span is not None:
+                self.values.append((offset + span[0], offset + span[1]))
+
+
+def _inline_https(value, cell=False):
+    """Inline markup with the https scheme of each link attribute value written in lower case (decision D15):
+    a value that starts with "https://" in any ASCII letter case ("HTTPS://", "hTtPs://") has those 8
+    characters written as "https://", and every other character of the markup stays as written. The values
+    are found by html.parser (_InlineLinkValues), so a quoted ">" or a scheme-shaped text inside another
+    attribute value or deeper in a URL is never mistaken for a value's start. A scheme written with a
+    character reference is not a literal scheme and is left as written; the link guard refuses it (it
+    accepts only a literal lower-case "https://"). An attribute is a link attribute by its name folded in
+    ASCII only, as a browser reads it (_ascii_lower). InlineMarkupRefused (a RefusedPage; render_page names the
+    page) when the markup holds a markup declaration or processing instruction other than an ordinary comment
+    (_site_markup.split_constructs; "<![" and "<!-->" among them), when it uses an element outside the inline
+    element allowlist (_site_markup.INLINE_ELEMENTS, and td as well in a table's raw cell, `cell` true; no svg
+    or math, no raw-text element, so html.parser and a browser read the same elements here), when a start tag
+    holds a literal "<" or ">" (an attribute value writes it as "&lt;" or "&gt;";
+    _site_markup.literal_in_start_tag), when it ends inside a construct html.parser still holds back (an
+    unterminated start tag, say, which would run on into the template's markup; _site_markup.unfinished),
+    and when a start tag's values cannot be placed in the markup exactly. Each fragment is read alone, and
+    a comment it opens must also close in it (split_constructs reports a "<!--" with no "-->" after it), so
+    no fragment is read inside a comment an earlier fragment of the page opened."""
+    constructs = _site_markup.split_constructs(value)
+    if constructs:
+        raise InlineMarkupRefused("inline markup holds a markup declaration or processing instruction other "
+                                  "than an ordinary comment at offset {}: {!r}".format(*constructs[0]))
+    reader = _InlineLinkValues(value, cell)
+    reader.feed(value)
+    rest = _site_markup.unfinished(reader)
+    reader.close()
+    if reader.outside:
+        raise InlineMarkupRefused("inline markup uses {}".format(reader.outside[0]))
+    if rest is not None:
+        raise InlineMarkupRefused("inline markup ends inside an unfinished construct {!r}, which would run on "
+                                  "into the template's markup".format(rest[:40]))
+    if reader.unplaced:
+        raise InlineMarkupRefused("inline markup start tag {!r} cannot be read exactly".format(reader.unplaced[0]))
+    parts, done = [], 0
+    for start, end in sorted(reader.values):
+        scheme = value[start:min(end, start + len(_HTTPS))]
+        if _https(scheme) == _HTTPS and scheme != _HTTPS:
+            parts.extend((value[done:start], _HTTPS))
+            done = start + len(_HTTPS)
+    parts.append(value[done:])
+    return "".join(parts)
 
 
 class _LinkGuard(HTMLParser):
@@ -1452,8 +1667,10 @@ class _LinkGuard(HTMLParser):
         self.scheme_src = scheme_src
         self.found = []
         self._anchor = None
+        # The page's elements are held to the template's element allowlist (_site_markup), in context.
+        self.rule = _site_markup.ElementRule(page=True)
 
-    def _url_finding(self, name, tag, value):
+    def _url_finding(self, name, tag, value, written):
         site, base = self.site, self.site["base"]
         if value is None:
             return "{} attribute on <{}> has no value".format(name, tag)
@@ -1464,12 +1681,34 @@ class _LinkGuard(HTMLParser):
         if _URL_BAD_CHAR_RE.search(value) or value.startswith("//") \
                 or any(unquote(segment) in (".", "..") for segment in segments):
             return "{} {!r} on <{}> is not a plain URL".format(name, value, tag)
-        if value.startswith("https://") or value.startswith("#") or value.startswith(base) \
-                or _kept_live(site, value):
+        # The scheme is read as a browser reads it, in any ASCII letter case (_https); decision D15 has every
+        # page write it as literal lower-case characters, so the value as written (`written`, character
+        # references undecoded; None when the start tag could not be re-read) must start with "https://".
+        # The inline path (_inline_https) and _external write it so; a scheme in another case, or written
+        # with a character reference ("&#72;TTPS://", "&#104;ttps://", "https&colon;//"), is refused here.
+        if _https(value).startswith("https://"):
+            if isinstance(written, str) and written.startswith(_HTTPS):
+                return None
+            return "{} {!r} on <{}> does not write its https scheme as literal lower-case https://".format(
+                name, value if written is None else written, tag)
+        if value.startswith("#") or value.startswith(base) or _kept_live(site, value):
             return None
         return "{} {!r} on <{}> is neither under {} nor an https URL".format(name, value, tag, base)
 
     def handle_starttag(self, tag, attrs):
+        problem = self.rule.start(tag, self.get_starttag_text())
+        if problem is not None:
+            self.found.append(problem)
+        # Each value as written in the start tag's source text, for the literal-scheme rule of _url_finding,
+        # and each attribute name folded in ASCII only, as a browser reads it (html.parser folds with
+        # str.lower; a tag that cannot be re-read keeps those names, which can only add URL checks).
+        try:
+            text, spans, names = _start_tag_values(self, tag, attrs)
+            written = [None if span is None else text[span[0]:span[1]] for span in spans]
+            attrs = [(name, value) for name, (_parsed, value) in zip(names, attrs)]
+        except ValueError:
+            self.found.append("<{}> start tag whose attribute values cannot be read exactly".format(tag))
+            written = [None] * len(attrs)
         first = {}
         for name, value in attrs:
             first.setdefault(name, value)
@@ -1483,12 +1722,13 @@ class _LinkGuard(HTMLParser):
             self.found.append("<{}> element".format(tag))
         if tag == "meta" and "http-equiv" in first:
             self.found.append("<meta http-equiv> element")
-        for name, value in attrs:
+        for (name, value), as_written in zip(attrs, written):
             if name in LINK_URL_ATTRS:
-                problem = self._url_finding(name, tag, value)
+                problem = self._url_finding(name, tag, value, as_written)
                 if problem is not None:
                     self.found.append(problem)
-        if tag in ("a", "area") and isinstance(first.get("href"), str) and first["href"].startswith("https://"):
+        if tag in ("a", "area") and isinstance(first.get("href"), str) \
+                and _https(first["href"]).startswith("https://"):
             rel = (first.get("rel") or "").split()
             if first.get("target") != "_blank" or "noopener" not in rel or "noreferrer" not in rel:
                 self.found.append("external link {!r} without the new-tab attributes".format(first["href"]))
@@ -1501,10 +1741,14 @@ class _LinkGuard(HTMLParser):
                 self.found.append("external link {!r} without the new-tab hint".format(first["href"]))
 
     def handle_data(self, data):
+        self.rule.text(data)
         if self._anchor is not None:
             self._anchor[1].append(data)
 
     def handle_endtag(self, tag):
+        problem = self.rule.end(tag)
+        if problem is not None:
+            self.found.append(problem)
         if tag == "a" and self._anchor is not None:
             if NEWTAB_HINT not in "".join(self._anchor[1]):
                 self.found.append("external link {!r} without the new-tab hint".format(self._anchor[0]))
@@ -1515,8 +1759,12 @@ def _link_findings(site, html, scripts=(), scheme_src=None):
     """Every link-rule finding on a built page (see the link guard comment above). `scripts` is the list of
     script src values the shell wrote; each allows 1 script element with exactly that src and defer.
     `scheme_src` is the head's scheme script src; it allows 1 script element with exactly
-    data-cfasync="false" then that src, and nothing else."""
+    data-cfasync="false" then that src, and nothing else. Each markup construct html.parser and a browser can
+    end at different places is a finding first: markup after it can be live in a browser yet hidden from
+    html.parser (_site_markup.split_constructs)."""
     guard = _LinkGuard(site, scripts, scheme_src)
+    guard.found.extend(_site_markup.construct_finding(offset, construct)
+                       for offset, construct in _site_markup.split_constructs(html, page=True))
     guard.feed(html)
     guard.close()
     if guard._anchor is not None:
@@ -1552,8 +1800,13 @@ def render_page(site, pages, page):
         head.append('<meta name="robots" content="noindex, nofollow">')
     # The page's meta text, as plain text, is also its search and link-preview description. Specification
     # section 5 does not place these metas; they join the other metas before the title, where every
-    # reference page keeps its robots meta, so the elements section 5 lists keep their order.
-    description = _description(site, page)
+    # reference page keeps its robots meta, so the elements section 5 lists keep their order. A refusal of
+    # the page's inline markup (_inline_https) is given the page's name here.
+    try:
+        description = _description(site, page)
+        body = _body_html(site, page)
+    except InlineMarkupRefused as exc:
+        raise RefusedPage("{}/{} ({}): {}".format(site["root"], rel, page["where"], exc)) from exc
     if description:
         head.append('<meta name="description" content="{}">'.format(_attr(description)))
         head.append('<meta property="og:description" content="{}">'.format(_attr(description)))
@@ -1581,14 +1834,16 @@ def render_page(site, pages, page):
         '<header class="mast">{}{}{}</header>'.format(
             _brand(site), _nav(site, pages, _page_url(site, rel)), SCHEME_BUTTON),
         '<main id="main-content">',
-        _body_html(site, page),
+        body,
         "</main>",
         _footer(site),
         '<p class="vh" id="copy-status" role="status" aria-live="polite"></p>',
         "</body>",
         "</html>",
     ]) + "\n"
-    refusals = refusals_for(html) + _model_findings(html) + _link_findings(site, html, scripts, scheme_src)
+    # A construct both refusals_for and the link guard report is named once.
+    refusals = list(dict.fromkeys(refusals_for(html) + _model_findings(html)
+                                  + _link_findings(site, html, scripts, scheme_src)))
     if refusals:
         raise RefusedPage("{}/{}: {}".format(site["root"], rel, "; ".join(refusals)))
     return html
@@ -1630,8 +1885,11 @@ class _Refusals(HTMLParser):
 
 
 def refusals_for(html):
-    """Every template code-style refusal a page triggers (specification sections 5 and 12)."""
-    found = []
+    """Every template code-style refusal a page triggers (specification sections 5 and 12). Each markup
+    construct html.parser and a browser can end at different places (_site_markup.split_constructs) comes
+    first: an inline script or handler after it would be live in a browser yet never reach the reader here."""
+    found = [_site_markup.construct_finding(offset, construct)
+             for offset, construct in _site_markup.split_constructs(html, page=True)]
     if any(dash in html for dash in DASHES):
         found.append("en or em dash")
     parser = _Refusals()
@@ -1738,7 +1996,7 @@ def build(pages=None, sites=SITES, registered=True, tree=ROOT):
                 raise RefusedPage("{}: built by more than 1 site".format(target))
             outputs[target] = render_page(dict(site, tree=tree), site_pages, page)
     if declared and registered:
-        targets = {entry["target"] for entry in GENSRC_OUTPUTS}
+        targets = page_targets()
         if set(outputs) != targets:
             raise RefusedPage("built outputs {} differ from GENSRC_OUTPUTS {}".format(
                 sorted(outputs), sorted(targets)))
@@ -1841,13 +2099,13 @@ def _temp_names(path):
 
 def stray_outputs(tree, sites=SITES, targets=None):
     """Every .html file (the extension in any case), and every leftover temporary file (TEMP_NAME_RE), in a
-    folder that holds a generated page of a site (the folder of a target) that the targets (GENSRC_OUTPUTS
-    by default) do not list, apart from a kept live path's own file. Only those
+    folder that holds a generated page of a site (the folder of a target) that the targets (the page targets
+    of GENSRC_OUTPUTS by default) do not list, apart from a kept live path's own file. Only those
     folders are listed, not their subfolders, so the asset folder and a promoted root's other folders (its
     downloads, its draft placeholder) are not read; a page in a folder holding no generated page is not
     found here."""
     if targets is None:
-        targets = {entry["target"] for entry in GENSRC_OUTPUTS}
+        targets = page_targets()
     found = []
     for site in sites:
         prefix = site["root"] + "/"
@@ -1967,6 +2225,700 @@ def run(root, check, outputs=None):
     return 1 if drift or stray else 0
 
 
+# The register rows: the declared sources of each page entry hold to what its built page carries (or, for the
+# hook count and the mappings bodies, what its data carries), and each STATUS_LINES file has its own entry.
+# Each row id is a key of the dict _register_findings returns.
+_FOOTER_ROW = "gensrc/footer-pages-declare-version-and-changelog"
+_NOTE_ROW = "gensrc/status-note-pages-declare-status-source"
+_LINES_ROW = "gensrc/status-lines-registered"
+_BUILT_ROW = "gensrc/page-entries-built"
+_HOOKS_ROW = "gensrc/hook-count-pages-declare-hooks-source"
+_MAPPINGS_ROW = "gensrc/mappings-pages-declare-renderer-sources"
+_FOOTER_SOURCES = ("VERSION", "changelog.toml")
+# The inputs a mappings component renders from: the 2 data folders _mappings_data reads and the 4 modules
+# whose functions load and render them. The self-test holds this tuple to _mappings_inputs, which derives the
+# same set from this file's own text (the functions _MAPPINGS_RENDERER calls and the modules, folders and
+# files they use, through module-level constants, imports inside them and ROOT.joinpath too), so an entry
+# dropped here, or one gained that no renderer reads, turns the self-test red. The derivation is a
+# best-effort static reading, not complete: it refuses (turns the self-test red on) only the forms its
+# docstring names, among them ROOT taken any way but as a path base or an argument to a tools/ module, a
+# ROOT default argument, an attribute other than joinpath and the plain reads of ROOT, of a ROOT path or
+# of a name bound alone to one, a ".." part, a walrus of a ROOT path taken as the base of another
+# attribute or of "/", a renderer's match capture of a ROOT path, and a renderer's use, by name, of open,
+# getattr, os, Path and the other names on _WALK_REFUSED_NAMES, or of a name an import of one of them binds
+# under any alias. It does not see what a tools/ module a renderer calls reads or imports in turn, a path
+# reaching a renderer as a parameter, return value, container, attribute or unpacking target, a path a
+# module-level match capture binds inside a larger case pattern, code reached through an object's
+# attribute rather than by name, a module-level name bound inside a function, or a file API not on that
+# list or reached as a module's attribute (its docstring's blind spots). A renderer change of those kinds
+# needs this tuple checked by hand.
+_MAPPINGS_RENDERER = "_c_mappings"
+_MAPPINGS_SOURCES = (".aiqt/standards/", ".aiqt/core/rules/", "tools/gen_mappings.py", "tools/gen_rules.py",
+                     "tools/_standards.py", "tools/gen_agents.py")
+# This generator's stem in the registry's discovery (tools/gen_gensrc.py discover_declarations).
+_OWN_STEM = "gen_draft_site"
+# The STATUS_LINES files with no register entry; the status line of each stays covered by this generator's
+# --check alone. .aiqt/core/ownership.toml excludes opf/README.md from the release (repository
+# documentation, not shipped), and tools/gen_manifest.py refuses an exclusion over any register target.
+# tools/check_overclaim.py scans every register target, a block target as its whole file, and the current
+# wording of opf/spec/OPF-SPEC.md draws findings there. The row requires each of these to have no entry, so
+# registering one fails until it is taken off this list.
+_STATUS_LINES_UNREGISTERED = ("opf/README.md", "opf/spec/OPF-SPEC.md")
+# Each flip: (the row it must turn red, alone; the text it replaces inside the GENSRC_OUTPUTS literal, which
+# must occur there exactly once; its replacement). In order: a page that carries the rendered text loses a
+# source (under-declaration); a page that does not carry it gains one (over-declaration); the block entry
+# goes, or loses one of the 2 sources it must name; opf/README.md, on _STATUS_LINES_UNREGISTERED, gains an
+# entry; a page entry names a target the build does not produce; the block entry is declared twice (the upper
+# bound of exactly 1); the block entry's kind becomes "tree", a registry kind the build does not treat as a
+# page, so only the kind guard fires; a footer page loses changelog.toml alone, and a page without the footer
+# gains changelog.toml alone, so each of the 2 footer sources is held in both directions;
+# opf/spec/OPF-SPEC.md, the other file on _STATUS_LINES_UNREGISTERED, gains an entry; the install details and
+# home entries each lose HOOKS_SOURCE, and the mappings entry loses tools/gen_mappings.py (under-declaration);
+# and a page whose data carries neither the $HOOK_COUNT token nor a mappings component gains HOOKS_SOURCE, or
+# tools/gen_mappings.py (over-declaration).
+_LLMS_ENTRY = ('\n    {"target": "opf/site/llms.txt", "kind": "block",\n'
+               '     "sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),\n'
+               '     "regenerate": "python3 tools/gen_draft_site.py"},')
+_REGISTER_FLIPS = (
+    (_FOOTER_ROW, 'site/draft-src/rules.toml", "VERSION", ', 'site/draft-src/rules.toml", '),
+    (_NOTE_ROW, 'opf/site/draft-src/core-files.toml", "opf/tools/opf.py"', 'opf/site/draft-src/core-files.toml"'),
+    (_FOOTER_ROW, '"site/draft-src/license.toml")', '"site/draft-src/license.toml", "VERSION")'),
+    (_NOTE_ROW, '"opf/site/draft-src/license.toml")', '"opf/site/draft-src/license.toml", "opf/tools/opf.py")'),
+    (_LINES_ROW, _LLMS_ENTRY, ''),
+    (_LINES_ROW, '"sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),\n     "regenerate"',
+     '"sources": ("tools/gen_draft_site.py",),\n     "regenerate"'),
+    (_LINES_ROW, '"sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),\n     "regenerate"',
+     '"sources": ("opf/tools/opf.py",),\n     "regenerate"'),
+    (_LINES_ROW, _LLMS_ENTRY, _LLMS_ENTRY + _LLMS_ENTRY.replace('"opf/site/llms.txt"', '"opf/README.md"')),
+    (_BUILT_ROW, _LLMS_ENTRY, _LLMS_ENTRY + '\n    {"target": "site/unbuilt/index.html", "kind": "file",\n'
+                              '     "sources": ("tools/gen_draft_site.py",),\n'
+                              '     "regenerate": "python3 tools/gen_draft_site.py"},'),
+    (_LINES_ROW, _LLMS_ENTRY, _LLMS_ENTRY + _LLMS_ENTRY),
+    (_LINES_ROW, '"opf/site/llms.txt", "kind": "block"', '"opf/site/llms.txt", "kind": "tree"'),
+    (_FOOTER_ROW, 'site/draft-src/rules.toml", "VERSION", "changelog.toml"', 'site/draft-src/rules.toml", "VERSION"'),
+    (_FOOTER_ROW, '"site/draft-src/license.toml")', '"site/draft-src/license.toml", "changelog.toml")'),
+    (_LINES_ROW, _LLMS_ENTRY, _LLMS_ENTRY + _LLMS_ENTRY.replace('"opf/site/llms.txt"', '"opf/spec/OPF-SPEC.md"')),
+    (_HOOKS_ROW, '".aiqt/core/hooks/manifest.toml", "VERSION"', '"VERSION"'),
+    (_HOOKS_ROW, '"site/draft-src/home.toml", ".aiqt/core/hooks/manifest.toml")', '"site/draft-src/home.toml")'),
+    (_MAPPINGS_ROW, '"tools/gen_mappings.py", ', ''),
+    (_HOOKS_ROW, '"site/draft-src/license.toml")', '"site/draft-src/license.toml", ".aiqt/core/hooks/manifest.toml")'),
+    (_MAPPINGS_ROW, '"site/draft-src/license.toml")', '"site/draft-src/license.toml", "tools/gen_mappings.py")'),
+)
+
+
+def _footer_markup(version, status):
+    """The Version and Status cells of the document control strip as _c_control renders them."""
+    return '<div><dt>Version</dt><dd>{}</dd></div><div><dt>Status</dt><dd>{}</dd></div>'.format(
+        _t(version), _t(status))
+
+
+def _naming_entries(entries, rel):
+    """The entries of a declaration that name the file `rel`: an entry whose target is `rel` itself, or a
+    kind "tree" entry whose target is an ancestor folder of `rel`. A tree target is compared as a folder
+    (a trailing "/" is added when the literal lacks one), so the match stops at a path component: a
+    sibling whose name only begins the same way (opf/README.mdx, a tree opf/spe/ or opf/spec/OPF-SPEC/)
+    does not name `rel`. An entry that is not a dict with a string target names nothing here (the
+    registry's own validation refuses it)."""
+    found = []
+    for entry in entries:
+        target = entry.get("target") if isinstance(entry, dict) else None
+        if not isinstance(target, str):
+            continue
+        folder = target if target.endswith("/") else target + "/"
+        if target == rel or (entry.get("kind") == "tree" and rel.startswith(folder)):
+            found.append(entry)
+    return found
+
+
+def _page_strings(page):
+    """Every string value of a page model's data, as the TOML parse decoded it: the title, label, heading,
+    meta and description, and every string nested in the body components (arrays and tables included). A
+    TOML comment is not among them, and an escape such as \\u0024 is decoded."""
+    stack = [page[key] for key in ("title", "label", "heading", "meta", "description", "body")]
+    found = []
+    while stack:
+        value = stack.pop()
+        if isinstance(value, str):
+            found.append(value)
+        elif isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+    return found
+
+
+def _data_carriers(sites=SITES, root=ROOT):
+    """{row id: frozenset of page targets}, found from the page models _load_pages returns (its bounded read
+    and TOML parse; no data file is read again): _FOOTER_ROW maps to the pages with a body component
+    "control", _NOTE_ROW to the pages with a decoded value carrying the $OPF_STATUS token, _HOOKS_ROW to the
+    pages with a decoded value carrying the $HOOK_COUNT token, and _MAPPINGS_ROW to the pages with a body
+    component "mappings". The register rows hold the last 2 from these sets (a hook count renders as a bare
+    number, a mappings body has no fixed marker). A token is looked for in the decoded values, so a TOML
+    comment naming it is no carrier and an escaped spelling is one; a token in a value that renders as
+    escaped text rather than through _inline counts too, and the self-test's -found rows then turn red, so
+    the sets fail closed rather than miss a page."""
+    found = {_FOOTER_ROW: set(), _NOTE_ROW: set(), _HOOKS_ROW: set(), _MAPPINGS_ROW: set()}
+    for site in sites:
+        for page in _load_pages(Path(root) / site["src"], site["src"]):
+            target = "{}/{}".format(site["root"], page["rel"])
+            names = {component["component"] for component in page["body"]}
+            strings = _page_strings(page)
+            for row, carries in ((_FOOTER_ROW, "control" in names),
+                                 (_NOTE_ROW, any("$OPF_STATUS" in value for value in strings)),
+                                 (_HOOKS_ROW, any("$HOOK_COUNT" in value for value in strings)),
+                                 (_MAPPINGS_ROW, "mappings" in names)):
+                if carries:
+                    found[row].add(target)
+    return {row: frozenset(targets) for row, targets in found.items()}
+
+
+class _FolderEntry:
+    """A path part standing for any entry of the folder named by the parts before it (the value of a loop
+    variable over that folder's iterdir())."""
+
+    def __repr__(self):
+        return "<entry>"
+
+
+_ROOT_ENTRY = _FolderEntry()
+
+
+def _root_parts(node, used, bound=None):
+    """The path parts of `node` when it is a path built on ROOT: ROOT itself, a name `bound` maps to parts
+    (bound(name) gives a name's parts, or None when it is no path base), X / "<part>" or
+    X.joinpath("<part>", ...) over such an X. None when `node` is no such path. ValueError (cannot evaluate)
+    when a part is not a string constant. Each node consumed as the base of a longer path is added to
+    `used`."""
+    import ast
+    if isinstance(node, ast.Name) and node.id == "ROOT":
+        return []
+    if isinstance(node, ast.Name):
+        return bound(node.id) if bound is not None and isinstance(node.ctx, ast.Load) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        base, extra = node.left, [node.right]
+    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "joinpath":
+        base, extra = node.func.value, list(node.args)
+    else:
+        return None
+    parts = _root_parts(base, used, bound)
+    if parts is None:
+        return None
+    used.add(id(base))
+    if isinstance(node, ast.Call) and node.keywords \
+            or not all(isinstance(part, ast.Constant) and isinstance(part.value, str) for part in extra):
+        raise ValueError("cannot evaluate a ROOT path whose parts are not all string constants (line {})"
+                         .format(node.lineno))
+    return parts + [part.value for part in extra]
+
+
+def _unwalrus(node):
+    """`node` read through any walrus expressions around it: the value of (a := (b := value))."""
+    import ast
+    while isinstance(node, ast.NamedExpr):
+        node = node.value
+    return node
+
+
+def _module_statements(body):
+    """Every statement of a module body, the bodies of its module-level if, try, with, for, while and match
+    statements included (a definition, assignment or import there binds a module-level name too), but not
+    the bodies of functions and classes."""
+    import ast
+    for node in body:
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            value = getattr(node, field, None)
+            if isinstance(value, list):
+                yield from _module_statements(value)
+        for nested in getattr(node, "handlers", ()) or ():
+            yield from _module_statements(nested.body)
+        for nested in getattr(node, "cases", ()) or ():
+            yield from _module_statements(nested.body)
+
+
+# Names whose use in a walked part makes _mappings_inputs refuse (cannot evaluate): each reaches a file or a
+# module some way the derivation does not follow (a path from __file__, a literal or relative path, a
+# computed import, a computed attribute, or this module's namespace by name). posix, nt and _io are the C
+# modules behind os and io; __loader__ and __spec__ reach this module's loader (get_data reads any path);
+# type of a ROOT path is Path, and operator.truediv extends a path as "/" does, neither seen as a path.
+_WALK_REFUSED_NAMES = frozenset({
+    "__file__", "open", "__import__", "importlib", "getattr", "setattr", "globals", "vars", "locals",
+    "exec", "eval", "compile", "builtins", "__builtins__", "sys", "os", "io", "glob", "shutil", "pathlib",
+    "Path", "tomllib", "tempfile", "subprocess", "posix", "nt", "_io", "__loader__", "__spec__",
+    "type", "operator"})
+# The attributes a walked part may take of a ROOT path (other than joinpath, which extends it): each reads
+# the path itself or the entries of the folder it names, never a path the derivation does not see.
+_ROOT_PATH_READS = frozenset({"iterdir", "read_text", "read_bytes", "open", "is_file", "is_dir", "exists"})
+
+
+def _mappings_inputs(source, root=ROOT):
+    """The inputs a mappings component renders from, derived from `source` (this file's text) alone. The
+    derivation is a best-effort static reading of that text: it derives the forms named below and refuses
+    (ValueError, as cannot evaluate) the forms named below, and a renderer read outside those forms (the
+    blind spots at the end) is the disclosed residual, which no row here turns red.
+
+    From the function _MAPPINGS_RENDERER, every module-level function, class and assigned name it names is
+    walked, directly or through another (a module-level constant's value is walked as the function's code
+    is). A module-level name is one bound by a module-level statement: a def or class, an assignment, an
+    augmented or annotated assignment, a for or with target, a walrus target anywhere in such a statement
+    or in the test of an if or while or the subject or a guard of a match, an import, or a capture (as,
+    star or mapping rest name) of a match case, whose walked value is the match subject; a statement nested
+    in a module-level if, try, with, for, while or match body counts too. The inputs are
+    "tools/<a>.py" (and "tools/<a>/<b>.py" and so on for a dotted name) for each module in root's tools/
+    folder that a walked part imports, or whose module-level import binds a name a walked part uses, and
+    each path a walked part builds on a path base from string constants (X / "<a>" / "<b>",
+    X.joinpath("<a>", "<b>") or both): "<a>/<b>" when that path is a file under root and "<a>/<b>/" when it
+    is a folder. A path base is ROOT; a name whose bindings (local to the walked part, or else at module
+    level) are all the same path and each assign it, alone, a path built on a path base or make it, alone,
+    the variable of a loop over that folder's entries (p = ROOT / "<a>", p := ..., a
+    module-level _P = ROOT / "<a>", a module-level bare match capture of such a path), a walrus around
+    that path being read through (p = (q := ROOT / "<a>")); or the variable, alone, of a for loop or
+    comprehension over X.iterdir() of such a path X, bare or as the one argument of sorted, list, tuple or
+    reversed (a walrus around any of these read through), which stands for an entry of that folder (a path
+    under the entry derives the folder). A walrus expression itself, (p := ROOT / "<a>"), is no path base:
+    the path in it is derived, and its target is a path base as above.
+
+    ValueError, as cannot evaluate, when `source` defines no _MAPPINGS_RENDERER; when the module, or a walked
+    part, has a relative import, a star import, or an import of tools or tools.<name>; when a walked part
+    imports a module on _WALK_REFUSED_NAMES or whose top package is on it (builtins among them), or imports
+    a name on it from any module, under any alias (import os as o, from os import listdir, from pathlib
+    import Path as P, from importlib import import_module, from builtins import open as op); when a walked
+    part uses a name a module-level import of that kind binds (import os as _os, then _os); or when a
+    walked part builds a path from a part that is not a string constant, names a path that is missing under
+    root or leaves it ("", "." or ".." as a part, on ROOT or on a named path base), takes an attribute of
+    ROOT or of a path other than joinpath and _ROOT_PATH_READS (ROOT.iterdir(), ROOT.parent,
+    (ROOT / "<a>").glob(...), p.parent or p.glob(...) for a named path base p, so a loop over X.glob(...)
+    or X.rglob(...) too, an entry's .parent), takes an attribute other than _ROOT_PATH_READS (joinpath
+    included) of a walrus expression whose value is a ROOT path, or has one on either side of "/"
+    ((p := ROOT / "<a>").parent, (p := ROOT / "<a>") / ".."), has a match statement whose subject is a ROOT
+    path (a walrus around it read through) and whose case patterns capture a name at any depth (case p:,
+    case object(parent=p):), uses a name bound to a ROOT path that has another binding as well: one that
+    is no ROOT path (p = ROOT / "<a>" then p /= "..") or one to another ROOT path (a loop variable reused
+    over another folder), is a function whose
+    default arguments use ROOT, uses ROOT any other way than as the base of such a path or as an argument
+    of a call into a module of root's tools/ folder (an alias r = ROOT, str(ROOT), os.path.join(ROOT, ...),
+    a match capture of ROOT), or uses a name on _WALK_REFUSED_NAMES (open, getattr, __file__, os, Path,
+    posix, nt, _io, __loader__, __spec__, type, operator and the others there).
+
+    Blind spots, which no row here turns red: what a tools/ module reads, and the modules it imports in
+    turn, when the walked part calls it (ROOT or a path handed to it included; the module is an input, its
+    own reads are not derived); a path that reaches a walked part other than as a path base (a function
+    parameter or default, a call's return value, an unpacking target, a conditional expression, a
+    container, an attribute or subscript, a with target, a loop over anything but the X.iterdir() forms
+    named above, such as enumerate(p.iterdir()) or a name bound to p.iterdir()): its attributes and further
+    parts are neither derived nor refused; the path a match capture binds inside a larger case pattern of a
+    module-level match (case object(parent=_P):), or from a match subject that is not itself a ROOT path (a
+    container holding one), at module level or in a walked part; a
+    module-level name bound other than by a module-level statement (a global statement in a function,
+    setattr on the module, an assignment through sys.modules) or a name a walked part reaches through an
+    object's attribute rather than by name (a method of a class instance, a callable stored in a
+    container): the code behind it is not walked; a module-level name bound twice is walked in every
+    binding, so one a renderer never reaches can still be refused or derived; a local name that shadows a
+    refused module-level import is refused all the same; and a read through a file API whose module and
+    name are not on _WALK_REFUSED_NAMES (codecs.open, linecache, zipfile, posixpath and the like, imported
+    under any name) or that a walked part reaches as an attribute of a module it may use
+    (gen_rules.Path(".aiqt/core/hooks").iterdir(), gen_mappings.os.listdir(...)), whatever path it names."""
+    import ast
+    tree = ast.parse(source)
+
+    def import_bindings(node):
+        # (bound name, source, refused) for each name an import binds: the source is the module (import) or
+        # module.name (from-import), refused when its module or top package, or the name imported, is on
+        # _WALK_REFUSED_NAMES (builtins among them), whatever alias binds it.
+        if isinstance(node, ast.Import):
+            return [(alias.asname or alias.name.partition(".")[0], alias.name,
+                     alias.name.partition(".")[0] in _WALK_REFUSED_NAMES) for alias in node.names]
+        module = node.module or ""
+        return [(alias.asname or alias.name, "{}.{}".format(module, alias.name),
+                 module.partition(".")[0] in _WALK_REFUSED_NAMES or alias.name in _WALK_REFUSED_NAMES)
+                for alias in node.names]
+
+    # defined: the code walked for a module-level name; module_bindings: each module-level binding of a
+    # name as (kind, value), kind "path" for a value bound to the name alone, "loop" for the iterable of a
+    # for loop over the name alone, "other" for any other binding (a def, an import, an unpacking target,
+    # an augmented assignment, a with target, a capture inside a larger case pattern).
+    defined, imported, refused_imports, module_bindings = {}, {}, {}, {}
+    for node in _module_statements(tree.body):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defined.setdefault(node.name, []).append(node)
+            module_bindings.setdefault(node.name, []).append(("other", node))
+            continue
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = [(target, node.value, "path") for target in
+                       (node.targets if isinstance(node, ast.Assign) else [node.target])]
+        elif isinstance(node, ast.AugAssign):
+            targets = [(node.target, node.value, "other")]
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            targets = [(node.target, node.iter, "loop")]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            targets = [(item.optional_vars, item.context_expr, "other") for item in node.items if item.optional_vars]
+        else:
+            targets = []
+        # The test of an if or while, and the subject and guards of a match, are not statements
+        # _module_statements yields, so their walrus targets are read here; a case pattern's captures (as,
+        # star and mapping rest names) bind parts of the subject, a bare capture the whole of it.
+        if isinstance(node, (ast.If, ast.While)):
+            scanned = [node.test]
+        elif isinstance(node, ast.Match):
+            scanned = [node.subject] + [case.guard for case in node.cases if case.guard is not None]
+            for case in node.cases:
+                for pattern in ast.walk(case.pattern):
+                    name = (pattern.name if isinstance(pattern, (ast.MatchAs, ast.MatchStar))
+                            else pattern.rest if isinstance(pattern, ast.MatchMapping) else None)
+                    if name:
+                        bare = isinstance(pattern, ast.MatchAs) and pattern is case.pattern and pattern.pattern is None
+                        targets.append((ast.Name(id=name, ctx=ast.Store()), node.subject, "path" if bare else "other"))
+        elif isinstance(node, (ast.Try, ast.TryStar, ast.Import, ast.ImportFrom)):
+            scanned = []
+        else:
+            scanned = [node]
+        targets += [(named.target, named.value, "path") for top in scanned for named in ast.walk(top)
+                    if isinstance(named, ast.NamedExpr)]
+        for target, value, kind in targets:
+            for name in ast.walk(target):
+                if isinstance(name, ast.Name) and name.id != "ROOT":
+                    defined.setdefault(name.id, []).append(value)
+                    module_bindings.setdefault(name.id, []).append((kind if name is target else "other", value))
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and not (isinstance(node, ast.ImportFrom)
+                                                                     and (node.level or not node.module)):
+            for name, origin, refused in import_bindings(node):
+                imported[name] = origin if isinstance(node, ast.Import) else node.module
+                module_bindings.setdefault(name, []).append(("other", node))
+                if refused:
+                    refused_imports[name] = origin
+
+    def refuse_import(node):
+        if isinstance(node, ast.ImportFrom) and (node.level or not node.module or node.module == "tools"
+                                                 or node.module.startswith("tools.")
+                                                 or any(alias.name == "*" for alias in node.names)):
+            raise ValueError("cannot evaluate a relative, star or tools-qualified import (line {})"
+                             .format(node.lineno))
+        if isinstance(node, ast.Import) and any(alias.name == "tools" or alias.name.startswith("tools.")
+                                                for alias in node.names):
+            raise ValueError("cannot evaluate a tools-qualified import (line {})".format(node.lineno))
+
+    for node in _module_statements(tree.body):
+        refuse_import(node)
+    if not any(isinstance(node, ast.FunctionDef) for node in defined.get(_MAPPINGS_RENDERER, ())):
+        raise ValueError("cannot evaluate: no module-level function {}".format(_MAPPINGS_RENDERER))
+    walked, pending, inputs = set(), [_MAPPINGS_RENDERER], set()
+
+    def tools_modules(module):
+        # The files of root's tools/ folder a dotted module name loads: tools/<a>.py, tools/<a>/<b>.py, ...
+        pieces = module.split(".")
+        rels = ["tools/{}.py".format("/".join(pieces[:end])) for end in range(1, len(pieces) + 1)]
+        return [rel for rel in rels if (Path(root) / rel).is_file()]
+
+    def add_module(module):
+        inputs.update(tools_modules(module))
+
+    def calls_tools_module(func):
+        while isinstance(func, ast.Attribute):
+            func = func.value
+        return isinstance(func, ast.Name) and func.id in imported and bool(tools_modules(imported[func.id]))
+
+    def entries(node, bound):
+        # The parts of the folder entries `node` iterates, plus _ROOT_ENTRY, when it is X.iterdir() (bare
+        # or as the one argument of sorted, list, tuple or reversed) over a ROOT path X; None otherwise.
+        # X.glob(...) and X.rglob(...) are no folder reads: the attribute check refuses them on a ROOT path.
+        # A walrus around the iterable, the call's argument or X is read through.
+        node = _unwalrus(node)
+        while isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and len(node.args) == 1 \
+                and node.func.id in ("sorted", "list", "tuple", "reversed"):
+            node = _unwalrus(node.args[0])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr == "iterdir":
+            parts = _root_parts(_unwalrus(node.func.value), set(), bound)
+            return None if parts is None else parts + [_ROOT_ENTRY]
+        return None
+
+    def resolver(bindings, fallback):
+        # bound(name) for _root_parts: the parts of a name in `bindings` ({name: [(kind, value)]}) whose
+        # bindings are each a ROOT path ("path", read through a walrus around it) or a loop over a ROOT
+        # folder's entries ("loop"), all the
+        # same, so the name is a path base as ROOT is; ValueError when a name with such a binding has another
+        # binding that is no ROOT path, or a binding to another ROOT path (a loop variable reused over a
+        # second folder); None for a name with no such binding; and fallback(name) for a name not in
+        # `bindings`.
+        memo, active = {}, set()
+
+        def bound(name):
+            if name not in bindings:
+                return fallback(name) if fallback is not None else None
+            if name in memo:
+                return memo[name]
+            if name in active:
+                return None
+            active.add(name)
+            try:
+                found = [(parts, value) for kind, value in bindings[name] for parts in (
+                    _root_parts(_unwalrus(value), set(), bound) if kind == "path" else
+                    entries(value, bound) if kind == "loop" else None,) if parts is not None]
+            finally:
+                active.discard(name)
+            if found and len(found) < len(bindings[name]):
+                raise ValueError("cannot evaluate {}, a name bound to a ROOT path and to another value (line {})"
+                                 .format(name, found[0][1].lineno))
+            other = next((value for parts, value in found if parts != found[0][0]), None)
+            if other is not None:
+                raise ValueError("cannot evaluate {}, a name bound to more than one ROOT path (line {})".format(
+                    name, other.lineno))
+            memo[name] = found[0][0] if found else None
+            return memo[name]
+        return bound
+
+    def local_bindings(nodes):
+        # Each binding of a name inside a walked part, as resolver reads them: a name assigned alone
+        # (=, an annotated assignment or :=) is "path", the target of a for loop or comprehension alone is
+        # "loop", and every other binding (a parameter, an unpacking or augmented target, an import, a
+        # global or nonlocal statement, an except, case or def name) is "other".
+        found, alone = {}, set()
+        for node in nodes:
+            pairs = ([(target, node.value) for target in node.targets] if isinstance(node, ast.Assign) else
+                     [(node.target, node.value)] if isinstance(node, (ast.AnnAssign, ast.NamedExpr))
+                     and node.value is not None else [])
+            loops = [(node.target, node.iter)] if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)) else []
+            for kind, items in (("path", pairs), ("loop", loops)):
+                for target, value in items:
+                    if isinstance(target, ast.Name):
+                        found.setdefault(target.id, []).append((kind, value))
+                        alone.add(id(target))
+        for node in nodes:
+            if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load) and id(node) not in alone:
+                names = [node.id]
+            elif isinstance(node, ast.arg):
+                names = [node.arg]
+            elif isinstance(node, (ast.Global, ast.Nonlocal)):
+                names = list(node.names)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = [name for name, _origin, _refused in import_bindings(node)]
+            elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar, ast.FunctionDef,
+                                   ast.AsyncFunctionDef, ast.ClassDef)):
+                names = [node.name] if node.name else []
+            elif isinstance(node, ast.MatchMapping):
+                names = [node.rest] if node.rest else []
+            else:
+                names = []
+            for name in names:
+                found.setdefault(name, []).append(("other", node))
+        return found
+
+    module_bound = resolver(module_bindings, None)
+    while pending:
+        name = pending.pop()
+        if name in walked:
+            continue
+        walked.add(name)
+        nodes = [node for top in defined[name] for node in ast.walk(top)]
+        bound = resolver(local_bindings(nodes), module_bound)
+        used, paths, chains = set(), [], {}
+        for node in nodes:
+            parts = _root_parts(node, used, bound)
+            if parts is not None:
+                chains[id(node)] = parts
+            if parts:
+                paths.append((node, parts))
+        handed = {id(arg) for node in nodes if isinstance(node, ast.Call) and calls_tools_module(node.func)
+                  for arg in list(node.args) + [keyword.value for keyword in node.keywords]}
+        # Defence in depth: the ROOT-use check below refuses a ROOT default too, unless ROOT there is an
+        # argument of a tools/ module call; no self-test row holds this check on its own.
+        for node in nodes:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) and any(
+                    isinstance(inner, ast.Name) and inner.id == "ROOT"
+                    for default in node.args.defaults + [d for d in node.args.kw_defaults if d is not None]
+                    for inner in ast.walk(default)):
+                raise ValueError("cannot evaluate a function whose default arguments use ROOT (line {})"
+                                 .format(node.lineno))
+        for node in nodes:
+            # A walrus expression whose value is a ROOT path ((p := ROOT / "<a>").parent) is no path base, so
+            # an attribute of it other than _ROOT_PATH_READS (joinpath included), or "/" on either side of
+            # it, is refused; its target is a path base as any name bound alone is.
+            for operand in ([node.value] if isinstance(node, ast.Attribute) and node.attr not in _ROOT_PATH_READS
+                            else [node.left, node.right] if isinstance(node, ast.BinOp) else []):
+                inner = _unwalrus(operand)
+                if inner is not operand and id(inner) in chains:
+                    raise ValueError("cannot evaluate a walrus of a ROOT path as the base of {} (line {})".format(
+                        "." + node.attr if isinstance(node, ast.Attribute) else "/", node.lineno))
+            # A capture (as, star or mapping rest name, at any depth of a case pattern) in a match statement
+            # of a walked part whose subject is a ROOT path is refused: it is not bound as a path base.
+            if isinstance(node, ast.Match):
+                if id(_unwalrus(node.subject)) in chains and any(
+                        isinstance(pattern, (ast.MatchAs, ast.MatchStar)) and pattern.name
+                        or isinstance(pattern, ast.MatchMapping) and pattern.rest
+                        for case in node.cases for pattern in ast.walk(case.pattern)):
+                    raise ValueError("cannot evaluate a match capture of a ROOT path in a renderer (line {})"
+                                     .format(node.lineno))
+            refuse_import(node)
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for _name, origin, refused in import_bindings(node):
+                    if refused:
+                        raise ValueError("cannot evaluate an import of {} in a renderer (line {})".format(
+                            origin, node.lineno))
+            if isinstance(node, ast.Name) and node.id in defined:
+                pending.append(node.id)
+            if isinstance(node, ast.Name) and node.id in _WALK_REFUSED_NAMES:
+                raise ValueError("cannot evaluate {} in a renderer (line {})".format(node.id, node.lineno))
+            if isinstance(node, ast.Name) and node.id in refused_imports:
+                raise ValueError("cannot evaluate {}, a module-level import of {}, in a renderer (line {})".format(
+                    node.id, refused_imports[node.id], node.lineno))
+            if isinstance(node, ast.Name) and node.id in imported:
+                add_module(imported[node.id])
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    add_module(alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                add_module(node.module)
+            elif isinstance(node, ast.Attribute) and id(node.value) in chains and id(node.value) not in used \
+                    and node.attr != "joinpath" and (node.attr not in _ROOT_PATH_READS or not chains[id(node.value)]):
+                raise ValueError("cannot evaluate {}.{} (line {})".format(
+                    "a ROOT path" if chains[id(node.value)] else "ROOT", node.attr, node.lineno))
+            elif isinstance(node, ast.Name) and node.id == "ROOT" and id(node) not in used \
+                    and id(node) not in handed and isinstance(node.ctx, ast.Load):
+                raise ValueError("cannot evaluate ROOT used other than as the base of a path or as an argument "
+                                 "to a tools/ module (line {})".format(node.lineno))
+        for node, parts in paths:
+            if id(node) in used:
+                continue
+            pieces = [piece for part in parts if part is not _ROOT_ENTRY for piece in part.split("/")]
+            if any(piece in ("", ".", "..") for piece in pieces) or parts[0] is _ROOT_ENTRY:
+                raise ValueError("cannot evaluate the ROOT path {!r} (line {})".format(parts, node.lineno))
+            # A path under a folder entry (a loop variable over the folder) reads inside that folder: the
+            # folder is the input.
+            entry = next((index for index, part in enumerate(parts) if part is _ROOT_ENTRY), None)
+            if entry is not None:
+                rel = "/".join(piece for part in parts[:entry] for piece in part.split("/"))
+                if not (Path(root) / rel).is_dir():
+                    raise ValueError("cannot evaluate the entries of {}, which is not a folder under root (line {})"
+                                     .format(rel, node.lineno))
+                inputs.add(rel + "/")
+                continue
+            rel = "/".join(pieces)
+            if (Path(root) / rel).is_file():
+                inputs.add(rel)
+            elif (Path(root) / rel).is_dir():
+                inputs.add(rel + "/")
+            else:
+                raise ValueError("cannot evaluate the ROOT path {}, which is missing under root, as a file or "
+                                 "a folder (line {})".format(rel, node.lineno))
+    return inputs
+
+
+def _mappings_sources_findings(source, declared, root=ROOT):
+    """Findings for `declared` (a _MAPPINGS_SOURCES tuple) against _mappings_inputs(source): each derived
+    input it lacks, and each entry it names that no walked renderer reads. Empty when the 2 sets are equal
+    (order and a repeated entry do not matter). When _mappings_inputs cannot evaluate `source`, that is the
+    one finding, so a read the derivation cannot follow fails closed."""
+    try:
+        derived = _mappings_inputs(source, root)
+    except ValueError as exc:
+        return ["_MAPPINGS_SOURCES cannot be checked: {}".format(exc)]
+    return (["_MAPPINGS_SOURCES lacks {}, which the mappings renderers read".format(rel)
+             for rel in sorted(derived - set(declared))]
+            + ["_MAPPINGS_SOURCES names {}, which no mappings renderer reads".format(rel)
+               for rel in sorted(set(declared) - derived)])
+
+
+def _other_declarations(root=ROOT):
+    """[(stem, declaration)] for every generator the registry reads apart from this one: each tools/gen_*.py
+    declaration as tools/gen_gensrc.py discover_declarations reads it (statically, never importing the
+    generator), then gen_gensrc's own output. Raises ValueError or OSError as discover_declarations does."""
+    import gen_gensrc
+    others = [(stem, decl) for stem, decl in gen_gensrc.discover_declarations(Path(root) / "tools")
+              if stem != _OWN_STEM]
+    return others + [(gen_gensrc.SELF, gen_gensrc.OWN_OUTPUTS)]
+
+
+def _register_findings(entries, outputs, footer, note, others, carriers):
+    """{row id: findings} for a declaration `entries` against the built pages `outputs` ({target: text}).
+    `footer` is the control strip's Version and Status markup and `note` the status note, each as rendered.
+    A page entry whose page carries `footer` must declare VERSION and changelog.toml, and one whose page
+    carries `note` must declare STATUS_SOURCE; a page entry declaring either set while its page does not
+    carry the text is a finding too. `carriers` is _data_carriers() of the live data: a page entry among
+    its _HOOKS_ROW pages must declare HOOKS_SOURCE, and one among its _MAPPINGS_ROW pages every source of
+    _MAPPINGS_SOURCES; a page entry outside those pages declaring any of them is a finding too. A page entry
+    whose target is not among `outputs` is a finding of its own row. Each STATUS_LINES file must have
+    exactly 1 entry, of kind "block", naming this generator and STATUS_SOURCE among its sources, apart from
+    a file on _STATUS_LINES_UNREGISTERED, which must have none. `others` is [(stem, declaration)] for every
+    other generator of the registry (_other_declarations); a STATUS_LINES file named by an entry there, by
+    its exact target or by an ancestor tree target, is a finding, and so is one under an ancestor tree
+    target of `entries`, because each such entry would claim the whole file where this generator owns only
+    its status line, or claim a file kept off the register."""
+    rows = {_FOOTER_ROW: [], _NOTE_ROW: [], _LINES_ROW: [], _BUILT_ROW: [], _HOOKS_ROW: [], _MAPPINGS_ROW: []}
+    for entry in entries:
+        if entry["kind"] != "file":
+            continue
+        target, sources = entry["target"], set(entry["sources"])
+        if target not in outputs:
+            rows[_BUILT_ROW].append("{}: declared but not built".format(target))
+            continue
+        for row, carries, wanted, holder, thing in (
+                (_FOOTER_ROW, footer in outputs[target], set(_FOOTER_SOURCES), "its page", "the rendered text"),
+                (_NOTE_ROW, note in outputs[target], {STATUS_SOURCE}, "its page", "the rendered text"),
+                (_HOOKS_ROW, target in carriers[_HOOKS_ROW], {HOOKS_SOURCE}, "its data", "the $HOOK_COUNT token"),
+                (_MAPPINGS_ROW, target in carriers[_MAPPINGS_ROW], set(_MAPPINGS_SOURCES), "its data",
+                 "a mappings component")):
+            declared = sources & wanted
+            if carries and declared != wanted:
+                rows[row].append("{}: {} carries {} but its sources lack {}".format(
+                    target, holder, thing, ", ".join(sorted(wanted - declared))))
+            elif declared and not carries:
+                rows[row].append("{}: its sources name {} but {} does not carry {}".format(
+                    target, ", ".join(sorted(declared)), holder, thing))
+    for rel, _prefix, _lead in STATUS_LINES:
+        matches = [entry for entry in entries if entry["target"] == rel]
+        if rel in _STATUS_LINES_UNREGISTERED:
+            if matches:
+                rows[_LINES_ROW].append("{}: registered while on _STATUS_LINES_UNREGISTERED ({})".format(
+                    rel, matches))
+        elif len(matches) != 1 or matches[0]["kind"] != "block" or not {
+                "tools/gen_draft_site.py", STATUS_SOURCE} <= set(matches[0]["sources"]):
+            rows[_LINES_ROW].append("{}: needs exactly 1 block entry naming tools/gen_draft_site.py and {} "
+                                    "({} found)".format(rel, STATUS_SOURCE, matches))
+        for entry in _naming_entries(entries, rel):
+            if entry["target"] != rel:
+                rows[_LINES_ROW].append("{}: under the tree entry {!r} of this generator".format(
+                    rel, entry["target"]))
+        for stem, decl in others:
+            if stem == _OWN_STEM:
+                continue
+            for entry in _naming_entries(decl, rel):
+                rows[_LINES_ROW].append("{}: named by the {} entry {!r} of {}.py".format(
+                    rel, entry.get("kind"), entry["target"], stem))
+    return rows
+
+
+def _register_mutant_source(source, old, new):
+    """`source` with `old` replaced by `new` inside its GENSRC_OUTPUTS literal, where `old` must occur
+    exactly once; None otherwise, so a stale anchor fails its flip rather than passing it."""
+    head, sep, rest = source.partition("\nGENSRC_OUTPUTS = (\n")
+    decl, end, tail = rest.partition("\n)\n")
+    if not sep or not end or decl.count(old) != 1:
+        return None
+    return head + sep + decl.replace(old, new) + end + tail
+
+
+def _load_register_mutant(source, directory, tag):
+    """Write one register mutant (this file's own source, read from __file__ by the one caller, with one
+    reviewed literal substitution from _REGISTER_FLIPS, or unmutated as the control) under the self-test's
+    temporary directory and load it with importlib; it is never registered in sys.modules. This is the
+    self-test's one code-loading site, so the dangerous-API allowlist entry is scoped to it."""
+    import importlib.util
+    name = "gen_draft_site_register_{}".format(tag)
+    path = Path(directory) / (name + ".py")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(source)
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    module = importlib.util.module_from_spec(spec)
+    saved_sys_path = list(sys.path)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = saved_sys_path
+    return module
+
+
 def _self_test():
     failures = []
 
@@ -1982,12 +2934,29 @@ def _self_test():
         failures.append("{}: expected a refusal".format(name))
         return ""
 
+    def accepted(name, callable_, *args):
+        """callable_(*args), or "" with a failure named `name` when it raises RefusedPage, so a refusal where
+        output is expected fails that row and the rows after it still run."""
+        try:
+            return callable_(*args)
+        except RefusedPage as exc:
+            failures.append("{}: expected no refusal, got {}".format(name, exc))
+            return ""
+
     # The declared build is the promoted one (base "/", pages at each live root); most fixtures below are
     # the same pages built in their staged form (staged_sites), so the staging rules keep their cases.
-    live_outputs = build()
+    # A refusal in either build (a start tag the guard cannot re-read, say) fails a named row and ends the
+    # self-test there with its report, rather than a traceback before any row runs: every row below reads
+    # these outputs.
+    live_outputs = accepted("build/declared-pages-render", build)
     staged_ = staged_sites()
     site = staged_[0]
-    outputs = build(sites=staged_, registered=False)
+    outputs = accepted("build/staged-pages-render", build, None, staged_, False)
+    if not live_outputs or not outputs:
+        print("SELF-TEST FAIL: gen_draft_site {} failure(s)".format(len(failures)))
+        for failure in failures:
+            print("  - " + failure)
+        return 1
     page = outputs["site/draft/index.html"]
     expect("shell/html-class", '<html lang="en" class="site-aiqt">' in page)
     expect("shell/title", "<title>Home | AIQT.ai</title>" in page)
@@ -2199,7 +3168,9 @@ def _self_test():
     expect("component/figures", figures == (
         '<div class="wide"><div class="figures"><div class="fig"><span class="num">17</span>'
         '<span class="cap">frameworks</span></div></div></div>'), figures)
-    table = rendered('component = "table"\ncaption = "C"\nsticky = true\nfixed = true\ncols = ["w26", "w17"]\n'
+    # The raw cell (a whole td element) is read with CELL_ELEMENTS; a refusal of it fails this row by name.
+    table = accepted("component/table", rendered,
+                     'component = "table"\ncaption = "C"\nsticky = true\nfixed = true\ncols = ["w26", "w17"]\n'
                      'head = ["A", "B"]\nrows = [["x", "<td class=\\"id\\"><code>y</code></td>"]]\n')
     expect("component/table", table == (
         '<div class="wide"><div class="tablewrap bounded" tabindex="0"><table class="sticky fixed">'
@@ -2376,6 +3347,509 @@ def _self_test():
     expect("refuse/http-external-href", "site-relative" in refused(
         "refuse/http-external-href", rendered,
         'component = "download"\nhref = "http://example.com/x"\nfilename = "x"\nsize = "s"\nhtml = "D"\n'))
+    # D15: an https scheme in any letter case is accepted and written in lower case; another scheme in upper
+    # case, a one-slash scheme and a non-ASCII lookalike stay refused.
+    for name, href in (("links/upper-case-https-download-lowercased", "HTTPS://example.com/x.zip"),
+                       ("links/mixed-case-https-download-lowercased", "hTtPs://example.com/x.zip")):
+        cased = accepted(name, rendered, 'component = "download"\nlabel = "The skill"\nhref = "{}"\n'
+                         'filename = "x.zip"\nsize = "zip, version 1"\nhtml = "D"\n'.format(href))
+        expect(name, cased == download, cased)
+    for name, href in (("refuse/upper-case-http-external-href", "HTTP://example.com/x"),
+                       ("refuse/upper-case-https-one-slash-href", "HTTPS:/example.com/x"),
+                       ("refuse/non-ascii-https-lookalike-href", "HTTP\\u017f://example.com/x")):
+        expect(name, "site-relative" in refused(
+            name, rendered,
+            'component = "download"\nhref = "{}"\nfilename = "x"\nsize = "s"\nhtml = "D"\n'.format(href)))
+    expect("links/upper-case-https-external-lowercased",
+           _external("HTTPS://example.com/X", "L").startswith('<a href="https://example.com/X" '),
+           _external("HTTPS://example.com/X", "L"))
+    expect("links/lower-case-https-external-unchanged",
+           _external("https://example.com/X", "L").startswith('<a href="https://example.com/X" '),
+           _external("https://example.com/X", "L"))
+
+    # D15 on inline page markup: the inline path (_inline_https) writes an https scheme given in any ASCII
+    # letter case in lower case, so such an anchor is accepted (held to the new-tab rules of any https link);
+    # the link guard reads the finished page and accepts only a scheme written as literal lower-case
+    # "https://", so a scheme in another case or written with a character reference is refused; http, a
+    # one-slash scheme and a non-ASCII lookalike stay refused, by the guard and on a built page.
+    def inline_page(html):
+        """A document page whose one prose component holds `html`, rendered and checked by render_page."""
+        page_model = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "{}"\n'.format(html.replace('"', '\\"')))
+        return render_page(site, [page_model], page_model)
+
+    newtab_tail = ' target="_blank" rel="noopener noreferrer">v<span class="vh"> (opens in a new tab)</span></a>'
+    literal = "{} {!r} on <{}> does not write its https scheme as literal lower-case https://"
+    for name, href in (("links/guard-upper-case-https-anchor-refused", "HTTPS://example.com/v"),
+                       ("links/guard-mixed-case-https-anchor-refused", "hTtPs://example.com/v"),
+                       ("links/guard-character-reference-upper-case-https-refused", "&#72;TTPS://example.com/v"),
+                       ("links/guard-character-reference-lower-case-https-refused", "&#104;ttps://example.com/v"),
+                       ("links/guard-character-reference-colon-https-refused", "https&colon;//example.com/v")):
+        got = _link_findings(site, '<a href="{}"'.format(href) + newtab_tail)
+        expect(name, got == [literal.format("href", href, "a")], got)
+    got = _link_findings(site, '<a href="https://example.com/v"' + newtab_tail)
+    expect("links/guard-literal-lower-case-https-anchor-passes", got == [], got)
+    got = _link_findings(site, '<a href="HTTPS://example.com/v">v</a>')
+    expect("links/guard-upper-case-https-without-newtab-refused",
+           got == [literal.format("href", "HTTPS://example.com/v", "a"),
+                   "external link 'HTTPS://example.com/v' without the new-tab attributes",
+                   "external link 'HTTPS://example.com/v' without the new-tab hint"], got)
+    # The guard and the inline rewrite place each value in the start tag's source text with html.parser's own
+    # patterns; a tag that does not re-read to the attributes the tokenizer gave is refused, not guessed at.
+    global _start_tag_values
+    saved_values = _start_tag_values
+
+    def unreadable(parser, tag, attrs):
+        raise ValueError("self-test: not re-read")
+
+    _start_tag_values = unreadable
+    try:
+        expect("refuse/inline-unplaced-start-tag", "cannot be read exactly" in refused(
+            "refuse/inline-unplaced-start-tag", _inline_https, '<a href="HTTPS://example.com/v">'))
+        got = _link_findings(site, '<a href="https://example.com/v"' + newtab_tail)
+        expect("links/guard-unplaced-start-tag-refused",
+               got == ["<a> start tag whose attribute values cannot be read exactly",
+                       literal.format("href", "https://example.com/v", "a"),
+                       "<span> start tag whose attribute values cannot be read exactly"], got)
+    finally:
+        _start_tag_values = saved_values
+
+    class _Retold:
+        def __init__(self, text):
+            self.text = text
+
+        def get_starttag_text(self):
+            return self.text
+
+    def placed(text, tag, attrs):
+        """_start_tag_values on `text`, or None when it raises ValueError, so a row fails by its own name."""
+        try:
+            return _start_tag_values(_Retold(text), tag, attrs)
+        except ValueError:
+            return None
+
+    got = placed("<a title='a>b' HREF=x href=\"\">", "a", [("title", "a>b"), ("href", "x"), ("href", "")])
+    expect("links/start-tag-values-placed", got == ("<a title='a>b' HREF=x href=\"\">", [(10, 13), (20, 21), (28, 28)],
+                                                    ["title", "href", "href"]), got)
+    # A value holding "&" is compared after decoding: a decoded span the tokenizer's value does not match is
+    # refused, and the matching twin is placed. A reference html.unescape decodes and the attribute rule
+    # keeps ("&copy=") does not compare equal, so its tag is refused (fail closed).
+    got = placed('<a href="https://x&amp;y">', "a", [("href", "HTTPS://totally-different/")])
+    expect("links/start-tag-other-value-with-reference-refused", got is None, got)
+    got = placed('<a href="https://x&amp;y">', "a", [("href", "https://x&y")])
+    expect("links/start-tag-value-with-reference-placed",
+           got == ('<a href="https://x&amp;y">', [(9, 24)], ["href"]), got)
+    got = placed('<a href="/x?a=1&copy=2">', "a", [("href", "/x?a=1&copy=2")])
+    expect("links/start-tag-attribute-rule-reference-refused", got is None, got)
+    # Names are folded in ASCII only, as a browser folds them: KELVIN SIGN stays as written, "K" folds.
+    got = placed('<span bacKground="x" bacKground="y">', "span", [("background", "x"), ("background", "y")])
+    expect("links/start-tag-non-ascii-name-kept", got is not None and got[2:] == (["bacKground", "background"],),
+           got)
+    for name, text, attrs in (("links/start-tag-other-name-refused", '<a href="x">', [("src", "x")]),
+                              ("links/start-tag-other-value-refused", '<a href="x">', [("href", "y")]),
+                              ("links/start-tag-missing-value-refused", "<a href>", [("href", "x")]),
+                              ("links/start-tag-other-tag-refused", '<img src="x">', [("src", "x")])):
+        try:
+            _start_tag_values(_Retold(text), "a", attrs)
+            expect(name, False, text)
+        except ValueError:
+            pass
+    # The inline reader finds each start tag's text at the offset getpos gives, counting a line at each LF
+    # only, as html.parser does: a reader 1 column late leaves the tag unplaced (so _inline_https refuses it)
+    # rather than rewriting the wrong bytes; the exact reader places it.
+
+    class _Shifted(_InlineLinkValues):
+        def getpos(self):
+            line, column = super().getpos()
+            return line, column + 1
+
+    for name, reader_class, want in (("links/inline-misplaced-start-tag-unplaced", _Shifted,
+                                      (['<a href="HTTPS://example.com/v">'], [])),
+                                     ("links/inline-start-tag-placed", _InlineLinkValues, ([], [(10, 31)]))):
+        reader = reader_class(' <a href="HTTPS://example.com/v">')
+        reader.feed(' <a href="HTTPS://example.com/v">')
+        reader.close()
+        expect(name, (reader.unplaced, reader.values) == want, (reader.unplaced, reader.values))
+    # Each value is placed by the tokenizer, so a ">" written as "&gt;" before the link attribute (a literal
+    # quoted ">" is refused, below; links/start-tag-values-placed places one), scheme-shaped text deeper in a
+    # URL or inside another attribute, and every quoting form are handled; each case has a twin that the rule
+    # leaves as written.
+    for name, text, want in (
+            ("links/inline-escaped-gt-before-href-lowercased",
+             '<a title="a&gt;b" href="HTTPS://example.com/v"' + newtab_tail,
+             '<a title="a&gt;b" href="https://example.com/v"' + newtab_tail),
+            ("links/inline-escaped-gt-before-href-twin-unchanged",
+             '<a title="a&gt;b" href="https://example.com/v"' + newtab_tail,
+             '<a title="a&gt;b" href="https://example.com/v"' + newtab_tail),
+            # A src on a span: inline markup may not use img (INLINE_ELEMENTS), and the rule reads a link
+            # attribute by its name on any element.
+            ("links/inline-escaped-gt-before-src-lowercased",
+             '<span title="a&gt;b" src="HTTPS://example.com/i.png">t</span>',
+             '<span title="a&gt;b" src="https://example.com/i.png">t</span>'),
+            ("links/inline-escaped-gt-before-src-twin-unchanged",
+             '<span title="a&gt;b" src="https://example.com/i.png">t</span>',
+             '<span title="a&gt;b" src="https://example.com/i.png">t</span>'),
+            ("links/inline-href-path-holding-href-scheme-unchanged",
+             '<a href="https://example.com/href=HTTPS://Other/Path"' + newtab_tail,
+             '<a href="https://example.com/href=HTTPS://Other/Path"' + newtab_tail),
+            ("links/inline-href-path-holding-href-scheme-only-scheme-lowercased",
+             '<a href="HTTPS://example.com/href=HTTPS://Other/Path"' + newtab_tail,
+             '<a href="https://example.com/href=HTTPS://Other/Path"' + newtab_tail),
+            ("links/inline-href-plain-path-twin-unchanged", '<a href="https://example.com/Other/Path"' + newtab_tail,
+             '<a href="https://example.com/Other/Path"' + newtab_tail),
+            ("links/inline-src-path-holding-href-scheme-unchanged",
+             '<span src="https://example.com/a/href=HTTPS://b.png" title="">t</span>',
+             '<span src="https://example.com/a/href=HTTPS://b.png" title="">t</span>'),
+            ("links/inline-src-plain-path-twin-unchanged", '<span src="https://example.com/a/b.png" title="">t</span>',
+             '<span src="https://example.com/a/b.png" title="">t</span>'),
+            ("links/inline-title-holding-href-scheme-unchanged",
+             '<a title="see href=HTTPS://x" href="https://example.com/v"' + newtab_tail,
+             '<a title="see href=HTTPS://x" href="https://example.com/v"' + newtab_tail),
+            ("links/inline-single-quoted-title-holding-href-scheme-unchanged",
+             "<a title='see href=HTTPS://x' href='https://example.com/v'" + newtab_tail,
+             "<a title='see href=HTTPS://x' href='https://example.com/v'" + newtab_tail),
+            ("links/inline-plain-title-twin-unchanged", '<a title="see x" href="https://example.com/v"' + newtab_tail,
+             '<a title="see x" href="https://example.com/v"' + newtab_tail),
+            ("links/inline-unquoted-upper-case-https-anchor-lowercased",
+             "<a href=HTTPS://example.com/v" + newtab_tail, "<a href=https://example.com/v" + newtab_tail),
+            ("links/inline-single-quoted-upper-case-https-anchor-lowercased",
+             "<a href='HTTPS://example.com/v'" + newtab_tail, "<a href='https://example.com/v'" + newtab_tail),
+            ("links/inline-unquoted-mixed-case-https-src-lowercased",
+             "<SPAN SRC=HtTpS://example.com/i.png title=''>t</SPAN>",
+             "<SPAN SRC=https://example.com/i.png title=''>t</SPAN>"),
+            # A CR is not a line end to getpos: a tag on the line after a CR is still placed exactly.
+            ("links/inline-carriage-return-before-tag-lowercased",
+             '<p>a\\rb\\n<a href="HTTPS://example.com/v"' + newtab_tail + "</p>",
+             'a\rb\n<a href="https://example.com/v"' + newtab_tail),
+            ("links/inline-line-feed-before-tag-twin-lowercased",
+             '<p>a b\\n<a href="HTTPS://example.com/v"' + newtab_tail + "</p>",
+             'a b\n<a href="https://example.com/v"' + newtab_tail),
+            # An attribute name holding KELVIN SIGN is not a link attribute to a browser, so its value stays as
+            # written; the ASCII "K" twin is the background attribute and is written in lower case.
+            ("links/inline-non-ascii-attribute-name-unchanged",
+             '<p><span bac\\u212aground="HTTPS://example.com/x">t</span></p>',
+             '<span bacKground="HTTPS://example.com/x">t</span>'),
+            ("links/inline-ascii-attribute-name-twin-lowercased",
+             '<p><span bacKground="HTTPS://example.com/x">t</span></p>',
+             '<span bacKground="https://example.com/x">t</span>')):
+        built = accepted(name, inline_page, text)
+        expect(name, want in built, built)
+    # A scheme written with a character reference is not rewritten (it is not a literal scheme); the guard
+    # refuses it on the built page. The literal lower-case twin is accepted.
+    for name, href in (("refuse/inline-character-reference-upper-case-https-anchor", "&#72;TTPS://example.com/v"),
+                       ("refuse/inline-character-reference-hex-https-anchor", "&#x68;ttps://example.com/v"),
+                       ("refuse/inline-character-reference-lower-case-https-anchor", "&#104;ttps://example.com/v"),
+                       ("refuse/inline-character-reference-colon-https-anchor", "HTTPS&#58;//example.com/v"),
+                       ("refuse/inline-named-character-reference-colon-https-anchor", "https&colon;//example.com/v")):
+        expect(name, "literal lower-case https://" in refused(
+            name, inline_page, '<a href="{}"'.format(href) + newtab_tail))
+    twin = accepted("links/inline-literal-lower-case-https-anchor-passes", inline_page,
+                    '<a href="https://example.com/v"' + newtab_tail)
+    expect("links/inline-literal-lower-case-https-anchor-passes",
+           '<a href="https://example.com/v"' + newtab_tail in twin, twin)
+    # "<![": html.parser reads "<![CDATA[" as a CDATA section up to "]]>", a browser in HTML content as a bogus
+    # comment up to the first ">", so the link after that ">" is live in a browser yet hidden from the rewrite
+    # and the guard. Inline markup holding "<![" is refused, and the guard reports it on a page. The twins
+    # write the same text escaped ("&lt;!["): the rewrite and the guard then see the link.
+    cdata_vectors = (("upper-case-https-anchor", '<a href="HTTPS://example.com/v"' + newtab_tail),
+                     ("http-anchor", '<a href="http://example.com/v">v</a>'),
+                     ("off-site-path-anchor", '<a href="/elsewhere/">v</a>'))
+    for vector, anchor in cdata_vectors:
+        name = "refuse/inline-cdata-" + vector
+        expect(name, "markup declaration" in refused(name, inline_page, "<p><![CDATA[ x > " + anchor + " ]]></p>"))
+    escaped = "<p>&lt;![CDATA[ x &gt; {} ]]&gt;</p>"
+    twin = accepted("links/inline-escaped-cdata-text-upper-case-https-anchor-lowercased", inline_page,
+                    escaped.format(cdata_vectors[0][1]))
+    expect("links/inline-escaped-cdata-text-upper-case-https-anchor-lowercased",
+           '&gt; <a href="https://example.com/v"' + newtab_tail in twin, twin)
+    for vector, anchor in cdata_vectors[1:]:
+        name = "refuse/inline-escaped-cdata-text-" + vector
+        expect(name, "nor an https URL" in refused(name, inline_page, escaped.format(anchor)))
+    declaration = _site_markup.construct_finding(3, "<![CDATA[")
+    # The guard lists every construct first (from the lexical scan), so the row requires that finding first,
+    # which also refuses the page. What the parser reads after "<![" depends on whether it reads a CDATA section
+    # or ends "<![" at the first ">" as a browser does, so the findings after it are not asserted.
+    for vector, anchor in cdata_vectors:
+        got = _link_findings(site, "<p><![CDATA[ x > " + anchor + " ]]></p>")
+        expect("links/guard-cdata-" + vector + "-refused", got[:1] == [declaration], got)
+    got = _link_findings(site, '<p><![CDATA[ <a href="http://example.com/v">v</a></p>')
+    expect("links/guard-unterminated-cdata-refused", got == [declaration], got)
+    for name, html, want in (
+            ("links/guard-escaped-cdata-text-anchor-passes",
+             escaped.format('<a href="https://example.com/v"' + newtab_tail), []),
+            ("links/guard-comment-before-anchor-passes",
+             '<p><!-- x > --> <a href="https://example.com/v"' + newtab_tail + "</p>", []),
+            ("links/guard-escaped-cdata-text-http-anchor-refused", escaped.format(cdata_vectors[1][1]),
+             ["href 'http://example.com/v' on <a> is neither under /draft/ nor an https URL"]),
+            ("links/guard-escaped-cdata-text-off-site-path-refused", escaped.format(cdata_vectors[2][1]),
+             ["href '/elsewhere/' on <a> is neither under /draft/ nor an https URL"])):
+        got = _link_findings(site, html)
+        expect(name, got == want, got)
+    # The element allowlist (_site_markup). html.parser reads textarea, title and plaintext as raw text even
+    # inside svg or math, where a browser keeps reading markup, so an anchor after "</svg>" is live in a browser
+    # and hidden from the rewrite and the guard. Inline markup may use only _site_markup.ELEMENTS, so each vector
+    # and its HTML-namespace twin (the same raw-text element with no svg or math) is refused, with the element
+    # and the page named; the link guard reports the element on a page. The passing twins write the same text
+    # escaped: the anchor is then read, rewritten and checked.
+    def inline_refusal(html):
+        """(the refusal message render_page gives for a prose component holding `html`, the page prefix it
+        must start with)."""
+        page_model = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "{}"\n'.format(html.replace('"', '\\"')))
+        try:
+            render_page(site, [page_model], page_model)
+        except RefusedPage as exc:
+            return str(exc), "{}/{} ({}): ".format(site["root"], page_model["rel"], page_model["where"])
+        return "", None
+
+    outside = "{}, an element outside the template's element allowlist"
+    upper_anchor = '<a href="HTTPS://example.com/v"' + newtab_tail
+    for wrapper, raw in (("svg", "textarea"), ("svg", "title"), ("svg", "plaintext"), ("math", "textarea"),
+                         ("math", "title"), ("math", "plaintext"), ("", "textarea"), ("", "title"),
+                         ("", "plaintext")):
+        before = "{}<{}>{}".format("<{}>".format(wrapper) if wrapper else "", raw,
+                                   "</{}>".format(wrapper) if wrapper else "</svg>")
+        after = "<!--</{}>-->".format(raw)
+
+        def vector(anchor, escape=False):
+            text = (lambda part: _html.escape(part, quote=False)) if escape else (lambda part: part)
+            return "<p>{}{}{}</p>".format(text(before), anchor, text(after))
+
+        label = (wrapper + "-" if wrapper else "html-namespace-") + raw
+        first = wrapper or raw
+        name = "refuse/inline-{}-hidden-anchor".format(label)
+        message, prefix = inline_refusal(vector(upper_anchor))
+        expect(name, prefix is not None and message.startswith(prefix + "inline markup uses " + outside.format(
+            "<{}>".format(first))), message)
+        name = "links/inline-escaped-{}-text-anchor-lowercased".format(label)
+        twin = accepted(name, inline_page, vector(upper_anchor, escape=True))
+        expect(name, '<a href="https://example.com/v"' + newtab_tail in twin, twin)
+        http_anchor = '<a href="http://example.com/v">v</a>'
+        got = _link_findings(site, vector(http_anchor))
+        want = outside.format("<{}> inside <svg>".format(raw) if wrapper == "svg" else "<{}> on the page".format(first))
+        expect("links/guard-{}-hidden-anchor-refused".format(label), want in got, got)
+        got = _link_findings(site, vector(http_anchor, escape=True))
+        expect("links/guard-escaped-{}-text-http-anchor-read".format(label),
+               got == ["href 'http://example.com/v' on <a> is neither under /draft/ nor an https URL"], got)
+    # Inline markup refuses every markup declaration and processing instruction but an ordinary comment, with
+    # the page named; "<![" is refused by that inline rule itself (before the guard reads the page), so the
+    # refusal names the page and says "inline markup holds". The ordinary comment twin is accepted.
+    for name, html in (("refuse/inline-cdata-by-inline-rule-naming-page", "<p><![CDATA[ x > ]]></p>"),
+                       ("refuse/inline-bogus-declaration", "<p><!x y> t</p>"),
+                       ("refuse/inline-processing-instruction", "<p><?x y> t</p>"),
+                       ("refuse/inline-bogus-end-tag-comment", "<p></3 x> t</p>"),
+                       ("refuse/inline-abrupt-comment", "<p><!--> t</p>"),
+                       ("refuse/inline-comment-holding-double-dash", "<p><!-- a -- b --> t</p>")):
+        message, prefix = inline_refusal(html)
+        expect(name, prefix is not None and message.startswith(
+            prefix + "inline markup holds a markup declaration or processing instruction other than an "
+            "ordinary comment at offset 3: "), message)
+    twin = accepted("links/inline-ordinary-comment-accepted", inline_page,
+                    "<p><!-- a note --> " + upper_anchor + "</p>")
+    expect("links/inline-ordinary-comment-accepted",
+           '<!-- a note --> <a href="https://example.com/v"' + newtab_tail in twin, twin)
+    # An abrupt comment ("<!-->", "<!--->") on a whole page: a browser ends it at once. Some html.parser patch
+    # releases keep it open to the next "-->", so the anchor and the script between are live in a browser and
+    # hidden from the guard and refusals_for; others end it at once and read them. Both report the construct
+    # first, from the lexical scan, whichever way the parser ends it, so each row requires that finding first
+    # (the page is refused) and does not assert what the parser reads after it. With an ordinary comment
+    # instead, both read what follows.
+    for name, opener in (("links/guard-abrupt-comment-hidden-anchor-refused", "<!-->"),
+                         ("links/guard-abrupt-dash-comment-hidden-anchor-refused", "<!--->")):
+        html = '<p>x</p>' + opener + '<a href="http://example.com/v">v</a>-->'
+        got = _link_findings(site, html)
+        expect(name, got[:1] == [_site_markup.construct_finding(8, html[8:17])], got)
+    got = _link_findings(site, '<p>x</p><!-- x --><a href="http://example.com/v">v</a>')
+    expect("links/guard-ordinary-comment-http-anchor-read",
+           got == ["href 'http://example.com/v' on <a> is neither under /draft/ nor an https URL"], got)
+    for name, opener in (("refuse/abrupt-comment-hidden-script", "<!-->"),
+                         ("refuse/abrupt-dash-comment-hidden-script", "<!--->")):
+        html = '<p>x</p>' + opener + '<script>alert(1)</script><img src="x" onerror="alert(1)">-->'
+        got = refusals_for(html)
+        expect(name, got[:1] == [_site_markup.construct_finding(8, html[8:17])], got)
+    got = refusals_for('<p>x</p><!-- x --><script>alert(1)</script><img src="x" onerror="alert(1)">')
+    expect("refuse/ordinary-comment-script-read",
+           "inline <script> element" in got and "onerror attribute on <img>" in got, got)
+    # A "<!--" inside an attribute value is text to html.parser and a browser alike; a scan that skipped from it
+    # to the next "-->" hid a real "<!-->" or "<![CDATA[" between them, so the script and the http anchor after
+    # that construct were live in a browser yet hidden from html.parser and from every check. The scan judges
+    # every "<!" on its own: the inline rule refuses the hidden construct with the page named, and the guard and
+    # refusals_for report it. The twins write the attribute's "<!--" as "&lt;!--" beside an ordinary comment,
+    # and the anchor and the script after it are read.
+    payload = '<script>alert(1)</script><a href="http://example.com/v">v</a>'
+    for vector, html, hidden in (
+            ("attribute-comment-opener-abrupt-comment", '<p><span title="<!--"><!-->' + payload + "--></span></p>",
+             "<!-->"),
+            ("attribute-comment-opener-cdata",
+             '<p><span title="<!--"><![CDATA[ x > ' + payload + " ]]>--></span></p>", "<![CDATA["),
+            ("attribute-comment-opener-cdata-after-element",
+             '<span title="<!--">x</span><![CDATA[ x > ' + payload + " ]]> -->", "<![CDATA[")):
+        at = html.find(hidden)
+        want = _site_markup.construct_finding(at, html[at:at + 9])
+        name = "refuse/inline-{}-hidden-construct".format(vector)
+        message, prefix = inline_refusal(html)
+        expect(name, prefix is not None and message.startswith(
+            prefix + "inline markup holds a markup declaration or processing instruction other than an "
+            "ordinary comment at offset {}: {!r}".format(at, html[at:at + 9])), message)
+        got = _link_findings(site, html)
+        expect("links/guard-{}-hidden-construct-refused".format(vector), want in got, got)
+        got = refusals_for(html)
+        expect("refuse/{}-hidden-construct-reported".format(vector), want in got, got)
+    twin = accepted("links/inline-escaped-attribute-comment-opener-ordinary-comment-accepted", inline_page,
+                    '<p><span title="&lt;!--"><!-- note --> ' + upper_anchor + "</span></p>")
+    expect("links/inline-escaped-attribute-comment-opener-ordinary-comment-accepted",
+           '<span title="&lt;!--"><!-- note --> <a href="https://example.com/v"' + newtab_tail in twin, twin)
+    got = _link_findings(site, '<p><span title="&lt;!--"><!-- note -->' + payload + "</span></p>")
+    expect("links/guard-escaped-attribute-comment-opener-ordinary-comment-anchor-read",
+           "<script> element" in got
+           and "href 'http://example.com/v' on <a> is neither under /draft/ nor an https URL" in got
+           and not any("markup construct" in f or "literal" in f for f in got), got)
+    got = refusals_for('<p><span title="&lt;!--"><!-- note -->' + payload + "</span></p>")
+    expect("refuse/escaped-attribute-comment-opener-ordinary-comment-script-read",
+           "inline <script> element" in got and not any("markup construct" in f for f in got), got)
+    # The second, independent layer: inline markup and a generated page write "<" and ">" inside an attribute
+    # value as "&lt;" and "&gt;" (_site_markup.literal_in_start_tag), so attribute text never looks like markup
+    # to the lexical construct scan. A literal one is refused inline with the page named, and the guard reports
+    # it; the escaped twin is accepted and passes.
+    for vector, literal, entity in (("lt", "<", "&lt;"), ("gt", ">", "&gt;")):
+        html = '<p><span title="a{}b">t</span></p>'.format(literal)
+        finding = "<span>{{}} with a literal {!r} inside its start tag (an attribute value writes it as {})".format(
+            literal, entity)
+        name = "refuse/inline-attribute-literal-" + vector
+        message, prefix = inline_refusal(html)
+        expect(name, prefix is not None and message.startswith(
+            prefix + "inline markup uses " + finding.format("")), message)
+        got = _link_findings(site, html)
+        expect("links/guard-attribute-literal-{}-refused".format(vector),
+               got == [finding.format(" on the page")], got)
+    twin = accepted("links/inline-attribute-escaped-lt-accepted", inline_page, '<p><span title="a&lt;b">t</span></p>')
+    expect("links/inline-attribute-escaped-lt-accepted", '<span title="a&lt;b">t</span>' in twin, twin)
+    got = _link_findings(site, '<p><span title="a&lt;b">t</span></p>')
+    expect("links/guard-attribute-escaped-lt-passes", got == [], got)
+    # Text other than whitespace ends an implied head, as in a browser (html5lib places such a title in the
+    # body), so the guard judges a head element after it on the page; whitespace and a title's own text do not.
+    for name, html, want in (
+            ("links/guard-title-after-text-in-implied-head-refused",
+             "<html>text<title>t</title><body><p>x</p></body></html>", "<title> on the page"),
+            ("links/guard-link-after-character-reference-text-refused",
+             '<meta charset="utf-8">&amp;<link rel="icon" href="/draft/i.svg"><p>y</p>', "<link> on the page")):
+        got = _link_findings(site, html)
+        expect(name, outside.format(want) in got, got)
+    for name, html in (("links/guard-whitespace-in-implied-head-passes",
+                        "<html> \n\t<title>t</title><body><p>x</p></body></html>"),
+                       ("links/guard-title-text-keeps-head-open-passes",
+                        '<html><title>a b</title><meta charset="utf-8"><body><p>x</p></body></html>')):
+        got = _link_findings(site, html)
+        expect(name, got == [], got)
+    # A non-ASCII element name is a finding: html.parser folds "linK" (KELVIN SIGN) to "link" with
+    # str.lower, a browser does not. The guard reports it in the head, and inline markup refuses it by that
+    # rule (not merely as an element outside INLINE_ELEMENTS). The ASCII twins pass.
+    got = _link_findings(site, '<head><linK rel="icon" href="/draft/i.svg"></head><p>x</p>')
+    expect("links/guard-non-ascii-element-name-refused",
+           got == ["<link> inside <head> has a non-ASCII element name 'linK'"], got)
+    got = _link_findings(site, '<head><link rel="icon" href="/draft/i.svg"></head><p>x</p>')
+    expect("links/guard-ascii-element-name-twin-passes", got == [], got)
+    message, prefix = inline_refusal("<p><bK>t</bK></p>")
+    expect("refuse/inline-non-ascii-element-name", prefix is not None and message.startswith(
+        prefix + "inline markup uses <bk> has a non-ASCII element name 'bK'"), message)
+    # Inline markup may use only the names the data files use (INLINE_ELEMENTS): an element the page body may
+    # carry but no inline value uses (a section, an img) is refused, and td only outside a table's raw cell
+    # (component/table above renders the raw cell twin).
+    for name, html, first in (("refuse/inline-section-outside-inline-allowlist", "<p>a</p><section>s</section>",
+                               "section"),
+                              ("refuse/inline-img-outside-inline-allowlist", '<p><img src="$BASE/i.png" alt=""></p>',
+                               "img"),
+                              ("refuse/inline-td-outside-raw-cell", "<p><td>x</td></p>", "td")):
+        message, prefix = inline_refusal(html)
+        expect(name, prefix is not None and message.startswith(
+            prefix + "inline markup uses " + outside.format("<{}>".format(first))), message)
+    # An inline value must end at a token boundary: a start or end tag it leaves open runs on into the
+    # template's markup on the page (its attribute value swallows "</div></div></main>..."). The refusal names
+    # the page; the terminated twin is accepted.
+    for name, html in (("refuse/inline-unterminated-start-tag", '<p><span title="x'),
+                       ("refuse/inline-unterminated-unquoted-start-tag", "<p>a <span title=x"),
+                       ("refuse/inline-unterminated-end-tag", "<p>a</p></p")):
+        message, prefix = inline_refusal(html)
+        expect(name, prefix is not None and message.startswith(
+            prefix + "inline markup ends inside an unfinished construct "), message)
+    twin = accepted("links/inline-terminated-start-tag-accepted", inline_page, '<p><span title="x">t</span></p>')
+    expect("links/inline-terminated-start-tag-accepted", '<p><span title="x">t</span></p>' in twin, twin)
+    # The allowlist is exactly what generation uses: the inline values of the declared build (recorded at
+    # _inline_https) use exactly INLINE_ELEMENTS, and the built pages' elements are within ELEMENTS and use every
+    # name of it but small, which only the plan component's template writes. Generation still succeeds (the
+    # declared build above rendered every page).
+    inline_values = []
+
+    def recording(reader, data):
+        inline_values.append(data)
+        return HTMLParser.feed(reader, data)
+
+    _InlineLinkValues.feed = recording
+    try:
+        recorded = accepted("elements/data-file-inline-values-within-allowlist", build)
+    finally:
+        del _InlineLinkValues.feed
+
+    class _Names(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.names = set()
+
+        def handle_starttag(self, tag, attrs):
+            self.names.add(tag)
+
+    names = _Names()
+    for value in inline_values:
+        names.feed(value)
+        names.close()
+        names.reset()
+    expect("elements/data-file-inline-values-within-allowlist",
+           recorded == live_outputs and len(inline_values) > 0 and names.names == _site_markup.INLINE_ELEMENTS,
+           (sorted(names.names - _site_markup.INLINE_ELEMENTS), sorted(_site_markup.INLINE_ELEMENTS - names.names)))
+    built_problems = []
+    page_names = _Names()
+    for built in list(live_outputs.values()) + list(outputs.values()):
+        rule_reader = _LinkGuard(site, ())
+        rule_reader.feed(built)
+        rule_reader.close()
+        built_problems.extend(f for f in rule_reader.found if "element allowlist" in f or "non-ASCII element" in f)
+        page_names.feed(built)
+        page_names.close()
+        page_names.reset()
+    expect("elements/built-pages-within-allowlist", built_problems == [], built_problems)
+    expect("elements/page-allowlist-used-by-built-pages",
+           _site_markup.ELEMENTS - page_names.names == {"small"} and "<small>" in plan,
+           sorted(_site_markup.ELEMENTS - page_names.names))
+    # A name a browser does not fold to a link attribute (KELVIN SIGN) is not checked as one; the ASCII twin is.
+    got = _link_findings(site, '<span xlinK:href="HTTP://example.com/x">t</span>')
+    expect("links/guard-non-ascii-attribute-name-not-a-link-attribute", got == [], got)
+    got = _link_findings(site, '<span xlinK:href="HTTP://example.com/x">t</span>')
+    expect("links/guard-ascii-attribute-name-twin-refused",
+           got == ["xlink:href 'HTTP://example.com/x' on <span> is neither under /draft/ nor an https URL"], got)
+    for name, href in (("links/guard-upper-case-http-anchor-refused", "HTTP://example.com/v"),
+                       ("links/guard-upper-case-https-one-slash-anchor-refused", "HTTPS:/example.com/v"),
+                       ("links/guard-non-ascii-https-lookalike-anchor-refused", "HTTP\u017f://example.com/v")):
+        got = _link_findings(site, '<a href="{}"'.format(href) + newtab_tail)
+        expect(name, got == ["href {!r} on <a> is neither under /draft/ nor an https URL".format(href)], got)
+    for name, text, want in (
+            ("links/inline-upper-case-https-anchor-lowercased", '<a href="HTTPS://example.com/v"' + newtab_tail,
+             '<a href="https://example.com/v"' + newtab_tail),
+            ("links/inline-mixed-case-https-anchor-lowercased",
+             "<A HREF='hTtPs://example.com/v'" + newtab_tail.replace("</a>", "</A>"),
+             "<A HREF='https://example.com/v'" + newtab_tail.replace("</a>", "</A>"))):
+        built = accepted(name, inline_page, text)
+        expect(name, want in built and "HTTPS:" not in built and "hTtPs:" not in built, built)
+    for name, href in (("refuse/inline-upper-case-http-anchor", "HTTP://example.com/v"),
+                       ("refuse/inline-upper-case-https-one-slash-anchor", "HTTPS:/example.com/v"),
+                       ("refuse/inline-non-ascii-https-lookalike-anchor", "HTTP\\u017f://example.com/v")):
+        expect(name, "nor an https URL" in refused(name, inline_page, '<a href="{}"'.format(href) + newtab_tail))
+    for name, text in (("refuse/inline-escaped-gt-before-http-anchor",
+                        '<a title="a&gt;b" href="HTTP://example.com/v"'),
+                       ("refuse/inline-escaped-gt-before-one-slash-anchor",
+                        "<a title='a&gt;b' href='HTTPS:/example.com/v'"),
+                       ("refuse/inline-unquoted-non-ascii-https-lookalike-anchor",
+                        "<a href=HTTP\\u017f://example.com/v"),
+                       ("refuse/inline-unquoted-full-width-https-lookalike-anchor",
+                        "<a href=\\uff28TTPS://example.com/v")):
+        expect(name, "nor an https URL" in refused(name, inline_page, text + newtab_tail))
     expect("refuse/bad-code-variant", "variant" in refused(
         "refuse/bad-code-variant", rendered, 'component = "code"\nid = "x"\ntext = "t"\nvariant = "inline"\n'))
     expect("refuse/bad-id", "not a valid id" in refused(
@@ -2511,7 +3985,7 @@ def _self_test():
     # The declared build: both sites at "/", their pages at the live roots, the asset URLs still under
     # /draft/assets/baseline/ (the asset base stays where the files are served), the robots meta gone from
     # every page but the /draft/ placeholder.
-    expect("base/live-targets-at-root", sorted(live_outputs) == sorted(e["target"] for e in GENSRC_OUTPUTS)
+    expect("base/live-targets-at-root", sorted(live_outputs) == sorted(page_targets())
            and all("/draft/" not in rel or rel.endswith("/draft/index.html") for rel in live_outputs),
            sorted(live_outputs))
     for rel, text in sorted(live_outputs.items()):
@@ -2572,6 +4046,16 @@ def _self_test():
     expect("refuse/control-off-aiqt", "aiqt.ai only" in refused(
         "refuse/control-off-aiqt", _c_control, opf,
         {"component": "control", "document": "d", "source_text": "s", "source_href": "https://example.com/"},
+        "fixture.body[1]"))
+    upper_control = accepted("links/upper-case-https-control-source-lowercased", _c_control, site,
+                             {"component": "control", "document": "d", "source_text": "s",
+                              "source_href": "HTTPS://example.com/"}, "fixture.body[1]")
+    expect("links/upper-case-https-control-source-lowercased",
+           '<a href="https://example.com/" target="_blank"' in upper_control and "HTTPS:" not in upper_control,
+           upper_control)
+    expect("refuse/upper-case-http-control-source", "https URL" in refused(
+        "refuse/upper-case-http-control-source", _c_control, site,
+        {"component": "control", "document": "d", "source_text": "s", "source_href": "HTTP://example.com/"},
         "fixture.body[1]"))
 
     # The 3 section 7.18 and 7.13 components added for opfiles.ai, each pinned exactly.
@@ -2831,13 +4315,14 @@ def _self_test():
             ("guard/aria-label-hint-passes", '<a href="https://example.com/" target="_blank" '
              'rel="noopener noreferrer" aria-label="Example (opens in a new tab)">x</a>'),
             ("guard/fragment-and-base-pass", '<a href="#top">x</a><img src="/draft/x.png" alt="">'),
-            ("guard/meta-name-passes", '<meta name="robots" content="noindex, nofollow">'),
+            # A meta and a script are head elements to the element allowlist, so these fixtures sit in a head.
+            ("guard/meta-name-passes", '<head><meta name="robots" content="noindex, nofollow"></head>'),
             ("guard/plain-path-passes", '<a href="/draft/install/">x</a>'),
             ("guard/encoded-non-dot-segment-passes", '<a href="/draft/a%2eb/">x</a>')):
         expect(name, _link_findings(site, text) == [], (text, _link_findings(site, text)))
     shell_src = _asset(site, "rail.js")
     expect("guard/shell-script-passes", _link_findings(
-        site, '<script src="{}" defer></script>'.format(shell_src), [shell_src]) == [])
+        site, '<head><script src="{}" defer></script></head>'.format(shell_src), [shell_src]) == [])
     expect("guard/shell-script-once", _link_findings(
         site, '<script src="{0}" defer></script><script src="{0}" defer></script>'.format(shell_src),
         [shell_src]) != [])
@@ -2847,7 +4332,8 @@ def _self_test():
     # once, with no other attribute; each near miss is refused.
     scheme_src = _asset(site, SCHEME_SCRIPT)
     expect("guard/scheme-script-passes", _link_findings(
-        site, '<script data-cfasync="false" src="{}"></script>'.format(scheme_src), (), scheme_src) == [])
+        site, '<head><script data-cfasync="false" src="{}"></script></head>'.format(scheme_src), (),
+        scheme_src) == [])
     for name, text in (
             ("guard/scheme-script-once", '<script data-cfasync="false" src="{0}"></script>'
              '<script data-cfasync="false" src="{0}"></script>'),
@@ -2896,8 +4382,8 @@ def _self_test():
            unresolved_links(outputs, staged_))
     promoted_sites_ = promoted_sites(staged_)
     promoted = build(sites=promoted_sites_, registered=False)
-    expect("links/promoted-targets-at-live-root", sorted(promoted) == sorted(
-        entry["target"] for entry in GENSRC_OUTPUTS) and promoted == live_outputs, sorted(promoted))
+    expect("links/promoted-targets-at-live-root", sorted(promoted) == sorted(page_targets())
+           and promoted == live_outputs, sorted(promoted))
     expect("links/resolve-live-clean", unresolved_links(live_outputs) == [], unresolved_links(live_outputs))
     staged_home, opf_home = "site/draft/index.html", "opf/site/draft/index.html"
 
@@ -3101,6 +4587,389 @@ def _self_test():
                 handle.write("VERB_STATUS = {}\n".format(bad))
             refused(name, verb_status, tmp)
 
+    # The register rows over the live declaration and the declared build, then each flip of _REGISTER_FLIPS:
+    # a copy of this file whose GENSRC_OUTPUTS literal carries that one change, loaded with importlib, must
+    # turn its row (and only that row) red, while the unmutated copy stays clean. Every call reads the other
+    # generators' declarations as the registry discovers them.
+    footer = _footer_markup(*_version_and_status())
+    others = _other_declarations()
+    # The hooks and mappings carriers come from the live data here, once; a mutant loaded from the temporary
+    # directory below is handed the same sets, since its own ROOT is not the repository.
+    carriers = _data_carriers()
+    expect("gensrc/registry-discovery-reads-other-generators",
+           others and "gen_gensrc" in {stem for stem, _decl in others}
+           and len({stem for stem, _decl in others}) > 1 and _OWN_STEM not in {stem for stem, _decl in others},
+           [stem for stem, _decl in others])
+    for row, found in sorted(_register_findings(GENSRC_OUTPUTS, live_outputs, footer, live_note, others,
+                                                carriers).items()):
+        expect(row, found == [], found)
+    with open(__file__, encoding="utf-8") as handle:
+        own = handle.read()
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-register-") as tmp:
+        control = _load_register_mutant(own, tmp, "control")
+        got = control._register_findings(control.GENSRC_OUTPUTS, live_outputs, footer, live_note, others, carriers)
+        expect("gensrc/flip-control-clean", not any(got.values()), got)
+        for position, (row, old, new) in enumerate(_REGISTER_FLIPS):
+            name = "{}/flip{}-red".format(row, position)
+            mutated = _register_mutant_source(own, old, new)
+            if mutated is None:
+                expect(name, False, "the flip's anchor is not in GENSRC_OUTPUTS exactly once")
+                continue
+            mutant = _load_register_mutant(mutated, tmp, "flip{}".format(position))
+            got = mutant._register_findings(mutant.GENSRC_OUTPUTS, live_outputs, footer, live_note, others,
+                                            carriers)
+            expect(name, sorted(key for key, found in got.items() if found) == [row], got)
+
+    def red_rows(entries, extra_others=()):
+        got = _register_findings(entries, live_outputs, footer, live_note, list(others) + list(extra_others),
+                                 carriers)
+        return sorted(key for key, found in got.items() if found)
+
+    # The pages that carry the control strip and the status note, found from the data files on their own
+    # (_data_carriers: a body component "control"; the $OPF_STATUS token in a decoded value), must be the
+    # pages whose built text carries the rendered strip and note, and neither set is empty, so the rows below
+    # are never vacuous.
+    control_pages, note_pages = carriers[_FOOTER_ROW], carriers[_NOTE_ROW]
+    footer_carriers = {target for target, text in live_outputs.items() if footer in text}
+    note_carriers = {target for target, text in live_outputs.items() if live_note in text}
+    expect("gensrc/control-pages-found", control_pages and control_pages == footer_carriers,
+           (sorted(control_pages), sorted(footer_carriers)))
+    expect("gensrc/status-note-pages-found", note_pages and note_pages == note_carriers,
+           (sorted(note_pages), sorted(note_carriers)))
+    # The hooks and mappings carriers (found from the data files) must be the pages whose built bytes change
+    # with that input: the hooks manifest of the built tree giving another count, and the mappings rows and
+    # registry emptied. Neither set is empty, so the rows below are never vacuous.
+    hook_pages, mappings_pages = carriers[_HOOKS_ROW], carriers[_MAPPINGS_ROW]
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-hook-carriers-") as tmp:
+        os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+        with open(Path(tmp) / HOOKS_SOURCE, "w", encoding="utf-8") as handle:
+            handle.write('[[hook]]\nplatform = "claude-code"\n' * (hook_count() + 1))
+        recounted = build(tree=tmp)
+    hook_changed = {target for target, text in live_outputs.items() if recounted.get(target) != text}
+    expect("gensrc/hook-count-pages-found", hook_pages and hook_pages == hook_changed,
+           (sorted(hook_pages), sorted(hook_changed)))
+    saved_mappings = _MAPPINGS_DATA
+    _MAPPINGS_DATA = ([], [])
+    try:
+        remapped = build()
+    finally:
+        _MAPPINGS_DATA = saved_mappings
+    mappings_changed = {target for target, text in live_outputs.items() if remapped.get(target) != text}
+    expect("gensrc/mappings-pages-found", mappings_pages and mappings_pages == mappings_changed,
+           (sorted(mappings_pages), sorted(mappings_changed)))
+    # Dropping one source from one page entry, for every entry whose page carries the rendered text (or whose
+    # data carries the hook token or a mappings component) and each source it must declare, turns that row
+    # (and only that row) red.
+    for name, row, source, pages in (
+            ("gensrc/control-pages-drop-version-red", _FOOTER_ROW, "VERSION", footer_carriers),
+            ("gensrc/control-pages-drop-changelog-red", _FOOTER_ROW, "changelog.toml", footer_carriers),
+            ("gensrc/status-note-pages-drop-status-source-red", _NOTE_ROW, STATUS_SOURCE, note_carriers),
+            ("gensrc/hook-count-pages-drop-hooks-source-red", _HOOKS_ROW, HOOKS_SOURCE, hook_pages)) + tuple(
+            ("gensrc/mappings-pages-drop-{}-red".format(source), _MAPPINGS_ROW, source, mappings_pages)
+            for source in _MAPPINGS_SOURCES):
+        missed = []
+        for target in sorted(pages):
+            dropped = tuple(dict(entry, sources=tuple(s for s in entry["sources"] if s != source))
+                            if entry["target"] == target else entry for entry in GENSRC_OUTPUTS)
+            if red_rows(dropped) != [row]:
+                missed.append((target, red_rows(dropped)))
+        expect(name, pages and not missed, missed)
+    # _MAPPINGS_SOURCES holds to the inputs derived from this file's own text (_mappings_inputs), which name
+    # at least 1 folder and 1 module, so the pin is never vacuous. The rows after it hold the check itself on
+    # the derived set (not on the tuple, so they neither shrink with it nor turn red beside it): its reverse
+    # order and a repeated entry are clean, and each derived input dropped, an input gained that no renderer
+    # reads, or a renderer reading another folder is a finding.
+    try:
+        derived = tuple(sorted(_mappings_inputs(own)))
+    except ValueError:
+        derived = ()
+    expect("gensrc/mappings-sources-derived", not _mappings_sources_findings(own, _MAPPINGS_SOURCES)
+           and any(rel.endswith("/") for rel in derived) and any(rel.endswith(".py") for rel in derived),
+           (_mappings_sources_findings(own, _MAPPINGS_SOURCES), derived))
+    expect("gensrc/mappings-sources-order-and-repeat-clean", not _mappings_sources_findings(own, derived[::-1])
+           and not _mappings_sources_findings(own, derived + derived[:1]), derived)
+    for rel in derived:
+        got = _mappings_sources_findings(own, tuple(item for item in derived if item != rel))
+        expect("gensrc/mappings-sources-drop-{}-red".format(rel), len(got) == 1 and rel in got[0], got)
+    got = _mappings_sources_findings(own, derived + (HOOKS_SOURCE,))
+    expect("gensrc/mappings-sources-gain-red", len(got) == 1 and HOOKS_SOURCE in got[0], got)
+    start = own.index("\ndef _mappings_data():")
+    end = own.index("\n\n\n", start)
+    loader = own[start:end]
+    got = _mappings_sources_findings(own[:start] + loader.replace('"rules")', '"hooks")') + own[end:],
+                                     derived) if loader.count('"rules")') == 1 else []
+    expect("gensrc/mappings-sources-renderer-reads-another-folder-red",
+           len(got) == 2 and ".aiqt/core/hooks/" in got[0] and ".aiqt/core/rules/" in got[1], got)
+    # Each form a renderer could read a new input by, added to _mappings_data, is derived: a path in a
+    # module-level constant, an import inside the function (plain or from), ROOT.joinpath, and a file read
+    # (derived as the file, never as a folder, so declaring the file is clean). A ROOT path the derivation
+    # cannot evaluate is a finding of its own: a part that is not a string constant, ROOT used through an
+    # attribute other than joinpath, a part leaving root, a path missing under root. The same forms in a
+    # constant no renderer names, a comment, or a function no renderer calls are clean.
+    anchor = "\ndef _mappings_data():\n"
+
+    def reading(body, module="", extra=""):
+        return (own.replace(anchor, "\n" + module + "def _mappings_data():\n    " + body + "\n") + extra
+                if own.count(anchor) == 1 else "")
+
+    hooks = ".aiqt/core/hooks/"
+    for name, text, want in (
+            ("constant-path", reading("_EXTRA_DIR.iterdir()",
+                                      '_EXTRA_DIR = ROOT / ".aiqt" / "core" / "hooks"\n\n\n'), hooks),
+            ("function-import", reading("import gen_hooks"), "tools/gen_hooks.py"),
+            ("function-from-import", reading("from gen_hooks import main"), "tools/gen_hooks.py"),
+            ("joinpath", reading('ROOT.joinpath(".aiqt", "core", "hooks").iterdir()'), hooks),
+            ("file-read", reading('(ROOT / "VERSION").read_text()'), "VERSION")):
+        got = _mappings_sources_findings(text, derived)
+        expect("gensrc/mappings-sources-{}-red".format(name),
+               got == ["_MAPPINGS_SOURCES lacks {}, which the mappings renderers read".format(want)], got)
+    got = _mappings_sources_findings(reading('(ROOT / "VERSION").read_text()'), derived + ("VERSION",))
+    expect("gensrc/mappings-sources-file-read-declared-clean", own.count(anchor) == 1 and not got, got)
+    for name, body in (("non-constant-part", 'ROOT / ".aiqt" / _MAPPINGS_RENDERER'),
+                       ("joinpath-non-constant", 'ROOT.joinpath(".aiqt", _MAPPINGS_RENDERER)'),
+                       ("root-attribute", "ROOT.iterdir()"),
+                       ("missing-path", 'ROOT / ".aiqt" / "no-such-folder"')):
+        got = _mappings_sources_findings(reading(body), derived)
+        expect("gensrc/mappings-sources-cannot-evaluate-{}-red".format(name),
+               own.count(anchor) == 1 and len(got) == 1
+               and got[0].startswith("_MAPPINGS_SOURCES cannot be checked: cannot evaluate") and "(line " in got[0],
+               got)
+    # A part leaving root is refused by its own check, not as a missing path: .aiqt/../.aiqt exists.
+    got = _mappings_sources_findings(reading('ROOT / ".aiqt" / ".." / ".aiqt"'), derived)
+    expect("gensrc/mappings-sources-cannot-evaluate-leaves-root-red",
+           own.count(anchor) == 1 and (ROOT / ".aiqt" / ".." / ".aiqt").is_dir() and len(got) == 1
+           and got[0].startswith("_MAPPINGS_SOURCES cannot be checked: cannot evaluate the ROOT path [")
+           and "(line " in got[0], got)
+    # ROOT reached any other way than as a path base or an argument to a tools/ module, and the names that
+    # reach a file or a module another way, are refused: a local alias of ROOT, a ROOT default argument (on
+    # the renderer, or on a function of this file it calls, as hook_count and verb_status have), ROOT handed
+    # to os.path.join or Path, getattr(ROOT, ...), a module-level alias of ROOT, open, __file__, __import__,
+    # importlib, a ROOT path's glob, and relative, star and tools-qualified imports. A name bound alone to a
+    # ROOT path (local, module-level or a loop variable over a folder's entries) is a path base: its .parent,
+    # a ".." part on it, or a second binding of it is refused. An import of a refused module or name under
+    # an alias, in the renderer or at module level then used there, and a match capture of ROOT are refused.
+    # A walrus of a ROOT path taken as the base of .parent, joinpath or "/" (nested, or around a bound path or
+    # a loop's folder, too), a renderer's match capture of a ROOT path (bare, in a larger pattern, or of a
+    # walrus subject), a module-level bare capture's .parent, a loop over a ROOT path's glob or rglob, a
+    # dotted refused import, a refused name from another module, and type, operator, posix, nt, _io,
+    # __loader__ and __spec__ are refused too. A module-level if or try body is walked as module level is.
+    # ROOT handed whole to a tools/ module call stays clean.
+    rooted = '(root / ".aiqt" / "core" / "hooks").iterdir()'
+    std_path = 'ROOT / ".aiqt" / "standards"'
+    bound = "p = " + std_path + "; "
+    for name, text in (
+            ("local-alias", reading('r = ROOT; (r / ".aiqt" / "core" / "hooks").iterdir()')),
+            ("root-default", own.replace(anchor, "\ndef _mappings_data(root=ROOT):\n    " + rooted + "\n")
+             if own.count(anchor) == 1 else ""),
+            ("calls-hook-count", reading("hook_count()")),
+            ("calls-verb-status", reading("verb_status()")),
+            ("os-path-join", reading('os.listdir(os.path.join(ROOT, ".aiqt", "core", "hooks"))')),
+            ("path-of-root", reading('Path(ROOT, ".aiqt", "core", "hooks").iterdir()')),
+            ("getattr-joinpath", reading('getattr(ROOT, "joinpath")(".aiqt", "core", "hooks").iterdir()')),
+            ("module-alias", reading('(_R / ".aiqt" / "core" / "hooks").iterdir()', "_R = ROOT\n\n\n")),
+            ("open-literal", reading('open(".aiqt/core/hooks/manifest.toml")')),
+            ("file-dunder", reading('(Path(__file__).parents[1] / ".aiqt").iterdir()')),
+            ("dunder-import", reading('__import__("gen_hooks")')),
+            ("importlib", reading('importlib.import_module("gen_hooks")')),
+            ("root-path-glob", reading('(ROOT / ".aiqt" / "standards").glob("../core/hooks/*")')),
+            ("relative-import", reading("load_hooks", "from .gen_hooks import load_hooks\n\n\n")),
+            ("star-import", reading("pass", "from gen_hooks import *\n\n\n")),
+            ("tools-import", reading("from tools import gen_hooks")),
+            ("bound-path-parent", reading(bound + 'p.parent.joinpath("core", "hooks").iterdir()')),
+            ("bound-path-leaves-root", reading(bound + '(p / ".." / "core" / "hooks").iterdir()')),
+            ("bound-path-rebound", reading(bound + 'p /= "../core/hooks"; p.iterdir()')),
+            ("module-path-parent", reading('(_STD.parent / "core" / "hooks").iterdir()',
+                                           '_STD = ROOT / ".aiqt" / "standards"\n\n\n')),
+            ("entry-parent", reading('[e.parent.parent / "core" / "hooks" for e in (ROOT / ".aiqt" / '
+                                     '"standards").iterdir()]')),
+            ("import-os-alias", reading('import os as o; o.listdir(".aiqt/core/hooks")')),
+            ("from-importlib", reading('from importlib import import_module; import_module("gen_hooks")')),
+            ("module-import-os-alias", reading('_os.listdir(".aiqt/core/hooks")', "import os as _os\n\n\n")),
+            ("match-capture-root", reading('(_R2 / ".aiqt" / "core" / "hooks").iterdir()',
+                                           "match ROOT:\n    case _R2:\n        pass\n\n\n")),
+            ("walrus-parent", reading("(p := " + std_path + ').parent.joinpath("core", "hooks").iterdir()')),
+            ("walrus-leaves-root", reading("((p := " + std_path + ') / ".." / "core" / "hooks").iterdir()')),
+            ("walrus-joinpath", reading("(p := " + std_path + ').joinpath("..", "core", "hooks").iterdir()')),
+            ("walrus-right-operand", reading('("x" / (p := ' + std_path + ")).iterdir()")),
+            ("walrus-nested-parent", reading("(q := (p := " + std_path + ")).parent.iterdir()")),
+            ("bound-walrus-parent", reading("p = (q := " + std_path + "); p.parent.iterdir()")),
+            ("entry-walrus-parent", reading('[e.parent.parent / "core" / "hooks" for e in (q := ' + std_path
+                                            + ").iterdir()]")),
+            ("local-match-capture", reading("match " + std_path + ":\n        case p:\n            "
+                                            '(p.parent / "core" / "hooks").iterdir()')),
+            ("local-match-capture-in-pattern", reading("match " + std_path + ":\n        case object(parent=p):\n"
+                                                       '            (p / "core" / "hooks").iterdir()')),
+            ("local-match-walrus-subject", reading("match (q := " + std_path + "):\n        case p:\n"
+                                                   "            p.parent.iterdir()")),
+            ("module-match-capture-parent", reading('(_S.parent / "core" / "hooks").iterdir()',
+                                                    "match " + std_path + ":\n    case _S:\n        pass\n\n\n")),
+            ("module-match-walrus-subject", reading("_S.parent.iterdir()", "match (_Q := " + std_path
+                                                    + "):\n    case _S:\n        pass\n\n\n")),
+            ("entry-glob", reading("[e for e in (" + std_path + ').glob("*")]')),
+            ("entry-rglob", reading("[e for e in sorted((" + std_path + ').rglob("*"))]')),
+            ("import-os-path-alias", reading('import os.path as osp; osp.exists(".aiqt/core/hooks")')),
+            ("from-importlib-machinery", reading("from importlib.machinery import SourceFileLoader; SourceFileLoader")),
+            ("from-module-path-alias", reading('from gen_rules import Path as GP; GP(".aiqt/core/hooks").iterdir()')),
+            ("type-of-path", reading("type(" + std_path + ')(".aiqt/core/hooks").iterdir()')),
+            ("operator-truediv", reading("operator.truediv(" + std_path + ', "..").iterdir()')),
+            ("import-posix", reading('import posix; posix.listdir(".aiqt/core/hooks")')),
+            ("import-nt", reading('import nt; nt.listdir(".aiqt/core/hooks")')),
+            ("from-io-c", reading('from _io import FileIO; FileIO(".aiqt/core/hooks/manifest.toml")')),
+            ("loader-get-data", reading('__loader__.get_data(".aiqt/core/hooks/manifest.toml")')),
+            ("spec-loader", reading('__spec__.loader.get_data(".aiqt/core/hooks/manifest.toml")')),
+            ("module-import-posix", reading('_px.listdir(".aiqt/core/hooks")', "import posix as _px\n\n\n"))):
+        got = _mappings_sources_findings(text, derived)
+        expect("gensrc/mappings-sources-refused-{}-red".format(name),
+               own.count(anchor) == 1 and len(got) == 1
+               and got[0].startswith("_MAPPINGS_SOURCES cannot be checked: cannot evaluate") and "(line " in got[0],
+               got)
+    for name, text, want in (
+            ("module-if-import", reading("gen_hooks.main", "if True:\n    import gen_hooks\n\n\n"),
+             "tools/gen_hooks.py"),
+            ("module-try-def", reading("_helper()", 'try:\n    def _helper():\n        return ROOT / ".aiqt" / '
+                                                    '"core" / "hooks"\nexcept ImportError:\n    pass\n\n\n'),
+             hooks),
+            ("module-if-test-walrus", reading("_H.iterdir()", 'if (_H := ROOT / ".aiqt" / "core" / "hooks"):\n'
+                                                               "    pass\n\n\n"), hooks),
+            ("module-while-test-walrus", reading("_H.iterdir()", 'while (_H := ROOT / ".aiqt" / "core" / "hooks") '
+                                                                 "is None:\n    pass\n\n\n"), hooks),
+            ("module-match-capture", reading("_H.iterdir()", 'match ROOT / ".aiqt" / "core" / "hooks":\n'
+                                                              "    case _H:\n        pass\n\n\n"), hooks),
+            ("module-for-target", reading("_H", 'for _H in [ROOT / ".aiqt" / "core" / "hooks"]:\n    pass\n\n\n'),
+             hooks),
+            ("module-with-target", reading("_H", 'with contextlib.nullcontext(ROOT / ".aiqt" / "core" / "hooks") '
+                                                 "as _H:\n    pass\n\n\n"), hooks),
+            ("module-dotted-import", reading("gen_hooks.main", "import gen_hooks.x\n\n\n"), "tools/gen_hooks.py"),
+            ("module-match-guard-walrus", reading("_H.iterdir()", 'match 0:\n    case _ if (_H := ROOT / ".aiqt" / '
+                                                                  '"core" / "hooks"):\n        pass\n\n\n'), hooks)):
+        got = _mappings_sources_findings(text, derived)
+        expect("gensrc/mappings-sources-{}-red".format(name),
+               got == ["_MAPPINGS_SOURCES lacks {}, which the mappings renderers read".format(want)], got)
+    # A path built on a name bound to a ROOT path is derived as one built on ROOT is (the bound path and the
+    # longer one), at module level and locally.
+    for name, text in (
+            ("module-path-extended", reading('(_CORE / "hooks").iterdir()', '_CORE = ROOT / ".aiqt" / "core"\n\n\n')),
+            ("bound-path-extended", reading('c = ROOT / ".aiqt" / "core"; (c / "hooks").iterdir()'))):
+        got = _mappings_sources_findings(text, derived)
+        expect("gensrc/mappings-sources-{}-red".format(name),
+               got == ["_MAPPINGS_SOURCES lacks {}, which the mappings renderers read".format(rel)
+                       for rel in (".aiqt/core/", hooks)], got)
+    # A name bound alone to a declared ROOT path (local, module-level, a loop variable over its entries) and
+    # read with the plain reads, a path under an entry, a declared path bound to a name and handed to a
+    # tools/ module, a standard-library import not on _WALK_REFUSED_NAMES, and a refused module imported
+    # under an alias at module level that no renderer uses, are all clean.
+    std = 'ROOT / ".aiqt" / "standards"'
+    got = [_mappings_sources_findings(text, derived) for text in (
+        reading(bound + "p.iterdir()"),
+        reading("_STD.iterdir()", "_STD = " + std + "\n\n\n"),
+        reading("for e in (" + std + ").iterdir():\n        e.read_text()"),
+        reading("[e.is_file() for e in sorted((" + std + ').iterdir())]; [(e / "x").exists() for e in ('
+                + std + ").iterdir()]"),
+        reading(bound + "load_manifests(p, root=ROOT)"),
+        reading('import json; json.loads("{}")'),
+        reading("pass", "import os as _os\n\n\n"))]
+    expect("gensrc/mappings-sources-bound-path-reads-clean", own.count(anchor) == 1 and got == [[]] * 7, got)
+    # A loop variable reused over 2 declared folders, and a path base given a second value that is no ROOT
+    # path, are each refused with a message naming that case.
+    for name, text, message in (
+            ("entry-two-folders", reading("for e in (" + std + ").iterdir():\n        e.read_text()\n"
+                                          "    for e in (ROOT / \".aiqt\" / \"core\" / \"rules\").iterdir():\n"
+                                          "        e.read_text()"), "e, a name bound to more than one ROOT path"),
+            ("bound-path-other-value", reading(bound + 'p /= "../core/hooks"; p.iterdir()'),
+             "p, a name bound to a ROOT path and to another value")):
+        got = _mappings_sources_findings(text, derived)
+        expect("gensrc/mappings-sources-refused-{}-message-red".format(name),
+               own.count(anchor) == 1 and len(got) == 1
+               and got[0].startswith("_MAPPINGS_SOURCES cannot be checked: cannot evaluate " + message), got)
+    # A walrus of a declared path read with the plain reads, its target used as a path base, a walrus around a
+    # bound path or a loop's folder, a match on a path with no capture, a capture of a value that is no path,
+    # and a loop variable reused over the same folder, are all clean.
+    got = [_mappings_sources_findings(text, derived) for text in (
+        reading("(p := " + std + ").iterdir()"),
+        reading("if (p := " + std + ").is_dir():\n        p.iterdir()"),
+        reading("p = (q := " + std + "); p.iterdir()"),
+        reading("[e.read_text() for e in (q := " + std + ").iterdir()]"),
+        reading("match " + std + ":\n        case _:\n            pass"),
+        reading("match 1:\n        case p:\n            p"),
+        reading("for e in (" + std + ").iterdir():\n        e.read_text()\n    for e in (" + std
+                + ").iterdir():\n        e.read_text()"))]
+    expect("gensrc/mappings-sources-walrus-and-match-clean", own.count(anchor) == 1 and got == [[]] * 7, got)
+    got = [_mappings_sources_findings(reading(body), derived)
+           for body in ("gen_rules.load_corpus(ROOT)", 'load_manifests(ROOT / ".aiqt" / "standards", root=ROOT)')]
+    expect("gensrc/mappings-sources-root-into-tools-module-clean", own.count(anchor) == 1 and got == [[], []],
+           got)
+    unused = ('\n\ndef _unread_forms(root=ROOT):\n    import gen_hooks\n    ROOT.joinpath(".aiqt").iterdir()\n'
+              '    ROOT.iterdir()\n    r = ROOT\n    hook_count()\n    os.path.join(ROOT, "x")\n'
+              '    getattr(ROOT, "joinpath")("x")\n    open("x")\n'
+              '    return ROOT / ".aiqt" / _MAPPINGS_RENDERER, gen_hooks, r, root\n')
+    got = [_mappings_sources_findings(text, derived) for text in (
+        reading("pass", '_EXTRA_DIR = ROOT / ".aiqt" / "core" / "hooks"\n\n\n'),
+        reading("pass", "_R = ROOT\n\n\n"),
+        reading("pass", "if True:\n    import gen_hooks\n\n\n"),
+        reading('pass  # ROOT / ".aiqt" / "core" / "hooks"; import gen_hooks; r = ROOT; open("x")'),
+        reading("pass", extra=unused))]
+    expect("gensrc/mappings-sources-unread-forms-clean", own.count(anchor) == 1 and got == [[]] * 5, got)
+    # The carriers come from decoded values: in a synthetic data folder, a TOML comment naming both tokens
+    # (a.toml) and a literal string spelling \u0024 (c.toml) carry neither token, while a basic string spelling
+    # each token as the escape \u0024 (b.toml) and a plain token in a body value (d.toml) carry it.
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-carriers-") as tmp:
+        os.makedirs(Path(tmp) / "draft-src")
+        head = 'path = "{}/index.html"\ntitle = "T"\nkind = "document"\nlabel = "L"\nheading = "H"\n'
+        for name, text in (
+                ("a", "# $HOOK_COUNT $OPF_STATUS\n[[body]]\ncomponent = \"prose\"\nhtml = \"<p>P</p>\"\n"),
+                ("b", "[[body]]\ncomponent = \"prose\"\nhtml = \"<p>\\u0024HOOK_COUNT \\u0024OPF_STATUS</p>\"\n"),
+                ("c", "[[body]]\ncomponent = \"prose\"\nhtml = '<p>\\u0024HOOK_COUNT \\u0024OPF_STATUS</p>'\n"),
+                ("d", "[[body]]\ncomponent = \"prose\"\nhtml = \"<p>$HOOK_COUNT</p>\"\n")):
+            with open(Path(tmp) / "draft-src" / (name + ".toml"), "w", encoding="utf-8") as handle:
+                handle.write(head.format(name) + text)
+        got = _data_carriers(({"src": "draft-src", "root": "x"},), tmp)
+    expect("gensrc/data-carriers-skip-comments-and-literals",
+           not {"x/a/index.html", "x/c/index.html"} & (got[_HOOKS_ROW] | got[_NOTE_ROW]), got)
+    expect("gensrc/data-carriers-decode-escapes",
+           got[_HOOKS_ROW] == {"x/b/index.html", "x/d/index.html"} and got[_NOTE_ROW] == {"x/b/index.html"}, got)
+    # A block entry is never a page: page_targets() leaves it out, and the template pages the site gates read
+    # (tools/_template_pages.py) are exactly the page targets, so a block entry neither becomes a template page
+    # nor moves a site's template base.
+    import _template_pages
+    blocks = {entry["target"] for entry in GENSRC_OUTPUTS if entry["kind"] == "block"}
+    expect("gensrc/block-entries-not-pages", blocks and not blocks & page_targets()
+           and _template_pages.template_targets(ROOT) == page_targets(), sorted(blocks))
+
+    # A STATUS_LINES file named outside this generator's own exact entries: by an exact target or an ancestor
+    # tree target in another generator's declaration, or by an ancestor tree target in this one. Each red
+    # vector turns the status-lines row (alone) red, and each of the vectors read from another generator is
+    # clean when the other declarations are left out, so the registry discovery is what finds it. Each twin
+    # names a sibling whose path only begins like the file's (and would match a bare prefix test), and stays
+    # clean.
+    def other(*targets):
+        return [("gen_fixture", tuple({"target": target, "kind": kind, "sources": ("tools/gen_fixture.py",),
+                                       "regenerate": "python3 tools/gen_fixture.py"} for target, kind in targets))]
+
+    own_tree = GENSRC_OUTPUTS + ({"target": "opf/", "kind": "tree", "sources": ("tools/gen_draft_site.py",),
+                                  "regenerate": "python3 tools/gen_draft_site.py"},)
+    own_sibling_tree = GENSRC_OUTPUTS + ({"target": "opf/READ/", "kind": "tree",
+                                          "sources": ("tools/gen_draft_site.py",),
+                                          "regenerate": "python3 tools/gen_draft_site.py"},)
+    for name, entries, extra, want in (
+            ("gensrc/unregistered-exact-target-in-other-generator-red", GENSRC_OUTPUTS,
+             other(("opf/README.md", "file")), [_LINES_ROW]),
+            ("gensrc/unregistered-block-entry-in-other-generator-red", GENSRC_OUTPUTS,
+             other(("opf/spec/OPF-SPEC.md", "block")), [_LINES_ROW]),
+            ("gensrc/unregistered-ancestor-tree-in-other-generator-red", GENSRC_OUTPUTS,
+             other(("opf/spec/", "tree")), [_LINES_ROW]),
+            ("gensrc/registered-ancestor-tree-in-other-generator-red", GENSRC_OUTPUTS,
+             other(("opf/site/", "tree")), [_LINES_ROW]),
+            ("gensrc/unregistered-ancestor-tree-in-own-declaration-red", own_tree, (), [_LINES_ROW]),
+            ("gensrc/sibling-files-in-other-generator-allowed", GENSRC_OUTPUTS,
+             other(("opf/README.mdx", "file"), ("opf/README", "file"), ("opf/spec/OPF-SPEC.md.bak", "block")), []),
+            ("gensrc/sibling-trees-in-other-generator-allowed", GENSRC_OUTPUTS,
+             other(("opf/spe/", "tree"), ("opf/spec/OPF-SPEC/", "tree"), ("opf/site/llms/", "tree")), []),
+            ("gensrc/sibling-tree-in-own-declaration-allowed", own_sibling_tree, (), [])):
+        expect(name, red_rows(entries, extra) == want, (red_rows(entries, extra), want))
+        if extra and want:
+            expect(name, _register_findings(entries, live_outputs, footer, live_note, (), carriers)[_LINES_ROW] == [],
+                   "found without the other declarations")
+
     # The hook count: read from the hooks manifest, rendered for the $HOOK_COUNT token, and the only form the
     # pages state it in.
     live_hooks = hook_count()
@@ -3109,6 +4978,12 @@ def _self_test():
                          ("site/install/details/index.html", "The {} Claude Code hooks")):
         expect("hooks/live-count-on-pages", wording.format(live_hooks) in live_outputs[rel], (rel, wording))
     expect("hooks/no-unrendered-token", not any("$HOOK_COUNT" in text for text in live_outputs.values()))
+    # The count the pages state equals the number of launchers the committed plugin hooks.json registers, so a
+    # control the plugin does not register (an opt-in one) can never be counted as shipped.
+    with open(ROOT / HOOKS_JSON, encoding="utf-8") as handle:
+        registered = json.load(handle)["hooks"]
+    launchers = sum(len(entry["hooks"]) for entries in registered.values() for entry in entries)
+    expect("hooks/live-count-matches-registration", live_hooks == launchers, (live_hooks, launchers))
     # A typed count: a number (digits or a number word) followed by "hooks" with at most 4 words between,
     # in any case, matched after TOML \u and \U escapes and HTML character references (&nbsp; among them)
     # are decoded, so neither a number word nor a no-break space hides a typed count. The pattern matches
@@ -3160,6 +5035,8 @@ def _self_test():
     for name, text, want in (
             ("hooks/count-claude-code-only", '[[hook]]\nplatform = "claude-code"\n[[hook]]\nplatform = "claude-code"\n'
              '[[hook]]\nplatform = "other"\n', 2),
+            ("hooks/count-opt-in-left-out", '[[hook]]\nplatform = "claude-code"\n[[hook]]\nplatform = "claude-code"\n'
+             'registration = "opt-in"\n[[hook]]\nplatform = "claude-code"\nregistration = "plugin"\n', 2),
             ("hooks/count-one", '[[hook]]\nplatform = "claude-code"\n', 1)):
         with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
             os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
@@ -3171,6 +5048,8 @@ def _self_test():
                        ("hooks/no-hooks-refused", 'format-version = 1\n'),
                        ("hooks/no-claude-code-hook-refused", '[[hook]]\nplatform = "other"\n'),
                        ("hooks/platform-missing-refused", '[[hook]]\nid = "x"\n'),
+                       ("hooks/registration-not-a-string-refused",
+                        '[[hook]]\nplatform = "claude-code"\nregistration = 3\n'),
                        ("hooks/hook-not-a-table-array-refused", 'hook = 3\n'),
                        ("hooks/missing-manifest-refused", None)):
         with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
@@ -3606,7 +5485,11 @@ def _self_test():
           "a symbolically linked parent directory there refused, each layer of the read driven on its "
           "own, and its descriptor closed once), no draft-src data file of either site typing a number (digits or a number word) "
           "with at most 4 words before \"hooks\" once TOML escapes and HTML character references are "
-          "decoded, --check exit codes, an explicit empty defaulted label refused while an optional key "
+          "decoded, --check exit codes, the register rows with their flips, each source dropped from every "
+          "control-strip, status-note, hook-count and mappings page entry, the carriers read from decoded "
+          "data values, _MAPPINGS_SOURCES held to the inputs derived from the mappings renderers, status "
+          "lines named by an exact or ancestor tree target in any generator's declaration, an explicit empty "
+          "defaulted label refused while an optional key "
           "accepts empty, a duplicate shell, component or inline id refused, 1 element repeating its id "
           "attribute and bare or empty id attributes refused with their own messages, only an element's first "
           "id compared across elements, a $BASE/ token outside an inline HTML value refused, an inline HTML "
