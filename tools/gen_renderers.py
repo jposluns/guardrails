@@ -740,11 +740,7 @@ def main():
         return self_test_main()
     root = repo_root()
     if "--root" in args:
-        i = args.index("--root")
-        if i + 1 >= len(args):
-            print("usage: gen_renderers.py [--check] [--root DIR] | --self-test", file=sys.stderr)
-            return 2
-        root = Path(args[i + 1]).resolve()
+        root = Path(args[args.index("--root") + 1]).resolve()  # the guard above refused a --root with no value
     return run(root, "--check" in args)
 
 

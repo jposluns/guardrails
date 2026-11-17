@@ -588,6 +588,12 @@ def main():
                 print("error: {!r} needs --legacy-root; fail closed".format(tok), file=sys.stderr)
                 print("usage: " + usage, file=sys.stderr)
                 return 2
+    # Adopter mode has no check mode (it archives and writes candidate material), so --check with --legacy-root is
+    # refused, never ignored by a run that writes.
+    elif "--check" in args:
+        print("error: '--check' does not apply to --legacy-root, which writes; fail closed", file=sys.stderr)
+        print("usage: " + usage, file=sys.stderr)
+        return 2
     if "--self-test" in args:
         return self_test()
     if "--legacy-root" in args:
@@ -1204,9 +1210,10 @@ def self_test():
             failures.append("D10-C: the adopter CLI must emit ranked candidate mapping rows against the "
                             "supplied successor inventory (main() previously passed an empty successor set)")
 
-        # (ARGV) --out and --successor-inventory without --legacy-root are exit 2 with the usage line, never
-        # dropped by a fall-through to the repo-mode write. run_repo and run_adopter are stood in for, so a
-        # reverted refusal shows as a stand-in call and touches no file.
+        # (ARGV) --out and --successor-inventory without --legacy-root, and --check with --legacy-root, are exit 2
+        # with the usage line, never dropped by a fall-through to the repo-mode write or ignored by the adopter-mode
+        # write. run_repo and run_adopter are stood in for, so a reverted refusal shows as a stand-in call and
+        # touches no file.
         import io
         from contextlib import redirect_stderr, redirect_stdout
         g, calls = globals(), []
@@ -1215,7 +1222,8 @@ def self_test():
         g["run_adopter"] = lambda *_a, **_k: calls.append("run_adopter") or 0
         try:
             for argv in (["--out", str(c_out)], ["--successor-inventory", str(c_inv)],
-                         ["--check", "--out", str(c_out)]):
+                         ["--check", "--out", str(c_out)], ["--check", "--legacy-root", str(c_legacy)],
+                         ["--legacy-root", str(c_legacy), "--out", str(c_out), "--check"]):
                 del calls[:]
                 err = io.StringIO()
                 sys.argv = ["gen_crosswalk.py"] + argv
@@ -1223,7 +1231,7 @@ def self_test():
                     rc_argv = main()
                 lines = err.getvalue().splitlines()
                 if rc_argv != 2 or calls or not lines or not lines[-1].startswith("usage: gen_crosswalk.py "):
-                    failures.append("ARGV: {} without --legacy-root expected exit 2 with the usage line and no run; "
+                    failures.append("ARGV: {} expected exit 2 with the usage line and no run; "
                                     "got exit {!r}, run calls {}, stderr {!r}".format(
                                         " ".join(argv), rc_argv, calls, err.getvalue()[-200:]))
         finally:
@@ -1257,7 +1265,8 @@ def self_test():
           "inventory (--successor-inventory) exercised through the real CLI, emits candidate mapping rows "
           "with EMPTY verdict fields, refuses a differing re-archive under an existing hash while an "
           "identical one is idempotent, and computes the unmatched list; --out or --successor-inventory "
-          "without --legacy-root is exit 2 with the usage line and runs nothing. Section 8.6-conformant: a pointer "
+          "without --legacy-root, and --check with --legacy-root, are exit 2 with the usage line and run "
+          "nothing. Section 8.6-conformant: a pointer "
           "lives only in adopter migration state, never in the archived source, and the Expected-successor:/"
           "Coverage: pointer lines are stripped from the ranking input, so changing only a predecessor's "
           "pointer content does not change which successor a candidate row names. The {} #378 close-vector "

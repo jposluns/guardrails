@@ -864,27 +864,26 @@ def main():
     # --root (which consumes the following token as its value); any other token (a misspelled --checkx, a
     # stray --help, a bare positional) is a LOUD exit 2, never a silent fall-through to a full regeneration
     # that writes the five outputs (the unknown-option-fails-loud pattern the sibling self-tests assert).
+    # As in _gen_common.unknown_args_refused, a token starting with "-" is never taken as the --root value, so
+    # `--root --chek` and a trailing `--root` are refused, not run.
     i = 0
     while i < len(args):
         tok = args[i]
-        if tok == "--root":
-            i += 2  # skip the flag and its value (missing/validated below in the --root branch)
+        if tok == "--root" and i + 1 < len(args) and not args[i + 1].startswith("-"):
+            i += 2  # skip the flag and its value
             continue
         if tok in ("--check", "--self-test"):
             i += 1
             continue
-        print("error: unrecognized option {!r}; fail closed".format(tok), file=sys.stderr)
+        print("error: {} {!r}; fail closed".format(
+            "option needs a value:" if tok == "--root" else "unrecognized option", tok), file=sys.stderr)
         print("usage: gen_manifest.py [--check] [--root DIR] | --self-test", file=sys.stderr)
         return 2
     if "--self-test" in args:
         return self_test_main()
     root = repo_root()
     if "--root" in args:
-        i = args.index("--root")
-        if i + 1 >= len(args):
-            print("usage: gen_manifest.py [--check] [--root DIR] | --self-test", file=sys.stderr)
-            return 2
-        root = Path(args[i + 1]).resolve()
+        root = Path(args[args.index("--root") + 1]).resolve()  # the guard above refused a --root with no value
     return run(root, "--check" in args)
 
 
