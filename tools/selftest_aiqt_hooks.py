@@ -31323,6 +31323,21 @@ def _main_isolated(monitor):
                 ("(ci-idc-e13) a GIT_CONFIG_PARAMETERS value held in a variable beside an AI product name denies",
                  "GIT_CONFIG_PARAMETERS=\"$P\" git commit -m 'fix the claude adapter'")):
             ciexpect(_ci_label, _ci_cmd, "deny")
+        # bash ends a backquote body at the first unescaped backquote even inside a single quote, while the raw
+        # reader keeps that quote open past the body and so closes it one quote late, splitting a later value
+        # before its AI part; any backquote in the text, and any quote character inside a $(...) body, makes the
+        # text inexact (_cmtidn_inexact). Each row allowed before this change.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-n1) an AI EMAIL default after a single quote inside a backquote body denies",
+                 ": x`echo '`; X='`'; set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-n2) an AI GIT_AUTHOR_NAME default after a single quote inside a backquote body denies",
+                 ": x`echo '`; X='`'; set -a; : ${GIT_AUTHOR_NAME:='Bot Claude'}; git commit -m x"),
+                ("(ci-idc-n3) an AI GIT_CONFIG_PARAMETERS pair after a single quote inside a backquote body denies",
+                 ": x`echo '`; X='`'; GIT_CONFIG_PARAMETERS=\"'author.name'='x Claude'\" git commit -m x"),
+                ("(ci-idc-n4) an AI GIT_CONFIG_VALUE_0 after a single quote inside a backquote body denies",
+                 ": x`echo '`; X='`'; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0='x Claude' "
+                 "git commit -m x")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
         for _ci_label, _ci_cmd in (
                 ("(ci-idc-e-c1) a human EMAIL with a backslash before a newline and no AI name allows",
                  "EMAIL=alice@example.com git commit -m 'fix the \\\nadapter'"),
