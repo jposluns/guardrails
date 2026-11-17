@@ -854,7 +854,7 @@ SCOPE_JOB = (
     "          fi",
     "      - name: Child exit status observable (after the scope decision)",
     "        " + STEP_SHELL_LINE,
-    "        run: python3 -I -B opf/tools/_child_status.py",
+    "        run: python3 -I -B tools/_child_status.py",
     "      - name: Site scope self-test",
     "        " + STEP_SHELL_LINE,
     "        run: python3 -I -B tools/ci_site_scope.py --self-test",
@@ -912,7 +912,7 @@ OPF_WHOLE_COMMAND = "opf/tools/opf.py --self-test"
 MSG_LEAKS_SCAN = "tools/check_msg_leaks.py"  # the live scan (module docstring, TRIGGER)
 # The child-status probe: the first step of every CI job that runs Python, msg-leaks.yml's one job
 # included, so that workflow admits it beside its own scan.
-CHILD_STATUS_PROBE = "opf/tools/_child_status.py"
+CHILD_STATUS_PROBE = "tools/_child_status.py"
 CHILD_STATUS_COVERAGE = "tools/check_child_status_coverage.py"
 # The OPF init contract gate run with the flag that adds its parent-repository roster checks.
 OPF_INIT_CONTRACT_PARENT = "opf/tools/check_opf_init_contract.py --parent-integration"
@@ -5575,7 +5575,7 @@ def self_test():
         "python3 -I -B .github/check_cited_standards_contract.py",
         "python3 -I -B .github/check_newtab_contract.py",
         # The child-status probe and its coverage gate, mandatory as the contracts are.
-        "python3 -I -B opf/tools/_child_status.py",
+        "python3 -I -B tools/_child_status.py",
         "python3 -I -B tools/check_child_status_coverage.py",
         # The OPF init contract gate's parent-integration run, mandatory the same way.
         "python3 -I -B " + OPF_INIT_CONTRACT_PARENT,
@@ -5766,7 +5766,7 @@ def self_test():
             ".github/check_cited_standards_contract.py",
             ".github/check_cited_standards_contract.py --self-test",
             ".github/check_newtab_contract.py",
-            "opf/tools/_child_status.py",
+            "tools/_child_status.py",
             "tools/check_child_status_coverage.py",
             "opf/tools/check_opf_init_contract.py --parent-integration"):
         count += 1
@@ -5781,8 +5781,8 @@ def self_test():
         case("01h mandatory member removed from both runners: " + member,
              evaluate(local_fixture(drop(member)), ci_fixture(drop(member)), ()),
              1, ("missing-mandatory",), (),
-             ("opf/tools/_child_status.py",)
-             if member == "opf/tools/_child_status.py" else ())
+             ("tools/_child_status.py",)
+             if member == "tools/_child_status.py" else ())
     # The OPF init contract gate run WITHOUT its --parent-integration flag checks only the OPF-local
     # rosters and cannot see the flag missing: the flag dropped from both runners together, or from
     # either one, is a finding here, never a pass.

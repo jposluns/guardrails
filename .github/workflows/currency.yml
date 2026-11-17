@@ -35,7 +35,7 @@ jobs:
 
       - name: Child exit status observable (before any gate)
         shell: bash
-        run: python3 -I -B opf/tools/_child_status.py
+        run: python3 -I -B tools/_child_status.py
 
       # Real audit against today's date: exit 1 (a manifest past its FAIL threshold) or exit 2 (a
       # malformed manifest / unparseable date) paints this scheduled run red. It ships green today

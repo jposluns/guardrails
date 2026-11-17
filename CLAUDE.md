@@ -144,7 +144,7 @@ runs only in skippable jobs; `tools/check_opf_declaration.py`, which decodes eve
 `opf/site/adopt.md` and `opf/site/adopt/index.html`) runs live in the always-run registry job in
 every run. What the fast lane deliberately gives up for a site-only train is every check in the 51
 heavy jobs named above: every step of those jobs is skipped. Of their commands, only the
-child-status probe (`opf/tools/_child_status.py`), the opf-declaration live gate and its
+child-status probe (`tools/_child_status.py`), the opf-declaration live gate and its
 `selftest-execution` suite, and `tools/check_byte_canon.py` (live gate and self-test) also run,
 as the same command, in an always-run job. Every other command in those jobs runs nowhere else
 in CI on such a train, among them the OPF tooling live gates and self-tests of the three

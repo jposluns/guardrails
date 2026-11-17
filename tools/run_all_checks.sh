@@ -46,7 +46,7 @@ run_gate() {
 # the inherited ignore for its children, so the probe is a gate member, not a reset: its exit 2 sets
 # failed, and the run ends RESULT: FAIL whatever later gates print. check_child_status_coverage.py holds
 # this line first.
-run_gate "child-status" python3 -I -B opf/tools/_child_status.py
+run_gate "child-status" python3 -I -B tools/_child_status.py
 run_gate "child-status-selftest" python3 -I -B tools/check_selftest_execution.py --suite child-status-selftest
 run_gate "child-status-coverage-selftest" python3 -I -B tools/check_selftest_execution.py --suite child-status-coverage-selftest
 run_gate "child-status-coverage" python3 -I -B tools/check_child_status_coverage.py

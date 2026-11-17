@@ -3210,9 +3210,8 @@ expected-check-ids = [
 ]
 
 [[suite]]
-# The canonical child-status probe's vectors (opf/tools/_child_status.py), replayed by the coverage gate:
-# the execution gate imports its report module from beside the runner, so a runner under opf/tools/
-# cannot be registered, and this row shares the coverage gate's runner with the next one.
+# The canonical child-status probe's vectors (tools/_child_status.py), replayed by the coverage gate;
+# this row shares the coverage gate's runner with the next one.
 id = "child-status-selftest"
 runner = "tools/check_child_status_coverage.py"
 args = ["--self-test", "--probe"]
@@ -3235,6 +3234,7 @@ args = ["--self-test"]
 expected-check-ids = [
   "copies/real-copies-identical",
   "copies/drift-is-finding",
+  "copies/legacy-one-byte-drift-is-finding",
   "copies/missing-copy-is-finding",
   "copies/hook-drift-is-finding",
   "copies/rebound-guard-is-finding",

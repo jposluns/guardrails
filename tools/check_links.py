@@ -1472,7 +1472,7 @@ def self_test(script=None):
     return 0
 
 
-# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# The child-status guard: an inline copy of the canonical guard in tools/_child_status.py, which
 # tools/check_child_status_coverage.py pins this copy to by AST. The self-test reads the exit status of
 # each fixture run it launches, so under an ignored SIGCHLD it would read a failing vector as a pass; it
 # refuses at its entry line instead, before main() runs.

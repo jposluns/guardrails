@@ -2846,7 +2846,7 @@ def main(argv=None):
     return 2
 
 
-# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# The child-status guard: an inline copy of the canonical guard in tools/_child_status.py, which
 # tools/check_child_status_coverage.py pins this copy to by AST. Inline, not imported, because this file's
 # own self-test copies it alone into an exported directory. This file launches every registered suite and
 # reads each child's exit status, so under an ignored SIGCHLD it would read a failing suite as a pass; it

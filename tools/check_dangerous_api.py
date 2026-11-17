@@ -696,7 +696,7 @@ ALLOWLIST = (
      " __file__ by its one caller, with one ratchet-comparison branch disabled by a reviewed literal"
      " substitution), written under the self-test's temporary directory; no external input"),
     ("tools/check_child_status_coverage.py", "_canonical_module", "code", 1,
-     "authority loader: exec_module of the repository's own opf/tools/_child_status.py under ROOT,"
+     "authority loader: exec_module of the repository's own tools/_child_status.py under ROOT,"
      " the equivalent of an import; no external input"),
     ("tools/check_child_status_coverage.py", "_load_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"

@@ -3975,7 +3975,7 @@ def main():
     return _self_test_main(sys.argv[1:])
 
 
-# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# The child-status guard: an inline copy of the canonical guard in tools/_child_status.py, which
 # tools/check_child_status_coverage.py pins this copy to by AST. The --self-test vectors launch children
 # and read their exit statuses, so under an ignored SIGCHLD a failing child would read as a pass; the guard
 # runs at the entry line, before main() runs them. Importing this module runs no guard: an importer's own

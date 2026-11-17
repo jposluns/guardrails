@@ -42705,7 +42705,7 @@ def _dispatcher_fail_open_warn(handler_name, detail):
 
 
 # The child-status guard: an inline copy of the canonical constant and probe in
-# opf/tools/_child_status.py, which tools/check_child_status_coverage.py pins this copy to by AST. main()
+# tools/_child_status.py, which tools/check_child_status_coverage.py pins this copy to by AST. main()
 # runs it right after it decides the mode's error posture (see the block there).
 # The status the probe child exits with; any value other than 0 and the refusal exit would do.
 _CHILD_STATUS_PROBE_CODE = 77

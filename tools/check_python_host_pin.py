@@ -461,11 +461,11 @@ GATE_PATH = "tools/check_python_host_pin.py"
 # The step right after a host-patch job's setup-python step: this gate, which fails there when the job does
 # not run the host patch.
 GATE_RUN = "python3 -I -B " + GATE_PATH
-# The child-status probe (opf/tools/_child_status.py). In each host-patch job the probe step runs right
+# The child-status probe (tools/_child_status.py). In each host-patch job the probe step runs right
 # after the Python host pin step: tools/check_child_status_coverage.py accepts the gate ahead of its probe
 # in those jobs only, so the gate-step rule holds the gate as the step right after setup-python with no
 # step between. The committed-line controls and the order vectors read this text.
-PROBE_RUN = "python3 -I -B opf/tools/_child_status.py"
+PROBE_RUN = "python3 -I -B tools/_child_status.py"
 # The runner image of each host-patch job. The setup-python versions manifest lists a patch release's Linux
 # builds by Ubuntu version (on 2026-10-12, x64 builds of 3.14.4 for 22.04 and 24.04 only), so ubuntu-latest
 # would fail the jobs once it moves to an image the host patch has no build for.
