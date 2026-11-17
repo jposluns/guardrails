@@ -161,6 +161,14 @@ def run(root, check):
 
 def main():
     argv = sys.argv[1:]
+    # Unknown-option rejection precedes every dispatch (the tools/gen_manifest.py shape): main() defines only
+    # --check and --self-test, so any other token (a misspelled --chek, a stray --help, a positional) is exit 2
+    # with the usage line on stderr and nothing read or written, never a fall-through to a write-mode run.
+    for tok in argv:
+        if tok not in ("--check", "--self-test"):
+            print("error: unrecognized option {!r}; fail closed".format(tok), file=sys.stderr)
+            print("usage: gen_cursor.py [--check | --self-test]", file=sys.stderr)
+            return 2
     if "--self-test" in argv:
         return self_test_main()
     return run(repo_root(), "--check" in argv)
@@ -314,6 +322,10 @@ def self_test_main():
                                         got, kept, wrote))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    # An unknown option is exit 2 with the usage line and runs nothing (red when main()'s guard is reverted):
+    # gen_rules._argv_guard_failures drives main() with run and repo_root stood in for, touching no file.
+    from gen_rules import _argv_guard_failures
+    failures.extend(_argv_guard_failures(globals(), "gen_cursor.py"))
 
     if failures:
         print("SELF-TEST FAIL:")
@@ -326,7 +338,7 @@ def self_test_main():
           "exits 2 with the generated .mdc kept, and one symlinked to a directory inside the root is read; a "
           "reserved subtree, a family directory inside it or a .cursor/ directory above it symlinked outside the "
           "root exits 2 in write mode with nothing written or deleted there, and one symlinked inside the root is "
-          "read.")
+          "read; an unknown option is exit 2 with the usage line and runs nothing.")
     return 0
 
 

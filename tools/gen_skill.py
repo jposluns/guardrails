@@ -1289,6 +1289,14 @@ def evidence_sentence_problem(text, want):
 
 def main():
     argv = sys.argv[1:]
+    # Unknown-option rejection precedes every dispatch (the tools/gen_manifest.py shape): main() defines only
+    # --check and --self-test, so any other token (a misspelled --chek, a stray --help, a positional) is exit 2
+    # with the usage line on stderr and nothing read or written, never a fall-through to a write-mode run.
+    for tok in argv:
+        if tok not in ("--check", "--self-test"):
+            print("error: unrecognized option {!r}; fail closed".format(tok), file=sys.stderr)
+            print("usage: gen_skill.py [--check | --self-test]", file=sys.stderr)
+            return 2
     if "--self-test" in argv:
         # The whole self-test runs inside the fixture git lifecycle, so the code under test
         # (authoring_marker_tracked's git ls-files, which strips GIT_* and so drops the scrub's config pins)
@@ -1328,7 +1336,8 @@ def main():
 #  12. the published download contract holds: both zip names, exactly LICENSE and SKILL.md at the archive
 #      root, their pinned metadata, identical bytes under both names, and whole-archive bytes equal to an
 #      independent packer; an extra, prefixed, reordered or changed member, a changed timestamp, compression,
-#      creator or mode, and differing aliases each turn it red.
+#      creator or mode, and differing aliases each turn it red,
+#  13. an unknown option (--chek, --help, a positional) is exit 2 with the usage line and runs nothing.
 
 # The published skill download contract. Packaging work that moves the generated skill (for example into a
 # plugin directory) must keep it, so it is pinned here as literals, never read back from ZIP_MEMBER,
@@ -3052,13 +3061,18 @@ def self_test_main():
                             "{}, got {}\n{}".format(ZIP_VERSIONED_PARTS[-1], code, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    # An unknown option is exit 2 with the usage line and runs nothing (red when main()'s guard is reverted):
+    # gen_rules._argv_guard_failures drives main() with run_gen and repo_root stood in for, touching no file.
+    from gen_rules import _argv_guard_failures
+    failures.extend(_argv_guard_failures(globals(), "gen_skill.py", "run_gen"))
 
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: well-formed source round-trips clean (SKILL.md and the zips); an unknown "
+    print("SELF-TEST PASS: an unknown option is exit 2 with the usage line and runs nothing; well-formed "
+          "source round-trips clean (SKILL.md and the zips); an unknown "
           "corpus-id, an invalid-UTF-8 target, and a version/zip-literal mismatch each fail closed (exit 2); "
           "from pack 1.1.1 on a skill version that differs from VERSION fails closed (exit 2, writing nothing) "
           "while the equal twin builds clean and a pack below 1.1.1 leaves the skill independent, and a "

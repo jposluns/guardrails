@@ -98,6 +98,14 @@ def render(pairs):
 
 def main():
     args = sys.argv[1:]
+    # Unknown-option rejection precedes every dispatch (the tools/gen_manifest.py shape): main() defines only
+    # --check and --self-test, so any other token (a misspelled --chek, a stray --help, a positional) is exit 2
+    # with the usage line on stderr and nothing read or written, never a fall-through to a write-mode run.
+    for tok in args:
+        if tok not in ("--check", "--self-test"):
+            print("error: unrecognized option {!r}; fail closed".format(tok), file=sys.stderr)
+            print("usage: gen_agents.py [--check | --self-test]", file=sys.stderr)
+            return 2
     if "--self-test" in args:
         return self_test_main()
     return run(repo_root(), "--check" in args, [(AGENTS_REL, HEADER)], "tools/gen_agents.py", corpus_bodies)
@@ -250,6 +258,9 @@ def main():
 #       refused, so a fallback that creates a real socket through that constructor is caught
 #       (the rerun patches socket.socket only; a socket reached without calling it, through a
 #       name bound before the patch, is outside what this vector discriminates).
+#   T39 an unknown option (--chek, --help, a positional) is exit 2 with the usage line and runs nothing, for
+#       this generator's main() and for gen_adapters.main() (which has no self-test of its own); each main()
+#       is driven with run and repo_root stood in for, so a reverted guard touches no file.
 
 _APEX = ("---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
          "\n# Project integrity\n\nApex text.\n")
@@ -2648,6 +2659,12 @@ def self_test_main(nested_run=False):
         # removal end to end, vector (h) the removal that reports no error yet leaves the root
         # standing, and the cleanup helper vectors a root that cannot be inspected.
         verified_rmtree(tmp, "cleanup")
+    # T39. An unknown option is exit 2 with the usage line and runs nothing, here and in gen_adapters (red when
+    #      either main()'s guard is reverted).
+    from gen_rules import _argv_guard_failures
+    import gen_adapters
+    failures.extend(_argv_guard_failures(globals(), "gen_agents.py"))
+    failures.extend(_argv_guard_failures(vars(gen_adapters), "gen_adapters.py"))
 
     if failures:
         print("SELF-TEST FAIL:")
@@ -2682,7 +2699,8 @@ def self_test_main(nested_run=False):
           "by its path from the root; and no descriptor is left open in an enumeration verified to "
           "hold its sentinel (an unlistable or sentinel-omitting listing, and a sentinel that cannot "
           "be opened or whose close fails, is a named NOT RUN failure, never a pass, and a partial "
-          "listing keeping the sentinel could still hide a leak).")
+          "listing keeping the sentinel could still hide a leak); an unknown option to this generator or to "
+          "gen_adapters.py is exit 2 with the usage line and runs nothing.")
     return 0
 
 

@@ -90,7 +90,17 @@ def render(pairs, header):
 
 
 def main():
-    return run(repo_root(), "--check" in sys.argv[1:], TARGETS, "tools/gen_adapters.py", corpus_bodies)
+    argv = sys.argv[1:]
+    # Unknown-option rejection precedes every dispatch (the tools/gen_manifest.py shape): main() defines only
+    # --check, so any other token (a misspelled --chek, a stray --help, a positional) is exit 2 with the usage
+    # line on stderr and nothing read or written, never a fall-through to a write-mode run. gen_agents.py's
+    # self-test drives this guard (vector T39), as this generator has no self-test of its own.
+    for tok in argv:
+        if tok != "--check":
+            print("error: unrecognized option {!r}; fail closed".format(tok), file=sys.stderr)
+            print("usage: gen_adapters.py [--check]", file=sys.stderr)
+            return 2
+    return run(repo_root(), "--check" in argv, TARGETS, "tools/gen_adapters.py", corpus_bodies)
 
 
 if __name__ == "__main__":

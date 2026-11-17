@@ -717,12 +717,58 @@ def run(root, check):
 
 def main():
     argv = sys.argv[1:]
+    # Unknown-option rejection precedes every dispatch (the tools/gen_manifest.py shape): main() defines only
+    # --check and --self-test, so any other token (a misspelled --chek, a stray --help, a positional) is exit 2
+    # with the usage line on stderr and nothing read or written, never a fall-through to a write-mode run.
+    for tok in argv:
+        if tok not in ("--check", "--self-test"):
+            print("error: unrecognized option {!r}; fail closed".format(tok), file=sys.stderr)
+            print("usage: gen_rules.py [--check | --self-test]", file=sys.stderr)
+            return 2
     if "--self-test" in argv:
         return self_test_main()
     return run(repo_root(), "--check" in argv)
 
 
 # --- self-test ----------------------------------------------------------------------------------------
+# The unknown-option vectors (argv, expected exit, the check flag each run call carries): an unknown option is
+# exit 2 with the usage line on stderr and reaches no run; no argument and --check alone still reach run.
+# main() is driven with run and repo_root stood in for, so a reverted guard shows as a call to the stand-in
+# (a write-mode run of the real tree) and never touches a file.
+_ARGV_CASES = ((["--chek"], 2, []), (["--check", "--chek"], 2, []), (["--help"], 2, []), (["check"], 2, []),
+               ([], 0, [False]), (["--check"], 0, [True]))
+
+
+def _argv_guard_failures(namespace, prog, run_name="run"):
+    """One failure line per _ARGV_CASES vector namespace["main"] mishandles. namespace is a module's globals;
+    its run_name and repo_root bindings are replaced for the calls and restored afterwards."""
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+    calls, failures = [], []
+    saved = namespace[run_name], namespace["repo_root"], sys.argv
+    namespace[run_name] = lambda _root, check, *_rest: calls.append(check) or 0
+    namespace["repo_root"] = lambda: None
+    try:
+        for argv, want, want_calls in _ARGV_CASES:
+            del calls[:]
+            err = io.StringIO()
+            sys.argv = [prog] + argv
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                try:
+                    got = namespace["main"]()
+                except SystemExit as exc:
+                    got = "raised SystemExit({!r})".format(exc.code)
+            usage = err.getvalue().count("usage: " + prog) == 1
+            if (got, calls, usage) != (want, want_calls, want == 2):
+                failures.append("{} {}: expected exit {} with run calls {} and {}; got exit {}, run calls {}, "
+                                "stderr {!r}".format(prog, " ".join(argv) or "(no argument)", want, want_calls,
+                                                     "the usage line on stderr" if want == 2 else "no usage line",
+                                                     got, calls, err.getvalue()[-200:]))
+    finally:
+        namespace[run_name], namespace["repo_root"], sys.argv = saved
+    return failures
+
+
 # One focused invariant (the sibling generators' idiom): an invalid-UTF-8 GENERATED TARGET fails closed
 # (exit 2) rather than a raw UnicodeDecodeError traceback. The reconcile loop reads each desired target as
 # UTF-8 (the drift compare), so a non-UTF-8 target must be caught by the widened (OSError, UnicodeError)
@@ -2090,6 +2136,9 @@ def self_test_main():
             continue
         failures.append("the tier value {} expected a refusal, got {!r}".format(ascii(text), got))
 
+    # An unknown option is exit 2 with the usage line and runs nothing (red when main()'s guard is reverted).
+    failures.extend(_argv_guard_failures(globals(), "gen_rules.py"))
+
     if failures:
         print("SELF-TEST FAIL:")
         for failure in failures:
@@ -2105,7 +2154,8 @@ def self_test_main():
           "hold and {} guard revert(s) each go red; an adopter-shaped rule with a non-ASCII value is accepted "
           "and goes red under the ASCII-only revert; {} parse-level revert(s) each go red; {} adopter-mode "
           "case(s) pass the placement gate and are refused by the pack reader, {} more are refused by both, "
-          "and {} adopter-mode revert(s) each go red; {}.".format(
+          "and {} adopter-mode revert(s) each go red; an unknown option is exit 2 with the usage line and runs "
+          "nothing; {}.".format(
               len(_MAP_KEYS_CONDITIONS), ", ".join(_MAP_KEYS_CONDITIONS),
               len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1, len(_PARSE_REVERTS), len(_ADOPTER_MODE_CASES),
               len(_ADOPTER_MODE_REFUSALS), len(_ADOPTER_MODE_REVERTS),
