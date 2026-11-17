@@ -5414,6 +5414,8 @@ expected-check-ids = [
   "couple/local-base-row-modified-refused",
   "couple/local-base-row-modified-refused-flip",
   "couple/local-base-absent-not-run",
+  "couple/local-base-missing-object-cannot-evaluate",
+  "couple/local-base-blob-cannot-evaluate",
   "exit/codes-0-1-2",
   "live/real-tree-passes",
 ]
