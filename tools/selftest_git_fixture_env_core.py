@@ -2267,6 +2267,7 @@ def _member_bound_checks(roster):
     release_cut = ("tools/check_release_cut.py", "--self-test", "--red-on-revert")
     aiqt_hooks = ("tools/selftest_aiqt_hooks.py",)
     adopt_apply = ("opf/tools/_opf_adopt_apply.py", "--self-test")
+    gen_rules = ("tools/gen_rules.py", "--self-test")
 
     figures, problems = _roster_figures(roster)
     print("CONFIG ROSTER FIGURES: {} members, {} in the malformed lane, {} outside the sizing"
@@ -2418,7 +2419,7 @@ def _member_bound_checks(roster):
     overrides = {record: 5100, opf_selftest: 3600, adopt_observe: 1800, release_delta: 1800,
                  opf_init: 1800, closure_a: 13500, closure_b: 10800, closure_c: 8100,
                  closure_d: 9900, closure_e: 9600, closure_f: 3600, coverage_suite: 5400,
-                 release_cut: 2700, aiqt_hooks: 5700, adopt_apply: 3900}
+                 release_cut: 2700, aiqt_hooks: 5700, adopt_apply: 3900, gen_rules: 1200}
     check("config/member-bound-table",
           (sorted(key for key in CONFIG_MEMBER_BOUNDS if key not in roster),
            {key: _config_member_bound(key) for key in CONFIG_MEMBER_BOUNDS},
