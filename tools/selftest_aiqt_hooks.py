@@ -31381,9 +31381,10 @@ def _main_isolated(monitor):
                  "X=\"${| { :; }; REPLY=\"'\"; }\"; set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x")):
             ciexpect(_ci_label, _ci_cmd, "deny")
         # bash runs a command substitution held in an indexed array subscript of a variable's value wherever it
-        # evaluates an arithmetic expression, so each such place makes the text inexact and a human EMAIL beside
-        # an AI product name denies (the disclosed over-deny; the same EMAIL with no such place is ci-idc-p5).
-        # Each row allowed before this change.
+        # evaluates an arithmetic expression, and one held in a value expanded as a prompt string (${X@P}), so
+        # each such place makes the text inexact and a human EMAIL beside an AI product name denies (the disclosed
+        # over-deny; the same EMAIL with no such place is ci-idc-p5). Rows a1 to a9 allowed before the arithmetic
+        # change; a10 to a13 pin shapes the narrowed search keeps; n18 allowed before the prompt-string change.
         _ci_human = "EMAIL=alice@example.com git commit -m 'fix the claude adapter'"
         for _ci_label, _ci_cmd in (
                 ("(ci-idc-a1) an indexed array subscript makes the text inexact (over-deny)",
@@ -31403,8 +31404,29 @@ def _main_isolated(monitor):
                 ("(ci-idc-a8) a ${NAME:OFFSET} substring expansion makes the text inexact (over-deny)",
                  "Y=${N:1}; " + _ci_human),
                 ("(ci-idc-a9) a ${!NAME} indirect expansion makes the text inexact (over-deny)",
-                 "Y=${!V}; " + _ci_human)):
+                 "Y=${!V}; " + _ci_human),
+                ("(ci-idc-a10) a [X]=v compound array assignment word makes the text inexact (over-deny)",
+                 "Y=([0]=1); " + _ci_human),
+                ("(ci-idc-a11) a ${a[X]} array expansion makes the text inexact (over-deny)",
+                 "Y=${a[0]}; " + _ci_human),
+                ("(ci-idc-a12) a let command word after an assignment word makes the text inexact (over-deny)",
+                 "X=1 let n=1; " + _ci_human),
+                ("(ci-idc-a13) a [[ command word after if makes the text inexact (over-deny)",
+                 "if [[ 1 -eq 1 ]]; then " + _ci_human + "; fi"),
+                ("(ci-idc-n18) a ${NAME@P} prompt-string expansion in the middle of a word makes the text inexact "
+                 "(over-deny)", "Y=a${X@P}; " + _ci_human)):
             ciexpect(_ci_label, _ci_cmd, "deny")
+        # An arithmetic place is sought in the shape bash reads it, so a [ right after a quote or a / and let
+        # inside a quoted message are not one, and the maintainer's EMAIL beside an AI tool path allows (the
+        # review's three shapes; each denied before this change).
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-a-c1) the maintainer's EMAIL beside a [tag] message prefix allows",
+                 "EMAIL=jeff@posluns.ca git commit -m '[hooks] refresh CLAUDE.md'"),
+                ("(ci-idc-a-c2) the maintainer's EMAIL beside a message that starts with let allows",
+                 "EMAIL=jeff@posluns.ca git commit -m 'let CLAUDE.md name the rules'"),
+                ("(ci-idc-a-c3) the maintainer's EMAIL beside a pathspec glob in .claude/rules allows",
+                 "EMAIL=jeff@posluns.ca git add .claude/rules/[a-z]*.md")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
         for _ci_label, _ci_cmd in (
                 ("(ci-idc-e-c1) a human EMAIL with a backslash before a newline and no AI name allows",
                  "EMAIL=alice@example.com git commit -m 'fix the \\\nadapter'"),

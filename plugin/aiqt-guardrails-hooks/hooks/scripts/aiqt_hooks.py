@@ -5377,15 +5377,35 @@ _CMTIDN_FILLERS = frozenset(("parallel", "sem", ":::", "::::", ":::+", "::::+"))
 # a backquote, and ${C...; } where C is a space, a tab, a newline or |, which runs in the current shell) and a
 # process substitution (3.5.6: <(...) or >(...)); a $(( arithmetic expansion matches as well.
 _CMTIDN_SUBSTITUTION_RE = re.compile(r"\$\(|`|[<>]\(|\$\{[ \t\n|]")
+# _CMTIDN_PROMPT_RE: a ${NAME@P} prompt-string expansion (3.5.3), whose result bash expands as a prompt string,
+# a command substitution included, so a command runs that the text need not spell ($ and ( can come from
+# separate words: printf -v X '%s(cmd)' '$'; : "${X@P}").
+_CMTIDN_PROMPT_RE = re.compile(r"@P\}")
+# The start of a command word: the start of the text or a ; & | ( ) { newline, backquote or ! before it, then
+# any blanks, reserved words that start a command, builtin, command or eval words and assignment words (a quoted
+# value included), each followed by blanks.
+_CMTIDN_COMMAND_START = (r"(?:^|(?<=[;&|(){}\n`!]))[ \t]*(?:(?:if|then|else|elif|do|while|until|time|coproc|!"
+                         r"|builtin|command|eval|[A-Za-z_][A-Za-z_0-9]*(?:\[[^\]\n]*\])?\+?="
+                         r"(?:'[^']*'|\"[^\"]*\"|[^\s;&|()<>'\"])*)[ \t]+)*")
 # _CMTIDN_ARITHMETIC_RE: a place where bash evaluates an arithmetic expression (6.5 Shell Arithmetic), where a
 # variable whose value holds an indexed array subscript has that subscript expanded, a command substitution in
-# it included, so a command runs that the text need not spell: a [ (an array subscript, a[X], ${a[X]},
-# ([X]=v), and the [[ compound command, whose -eq, -lt and the rest compare arithmetic expressions, 6.4), a
-# deprecated $[...] arithmetic expansion matching as well, a (( arithmetic command or for (( loop (3.2.5.1,
-# 3.2.5.2), a let word (4.2), a declare, typeset or local word with an option cluster holding i (the integer
-# attribute, 4.2), a ${NAME:OFFSET} substring expansion (3.5.3) and a ${!NAME} indirect expansion (3.5.3),
-# whose name may hold a subscript.
-_CMTIDN_ARITHMETIC_RE = re.compile(r"\[|\(\(|(?<![A-Za-z0-9_.-])let(?![A-Za-z0-9_.-])"
+# it included, so a command runs that the text need not spell. Each is sought in the shape bash reads it, not
+# as any [ or let word: an indexed array subscript, a name directly followed by [ with no letter, digit, _, /,
+# . or $ before the name (an assignment a[X]=v, an expansion ${a[X]}, ${#a[X]} or ${!a[X]}, a name operand of
+# unset, read, printf -v or test -v), so a [ right after a quote ('[hooks] ...'), a / or a . (the glob
+# .claude/rules/[a-z]*.md) is not one, nor is $a[X], which bash reads as $a followed by a glob; a [X]=v or
+# [X]+=v word of a compound array assignment (a=([X]=v)); a deprecated $[...] arithmetic expansion; a ((
+# arithmetic command or for (( loop (3.2.5.1, 3.2.5.2), which a $(( arithmetic expansion matches as well; a
+# let word (4.2), spelled through quotes or backslashes too ('let', l\et), or the [[ compound command, whose
+# -eq, -lt and the rest compare arithmetic expressions (6.4), each as a command word (_CMTIDN_COMMAND_START),
+# so let inside a quoted message ('let CLAUDE.md ...') is not one; a declare, typeset or local word with an
+# option cluster holding i (the integer attribute, 4.2); a ${NAME:OFFSET} substring expansion (3.5.3) and a
+# ${!NAME} indirect expansion (3.5.3), whose name may hold a subscript.
+_CMTIDN_ARITHMETIC_RE = re.compile(r"(?<![A-Za-z0-9_./$])[A-Za-z_][A-Za-z_0-9]*\["
+                                   r"|(?<![^\s(])\[[^\]\n]*\]\+?="
+                                   r"|\$\[|\(\("
+                                   r"|" + _CMTIDN_COMMAND_START + r"(?:[\\'\"]*l[\\'\"]*e[\\'\"]*t[\\'\"]*|\[\[)"
+                                   r"(?![^\s;&|()<>])"
                                    r"|(?<![A-Za-z0-9_.-])(?:declare|typeset|local)(?:[ \t]+[-+][A-Za-z]+)*?"
                                    r"[ \t]+-[A-Za-z]*i"
                                    r"|\$\{(?:[A-Za-z_][A-Za-z_0-9]*|[0-9]+|[@*]):(?![-=+?])|\$\{!")
@@ -5400,15 +5420,17 @@ def _cmtidn_inexact(command):
     {1}, {a,b}), a GNU parallel or sem word or its ::: separator (_CMTIDN_FILLERS), or a word that starts with an
     expansion (_CMTIDN_EXPANSION_WORD_RE: $X -I NAME ..., where the variable may name xargs), or, anywhere in the
     text, a construct inside which bash 5.3 runs a command: a command or process substitution
-    (_CMTIDN_SUBSTITUTION_RE: $(, a backquote, ${ , ${<tab>, ${<newline> or ${|, <( or >() or a place where
-    bash evaluates an arithmetic expression, which runs a command substitution held in an array subscript of a
-    variable's value (_CMTIDN_ARITHMETIC_RE: a [, ((, a let word, a declare, typeset or local integer attribute,
-    a ${NAME:OFFSET} or ${!NAME} expansion). The value reader does not model what happens inside a substitution
-    body (a quote there, a case pattern's ')', a backquote or a brace group in a ${ cmd; } body can each put it
-    out of step with bash and split a later value before its AI part), nor a command run from an arithmetic
-    expression, so each of these makes the text inexact. A construct is sought lexically in the words of
-    _cmtidn_raw_words, and a substitution or arithmetic place in the whole text, so one inside a quoted string or
-    a heredoc body counts as well, and so does a $(( arithmetic expansion (a safe-direction over-deny)."""
+    (_CMTIDN_SUBSTITUTION_RE: $(, a backquote, ${ , ${<tab>, ${<newline> or ${|, <( or >(), a ${NAME@P}
+    prompt-string expansion (_CMTIDN_PROMPT_RE) or a place where bash evaluates an arithmetic expression, which
+    runs a command substitution held in an array subscript of a variable's value (_CMTIDN_ARITHMETIC_RE: a name
+    directly followed by [, a [X]=v compound assignment word, $[, ((, let or [[ as a command word, a declare,
+    typeset or local integer attribute, a ${NAME:OFFSET} or ${!NAME} expansion). The value reader does not model
+    what happens inside a substitution body (a quote there, a case pattern's ')', a backquote or a brace group in
+    a ${ cmd; } body can each put it out of step with bash and split a later value before its AI part), nor a
+    command run from a prompt string or an arithmetic expression, so each of these makes the text inexact. A
+    construct is sought lexically in the words of _cmtidn_raw_words, and a substitution, prompt-string expansion
+    or arithmetic place in the whole text, so one inside a quoted string or a heredoc body counts as well, and so
+    does a $(( arithmetic expansion (a safe-direction over-deny)."""
     if "\\\n" in command:
         return "a backslash before a newline"
     xargs = False
@@ -5427,6 +5449,8 @@ def _cmtidn_inexact(command):
             return "a word that starts with an expansion ({!r})".format(word[:40])
     if _CMTIDN_SUBSTITUTION_RE.search(command):
         return "a command or process substitution"
+    if _CMTIDN_PROMPT_RE.search(command):
+        return "a prompt-string expansion"
     if _CMTIDN_ARITHMETIC_RE.search(command):
         return "an arithmetic expression that can run a command through an array subscript"
     return None
@@ -5564,10 +5588,11 @@ def _cmtidn_identity_set_ai(command):
     echo, a quoted heredoc that writes such text), and of a command that names an AI beside an assignment of
     an unspelled value. A command whose text holds a construct the value reader cannot read exactly
     (_cmtidn_inexact: a backslash before a newline, an xargs or parallel replacement string, a braced
-    placeholder or brace expansion, a word that starts with an expansion, a command substitution ($(...) or a
-    backquote) or a process substitution (<(...) or >(...)) anywhere) is not judged by its values: any
-    identity name or GIT_CONFIG_KEY_<n>, GIT_CONFIG_VALUE_<n> or GIT_CONFIG_PARAMETERS name in an assignment form
-    there denies when the command names an AI identity anywhere, as written or once those characters are
+    placeholder or brace expansion, a word that starts with an expansion, or anywhere a command substitution
+    ($(...), a backquote, ${ cmd; } or ${| cmd; }), a process substitution (<(...) or >(...)), a ${NAME@P}
+    prompt-string expansion or a place where bash evaluates an arithmetic expression) is not judged by its
+    values: any identity name or GIT_CONFIG_KEY_<n>, GIT_CONFIG_VALUE_<n> or GIT_CONFIG_PARAMETERS name in an
+    assignment form there denies when the command names an AI identity anywhere, as written or once those characters are
     dropped. Bounded: a command longer than _CMTIDN_READ_LIMIT is not searched here, since the
     too-long fallback already denies one that names an AI and holds any of these names
     (_commit_identity_fallback); the words are read in one pass and each word is searched a fixed number of
