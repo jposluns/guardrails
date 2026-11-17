@@ -77,6 +77,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import collections
 import hashlib
 import os
 import re
@@ -88,6 +89,7 @@ from urllib.parse import unquote, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 import _template_pages  # noqa: E402  which pages the site template generates (GENSRC_OUTPUTS, not a folder name)
+import _site_markup  # noqa: E402  the template's element allowlist, shared with tools/gen_draft_site.py
 
 EN, EM = "–", "—"
 # Site host from AIQT_SITE_HOST (default, and empty-value fallback, aiqt.ai; lowercased), so a
@@ -140,11 +142,31 @@ INTERACTIVE = {"a", "button"}
 # The Apple touch icon link every live page carries. A generated template page (built under the site
 # template's own rules) is not held to the live pages' head; _template_pages says which pages those are.
 TOUCH_ICON_REL = "apple-touch-icon"
+# The markup constructs html.parser and a browser can end at different places (_site_markup.split_constructs,
+# the definition tools/gen_draft_site.py also reads): html.parser (3.14) reads "<![CDATA[" as a CDATA section
+# that ends at "]]>" where a browser in HTML content ends "<![" at the first ">", and some 3.14 patch releases
+# keep a comment opened at "<!-->" or "<!--->" open to the next "-->" where a browser ends each at once, so a
+# link after such a construct can be live in a browser yet never reach handle_starttag here. The scan is
+# lexical, so the finding does not depend on the patch release. Each one in the text a Page is fed (any
+# "<!" but an ordinary comment and "<!doctype html>", any "<?", any "</" not followed by an ASCII letter) is a
+# structural finding wherever it sits, on every page, live or generated; an ordinary comment's text is scanned
+# too, so a "<!--" inside an attribute value cannot hide a later construct. A generated page is also held to
+# write "<" and ">" inside an attribute value as "&lt;" and "&gt;" (_site_markup.literal_in_start_tag).
 
 
 class Page(HTMLParser):
-    def __init__(self):
+    """One parsed page. `template` true (a generated template page, _template_pages) also holds every element
+    to the template's element allowlist in its context (_site_markup, the definition tools/gen_draft_site.py
+    reads for its inline markup and its link guard): each element outside it is a structural finding with its
+    line. That covers the subtree of svg and math too, which the structure check suspends, so a raw-text element
+    html.parser reads inside foreign content (where a browser keeps reading markup) is reported, not hidden, and
+    so is a literal "<" or ">" inside a start tag. A live page (not generated) is not held to either."""
+
+    def __init__(self, template=False):
         super().__init__(convert_charrefs=True)
+        self._elements = _site_markup.ElementRule(page=True) if template else None
+        self._self_closing = False
+        self._fed = []        # every text fed, for the split_constructs scan in finalize
         self.links = []       # (value, line)
         self.ids = set()
         self.id_list = []     # (value, line) for duplicate detection
@@ -158,7 +180,13 @@ class Page(HTMLParser):
         self.touch_icons = []     # (href, line) of each <link rel="apple-touch-icon">
         self.metas = {}           # the content of the first <meta> per property or name
 
+    def _element(self, problem):
+        if problem is not None:
+            self.tag_findings.append((self.getpos()[0], problem))
+
     def handle_starttag(self, tag, attrs):
+        if self._elements is not None and not self._self_closing:
+            self._element(self._elements.start(tag, self.get_starttag_text()))
         if self.suspend_tag is not None:
             if tag == self.suspend_tag:
                 self.suspend_count += 1
@@ -208,6 +236,15 @@ class Page(HTMLParser):
                 self.suspend_count = 1
 
     def handle_startendtag(self, tag, attrs):
+        if self._elements is not None:
+            self._element(self._elements.start(tag, self.get_starttag_text(), closed=True))
+        self._self_closing = True
+        try:
+            self._startendtag(tag, attrs)
+        finally:
+            self._self_closing = False
+
+    def _startendtag(self, tag, attrs):
         if self.suspend_tag is not None:
             return
         if tag in VOID_ELEMENTS:
@@ -224,6 +261,8 @@ class Page(HTMLParser):
         self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag):
+        if self._elements is not None:
+            self._element(self._elements.end(tag))
         if tag == "title":
             self._in_title = False
         if self.suspend_tag is not None:
@@ -249,7 +288,16 @@ class Page(HTMLParser):
         self.tag_findings.append(
             (self.getpos()[0], "end tag </{}> has no matching open tag".format(tag)))
 
+    def feed(self, data):
+        self._fed.append(data)
+        super().feed(data)
+
     def finalize(self):
+        source = "".join(self._fed)
+        for start, construct in _site_markup.split_constructs(source, page=True):
+            # A line ends at LF only, as getpos counts lines.
+            self.tag_findings.append((source.count("\n", 0, start) + 1,
+                                      _site_markup.construct_finding(start, construct)))
         for tag, line in self.stack:
             if tag not in OPTIONAL_END_TAGS:
                 self.tag_findings.append(
@@ -257,6 +305,8 @@ class Page(HTMLParser):
         self.stack = []
 
     def handle_data(self, data):
+        if self._elements is not None:
+            self._elements.text(data)
         if self._in_title:
             self.title_text += data
 
@@ -460,9 +510,12 @@ def card_findings(label, metas, site_root, hosts):
 NOT_FOUND_URL_ATTRS = {"href", "src", "srcset", "poster", "data", "action", "xlink:href"}
 # The (element, attribute) pairs the live 404 pages load a resource through: these must be root-absolute (a
 # fragment-only or query-only value resolves against the request URL, https:// names another host). The one
-# pair the live 404 pages write https:// on is a href, so no other pair accepts it.
+# pair the live 404 pages write https:// on is a href, so no other pair accepts it. A browser reads the scheme
+# case-insensitively (ASCII only), so https:// is accepted in any letter case (decision D15, 2026-11-15); the
+# generator writes it in lower case.
 NOT_FOUND_LOADING_PAIRS = frozenset((("link", "href"), ("script", "src")))
 NOT_FOUND_HTTPS_PAIRS = frozenset((("a", "href"),))
+_HTTPS_PREFIX = "https://"
 _HTML_SPACE = "\t\n\f\r "
 _RAW_TAG_RE = re.compile(r"<[A-Za-z]")
 # After a leading "/", a browser reads a backslash as a second slash and drops tabs and newlines, so any of
@@ -484,6 +537,21 @@ NOT_FOUND_ATTRIBUTES = frozenset((
     "target", "text-anchor", "type", "viewbox", "width", "x", "y",
 ))
 NOT_FOUND_META_ATTRIBUTES = frozenset(("charset", "content", "name"))
+# The values, exactly as written (charset aside: NOT_FOUND_META_CASELESS below), a meta attribute other than
+# content may carry on a live 404 page: an
+# allowed name with any other value (a referrer policy, another charset) is a finding. Taken from the live 404
+# pages before the template cutover (charset, and the viewport, description and robots names); content is
+# read by its name, so pinning the name fixes what content means (its url( check still applies).
+NOT_FOUND_META_VALUES = {
+    "charset": frozenset(("utf-8",)),
+    "name": frozenset(("description", "robots", "viewport")),
+}
+# The meta attributes whose value is compared ASCII case-insensitively (A to Z read as a to z, any other
+# character as written): charset only, because HTML reads an encoding label case-insensitively, so "UTF-8"
+# names the same encoding as "utf-8". Every other pinned value (each name and property) is compared exactly
+# as written.
+NOT_FOUND_META_CASELESS = frozenset(("charset",))
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 NOT_FOUND_ONCLICK = frozenset(("toggleNav()", "toggleTheme()"))
 NOT_FOUND_PRESENTATION = {
     "fill": frozenset(("var(--accent)", "var(--accent-2)")),
@@ -514,6 +582,18 @@ NOT_FOUND_DRAFT_ATTRIBUTES = frozenset((
 ))
 # "property" is the og:description meta the generator writes from each page's description.
 NOT_FOUND_DRAFT_META_ATTRIBUTES = frozenset(("charset", "content", "name", "property"))
+# The meta values the generated 404 pages write (site/404.html and opf/site/404.html, and in the staged form
+# site/draft/404.html and opf/site/draft/404.html): the charset, the viewport and description names, the
+# robots name (the noindex meta the generator writes on a page under the draft base or folder, so the staged
+# 404 pages carry it), and the link-preview card names and properties (_social_metas).
+NOT_FOUND_DRAFT_META_VALUES = {
+    "charset": frozenset(("utf-8",)),
+    "name": frozenset(("description", "robots", "twitter:card", "twitter:image", "viewport")),
+    "property": frozenset((
+        "og:description", "og:image", "og:image:alt", "og:image:height", "og:image:width", "og:site_name",
+        "og:title", "og:type", "og:url",
+    )),
+}
 NOT_FOUND_DRAFT_ONCLICK = frozenset()
 NOT_FOUND_DRAFT_PRESENTATION = {
     "fill": frozenset(("none",)),
@@ -618,10 +698,12 @@ def not_found_reference_ok(element, name, value):
     """Whether a URL value of attribute `name` on `element`, taken as written, is safe on a 404 page (served
     at any path): exactly one leading "/" followed by a safe character or nothing; also fragment-only or
     query-only unless the pair loads a resource (NOT_FOUND_LOADING_PAIRS); also https:// on a pair in
-    NOT_FOUND_HTTPS_PAIRS. Nothing is percent-decoded, so "%2F..." is not a slash."""
+    NOT_FOUND_HTTPS_PAIRS, its scheme in any ASCII letter case ("HTTPS://" too, as a browser reads it).
+    Nothing is percent-decoded, so "%2F..." is not a slash."""
     if (element, name) not in NOT_FOUND_LOADING_PAIRS and value.startswith(("#", "?")):
         return True
-    if (element, name) in NOT_FOUND_HTTPS_PAIRS and value.startswith("https://"):
+    scheme = value[:len(_HTTPS_PREFIX)]
+    if (element, name) in NOT_FOUND_HTTPS_PAIRS and scheme.isascii() and scheme.lower() == _HTTPS_PREFIX:
         return True
     return value.startswith("/") and value[1:2] not in _SECOND_SLASH
 
@@ -646,7 +728,7 @@ def not_found_reference_findings(label, text):
                         "host are refused").format(element, name)
             elif (element, name) in NOT_FOUND_HTTPS_PAIRS:
                 rule = ("{} on a 404 page must be root-absolute (one leading /), fragment-only, query-only or "
-                        "https://; a 404 page is served at any path").format(name)
+                        "https:// (scheme in any letter case); a 404 page is served at any path").format(name)
             else:
                 rule = ("{} on a 404 page must be root-absolute (one leading /), fragment-only or query-only (https:// "
                         "only on a href); a 404 page is served at any path").format(name)
@@ -665,7 +747,9 @@ def not_found_structure_findings(label, text, draft=False):
     """Findings for the raw markup `text` of a 404 page named `label` against the structural allowlist (the
     NOT_FOUND_DRAFT_* sets in place of the NOT_FOUND_* ones when `draft` is true, for a draft 404 page): an
     element or attribute name raw_tags finds that is not in NOT_FOUND_ELEMENTS or NOT_FOUND_ATTRIBUTES, a meta
-    attribute outside NOT_FOUND_META_ATTRIBUTES, an onclick or SVG presentation value the live 404 pages do
+    attribute outside NOT_FOUND_META_ATTRIBUTES, a meta attribute named in NOT_FOUND_META_VALUES whose value
+    as written (an empty value for a name written without "="; ASCII letter case aside for an attribute in
+    NOT_FOUND_META_CASELESS, charset only) is not one listed there, an onclick or SVG presentation value the live 404 pages do
     not use, any value or script or style text that contains "url(" (any case, as written or with its
     character references decoded), a script without src whose body's sha256 is not pinned in
     NOT_FOUND_INLINE_SCRIPT_SHA256, a script with src whose body is not empty, and any script start tag at or
@@ -675,13 +759,14 @@ def not_found_structure_findings(label, text, draft=False):
     (it trusts the pinned script bodies), nor what the same-origin script, stylesheet or icon a root-absolute
     URL loads contains."""
     if draft:
-        kind, elements, attribute_names, meta_names = (
-            "draft", NOT_FOUND_DRAFT_ELEMENTS, NOT_FOUND_DRAFT_ATTRIBUTES, NOT_FOUND_DRAFT_META_ATTRIBUTES)
+        kind, elements, attribute_names, meta_names, meta_values = (
+            "draft", NOT_FOUND_DRAFT_ELEMENTS, NOT_FOUND_DRAFT_ATTRIBUTES, NOT_FOUND_DRAFT_META_ATTRIBUTES,
+            NOT_FOUND_DRAFT_META_VALUES)
         onclicks, presentation, inline_scripts = (
             NOT_FOUND_DRAFT_ONCLICK, NOT_FOUND_DRAFT_PRESENTATION, NOT_FOUND_DRAFT_INLINE_SCRIPT_SHA256)
     else:
-        kind, elements, attribute_names, meta_names = (
-            "live", NOT_FOUND_ELEMENTS, NOT_FOUND_ATTRIBUTES, NOT_FOUND_META_ATTRIBUTES)
+        kind, elements, attribute_names, meta_names, meta_values = (
+            "live", NOT_FOUND_ELEMENTS, NOT_FOUND_ATTRIBUTES, NOT_FOUND_META_ATTRIBUTES, NOT_FOUND_META_VALUES)
         onclicks, presentation, inline_scripts = (
             NOT_FOUND_ONCLICK, NOT_FOUND_PRESENTATION, NOT_FOUND_INLINE_SCRIPT_SHA256)
     out = []
@@ -702,6 +787,10 @@ def not_found_structure_findings(label, text, draft=False):
                 out.append("{}:{}: attribute {} on <meta> is not one the {} 404 pages use on meta".format(
                     label, attr_line, name, kind))
             value = "" if value is None else value
+            compared = value.translate(_ASCII_LOWER) if name in NOT_FOUND_META_CASELESS else value
+            if element == "meta" and name in meta_values and compared not in meta_values[name]:
+                out.append("{}:{}: {} value on <meta> is not one the {} 404 pages use -> {!r}".format(
+                    label, attr_line, name, kind, value))
             if _URL_FUNCTION in value.lower() or _URL_FUNCTION in unescape(value).lower():
                 out.append("{}:{}: {} value on a 404 page contains url(, which loads relative to the page "
                            "-> {!r}".format(label, attr_line, name, value))
@@ -985,6 +1074,8 @@ def _self_test():
 
     _touch_icon_self_test(quiet)
     _card_self_test(quiet)
+    _markup_declaration_self_test(quiet)
+    _element_allowlist_self_test()
     _not_found_links_self_test()
     _declaration_self_test()
     _entry_self_test()
@@ -1305,6 +1396,247 @@ def _card_self_test(quiet):
         (root / "index.html").write_text(template, encoding="utf-8")
         check("card/scan-reports-missing-card", quiet(_scan_root, base, "site", targets) == 1, None)
         check("card/live-page-not-held", quiet(_scan_root, base, "site", frozenset()) == 0, None)
+        # The scan holds each generated template page on disk to the element allowlist (_scan_root passes
+        # `template` from _template_pages), and a live page not: the same carded page with a textarea fails
+        # as a target and passes as a live page; with a paragraph instead it passes as a target.
+        carded = template + head.replace('<meta property="twitter:', '<meta name="twitter:')
+        (root / "index.html").write_text(carded + "<p><textarea>x</textarea></p>", encoding="utf-8")
+        check("page/scan-template-page-outside-element-allowlist-fails",
+              quiet(_scan_root, base, "site", targets) == 1, None)
+        check("page/scan-live-page-outside-element-allowlist-passes",
+              quiet(_scan_root, base, "site", frozenset()) == 0, None)
+        (root / "index.html").write_text(carded + "<p>x</p>", encoding="utf-8")
+        check("page/scan-template-page-within-element-allowlist-passes",
+              quiet(_scan_root, base, "site", targets) == 0, None)
+
+
+def _markup_declaration_self_test(quiet):
+    """The construct rule of Page (_site_markup.split_constructs): html.parser reads "<![CDATA[" up to "]]>"
+    while a browser ends "<![" at the first ">", and some patch releases keep a comment opened at "<!-->" or
+    "<!--->" open to the next "-->" while a browser ends each at once, so a link after either can be live in a
+    browser but never read here; each such construct is a finding, with its line, on a live page and a
+    generated one, whichever way the running html.parser ends it. The same
+    text escaped ("&lt;![") and an ordinary comment are no finding, and the link after them is read."""
+    import tempfile
+
+    def message(text):
+        """The finding for the first "<![" of `text`, in the wording _site_markup gives every construct."""
+        start = text.find("<![")
+        return _site_markup.construct_finding(start, text[start:start + 9])
+
+    tail = ' target="_blank" rel="noopener noreferrer">v</a>'
+    upper_https = '<a href="HTTPS://example.test/v"' + tail
+
+    def read(text):
+        page = Page()
+        page.feed(text)
+        page.finalize()
+        return page
+
+    for name, twin, href, anchor in (
+            ("page/cdata-upper-case-https-anchor-fails", "page/escaped-cdata-text-upper-case-https-anchor-passes",
+             "HTTPS://example.test/v", upper_https),
+            ("page/cdata-http-anchor-fails", "page/escaped-cdata-text-http-anchor-passes",
+             "http://example.test/v", '<a href="http://example.test/v">v</a>'),
+            ("page/cdata-off-site-path-fails", "page/escaped-cdata-text-off-site-path-passes",
+             "/elsewhere/", '<a href="/elsewhere/">v</a>')):
+        text = "<title>t</title>\n<p><![CDATA[ x > {} ]]></p>".format(anchor)
+        page = read(text)
+        check(name, page.tag_findings == [(2, message(text))], (page.tag_findings, page.links))
+        page = read("<title>t</title>\n<p>&lt;![CDATA[ x &gt; {} ]]&gt;</p>".format(anchor))
+        check(twin, page.tag_findings == [] and page.links == [(href, 2)], (page.tag_findings, page.links))
+    # A parser that reads a CDATA section runs it to the end of the text; one that ends "<![" at the first ">", as
+    # a browser does, then reads "</a>" with no open <a>. The finding comes from the lexical scan either way, so
+    # the row requires it (the page fails) and does not assert what the parser reads after it.
+    text = '<p><![CDATA[ <a href="/elsewhere/">v</a></p>'
+    page = read(text)
+    check("page/unterminated-cdata-fails", (1, message(text)) in page.tag_findings,
+          (page.tag_findings, page.links))
+    page = read('<p><!-- x > --> <a href="/elsewhere/">v</a></p>')
+    check("page/comment-before-anchor-passes", page.tag_findings == [] and page.links == [("/elsewhere/", 1)],
+          (page.tag_findings, page.links))
+    # An abrupt comment ("<!-->", "<!--->") ends at once in a browser. Whether html.parser keeps it open to
+    # the next "-->" (hiding the anchor and the script between) or ends it at once as a browser does depends on
+    # the Python patch release, so the row does not assert what the parser reads after it: the finding comes
+    # from the lexical scan (split_constructs), not from the parser, and is required on a live page and on a
+    # generated template page on every release. The ordinary comment twin is none, and the anchor after it is
+    # read.
+    hidden = '<a href="HTTP://example.test/v">v</a><script>alert(1)</script>-->'
+    for name, opener in (("page/abrupt-comment-hidden-anchor-fails", "<!-->"),
+                         ("page/abrupt-dash-comment-hidden-anchor-fails", "<!--->")):
+        text = "<title>t</title>\n<p>x</p>{}{}".format(opener, hidden)
+        want = (2, _site_markup.construct_finding(text.find(opener), text[text.find(opener):][:9]))
+        live, generated = read(text), Page(template=True)
+        generated.feed(text)
+        generated.finalize()
+        check(name, want in live.tag_findings and want in generated.tag_findings,
+              (live.tag_findings, generated.tag_findings, live.links))
+    page = read('<title>t</title>\n<p>x</p><!-- x --><a href="HTTP://example.test/v">v</a>')
+    check("page/ordinary-comment-anchor-read-passes",
+          page.tag_findings == [] and page.links == [("HTTP://example.test/v", 2)], (page.tag_findings, page.links))
+    # A "<!--" inside an attribute value is text to html.parser and a browser alike; a scan that skipped from it
+    # to the next "-->" hid a real "<!-->" or "<![CDATA[" between them, and the script and anchor after it, live
+    # in a browser. The scan judges every "<!" on its own, so the hidden construct is a finding on a live page
+    # and on a generated one; the twin (the attribute's "<!--" written as "&lt;!--", an ordinary comment) is
+    # none, and the anchor after it is read.
+    payload = '<script>alert(1)</script><a href="http://example.test/v">v</a>'
+    for name, body, construct in (
+            ("page/attribute-comment-opener-abrupt-comment-fails",
+             '<p><span title="<!--"><!-->' + payload + "--></span></p>", "<!-->"),
+            ("page/attribute-comment-opener-cdata-fails",
+             '<p><span title="<!--"><![CDATA[ x > ' + payload + " ]]>--></span></p>", "<![CDATA["),
+            ("page/attribute-comment-opener-cdata-after-element-fails",
+             '<span title="<!--">x</span><![CDATA[ x > ' + payload + " ]]> -->", "<![CDATA[")):
+        text = "<title>t</title>\n" + body
+        at = text.find(construct)
+        want = (2, _site_markup.construct_finding(at, text[at:at + 9]))
+        live, generated = read(text), Page(template=True)
+        generated.feed(text)
+        generated.finalize()
+        check(name, want in live.tag_findings and want in generated.tag_findings,
+              (live.tag_findings, generated.tag_findings))
+    text = '<title>t</title>\n<p><span title="&lt;!--"><!-- note --><a href="HTTP://example.test/v">v</a></span></p>'
+    live, generated = read(text), Page(template=True)
+    generated.feed(text)
+    generated.finalize()
+    check("page/escaped-attribute-comment-opener-ordinary-comment-anchor-read-passes",
+          live.tag_findings == [] and generated.tag_findings == [] and live.links == [("HTTP://example.test/v", 2)],
+          (live.tag_findings, generated.tag_findings, live.links))
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        root = base / "site"
+        (root / "assets").mkdir(parents=True)
+        (root / "assets" / "t.png").write_bytes(b"png")
+        head = '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/assets/t.png">'
+        (root / "index.html").write_text(head + "<p><![CDATA[ x > {} ]]></p>".format(upper_https),
+                                         encoding="utf-8")
+        check("page/scan-reports-cdata", quiet(_scan_root, base, "site", frozenset()) == 1, None)
+        (root / "index.html").write_text(head + "<p>&lt;![CDATA[ x &gt; {} ]]&gt;</p>".format(upper_https),
+                                         encoding="utf-8")
+        check("page/scan-passes-escaped-cdata-text", quiet(_scan_root, base, "site", frozenset()) == 0, None)
+        # What follows the abrupt comment is the anchor the ordinary-comment twin below shows passing, so the scan
+        # fails on the abrupt comment alone, whether the parser keeps it open (hiding the anchor) or ends it at
+        # once (reading the anchor).
+        (root / "index.html").write_text(head + "<p>x</p><!-->" + upper_https + "-->", encoding="utf-8")
+        check("page/scan-reports-abrupt-comment", quiet(_scan_root, base, "site", frozenset()) == 1, None)
+        (root / "index.html").write_text(head + "<p>x</p><!-- x -->" + upper_https, encoding="utf-8")
+        check("page/scan-passes-ordinary-comment", quiet(_scan_root, base, "site", frozenset()) == 0, None)
+
+
+def _element_allowlist_self_test():
+    """The element allowlist of a generated template page (_site_markup): html.parser reads textarea, title and
+    plaintext as raw text even inside svg or math, where a browser keeps reading markup, so an anchor after
+    "</svg>" is live in a browser yet never reaches handle_starttag here. On a template page each such element,
+    and its HTML-namespace twin, is a finding with its line; the same text escaped is no finding and the anchor
+    after it is read. A live page is not held to the allowlist, and every generated page in the tree is within
+    it."""
+    import html as _html_module
+    outside = "{}, an element outside the template's element allowlist"
+    anchor = '<a href="HTTPS://example.test/v" target="_blank" rel="noopener noreferrer">v</a>'
+    shell = '<!doctype html><html lang="en"><head><title>t</title></head>\n<body>{}</body></html>'
+
+    def read(text, template=True):
+        page = Page(template=template)
+        page.feed(text)
+        page.finalize()
+        return page
+
+    for name, twin, wrapper, raw in (
+            ("page/svg-textarea-hidden-anchor-fails", "page/escaped-svg-textarea-text-anchor-passes",
+             "svg", "textarea"),
+            ("page/svg-title-hidden-anchor-fails", "page/escaped-svg-title-text-anchor-passes", "svg", "title"),
+            ("page/svg-plaintext-hidden-anchor-fails", "page/escaped-svg-plaintext-text-anchor-passes",
+             "svg", "plaintext"),
+            ("page/math-textarea-hidden-anchor-fails", "page/escaped-math-textarea-text-anchor-passes",
+             "math", "textarea"),
+            ("page/math-title-hidden-anchor-fails", "page/escaped-math-title-text-anchor-passes", "math", "title"),
+            ("page/math-plaintext-hidden-anchor-fails", "page/escaped-math-plaintext-text-anchor-passes",
+             "math", "plaintext"),
+            ("page/html-namespace-textarea-hidden-anchor-fails",
+             "page/escaped-html-namespace-textarea-text-anchor-passes", "", "textarea"),
+            ("page/html-namespace-title-hidden-anchor-fails",
+             "page/escaped-html-namespace-title-text-anchor-passes", "", "title"),
+            ("page/html-namespace-plaintext-hidden-anchor-fails",
+             "page/escaped-html-namespace-plaintext-text-anchor-passes", "", "plaintext")):
+        before = "{}<{}>{}".format("<{}>".format(wrapper) if wrapper else "", raw,
+                                   "</{}>".format(wrapper) if wrapper else "</svg>")
+        after = "<!--</{}>-->".format(raw)
+        want = outside.format("<{}> inside <svg>".format(raw) if wrapper == "svg"
+                              else "<{}> on the page".format(wrapper or raw))
+        page = read(shell.format("<p>{}{}{}</p>".format(before, anchor, after)))
+        check(name, (2, want) in page.tag_findings, page.tag_findings)
+        escaped = "<p>{}{}{}</p>".format(_html_module.escape(before, quote=False), anchor,
+                                         _html_module.escape(after, quote=False))
+        page = read(shell.format(escaped))
+        check(twin, page.tag_findings == [] and page.links == [("HTTPS://example.test/v", 2)],
+              (page.tag_findings, page.links))
+    page = read(shell.format("<p><svg><textarea></svg>{}<!--</textarea>--></p>".format(anchor)), template=False)
+    check("page/live-page-not-held-to-element-allowlist",
+          not any("element allowlist" in msg for _line, msg in page.tag_findings), page.tag_findings)
+    # The shell's own structure passes only where the shell writes it: a title or script inside head, the
+    # svg glyph elements inside svg; a head element in the body is a finding.
+    page = read(shell.format('<svg viewBox="0 0 2 2"><path d="M0 0"/><circle cx="1" cy="1" r="1"/></svg>'))
+    check("page/shell-svg-glyph-passes", page.tag_findings == [], page.tag_findings)
+    page = read(shell.format("<p>x</p><title>u</title>"))
+    check("page/title-in-body-fails", (2, outside.format("<title> on the page")) in page.tag_findings,
+          page.tag_findings)
+    # Text other than whitespace ends an implied head, as in a browser (html5lib places such a title in the
+    # body), so a head element after it is judged on the page; whitespace and a title's own text do not.
+    for name, text, want in (
+            ("page/title-after-text-in-implied-head-fails",
+             "<html>text<title>t</title><body><p>x</p></body></html>", "<title> on the page"),
+            ("page/title-after-character-reference-text-fails",
+             "<html>&amp;<title>t</title><body><p>x</p></body></html>", "<title> on the page"),
+            ("page/link-after-text-in-implied-head-fails",
+             '<meta charset="utf-8">x<link rel="icon" href="/i.svg"><p>y</p>', "<link> on the page")):
+        page = read(text)
+        check(name, (1, outside.format(want)) in page.tag_findings, page.tag_findings)
+    for name, text in (("page/whitespace-in-implied-head-passes",
+                        "<html> \n\t<title>t</title><body><p>x</p></body></html>"),
+                       ("page/title-text-keeps-head-open-passes",
+                        '<html><title>a b</title><meta charset="utf-8"><body><p>x</p></body></html>')):
+        page = read(text)
+        check(name, page.tag_findings == [], page.tag_findings)
+    # A non-ASCII element name is a finding: html.parser folds "linK" (KELVIN SIGN) to "link" with
+    # str.lower, a browser does not. The ASCII twin is a head element and passes.
+    head_shell = '<!doctype html><html lang="en"><head><title>t</title>{}</head>\n<body><p>x</p></body></html>'
+    page = read(head_shell.format('<linK rel="icon" href="/i.svg">'))
+    check("page/non-ascii-element-name-fails",
+          (1, "<link> inside <head> has a non-ASCII element name 'linK'") in page.tag_findings, page.tag_findings)
+    page = read(head_shell.format('<link rel="icon" href="/i.svg">'))
+    check("page/ascii-element-name-twin-passes", page.tag_findings == [], page.tag_findings)
+    # A self-closed tag is judged too: a browser ignores the "/" of "<textarea/>" and opens the raw-text
+    # element. A self-closed allowed element passes.
+    page = read(shell.format("<p><textarea/>x</p>"))
+    check("page/self-closed-raw-text-element-fails",
+          (2, outside.format("<textarea> on the page")) in page.tag_findings, page.tag_findings)
+    page = read(shell.format('<p><img src="/i.png" alt=""/></p>'))
+    check("page/self-closed-allowed-element-passes", page.tag_findings == [], page.tag_findings)
+    # A generated page writes "<" and ">" inside an attribute value as "&lt;" and "&gt;"
+    # (_site_markup.literal_in_start_tag), so attribute text never looks like markup to the lexical construct
+    # scan: a literal one is a finding there, with its line. The escaped twin passes, and a live page is not
+    # held to the rule.
+    for name, literal, entity in (("page/attribute-literal-lt-fails", "<", "&lt;"),
+                                  ("page/attribute-literal-gt-fails", ">", "&gt;")):
+        page = read(shell.format('<p><span title="a{}b">t</span></p>'.format(literal)))
+        want = ("<span> on the page with a literal {!r} inside its start tag "
+                "(an attribute value writes it as {})").format(literal, entity)
+        check(name, (2, want) in page.tag_findings, page.tag_findings)
+    page = read(shell.format('<p><span title="a&lt;b">t</span></p>'))
+    check("page/attribute-escaped-lt-passes", page.tag_findings == [], page.tag_findings)
+    page = read(shell.format('<p><span title="a<b">t</span></p>'), template=False)
+    check("page/live-page-not-held-to-attribute-literal", page.tag_findings == [], page.tag_findings)
+    # Every generated template page in the tree is within the allowlist.
+    root = Path(__file__).resolve().parents[1]
+    problems, pages = [], 0
+    for target in sorted(_template_pages.template_targets()):
+        path = root / target
+        if not path.is_file():
+            continue
+        pages += 1
+        page = read(path.read_text(encoding="utf-8"))
+        problems.extend((target, line, msg) for line, msg in page.tag_findings if "element" in msg)
+    check("page/generated-pages-within-element-allowlist", pages > 0 and problems == [], (pages, problems))
 
 
 def _touch_icon_self_test(quiet):
@@ -1413,8 +1745,8 @@ def _touch_icon_self_test(quiet):
 
 def _not_found_links_self_test():
     """The 404-page reference allowlist: every URL-bearing attribute value on a page named 404.html, top-level
-    or nested, that is not root-absolute, fragment-only or query-only (https:// too on a href; root-absolute
-    only on script src and link href) is a finding even where it resolves from the page's own directory, and
+    or nested, that is not root-absolute, fragment-only or query-only (https:// too on a href, its scheme in
+    any letter case; root-absolute only on script src and link href) is a finding even where it resolves from the page's own directory, and
     the same relative links pass on any other page."""
     import contextlib
     import io
@@ -1426,12 +1758,35 @@ def _not_found_links_self_test():
             return _scan_root(base, "site"), out.getvalue()
 
     # The structural allowlist also reports the img, video, object, form, math and svg markup these reference
-    # cases use, so they count the reference findings, and a passing case allows only allowlist findings.
+    # cases use, so a failing case counts the reference findings, and a passing case names exactly the
+    # allowlist findings its markup draws: any other finding, or a named one that does not appear, fails it.
     def ref_findings(output):
         return [line for line in output.splitlines() if "on a 404 page must be root-absolute" in line]
 
-    def other_findings(output):
-        return [line for line in output.splitlines()[1:] if not line.endswith(" allowlist")]
+    def unexpected(output, allowed=()):
+        """What a scan's output and `allowed` (each finding written in full, "path:line: message") disagree
+        on, counted as multisets (the scan prints every finding, repeats included): each printed finding
+        more often than `allowed` lists it, each finding in `allowed` more often than the output prints
+        it, and, when they differ, the scan's own FAIL count against len(allowed). So a finding on another
+        line, one finding more or fewer, or the same count made of other repeats, fails a passing case."""
+        lines = output.splitlines()
+        found = collections.Counter(line.strip() for line in lines[1:])
+        named = collections.Counter(allowed)
+        out = sorted((found - named).elements()) + sorted((named - found).elements())
+        want = "FAIL: {} site/ site-integrity issue(s)".format(len(allowed))
+        if allowed and (not lines or lines[0] != want):
+            out.append("count line {!r}, expected {!r}".format(lines[0] if lines else "", want))
+        return out
+
+    def passes(got, allowed=()):
+        return got[0] == (1 if allowed else 0) and not unexpected(got[1], allowed)
+
+    def live_allowlist(element, *attributes, line=1, path="site/404.html"):
+        """The live structural allowlist findings for one `element` start tag on `line` of `path` that
+        carries `attributes` (each page() writes is one line)."""
+        return (["{}:{}: element <{}> is not in the 404-page element allowlist".format(path, line, element)] +
+                ["{}:{}: attribute {} on <{}> is not in the 404-page attribute allowlist".format(
+                    path, line, a, element) for a in attributes])
 
     icon ='<link rel="apple-touch-icon" href="/t.png">'
     with tempfile.TemporaryDirectory() as d:
@@ -1481,9 +1836,33 @@ def _not_found_links_self_test():
         (root / "index.html").write_text('<!doctype html><title>t</title>' + icon +
                                          '<a class="logo" href="./"><img src="/l.png" alt=""></a>', encoding="utf-8")
         got = scan(base)
-        check("404-links/root-absolute-and-fragment-links-pass", got[0] in (0, 1) and not other_findings(got[1]),
-              got)
+        # The page has 2 img start tags (the content image and the logo), both on line 1.
+        check("404-links/root-absolute-and-fragment-links-pass", passes(got, live_allowlist("img", "alt") * 2), got)
+        # The passing-case rule itself: a finding the case does not name fails it, allowlist finding or not.
+        check("404-links/unexpected-allowlist-finding-fails-passing-case",
+              not passes(got) and not passes(got, live_allowlist("img"))
+              and not passes(got, live_allowlist("img", "alt") + live_allowlist("b")), got)
         (root / "404.html").unlink()
+        # The passing-case rule compares line numbers and counts: an allowed finding on another line than the
+        # case names, or a finding repeated more often than the case names it, fails the case, and each passes
+        # when the case names it exactly.
+        for name, body, allowed, want in (
+                ("404-links/allowlist-finding-on-other-line-fails-passing-case", '\n<img src="/i.png" alt="">',
+                 live_allowlist("img", "alt"), False),
+                ("404-links/allowlist-finding-on-named-line-passes", '\n<img src="/i.png" alt="">',
+                 live_allowlist("img", "alt", line=2), True),
+                ("404-links/repeated-allowlist-finding-fails-passing-case",
+                 '<img src="/i.png" alt=""><img src="/i.png" alt="">', live_allowlist("img", "alt"), False),
+                ("404-links/repeated-allowlist-finding-named-twice-passes",
+                 '<img src="/i.png" alt=""><img src="/i.png" alt="">', live_allowlist("img", "alt") * 2, True),
+                # The same count made of other repeats: 2 element and 2 alt findings named as 1 and 3.
+                ("404-links/swapped-repeat-allowlist-finding-fails-passing-case",
+                 '<img src="/i.png" alt=""><img src="/i.png" alt="">',
+                 live_allowlist("img") + live_allowlist("img", "alt")[1:] * 3, False)):
+            (root / "404.html").write_text(page(icon, body), encoding="utf-8")
+            got = scan(base)
+            (root / "404.html").unlink()
+            check(name, passes(got, allowed) == want, got)
 
         (root / "sub" / "c.html").write_text(page(icon + '<link rel="stylesheet" href="s.css">',
                                                   '<img src="i.png" alt=""><nav><a href="b">B</a></nav>'),
@@ -1548,6 +1927,20 @@ def _not_found_links_self_test():
                  icon + '<link rel="preconnect" href="https://evil.example">', "", "href", "https://evil.example", 1),
                 ("404-links/https-img-src-fails", "404.html", icon, '<img src="https://example.test/i.png" alt="">',
                  "src", "https://example.test/i.png", 1),
+                # An upper-case https scheme is accepted on a href only (D15); any other scheme, in any case,
+                # and a scheme with one slash stay refused.
+                ("404-links/upper-case-https-script-src-fails", "404.html",
+                 icon + '<script src="HTTPS://evil.example/x.js"></script>', "", "src", "HTTPS://evil.example/x.js", 1),
+                ("404-links/upper-case-https-img-src-fails", "404.html", icon,
+                 '<img src="HTTPS://example.test/i.png" alt="">', "src", "HTTPS://example.test/i.png", 1),
+                ("404-links/upper-case-http-href-fails", "404.html", icon, '<a href="HTTP://aiqt.ai/b">B</a>',
+                 "href", "HTTP://aiqt.ai/b", 1),
+                ("404-links/upper-case-https-one-slash-href-fails", "404.html", icon,
+                 '<a href="HTTPS:/aiqt.ai/b">B</a>', "href", "HTTPS:/aiqt.ai/b", 1),
+                # A non-ASCII lookalike of the scheme (HTTP then U+017F, which casefold() maps to "s") is
+                # refused, so the ASCII guard on the scheme is tested.
+                ("404-links/non-ascii-lookalike-https-href-fails", "404.html", icon,
+                 '<a href="HTTP\u017f://aiqt.ai/b">B</a>', "href", "HTTP\u017f://aiqt.ai/b", 1),
                 # A query-only or fragment-only load resolves against the request URL.
                 ("404-links/query-only-script-src-fails", "404.html", icon + '<script src="?x"></script>', "",
                  "src", "?x", 1),
@@ -1563,17 +1956,32 @@ def _not_found_links_self_test():
             check(name, got[0] == 1 and len(ref_findings(got[1])) == count
                   and "{} on a 404 page must be root-absolute".format(attr) in got[1]
                   and "-> {}\n".format(repr(value)) in got[1], got)
-        for name, body in (
-                ("404-links/query-only-passes", '<a href="?q=1">Q</a><form action="?q=1"></form>'),
-                ("404-links/fragment-only-passes", '<p id="top"></p><a href="#top">T</a>'
-                 '<svg><use href="#top"></use></svg>'),
-                ("404-links/root-absolute-passes", '<a href="/">H</a><img src="/i.png" srcset="/i.png 1x, /i.png 2x" '
-                 'alt=""><video poster="/i.png"></video><object data="/f.svg"></object><form action="/b"></form>'),
-                ("404-links/https-passes", '<a href="https://aiqt.ai/b">B</a><a href="https://example.test/b">E</a>')):
-            (root / "404.html").write_text(page(icon, body), encoding="utf-8")
+        for name, head, body, allowed in (
+                ("404-links/query-only-passes", icon, '<a href="?q=1">Q</a><form action="?q=1"></form>',
+                 live_allowlist("form", "action")),
+                ("404-links/fragment-only-passes", icon, '<p id="top"></p><a href="#top">T</a>'
+                 '<svg><use href="#top"></use></svg>', live_allowlist("use")),
+                ("404-links/root-absolute-passes", icon, '<a href="/">H</a><img src="/i.png" '
+                 'srcset="/i.png 1x, /i.png 2x" alt=""><video poster="/i.png"></video><object data="/f.svg"></object>'
+                 '<form action="/b"></form>',
+                 live_allowlist("img", "srcset", "alt") + live_allowlist("video", "poster")
+                 + live_allowlist("object", "data") + live_allowlist("form", "action")),
+                ("404-links/https-passes", icon, '<a href="https://aiqt.ai/b">B</a><a href="https://example.test/b">E</a>',
+                 ()),
+                # D15: the scheme of an https href in any letter case.
+                ("404-links/upper-case-https-href-passes", icon,
+                 '<a href="HTTPS://aiqt.ai/b">B</a><a href="Https://example.test/b">E</a>'
+                 '<a href="hTtPs://example.test/c">C</a>', ()),
+                # Every meta name and value the live 404 pages used.
+                ("404-structure/live-meta-values-pass",
+                 '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+                 '<meta name="description" content="D."><meta name="robots" content="noindex">' + icon, "", ()),
+                # The charset value is read in any ASCII letter case, as HTML reads an encoding label.
+                ("404-structure/meta-charset-upper-case-passes", '<meta charset="UTF-8">' + icon, "", ())):
+            (root / "404.html").write_text(page(head, body), encoding="utf-8")
             got = scan(base)
             (root / "404.html").unlink()
-            check(name, got[0] in (0, 1) and not other_findings(got[1]), got)
+            check(name, passes(got, allowed), got)
 
         # A tab or newline after the leading "/" can make a protocol-relative //host URL.
         for name, value in (("404-links/tab-after-slash-fails", "/\taiqt.ai/b"),
@@ -1597,6 +2005,20 @@ def _not_found_links_self_test():
                  "attribute ping on <a> is not in the 404-page attribute allowlist"),
                 ("404-structure/meta-refresh-fails", page(icon + '<meta http-equiv="refresh" content="0;url=b">', ""),
                  "attribute http-equiv on <meta> is not one the live 404 pages use on meta"),
+                # An allowed meta attribute name with a value the live 404 pages do not use.
+                ("404-structure/meta-name-unpinned-value-fails",
+                 page(icon + '<meta name="referrer" content="unsafe-url">', ""),
+                 "name value on <meta> is not one the live 404 pages use -> 'referrer'"),
+                ("404-structure/meta-charset-unpinned-value-fails", page('<meta charset="utf-7">' + icon, ""),
+                 "charset value on <meta> is not one the live 404 pages use -> 'utf-7'"),
+                ("404-structure/meta-name-without-value-fails", page(icon + '<meta name content="x">', ""),
+                 "name value on <meta> is not one the live 404 pages use -> ''"),
+                # Only charset is read without letter case: a name value in another case stays a finding, and
+                # a charset with a non-ASCII letter is not folded to an ASCII one.
+                ("404-structure/meta-name-upper-case-fails", page(icon + '<meta name="ROBOTS" content="noindex">', ""),
+                 "name value on <meta> is not one the live 404 pages use -> 'ROBOTS'"),
+                ("404-structure/meta-charset-non-ascii-letter-fails", page('<meta charset="ＵTF-8">' + icon, ""),
+                 "charset value on <meta> is not one the live 404 pages use -> 'ＵTF-8'"),
                 ("404-structure/style-attribute-url-fails", page(icon, '<div style="background:url(i.png)"></div>'),
                  "style value on a 404 page contains url("),
                 ("404-structure/entity-escaped-url-fails", page(icon, '<div class="u&#114;l&#40;i.png)"></div>'),
@@ -1643,6 +2065,39 @@ def _not_found_links_self_test():
         got = not_found_structure_findings("404.html", '<script src="/j.js"> </script>')
         check("404-structure/script-with-src-and-space-body-fails",
               any("must have an empty body" in f for f in got), got)
+        # The draft meta values: a card property or name the generator does not write is refused, and every
+        # value it writes passes.
+        got = not_found_structure_findings("404.html", '<meta property="og:locale" content="en">', draft=True)
+        check("404-structure/draft-meta-property-unpinned-value-fails",
+              got == ["404.html:1: property value on <meta> is not one the draft 404 pages use -> 'og:locale'"], got)
+        got = not_found_structure_findings("404.html", '<meta name="referrer" content="unsafe-url">', draft=True)
+        check("404-structure/draft-meta-name-unpinned-value-fails",
+              got == ["404.html:1: name value on <meta> is not one the draft 404 pages use -> 'referrer'"], got)
+        written = "".join('<meta {}="{}" content="x">'.format(kind, value)
+                          for kind in ("name", "property") for value in sorted(NOT_FOUND_DRAFT_META_VALUES[kind]))
+        got = not_found_structure_findings("404.html", '<meta charset="utf-8">' + written, draft=True)
+        check("404-structure/draft-meta-values-pass", got == [], got)
+        got = not_found_structure_findings("404.html", '<meta charset="UTF-8">', draft=True)
+        check("404-structure/draft-meta-charset-upper-case-passes", got == [], got)
+        # The 404 pages the generator builds in the staged form (staged_sites: base /draft/, each page under its
+        # root's draft/ folder, with the robots noindex meta) pass the draft allowlist with no finding, and
+        # the same pages with the robots name changed to one the generator does not write draw exactly 1 meta
+        # finding each.
+        import gen_draft_site
+        staged_build = gen_draft_site.build(sites=gen_draft_site.staged_sites(), registered=False)
+        staged_404 = sorted((target, text) for target, text in staged_build.items()
+                            if target.endswith("/draft/" + NOT_FOUND_PAGE))
+        robots = '<meta name="robots" content="noindex, nofollow">'
+        got = [(target, robots in text, not_found_structure_findings(target, text, draft=True))
+               for target, text in staged_404]
+        check("404-structure/staged-generated-404-pages-pass",
+              [target for target, _text in staged_404] == ["opf/site/draft/404.html", "site/draft/404.html"]
+              and all(has_robots and found == [] for _target, has_robots, found in got), got)
+        got = [not_found_structure_findings(target, text.replace('name="robots"', 'name="googlebot"', 1),
+                                            draft=True) for target, text in staged_404]
+        check("404-structure/staged-generated-404-unpinned-robots-name-fails",
+              len(got) == 2 and all(len(found) == 1 and found[0].endswith(
+                  ": name value on <meta> is not one the draft 404 pages use -> 'googlebot'") for found in got), got)
 
         # A 404 page the parser rejects still gets both raw-markup rules (the parse failure is simulated: no
         # input tried makes this parser raise).
@@ -1717,7 +2172,7 @@ def _scan_root(root, subdir, targets=None):
         except OSError as exc:
             print("error: cannot read {} ({}); fail-closed".format(rel, exc), file=sys.stderr)
             return 2
-        page = Page()
+        page = Page(template=_template_pages.is_template_page(subdir, f.relative_to(site), targets))
         try:
             page.feed(text)
             page.finalize()
@@ -1786,7 +2241,8 @@ def _scan_root(root, subdir, targets=None):
     findings.extend(logo_findings([(str(rel), text) for _f, rel, text, _p in docs]))
     if findings:
         print("FAIL: {} {}/ site-integrity issue(s)".format(len(findings), subdir))
-        for finding in sorted(set(findings)):
+        # Every finding is printed, repeats included, so the listed lines are exactly the counted findings.
+        for finding in sorted(findings):
             print("  " + finding)
         return 1
     print("PASS: {}/ dashes, links, anchors, titles, unique ids, tag structure, touch icons and link-preview "
