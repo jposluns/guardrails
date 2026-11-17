@@ -31325,8 +31325,8 @@ def _main_isolated(monitor):
             ciexpect(_ci_label, _ci_cmd, "deny")
         # bash ends a backquote body at the first unescaped backquote even inside a single quote, while the raw
         # reader keeps that quote open past the body and so closes it one quote late, splitting a later value
-        # before its AI part; any backquote in the text, and any quote character inside a $(...) body, makes the
-        # text inexact (_cmtidn_inexact). Each row allowed before this change.
+        # before its AI part; any command or process substitution in the text ($(, a backquote, <( or >()
+        # makes the text inexact (_cmtidn_inexact). Each row allowed before the backquote change.
         for _ci_label, _ci_cmd in (
                 ("(ci-idc-n1) an AI EMAIL default after a single quote inside a backquote body denies",
                  ": x`echo '`; X='`'; set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
@@ -31337,6 +31337,23 @@ def _main_isolated(monitor):
                 ("(ci-idc-n4) an AI GIT_CONFIG_VALUE_0 after a single quote inside a backquote body denies",
                  ": x`echo '`; X='`'; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0='x Claude' "
                  "git commit -m x")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        # A case pattern written without a leading '(' inside a double-quoted $(...) body closes that body early
+        # in the raw reader but not in bash, which puts every later quote out of step and splits a later value
+        # before its AI part. Each row allowed before this change.
+        _ci_case = "X=\"$(case a in a) echo '\"' ;; esac)\"; "
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-n5) an AI EMAIL default after a case pattern inside a quoted $(...) body denies",
+                 _ci_case + "set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-n6) an AI GIT_AUTHOR_NAME default after a case pattern inside a quoted $(...) body denies",
+                 _ci_case + "set -a; : ${GIT_AUTHOR_NAME:='Bot Claude'}; git commit -m x"),
+                ("(ci-idc-n7) an AI GIT_CONFIG_PARAMETERS pair after a case pattern inside a quoted $(...) body "
+                 "denies", _ci_case + "GIT_CONFIG_PARAMETERS=\"'author.name'='x Claude'\" git commit -m x"),
+                ("(ci-idc-n8) an AI GIT_CONFIG_VALUE_0 after a case pattern inside a quoted $(...) body denies",
+                 _ci_case + "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0='x Claude' "
+                 "git commit -m x"),
+                ("(ci-idc-n9) a --config-env pair after a case pattern inside a quoted $(...) body denies",
+                 _ci_case + "V='Claude Code' git --config-env=author.name=V commit -m x")):
             ciexpect(_ci_label, _ci_cmd, "deny")
         for _ci_label, _ci_cmd in (
                 ("(ci-idc-e-c1) a human EMAIL with a backslash before a newline and no AI name allows",

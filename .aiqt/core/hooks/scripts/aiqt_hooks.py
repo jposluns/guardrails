@@ -5371,6 +5371,9 @@ _CMTIDN_EXPANSION_WORD_RE = re.compile(r"^[\"']*(?:`|\$[A-Za-z_0-9{(@*#?!$-])")
 # A program that fills a replacement string into its command from its input or operands (GNU parallel and its
 # sem alias, and the ::: and :::: operand separators of parallel).
 _CMTIDN_FILLERS = frozenset(("parallel", "sem", ":::", "::::", ":::+", "::::+"))
+# A command substitution ($( or a backquote) or a process substitution (<( or >() anywhere in the text, sought
+# lexically, so one inside a quote and a $(( arithmetic expansion match too.
+_CMTIDN_SUBSTITUTION_RE = re.compile(r"\$\(|`|[<>]\(")
 
 
 def _cmtidn_inexact(command):
@@ -5380,12 +5383,13 @@ def _cmtidn_inexact(command):
     attached or detached (an xargs word followed by an option word whose short cluster holds I or i, or a
     --r... long option, a prefix of --replace), a braced placeholder or brace expansion (_CMTIDN_BRACE_RE: {},
     {1}, {a,b}), a GNU parallel or sem word or its ::: separator (_CMTIDN_FILLERS), or a word that starts with an
-    expansion (_CMTIDN_EXPANSION_WORD_RE: $X -I NAME ..., where the variable may name xargs), a backquote
-    anywhere in the text, or a quote character inside a $(...) body (_cmtidn_substitution_quote). bash ends a
-    backquote body at the first unescaped backquote even inside a quote, while _cmtidn_raw_words keeps a quote
-    opened in a body open past the body's end, so a quote there can split a later value before its AI part. A
-    construct is sought lexically in the words of _cmtidn_raw_words, so one inside a quoted string or a heredoc
-    body counts as well (a safe-direction over-deny)."""
+    expansion (_CMTIDN_EXPANSION_WORD_RE: $X -I NAME ..., where the variable may name xargs), or a command or
+    process substitution anywhere in the text (_CMTIDN_SUBSTITUTION_RE: $(, a backquote, <( or >(). The value
+    reader does not model what happens inside a substitution body (a quote there, a case pattern's ')' or a
+    backquote can each put it out of step with bash and split a later value before its AI part), so any
+    substitution makes the text inexact. A construct is sought lexically in the words of _cmtidn_raw_words, and a
+    substitution in the whole text, so one inside a quoted string or a heredoc body counts as well, and so does a
+    $(( arithmetic expansion (a safe-direction over-deny)."""
     if "\\\n" in command:
         return "a backslash before a newline"
     xargs = False
@@ -5402,52 +5406,9 @@ def _cmtidn_inexact(command):
             return "a braced placeholder or brace expansion ({!r})".format(word[:40])
         if _CMTIDN_EXPANSION_WORD_RE.match(word):
             return "a word that starts with an expansion ({!r})".format(word[:40])
-    if "`" in command:
-        return "a backquote"
-    if _cmtidn_substitution_quote(command):
-        return "a quote character inside a $(...) body"
+    if _CMTIDN_SUBSTITUTION_RE.search(command):
+        return "a command or process substitution"
     return None
-
-
-def _cmtidn_substitution_quote(text):
-    """True when a single or double quote character stands inside a $(...) body of the text, read lexically
-    as _cmtidn_raw_words reads it (a single-quoted string opens no body, a backslash escapes the character after
-    it, and a '(' inside a body nests in it), else False. A backquote is not read here: _cmtidn_inexact treats
-    any backquote in the text as a construct of its own."""
-    stack = []  # the open contexts: "'", '"', "{" (a ${ body), "(" (a $( body or a ( inside one)
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        top = stack[-1] if stack else None
-        if top == "'":
-            if c == "'":
-                stack.pop()
-            i += 1
-            continue
-        if c == "\\":
-            i += 2
-            continue
-        if c in "'\"" and "(" in stack:
-            return True
-        if c == "'" and top != '"':
-            stack.append("'")
-        elif c == '"':
-            if top == '"':
-                stack.pop()
-            else:
-                stack.append('"')
-        elif c == "$" and i + 1 < n and text[i + 1] in "{(":
-            stack.append("{" if text[i + 1] == "{" else "(")
-            i += 2
-            continue
-        elif c == "}" and top == "{":
-            stack.pop()
-        elif c == "(" and top == "(":
-            stack.append("(")
-        elif c == ")" and top == "(":
-            stack.pop()
-        i += 1
-    return False
 
 
 def _cmtidn_raw_words(text):
@@ -5582,8 +5543,8 @@ def _cmtidn_identity_set_ai(command):
     echo, a quoted heredoc that writes such text), and of a command that names an AI beside an assignment of
     an unspelled value. A command whose text holds a construct the value reader cannot read exactly
     (_cmtidn_inexact: a backslash before a newline, an xargs or parallel replacement string, a braced
-    placeholder or brace expansion, a word that starts with an expansion, a backquote anywhere, a quote character
-    inside a $(...) body) is not judged by its values: any
+    placeholder or brace expansion, a word that starts with an expansion, a command substitution ($(...) or a
+    backquote) or a process substitution (<(...) or >(...)) anywhere) is not judged by its values: any
     identity name or GIT_CONFIG_KEY_<n>, GIT_CONFIG_VALUE_<n> or GIT_CONFIG_PARAMETERS name in an assignment form
     there denies when the command names an AI identity anywhere, as written or once those characters are
     dropped. Bounded: a command longer than _CMTIDN_READ_LIMIT is not searched here, since the
