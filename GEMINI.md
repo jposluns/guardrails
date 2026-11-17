@@ -1118,9 +1118,14 @@ the durable record; only the authority that set it can lift it, never context lo
 assistant cannot confirm whether it still applies, it holds and checks rather than proceeding as though it
 were gone. A numeric limit the operator or a governing rule has set, such as a cap on rounds, retries,
 spend, or concurrency, is enforced by a check at the point of the action it limits, never by a count kept
-by hand: the check reads the limit and the count against it from durable records, refuses the action
-once the limit is reached or when either cannot be read, and admits more only on a grant from the
-authority that set it; the refusal holds only that action, and other work continues.
+by hand: the check reads the limit and the count against it from durable records, admits and counts a
+concurrent action in one atomic step, refuses the action when it would take the count past the limit or
+when either record cannot be read, and admits more only on a grant from the authority that set it,
+recorded where the assistant cannot write, though an allowance replenished within the limit, such as a
+freed concurrency slot, is not an increase and needs no grant; the refusal holds only that action, and
+work the limit does not cover continues. Where the host provides no such check or no durable count, the
+limit still binds, and accepting a weaker surface to enforce it is an explicit, recorded maintainer
+acceptance, never the assistant's default.
 
 ## Trust recovery and escalation
 
