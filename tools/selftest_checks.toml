@@ -3601,6 +3601,8 @@ expected-check-ids = [
   "vector/every-vector-holds",
   "launch/nonexistent-root-cannot-evaluate",
   "launch/comma-joined-root-cannot-evaluate",
+  "launch/default-root-ignores-working-directory",
+  "gate/generated-tree-absent-exits-2",
   "mutant/every-mutant-caught",
   "mutant/every-vector-discriminates",
   "live/default-root-passes",
