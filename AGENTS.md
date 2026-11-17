@@ -208,10 +208,6 @@ before it. An expensive apply and a check of whether it will succeed decide from
 where the apply's predicate is out of reach, a test holds the check to failing on every input the apply
 rejects. A check of whether an expensive apply will succeed refuses an input the apply would refuse, such
 as a version or sequence number no greater than the last one consumed, before any long work begins.
-A write path and the gate that later reads what it wrote validate from one shared definition, or, where
-the gate's definition is out of reach, a test holds the writer to refusing every entry the gate rejects, so
-nothing the gate refuses can be written. Otherwise an entry the writer accepted is refused only when the
-gate next reads it, and then blocks every later run of that gate until it is removed.
 
 ## Measured and estimated figures stay separate
 
@@ -591,6 +587,8 @@ not needed, detaching it is a deliberate, recorded choice, not a reflex.
 
 There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its
 source. Trust is never a substitute for the gate.
+A path that writes a record a later gate reads validates it with that gate's definition, or, where the
+definition is out of reach, a test holds the writer to refusing what the gate would refuse.
 
 ## Workers produce inert data
 
