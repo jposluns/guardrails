@@ -17,7 +17,13 @@ base is read as its fully qualified ref, never by short name: the default reads 
 refs/remotes/origin/main, and a --base naming a remote-tracking branch (refs/remotes/<REF> exists, or
 REF starts with a configured remote's name and a slash) reads exactly refs/remotes/<REF>, so a tag or
 a local branch of the same short name, which git's short-name search order prefers, cannot stand in
-for it (an absent remote-tracking ref is exit 2). tools/run_all_checks.sh runs the bare form, so a
+for it (an absent remote-tracking ref is exit 2). A --base that is a full (40-hex or 64-hex) object id
+that exists is read as that commit, never looked up under refs/remotes/. A --base that is a bare
+remote name (origin), alone or leading a revision expression (origin~1), and a revision expression
+whose leading name is a remote-tracking branch shadowed by refs/<name>, refs/tags/<name> or
+refs/heads/<name> (origin/main~1 with a tag origin/main), are exit 2: pass the remote-tracking
+branch, its fully qualified form (refs/remotes/origin/main~1) or a commit id instead.
+tools/run_all_checks.sh runs the bare form, so a
 local run compares with that default; CI passes --base (the pull request's target branch, a push's
 before SHA, or HEAD^ for any other event when it resolves). The
 base file is read from the base commit through the same strict parser as the working file; a base
@@ -44,9 +50,12 @@ visible before a listed rule falls out.
 DISCLOSED RESIDUAL (disclose-guard-residuals): a PR that removes a rule from the list AND adds a
 [[removal]] row for it passes this gate (the row turns a silent deletion into a named, reasoned record the
 gate prints; review must judge the removal itself); the ratchet sees only what changed since the base it
-is given, so it is as good as that base (a stale or wrong --base compares against the wrong list; a
-revision expression such as origin/main~1 is not a ref name and is resolved by git's own short-name
-order, so the fully qualified read covers bare remote-tracking names only); a
+is given, so it is as good as that base (a stale or wrong --base compares against the wrong list; an
+unshadowed revision expression such as origin/main~1 is still resolved by git's own short-name order,
+so a pseudo-ref file of its leading name directly under the git directory, which git tries first, is
+not checked; an abbreviated object id is resolved by git, which prefers a ref of the same name; and a
+--base or expression led by a local branch or tag name, not a remote-tracking one, gets git's
+tag-before-branch order); a
 listed rule cut down to a stub still passes (content is not judged);
 the gate measures the repository file against the configured cap, not any platform's actual truncation
 behaviour or a budget other instruction files may share; and a client that checks AGENTS.md out with CRLF
@@ -233,21 +242,60 @@ def _exact_ref_oid(root, full):
     return _object_id(proc.stdout.decode("ascii", "replace")) if proc.returncode == 0 else None
 
 
+def _remotes(root):
+    """The configured remote names (git remote); a failing call is a DemoError (exit 2)."""
+    proc = _git(root, ["remote"])
+    if proc.returncode != 0:
+        raise DemoError("git remote failed ({})".format(_git_err(proc)))
+    return [r for r in proc.stdout.decode("utf-8", "replace").splitlines() if r]
+
+
 def _remote_tracking_ref(root, base):
     """refs/remotes/<base> (or base itself when it already starts with refs/remotes/) when base names a
-    remote-tracking branch, otherwise None. base names one when refs/remotes/<base> exists, or when it
-    starts with a configured remote's name and a slash; a revision expression that is not a valid ref
-    name (origin/main~1) is not a branch name and is left to git's own resolution."""
+    remote-tracking branch, otherwise None. A full (40-hex or 64-hex) object id that exists is that
+    object, never a branch name, so a ref planted at refs/remotes/<id> cannot stand in for it. Otherwise
+    base names one when refs/remotes/<base> exists, or when it starts with a configured remote's name and
+    a slash; a revision expression that is not a valid ref name (origin/main~1) is not a branch name and
+    is left to resolve_base's short-name refusal and then git's own resolution."""
+    if (len(base) in (40, 64) and all(c in "0123456789abcdefABCDEF" for c in base)
+            and _git(root, ["cat-file", "-e", base]).returncode == 0):
+        return None
     full = base if base.startswith(REMOTE_REF_PREFIX) else REMOTE_REF_PREFIX + base
     if _git(root, ["check-ref-format", full]).returncode != 0:
         return None
     if full == base or _exact_ref_oid(root, full) is not None:
         return full
-    proc = _git(root, ["remote"])
-    if proc.returncode != 0:
-        raise DemoError("git remote failed ({})".format(_git_err(proc)))
-    remotes = [r for r in proc.stdout.decode("utf-8", "replace").splitlines() if r]
-    return full if any(base.startswith(r + "/") for r in remotes) else None
+    return full if any(base.startswith(r + "/") for r in _remotes(root)) else None
+
+
+REV_OPERATORS = ("~", "^", ":", "@{")
+
+
+def _short_name_refusal(root, base):
+    """Why base, which names no remote-tracking branch itself, cannot be left to git's short-name search
+    order, or None when it can. git resolves a bare remote name (origin) as refs/remotes/origin/HEAD only
+    after refs/origin, refs/tags/origin and refs/heads/origin, and a revision expression
+    (origin/main~1) through its leading ref name in the same order, so a tag or branch of that short name
+    would stand in for the remote-tracking ref. A bare remote name (alone or leading an expression) is
+    always refused; an expression whose leading name is a remote-tracking branch is refused when
+    refs/<name>, refs/tags/<name> or refs/heads/<name> exists."""
+    cut = min([i for i in (base.find(op) for op in REV_OPERATORS) if i >= 0] or [len(base)])
+    lead = base[:cut]
+    if lead in _remotes(root):
+        return "{!r} is the bare remote name {!r}, which a tag or branch of that name would shadow; " \
+               "pass the remote-tracking branch, such as {}/main".format(base, lead, lead)
+    if lead == base or not lead or lead.startswith(REMOTE_REF_PREFIX):
+        return None
+    full = _remote_tracking_ref(root, lead)
+    if full is None:
+        return None
+    shadows = [r for r in ("refs/" + lead, "refs/tags/" + lead, "refs/heads/" + lead)
+               if _exact_ref_oid(root, r) is not None]
+    if not shadows:
+        return None
+    return "the leading ref name {!r} of {!r} names {}, but {} of the same short name would stand in for " \
+           "it; pass the base as {} or a commit id".format(lead, base, full, " and ".join(shadows),
+                                                         full + base[cut:])
 
 
 def _peel_commit(root, rev):
@@ -259,8 +307,11 @@ def resolve_base(root, base):
     """(commit, label) of the comparison base: the explicit ref, or with base None the merge base of
     HEAD and refs/remotes/origin/main. A remote base is read as its fully qualified ref with show-ref
     --verify, so a tag or a local branch of the same short name (refs/tags/origin/main,
-    refs/heads/origin/main), which git's short-name search order prefers, cannot stand in for it. A base
-    that does not resolve to one commit is a DemoError (exit 2), never "nothing to compare"."""
+    refs/heads/origin/main), which git's short-name search order prefers, cannot stand in for it. A full
+    object id that exists is read as that object. A bare remote name, and a revision expression whose
+    leading remote-tracking name is shadowed by a ref of the same short name, are refused
+    (_short_name_refusal). A base that does not resolve to one commit is a DemoError (exit 2), never
+    "nothing to compare"."""
     if base is None:
         full = REMOTE_REF_PREFIX + DEFAULT_BASE_REMOTE
         tip = _exact_ref_oid(root, full)
@@ -283,6 +334,9 @@ def resolve_base(root, base):
             raise DemoError("cannot resolve the comparison base {!r}: the remote-tracking ref {} does not "
                             "exist or is not a commit".format(base, full))
         return commit, "{} ({}, {})".format(base, full, commit[:12])
+    refusal = _short_name_refusal(root, base)
+    if refusal is not None:
+        raise DemoError("cannot resolve the comparison base {!r} by short name: {}".format(base, refusal))
     commit = _peel_commit(root, base)
     if commit is None:
         raise DemoError("cannot resolve the comparison base {!r} to a commit".format(base))
@@ -452,7 +506,7 @@ def main():
 #       offsets relative to the rule region, without the rules_start shift, passes);
 #   T13 the margin report: the unlisted-rule line, and a WARNING line under warn-margin-bytes that still
 #       exits 0 (a mutant whose warning exits non-zero, or margin off by one, fails).
-# The list ratchet (T14 to T26) runs gate() against temporary git repositories built with the same
+# The list ratchet (T14 to T29) runs gate() against temporary git repositories built with the same
 # helpers and committed through _git_fixture_env's hermetic environment, the whole self-test inside
 # fixture_git_lifecycle so the gate's own base reads see no caller git configuration either:
 #   T14 the base lists ruleaa and the working list drops it with no [[removal]] row: exit 1 naming ruleaa
@@ -486,7 +540,19 @@ def main():
 #   T25 a replace ref substitutes, for the base commit, a commit that drops ruleaa: the base is still read
 #       as committed and the drop is exit 1 (a mutant that leaves replace objects on passes);
 #   T26 a --base value starting with - (-h, --git-dir=/nonexistent): each exit 2 naming it not a ref (a
-#       mutant accepting it hands it to git as an option and fails for another reason).
+#       mutant accepting it hands it to git as an option and fails for another reason);
+#   T27 the base lists ruleaa, HEAD drops it, and a ref refs/remotes/<base id> points at HEAD: --base <base
+#       id> reads that commit and the drop is exit 1, labelled without refs/remotes/ (a mutant looking a
+#       full object id up under refs/remotes/ reads HEAD's list and passes);
+#   T28 refs/remotes/origin/main (and origin/HEAD) is the base listing ruleaa under a configured remote
+#       origin, and HEAD drops it: --base origin/main~0 is exit 1 unshadowed; with a tag origin at HEAD,
+#       --base origin and origin~0 are exit 2 naming the bare remote name (a mutant without that refusal
+#       lets the tag stand in and passes); with a branch and then also a tag origin/main at HEAD,
+#       origin/main~0 and origin/main^0 are exit 2 naming the shadow (a mutant without the shadow
+#       refusal lets the branch or tag stand in and passes);
+#   T29 the configured-remote fallback: origin is configured, refs/remotes/origin/gone is absent and a tag
+#       origin/gone points at a commit that drops ruleaa: --base origin/gone is exit 2 naming the absent
+#       remote-tracking ref (a mutant without the fallback resolves the tag and passes).
 
 import gen_first_pin_demo as gfpd  # noqa: E402  fixture helpers (_write_tree, _tuned) and CAP_BYTES
 
@@ -1054,6 +1120,60 @@ def _self_test_main_isolated():
             if code != 2 or "--base {!r} is not a ref".format(bad) not in out:
                 failures.append("T26: --base {!r} must be exit 2 naming it not a ref, got {}\n{}".format(
                     bad, code, out))
+
+        def drop_at_head(root):
+            """Commit the working list without ruleaa as HEAD; returns HEAD's object id."""
+            _decl(root, [], raw=raw_decl(["prjint1"]))
+            fixture_git(root, "add", "-A")
+            fixture_git(root, "commit", "-q", "-m", "fixture head drops ruleaa")
+            return fixture_git(root, "rev-parse", "HEAD")
+
+        # T27. A full object id is that commit: refs/remotes/<base id> pointing at HEAD (which drops
+        # ruleaa) must not stand in for it.
+        t27, base27 = ratchet_fixture("t27")
+        head27 = drop_at_head(t27)
+        fixture_git(t27, "update-ref", REMOTE_REF_PREFIX + base27, head27)
+        code, out = capture_gate(t27, base27)
+        if (code != 1 or drop_msg not in out or "base {} ({})".format(base27, base27[:12]) not in out
+                or "(" + REMOTE_REF_PREFIX in out):
+            failures.append("T27: with refs/remotes/<base id> planted, --base <base id> must read that commit "
+                            "and the drop be exit 1, got {}\n{}".format(code, out))
+
+        # T28. A bare remote name, and a revision expression whose leading remote-tracking name is
+        # shadowed by a branch or tag of the same short name, are refused (exit 2).
+        t28, base28 = ratchet_fixture("t28")
+        fixture_git(t28, "remote", "add", "origin", str(tmp / "t28-nowhere"))
+        fixture_git(t28, "update-ref", "refs/remotes/origin/main", base28)
+        fixture_git(t28, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        head28 = drop_at_head(t28)
+        code, out = capture_gate(t28, "origin/main~0")
+        if code != 1 or drop_msg not in out:
+            failures.append("T28: unshadowed, --base origin/main~0 must read refs/remotes/origin/main and the "
+                            "drop be exit 1, got {}\n{}".format(code, out))
+        fixture_git(t28, "update-ref", "refs/tags/origin", head28)
+        for base in ("origin", "origin~0"):
+            code, out = capture_gate(t28, base)
+            if code != 2 or "is the bare remote name 'origin'" not in out:
+                failures.append("T28: with a tag origin, --base {!r} must be exit 2 naming the bare remote "
+                                "name, got {}\n{}".format(base, code, out))
+        fixture_git(t28, "update-ref", "-d", "refs/tags/origin")
+        for shadow in ("refs/heads/origin/main", "refs/tags/origin/main"):
+            fixture_git(t28, "update-ref", shadow, head28)
+            for base in ("origin/main~0", "origin/main^0"):
+                code, out = capture_gate(t28, base)
+                if code != 2 or "would stand in" not in out or shadow not in out:
+                    failures.append("T28: with {} shadowing it, --base {!r} must be exit 2 naming the shadow, "
+                                    "got {}\n{}".format(shadow, base, code, out))
+
+        # T29. The configured-remote fallback: origin is configured and refs/remotes/origin/gone is
+        # absent, so --base origin/gone is exit 2 even with a tag origin/gone at a commit dropping ruleaa.
+        t29, _base29 = ratchet_fixture("t29")
+        fixture_git(t29, "remote", "add", "origin", str(tmp / "t29-nowhere"))
+        fixture_git(t29, "update-ref", "refs/tags/origin/gone", drop_at_head(t29))
+        code, out = capture_gate(t29, "origin/gone")
+        if code != 2 or "the remote-tracking ref refs/remotes/origin/gone does not exist" not in out:
+            failures.append("T29: with origin configured and refs/remotes/origin/gone absent, --base "
+                            "origin/gone must be exit 2 naming the absent ref, got {}\n{}".format(code, out))
     except _FixtureError as exc:
         fixture_error = str(exc)
     finally:
@@ -1087,7 +1207,10 @@ def _self_test_main_isolated():
           "a declared removal passes and is printed, an addition passes, and a malformed removal row, an "
           "unresolvable or missing base and an absent or malformed base list fail closed (exit 2); a "
           "branch or tag shadowing origin/main, a GIT_DIR in the environment and a replace ref do not "
-          "change the base read, and a symlinked base list and a --base starting with - fail closed. "
+          "change the base read, a full object id is read as that commit despite a refs/remotes/<id> ref, "
+          "and a symlinked base list, a --base starting with -, a bare remote name, an expression led by "
+          "a shadowed remote-tracking name and an absent remote-tracking ref of a configured remote fail "
+          "closed. "
           "{}".format(
               "SKIPPED on this runner: {}.".format("; ".join(skipped)) if skipped
               else "No case was skipped (the mode-000 list ran too)."))
