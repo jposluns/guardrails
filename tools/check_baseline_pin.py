@@ -48,9 +48,11 @@ be an ancestor of HEAD (git merge-base --is-ancestor); a REF that is not, such a
 otherwise divergent push, is cannot-evaluate, never replaced by a common ancestor. With --local-base REF (the
 local runner's form) the base is `git merge-base HEAD REF`, the fork point, derived the way
 check_version_monotonicity.py derives its default base; when the name REF does not exist in this clone (git
-rev-parse --verify --quiet REF, without a peel, exits 1) the leg does not run and the run says so on a NOTE line,
-while a REF that exists but does not resolve to a readable commit (its object is missing, or it names a blob or a
-tree) and any other git failure are cannot-evaluate. The leg compares the base and HEAD endpoints only: a row
+rev-parse --verify --quiet REF, without a peel, exits 1 with nothing on stdout or stderr, and git for-each-ref
+over every ref exits 0 with nothing on stderr) the leg does not run and the run says so on a NOTE line, while any
+git diagnostic on either read (a broken loose ref, a broken packed-refs line, a dangling symbolic ref), a REF
+that exists but does not resolve to a readable commit (its object is missing, or it names a blob or a tree) and
+any other git failure are cannot-evaluate. The leg compares the base and HEAD endpoints only: a row
 changed in one commit of a range and restored by a later one is not seen. The leg reads each pin at the base (git
 ls-tree and cat-file, with replacement objects off and every GIT_ variable dropped but the config-isolation
 pins) and compares the parsed tables, not the text, so a comment edit or a reordering is ignored. A pin whose
@@ -61,8 +63,8 @@ path within the copy root or its build-tool path, must keep its base digest; a c
 path by path, with each registered pin present at the base under the same version. The pin records no
 archive digest, so the version is the only pin key: a change that also moves the version passes. A REF that
 is empty, starts with "-" or holds ":", whitespace or a control character, a --base REF that does not resolve
-to a commit or is not an ancestor of HEAD, a --local-base REF that exists but does not resolve to a readable
-commit, a --local-base merge-base that cannot be resolved, a base pin that is not a regular file, and a base
+to a commit or is not an ancestor of HEAD, a --local-base REF that git reports broken or dangling, a --local-base
+REF that exists but does not resolve to a readable commit, a --local-base merge-base that cannot be resolved, a base pin that is not a regular file, and a base
 pin that is oversized or malformed are cannot-evaluate (exit 2), never a pass. With neither flag the leg is not evaluated, and the run says so on a NOTE line.
 
 The entry line runs an inline copy of the canonical child-status guard (opf/tools/_child_status.py) before
@@ -503,15 +505,33 @@ def _base_commit(root, base):
     return commit
 
 
+def _last_line(data):
+    """The last nonblank line of a git diagnostic, or "" when there is none."""
+    lines = data.decode("utf-8", "replace").strip().splitlines()
+    return lines[-1] if lines else ""
+
+
 def _local_base_commit(root, ref):
     """The fork point `git merge-base HEAD ref` (as check_version_monotonicity.py derives its default base), or
-    None when the name ref does not exist in this clone (git rev-parse --verify --quiet ref, without a peel,
-    exits 1 and prints nothing); CannotEvaluate when ref is unsafe, when it exists but does not resolve to a
-    readable commit (its object is missing, or it names a blob or a tree), or when any git read fails otherwise.
-    The name is read first because the peeled read exits 1 with no output for a missing object too."""
+    None when the name ref does not exist in this clone: git rev-parse --verify --quiet ref, without a peel,
+    exits 1 and prints nothing on stdout or stderr, and git for-each-ref over every ref in the clone then exits
+    0 with nothing on stderr. CannotEvaluate when ref is unsafe, when either read reports any diagnostic (a
+    broken loose ref, a dangling symbolic ref, or a broken packed-refs line, which git may skip silently in the
+    name read), when ref exists but does not resolve to a readable commit (its object is missing, or it names a
+    blob or a tree), or when any git read fails otherwise. The name is read first because the peeled read exits
+    1 with no output for a missing object too."""
     _check_ref(ref)
     proc = _git_base_read(root, ["rev-parse", "--verify", "--quiet", ref])
     if proc.returncode == 1 and not proc.stdout:
+        if proc.stderr:
+            raise CannotEvaluate("base: {} does not resolve, and git rev-parse --verify {} reported a diagnostic, so "
+                                 "it cannot be read as absent (a broken or dangling ref is never the skip NOTE): "
+                                 "{}".format(ref, ref, _last_line(proc.stderr)))
+        refs = _git_base_read(root, ["for-each-ref", "--format=%(refname)"])
+        if refs.returncode != 0 or refs.stderr:
+            raise CannotEvaluate("base: {} does not resolve, and git for-each-ref over this clone's refs exited {} "
+                                 "with a diagnostic, so it cannot be read as absent (a broken ref is never the skip "
+                                 "NOTE): {}".format(ref, refs.returncode, _last_line(refs.stderr)))
         return None
     _commit_id(proc, "git rev-parse --verify " + ref)
     proc = _git_base_read(root, ["rev-parse", "--verify", "--quiet", ref + "^{commit}"])
@@ -948,6 +968,32 @@ def _coupling_cases():
         check(name, deleted and got == 2 and "CANNOT EVALUATE: base: origin/main exists in this clone but does not "
               "resolve to a readable commit" in report and "NOTE: the base-coupling leg did not run" not in report,
               (deleted, got, report))
+
+    # A --local-base REF git reports broken is cannot-evaluate, never the absent ref's NOTE, though the name read
+    # exits 1 with no output on stdout for each: a loose ref file holding no object id (git warns it ignores a
+    # broken ref), a symbolic ref to a ref that does not exist (git warns it ignores a dangling symref), and a
+    # packed-refs line for origin/main ending in CRLF, which the name read skips silently and only the read of
+    # every ref reports. HEAD changes a row under an unchanged version, so a skipped leg would pass the run.
+    for name, broken in (("couple/local-base-broken-loose-ref-cannot-evaluate", "loose"),
+                         ("couple/local-base-broken-packed-ref-cannot-evaluate", "packed"),
+                         ("couple/local-base-dangling-symref-cannot-evaluate", "dangling")):
+        with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
+            _fixture(tmp)
+            _commit_all(tmp, "base", init=True)
+            _fixture(tmp, changed, _pin_text(changed))
+            _commit_all(tmp, "head")
+            gitdir = Path(tmp) / ".git"
+            written = not (gitdir / "packed-refs").exists()
+            if broken == "packed":
+                with open(gitdir / "packed-refs", "xb") as handle:
+                    handle.write(b"1" * 40 + b" refs/remotes/origin/main\r\n")
+            else:
+                os.makedirs(gitdir / "refs" / "remotes" / "origin", exist_ok=True)
+                with open(gitdir / "refs" / "remotes" / "origin" / "main", "xb") as handle:
+                    handle.write(b"broken\n" if broken == "loose" else b"ref: refs/remotes/origin/nowhere\n")
+            got, report = _coupling_gate(tmp, "origin/main", FIXTURE_PINS, False, local=True)
+        check(name, written and got == 2 and "CANNOT EVALUATE: base: origin/main does not resolve, and git " in report
+              and "NOTE: the base-coupling leg did not run" not in report, (written, got, report))
 
 
 def _self_test():

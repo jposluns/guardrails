@@ -5416,6 +5416,9 @@ expected-check-ids = [
   "couple/local-base-absent-not-run",
   "couple/local-base-missing-object-cannot-evaluate",
   "couple/local-base-blob-cannot-evaluate",
+  "couple/local-base-broken-loose-ref-cannot-evaluate",
+  "couple/local-base-broken-packed-ref-cannot-evaluate",
+  "couple/local-base-dangling-symref-cannot-evaluate",
   "exit/codes-0-1-2",
   "live/real-tree-passes",
 ]
