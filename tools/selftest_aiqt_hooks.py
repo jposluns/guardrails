@@ -3895,6 +3895,485 @@ def _ie_dispatch_failures():
     return out
 
 
+@contextlib.contextmanager
+def _cp_environ(pattern, posture=None, config=None):
+    """While the block runs, the console prefix settings in os.environ are exactly pattern and posture, and
+    CLAUDE_CONFIG_DIR is config (None removes one); the values before are put back after."""
+    names = (aiqt_hooks._CONSOLE_PREFIX_PATTERN_ENV, aiqt_hooks._CONSOLE_PREFIX_POSTURE_ENV,
+             aiqt_hooks._CONSOLE_PREFIX_CONFIG_ENV)
+    saved = {name: os.environ.get(name) for name in names}
+    try:
+        for name, value in zip(names, (pattern, posture, config)):
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+@contextlib.contextmanager
+def _cp_patched(name, value):
+    """While the block runs, aiqt_hooks.<name> is value (a mutant); the real one is put back after."""
+    real = getattr(aiqt_hooks, name)
+    setattr(aiqt_hooks, name, value)
+    try:
+        yield
+    finally:
+        setattr(aiqt_hooks, name, real)
+
+
+def _cp_line(kind, content, **extra):
+    """One synthetic transcript line: a user or assistant record carrying message.content."""
+    record = {"type": kind, "message": {"role": kind, "content": content}}
+    record.update(extra)
+    return json.dumps(record) + "\n"
+
+
+_CP_PATTERN = r"\[\d{4}-\d\d-\d\dT\d\d:\d\dZ\] "
+_CP_STAMPED = "[2026-11-16T10:00Z] working on it"
+_CP_UNSTAMPED = "working on it"
+
+
+def _test_console_prefix(failures, tmp):
+    """(cp-*) console_prefix_pretool, called directly over synthetic transcripts written under tmp; nothing
+    is executed and no live transcript is read. Each row pins the real handler's outcome, then the same row
+    under a mutant with the check that decides it removed (patched in through _cp_patched) must give a
+    different outcome, so the row is red without that check. The rows: stamped, unstamped (warn and deny),
+    no text, multiple blocks, malformed, oversized (the bounded read and a tail with no complete record),
+    missing file, the mode off (reading nothing, a missing or wrong event included), a pattern that matches
+    empty text, a final symlink, a FIFO, a relative path, a path outside the transcript directory, the
+    4096-character match cap, a non-string text, an unfinished last line, a bad pattern, a bad posture, the
+    wrong event, patterns matching every sample line, isMeta and API error records, a subagent's call, a
+    sibling directory, the transcript directory itself, a path ending in '..', a symlinked configuration
+    directory, a boundary with no content, a blank block, a prefix written mid-block, and a file that grew
+    after its size was read. The transcripts lie in projects/ under a synthetic CLAUDE_CONFIG_DIR, the platform
+    transcript directory the handler confines its read to."""
+    handler = aiqt_hooks.console_prefix_pretool
+    config = tmp / "console-prefix"
+    root = config / "projects" / "session"
+    root.mkdir(parents=True, exist_ok=True)
+    outside = tmp / "console-prefix-outside"
+    outside.mkdir(parents=True, exist_ok=True)
+    tool_result = _cp_line("user", [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}])
+    tool_use = _cp_line("assistant", [{"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "ls"}}])
+
+    def transcript(name, text, where=root):
+        path = where / name
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def payload(path, event=aiqt_hooks.PRETOOL):
+        data = {"tool_name": "Bash", "tool_input": {"command": "ls"}}
+        if event is not None:
+            data["hook_event_name"] = event
+        if path is not None:
+            data["transcript_path"] = path
+        return data
+
+    def outcome(path, pattern=_CP_PATTERN, posture=None, event=aiqt_hooks.PRETOOL, config_dir=None):
+        try:
+            with _cp_environ(pattern, posture, str(config_dir or config)):
+                code, stdout_obj, _stderr = handler(payload(path, event))
+        except Exception as exc:  # a mutant may crash; the real handler never may, and "error" fails its row
+            return "error", "{}: {}".format(type(exc).__name__, exc)
+        reduced = "hard-block" if code == 2 else _reduce_result(code, stdout_obj)
+        note = ""
+        if isinstance(stdout_obj, dict):
+            note = str(stdout_obj.get("systemMessage", ""))
+            specific = stdout_obj.get("hookSpecificOutput")
+            if isinstance(specific, dict):
+                note = str(specific.get("permissionDecisionReason", ""))
+        return reduced, note
+
+    def always(value):
+        return lambda _pattern, _text: value
+
+    def swallow_missing(path, limit):
+        try:
+            return real_read(path, limit)
+        except OSError:
+            return b"", False
+
+    real_read = aiqt_hooks._console_prefix_read_tail
+    stamped = transcript("stamped.jsonl", _cp_line("assistant", [{"type": "text", "text": _CP_UNSTAMPED}])
+                         + tool_result + _cp_line("assistant", [{"type": "text", "text": _CP_STAMPED}]) + tool_use)
+    unstamped = transcript("unstamped.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}]) + tool_use)
+    no_text = transcript("no-text.jsonl", _cp_line("assistant", [{"type": "text", "text": _CP_UNSTAMPED}])
+                         + tool_result + tool_use)
+    multiple = transcript("multiple.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}]) + _cp_line(
+        "assistant", [{"type": "text", "text": "  " + _CP_STAMPED}, {"type": "thinking", "thinking": "x"}])
+        + tool_use)
+    malformed = transcript("malformed.jsonl", tool_result + "{not json\n" + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_STAMPED}]) + tool_use)
+    window = aiqt_hooks._CONSOLE_PREFIX_TAIL_BYTES
+    # Far more than the window of earlier, unstamped records, then a span the window does reach.
+    filler = _cp_line("assistant", [{"type": "text", "text": "x" * 4000}])
+    oversized = transcript("oversized.jsonl", filler * (2 * window // len(filler) + 2) + tool_result
+                           + _cp_line("assistant", [{"type": "text", "text": _CP_UNSTAMPED}]) + tool_use)
+    one_line = transcript("one-line.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_STAMPED + "y" * (window + 4096)}]))
+    missing = str(root / "absent.jsonl")
+    unprefixed_note = "1 of 1 assistant text block(s)"
+    # A final symlink to the unstamped transcript, read only with O_NOFOLLOW removed.
+    final_link = root / "final-link.jsonl"
+    if not os.path.lexists(final_link):
+        os.symlink(unstamped, final_link)
+    # A FIFO: opened without blocking, it reads as empty, so only the regular-file check refuses it.
+    fifo = root / "fifo.jsonl"
+    if hasattr(os, "mkfifo") and not os.path.lexists(fifo):
+        os.mkfifo(fifo)
+    # The unstamped transcript named relative to the cwd: it resolves only with the absolute-path check removed.
+    relative = os.path.relpath(unstamped)
+    # A transcript outside the transcript directory, reached directly, through '..' and through a symlinked
+    # directory inside it.
+    elsewhere = transcript("elsewhere.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}]) + tool_use, where=outside)
+    dotdot = os.path.join(str(root), "..", "..", "..", outside.name, "elsewhere.jsonl")
+    link_dir = root / "link-dir"
+    if not os.path.lexists(link_dir):
+        os.symlink(outside, link_dir)
+    via_link = str(link_dir / "elsewhere.jsonl")
+    # The prefix appears only past the 4096-character match cap (a literal size, so a raised cap fails the row).
+    far = transcript("far.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": "x" * 5000 + "STAMP"}]) + tool_use)
+    near = transcript("near.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": "x" * 100 + "STAMP"}]) + tool_use)
+    capped = r"[\s\S]*STAMP"
+    non_string = transcript("non-string.jsonl", tool_result + _cp_line("assistant", [{"type": "text", "text": 5}])
+                            + tool_use)
+    # Complete records, then a last line still being written (no newline, not yet JSON).
+    unfinished_tail = '{"type": "assistant", "message": {"con'
+    unfinished = transcript("unfinished.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}]) + unfinished_tail)
+    unfinished_ok = transcript("unfinished-ok.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_STAMPED}]) + unfinished_tail)
+    no_newline = transcript("no-newline.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}]).rstrip("\n"))
+    unstamped_text = _cp_line("assistant", [{"type": "text", "text": _CP_UNSTAMPED}])
+    # An isMeta user record (injected context) after unstamped text, and isMeta assistant text: neither ends
+    # the span nor counts. A synthetic API error record carries text the model did not write.
+    meta_after = transcript("meta-after.jsonl", tool_result + unstamped_text
+                            + _cp_line("user", "<command-name>/x</command-name>", isMeta=True) + tool_use)
+    meta_text = transcript("meta-text.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}], isMeta=True) + tool_use)
+    api_error = transcript("api-error.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": "API Error: overloaded"}], isApiErrorMessage=True) + tool_use)
+    # Sidechain (subagent) records in the main transcript: the main agent's unstamped text, its Task call, then
+    # a subagent's prompt, stamped text and tool call, the newest record. The twin ends at the main agent's
+    # own Task call after the same text.
+    task_use = _cp_line("assistant", [{"type": "tool_use", "id": "t3", "name": "Task", "input": {}}])
+    subagent_call = transcript("subagent-call.jsonl", tool_result + unstamped_text + task_use
+                               + _cp_line("user", "subagent prompt", isSidechain=True)
+                               + _cp_line("assistant", [{"type": "text", "text": _CP_STAMPED}], isSidechain=True)
+                               + _cp_line("assistant", [{"type": "tool_use", "id": "t4", "name": "Bash",
+                                                        "input": {}}], isSidechain=True))
+    main_task = transcript("main-task.jsonl", tool_result + unstamped_text + task_use)
+    # A sibling of the transcript directory whose name only starts with it, and a symlink to the configuration
+    # directory used as CLAUDE_CONFIG_DIR (the platform's path reaches the transcript through it).
+    sibling = config / "projects-evil"
+    sibling.mkdir(parents=True, exist_ok=True)
+    sibling_path = transcript("sibling.jsonl", tool_result + unstamped_text + tool_use, where=sibling)
+    config_link = tmp / "console-prefix-config-link"
+    if not os.path.lexists(config_link):
+        os.symlink(config, config_link)
+    via_config_link = str(config_link / "projects" / "session" / "unstamped.jsonl")
+    # A boundary record with no readable content, a whitespace-only block, and a prefix written mid-block.
+    no_content_boundary = transcript("no-content-boundary.jsonl", json.dumps({"type": "user"}) + "\n" + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_STAMPED}]) + tool_use)
+    blank_block = transcript("blank-block.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": "  \n "}, {"type": "text", "text": _CP_STAMPED}]) + tool_use)
+    mid_prefix = transcript("mid-prefix.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": "working " + _CP_STAMPED}]) + tool_use)
+
+    def searching(pattern, text):
+        """The search mutant: the prefix found anywhere in the block, not only at its start."""
+        return pattern.search(text.lstrip()[:aiqt_hooks._CONSOLE_PREFIX_MATCH_CHARS]) is not None
+
+    def by_text_prefix(root_dir, candidate):
+        """The text-prefix mutant: a sibling whose name starts with the directory's reads as inside."""
+        return candidate.startswith(root_dir)
+
+    def without_root_check(root_dir, candidate):
+        return os.path.commonpath([root_dir, candidate]) == root_dir
+
+    def pinned_lines(data, truncated):
+        """The pinned reader: only the first fragment dropped, an unfinished last line kept."""
+        lines = data.split(b"\n")
+        return [line for line in (lines[1:] if truncated else lines) if line.strip()], False
+
+    def unconfined(path, _environ):
+        return path
+    deny = {"posture": "deny"}
+
+    rows = (
+        ("(cp-stamped) a stamped block after the last tool result allows silently", stamped, {}, "allow", "",
+         ("_console_prefix_matches", always(False)), "allow-note"),
+        ("(cp-unstamped) an unstamped block warns", unstamped, {}, "allow-note", unprefixed_note,
+         ("_console_prefix_matches", always(True)), "allow"),
+        ("(cp-unstamped-deny) an unstamped block denies under the deny posture", unstamped,
+         {"posture": "deny"}, "deny", unprefixed_note,
+         ("_console_prefix_config", lambda env: (re.compile(_CP_PATTERN), "warn", None)), "allow-note"),
+        ("(cp-no-text) a span with only a tool call allows silently, the earlier text past the boundary unread",
+         no_text, {}, "allow", "", ("_console_prefix_is_boundary", lambda record: False), "allow-note"),
+        ("(cp-multiple) every block of the span is checked, the first unstamped one too", multiple, {},
+         "allow-note", "1 of 2 assistant text block(s)", ("_console_prefix_checked", lambda texts: texts[-1:]),
+         "allow"),
+        ("(cp-malformed) a line that is not JSON notes and never blocks", malformed, {"posture": "deny"},
+         "allow-note", "a transcript line is not JSON",
+         ("_console_prefix_record", lambda line: {} if line.startswith(b"{not") else json.loads(line)),
+         "allow"),
+        ("(cp-oversized) the bounded tail of an oversized transcript still decides on its span", oversized,
+         {}, "allow-note", unprefixed_note,
+         ("_console_prefix_is_boundary", lambda record: False), "allow-note"),
+        ("(cp-oversized-line) a tail holding no complete record notes", one_line, {"posture": "deny"},
+         "allow-note", "hold no complete record",
+         ("_console_prefix_lines", lambda data, truncated: ([line for line in data.split(b"\n") if line], False)),
+         "allow-note"),
+        ("(cp-missing) a missing transcript notes and never blocks", missing, {"posture": "deny"},
+         "allow-note", "did not run", ("_console_prefix_read_tail", swallow_missing), "allow"),
+        # The off switch itself is removed (not the whole settings reader): the unset pattern then reads as an
+        # empty one, which matches empty text, so the mutant notes instead of allowing silently.
+        ("(cp-off) with no pattern set the mode is off, an unstamped transcript included", unstamped,
+         {"pattern": None}, "allow", "", ("_console_prefix_is_off", lambda raw: False), "allow-note"),
+        ("(cp-off-unread) with no pattern set a missing transcript is never opened and nothing notes", missing,
+         {"pattern": None, "posture": "deny"}, "allow", "", ("_console_prefix_is_off", lambda raw: False),
+         "allow-note"),
+        ("(cp-off-no-event) with no pattern set a payload naming no event allows silently", stamped,
+         {"pattern": None, "event": None}, "allow", "", ("_console_prefix_is_off", lambda raw: False),
+         "hard-block"),
+        ("(cp-off-wrong-event) with no pattern set a PostToolUse payload allows silently", stamped,
+         {"pattern": None, "event": "PostToolUse"}, "allow", "", ("_console_prefix_is_off", lambda raw: False),
+         "hard-block"),
+        ("(cp-no-path) a payload with no transcript_path notes", None, {}, "allow-note",
+         "transcript_path is missing", ("_console_prefix_config", lambda env: (None, "warn", None)), "allow"),
+        # These three also match every sample line, so without the empty-text check the sample check refuses
+        # them, with its own note; cp-empty-end is decided by the empty-text check alone.
+        ("(cp-empty-star) a pattern matching empty text cannot be evaluated, noted under deny", unstamped,
+         {"pattern": "x*", "posture": "deny"}, "allow-note", "matches empty text",
+         ("_console_prefix_matches_empty", lambda pattern: False), "allow-note"),
+        ("(cp-empty-alt) an alternation with an empty branch cannot be evaluated", unstamped,
+         {"pattern": r"\[S\]|", "posture": "deny"}, "allow-note", "cannot evaluate",
+         ("_console_prefix_matches_empty", lambda pattern: False), "allow-note"),
+        ("(cp-empty-look) an empty lookahead cannot be evaluated", unstamped,
+         {"pattern": "(?=)", "posture": "deny"}, "allow-note", "matches empty text",
+         ("_console_prefix_matches_empty", lambda pattern: False), "allow-note"),
+        ("(cp-empty-end) a pattern matching only empty text cannot be evaluated", unstamped,
+         {"pattern": "$", "posture": "deny"}, "allow-note", "matches empty text",
+         ("_console_prefix_matches_empty", lambda pattern: False), "deny"),
+        ("(cp-symlink) a symlink as the final component is not followed, noted under deny", str(final_link), deny,
+         "allow-note", "did not run",
+         ("_CONSOLE_PREFIX_OPEN_FLAGS", aiqt_hooks._CONSOLE_PREFIX_OPEN_FLAGS & ~getattr(os, "O_NOFOLLOW", 0)),
+         "deny"),
+        ("(cp-relative) a relative transcript_path is never resolved against the cwd", relative, deny,
+         "allow-note", "not an absolute path", ("_console_prefix_is_absolute", lambda path: True), "deny"),
+        ("(cp-outside) a transcript outside the transcript directory is not read", elsewhere, deny,
+         "allow-note", "outside the platform transcript directory", ("_console_prefix_confined", unconfined),
+         "deny"),
+        ("(cp-outside-dotdot) '..' out of the transcript directory is not followed", dotdot, deny,
+         "allow-note", "outside the platform transcript directory", ("_console_prefix_confined", unconfined),
+         "deny"),
+        ("(cp-outside-link) a symlinked directory out of the transcript directory is not followed", via_link,
+         deny, "allow-note", "outside the platform transcript directory",
+         ("_console_prefix_confined", unconfined), "deny"),
+        ("(cp-match-cap) the pattern sees only the first 4096 characters of a block", far,
+         {"pattern": capped}, "allow-note", unprefixed_note, ("_CONSOLE_PREFIX_MATCH_CHARS", 1 << 40), "allow"),
+        ("(cp-non-string) a text block whose text is not a string notes, never crashes", non_string, deny,
+         "allow-note", "carries no text string", ("_console_prefix_text_string", lambda text: None), "error"),
+        ("(cp-unfinished) the complete records before an unfinished last line are judged", unfinished, deny,
+         "deny", "still being written", ("_console_prefix_lines", pinned_lines), "allow-note"),
+        ("(cp-unfinished-pass) a stamped span before an unfinished last line passes with a note", unfinished_ok,
+         deny, "allow-note", "still being written", ("_console_prefix_lines", pinned_lines), "allow-note"),
+        ("(cp-any-dot) a pattern matching any one character cannot be evaluated, noted under deny", unstamped,
+         {"pattern": ".", "posture": "deny"}, "allow-note", "unrelated sample lines",
+         ("_console_prefix_matches_arbitrary", lambda pattern: False), "allow"),
+        ("(cp-any-nonspace) a pattern matching any non-space character cannot be evaluated", unstamped,
+         {"pattern": r"\S", "posture": "deny"}, "allow-note", "cannot evaluate",
+         ("_console_prefix_matches_arbitrary", lambda pattern: False), "allow"),
+        ("(cp-any-look) a lookahead for any character cannot be evaluated", unstamped,
+         {"pattern": "(?=.)", "posture": "deny"}, "allow-note", "unrelated sample lines",
+         ("_console_prefix_matches_arbitrary", lambda pattern: False), "allow"),
+        ("(cp-any-two) a pattern matching any two characters cannot be evaluated", unstamped,
+         {"pattern": "..", "posture": "deny"}, "allow-note", "unrelated sample lines",
+         ("_console_prefix_matches_arbitrary", lambda pattern: False), "allow"),
+        ("(cp-meta-not-boundary) an isMeta user record after unstamped text does not end the span", meta_after,
+         deny, "deny", unprefixed_note, ("_console_prefix_is_meta", lambda record: False), "allow"),
+        ("(cp-meta-text) isMeta assistant text is not held to the prefix", meta_text, deny, "allow", "",
+         ("_console_prefix_is_meta", lambda record: False), "deny"),
+        ("(cp-api-error) a synthetic API error record is not held to the prefix", api_error, deny, "allow", "",
+         ("_console_prefix_is_api_error", lambda record: False), "deny"),
+        ("(cp-subagent-call) a subagent's tool call is not denied for the main agent's text", subagent_call, deny,
+         "allow", "", ("_console_prefix_is_subagent_record", lambda record: False), "deny"),
+        ("(cp-outside-sibling) a sibling directory whose name starts with projects is outside", sibling_path,
+         deny, "allow-note", "outside the platform transcript directory", ("_console_prefix_inside", by_text_prefix),
+         "deny"),
+        ("(cp-root-itself) the transcript directory itself is not a transcript", str(config / "projects"), deny,
+         "allow-note", "outside the platform transcript directory", ("_console_prefix_inside", without_root_check),
+         "allow-note"),
+        ("(cp-names-file) a transcript_path ending in '..' names no file", str(root) + "/..", deny, "allow-note",
+         "does not name a file", ("_console_prefix_names_file", lambda name: True), "allow-note"),
+        ("(cp-config-link) a symlinked configuration directory is resolved before the comparison",
+         via_config_link, {"posture": "deny", "config_dir": config_link}, "deny", unprefixed_note,
+         ("_console_prefix_real_root", lambda path: path), "allow-note"),
+        ("(cp-boundary-content) a boundary record with no readable content notes, never ends the span silently",
+         no_content_boundary, deny, "allow-note", "carries no message content",
+         ("_console_prefix_boundary_checked", lambda record: None), "allow"),
+        ("(cp-blank) a whitespace-only block is not held to the prefix", blank_block, deny, "allow", "",
+         ("_console_prefix_is_blank", lambda text: False), "deny"),
+        ("(cp-match-start) a prefix written after other text does not count", mid_prefix, deny, "deny",
+         unprefixed_note, ("_console_prefix_matches", searching), "allow"),
+    )
+    if hasattr(os, "mkfifo"):
+        # Without the regular-file check a FIFO still allows, but only because its seek fails (a different
+        # note): inside the transcript directory no seekable non-regular file can be made without privilege.
+        rows += (("(cp-fifo) a FIFO as the transcript is refused as not a regular file, noted under deny", str(fifo),
+                  deny, "allow-note", "not a regular file", ("_console_prefix_is_regular", lambda mode: True),
+                  "allow-note"),)
+    for label, path, settings, want, want_text, (mutant_name, mutant), flipped_want in rows:
+        got, note = outcome(path, **settings)
+        if got != want or want_text not in note:
+            failures.append("{}: expected {} with {!r} in its text, got {} with {!r}".format(
+                label, want, want_text, got, note))
+        with _cp_patched(mutant_name, mutant):
+            flipped, flipped_note = outcome(path, **settings)
+        if flipped == got and flipped_note == note:
+            failures.append("{}: the mutant of {} gave the same result ({}, {!r}), so the row does not show "
+                            "that check decides it".format(label, mutant_name, flipped, flipped_note))
+        elif flipped != flipped_want:
+            failures.append("{}: the mutant of {} must give {}, got {}".format(
+                label, mutant_name, flipped_want, flipped))
+
+    # (cp-no-quote) the note counts and places the missed block but never quotes the transcript's text.
+    got, note = outcome(unstamped)
+    if got != "allow-note" or _CP_UNSTAMPED in note or "block 1 of the span" not in note:
+        failures.append("(cp-no-quote) expected a note placing the block without its text, got {} with {!r}"
+                        .format(got, note))
+    # Passing twins: a prefix inside the match cap passes, a complete last line with no newline is judged,
+    # and a transcript inside the directory reached through no symlink is read.
+    for label, path, settings, want in (
+            ("(cp-match-cap-twin) a prefix inside the cap passes", near, {"pattern": capped}, "allow"),
+            ("(cp-no-newline-twin) a complete last line with no newline is judged", no_newline, deny, "deny"),
+            ("(cp-inside-twin) a transcript inside the directory is read and denied", unstamped, deny, "deny"),
+            ("(cp-subagent-main-twin) the main agent's own call after the same text is denied", main_task, deny,
+             "deny"),
+            ("(cp-meta-twin) a genuine prompt after unstamped text ends the span", transcript(
+                "prompt-after.jsonl", unstamped_text + _cp_line("user", "a real prompt") + tool_use), deny, "allow"),
+            ("(cp-api-error-twin) the same text without the API error mark is held to the prefix", transcript(
+                "api-error-twin.jsonl", tool_result + _cp_line(
+                    "assistant", [{"type": "text", "text": "API Error: overloaded"}]) + tool_use), deny, "deny"),
+            # The disclosed residual of the sample check: a pattern passing every block that starts with a word
+            # character matches no punctuation sample, so it is accepted and an unstamped word passes.
+            ("(cp-any-class-accepted) a class-wide pattern such as \\b is accepted (disclosed residual)", unstamped,
+             {"pattern": r"\b", "posture": "deny"}, "allow")):
+        got, note = outcome(path, **settings)
+        if got != want:
+            failures.append("{}: expected {}, got {} with {!r}".format(label, want, got, note))
+    # (cp-grown-bound) a file holding more than its fstat size (as a transcript that grew after its size was
+    # read does) is still read for at most the limit: /proc/self/status is a regular file whose fstat size is 0
+    # but which reads several hundred bytes, so the read must stop at the 64-byte limit, never run on to the end
+    # of the file. Where that file is absent or not of that shape (not Linux) the row is skipped.
+    grown = "/proc/self/status"
+    if os.path.isfile(grown) and os.stat(grown).st_size == 0:
+        data, truncated = aiqt_hooks._console_prefix_read_tail(grown, 64)
+        if len(data) != 64 or truncated:
+            failures.append("(cp-grown-bound) expected exactly 64 bytes read from a file holding more than its "
+                            "fstat size, got {} (truncated {})".format(len(data), truncated))
+    # (cp-off-reads-nothing) while off the transcript is never opened; the same payload with the pattern set
+    # opens it once.
+    opened = []
+
+    def counting(path, limit):
+        opened.append(path)
+        return real_read(path, limit)
+    with _cp_patched("_console_prefix_read_tail", counting):
+        outcome(unstamped, pattern=None)
+        off_reads = len(opened)
+        outcome(unstamped)
+    if off_reads != 0 or len(opened) != 1:
+        failures.append("(cp-off-reads-nothing) expected no read while off and one read when on, got {} and {}"
+                        .format(off_reads, len(opened) - off_reads))
+    # (cp-oversized-bound) the read takes at most the window from the end of an oversized transcript, and is
+    # red with the bound removed.
+    reads = []
+
+    def spy(path, limit):
+        data, truncated = real_read(path, limit)
+        reads.append((len(data), truncated))
+        return data, truncated
+    with _cp_patched("_console_prefix_read_tail", spy):
+        outcome(oversized)
+        bounded = list(reads)
+        reads.clear()
+        with _cp_patched("_CONSOLE_PREFIX_TAIL_BYTES", 1 << 40):
+            outcome(oversized)
+        unbounded = list(reads)
+    size = os.path.getsize(oversized)
+    if bounded != [(window, True)] or size <= window:
+        failures.append("(cp-oversized-bound) expected one read of exactly {} bytes from the end of a {}-byte "
+                        "transcript, got {!r}".format(window, size, bounded))
+    if unbounded == bounded or not unbounded or unbounded[0][0] != size:
+        failures.append("(cp-oversized-unbounded) with the bound removed the read must take the whole {}-byte file, "
+                        "got {!r}".format(size, unbounded))
+    # (cp-oversized-cost) the handler's own CPU time on the oversized transcript stays far inside the budget.
+    _result, spent = _hook_cpu_timed(lambda: outcome(oversized), bound=1.0)
+    if spent >= 1.0:
+        failures.append("(cp-oversized-cost) console_prefix_pretool used {:.2f}s of CPU on a {}-byte transcript; "
+                        "the bound is 1 s".format(spent, size))
+    # (cp-settings) a pattern that does not compile, an overlong pattern and an unknown posture each note.
+    for label, settings, want_text in (
+            ("(cp-bad-pattern)", {"pattern": "(["}, "does not compile"),
+            ("(cp-long-pattern)", {"pattern": "a" * (aiqt_hooks._CONSOLE_PREFIX_PATTERN_MAX + 1)},
+             "over the 512-character limit"),
+            ("(cp-bad-posture)", {"posture": "block"}, "neither warn nor deny")):
+        got, note = outcome(unstamped, **settings)
+        if got != "allow-note" or want_text not in note:
+            failures.append("{} expected allow-note with {!r}, got {} with {!r}".format(label, want_text, got, note))
+    got, note = outcome(stamped, posture="block")
+    if got != "allow-note" or "check passed" not in note:
+        failures.append("(cp-bad-posture-pass) expected allow-note naming the passed check, got {} with {!r}"
+                        .format(got, note))
+    # (cp-pattern-boundary) at the pattern length limit the pattern is used, one past it is refused.
+    limit = aiqt_hooks._CONSOLE_PREFIX_PATTERN_MAX
+    for label, length, want in (("just inside", limit - 1, "allow"), ("exactly at", limit, "allow"),
+                                ("just past", limit + 1, "allow-note")):
+        # A pattern of exactly `length` characters that matches the unstamped text: a one- or two-character
+        # start that matches its "w", then optional "o?" pairs.
+        start = "w" if length % 2 else "\\w"
+        pattern = start + "o?" * ((length - len(start)) // 2)
+        got, _note = outcome(unstamped, pattern=pattern)
+        if got != want or len(pattern) != length:
+            failures.append("(cp-pattern-boundary) a pattern {} the {}-character limit ({} characters) expected "
+                            "{}, got {}".format(label, limit, len(pattern), want, got))
+    # (cp-wrong-event) wired to another event it hard-blocks, the sibling convention.
+    got, _note = outcome(stamped, event="PostToolUse")
+    if got != "hard-block":
+        failures.append("(cp-wrong-event) expected a hard block on a PostToolUse payload, got {}".format(got))
+    # (cp-partial) a long span whose boundary lies before the window is checked as far as the window reaches.
+    partial = transcript("partial.jsonl", tool_result + filler * (window // len(filler) + 2)
+                         + _cp_line("assistant", [{"type": "text", "text": _CP_STAMPED}]))
+    got, note = outcome(partial, pattern=r"[x\[]")
+    if got != "allow-note" or "start of the span" not in note:
+        failures.append("(cp-partial) expected allow-note saying the span start was not reached, got {} with "
+                        "{!r}".format(got, note))
+    # (cp-sidechain-and-string) a sidechain record is passed over; string content counts as one text block.
+    side = transcript("side.jsonl", tool_result + _cp_line("assistant", _CP_UNSTAMPED, isSidechain=True)
+                      + _cp_line("assistant", _CP_STAMPED))
+    got, note = outcome(side)
+    if got != "allow":
+        failures.append("(cp-sidechain-and-string) expected a silent allow, got {} with {!r}".format(got, note))
+    # (cp-not-regular) a directory as the transcript notes.
+    got, note = outcome(str(root))
+    if got != "allow-note" or "did not run" not in note:
+        failures.append("(cp-not-regular) expected allow-note for a directory, got {} with {!r}".format(got, note))
+
+
 def _test_inline_errexit(failures, tmp):
     """(ie-*) inline_errexit, called directly; no submitted Bash command is executed. Each fire row must
     allow with the note and no decision, and each silent row must allow silently; each row must then flip
@@ -7603,6 +8082,7 @@ _DEADLINE_CASES = {
     "branch_root": ("heredocs", "git_push_words_unbal", "nest_parens", "procsubst_run_after"),
     "commit_identity": ("nest_parens", "git_words_unbal_dq"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
+    "console_prefix_pretool": ("git_words", "write_content"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
     "future_stamp_write": ("fsw_store_past_appends", "fsw_store_past_appends_after", "fsw_open_substs_after",
                            "fsw_store_write_after", "fsw_literal_lines", "write_content", "nest_cmdsubst",
@@ -16295,6 +16775,332 @@ def _main_isolated(monitor):
         expect("(br-a) branch -D allows with a note", "git branch -D other", "allow-note", cwd=rp)
         expect("(br-b) branch -d allows (git refuses unmerged)", "git branch -d other", "allow", cwd=rp)
 
+        # === clean -x/-X: ignored files the recovery snapshot never holds ====================
+        # git add --all (the snapshot) skips ignored files and the clean-tree probe never lists them, so a
+        # tree whose only uncommitted content is an ignored file read as provably clean and a clean -x/-X
+        # there was silently allowed with no snapshot; on a dirty tree it was allowed after a snapshot that
+        # lacked the ignored file. Such a clean now DENIES unless a read-only dry run (git clean -n with the
+        # same options) shows it removes no ignored file; a clean without -x/-X keeps its outcome. The hook
+        # launches the real git (resolved through PATH under the suite's fixture pins) only for the read-only
+        # dry run, inside these throwaway repos: no credentials, no remote, nothing written.
+        cx_repo = _init_repo(tmp / "cleanx-ignored")
+        (cx_repo / ".gitignore").write_text("*.local\n", encoding="utf-8")
+        _git(cx_repo, "add", ".gitignore")
+        _git(cx_repo, "commit", "-q", "-m", "ignore rule", env_identity=True)
+        (cx_repo / "secrets.local").write_text("kept\n", encoding="utf-8")
+        cx = str(cx_repo)
+        expect("(cx-a) clean -fdx on an ignored-only tree denies", "git clean -fdx", "deny", cwd=cx)
+        expect("(cx-b) clean -fX on an ignored-only tree denies", "git clean -fX", "deny", cwd=cx)
+        expect("(cx-c) clean -f -x -d on an ignored-only tree denies", "git clean -f -x -d", "deny", cwd=cx)
+        expect("(cx-d) clean --force -x on an ignored-only tree denies", "git clean --force -x", "deny", cwd=cx)
+        expect("(cx-e) compound clean -f -x -d && true on an ignored-only tree denies",
+               "git clean -f -x -d && true", "deny", cwd=cx)
+        expect("(cx-f) clean -fdx behind -C on an ignored-only tree denies",
+               "git -C {} clean -fdx".format(cx), "deny", cwd=cx)
+        expect("(cx-g) twin: clean -fd on the same tree allows as before", "git clean -fd", "allow", cwd=cx)
+        expect("(cx-h) twin: dry run clean -n -x on the same tree allows as before", "git clean -n -x", "allow",
+               cwd=cx)
+        expect("(cx-i) twin: an exclude value spelled -x is not the flag, allows as before",
+               "git clean -f -e -x", "allow", cwd=cx)
+        expect("(cx-j) twin: clean -fdx whose exclude keeps the only ignored file allows (dry run shows none)",
+               "git clean -fdx -e secrets.local", "allow", cwd=cx)
+        if not (cx_repo / "secrets.local").is_file():
+            failures.append("(cx-k) the ignored file must survive every probe above (each probe is a dry run)")
+        # A probe that fails denies (fail closed): -x with -X makes git itself refuse the dry run, and a
+        # dry-run helper that reports failure (None, as on a timeout) denies too.
+        expect("(cx-l) clean -fxX, whose dry run git refuses, denies", "git clean -fxX", "deny", cwd=cx)
+        _cx_saved_listing = aiqt_hooks._clean_probe_listing
+        aiqt_hooks._clean_probe_listing = lambda *_a, **_k: None
+        try:
+            expect("(cx-m) clean -fdx whose dry run fails or times out denies", "git clean -fdx", "deny",
+                   cwd=str(_init_repo(tmp / "cleanx-probefail")))
+        finally:
+            aiqt_hooks._clean_probe_listing = _cx_saved_listing
+        # The listing bound is a real deadline: with no time left the listing is never launched and the
+        # clean denies with the bounded-listing reason, not the hook deadline's.
+        _cx_saved_seconds = aiqt_hooks._CLEAN_PROBE_SECONDS
+        aiqt_hooks._CLEAN_PROBE_SECONDS = 0.0
+        try:
+            expect("(cx-m2) clean -fd whose listing deadline has passed denies", "git clean -fd", "deny", cwd=cx)
+        finally:
+            aiqt_hooks._CLEAN_PROBE_SECONDS = _cx_saved_seconds
+        if aiqt_hooks._CLEAN_PROBE_SECONDS >= aiqt_hooks.PRETOOL_BUDGET_SECONDS:
+            failures.append("(cx-m3) the clean listing bound must sit under the hook deadline")
+        # A negated -e/--exclude pattern un-ignores a file, so a clean WITHOUT -x removes it, and with -x
+        # it passed the old compare-with-and-without-x premise; every form denies on its listings.
+        expect("(cx-s) clean -f -x -e '!*.local' (negated exclude with -x) denies",
+               "git clean -f -x -e '!*.local'", "deny", cwd=cx)
+        expect("(cx-t) clean -f -d -x -e '!*.local' denies", "git clean -f -d -x -e '!*.local'", "deny", cwd=cx)
+        expect("(cx-u) clean -f -x -e '!secrets.local' denies", "git clean -f -x -e '!secrets.local'", "deny",
+               cwd=cx)
+        expect("(cx-v) clean -fx behind -C with a negated exclude denies",
+               "git -C {} clean -f -x -e '!*.local'".format(cx), "deny", cwd=cx)
+        expect("(cx-w) clean -f -e '!*.local' (no -x) denies", "git clean -f -e '!*.local'", "deny", cwd=cx)
+        expect("(cx-x) clean -f -d -e '!*.local' -e '!sub/' (no -x) denies",
+               "git clean -f -d -e '!*.local' -e '!sub/'", "deny", cwd=cx)
+        expect("(cx-y) compound clean -f -e '!*.local' && true denies", "git clean -f -e '!*.local' && true",
+               "deny", cwd=cx)
+        expect("(cx-z) clean --exclude '!*.local' -f (long spelling) denies",
+               "git clean --exclude '!*.local' -f", "deny", cwd=cx)
+        # A -c or --config-env option, or a leading HOME, XDG_CONFIG_HOME or GIT_* assignment, can remove an
+        # ignore source (a global excludes file here would be hidden), so a clean carrying one denies.
+        expect("(cx-c1) clean -f under -c core.excludesFile=/dev/null denies",
+               "git -c core.excludesFile=/dev/null clean -f", "deny", cwd=cx)
+        expect("(cx-c2) clean -f under a leading XDG_CONFIG_HOME assignment denies",
+               "XDG_CONFIG_HOME=/nonexistent git clean -f", "deny", cwd=cx)
+        expect("(cx-c3) clean -f under leading HOME and XDG_CONFIG_HOME assignments denies",
+               "HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent git clean -f", "deny", cwd=cx)
+        expect("(cx-c4) clean -f under --config-env denies", "git --config-env=core.excludesFile=NOPE clean -f",
+               "deny", cwd=cx)
+        # An earlier step that restores, checks out or cleans the ignore rules changes them before the clean.
+        expect("(cx-k2) checkout -- .gitignore && clean -f denies", "git checkout -- .gitignore && git clean -f",
+               "deny", cwd=cx)
+        expect("(cx-k3) restore .gitignore && clean -f denies", "git restore .gitignore && git clean -f", "deny",
+               cwd=cx)
+        expect("(cx-k1) clean -f .gitignore && clean -f denies", "git clean -f .gitignore && git clean -f", "deny",
+               cwd=cx)
+        expect("(cx-k4) clean -f .gitignore ; clean -f denies", "git clean -f .gitignore ; git clean -f", "deny",
+               cwd=cx)
+        # A dry run removes nothing, an exclude beside it included: git's option reader consumes each exclude
+        # value, so -n after the value is the flag (the quoted pattern makes the command non-pristine, so the
+        # closed allowlist grammar gives its noted allow), and a -n that IS the exclude value is no dry run.
+        expect("(cx-tw1) twin: dry run clean -n -e '!*.local' allows", "git clean -n -e '!*.local'",
+               "allow-note", cwd=cx)
+        expect("(cx-tw3) dry run clean -f -e secrets.local -n -x (the -n after the value) allows",
+               "git clean -f -e secrets.local -n -x", "allow", cwd=cx)
+        expect("(cx-tw4) twin: clean -f -e -n -x (the -n is the exclude value) denies",
+               "git clean -f -e -n -x", "deny", cwd=cx)
+        expect("(cx-tw5) twin: clean -n --no-dry-run -f -x (the last of the pair wins) denies",
+               "git clean -n --no-dry-run -f -x", "deny", cwd=cx)
+        # An abbreviated --exclude (--e, --ex, --exc, --exclud) consumes the next token as its pattern, as git
+        # reads it, so a '-n' or '--dry-run' there is the pattern and the clean is a real -x clean.
+        expect("(cx-e1) clean -fdx --exc -n (the -n is the abbreviated exclude's value) denies",
+               "git clean -fdx --exc -n", "deny", cwd=cx)
+        expect("(cx-e5) clean -fx --ex --dry-run (the --dry-run is the exclude's value) denies",
+               "git clean -fx --ex --dry-run", "deny", cwd=cx)
+        expect("(cx-e13) clean -fdx --exc --dry-run denies", "git clean -fdx --exc --dry-run", "deny", cwd=cx)
+        expect("(cx-e4) twin: clean -fdx --exclude -n (the full spelling) denies", "git clean -fdx --exclude -n",
+               "deny", cwd=cx)
+        expect("(cx-e6) twin: clean -fdx --ex=-n (the inline value) denies", "git clean -fdx --ex=-n", "deny",
+               cwd=cx)
+        expect("(cx-e7) twin: dry run clean -fdx --exc x -n (the -n after the value) allows",
+               "git clean -fdx --exc x -n", "allow", cwd=cx)
+        # Only a global option or leading assignment that can change the ignore sources or the worktree the
+        # listings read denies; the rest keep the listing verdict.
+        expect("(cx-g1) clean -fdx under --no-pager still denies on its listings",
+               "git --no-pager clean -fdx", "deny", cwd=cx)
+        expect("(cx-g2) clean -f under -c core.ignoreCase=true denies", "git -c core.ignoreCase=true clean -f",
+               "deny", cwd=cx)
+        expect("(cx-g3) clean -f under -c CORE.EXCLUDESFILE (any case) denies",
+               "git -c CORE.EXCLUDESFILE=/dev/null clean -f", "deny", cwd=cx)
+        expect("(cx-g4) clean -f under a leading GIT_CONFIG_GLOBAL denies",
+               "GIT_CONFIG_GLOBAL=/dev/null git clean -f", "deny", cwd=cx)
+        (cx_repo / "sub").mkdir(exist_ok=True)
+        expect("(cx-g5) clean -f whose --work-tree roots the worktree in a subdirectory denies",
+               "git --work-tree={}/sub clean -f".format(cx), "deny", cwd=cx)
+        if not (cx_repo / "secrets.local").is_file():
+            failures.append("(cx-k5) the ignored file must survive every listing above (each is read-only)")
+        # git C-quotes a name holding a control byte, a double quote or a backslash; a malformed quoting
+        # makes the listing untrusted.
+        for _cq_in, _cq_out in ((b"plain name", b"plain name"), (b'"a\\tb"', b"a\tb"),
+                                (b'"q\\"\\\\"', b'q"\\'), (b'"\\303\\251"', b"\xc3\xa9"),
+                                (b'"open', None), (b'"bad\\q"', None), (b'"x\\40"', None)):
+            if aiqt_hooks._clean_unquote(_cq_in) != _cq_out:
+                failures.append("(cx-q1) _clean_unquote({!r}) must be {!r}".format(_cq_in, _cq_out))
+        # A dirty tree: -x would remove the ignored file the snapshot lacks, so it denies (it was allowed
+        # with a note saying a snapshot was saved); the same clean without -x keeps its allow-note.
+        (cx_repo / "file.txt").write_text("committed line\nuncommitted fix\n", encoding="utf-8")
+        (cx_repo / "untracked.txt").write_text("junk\n", encoding="utf-8")
+        expect("(cx-n) clean -fdx on a dirty tree with an ignored file denies", "git clean -fdx", "deny", cwd=cx)
+        expect("(cx-o) compound clean -f -d -x && true on a dirty tree with an ignored file denies",
+               "git clean -f -d -x && true", "deny", cwd=cx)
+        expect("(cx-p) twin: clean -fd on the same dirty tree allows with a note as before", "git clean -fd",
+               "allow-note", cwd=cx)
+        # No ignored file in reach: -x removes nothing the plain clean would not, so today's outcome stands.
+        cx_plain = _init_repo(tmp / "cleanx-noignored")
+        (cx_plain / "untracked.txt").write_text("junk\n", encoding="utf-8")
+        expect("(cx-q) clean -fdx with no ignored file allows with a note as before", "git clean -fdx",
+               "allow-note", cwd=str(cx_plain))
+        expect("(cx-tw2) twin: clean -fd on a tree with only untracked non-ignored files allows with a note",
+               "git clean -fd", "allow-note", cwd=str(cx_plain))
+        expect("(cx-r) clean -fdx on a provably clean tree with no ignored file allows as before",
+               "git clean -fdx", "allow", cwd=str(_init_repo(tmp / "cleanx-clean")))
+        # With no ignored file in reach, a clean under an option or assignment that changes no ignore source
+        # keeps the outcome it had before the listings existed.
+        expect("(cx-f3a) LC_ALL=C clean -fd with no ignored file allows with a note as before",
+               "LC_ALL=C git clean -fd", "allow-note", cwd=str(cx_plain))
+        expect("(cx-f3b) clean -fd under -c x.y=z with no ignored file allows with a note as before",
+               "git -c x.y=z clean -fd", "allow-note", cwd=str(cx_plain))
+        expect("(cx-f3c) clean -fd under -P with no ignored file allows with a note as before",
+               "git -P clean -fd", "allow-note", cwd=str(cx_plain))
+        # A doubly forced clean removes a nested repository at any depth below a directory it removes, with
+        # the nested repository's ignored and untracked files; the snapshot holds none of them.
+        cx_nest = _init_repo(tmp / "cleanx-nested")
+        _init_repo(cx_nest / "a" / "x" / "b")
+        (cx_nest / "a" / "x" / "b" / "wip.txt").write_text("nested work\n", encoding="utf-8")
+        expect("(cx-n1) clean -ffd removing a/ that holds a/x/b/.git denies", "git clean -ffd", "deny",
+               cwd=str(cx_nest))
+        expect("(cx-n2) clean -f -f -d a/ (separate flags, a pathspec) denies", "git clean -f -f -d a/", "deny",
+               cwd=str(cx_nest))
+        expect("(cx-n3) twin: clean -fd (single -f keeps a nested repository) allows with a note",
+               "git clean -fd", "allow-note", cwd=str(cx_nest))
+        if not (cx_nest / "a" / "x" / "b" / "wip.txt").is_file():
+            failures.append("(cx-n4) the nested repository's file must survive every listing above")
+        cx_flat = _init_repo(tmp / "cleanx-flatdir")
+        (cx_flat / "a" / "x" / "y").mkdir(parents=True)
+        (cx_flat / "a" / "x" / "y" / "u.txt").write_text("junk\n", encoding="utf-8")
+        expect("(cx-n5) twin: clean -ffd of a directory holding no nested repository allows with a note",
+               "git clean -ffd", "allow-note", cwd=str(cx_flat))
+        _cx_saved_limit = getattr(aiqt_hooks, "_CLEAN_NESTED_WALK_LIMIT", None)
+        aiqt_hooks._CLEAN_NESTED_WALK_LIMIT = 0
+        try:
+            expect("(cx-n6) clean -ffd whose nested-repository walk hits its entry bound denies",
+                   "git clean -ffd", "deny", cwd=str(cx_flat))
+        finally:
+            if _cx_saved_limit is None:
+                del aiqt_hooks._CLEAN_NESTED_WALK_LIMIT
+            else:
+                aiqt_hooks._CLEAN_NESTED_WALK_LIMIT = _cx_saved_limit
+        if hasattr(os, "geteuid") and os.geteuid() != 0:
+            (cx_flat / "a" / "x").chmod(0)
+            try:
+                expect("(cx-n7) clean -ffd whose nested-repository walk meets an unreadable entry denies",
+                       "git clean -ffd", "deny", cwd=str(cx_flat))
+            finally:
+                (cx_flat / "a" / "x").chmod(0o755)
+        # On a split-index repository git refreshes the shared index's mtime on every index read; the
+        # listings read a private copy outside .git, so nothing under .git changes.
+        cx_split = _init_repo(tmp / "cleanx-split")
+        _git(cx_split, "config", "core.splitIndex", "true")
+        _git(cx_split, "update-index", "--split-index")
+        (cx_split / ".gitignore").write_text("*.local\n", encoding="utf-8")
+        (cx_split / "secrets.local").write_text("kept\n", encoding="utf-8")
+        _cx_gd = cx_split / ".git"
+        _cx_old = time.time() - 3 * 86400
+        for _cx_p in _cx_gd.iterdir():
+            if _cx_p.name.startswith("sharedindex."):
+                os.utime(_cx_p, (_cx_old, _cx_old))
+        _cx_before = {p.name: p.stat().st_mtime_ns for p in _cx_gd.iterdir() if p.is_file()}
+        expect("(cx-si1) clean -fdx on a split-index repository with an ignored file denies",
+               "git clean -fdx", "deny", cwd=str(cx_split))
+        _cx_after = {p.name: p.stat().st_mtime_ns for p in _cx_gd.iterdir() if p.is_file()}
+        if not any(n.startswith("sharedindex.") for n in _cx_before) or _cx_before != _cx_after:
+            failures.append("(cx-si2) the listings must write nothing under .git on a split-index repository: "
+                            "changed {}".format(sorted(n for n in set(_cx_before) | set(_cx_after)
+                                                       if _cx_before.get(n) != _cx_after.get(n))))
+        # Run from inside an untracked directory it would remove whole, git clean keeps that directory,
+        # prints 'Would refuse to remove current working directory' and removes all of its contents, listed
+        # as './x' (a directory with no trailing slash). The listings run in that directory (this suite's own
+        # working directory is elsewhere), read that line as removal of the whole directory and compare
+        # './s.local' with the ignored 's.local'.
+        cx_cwn = _init_repo(tmp / "cleanx-cwd-nested")
+        _init_repo(cx_cwn / "a" / "x" / "y" / "b")
+        (cx_cwn / "a" / "x" / "y" / "b" / "wip.txt").write_text("nested work\n", encoding="utf-8")
+        (cx_cwn / "a" / "top.txt").write_text("junk\n", encoding="utf-8")
+        expect("(cx-cw-n6) clean -ffd run from inside untracked a/ holding a/x/y/b/.git denies",
+               "git clean -ffd", "deny", cwd=str(cx_cwn / "a"))
+        # The same clean with the hook process itself started in a/ (the listings once ran in the hook's own
+        # working directory; started in a/, git printed the refuse line and './'-prefixed entries that neither
+        # the ignored match nor the nested-repository walk read).
+        _cx_here = os.getcwd()
+        os.chdir(str(cx_cwn / "a"))
+        try:
+            expect("(cx-cw-n6b) clean -ffd from inside a/ with the hook process also in a/ denies",
+                   "git clean -ffd", "deny", cwd=str(cx_cwn / "a"))
+        finally:
+            os.chdir(_cx_here)
+        expect("(cx-cw-n7) twin: clean -ffd x run from inside a/ denies", "git clean -ffd x", "deny",
+               cwd=str(cx_cwn / "a"))
+        expect("(cx-cw-n8) twin: clean -fd run from inside a/ (single -f keeps the nested repository) allows "
+               "with a note", "git clean -fd", "allow-note", cwd=str(cx_cwn / "a"))
+        if not (cx_cwn / "a" / "x" / "y" / "b" / "wip.txt").is_file():
+            failures.append("(cx-cw-n9) the nested repository's file must survive every listing above")
+        cx_cwi = _init_repo(tmp / "cleanx-cwd-ignored")
+        (cx_cwi / ".gitignore").write_text("*.local\n", encoding="utf-8")
+        _git(cx_cwi, "add", ".gitignore")
+        _git(cx_cwi, "commit", "-q", "-m", "ignore rule", env_identity=True)
+        (cx_cwi / "u").mkdir()
+        (cx_cwi / "u" / "a.txt").write_text("junk\n", encoding="utf-8")
+        (cx_cwi / "u" / "s.local").write_text("kept\n", encoding="utf-8")
+        expect("(cx-cw-c1) clean -fdx run from inside untracked u/ holding the ignored u/s.local denies",
+               "git clean -fdx", "deny", cwd=str(cx_cwi / "u"))
+        expect("(cx-cw-c3) twin: clean -fX run from inside u/ denies", "git clean -fX", "deny",
+               cwd=str(cx_cwi / "u"))
+        expect("(cx-cw-c4) twin: clean -fd run from inside u/ (the ignored file stays) allows with a note",
+               "git clean -fd", "allow-note", cwd=str(cx_cwi / "u"))
+        if not (cx_cwi / "u" / "s.local").is_file():
+            failures.append("(cx-cw-c5) the ignored file must survive every listing above")
+        cx_cwp = _init_repo(tmp / "cleanx-cwd-plain")
+        (cx_cwp / "u" / "d").mkdir(parents=True)
+        (cx_cwp / "u" / "a.txt").write_text("junk\n", encoding="utf-8")
+        (cx_cwp / "u" / "d" / "b.txt").write_text("junk\n", encoding="utf-8")
+        expect("(cx-cw-p1) twin: clean -ffd run from inside u/ holding no ignored file and no nested "
+               "repository allows with a note", "git clean -ffd", "allow-note", cwd=str(cx_cwp / "u"))
+        # A symlinked run directory: git runs in the PHYSICAL directory and prints '../x/' relative to it, so
+        # the listings resolve the run directory with os.path.realpath; normalized lexically against the link,
+        # '..' named the link's parent, where a decoy x/ holding no repository let a doubly forced clean of
+        # the real a/x (a nested repository with an ignored file) through with a note. L is a committed
+        # symlink to a/b (a/b/keep.txt is tracked, so a/b itself is never removed), and outside/L points at
+        # a/b from outside the repository.
+        cx_sl = _init_repo(tmp / "cleanx-symlink")
+        (cx_sl / "a" / "b").mkdir(parents=True)
+        (cx_sl / "a" / "b" / "keep.txt").write_text("kept\n", encoding="utf-8")
+        os.symlink("a/b", str(cx_sl / "L"))
+        _git(cx_sl, "add", "a/b/keep.txt", "L")
+        _git(cx_sl, "commit", "-q", "-m", "symlinked run directory", env_identity=True)
+        _init_repo(cx_sl / "a" / "x")
+        (cx_sl / "a" / "x" / ".gitignore").write_text("*.zz\n", encoding="utf-8")
+        (cx_sl / "a" / "x" / "wip.txt").write_text("nested work\n", encoding="utf-8")
+        (cx_sl / "a" / "x" / "s.zz").write_text("nested ignored\n", encoding="utf-8")
+        (cx_sl / "x").mkdir()
+        (cx_sl / "x" / "junk.txt").write_text("decoy\n", encoding="utf-8")
+        cx_slo = tmp / "cleanx-symlink-outside"
+        (cx_slo / "x").mkdir(parents=True)
+        (cx_slo / "x" / "junk.txt").write_text("decoy\n", encoding="utf-8")
+        os.symlink(str(cx_sl / "a" / "b"), str(cx_slo / "L"))
+        expect("(cx-sl-s1) clean -ffd .. run from a symlink outside the repository to a/b denies",
+               "git clean -ffd ..", "deny", cwd=str(cx_slo / "L"))
+        expect("(cx-sl-s4) clean -ffd .. run from the committed symlink L to a/b denies", "git clean -ffd ..",
+               "deny", cwd=str(cx_sl / "L"))
+        expect("(cx-sl-s5) clean -ffdx .. run from the committed symlink L to a/b denies", "git clean -ffdx ..",
+               "deny", cwd=str(cx_sl / "L"))
+        expect("(cx-sl-s6) twin: clean -ffdx .. run from the real a/b denies", "git clean -ffdx ..", "deny",
+               cwd=str(cx_sl / "a" / "b"))
+        expect("(cx-sl-s7) clean -ffd x under a relative -C .. from the symlink L denies",
+               "git -C .. clean -ffd x", "deny", cwd=str(cx_sl / "L"))
+        expect("(cx-sl-s7r) twin: clean -ffd x under -C .. from the real a/b denies", "git -C .. clean -ffd x",
+               "deny", cwd=str(cx_sl / "a" / "b"))
+        expect("(cx-sl-s8) twin: clean -fd .. from the symlink L (single -f keeps the nested repository) allows "
+               "with a note", "git clean -fd ..", "allow-note", cwd=str(cx_sl / "L"))
+        if not ((cx_sl / "a" / "x" / "wip.txt").is_file() and (cx_sl / "a" / "x" / "s.zz").is_file()
+                and (cx_sl / "x" / "junk.txt").is_file()):
+            failures.append("(cx-sl-s9) the nested repository's files and the decoy must survive every listing "
+                            "above")
+        # The clean's note names the saved snapshot once (the pointer sentence opens with it), and the deny on
+        # a failed snapshot never says the clean can be undone from a snapshot it then reports as not made.
+        cx_txt = _init_repo(tmp / "cleanx-text")
+        (cx_txt / "untracked.txt").write_text("junk\n", encoding="utf-8")
+        _cx_code, _cx_obj, _ = handler({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                        "tool_input": {"command": "git clean -fd"}, "cwd": str(cx_txt)})
+        _cx_msg = _cx_obj.get("systemMessage", "") if isinstance(_cx_obj, dict) else ""
+        if _cx_msg.count("A pre-command recovery snapshot was saved") != 1 or "It is allowed." not in _cx_msg:
+            failures.append("(cx-t1) the clean allow note must name the saved snapshot exactly once: {!r}".format(
+                _cx_msg))
+        _cx_orig_rec = aiqt_hooks._record_recovery
+        aiqt_hooks._record_recovery = lambda repo, verb: ("fail", "forced snapshot failure (self-test)")
+        try:
+            _cx_code, _cx_obj, _ = handler({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                            "tool_input": {"command": "git clean -fd"}, "cwd": str(cx_txt)})
+        finally:
+            aiqt_hooks._record_recovery = _cx_orig_rec
+        _cx_hso = _cx_obj.get("hookSpecificOutput", {}) if isinstance(_cx_obj, dict) else {}
+        _cx_why = _cx_hso.get("permissionDecisionReason", "")
+        if (_cx_hso.get("permissionDecision") != "deny"
+                or "NOTE: no pre-command recovery snapshot could be created" not in _cx_why
+                or "the recovery snapshot, which holds" in _cx_why):
+            failures.append("(cx-t2) a clean whose snapshot fails must deny without claiming a snapshot holds "
+                            "its files: {!r}".format(_cx_why))
+
         # === round-19 Fix A: an UNPARSEABLE 'git branch' ASKS regardless of any delete flag ====
         # The raw fallback (a tokenizer ValueError) now treats ANY raw 'git' + 'branch' as lossy: it does NOT parse
         # branch flags, so an unparseable 'git branch -d -f topic <heredoc>' / '-df' / '--del --for' can no
@@ -17472,10 +18278,15 @@ def _main_isolated(monitor):
             (("clean", ["-nfd"]), "allow"),
             (("clean", ["-d"]), "ask"),
             (("clean", ["-f", "--", "-nasty"]), "ask"),   # blocker 3: -nasty after -- is not the -n flag
-            (("clean", ["-f", "-e", "*.keep", "-n"]), "ask"),  # fix 2: -e consumes; '-n' not trusted as dry-run
+            (("clean", ["-f", "-e", "*.keep", "-n"]), "allow"),  # -e consumes '*.keep'; the later '-n' is the dry run
             (("clean", ["-f", "-e", "-n"]), "ask"),       # fix 2: '-n' is the exclude PATTERN, not dry-run
-            (("clean", ["--exclude=x", "-n"]), "ask"),    # fix 2: an --exclude= present -> do not trust '-n'
+            (("clean", ["-fen"]), "ask"),                 # '-fen' is -f plus -e with the value 'n': no dry run
+            (("clean", ["--exclude=x", "-n"]), "allow"),  # the inline exclude consumes nothing: '-n' is the dry run
+            (("clean", ["-n", "-e", "x", "--no-dry-run"]), "ask"),  # the last of -n/--no-dry-run wins
             (("clean", ["-n"]), "allow"),                 # a plain dry run with no arg-consuming option allows
+            (("clean", ["-fdx", "--exc", "-n"]), "ask"),  # an abbreviated --exclude consumes '-n': no dry run
+            (("clean", ["-fdx", "--e", "--dry-run"]), "ask"),  # '--e' is --exclude, its value '--dry-run'
+            (("clean", ["-fdx", "--exc", "x", "-n"]), "allow"),  # twin: the '-n' after the value is the dry run
             (("stash", ["drop"]), "ask"),
             (("stash", ["pop"]), "allow"),
             (("stash", ["export", "--to-ref", "refs/heads/topic"]), "ask"),  # F-95: export overwrites a ref
@@ -35363,6 +36174,7 @@ def _main_isolated(monitor):
         _test_malformed_bash_payload(failures)
         _test_nul_bash_command(failures)
         _test_inline_errexit(failures, tmp)
+        _test_console_prefix(failures, tmp)
         _test_pgrep_self_match(failures)
         _test_trkasy_no_amp(failures, tmp)
         _test_trkasy_heredoc_body_data(failures, tmp)

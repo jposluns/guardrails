@@ -766,12 +766,26 @@ _LINKED_SUMMARY_LABELS = tuple(label + suffix
                                for suffix in ("", ", partial"))
 
 
+def is_opt_in(hook):
+    """True for a hooks-manifest control whose registration is "opt-in": gen_hooks leaves it out of the
+    plugin's hooks.json, so it is not one of the hooks the plugin registers. A registration that is not a
+    string is refused (OSError, exit 2), never read as either value."""
+    registration = hook.get("registration", "plugin")
+    if not isinstance(registration, str):
+        raise OSError("hooks manifest: hook {!r} carries a registration that is not a string".format(
+            hook.get("id")))
+    return registration == "opt-in"
+
+
 def expected_counts(root, manifests):
     """Recompute the landing page's counts from the surfaces that define them, fail-closed on a missing or
     malformed one: rules = the .md files directly under .aiqt/core/rules/ (the corpus layout gen_rules
     validates), gates = the [[gate]] entries of .aiqt/core/gates/manifest.toml whose platform is "ci"
     (the page's predicate: CI gates), hooks (with the blocking/warning split from `default`) = the
-    [[hook]] entries of .aiqt/core/hooks/manifest.toml whose platform is "claude-code", frameworks = the
+    [[hook]] entries of .aiqt/core/hooks/manifest.toml whose platform is "claude-code" and whose registration
+    is not "opt-in" (an opt-in control is left out of the plugin's hooks.json by gen_hooks, so the plugin
+    does not ship it registered; tools/gen_reference_facts.py checks this count against the committed
+    hooks.json), frameworks = the
     loaded standards manifests, and enforced = the sum of the enforcement register's linked summary rows
     (_LINKED_SUMMARY_LABELS; ENFORCEMENT.md is generated and drift-gated against its sources by
     gen_enforcement_register). Both manifests are structure-validated by _manifest_entries before
@@ -785,7 +799,7 @@ def expected_counts(root, manifests):
                                           "gate", ("platform",)) if g["platform"] == "ci"]
     hooks = [h for h in _manifest_entries(root / ".aiqt" / "core" / "hooks" / "manifest.toml",
                                           "hook", ("platform", "default"))
-             if h["platform"] == "claude-code"]
+             if h["platform"] == "claude-code" and not is_opt_in(h)]
     if not rules or not gates or not hooks:
         raise OSError("no rule files, no ci gates, or no claude-code hooks")
     blocking = sum(1 for h in hooks if h["default"] == "block")

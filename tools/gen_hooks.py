@@ -173,8 +173,9 @@ TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
 # A non-blocking "warn" default is legal on every event EXCEPT PreToolUse: on a PreToolUse control a
 # silent non-decision would weaken an enforcement point, so warn there requires the explicit,
 # recorded stage = "bake" posture below, or a handler the dispatcher names in NOTE_ONLY_PRETOOL_MODES: such
-# a handler never decides anything but an allow or a note, and main() turns each of its error paths into
-# a warning on exit 0, so "warn" is its truthful default (and the only one cross_check accepts for it).
+# a handler decides nothing but an allow or a note by default (its only blocking results are a miswired
+# event and a deny the adopter explicitly opts into), and main() turns each of its error paths into a warning
+# on exit 0, so "warn" is its truthful default (and the only one cross_check accepts for it).
 # SessionStart cannot block at the platform (exit 2 only shows
 # stderr, doc-confirmed 2026-08-29), so a SessionStart control MUST declare warn: a block/ask claim
 # there would be an overclaim the platform cannot honour.
@@ -185,8 +186,13 @@ STAGES = {"bake", "enforce"}  # stage is optional authoring metadata; absent mea
 NOTE_ONLY_NAME = "NOTE_ONLY_PRETOOL_MODES"  # the dispatcher's tuple of note-only PreToolUse handlers
 
 HOOK_KEYS = {"id", "rules", "platform", "event", "matcher", "handler", "default", "class", "residue",
-             "stage", "timeout"}
-REQUIRED_HOOK_KEYS = HOOK_KEYS - {"matcher", "stage", "timeout"}
+             "stage", "timeout", "registration"}
+REQUIRED_HOOK_KEYS = HOOK_KEYS - {"matcher", "stage", "timeout", "registration"}
+# Optional per-hook registration: "plugin" (absent means this) renders the control into the plugin hooks.json;
+# "opt-in" keeps it out of hooks.json, so an adopter who has not turned it on starts no process for it, and its
+# residue must say how the adopter registers it. An opt-in control is still validated, cross-checked and listed
+# in the ledger like any other; only its plugin registration is withheld.
+REGISTRATIONS = {"plugin", "opt-in"}
 PLUGIN_KEYS = ("name", "version", "description", "author-name", "author-email", "homepage")
 # Optional [plugin] keys. claude-code-min-version records the oldest client version whose documented
 # onFailure semantics the authored fields rely on; on-failure-render gates whether the per-hook timeout
@@ -378,6 +384,10 @@ def load_manifest(path):
                     not TIMEOUT_MIN <= timeout <= TIMEOUT_MAX:
                 raise ValueError("{}: timeout must be an integer from {} to {} seconds, got {!r}"
                                  .format(where, TIMEOUT_MIN, TIMEOUT_MAX, timeout))
+        registration = hook.get("registration", "plugin")
+        if not isinstance(registration, str) or registration not in REGISTRATIONS:
+            raise ValueError("{}: registration must be one of {}, got {!r}".format(
+                where, "/".join(sorted(REGISTRATIONS)), registration))
         if _req_str(hook, "class", where) not in CLASSES:
             raise ValueError("{}: class must be the EN-5 letter a/b/c/d".format(where))
         _req_str(hook, "residue", where)  # required, never empty: the control's honest coverage gap
@@ -543,9 +553,12 @@ def render_hooks_json(hooks, on_failure_render=False):
     "onFailure": "block" (never a warn hook, never any other event). This function renders what it is
     given; build_desired runs check_authored_timeouts first, so the generator never renders an authored
     timeout at or below the dispatcher's budget plus its margin (a hook that authors none renders
-    TIMEOUT, which equals that sum)."""
+    TIMEOUT, which equals that sum). A control with registration "opt-in" is never rendered here: the
+    adopter registers it, so an adopter who has not turned it on starts no process for it."""
     events = {}
     for hook in sorted(hooks, key=lambda h: (KNOWN_EVENTS.index(h["event"]), h["id"])):
+        if hook.get("registration", "plugin") == "opt-in":
+            continue
         entry = {}
         if "matcher" in hook:
             entry["matcher"] = hook["matcher"]
@@ -2066,6 +2079,30 @@ def self_test_main(_nested=False):
         _mutate(nostage, 'default = "block"', 'default = "warn"')
         if run_quiet(nostage, check=True) != 2:
             failures.append("'warn' on PreToolUse without stage=bake expected exit 2 (fail-closed)")
+
+        # 14a. registration = "opt-in" keeps a control out of the plugin hooks.json (it generates and checks
+        #      clean, and its handler is absent from the render), its twin with no registration key renders the
+        #      handler, registration = "plugin" renders it too, and any other value or type fails closed.
+        def registration_case(label, line):
+            tree = tmp / ("registration-" + label)
+            tree.mkdir()
+            _build_tree(tree)
+            if line is not None:
+                _mutate(tree, 'default = "block"', 'default = "block"\n' + line)
+            return tree
+        for label, line, rendered in (("absent", None, True), ("plugin", 'registration = "plugin"', True),
+                                      ("opt-in", 'registration = "opt-in"', False)):
+            tree = registration_case(label, line)
+            if run_quiet(tree, check=False) != 0 or run_quiet(tree, check=True) != 0:
+                failures.append("registration {}: expected a clean generate and check".format(label))
+                continue
+            text = (tree / HOOKS_JSON_REL).read_text(encoding="utf-8")
+            if ('"test_handler"' in text) != rendered:
+                failures.append("registration {}: the handler must {}be rendered into hooks.json".format(
+                    label, "" if rendered else "not "))
+        for label, line in (("unknown", 'registration = "optional"'), ("bool", "registration = true")):
+            if run_quiet(registration_case(label, line), check=True) != 2:
+                failures.append("registration {}: expected exit 2 (fail-closed)".format(label))
 
         # 14b. A note-only PreToolUse handler (named in the dispatcher's NOTE_ONLY_PRETOOL_MODES) may declare
         #      'warn' without a bake stage and must not declare 'block'; another handler still may not

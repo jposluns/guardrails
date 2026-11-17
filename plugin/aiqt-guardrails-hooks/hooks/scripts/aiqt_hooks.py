@@ -189,7 +189,8 @@ DELIBERATE decision where the platform documents exit 2 as the block (the orches
 manufactured wind-down that way, doc-confirmed 2026-08-29, bounded by its own loop bound so it cannot wedge
 the chain). Outside that deliberate deny, only a PreToolUse handler fails closed via exit 2, and only a
 genuinely UNKNOWN mode (not in HANDLERS, an unidentifiable broken install) does so on a bad invocation.
-A note-only PreToolUse mode (NOTE_ONLY_PRETOOL_MODES), which never blocks a call, takes the Stop handlers'
+A note-only PreToolUse mode (NOTE_ONLY_PRETOOL_MODES), which never blocks a call on its own failure (its only
+blocking results are a miswired event and a deny the adopter explicitly opted into), takes the Stop handlers'
 posture on every one of these error paths instead: a non-blocking systemMessage warning on exit 0.
 A handler result whose exit code is not 0 or 2, or whose stderr text is neither a str nor None, is a
 handler crash with that same posture, and an exception's text in a diagnostic is built so that its own
@@ -279,8 +280,8 @@ import sys
 # streams: with a sys.stderr whose write works but whose flush fails, `raise SystemExit` here ended
 # as the interpreter's own exit 120 instead of the refusal exit. Nothing runs before this guard, so
 # os._exit discards no other buffered output; the warning itself is flushed before the exit.
-FLOOR_FAIL_OPEN_MODES = ("clock_inject_failure", "clock_inject_post", "diff_wall_stop",
-                         "future_stamp_write", "inline_errexit", "orch_dispatch_ledger",
+FLOOR_FAIL_OPEN_MODES = ("clock_inject_failure", "clock_inject_post", "console_prefix_pretool",
+                         "diff_wall_stop", "future_stamp_write", "inline_errexit", "orch_dispatch_ledger",
                          "orch_lease_heartbeat_post", "orch_lease_heartbeat_stop", "orch_prompt_stamp",
                          "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle")
 
@@ -348,11 +349,13 @@ STOP_EVENTS = ("Stop", "SubagentStop")
 PRETOOL_WARN_ONLY = "PreToolUse (warn-only)"
 FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSubmit", "PostToolUse",
                                   "PostToolUseFailure", PRETOOL_WARN_ONLY)
-# PreToolUse modes that never block a call: every result is an allow or an allow with a note, and only a
-# miswired event hard-blocks. main() gives each one the fail-open posture of a FAIL_OPEN_EVENTS mode on every
-# error path, and keeps its PreToolUse deadline, which then warns on exit 0 instead of failing closed.
-# tools/gen_hooks.py reads this tuple: such a mode's control must declare the manifest default "warn".
-NOTE_ONLY_PRETOOL_MODES = ("inline_errexit",)
+# PreToolUse modes that never block a call on their own: every result is an allow or an allow with a note,
+# and only a miswired event hard-blocks, or a deny the adopter explicitly opted into
+# (console_prefix_pretool under AIQT_CONSOLE_PREFIX_POSTURE=deny). main() gives each one the fail-open
+# posture of a FAIL_OPEN_EVENTS mode on every error path, and keeps its PreToolUse deadline, which then
+# warns on exit 0 instead of failing closed. tools/gen_hooks.py reads this tuple: such a mode's control
+# must declare the manifest default "warn".
+NOTE_ONLY_PRETOOL_MODES = ("inline_errexit", "console_prefix_pretool")
 # The platform stops a hook command at the timeout tools/gen_hooks.py writes into hooks.json (its
 # TIMEOUT); HOOK_TIMEOUT_SECONDS mirrors that value, and gen_hooks refuses to render (exit 2) when the two
 # differ, so both numbers come from that one source. main() gives every PreToolUse mode that is not
@@ -398,7 +401,7 @@ NOTE_CONSTRUCTORS = (
     "_expbnd_target_ask", "_gate_weakening_fallback", "_gensrc_fail_ask", "_stash_drop_clear_outcome",
     "_orch_ask_attended", "_orch_oos_unreadable_input_note", "_orch_stop_family")
 DENY_CONSTRUCTORS = (
-    "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
+    "_deny", "_abspth_check_required", "_abspth_check_search_root", "_clean_ignored_deny", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_unreadable_command", "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
@@ -9570,10 +9573,13 @@ def _tree_is_clean(repo):
     file from the guard and thereby win a silent allow for reset --hard / checkout -f / clean -f. The '-c'
     override and the explicit '--untracked-files=all' both defeat the config; either alone would suffice, and
     carrying both keeps the intent legible. The probe never asks for ignored files, so an ignored file is
-    invisible to it, and a '!!' line in its answer is malformed (above), never clean. A forced checkout or
-    'clean -x' CAN overwrite/remove an ignored file, but probing --ignored would ASK on every repo carrying
-    build artifacts, so ignored-file loss on those forms is a DISCLOSED residual the recovery layer backstops
-    (every non-dry-run clean already ASKS regardless).
+    invisible to it, and a '!!' line in its answer is malformed (above), never clean. Probing --ignored here
+    would treat every repo carrying build artifacts as dirty, so this probe stays blind to ignored files and
+    the recovery snapshot (git add --all) never holds one either. Every non-dry-run clean (with or without
+    -x or -X: a negated -e pattern un-ignores a file too) is therefore judged before this probe by its own
+    read-only listings (_clean_ignored_refusal) and DENIED unless they show it removes no file that the
+    standard ignore sources ignore. A forced checkout that overwrites an ignored file remains a DISCLOSED
+    residual: this probe does not see that file and no snapshot holds it.
     Deliberately coarse: ANY tracked change or untracked file anywhere makes the tree not-provably-clean.
     Offline, read-only, 5s timeout; the guard never mutates the repo. GIT_OPTIONAL_LOCKS=0 keeps this probe
     from refreshing/writing the real `.git/index`, and EVERY ambient GIT_*-prefixed var is scrubbed via
@@ -9940,26 +9946,560 @@ def _reset_ancestry_deny(refusal, alts):
         "reset to the merge base instead.")
 
 
-# git clean options that CONSUME the following token (so its value must not be read as a flag): '-e'/
-# '--exclude PAT'. The '--exclude=PAT' inline shape carries its value in the same token, consuming none.
-_CLEAN_ARG_OPTS = frozenset(("-e", "--exclude"))
+# IGNORED FILES AND git clean. The recovery snapshot is built with `git add --all`, which skips ignored
+# files, and the clean-tree probe never lists them, so a clean that removes an ignored file can neither be
+# proven harmless by that probe nor recovered from a snapshot. -x and -X are not the only way a clean
+# reaches one: an -e/--exclude pattern sits in the highest-precedence exclude group, so a negated one
+# ('!*.local') un-ignores a file and a clean WITHOUT -x then removes it. Every non-dry-run clean is
+# therefore judged by two read-only listings, under the scrubbed git environment with fsmonitor and hooks
+# off: what the clean would remove (git clean --dry-run with the same options and pathspecs), and which
+# untracked files are ignored under the repository's standard ignore sources (.gitignore files,
+# info/exclude and core.excludesFile) read with no command-level override (git ls-files --others --ignored
+# --exclude-standard --directory with the same pathspecs). Both listings run with the directory the command
+# runs in as git's working directory, resolved PHYSICALLY (os.path.realpath) as the kernel and git resolve
+# it, so a symlinked session directory or a relative -C through one names the directory git enters. When
+# git clean would remove that directory whole it keeps the directory, prints 'Would refuse to remove
+# current working directory' and removes all of its contents: that line is read as removal of the whole
+# directory (_CLEAN_CWD_LINE). git prints every name relative to that physical directory, so every entry of
+# both listings is compared as one absolute path, normalized against the physical directory and never a
+# symlink (_clean_entry_path): './x' and 'x/' are the same directory, and '../x/' is the real parent's x.
+# The clean is DENIED when any entry it would remove is, holds or lies inside an ignored entry, when it is
+# doubly forced (-ff) and a directory it would remove, the directory it runs in included, holds a nested
+# repository at any depth (whose ignored files neither listing shows; a bounded walk, _clean_nested_repo,
+# that denies when it cannot finish), and when either listing cannot be taken or read
+# (fail closed), as is a clean whose options cannot be read with certainty or whose repository view or
+# ignore sources the probe cannot reproduce (_clean_command_view names the global options and leading
+# assignments that make it so; every other one keeps the listing verdict). On a split-index repository the
+# listings read a private copy of the git dir's index files outside it (_clean_private_gitdir), so they
+# write nothing under it. A clean whose listings show it removes no ignored file and no nested repository
+# keeps the outcome it had before these listings existed. The flag letters below are git clean's: -d, -f (counted), -i, -n, -q, -x, -X,
+# and -e, which takes the rest of its cluster or the next token as its value; its long options, each also
+# accepted as a unique abbreviation, are --force, --dry-run, --quiet, --interactive and --exclude (value
+# '=VAL' or the next token), with the --no- forms of the first four. -x and -X have no long form. Whether a
+# clean is a dry run is read only by _clean_parse_options, so an abbreviated --exclude (--e, --exc) consumes
+# its value as git does and a '-n' that is that value is no dry run.
+_CLEAN_SHORT_FLAGS = frozenset("dfinqxX")
+_CLEAN_LONG_OPTS = ("force", "dry-run", "quiet", "interactive", "exclude",
+                    "no-force", "no-dry-run", "no-quiet", "no-interactive")
+# The dry-run line naming a nested repository a clean without a second -f skips (nothing removed).
+_CLEAN_SKIP_LINE = b"Would skip repository "
+# The dry-run line git prints when the directory it runs in is one the clean would remove whole: git keeps
+# that directory itself but removes everything in it (remove_dirs in builtin/clean.c), and the entries it
+# then prints are relative to it ('./x', a directory shown without a trailing slash). The listings read it
+# as removal of all of that directory's contents.
+_CLEAN_CWD_LINE = b"Would refuse to remove current working directory"
+# The one wall-clock bound shared by both listings of a clean. It sits well under PRETOOL_BUDGET_SECONDS
+# (8 seconds), so a slow listing ends here with its own reason before the hook deadline, leaving that
+# budget room for the clean-tree probe and the snapshot that follow.
+_CLEAN_PROBE_SECONDS = 3.0
+# The C escapes git uses in a quoted path (quote_c_style), besides a three-digit octal byte.
+_CLEAN_C_ESCAPES = {ord("a"): 7, ord("b"): 8, ord("f"): 12, ord("n"): 10, ord("r"): 13, ord("t"): 9,
+                    ord("v"): 11, ord('"'): 34, ord("\\"): 92}
 
 
-def _clean_is_dry_run(pre):
-    """True when a git clean option region (already split before any '--') is a genuine DRY RUN
-    (-n/--dry-run) that removes nothing. ULTRA-CONSERVATIVE about the arg-consuming '-e'/'--exclude': when
-    one is present the guard CANNOT reliably tell a real '-n' flag from an exclude PATTERN token that merely
-    looks like '-n' (git clean -f -e '*.keep' -n, or the adversarial git clean -f -e -n where '-n' is the
-    pattern), so it does NOT trust '-n' at all and returns False, routing the clean to its unconditional ASK.
-    A '-n'/'--dry-run' with no arg-consuming option present still reports a dry run and allows."""
-    for t in pre:
-        if t in _CLEAN_ARG_OPTS or t.startswith("--exclude="):
-            return False  # a separate/inline arg-consuming exclude: do not trust '-n'
-        if t.startswith("-") and not t.startswith("--") and "e" in t[1:]:
-            return False  # an ATTACHED short exclude ('-en' is '-e' with value 'n'): '-n' not trustworthy
-    if _has_long_prefix(pre, "no-dry-run"):
-        return False  # the negation (prefix-matched, e.g. '--no-dry-r') turns the dry run back on
-    return "--dry-run" in pre or _has_short(pre, "n")
+def _clean_parse_options(args):
+    """Read a git clean argument list as git does, for the ignored-file probe. None when a token cannot be
+    read with certainty (an unknown or ambiguous option, a value given to a flag, an exclude with no value),
+    else (force, d, x, big_x, excludes, pathspecs, dry_run): force counts -f/--force (--no-force resets it),
+    excludes holds each -e/--exclude value in order, pathspecs holds each bare operand, then each token after
+    the option boundary, and dry_run is the last of -n/--dry-run (on) and --no-dry-run (off), as git's option
+    parser leaves it. -q and -i and their long and negated forms are read and dropped: -q would silence the
+    listing, and without -i it lists everything an interactive clean could select."""
+    pre, post, _had_sep = _split_pre_post(args)
+    force, d, x, big_x, dry_run = 0, False, False, False, False
+    excludes, paths = [], []
+    i = 0
+    while i < len(pre):
+        tok = pre[i]
+        i += 1
+        if tok.startswith("--"):
+            name, eq, val = tok[2:].partition("=")
+            found = [o for o in _CLEAN_LONG_OPTS if name and o.startswith(name)]
+            opt = name if name in _CLEAN_LONG_OPTS else (found[0] if len(found) == 1 else None)
+            if opt is None:
+                return None  # an unknown or ambiguous long option
+            if opt == "exclude":
+                if not eq:
+                    if i >= len(pre):
+                        return None
+                    val = pre[i]
+                    i += 1
+                excludes.append(val)
+            elif eq:
+                return None  # a flag given a value, which git refuses
+            elif opt == "force":
+                force += 1
+            elif opt == "no-force":
+                force = 0
+            elif opt in ("dry-run", "no-dry-run"):
+                dry_run = opt == "dry-run"
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            body = tok[1:]
+            for j, ch in enumerate(body):
+                if ch == "e":
+                    val = body[j + 1:]
+                    if not val:
+                        if i >= len(pre):
+                            return None
+                        val = pre[i]
+                        i += 1
+                    excludes.append(val)
+                    break  # the rest of the cluster is the exclude value
+                if ch not in _CLEAN_SHORT_FLAGS:
+                    return None
+                force += ch == "f"
+                d = d or ch == "d"
+                x = x or ch == "x"
+                big_x = big_x or ch == "X"
+                dry_run = dry_run or ch == "n"
+            continue
+        paths.append(tok)
+    return force, d, x, big_x, excludes, paths + post, dry_run
+
+
+def _clean_probe_listing(repo, argv, deadline, env_extra=None, global_opts=()):
+    """The stdout (bytes) of the read-only 'git <global_opts> <argv>' run in repo, or None when it cannot be
+    launched, exits nonzero, or does not finish by `deadline` (a time.monotonic value). It runs under the
+    scrubbed git environment of the clean-tree probe (_isolate_git_env, GIT_OPTIONAL_LOCKS=0) with the C
+    locale, so a dry run's 'Would remove' lines are untranslated, with no stdin, and with core.fsmonitor and
+    hooks off (core.hooksPath=/dev/null), so the probe runs no configured monitor or hook program;
+    core.quotePath is off so only a name holding a control byte, a double quote or a backslash is C-quoted.
+    None of these settings is an ignore source, so the listing reads the same ignore rules the command does.
+    `env_extra` is set after the scrub (the private git dir of _clean_private_gitdir), and `global_opts` are
+    the command's own pathspec-reading global options (_CLEAN_PATHSPEC_GLOBALS). git is started with repo
+    as its process working directory as well as its -C target, so the directory git clean treats as the
+    current one (the one it refuses to remove, startup_info->original_cwd, read before any -C) is repo and
+    never the hook's own working directory; a dry run therefore lists the same entries wherever the hook
+    runs. repo is resolved physically (os.path.realpath), never lexically: a run directory such as
+    '<symlink>/..' (a relative -C from a symlinked session directory) names the directory the kernel, and
+    so git, enters, not the one a lexical '..' would reach."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return None
+    try:
+        where = os.path.realpath(repo)
+        env = _isolate_git_env(dict(os.environ))
+        env["GIT_OPTIONAL_LOCKS"] = "0"
+        env["LC_ALL"] = "C"
+        env.pop("LANGUAGE", None)
+        env.update(env_extra or {})
+        result = subprocess.run(
+            ["git", "-C", where, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+             "-c", "core.quotePath=false"] + list(global_opts) + argv,
+            capture_output=True, timeout=left, env=env, stdin=subprocess.DEVNULL, cwd=where)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _clean_private_gitdir(repo, deadline):
+    """(env_extra, tmpdir) under which the listings of a clean in repo write nothing under its git dir, or
+    None when that cannot be set up (the caller fails closed). git refreshes the modification time of the
+    shared index each time it reads a split index (core.splitIndex; read_index_from in read-cache.c), so on
+    a git dir holding any sharedindex.* file the listings run against a private copy outside it: a
+    temporary directory (tempfile.mkdtemp) holding copies of HEAD, index, every sharedindex.* and
+    config.worktree, plus a 'commondir' file naming the real common dir, the layout git reads for a linked
+    worktree (gitrepository-layout(5)). Objects, refs, config and info/exclude are read from that common
+    dir, so the copy reads the same tracked set and ignore rules; GIT_WORK_TREE names the same toplevel,
+    so the pathspecs and the prefix of repo are unchanged. Any other git dir needs no copy: ({}, None)."""
+    out = _clean_probe_listing(repo, ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir",
+                                      "--show-toplevel"], deadline)
+    if out is None:
+        return None
+    lines = out.split(b"\n")
+    if len(lines) != 4 or lines[3] or not all(os.path.isabs(p) for p in lines[:3]):
+        return None
+    gd, common, top = lines[:3]
+    try:
+        names = os.listdir(gd)
+    except OSError:
+        return None
+    if not any(n.startswith(b"sharedindex.") for n in names):
+        return {}, None
+    tmp = None
+    try:
+        tmp = tempfile.mkdtemp(prefix="aiqt-clean-")
+        tmp_b = os.fsencode(tmp)
+        for n in names:
+            if n in (b"HEAD", b"index", b"config.worktree") or n.startswith(b"sharedindex."):
+                src = os.path.join(gd, n)
+                if os.path.isfile(src):
+                    shutil.copyfile(src, os.path.join(tmp_b, n))
+        with open(os.path.join(tmp_b, b"commondir"), "wb") as fh:
+            fh.write(common + b"\n")
+    except (OSError, ValueError, shutil.Error):
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+        return None
+    return {"GIT_DIR": tmp, "GIT_WORK_TREE": os.fsdecode(top)}, tmp
+
+
+# The most entries the nested-repository walk of one clean reads before it gives up (and denies).
+_CLEAN_NESTED_WALK_LIMIT = 20000
+
+
+def _clean_nested_repo(top, deadline):
+    """True when the directory top (bytes) a doubly forced clean would remove holds a nested repository at
+    any depth (an entry named .git, a directory or a gitfile, in top or in any directory below it), False
+    when a full walk finds none, and None when the walk cannot finish: an entry cannot be read, more than
+    _CLEAN_NESTED_WALK_LIMIT entries are met, or `deadline` passes. Symbolic links are not followed (git
+    clean removes a link, never its target). git clean -ff removes such a repository with its ignored and
+    untracked files, which neither listing shows, so the caller denies on True and on None."""
+    stack = [top]
+    seen = 0
+    while stack:
+        if time.monotonic() > deadline:
+            return None
+        here = stack.pop()
+        try:
+            with os.scandir(here) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > _CLEAN_NESTED_WALK_LIMIT:
+                        return None
+                    if entry.name == b".git":
+                        return True
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+        except OSError:
+            return None
+    return False
+
+
+def _clean_unquote(name):
+    """The raw bytes of one path as git clean prints it: unchanged when unquoted, else decoded from git's
+    C-style quoting; None when a quoted name is malformed (the listing cannot then be trusted)."""
+    if not name.startswith(b'"'):
+        return name
+    if len(name) < 2 or not name.endswith(b'"'):
+        return None
+    body = name[1:-1]
+    out = bytearray()
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == 0x22:
+            return None  # an unescaped quote inside a quoted name
+        if ch != 0x5C:
+            out.append(ch)
+            i += 1
+            continue
+        nxt = body[i + 1] if i + 1 < len(body) else None
+        if nxt in _CLEAN_C_ESCAPES:
+            out.append(_CLEAN_C_ESCAPES[nxt])
+            i += 2
+            continue
+        digits = body[i + 1:i + 4]
+        if len(digits) != 3 or any(not 0x30 <= b <= 0x37 for b in digits) or int(digits, 8) > 255:
+            return None
+        out.append(int(digits, 8))
+        i += 4
+    return bytes(out)
+
+
+def _clean_entry_path(base, name):
+    """The absolute, lexically normalized path (bytes) of `name` as a listing prints it relative to the
+    directory `base` (bytes) both listings run in, ending in a slash when it names a directory: a name
+    printed with a trailing slash, '.', or a path lstat reads as a directory (git clean prints a directory it
+    removes from inside a kept current directory with no slash, './x'). Both listings are compared in this
+    one form, so './s.local', 's.local' and 'sub/../s.local' name the same entry. `base` MUST be the
+    PHYSICAL directory (os.path.realpath) git ran in: git prints each name relative to its physical working
+    directory (getcwd), so a '..' in a name climbs that directory's real parent, and lexical normalization
+    is exact only against a base that holds no symbolic link. Against a symlinked base it would name another
+    directory (the parent of the link), and the ignored match and the nested-repository walk would judge
+    that directory instead."""
+    full = os.path.normpath(os.path.join(base, name))
+    is_dir = name.endswith(b"/") or os.path.basename(name) in (b".", b"..")
+    if not is_dir:
+        try:
+            is_dir = stat.S_ISDIR(os.lstat(full).st_mode)
+        except OSError:
+            is_dir = False
+    return full + b"/" if is_dir and not full.endswith(b"/") else full
+
+
+def _clean_hits_ignored(entry, ignored, ignored_sorted):
+    """True when a path the clean would remove is an ignored entry, lies inside an ignored directory, or is
+    a directory holding one (ls-files --directory lists a wholly ignored directory once, with a slash). All
+    three arguments hold paths in the form of _clean_entry_path."""
+    if entry in ignored:
+        return True
+    parts = entry.rstrip(b"/").split(b"/")
+    for k in range(1, len(parts)):
+        if b"/".join(parts[:k]) + b"/" in ignored:
+            return True
+    if entry.endswith(b"/"):
+        at = bisect.bisect_left(ignored_sorted, entry)
+        if at < len(ignored_sorted) and ignored_sorted[at].startswith(entry):
+            return True
+    return False
+
+
+def _clean_entries_text(entries):
+    """'N entr(y|ies): 'a', 'b', 'c'(, and more)' for the entries a clean deny names."""
+    shown = ", ".join(repr(e.decode("utf-8", "backslashreplace")) for e in entries[:3])
+    return "{} entr{}: {}{}".format(len(entries), "y" if len(entries) == 1 else "ies", shown,
+                                    ", and more" if len(entries) > 3 else "")
+
+
+def _clean_ignored_refusal(args, repo, cannot=None, global_opts=()):
+    """None when this non-dry-run git clean, with or without -x or -X, provably removes no IGNORED file and
+    no nested repository, else a clause saying why that cannot be shown (see the block comment above
+    _CLEAN_SHORT_FLAGS). `repo` is the directory both listings read (the directory git runs the command in,
+    as the caller resolved it); `cannot`, when set, says why no read-only listing can reproduce what the
+    command would see (a repository view or ignore source the command itself can change); `global_opts` are
+    the command's own pathspec-reading global options, handed to both listings."""
+    parsed = _clean_parse_options(args)
+    if parsed is None:
+        return "its options cannot be read with certainty, so which files it would remove cannot be shown"
+    force, d, x, big_x, excludes, paths, _dry = parsed
+    if cannot is not None or repo is None:
+        return "{}, and no read-only listing taken now can show which files it would remove".format(
+            cannot or "the directory it runs in cannot be established")
+    try:
+        # The physical directory git runs in, resolved once: git reports every listed name relative to it
+        # (see _clean_entry_path), so a symlinked run directory is never normalized lexically.
+        repo = os.path.realpath(repo)
+    except (OSError, ValueError):
+        return ("the directory it runs in cannot be resolved to a physical path, so no read-only listing "
+                "taken now can show which files it would remove")
+    deadline = time.monotonic() + _CLEAN_PROBE_SECONDS
+    private = _clean_private_gitdir(repo, deadline)
+    if private is None:
+        return ("the read-only listings could not be set up to read its repository without writing under its "
+                "git dir (git rev-parse failed or did not finish within {:g} seconds, or the private copy of a "
+                "split index could not be made)".format(_CLEAN_PROBE_SECONDS))
+    env_extra, tmp = private
+    try:
+        return _clean_listings_refusal(repo, force, d, x, big_x, excludes, paths, deadline, env_extra,
+                                       global_opts)
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _clean_listings_refusal(repo, force, d, x, big_x, excludes, paths, deadline, env_extra, global_opts):
+    """The listing half of _clean_ignored_refusal: None or the clause saying why the clean is denied."""
+    opts = (["-f"] * force + (["-d"] if d else []) + (["-x"] if x else []) + (["-X"] if big_x else [])
+            + ["--exclude=" + e for e in excludes])
+    listed = _clean_probe_listing(repo, ["clean", "--dry-run"] + opts + ["--"] + paths, deadline, env_extra,
+                                  global_opts)
+    if listed is None:
+        return ("its read-only dry run (git clean -n with the same options and pathspecs) failed, exited "
+                "nonzero or did not finish within {:g} seconds".format(_CLEAN_PROBE_SECONDS))
+    # Physical, as git's own working directory is (never os.path.abspath): a '..' in a listed name climbs
+    # the real parent of the run directory, not the parent of a symlink that names it (_clean_entry_path).
+    base = os.fsencode(os.path.realpath(repo))
+    removed = []  # (name as git printed it, its _clean_entry_path form)
+    for line in listed.split(b"\n"):
+        if not line or line.startswith(_CLEAN_SKIP_LINE):
+            continue
+        if line == _CLEAN_CWD_LINE:
+            # git keeps the directory it runs in but removes all of its contents: judge that whole directory.
+            removed.append((b"./ (all contents of the directory it runs in)", _clean_entry_path(base, b".")))
+            continue
+        name = _clean_unquote(line[len(b"Would remove "):]) if line.startswith(b"Would remove ") else None
+        if not name:
+            return "its read-only dry run printed a line that cannot be read ({!r})".format(
+                line.decode("utf-8", "backslashreplace"))
+        removed.append((name, _clean_entry_path(base, name)))
+    if not removed:
+        return None
+    ignored_out = _clean_probe_listing(
+        repo, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--"] + paths,
+        deadline, env_extra, global_opts)
+    if ignored_out is None:
+        return ("the read-only listing of its ignored files (git ls-files --others --ignored "
+                "--exclude-standard with the same pathspecs) failed, exited nonzero or did not finish within "
+                "{:g} seconds".format(_CLEAN_PROBE_SECONDS))
+    ignored = frozenset(_clean_entry_path(base, p) for p in ignored_out.split(b"\0") if p)
+    ignored_sorted = sorted(ignored)
+    gone = [name for name, path in removed if _clean_hits_ignored(path, ignored, ignored_sorted)]
+    if gone:
+        return "its read-only listings show it would remove ignored content ({})".format(
+            _clean_entries_text(gone))
+    if force > 1:
+        nested, unwalked, walked = [], [], []
+        for e, path in sorted(removed, key=lambda item: item[1]):
+            if not path.endswith(b"/") or any(path.startswith(w) for w in walked):
+                continue  # a file, or a directory inside one already walked
+            walked.append(path)
+            found = _clean_nested_repo(path, deadline)
+            if found is None:
+                unwalked.append(e)
+                break
+            if found:
+                nested.append(e)
+        if unwalked:
+            return ("it is doubly forced (-ff), which removes a nested repository with its ignored files, and "
+                    "the walk for one below the directory it would remove ({}) met an unreadable entry, more "
+                    "than {} entries or the {:g}-second bound".format(
+                        _clean_entries_text(unwalked), _CLEAN_NESTED_WALK_LIMIT, _CLEAN_PROBE_SECONDS))
+        if nested:
+            return ("it is doubly forced (-ff) and would remove a directory holding a nested repository, whose "
+                    "ignored files neither listing shows ({})".format(_clean_entries_text(nested)))
+    return None
+
+
+def _clean_ignored_deny(why, alts):
+    """The prsunc deny for a git clean that can remove ignored files or a nested repository
+    (_clean_ignored_refusal); `why` is the refusal clause."""
+    return _deny(
+        "AIQT rule prsunc (preserve-uncommitted-work): this git clean may remove IGNORED files (through -x, "
+        "-X, an -e/--exclude pattern that un-ignores them, or ignore rules the command itself changes) or a "
+        "nested repository, and the recovery snapshot holds neither (it is built with git add --all, which "
+        "skips ignored files and never takes in the files of a nested repository). It is denied rather "
+        "than run because {}. To proceed, list what it would remove with 'git clean -n' and the same options "
+        "and pathspecs, move or commit what must be kept, and run the clean alone, without -x, -X, a negated "
+        "exclude, a second -f or a config or environment override. {}".format(why, alts),
+        "AIQT guardrail: denied a git clean that may remove ignored files or a nested repository no recovery "
+        "snapshot holds (rule prsunc); list them with git clean -n and the same options, keep what matters, "
+        "then run it alone.")
+
+
+# WHAT A PRISTINE git clean's OWN GLOBAL OPTIONS AND LEADING ASSIGNMENTS DO TO ITS LISTINGS. Each is read
+# from git(1), git-config(1), gitignore(5) and git-clean(1); only those that can change the ignore sources,
+# the matching of ignore patterns or the worktree and repository the listings read deny the clean:
+#   - a configuration variable set by -c <name>=<value> or --config-env=<name>=<envvar> whose name is
+#     core.excludesFile (an ignore source, gitignore(5)), core.ignoreCase (case-insensitive matching of
+#     ignore patterns), core.worktree or core.bare (the worktree git acts on), or include.path or
+#     includeIf.<condition>.path (they load a file that may set any of these). Section and variable names
+#     are case-insensitive in git, so the name is compared lowercased; any other name (x.y=z) passes.
+#   - a leading HOME or XDG_CONFIG_HOME (they place the global configuration file and the default
+#     excludes file $XDG_CONFIG_HOME/git/ignore), PATH (it can select another git, with another system
+#     configuration), an LD_* or DYLD_* loader variable, or any GIT_* variable other than GIT_DIR,
+#     GIT_WORK_TREE and the cosmetic ones (_COSMETIC_GIT_VARS): GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM,
+#     GIT_CONFIG_NOSYSTEM, GIT_CONFIG_COUNT/KEY/VALUE, GIT_CONFIG_PARAMETERS, GIT_INDEX_FILE, GIT_COMMON_DIR
+#     and the rest can each change the configuration, the tracked set or the info/exclude file read.
+#   - --git-dir, --work-tree, --bare, GIT_DIR or GIT_WORK_TREE, unless git, asked read-only
+#     (_segment_git_target), resolves exactly the git dir and toplevel a plain git run from the directory
+#     the command runs in discovers (_discovered_git_target): a worktree rooted elsewhere reads other
+#     .gitignore files and another tracked set. git_discard's existing redirect resolution decides these
+#     commands first (_redirect_snapshot_plan and the --git-dir and --work-tree denies), so this check sees
+#     only what that resolution confirmed.
+# The pathspec options (--literal-pathspecs, --glob-pathspecs, --noglob-pathspecs, --icase-pathspecs)
+# change only which paths the clean's pathspecs match, so both listings are taken with them. -p,
+# --paginate, -P, --no-pager, --no-replace-objects, --no-lazy-fetch, --no-advice, --no-optional-locks,
+# --namespace, --attr-source, --shallow-file, --exec-path and --super-prefix touch no ignore source and no
+# worktree, and the print-and-exit options run no clean. Any other option is one git(1) does not document:
+# when git itself rejects it as an unknown option the command runs nothing, and otherwise the clean denies.
+_CLEAN_IGNORE_CONFIG_KEYS = frozenset(("core.excludesfile", "core.ignorecase", "core.worktree", "core.bare"))
+_CLEAN_PATHSPEC_GLOBALS = frozenset(("--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
+                                     "--icase-pathspecs"))
+_CLEAN_INERT_GLOBALS = frozenset((
+    "-p", "--paginate", "-P", "--no-pager", "--no-replace-objects", "--no-lazy-fetch", "--no-advice",
+    "--no-optional-locks", "--namespace", "--attr-source", "--shallow-file", "--exec-path", "--super-prefix",
+    "--version", "-v", "--help", "-h", "--html-path", "--man-path", "--info-path"))
+_CLEAN_IGNORE_ENV_NAMES = frozenset(("HOME", "XDG_CONFIG_HOME", "PATH"))
+
+
+def _clean_config_name_bad(name):
+    """True when the git configuration variable `name` (from -c or --config-env) can change an ignore
+    source, the matching of ignore patterns or the worktree (see the block comment above)."""
+    low = name.lower()
+    return low in _CLEAN_IGNORE_CONFIG_KEYS or low == "include.path" or (
+        low.startswith("includeif.") and low.endswith(".path"))
+
+
+def _git_rejects_global_option(option, deadline):
+    """True when git itself refuses `option` as an unknown global option (it prints 'unknown option: ' and
+    exits 129 before running any subcommand), read with 'git <option> version' under the probe's scrubbed
+    environment; False when git accepts it or the answer cannot be read."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return False
+    try:
+        env = _isolate_git_env(dict(os.environ))
+        env["LC_ALL"] = "C"
+        env.pop("LANGUAGE", None)
+        result = subprocess.run(["git", option, "version"], capture_output=True, timeout=left, env=env,
+                                stdin=subprocess.DEVNULL)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 129 and result.stderr.startswith(b"unknown option: ")
+
+
+def _clean_command_view(tokens, cwd):
+    """How the read-only listings of the pristine git clean `tokens` reproduce what it would see:
+    ('probe', directory, global_opts) when listings run in that directory with those pathspec options read
+    what the command reads; ('cannot', why, None) when a leading assignment or global option can change its
+    ignore sources or its worktree (see the block comment above); ('inert', why, None) when git rejects one
+    of its global options outright, so the command runs nothing. The caller has already applied the existing
+    redirect resolution and its denies; an ambient GIT_* override is the caller's own 'cannot'."""
+    cw = _command_word_index(tokens)
+    for tok in tokens[:cw]:
+        if _REMOVED_DISCARD_PREFIX_RE.fullmatch(tok) or _GIT_TARGET_ASSIGN_RE.match(tok):
+            continue
+        name = tok.split("=", 1)[0].rstrip("+")
+        if (name in _CLEAN_IGNORE_ENV_NAMES or name.startswith(("LD_", "DYLD_"))
+                or (name.startswith("GIT_") and name not in _COSMETIC_GIT_VARS)):
+            return ("cannot", "its leading assignment {!r} can change the configuration, the ignore sources "
+                              "or the repository it reads".format(name), None)
+    global_opts = []
+    deadline = time.monotonic() + _CLEAN_PROBE_SECONDS
+    i = cw + 1
+    n = len(tokens)
+    while i < n and tokens[i].startswith("-"):
+        tok = tokens[i]
+        opt, eq, val = tok.partition("=")
+        if "=" not in tok and tok in _GIT_ARG_OPTS:
+            val = tokens[i + 1] if i + 1 < n else ""
+            i += 2
+        else:
+            i += 1
+        if opt == "-c" and not eq:
+            if _clean_config_name_bad(val.split("=", 1)[0]):
+                return ("cannot", "its git global option '-c {}' sets a configuration variable that can "
+                                  "change its ignore sources or its worktree".format(val.split("=", 1)[0]), None)
+        elif opt == "--config-env":
+            if _clean_config_name_bad(val.rpartition("=")[0] if "=" in val else val):
+                return ("cannot", "its git global option '--config-env {}' sets a configuration variable that "
+                                  "can change its ignore sources or its worktree".format(val), None)
+        elif opt in ("-C", "--git-dir", "--work-tree", "--bare"):
+            continue
+        elif opt in _CLEAN_PATHSPEC_GLOBALS and not eq:
+            global_opts.append(opt)
+        elif opt in _CLEAN_INERT_GLOBALS or opt == "--list-cmds":
+            continue
+        elif _git_rejects_global_option(tok, deadline):
+            return ("inert", "git rejects its global option {!r} as unknown, so it runs nothing".format(tok),
+                    None)
+        else:
+            return ("cannot", "its git global option {!r} is not one this guard reads".format(tok), None)
+    c_dir = _segment_c_dir(tokens, cwd)
+    if c_dir is None:
+        return ("cannot", "the directory it runs in cannot be established (no session working directory, "
+                          "or a -C with no value)", None)
+    if _segment_has_path_redirect(tokens):
+        tgt = _segment_git_target(tokens, cwd)
+        own = _discovered_git_target(c_dir)
+        if tgt is None or own is None or tgt != own:
+            return ("cannot", "its --git-dir, --work-tree, --bare, GIT_DIR or GIT_WORK_TREE redirect makes git "
+                              "act on {}, not on the git dir and toplevel a plain git run from {} finds".format(
+                                  "a git dir and worktree git could not report read-only" if tgt is None
+                                  else "the git dir {} with the worktree {}".format(tgt[0], tgt[1]), c_dir),
+                    None)
+    return ("probe", c_dir, tuple(global_opts))
+
+
+def _clean_pristine_refusal(tokens, args, cwd, ambient_override):
+    """_clean_ignored_refusal for the pristine single git clean `tokens` (subcommand arguments `args`), run
+    in the directory _clean_command_view resolves from the session directory `cwd`; None when git rejects
+    one of its global options (it runs nothing) or the listings show it removes no ignored file and no
+    nested repository. A non-cosmetic ambient GIT_* variable shapes the view the command acts on but is
+    scrubbed from the listings, so it leaves them unable to show what the clean would remove."""
+    if ambient_override:
+        return _clean_ignored_refusal(
+            args, None, "a non-cosmetic ambient GIT_* variable shapes the repository view it acts on")
+    state, value, global_opts = _clean_command_view(tokens, cwd)
+    if state == "inert":
+        return None
+    if state == "cannot":
+        return _clean_ignored_refusal(args, None, value)
+    return _clean_ignored_refusal(args, value, None, global_opts)
 
 
 # git branch long options that CONSUME the following token as a REQUIRED separated value, so that value is
@@ -10022,10 +10562,12 @@ def _branch_parse_options(pre):
 def _discard_role(sub, args):
     """Classify a git segment's subcommand into (role, kind); see the block comment above. clean, stash,
     and branch do not use the tracked-tree probe: a real 'git clean' removes UNTRACKED files (a different,
-    unrecoverable asset the tracked-change probe does not see), so ANY non-dry-run clean ASKS
-    unconditionally (this also closes the clean.requireForce / -q / -i / clustered-flag edges, since the
-    guard no longer tries to model whether the clean would fire); stash drop/clear ASK, and a force branch
-    delete/move/copy/reset ASKS (an unforced create/list/-d keeps its allow)."""
+    unrecoverable asset the tracked-change probe does not see), so ANY non-dry-run clean gets the 'ask'
+    role (this also closes the clean.requireForce / -q / -i / clustered-flag edges, since the role does not
+    model whether the clean would fire); git_discard then judges it by its read-only listings
+    (_clean_ignored_refusal) and, when they pass, by the recovery snapshot. A dry run (-n/--dry-run, read
+    only by _clean_parse_options, as git reads it) removes nothing and allows. stash drop/clear
+    ASK, and a force branch delete/move/copy/reset ASKS (an unforced create/list/-d keeps its allow)."""
     if sub == "checkout":
         return _checkout_role(args)
     if sub == "switch":
@@ -10037,15 +10579,15 @@ def _discard_role(sub, args):
     if sub == "rm":
         return _rm_role(args)
     if sub == "clean":
-        # Judge dry-run on the option region BEFORE any '--' (blocker 3): an operand after '--' (git clean
-        # -f -- -nasty is a file literally named -nasty) must NOT be read as the '-n' dry-run flag, or a real
-        # force-clean is misclassified as a harmless dry run and silently allowed. _clean_is_dry_run also
-        # refuses to trust '-n' when an arg-consuming clean option ('-e'/'--exclude') is present, since '-n'
-        # may be that option's value rather than the dry-run flag.
-        pre, _post, _had_sep = _split_pre_post(args)
-        if _clean_is_dry_run(pre):
-            return ("allow", None)  # a dry run removes nothing
-        return ("ask", "git clean (removes untracked files, which cannot be recovered)")
+        # A dry run is decided ONLY by the full option reader, _clean_parse_options, which reads the option
+        # region before any '--' (git clean -f -- -nasty removes a file literally named -nasty) and consumes
+        # each -e/--exclude value as git does, an abbreviated long option (--e, --exc, --exclud) included, so
+        # a '-n' that is an exclude value is never read as the dry-run flag. An option list it cannot read with
+        # certainty (None) is no dry run: the clean takes the 'ask' role and its listings deny it.
+        parsed = _clean_parse_options(args)
+        if parsed is not None and parsed[6]:
+            return ("allow", None)  # read as git reads it (exclude values consumed), a dry run: removes nothing
+        return ("ask", "git clean (removes untracked files)")
     if sub == "stash":
         first = next((a for a in args if not a.startswith("-")), None)
         if first in ("drop", "clear"):
@@ -10549,7 +11091,10 @@ def _pristine_single_bare_git(command, segments):
 # system, or command-scope) program during the
 # snapshot, whose effects are OUTSIDE this guard's control, so the inert guarantee is BOUNDED, not
 # categorical: a clean/process filter runs on `git add --all` (the CHECK-IN / clean direction, NOT smudge -
-# smudge would run only on a restore/checkout), an fsmonitor hook runs on the `git status` probe, a
+# smudge would run only on a restore/checkout), an fsmonitor hook runs on the `git status` probe, and so
+# does a clean/process filter whenever that probe re-reads a tracked file's content to compare it with the
+# index (seen for files committed moments before the probe), so a configured clean filter runs even on a
+# clean that takes no snapshot, a
 # reference-transaction hook AND a post-index-change hook can run on the temp-index write, and a
 # reference-transaction hook runs on `git update-ref`. Because a clean filter can TRANSFORM worktree bytes
 # before they enter the snapshot, the snapshot is NOT guaranteed byte-exact on a filtered repo. Further, a
@@ -10564,7 +11109,9 @@ def _pristine_single_bare_git(command, segments):
 # a would-be ALLOW is DOWNGRADED to ASK, and an already-ASK/DENY decision is left as-is with the failure
 # surfaced in its reason. HONEST LIMITATION: the snapshot cannot capture what the probe cannot see (content
 # hidden by assume-unchanged/skip-worktree marks or submodule.<name>.ignore), nor ignored files (git add
-# --all excludes them), so a discard of that content is not recoverable here.
+# --all excludes them), so a discard of that content is not recoverable here; every non-dry-run git clean
+# is therefore denied unless its own read-only listings show it removes no ignored file
+# (_clean_ignored_refusal).
 _SNAPSHOTTABLE_VERBS = frozenset(("checkout", "switch", "restore", "reset", "rm", "clean"))
 # The lossy git verbs the form-classifier can reason about (the recognized-verb set). A command the raw scan
 # flags as in-scope whose resolved subcommand is outside this set (e.g. 'checkout-index', 'read-tree',
@@ -11018,9 +11565,11 @@ def _discard_recovery_result(kind, detail, snap, note=""):
             "AIQT guardrail: denied an unrecoverable git discard - no recovery snapshot could be created "
             "(rule prsunc); commit or stash first, then retry.")
     if snap is not None and snap[0] == "ok":
+        # _recovery_pointer itself opens with 'A pre-command recovery snapshot was saved', so the note says it
+        # once.
         return _allow_note(
-            "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. A pre-command recovery snapshot "
-            "was saved, so it is allowed. {}".format(kind, detail, _recovery_pointer(snap[1])) + note)
+            "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. It is allowed. {}".format(
+                kind, detail, _recovery_pointer(snap[1])) + note)
     return _allow_note(
         "AIQT guardrail (rule prsunc, preserve-uncommitted-work): {} {}. This guard could not auto-snapshot "
         "it (a ref-level or branch asset a working-tree snapshot cannot capture, which is typically "
@@ -12211,8 +12760,13 @@ def _discard_positive_grammar(command, cwd):
       subs            - the snapshottable subcommands seen (the recovery-ledger verb label)
       reset_checks    - (directory or None, args, moved) of every accepted git reset that moves HEAD to one
                         commit (_reset_commit_operand); moved says an earlier segment is a recognized lossy
-                        verb, which may already have moved HEAD before the reset runs"""
-    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set(), "reset_checks": []}
+                        verb, which may already have moved HEAD before the reset runs
+      clean_checks    - (directory, args, moved) of every accepted non-dry-run git clean, for the
+                        ignored-file probe (_clean_ignored_refusal); moved says an earlier segment is a
+                        recognized lossy verb, which may change the tree or its ignore rules before the
+                        clean runs"""
+    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set(), "reset_checks": [],
+           "clean_checks": []}
     items, bad = _discard_grammar_lex(command)
     if bad is None:
         segments, bad = _discard_grammar_segments(items)
@@ -12255,6 +12809,8 @@ def _discard_positive_grammar(command, cwd):
             r_dir, r_sub, r_args = _discard_grammar_git_target(words, eff)
             if r_sub == "reset" and _reset_commit_operand(r_args) is not None:
                 out["reset_checks"].append((r_dir, r_args, lossy_segs > 0))
+            if r_sub == "clean" and _act == "snapshot":
+                out["clean_checks"].append((r_dir, r_args, lossy_segs > 0))
             if _act is not None:
                 lossy_segs += 1  # every action but None marks a recognized-lossy-verb segment
             if _act == "snapshot":
@@ -12626,7 +13182,12 @@ def git_discard(data):
     still act on the unknown cwd. See the recovery block comment above
     _SNAPSHOTTABLE_VERBS. The snapshot cannot capture what the probe cannot see (assume-unchanged/skip-worktree
     marks, submodule.<name>.ignore) or ignored files (git add --all excludes them), so a discard of that
-    content is not recoverable here."""
+    content is not recoverable here. Every non-dry-run git clean, with or without -x or -X, is therefore
+    DENIED, on the pristine and the compound path alike and before any snapshot, unless its read-only
+    listings (git clean -n with the same options and pathspecs, and git ls-files --others --ignored
+    --exclude-standard with the same pathspecs, scrubbed git environment, fsmonitor and hooks off, one
+    bounded timeout) show it removes no ignored file; a listing that fails or times out denies, and so does
+    a clean whose ignore sources the command itself can change (_clean_ignored_refusal)."""
     if data.get("hook_event_name") != PRETOOL:
         # A mis-wired event is a broken install: loud (unreachable given the generator's event whitelist).
         return _hard_block("aiqt_hooks: git_discard wired to unexpected event {!r}; failing closed"
@@ -12791,6 +13352,24 @@ def git_discard(data):
             r_refusal = _reset_ancestry_refusal(r_args, r_dir, r_cannot)
             if r_refusal is not None:
                 return _reset_ancestry_deny(r_refusal, _DISCARD_ALTS)
+        # Every accepted non-dry-run clean, with or without -x or -X, is denied unless its read-only listings
+        # in the directory the grammar resolved for it show it removes no ignored file, before any
+        # snapshot: the snapshot never holds an ignored file. An earlier lossy segment may change the tree
+        # or its ignore rules before the clean runs (a checkout, restore, reset, stash, rm or clean of a
+        # .gitignore, an info/exclude file or the configured excludes file), and an ambient GIT_* variable
+        # may change the view the command sees, so either one leaves the listings unable to show what the
+        # clean would remove, and it denies. The grammar admits no assignment word and no git global
+        # option but -C, so no -c, --config-env, HOME, XDG_CONFIG_HOME or GIT_* override reaches here.
+        for c_dir, c_args, c_moved in walk["clean_checks"]:
+            c_cannot = None
+            if c_moved:
+                c_cannot = ("an earlier segment of this command may change the tree or its ignore rules (a "
+                            ".gitignore, info/exclude or the configured excludes file) before the clean runs")
+            elif _ambient_repo_view_override():
+                c_cannot = "a non-cosmetic ambient GIT_* variable shapes the repository view it acts on"
+            c_why = _clean_ignored_refusal(c_args, c_dir, c_cannot)
+            if c_why is not None:
+                return _clean_ignored_deny(c_why, _DISCARD_ALTS)
         np_verb = next(iter(sorted(walk["subs"])), "discard")
         # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo
         # whose stash cannot be preserved), so a resolved stash removal never notes a recovery that omits
@@ -12871,6 +13450,15 @@ def git_discard(data):
         if st_bad is not None:
             st_reason, st_banner = _DISCARD_GRAMMAR_DENY_TEXTS["stashro"]
             return _deny(st_reason.format(st_bad, alts), st_banner)
+
+    # Every non-dry-run clean, with or without -x or -X, is denied unless its read-only listings show it
+    # removes no ignored file and no nested repository (_clean_pristine_refusal), decided before any
+    # snapshot on both the redirect branch and the plain path below, AFTER the existing resolution of the
+    # command's global options and leading assignments on that branch: the clean-tree probe never lists an
+    # ignored file (so an ignored-only tree reads as provably clean) and the recovery snapshot never holds
+    # one, so neither the provably-clean allow nor a snapshot-then-allow could recover what such a clean
+    # removes. Only an option or assignment that can change the ignore sources or the worktree the listings
+    # read denies (_clean_command_view); the listings run in the directory that resolution confirmed.
 
     # FAIL-SAFE (structural completion): the command's repository view cannot be proven to be the
     # session cwd when EITHER cause is present. (1) A NON-COSMETIC ambient GIT_* var: the probe scrubs it,
@@ -13115,6 +13703,12 @@ def git_discard(data):
                 .format(kind or "a git work-losing verb", alts),
                 "AIQT guardrail: denied a view-overridden git discard with no session directory to snapshot "
                 "(rule prsunc); run it from the target repo, or commit or stash first.")
+        # A non-dry-run clean is judged by its read-only listings here, after the redirect resolution and
+        # its denies above and before any snapshot below (see the comment above the FAIL-SAFE branch).
+        if sub == "clean" and role != "allow":
+            cx_why = _clean_pristine_refusal(pristine, args, cwd_base, ambient_override)
+            if cx_why is not None:
+                return _clean_ignored_deny(cx_why, alts)
         # The floor base (pre_base, set only beside a redirect git resolved to another repository) is probed
         # and snapshotted first, exactly as the base itself was before git was asked, and the repository git
         # resolved is probed and snapshotted next. A successful floor snapshot is named in the outcome below,
@@ -13203,6 +13797,12 @@ def git_discard(data):
     base = cwd if isinstance(cwd, str) and cwd else None
     resolvable = base is not None and _segment_dir_simple(pristine)
     snapshottable = sub in _SNAPSHOTTABLE_VERBS
+    # A non-dry-run clean on this plain path is judged by its read-only listings before any snapshot (see
+    # the comment above the FAIL-SAFE branch).
+    if sub == "clean" and role != "allow":
+        cx_why = _clean_pristine_refusal(pristine, args, base, False)
+        if cx_why is not None:
+            return _clean_ignored_deny(cx_why, alts)
 
     # THE RECOVERY LAYER. For a subcommand a discard could use to destroy worktree or untracked content
     # (checkout/switch/restore/reset/rm/clean), when the worktree is resolvable and the tree is NOT provably
@@ -13270,7 +13870,18 @@ def git_discard(data):
                     "snapshot (rule prsunc); re-issue from the target repo, or commit or stash first.")
             # resolvable + not provably clean: a snapshot was taken above; fold its outcome in (ok ->
             # allow-note, fail -> deny), so a clean with no recovery point never silently allows.
-            return _discard_recovery_result(kind, "removes untracked files, which cannot be recovered", snap, note)
+            # The note says what the snapshot can hold and no more: git add --all takes in untracked files
+            # (as a configured clean filter outputs them), never an ignored file, the files of a nested
+            # repository or an empty directory. When no snapshot could be made the deny names none as saved:
+            # its NOTE says why, so the clause before it says only what a snapshot would have had to hold.
+            if snap is not None and snap[0] == "ok":
+                c_detail = ("can be undone only from the recovery snapshot, which holds the untracked files git "
+                            "add --all takes in (as a configured clean filter outputs them) and never an ignored "
+                            "file, the files of a nested repository or an empty directory")
+            else:
+                c_detail = ("can be undone only from a pre-command recovery snapshot of the untracked files git "
+                            "add --all takes in")
+            return _discard_recovery_result(kind, c_detail, snap, note)
         if sub == "stash":
             # 'git stash drop'/'clear' is NOT reflog-recoverable after the fact (it deletes
             # the stash reflog entry, orphaning the stash commit), so a worktree snapshot cannot protect it.
@@ -41154,6 +41765,418 @@ def clock_inject_failure(data):
         "additionalContext": _clock_context("PostToolUseFailure")}}, None)
 
 
+# --- console prefix at the next tool call (console_prefix_pretool) -------------------------------------
+# A project that requires every console message to begin with a fixed prefix (a timestamp, say) can check it
+# at turn end, but text written between tool calls is then caught only once the turn is over. This mode runs
+# at the tool call that follows such text: it reads the bounded tail of the session transcript, walks back
+# from its end to the last tool result (or the prompt that began the turn), and checks each assistant text
+# block in that span against the adopter's pattern. It is inert unless the adopter sets the pattern.
+#
+# OPT-IN REGISTRATION: the plugin's hooks.json does NOT register this mode (its manifest control carries
+# registration = "opt-in"), so an adopter who has not turned it on starts no process for it and pays nothing.
+# An adopter turns it on with two settings in a Claude Code settings file (.claude/settings.json, or
+# .claude/settings.local.json for one person): an env block setting AIQT_CONSOLE_PREFIX_RE, and a PreToolUse
+# hooks entry with matcher ".*" whose command is python3 -I, then the absolute path of this dispatcher in the
+# installed plugin (hooks/scripts/aiqt_hooks.py under the plugin directory), then console_prefix_pretool, with
+# timeout 10. Registered without the pattern it is off and allows silently, but each tool call still starts one
+# python3 process for it.
+#
+# Adopter settings, read from the hook process environment (for example the env block of the Claude Code
+# settings file): AIQT_CONSOLE_PREFIX_RE, a Python regular expression matched at the start of each text block
+# with leading whitespace removed (unset or empty: the mode is off and allows silently; one that matches empty
+# text, or the start of every line of a fixed sample of unrelated text, is refused, since it would pass every
+# block); and AIQT_CONSOLE_PREFIX_POSTURE, "warn" (the default) or "deny". Any other posture value warns, and
+# the note names the value it did not accept. The transcript must lie in the platform transcript directory,
+# projects/ under CLAUDE_CONFIG_DIR when that is set, or under ~/.claude otherwise; a transcript_path anywhere
+# else is not read. That confinement is by path text (a hard link inside the directory is read).
+_CONSOLE_PREFIX_PATTERN_ENV = "AIQT_CONSOLE_PREFIX_RE"
+_CONSOLE_PREFIX_POSTURE_ENV = "AIQT_CONSOLE_PREFIX_POSTURE"
+_CONSOLE_PREFIX_CONFIG_ENV = "CLAUDE_CONFIG_DIR"
+# How the transcript is opened: read only, never blocking on a FIFO or device, never following a symlink in
+# the final path component, and not inherited by a child.
+_CONSOLE_PREFIX_OPEN_FLAGS = (os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+                              | getattr(os, "O_CLOEXEC", 0))
+# The most bytes read from the end of the transcript. A span longer than this is checked as far as the read
+# reaches, and the note says the start of the span was not reached.
+_CONSOLE_PREFIX_TAIL_BYTES = 1048576
+# The longest pattern accepted, and the most characters of a text block the pattern is matched against (it
+# is matched at the start only, so a longer block adds nothing but cost to a pattern that backtracks).
+_CONSOLE_PREFIX_PATTERN_MAX = 512
+_CONSOLE_PREFIX_MATCH_CHARS = 4096
+_CONSOLE_PREFIX_RESIDUAL = ("Text with no following tool call (the end of a turn) is left to a turn-end "
+                            "check.")
+
+
+class _ConsolePrefixUnreadable(Exception):
+    """The transcript tail could not be read as transcript records; its one argument says why."""
+
+
+def _console_prefix_is_off(raw):
+    """True when the adopter has not set a pattern: the mode is off and allows silently, reading nothing."""
+    return not raw
+
+
+def _console_prefix_config(environ):
+    """(pattern or None, posture, problem) from the adopter's environment: pattern None means the mode is
+    off; problem is None, or a sentence naming a setting that could not be used (a pattern that does not
+    compile, is too long or matches empty text, each of which means the check cannot be evaluated and is
+    reported with a note, whatever the posture; or a posture value other than warn or deny, which warns)."""
+    raw = environ.get(_CONSOLE_PREFIX_PATTERN_ENV, "")
+    if _console_prefix_is_off(raw):
+        return None, "warn", None
+    posture_raw = environ.get(_CONSOLE_PREFIX_POSTURE_ENV, "")
+    posture, problem = "warn", None
+    if posture_raw.strip().lower() == "deny":
+        posture = "deny"
+    elif posture_raw.strip().lower() not in ("", "warn"):
+        problem = "{} is {!r}, which is neither warn nor deny, so this check warns".format(
+            _CONSOLE_PREFIX_POSTURE_ENV, posture_raw[:80])
+    if len(raw) > _CONSOLE_PREFIX_PATTERN_MAX:
+        return None, posture, "{} is {} characters long, over the {}-character limit".format(
+            _CONSOLE_PREFIX_PATTERN_ENV, len(raw), _CONSOLE_PREFIX_PATTERN_MAX)
+    try:
+        pattern = re.compile(raw)
+    except (re.error, RecursionError, OverflowError, ValueError) as exc:
+        return None, posture, "{} does not compile ({})".format(_CONSOLE_PREFIX_PATTERN_ENV, _exception_text(exc))
+    if _console_prefix_matches_empty(pattern):
+        return None, posture, ("{} matches empty text, so it would pass every block; the check cannot be "
+                               "evaluated with it".format(_CONSOLE_PREFIX_PATTERN_ENV))
+    if _console_prefix_matches_arbitrary(pattern):
+        return None, posture, ("{} matches every one of {} unrelated sample lines, so it would pass any "
+                               "non-blank block; the check cannot be evaluated with it".format(
+                                   _CONSOLE_PREFIX_PATTERN_ENV, len(_CONSOLE_PREFIX_ARBITRARY_SAMPLES)))
+    return pattern, posture, problem
+
+
+def _console_prefix_matches_empty(pattern):
+    """True when the pattern matches at the start of empty text, so any block, stamped or not, would pass."""
+    return pattern.match("") is not None
+
+
+# Sample lines with no prefix, each starting with a different kind of character (lower and upper case
+# letters, a digit, an underscore, punctuation and markup, a non-ASCII letter, a CJK character and an emoji),
+# each at least two characters long. A pattern that matches the start of every one of them, such as ".",
+# "\S", "(?=.)" or "..", would pass any non-blank block, so it is refused like a pattern that matches empty
+# text. This is a sample, not a proof: Python patterns (lookarounds, backreferences) cannot be decided in
+# general, so a pattern that passes a whole class of text without matching every sample (for example "\b" or
+# "\w", which pass every block that starts with a word character) is still accepted.
+_CONSOLE_PREFIX_ARBITRARY_SAMPLES = (
+    "working on it", "Done.", "0 files changed", "_x", "!x", "[x", "(x", "#x", "-x", "*x", "`x", "\"x",
+    "'x", ">x", "|x", "/x", "~x", "été", "中文", "\U0001f600x")
+
+
+def _console_prefix_matches_arbitrary(pattern):
+    """True when the pattern matches the start of every sample line in _CONSOLE_PREFIX_ARBITRARY_SAMPLES, so
+    it would pass any non-blank block, stamped or not."""
+    return all(pattern.match(sample) is not None for sample in _CONSOLE_PREFIX_ARBITRARY_SAMPLES)
+
+
+def _console_prefix_read_tail(path, limit):
+    """(data, truncated): at most `limit` bytes from the end of the regular file at `path`, and whether the
+    read started after the first byte. Opened without following a final symlink and without blocking, so a
+    FIFO or device cannot hold the hook; anything but a regular file raises _ConsolePrefixUnreadable, and an
+    open or read failure raises OSError. The descriptor is closed exactly once on every path."""
+    fd = os.open(path, _CONSOLE_PREFIX_OPEN_FLAGS)
+    try:
+        info = os.fstat(fd)
+        if not _console_prefix_is_regular(info.st_mode):
+            raise _ConsolePrefixUnreadable("the transcript path is not a regular file")
+        start = max(0, info.st_size - limit)
+        os.lseek(fd, start, os.SEEK_SET)
+        chunks = []
+        left = limit
+        while left > 0:
+            chunk = os.read(fd, min(left, 65536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+        return b"".join(chunks), start > 0
+    finally:
+        os.close(fd)
+
+
+def _console_prefix_is_regular(mode):
+    """True for a regular file's st_mode: a FIFO, device or directory is never read as a transcript."""
+    return stat.S_ISREG(mode)
+
+
+def _console_prefix_lines(data, truncated):
+    """(lines, unfinished): the complete lines of the tail read, oldest first, and whether an unfinished last
+    line was set aside. When the read started inside the file its first line may be a fragment of a longer
+    record, so it is dropped. A last line with no newline after it that does not parse as JSON is a record
+    still being written: it is set aside, so the complete records before it are judged, and the caller's note
+    says it was not checked. A last line with no newline that does parse is a complete record and is kept."""
+    lines = data.split(b"\n")
+    if truncated:
+        lines = lines[1:]
+    unfinished = False
+    if lines and lines[-1].strip() and not data.endswith(b"\n"):
+        try:
+            json.loads(lines[-1])
+        except (ValueError, RecursionError):
+            lines = lines[:-1]
+            unfinished = True
+    return [line for line in lines if line.strip()], unfinished
+
+
+def _console_prefix_record(line):
+    """One transcript line parsed to a JSON object; _ConsolePrefixUnreadable on anything else."""
+    try:
+        record = json.loads(line)
+    except (ValueError, RecursionError) as exc:
+        raise _ConsolePrefixUnreadable("a transcript line is not JSON ({})".format(_exception_text(exc)))
+    if not isinstance(record, dict):
+        raise _ConsolePrefixUnreadable("a transcript line is {}, not a JSON object".format(_orch_json_kind(record)))
+    return record
+
+
+def _console_prefix_content(record):
+    """The message content of a user or assistant record: a list of blocks, or a string."""
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, (list, str)):
+        raise _ConsolePrefixUnreadable("a {} record carries no message content list or string".format(
+            record.get("type")))
+    return content
+
+
+def _console_prefix_is_boundary(record):
+    """True for a record that ends the span walking back: any user record that is not passed over first,
+    which is either a tool result or a prompt (a human prompt begins the turn, so text before it belongs to
+    an earlier turn)."""
+    return record.get("type") == "user"
+
+
+def _console_prefix_is_meta(record):
+    """True for a record the platform marks isMeta (injected context such as a command's output or a task
+    notification, not a prompt, a tool result or the model's own text): it neither ends the span nor counts,
+    the convention of the governance pack's turn-end reader (.preview/stamp-truth-stop.py)."""
+    return record.get("isMeta") is True
+
+
+def _console_prefix_is_api_error(record):
+    """True for a synthetic assistant record the platform writes for a failed API call (isApiErrorMessage,
+    "API Error: ..."): the model did not write it, so its text is not held to the prefix."""
+    return record.get("isApiErrorMessage") is True
+
+
+def _console_prefix_is_subagent_record(record):
+    """True for a sidechain (subagent) record. When the newest user or assistant record of the transcript is
+    one, the tool call being checked is a subagent's: the main agent's text is not the subagent's to fix, and
+    a subagent's text is returned to the main agent rather than shown in the console, so the call is not
+    checked."""
+    return record.get("isSidechain") is True
+
+
+def _console_prefix_boundary_checked(record):
+    """A boundary record must still carry readable content, so a record in another layout is noted as
+    unreadable rather than taken as the end of the span."""
+    _console_prefix_content(record)
+
+
+def _console_prefix_is_blank(text):
+    """True for a text block holding only whitespace: it carries no message, so it is not held to the
+    prefix."""
+    return not text.strip()
+
+
+def _console_prefix_span(lines):
+    """(texts, reached): the assistant text blocks written after the last boundary record, oldest first, and
+    whether the walk reached a boundary. When the newest user or assistant record is a sidechain record the
+    call is a subagent's: the walk stops there with no texts (nothing is checked). Records of other types,
+    sidechain and isMeta records, and API error records are passed over; a line that is not a JSON object, or
+    a user or assistant record with no readable content, raises _ConsolePrefixUnreadable."""
+    texts = []
+    newest = True
+    for line in reversed(lines):
+        record = _console_prefix_record(line)
+        if newest and record.get("type") in ("user", "assistant"):
+            newest = False
+            if _console_prefix_is_subagent_record(record):
+                return [], True
+        if record.get("isSidechain") is True or _console_prefix_is_meta(record):
+            continue
+        if _console_prefix_is_boundary(record):
+            _console_prefix_boundary_checked(record)
+            texts.reverse()
+            return texts, True
+        if record.get("type") != "assistant" or _console_prefix_is_api_error(record):
+            continue
+        content = _console_prefix_content(record)
+        blocks = [content] if isinstance(content, str) else [
+            block.get("text") for block in reversed(content)
+            if isinstance(block, dict) and block.get("type") == "text"]
+        for text in blocks:
+            _console_prefix_text_string(text)
+            if not _console_prefix_is_blank(text):
+                texts.append(text)
+    texts.reverse()
+    return texts, False
+
+
+def _console_prefix_text_string(text):
+    """_ConsolePrefixUnreadable unless an assistant text block's text is a string."""
+    if not isinstance(text, str):
+        raise _ConsolePrefixUnreadable("an assistant text block carries no text string")
+
+
+def _console_prefix_is_absolute(path):
+    """True when the payload's transcript_path is absolute, so it never resolves against the hook's cwd."""
+    return os.path.isabs(path)
+
+
+def _console_prefix_transcript_root(environ):
+    """The platform transcript directory, resolved: projects/ under CLAUDE_CONFIG_DIR when that is a non-empty
+    absolute path, else under ~/.claude. _ConsolePrefixUnreadable when neither can be established."""
+    base = environ.get(_CONSOLE_PREFIX_CONFIG_ENV, "")
+    if not (base and os.path.isabs(base) and "\x00" not in base):
+        home = os.path.expanduser("~")
+        if not os.path.isabs(home) or "\x00" in home:
+            raise _ConsolePrefixUnreadable("the platform transcript directory cannot be established (no "
+                                           "absolute {} or home directory)".format(_CONSOLE_PREFIX_CONFIG_ENV))
+        base = os.path.join(home, ".claude")
+    return _console_prefix_real_root(os.path.join(base, "projects"))
+
+
+def _console_prefix_real_root(path):
+    """The transcript directory with every symlink in it resolved, so a symlinked ~/.claude or
+    CLAUDE_CONFIG_DIR is compared in the same resolved form as the transcript's own directory."""
+    return os.path.realpath(path)
+
+
+def _console_prefix_names_file(name):
+    """True when the final component of transcript_path can name a file (not empty, '.' or '..')."""
+    return name not in ("", ".", "..")
+
+
+def _console_prefix_inside(root, candidate):
+    """True when candidate lies below root, compared by whole path components (a sibling such as
+    projects-evil/ is outside), and is not root itself."""
+    return os.path.commonpath([root, candidate]) == root and candidate != root
+
+
+def _console_prefix_confined(path, environ):
+    """The transcript path to open: its directory resolved (every symlink and '..' in it), joined to its final
+    component, which must lie inside the platform transcript directory; _ConsolePrefixUnreadable otherwise. The
+    final component is left unresolved, so the O_NOFOLLOW open still refuses a symlink there. RESIDUAL: the
+    confinement is by path text, resolved once before the open. A hard link inside the directory to a file
+    outside it is read, and a directory on the path swapped for a symlink between the resolution and the open
+    is followed (O_NOFOLLOW covers only the final component); both need write access to the user's transcript
+    directory."""
+    root = _console_prefix_transcript_root(environ)
+    head, name = os.path.split(path)
+    if not _console_prefix_names_file(name):
+        raise _ConsolePrefixUnreadable("the payload's transcript_path does not name a file")
+    candidate = os.path.join(os.path.realpath(head), name)
+    if not _console_prefix_inside(root, candidate):
+        raise _ConsolePrefixUnreadable("the payload's transcript_path lies outside the platform transcript "
+                                       "directory, so it was not read")
+    return candidate
+
+
+def _console_prefix_matches(pattern, text):
+    """True when the text block, leading whitespace removed, starts with the pattern."""
+    return pattern.match(text.lstrip()[:_CONSOLE_PREFIX_MATCH_CHARS]) is not None
+
+
+def _console_prefix_checked(texts):
+    """The text blocks the pattern is held to: every one in the span."""
+    return texts
+
+
+def console_prefix_pretool(data):
+    """tstamp, PreToolUse on every tool (matcher .*). NOTE-ONLY by default and OFF unless the adopter sets
+    AIQT_CONSOLE_PREFIX_RE: at each tool call it reads at most _CONSOLE_PREFIX_TAIL_BYTES from the end of the
+    payload's transcript_path, walks back to the last user record (a tool result, or the prompt that began
+    the turn), and checks that each non-blank assistant text block written since starts with the pattern.
+    An unprefixed block allows with a note naming how many blocks missed it and where the first one sits in
+    the span (never its text), or, where the adopter set AIQT_CONSOLE_PREFIX_POSTURE=deny, denies the tool call
+    with the same reason. OPT-IN REGISTRATION: the plugin's hooks.json does not register this mode; the adopter
+    registers it (see the comment above _CONSOLE_PREFIX_PATTERN_ENV), so it costs nothing until then.
+
+    The off switch is read first: with no pattern set it allows silently, whatever the payload, and reads
+    nothing. It never blocks on its own failure: a transcript_path that is missing, empty, not a string,
+    relative or outside the platform transcript directory, a transcript that cannot be opened, is a symlink
+    or is not a regular file, a tail holding no complete record, a line that is not a JSON object (except an
+    unfinished last line, which is set aside with a note so the complete records before it are judged), a
+    record with no readable content, and a pattern that does not compile, is too long, matches empty text or
+    matches every sample line of _CONSOLE_PREFIX_ARBITRARY_SAMPLES (".", "\\S" and "(?=.)" among them)
+    each allow with a note saying the check did not run or could not be evaluated, under either posture;
+    main() turns every error path and the deadline into a warning on exit 0 (NOTE_ONLY_PRETOOL_MODES). With
+    the pattern set, a payload naming another event hard-blocks, the sibling convention for a miswired hook.
+    The adopter's deny is the one other blocking result, a deliberate decision on a span it read in full or
+    in part.
+
+    HONEST RESIDUAL: text with no following tool call (the end of a turn) is never seen here and is left to
+    a turn-end check. Whether the platform has already written the current assistant message's text to the
+    transcript when PreToolUse fires is the platform's behaviour, not checked here. Text it has not yet
+    written is seen only if a later tool call of the same assistant message runs this check before any tool
+    result is written; once a tool result follows that text, the text lies before the boundary and is never
+    checked. The transcript format (JSON lines whose user and assistant records carry message.content) is
+    read as Claude Code writes it; another layout reads as unreadable and notes. Only text blocks count: text
+    inside a tool input, a thinking block, a sidechain record, an isMeta record and a synthetic API error
+    record (isApiErrorMessage) are not checked, and an isMeta user record does not end the span. When the
+    newest user or assistant record is a sidechain record the call is taken as a subagent's and allowed
+    silently, unchecked; which transcript_path the platform gives a subagent's hook, and whether its records
+    sit in the main transcript, is not verified here. The pattern refusal for text-agnostic patterns is a
+    sample check, so a pattern that passes a whole class of text ("\\b", "\\w") is still accepted. The read
+    is confined to the transcript directory by path text (see _console_prefix_confined): a hard link there to
+    an outside file is read. A span longer than the read window is checked as far as the window reaches, and
+    the note says so. The pattern runs on at most _CONSOLE_PREFIX_MATCH_CHARS characters of each block; a
+    pattern slow enough to pass the deadline ends in main()'s warning, never a block."""
+    pattern, posture, problem = _console_prefix_config(os.environ)
+    if pattern is None and problem is None:
+        return _allow()  # the adopter has not turned the check on: nothing is read and nothing blocks
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: console_prefix_pretool wired to unexpected event {!r}; failing "
+                           "closed".format(data.get("hook_event_name")))
+    if pattern is None:
+        return _allow_note("AIQT rule tstamp: the console prefix check did not run (cannot evaluate): {}."
+                           .format(problem))
+    path = data.get("transcript_path")
+    try:
+        if not isinstance(path, str) or not path or "\x00" in path or not _console_prefix_is_absolute(path):
+            raise _ConsolePrefixUnreadable("the payload's transcript_path is {}".format(
+                "missing" if "transcript_path" not in data else
+                "not an absolute path" if isinstance(path, str) and path and "\x00" not in path else
+                "empty" if path == "" else "not a usable string ({})".format(_orch_json_kind(path))))
+        path = _console_prefix_confined(path, os.environ)
+        tail, truncated = _console_prefix_read_tail(path, _CONSOLE_PREFIX_TAIL_BYTES)
+        lines, unfinished = _console_prefix_lines(tail, truncated)
+        if not lines and truncated:
+            raise _ConsolePrefixUnreadable("the last {} bytes of the transcript hold no complete record".format(
+                _CONSOLE_PREFIX_TAIL_BYTES))
+        texts, reached = _console_prefix_span(lines)
+    except (_ConsolePrefixUnreadable, OSError, MemoryError) as exc:
+        detail = exc.args[0] if isinstance(exc, _ConsolePrefixUnreadable) else _exception_text(exc)
+        return _allow_note("AIQT rule tstamp: the console prefix check did not run ({}); allowing the call. "
+                           "{}".format(detail, _CONSOLE_PREFIX_RESIDUAL))
+    checked = _console_prefix_checked(texts)
+    missed = [index for index, text in enumerate(checked, 1) if not _console_prefix_matches(pattern, text)]
+    partial = "" if reached or not truncated else (
+        " The start of the span lies before the last {} bytes of the transcript, so earlier text in it was "
+        "not checked.".format(_CONSOLE_PREFIX_TAIL_BYTES))
+    if unfinished:
+        partial += " The last transcript line was still being written and was not checked."
+    setting = "" if problem is None else " ({})".format(problem)
+    if not missed:
+        if partial:
+            return _allow_note("AIQT rule tstamp: console prefix check:{}{}".format(partial, setting))
+        if problem is not None:
+            return _allow_note("AIQT rule tstamp: console prefix check passed{}.".format(setting))
+        return _allow()
+    reason = ("AIQT rule tstamp: {} of {} assistant text block(s) written since the last tool result do not "
+              "start with the required console prefix (the {} pattern); the first is block {} of the span. "
+              "Start every console message with the prefix.{} {}".format(
+                  len(missed), len(checked), _CONSOLE_PREFIX_PATTERN_ENV, missed[0], partial,
+                  _CONSOLE_PREFIX_RESIDUAL))
+    if posture == "deny":
+        return _deny(reason, "AIQT guardrail: denied a tool call that followed console text without its "
+                             "required prefix (rule tstamp).")
+    return _allow_note(reason + setting)
+
+
 # --- dispatcher ---------------------------------------------------------------------------------------
 HANDLERS = {
     "diff_wall_stop": diff_wall_stop,
@@ -41190,6 +42213,7 @@ HANDLERS = {
     "future_stamp_write": future_stamp_write,
     "clock_inject_post": clock_inject_post,
     "clock_inject_failure": clock_inject_failure,
+    "console_prefix_pretool": console_prefix_pretool,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -41236,6 +42260,7 @@ HANDLER_EVENT = {
     "future_stamp_write": PRETOOL_WARN_ONLY,
     "clock_inject_post": "PostToolUse",
     "clock_inject_failure": "PostToolUseFailure",
+    "console_prefix_pretool": PRETOOL,
 }
 
 
@@ -41757,8 +42782,9 @@ def main(argv):
     # wedge the session (an error path keeps no loop bound and never consults the stop_hook_active
     # field of the payload), so a bad-argv Stop invocation WARNS on exit 0 like every other Stop error
     # path. A bad-argv PreToolUse handler still fails closed (exit 2), save a warn-only one (HANDLER_EVENT
-    # class PRETOOL_WARN_ONLY, one of FAIL_OPEN_EVENTS) or a note-only one (NOTE_ONLY_PRETOOL_MODES), which
-    # never blocks a call and so takes the fail-open posture throughout.
+    # class PRETOOL_WARN_ONLY, one of FAIL_OPEN_EVENTS), which never blocks a call, or a note-only one
+    # (NOTE_ONLY_PRETOOL_MODES), which never blocks a call on its own failure; each takes the fail-open
+    # posture throughout.
     mode = argv[0] if argv else None
     if mode not in HANDLERS:
         _stderr_note("aiqt_hooks: usage: aiqt_hooks.py <{}>".format("|".join(sorted(HANDLERS))))
@@ -41869,8 +42895,8 @@ def main(argv):
         if exc.args[:1] != (window,):
             raise  # an enclosing window's deadline (an in-process caller's), not this call's
         if is_fail_open:
-            # Only a note-only PreToolUse mode is fail-open with a deadline: its check never blocks a call,
-            # so neither does its deadline. The warn print raising loses the warning and keeps the 0.
+            # Only a note-only PreToolUse mode is fail-open with a deadline: its check never blocks a call on
+            # its own failure, so neither does its deadline. The warn print raising loses the warning and keeps the 0.
             try:
                 return _dispatcher_fail_open_warn(handler_name, "no decision within its deadline")
             except BaseException:

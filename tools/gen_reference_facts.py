@@ -18,8 +18,13 @@ would leave the end marker indented as a Markdown code block. The landing page's
 carries the WHOLE "What is inside" table, its prose-only row included: a Markdown table is one
 contiguous run of lines, so a marker line inside it would split the rendered table in two.
 
+The landing hook count is the hooks the plugin registers by default (claude-code controls that are not
+opt-in), and both modes first hold it to the committed plugin hooks.json handler by handler: when they
+disagree, nothing is written and the run exits 1.
+
   gen_reference_facts.py            regenerate the roster and landing-count blocks
-  gen_reference_facts.py --check    exit 1 if a block is stale; exit 2 on error (fail-closed)
+  gen_reference_facts.py --check    exit 1 if a block is stale or the hook count and the plugin registration
+                                    disagree; exit 2 on error (fail-closed)
   gen_reference_facts.py --self-test
 """
 import sys
@@ -41,10 +46,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import linked_dir_failures, repo_root, reconcile, target_dir_present, unknown_args_refused  # noqa: E402
 from _standards import load_manifests, ManifestError, natkey  # noqa: E402
-from check_reference_facts import expected_counts  # noqa: E402
+from check_reference_facts import _manifest_entries, expected_counts, is_opt_in  # noqa: E402
 
 README_REL = Path(".aiqt") / "standards" / "README.md"
 LANDING_REL = Path("README.md")
+# The hooks the landing page counts are the ones the plugin registers by default: the claude-code controls of
+# the hooks manifest that are not opt-in. registration_disagreement holds that count to the committed plugin
+# hooks.json (what an installed plugin actually registers), handler by handler.
+HOOKS_MANIFEST_REL = Path(".aiqt") / "core" / "hooks" / "manifest.toml"
+HOOKS_JSON_REL = Path("plugin") / "aiqt-guardrails-hooks" / "hooks" / "hooks.json"
 MARKER = "ROSTER"
 # The landing page's two generated blocks: the bold proof line and the "What is inside" table.
 PROOF_MARKER = "COUNTS-PROOF"
@@ -182,6 +192,32 @@ def build_landing(root, manifests):
     return _replace_marked(text, TABLE_MARKER, render_inside_table(counts), LANDING_REL)
 
 
+def registration_disagreement(root):
+    """None when the hooks the landing page counts (the claude-code controls of the hooks manifest that are
+    not opt-in, the expected_counts predicate) are exactly the hooks the committed plugin hooks.json
+    registers, compared as a multiset of handler names; otherwise a sentence naming both counts and the
+    handlers on each side only. Raises OSError/ValueError/KeyError/TypeError on an unreadable or malformed
+    manifest or hooks.json; the caller maps those to exit 2."""
+    import json
+    from collections import Counter
+    counted = Counter(h["handler"] for h in _manifest_entries(root / HOOKS_MANIFEST_REL, "hook",
+                                                              ("platform", "default", "handler"))
+                      if h["platform"] == "claude-code" and not is_opt_in(h))
+    registered = Counter()
+    events = json.loads((root / HOOKS_JSON_REL).read_text(encoding="utf-8"))["hooks"]
+    for entries in events.values():
+        for entry in entries:
+            for launcher in entry["hooks"]:
+                registered[launcher["args"][-1]] += 1
+    if counted == registered:
+        return None
+    return ("the landing page would count {} Claude Code hooks, but {} registers {} (counted only: {}; "
+            "registered only: {})".format(sum(counted.values()), HOOKS_JSON_REL.as_posix(),
+                                          sum(registered.values()),
+                                          sorted((counted - registered).elements()) or "none",
+                                          sorted((registered - counted).elements()) or "none"))
+
+
 def run(root, check):
     # The directory probe reconcile runs (target_dir_present), for both pages before anything is read: an
     # .aiqt/standards/ that is there but cannot be read as a directory inside the repository exits 2 here, so
@@ -192,10 +228,17 @@ def run(root, check):
         manifests = load_manifests(root / ".aiqt" / "standards", root=root)
         roster_text = build(root, manifests)
         landing_text = build_landing(root, manifests)
-    except (ManifestError, OSError, ValueError, KeyError) as exc:
+        disagreement = registration_disagreement(root)
+    except (ManifestError, OSError, ValueError, KeyError, TypeError, AttributeError, IndexError) as exc:
         print("error: cannot build the reference-facts blocks ({}); fail-closed".format(exc),
               file=sys.stderr)
         return 2
+    if disagreement is not None:
+        # Checked before anything is written, in generate and --check alike: a count that is not what the
+        # plugin registers is never rendered, and regenerating cannot repair it (gen_hooks renders hooks.json).
+        print("registration: {}; the hook count and the plugin registration disagree, so nothing was "
+              "written".format(disagreement), file=sys.stderr)
+        return 1
     drifted = False
     if reconcile(root / README_REL, roster_text, check, root):
         print("drift: .aiqt/standards/README.md roster is out of date; run tools/gen_reference_facts.py",
@@ -295,15 +338,30 @@ _GATES_TOML = (
 )
 _EXTRA_CI_GATE = '[[gate]]\nid = "g7"\nplatform = "ci"\n'
 _HOOKS_TOML = (
-    '[[hook]]\nid = "h1"\nplatform = "claude-code"\ndefault = "block"\n'
-    '[[hook]]\nid = "h2"\nplatform = "claude-code"\ndefault = "block"\n'
-    '[[hook]]\nid = "h3"\nplatform = "claude-code"\ndefault = "block"\n'
-    '[[hook]]\nid = "h4"\nplatform = "claude-code"\ndefault = "block"\n'
-    '[[hook]]\nid = "h5"\nplatform = "claude-code"\ndefault = "warn"\n'
-    '[[hook]]\nid = "h6"\nplatform = "claude-code"\ndefault = "warn"\n'
-    '[[hook]]\nid = "h7"\nplatform = "claude-code"\ndefault = "warn"\n'
-    '[[hook]]\nid = "h8"\nplatform = "other"\ndefault = "block"\n'
+    '[[hook]]\nid = "h1"\nplatform = "claude-code"\nhandler = "h1"\ndefault = "block"\n'
+    '[[hook]]\nid = "h2"\nplatform = "claude-code"\nhandler = "h2"\ndefault = "block"\n'
+    '[[hook]]\nid = "h3"\nplatform = "claude-code"\nhandler = "h3"\ndefault = "block"\n'
+    '[[hook]]\nid = "h4"\nplatform = "claude-code"\nhandler = "h4"\ndefault = "block"\nregistration = "plugin"\n'
+    '[[hook]]\nid = "h5"\nplatform = "claude-code"\nhandler = "h5"\ndefault = "warn"\n'
+    '[[hook]]\nid = "h6"\nplatform = "claude-code"\nhandler = "h6"\ndefault = "warn"\n'
+    '[[hook]]\nid = "h7"\nplatform = "claude-code"\nhandler = "h7"\ndefault = "warn"\n'
+    '[[hook]]\nid = "h8"\nplatform = "other"\nhandler = "h8"\ndefault = "block"\n'
+    # An opt-in control: the plugin does not register it, so it is in neither the count nor the split (were it
+    # counted, the fixture's literal figures 7 hooks and 4 blocking would read 8 and 5).
+    '[[hook]]\nid = "h-opt"\nplatform = "claude-code"\nhandler = "h_opt"\ndefault = "block"\n'
+    'registration = "opt-in"\n'
 )
+# The handlers the fixture's plugin hooks.json registers: every claude-code hook that is not opt-in.
+_REGISTERED = ("h1", "h2", "h3", "h4", "h5", "h6", "h7")
+
+
+def _hooks_json(handlers):
+    """A plugin hooks.json in the gen_hooks shape registering one PreToolUse launcher per handler."""
+    import json
+    return json.dumps({"description": "fixture", "hooks": {"PreToolUse": [
+        {"matcher": "Bash", "hooks": [{"type": "command", "command": "python3",
+                                       "args": ["-I", "scripts/aiqt_hooks.py", name], "timeout": 10}]}
+        for name in handlers]}}, indent=2) + "\n"
 _ENFORCEMENT = (
     "# Register\n\n| Status | Count |\n| --- | --- |\n"
     "| Gate-linked (class a) | 1 |\n| Gate-linked (class a), partial | 0 |\n"
@@ -341,6 +399,8 @@ def _write_fixture(base, manifests, readme, landing=None):
     (core / "gates" / "manifest.toml").write_text(_GATES_TOML, encoding="utf-8")
     (core / "hooks").mkdir()
     (core / "hooks" / "manifest.toml").write_text(_HOOKS_TOML, encoding="utf-8")
+    (base / HOOKS_JSON_REL).parent.mkdir(parents=True)
+    (base / HOOKS_JSON_REL).write_text(_hooks_json(_REGISTERED), encoding="utf-8")
     (base / "ENFORCEMENT.md").write_text(_ENFORCEMENT, encoding="utf-8")
     (base / "README.md").write_text(landing if landing is not None else _LANDING, encoding="utf-8")
 
@@ -476,10 +536,13 @@ def self_test_main():
             (gatemove / ".aiqt" / "core" / "rules" / (stem + ".md")).write_text(
                 "# a fixture rule\n", encoding="utf-8")
         (gatemove / ".aiqt" / "core" / "hooks" / "manifest.toml").write_text(_HOOKS_TOML + (
-            '[[hook]]\nid = "h9"\nplatform = "claude-code"\ndefault = "block"\n'
-            '[[hook]]\nid = "h10"\nplatform = "claude-code"\ndefault = "block"\n'
-            '[[hook]]\nid = "h11"\nplatform = "claude-code"\ndefault = "warn"\n'
-            '[[hook]]\nid = "h12"\nplatform = "claude-code"\ndefault = "warn"\n'), encoding="utf-8")
+            '[[hook]]\nid = "h9"\nplatform = "claude-code"\nhandler = "h9"\ndefault = "block"\n'
+            '[[hook]]\nid = "h10"\nplatform = "claude-code"\nhandler = "h10"\ndefault = "block"\n'
+            '[[hook]]\nid = "h11"\nplatform = "claude-code"\nhandler = "h11"\ndefault = "warn"\n'
+            '[[hook]]\nid = "h12"\nplatform = "claude-code"\nhandler = "h12"\ndefault = "warn"\n'),
+            encoding="utf-8")
+        (gatemove / HOOKS_JSON_REL).write_text(_hooks_json(_REGISTERED + ("h9", "h10", "h11", "h12")),
+                                               encoding="utf-8")
         (gatemove / ".aiqt" / "standards" / "gamma.toml").write_text(
             _MANIFEST.format(k="gamma", name="Gamma Framework", ed="3.0"), encoding="utf-8")
         (gatemove / "ENFORCEMENT.md").write_text(
@@ -631,6 +694,42 @@ def self_test_main():
             if run_quiet(disjoint, check=True) != 0:
                 failures.append("{} disjoint landing blocks expected exit 0 on --check".format(label))
 
+        # (p) the hook count is held to the plugin registration: the fixture's opt-in control is in neither the
+        #     count nor the split (case (a) asserts 7 hooks, 4 blocking, which would read 8 and 5 were it
+        #     counted); a hooks.json that registers one hook fewer, registers the opt-in control, or swaps a
+        #     registered handler for another each fails generate and --check (exit 1) with the disagreement
+        #     named, writing nothing; a missing or malformed hooks.json fails closed (exit 2).
+        for label, handlers in (("one-fewer", _REGISTERED[:-1]),
+                                ("opt-in-registered", _REGISTERED + ("h_opt",)),
+                                ("swapped", _REGISTERED[:-1] + ("h8",))):
+            for check_mode, mode_label in ((False, "generate"), (True, "--check")):
+                reg = tmp / "registration-{}-{}".format(label, mode_label.strip("-"))
+                _write_fixture(reg, two, _README)
+                (reg / HOOKS_JSON_REL).write_text(_hooks_json(handlers), encoding="utf-8")
+                before = ((reg / LANDING_REL).read_bytes(), (reg / README_REL).read_bytes())
+                code, err = run_captured(reg, check=check_mode)
+                if code != 1 or "disagree" not in err:
+                    failures.append("registration {} on {}: expected exit 1 naming the disagreement, got {} "
+                                    "({!r})".format(label, mode_label, code, err))
+                if ((reg / LANDING_REL).read_bytes(), (reg / README_REL).read_bytes()) != before:
+                    failures.append("registration {} on {}: a disagreement must write nothing".format(
+                        label, mode_label))
+        for label, text in (("missing", None), ("malformed", "{not json\n"), ("no-hooks-key", "{}\n")):
+            reg = tmp / ("registration-" + label)
+            _write_fixture(reg, two, _README)
+            if text is None:
+                (reg / HOOKS_JSON_REL).unlink()
+            else:
+                (reg / HOOKS_JSON_REL).write_text(text, encoding="utf-8")
+            if run_quiet(reg, check=True) != 2:
+                failures.append("registration {} hooks.json expected exit 2 (fail-closed)".format(label))
+        nonstring = tmp / "registration-not-a-string"
+        _write_fixture(nonstring, two, _README)
+        (nonstring / ".aiqt" / "core" / "hooks" / "manifest.toml").write_text(
+            _HOOKS_TOML.replace('registration = "plugin"', "registration = 1"), encoding="utf-8")
+        if run_quiet(nonstring, check=True) != 2:
+            failures.append("a registration that is not a string expected exit 2 (fail-closed)")
+
         # .aiqt/ above the roster README symlinked outside the root fails closed (exit 2) in --check and write
         # mode with the README there untouched and never read: the README there has no ROSTER markers, and each
         # run prints the link refusal, not the marker error; symlinked inside the root, it is read and the
@@ -660,7 +759,10 @@ def self_test_main():
           "again writing nothing), duplicated ROSTER blocks "
           "(on both generate and --check), an empty standards dir, a missing ENFORCEMENT.md, and an "
           "invalid-UTF-8 README all fail closed (exit 2); an .aiqt/ symlinked outside the root fails closed "
-          "(exit 2) with the README there untouched and never read, and one inside the root is followed")
+          "(exit 2) with the README there untouched and never read, and one inside the root is followed; "
+          "an opt-in hook is left out of the count and split, a plugin hooks.json registering one hook fewer, "
+          "the opt-in hook, or another handler fails generate and --check (exit 1, nothing written), and a "
+          "missing or malformed hooks.json or a non-string registration fails closed (exit 2)")
     return 0
 
 
