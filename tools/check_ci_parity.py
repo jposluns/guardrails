@@ -996,11 +996,24 @@ ALLOWLIST = (
     },
     {
         "side": "ci-only",
+        "identity": "tools/check_must_deliver.py --base <ref:$PUSH_BEFORE>",
+        "reason": (
+            "The push CI job compares the list with the list at the event's "
+            "before OID, so a rule dropped in any commit of the push is caught; "
+            "a missing or all-zero before OID fails the step closed. The bare "
+            "leg (default base: the merge base with origin/main) runs on both "
+            "sides."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
         "identity": "tools/check_must_deliver.py --base HEAD^",
         "reason": (
-            "The CI else-branch uses the history-relative literal base HEAD^ "
-            "when no pull-request target ref is available; there is no local "
-            "--base leg, so this literal form is CI-only by design."
+            "The CI else-branch (a workflow_dispatch run, which has neither a "
+            "pull-request target ref nor a pushed range) uses the "
+            "history-relative literal base HEAD^; there is no local --base "
+            "leg, so this literal form is CI-only by design."
         ),
         "backlog": "GD-123",
     },

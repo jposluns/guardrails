@@ -187,11 +187,15 @@ def _git_env():
 
 
 def _git(root, args):
-    """Run git -C root with args; returns the CompletedProcess (bytes). A missing git binary or a call
-    past GIT_TIMEOUT is a DemoError (exit 2): the comparison cannot run."""
+    """Run git -C root with args; returns the CompletedProcess (bytes). The three `-c` pairs in option
+    position switch off automatic gc and maintenance (tools/_git_fixture_env.py _NO_AUTO_MAINTENANCE),
+    the posture tools/check_no_dashes.py takes for its own git reads, so no call here can leave a
+    detached repack behind. A missing git binary or a call past GIT_TIMEOUT is a DemoError (exit 2):
+    the comparison cannot run."""
     try:
-        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, env=_git_env(),
-                              timeout=GIT_TIMEOUT)
+        return subprocess.run(["git", "-C", str(root), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
+                               "-c", "maintenance.auto=false", *args], capture_output=True,
+                              env=_git_env(), timeout=GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise DemoError("git {} could not run ({})".format(args[0], exc))
 
@@ -392,8 +396,9 @@ def main():
 #       offsets relative to the rule region, without the rules_start shift, passes);
 #   T13 the margin report: the unlisted-rule line, and a WARNING line under warn-margin-bytes that still
 #       exits 0 (a mutant whose warning exits non-zero, or margin off by one, fails).
-# The list ratchet (T14 to T20) runs gate() against temporary git repositories built with the same
-# helpers and committed through _git_fixture_env's hermetic environment:
+# The list ratchet (T14 to T21) runs gate() against temporary git repositories built with the same
+# helpers and committed through _git_fixture_env's hermetic environment, the whole self-test inside
+# fixture_git_lifecycle so the gate's own base reads see no caller git configuration either:
 #   T14 the base lists ruleaa and the working list drops it with no [[removal]] row: exit 1 naming ruleaa
 #       (a mutant that never reads the base, comparing the working list with itself, passes);
 #   T15 the same drop with a [[removal]] row naming ruleaa: exit 0, the removal and its reason printed (a
@@ -409,7 +414,10 @@ def main():
 #       between the two lists fails);
 #   T20 ruleaa grows past the cap, the working list drops it, and the first-pin demonstration is
 #       regenerated without it: exit 1 naming ruleaa from the ratchet, with no prefix FAIL line (a mutant
-#       comparing against the demonstration's delivered list instead of the base list passes).
+#       comparing against the demonstration's delivered list instead of the base list passes);
+#   T21 the base lists ruleaa, a later commit (HEAD) drops it with no [[removal]] row and the working list
+#       matches HEAD: against the base, exit 1 naming ruleaa (a mutant that resolves --base but reads the
+#       list at HEAD sees no drop and passes).
 
 import gen_first_pin_demo as gfpd  # noqa: E402  fixture helpers (_write_tree, _tuned) and CAP_BYTES
 
@@ -432,6 +440,17 @@ def _decl(root, rows, warn=512, raw=None):
 
 
 def self_test_main():
+    """The self-test runs inside _git_fixture_env.fixture_git_lifecycle, as the sibling gates' self-tests
+    do: HOME, XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM are pinned to fixture-owned
+    values for the whole run, and its PATH wrapper reasserts the system-config pin after _git_env drops
+    every GIT_ variable, so neither the fixture git calls nor the gate's own base reads under test can
+    read the caller's git configuration."""
+    from _git_fixture_env import fixture_git_lifecycle
+    with fixture_git_lifecycle():
+        return _self_test_main_isolated()
+
+
+def _self_test_main_isolated():
     import io
     import shutil
     import tempfile
@@ -875,6 +894,21 @@ def self_test_main():
         if code != 1 or drop_msg not in out or "FAIL: rule ruleaa ends at" in out:
             failures.append("T20: a rule dropped from the list together with a regenerated demonstration "
                             "must be exit 1 from the ratchet naming it, got {}\n{}".format(code, out))
+
+        # T21. The list is read from the named base, not HEAD: the base lists ruleaa, a later commit (HEAD)
+        # drops it with no [[removal]] row, and the working list matches HEAD. Against the base the drop is
+        # exit 1; a gate reading HEAD's list instead sees no drop and exits 0.
+        t21, base21 = ratchet_fixture("t21")
+        _decl(t21, [], raw=raw_decl(["prjint1"]))
+        fixture_git(t21, "add", "-A")
+        fixture_git(t21, "commit", "-q", "-m", "fixture head drops ruleaa")
+        head21 = fixture_git(t21, "rev-parse", "HEAD")
+        if head21 == base21:
+            failures.append("T21: the fixture HEAD did not move past the base ({})".format(base21))
+        code, out = capture_gate(t21, base21)
+        if code != 1 or drop_msg not in out or "base {} ({})".format(base21, base21[:12]) not in out:
+            failures.append("T21: with HEAD past the base, the list must be read at the named base and the "
+                            "drop be exit 1 naming ruleaa, got {}\n{}".format(code, out))
     except _FixtureError as exc:
         fixture_error = str(exc)
     finally:
@@ -903,7 +937,8 @@ def self_test_main():
           "cap is read from check_release_build.CAP_BYTES at call time; a before-rules block moves the "
           "spans it measures; the margin report, the unlisted-rule line and the warn-margin WARNING "
           "(still exit 0) are printed exactly; and against a committed base, a rule dropped from the list "
-          "with no [[removal]] row fails naming it (also with the demonstration regenerated without it), "
+          "with no [[removal]] row fails naming it (also with the demonstration regenerated without it, "
+          "and with HEAD past the base, the list read at the base), "
           "a declared removal passes and is printed, an addition passes, and a malformed removal row, an "
           "unresolvable or missing base and an absent or malformed base list fail closed (exit 2). "
           "{}".format(
