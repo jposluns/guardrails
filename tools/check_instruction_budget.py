@@ -342,6 +342,10 @@ DOT_CLAUDE_REL = ".claude/CLAUDE.md"
 HEADER_FIXED = "Contents of " + " (project instructions, checked into the codebase)" + ":\n\n" + "\n\n"
 BUDGET_REL = ".aiqt/core/instruction-budget.toml"
 BUDGET_KEYS = {"ratchet", "ceiling", "claude-code-version", "binary-sha256"}
+# The largest integer TOML defines (64-bit signed). _budget_data refuses a ratchet or ceiling above it:
+# tomllib reads a hex, octal or binary literal of any length, and decimal text of one past CPython's
+# int-string limit raises ValueError wherever the value is formatted.
+BUDGET_INT_MAX = 2 ** 63 - 1
 # Importing either from the managed block loads the rule index or a second full copy of the corpus on top
 # of the rule tree, so either is a finding whatever the measured total. Matched on the final path
 # component in any case, as a case-insensitive file system reads it.
@@ -1299,8 +1303,8 @@ def _budget_file(root):
 
 def load_budget(root):
     """The validated budget source, opened only after _budget_file. GateError on a missing, unreadable, or
-    malformed file: exactly the four BUDGET_KEYS, positive integer ratchet and ceiling (a bool is refused),
-    an X.Y.Z version, and a lowercase hex SHA-256 (_budget_data)."""
+    malformed file: exactly the four BUDGET_KEYS, positive integer ratchet and ceiling no greater than
+    BUDGET_INT_MAX (a bool is refused), an X.Y.Z version, and a lowercase hex SHA-256 (_budget_data)."""
     return _budget_data(read_text(_budget_file(root), BUDGET_REL), BUDGET_REL)
 
 
@@ -1319,6 +1323,10 @@ def _budget_data(text, where):
     for key in ("ratchet", "ceiling"):
         if type(data[key]) is not int or data[key] <= 0:
             raise GateError("{}: {} must be a positive integer".format(where, key))
+        # Compared, never formatted: the value may be a non-decimal literal past the int-string limit.
+        if data[key] > BUDGET_INT_MAX:
+            raise GateError("{}: {} must be at most {} (2**63-1, the largest TOML integer)".format(
+                where, key, BUDGET_INT_MAX))
     version = data["claude-code-version"]
     if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
         raise GateError("{}: claude-code-version must be an X.Y.Z string".format(where))
@@ -1385,9 +1393,10 @@ SHAPE_ENTRY_INDENT_WIDTH = 24
 SHAPE_ENTRY_LINE_RE = re.compile(r"#( +)([ -~]*)\n", re.ASCII)
 # An entry's first line. Its numbers are canonical: no leading zero, sign, or digit separator.
 SHAPE_NUMBER = r"[1-9][0-9]*"
-# The most digits an entry number may have before int() reads it: a TOML integer is 64-bit signed, so a
-# valid ratchet has at most 19 digits. A longer number is cannot-evaluate (exit 2), never a conversion
-# past CPython's int-string limit.
+# The most digits an entry number may have before int() reads it. _budget_data refuses a ratchet above
+# BUDGET_INT_MAX (2**63-1, which has 19 digits), so every ratchet it accepts has at most 19 digits. An
+# entry number with more is cannot-evaluate (exit 2), never a conversion past CPython's int-string limit;
+# one of 19 digits is read and evaluated, even above BUDGET_INT_MAX.
 SHAPE_NUMBER_MAX_DIGITS = 19
 SHAPE_ENTRY_FIRST_RE = re.compile(
     "Raised (" + SHAPE_NUMBER + ") -> (" + SHAPE_NUMBER + r") on ([0-9]{4}-[0-9]{2}-[0-9]{2})(?: [ -~]*)?",
@@ -1568,7 +1577,11 @@ def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
     exact base and head bytes covers it; a declaration never waives the entry rules. A candidate without
     exactly one `#   ceiling` line is compared whole and has no entry block. A candidate without exactly
     one `#   ceiling` line or exactly one `ratchet = N` line (SHAPE_RATCHET_RE) is a finding no declaration
-    waives, so an accepted candidate can always serve as a later comparison's base."""
+    waives, so an accepted candidate stays evaluable as a later comparison's base. That is all it keeps:
+    not that a routine raise on it can pass. A declared change that writes a future date above the
+    `#   ceiling` line (`review due 2031-01-01`, say) is accepted, and then every later raise dated before
+    that day is a finding (the entry date floor), which no declaration waives, until a declared change
+    removes the date."""
     if today is None:
         today = datetime.datetime.now(datetime.timezone.utc).date()
     base_text, base_data = _shape_text(base_raw, "the base " + BUDGET_REL)
@@ -1828,6 +1841,16 @@ def _measured(fn, root):
         if type(exc).__name__ == "GateError":
             return "GateError"
         raise
+
+
+def _status_or_escape(fn, *args):
+    """`fn(*args)` with its output discarded, or the class name of an Exception escaping it, so a row records
+    an uncaught conversion error as its value instead of ending the self-test."""
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return fn(*args)
+    except Exception as exc:  # noqa: BLE001  recorded as the row's value
+        return type(exc).__name__
 
 
 class _GuardedMutant:
@@ -2938,6 +2961,26 @@ def self_test(report_path=None):
         badbudget = _tree(tmp / "badbudget")
         (badbudget / BUDGET_REL).write_bytes(b"ratchet = true\nceiling = 90000\n")
         check("exit/malformed-budget-2", _quiet(run, badbudget), 2)
+        # A ratchet or ceiling above BUDGET_INT_MAX is refused (exit 2) in each non-decimal TOML form, just
+        # past the bound and far past CPython's int-string limit (which tomllib applies to decimal only);
+        # the bound itself is accepted in every form.
+        past_bound = [hex(BUDGET_INT_MAX + 1), oct(BUDGET_INT_MAX + 1), bin(BUDGET_INT_MAX + 1),
+                      "0x" + "f" * 5000, "0o" + "7" * 6000, "0b" + "1" * 15000]
+
+        def bound_budget(name, ratchet, ceiling="90000"):
+            root = _tree(tmp / name)
+            (root / BUDGET_REL).write_bytes(_budget_text(ratchet).replace(
+                "ceiling = 90000\n", "ceiling = {}\n".format(ceiling)).encode("utf-8"))
+            return root
+
+        bound_roots = ([bound_budget("bound-ratchet-{}".format(i), value) for i, value in enumerate(past_bound)]
+                       + [bound_budget("bound-ceiling-{}".format(i), 10 ** 6, value)
+                          for i, value in enumerate(past_bound)])
+        check("exit/budget-integer-past-bound-2", [_status_or_escape(run, root) for root in bound_roots], [2] * 12)
+        at_bound = [str(BUDGET_INT_MAX), hex(BUDGET_INT_MAX), oct(BUDGET_INT_MAX), bin(BUDGET_INT_MAX)]
+        check("exit/budget-integer-at-bound-0",
+              [_quiet(run, bound_budget("bound-at-{}".format(i), value, value)) for i, value in enumerate(at_bound)],
+              [0] * 4)
         nomarkers = _tree(tmp / "nomarkers")
         (nomarkers / CLAUDE_REL).write_bytes(b"# CLAUDE.md with no managed block\n")
         check("exit/missing-managed-block-markers-2", _quiet(run, nomarkers), 2)
@@ -3316,6 +3359,12 @@ def self_test(report_path=None):
               ([shape(base_shape, head) for head in oversized],
                shape(base_shape, raised(base_shape, opened(text="Raised 100 -> " + "9" * 19 + " on {}")))),
               ([(2, [])] * 3, (1, ["5"])))
+        # A candidate ratchet or ceiling above BUDGET_INT_MAX (past_bound) is cannot-evaluate, never an
+        # uncaught ValueError where the candidate's ratchet is formatted as decimal text.
+        bound_heads = ([raised(base_shape, ratchet=value) for value in past_bound]
+                       + [clean.replace("ceiling = 90000\n", "ceiling = {}\n".format(value)) for value in past_bound])
+        check("shape/budget-integer-past-bound-2",
+              [_status_or_escape(shape, base_shape, head) for head in bound_heads], [(2, [])] * 12)
         check("shape/options-grammar",
               [shape_options(args) for args in (
                   [], ["--protected", "origin/main"], ["--base", "a1", "--protected", "origin/main"],
@@ -3355,6 +3404,14 @@ def self_test(report_path=None):
               shape(base_shape, oversized[0], module=_mutant(
                   tmp, "        if max(len(match.group(1)), len(match.group(2))) > SHAPE_NUMBER_MAX_DIGITS:\n",
                   "        if False:\n"))[0], 1)
+        # With the bound removed, a value just past it is accepted (live 0, shape 1) and a huge one escapes
+        # as the int-string ValueError: no row value stays a refusal.
+        bound_mutant = _mutant(tmp, "        if data[key] > BUDGET_INT_MAX:\n", "        if False:\n")
+        check("revert/budget-integer-bound-red",
+              ([_status_or_escape(bound_mutant.run, root) for root in bound_roots],
+               [(lambda got: got if isinstance(got, str) else got[0])(
+                   _status_or_escape(shape, base_shape, head, None, bound_mutant)) for head in bound_heads]),
+              (([0] * 3 + ["ValueError"] * 3) * 2, [1] * 3 + ["ValueError"] * 3 + [1] * 6))
         check("revert/shape-unreadable-base-red",
               shape(None, clean, module=_mutant(tmp, '_shape_text(base_raw, "the base "',
                                                 '_shape_text(base_raw or head_raw, "the base "'))[0], 0)
