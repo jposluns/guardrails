@@ -798,12 +798,15 @@ def _valued_option_failures():
 # lets one child process through: the exact git index read the generators make, `git -C <dir>`, then only the
 # pins `-c core.fsmonitor=false` and `-c protocol.allow=never`, then `ls-files` with only -z, --cached and --stage
 # before an optional `--` and its pathspecs, launched as git with no GIT_* variable in its environment but
-# GIT_NO_LAZY_FETCH; that read writes nothing. Any other git command is blocked. With no
-# argument the generator must reach write mode, shown as the hook ending the child at a write (not at a process
-# event), or, where a write is not expected because the generator writes only on a difference and the tree is
-# current, as exit 0 with nothing blocked and no refusal; with --check it must exit 0 or 1, not refused and with
-# nothing blocked. So a generator that exits 2 with an `error:` line and a usage line whatever its arguments, which
-# the refusal shape alone would pass, is reported.
+# GIT_NO_LAZY_FETCH; that read writes nothing. Any other git command is blocked. A write
+# here is an open for writing, a directory creation, a delete, a rename or a truncation whose path lies in the
+# child's working directory (the copy); the hook marks such a block, so a process event, an os.chmod, or a
+# directory tempfile.mkdtemp makes outside the copy is not a write. On the current tree, with no argument the
+# generator must end at a write or exit 0 with nothing blocked and no refusal, and with --check it must exit 0 or 1,
+# not refused and with nothing blocked. On the stale tree (below), with no argument it must end at a write, and with
+# --check it must exit 1 with nothing blocked and no refusal. So a generator that exits 2 with an `error:` line and
+# a usage line whatever its arguments, which the refusal shape alone would pass, is reported, and so are one that
+# runs a mode writing nothing with no argument and one whose --check writes.
 # The check over the real generators is hermetic: they run only inside a throwaway git repository that
 # _gen_argv_head_copy builds from `git archive HEAD` (extracted, then git init, add and commit there), each child
 # with the copy as its working directory and an environment holding no GIT_* variable of the caller
@@ -815,22 +818,28 @@ def _valued_option_failures():
 # generator's runs the copy's `git status --ignored` must show nothing new but .pyc files directly in a
 # __pycache__/ directory, so the plain form also writes nothing but Python's own bytecode cache, which the imports
 # write before the guard runs (gitignored).
-# Stale tree: the copy's generated files are current, so a generator that writes only on a difference (most go
-# through reconcile) would write nothing even if it wrote before its guard. So, in the copy, the refusal cases and
-# the plain form each run on a tree made stale on purpose: every file under each target the copy's
+# Stale tree: the copy's generated files are current, so a generator that writes only when a target differs (not
+# every generator does: reconcile in _gen_common writes whenever it is not in check mode) would write nothing there
+# even if it wrote before its guard or ran the wrong mode. So, in the copy, the refusal cases, the plain form, the
+# no-argument case and the --check case each run on a tree made stale on purpose: every file under each target the
+# copy's
 # .aiqt/gensrc.json names for that generator (its entry's regenerate command `python3 tools/<name>`) gains a stale
 # line at its end and after each line holding BEGIN (inside a marked block, for a block target), and after the
 # run it must still hold exactly those bytes; the originals are then restored. So a write on difference before the
-# guard is blocked by the hook (the refusal cases), or rewrites the altered file (the plain form), and is
-# reported. A generator the registry names no target for is reported, since its refusal ran on no stale target.
+# guard is blocked by the hook (the refusal cases, the --check case), or rewrites the altered file (the plain
+# form), and is reported; a no-argument run that writes nothing on the stale tree is reported too. A generator the
+# registry names no target for is reported, since its refusal ran on no stale target, and its no-argument and
+# --check cases then run on the current tree only.
 # Residuals, not covered:
 # - the check reads the committed tree: an uncommitted change to a generator is checked once it is committed, and
 #   a stale generated file committed at HEAD can still fail it (the --check gates fail that commit as well);
-# - the no-argument and --check cases run on the current (restored) tree: there a generator that writes only on a
-#   difference passes the no-argument case if it runs its check mode, and passes the --check case if it ignores
-#   --check and runs its write mode, since neither mode writes on a current tree;
+# - the mode cases show behaviour, not the mode: a no-argument run passes by reaching any write in the copy (the
+#   hook ends it there, so what it would have written is not seen), and a --check run passes by exiting 1 with
+#   nothing blocked on the stale tree, whatever made it exit 1; a path relative to a dir_fd passed to os.open is
+#   judged against the working directory;
 # - the stale tree alters only the files the registry declares: a write before the guard to a file the registry
-#   does not name, or to a block whose opening marker line does not hold BEGIN, is still not made to fire;
+#   does not name, or to a block whose opening marker line does not hold BEGIN, is still not made to fire; it adds
+#   no file to a directory target, so a deletion of an orphan file before the guard is not made to fire either;
 # - a write made inside C code without an audit event (for example the database file sqlite3 creates, os.mknod,
 #   posix.mkfifo, which the os.mkfifo wrapper does not reach, or an extension module's own I/O) is not seen by the
 #   hook, and the status comparison sees it only when it changes a file in the copy: such a write of identical
@@ -841,9 +850,9 @@ def _valued_option_failures():
 #   named otherwise is not checked.
 _GEN_ARGV_CLASS_CASES = (["--chek"], ["--check", "--chek"], ["--self-test", "--chek"], ["--help"], ["check"],
                          ["--root", "--chek"])
-# The process events of the hook below: a no-argument run ended at one of these has not shown a write.
-_GEN_ARGV_PROCESS_EVENTS = frozenset(("os.exec", "os.fork", "os.forkpty", "os.kill", "os.killpg", "os.posix_spawn",
-                                      "os.spawn", "os.system", "subprocess.Popen"))
+# The text the hook below adds to a block that is a write in its working directory (_WRITE_PATH there); a mode case
+# shows a write only when its child was ended at a block carrying it.
+_GEN_ARGV_TREE_WRITE = " (a write in the working directory)"
 _GEN_ARGV_CHILD = """import contextlib, io, json, os, runpy, sys
 _real_mkfifo = os.mkfifo
 def _audited_mkfifo(path, mode=0o666, *, dir_fd=None):
@@ -858,6 +867,22 @@ _MUTATING = frozenset(("os.chflags", "os.chmod", "os.chown", "os.exec", "os.fork
                        "subprocess.Popen", "tempfile.mkdtemp", "tempfile.mkstemp"))
 _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
 script, cases, accept = sys.argv[1], json.loads(sys.argv[2]), sys.argv[3] == "accept"
+_CWD = os.getcwd()
+# event: (index of the written path in its arguments, index of its dir_fd or None)
+_WRITE_PATH = {"open": (0, None), "os.mkdir": (0, 2), "os.remove": (0, 1), "os.rename": (1, 3),
+               "os.truncate": (0, None)}
+def _in_tree(event, args):
+    if event not in _WRITE_PATH:
+        return False
+    i, fd = _WRITE_PATH[event]
+    try:
+        path = os.fsdecode(os.fspath(args[i]))
+        if fd is not None and len(args) > fd and args[fd] is not None and not os.path.isabs(path):
+            return False
+        path = os.path.normpath(os.path.join(_CWD, path))
+    except (TypeError, ValueError, IndexError):
+        return False
+    return path == _CWD or path.startswith(_CWD.rstrip(os.sep) + os.sep)
 def _git_listing(args):
     if not accept or len(args) < 4 or not isinstance(args[1], (list, tuple)):
         return False
@@ -886,7 +911,8 @@ def _hook(event, args):
             return
     elif event not in _MUTATING or (event == "subprocess.Popen" and _git_listing(args)):
         return
-    os.write(2, ("blocked: " + event + "\\n").encode())
+    note = " (a write in the working directory)" if _in_tree(event, args) else ""
+    os.write(2, ("blocked: " + event + note + "\\n").encode())
     os._exit(97)
 sys.addaudithook(_hook)
 for argv in cases:
@@ -926,12 +952,12 @@ def _gen_argv_child(path, cases, accept, cwd):
 def _gen_argv_class_failures(tools, repo=None):
     """One failure line per tools/gen_*.py in the directory tools that does not refuse every
     _GEN_ARGV_CLASS_CASES argv with exit 2 and a stderr that is only the refusal (see _gen_argv_refusal), or whose
-    no-argument run does not reach a write, or whose --check run is refused, writes or does not exit 0 or 1. With
-    repo, a throwaway git repository holding tools as repo/tools, the children run in repo, each generator also runs
-    in the plain form `python3 tools/<name> --chek` there, a change to repo that `git status --ignored` shows
-    after a generator's runs, other than a .pyc file in a __pycache__/ directory, is reported (see
-    _gen_argv_plain_failures), and the refusal cases and the plain form run on a tree made stale on purpose (see
-    _gen_argv_stale)."""
+    no-argument or --check run fails _gen_argv_mode_failures on the current tree. With repo, a throwaway git
+    repository holding tools as repo/tools, the children run in repo, each generator also runs in the plain form
+    `python3 tools/<name> --chek` there, a change to repo that `git status --ignored` shows after a generator's
+    runs, other than a .pyc file in a __pycache__/ directory, is reported (see _gen_argv_plain_failures), the
+    refusal cases and the plain form run on a tree made stale on purpose (see _gen_argv_stale), and the
+    no-argument and --check runs are repeated on that stale tree (_gen_argv_mode_failures with stale true)."""
     failures = []
     cwd = repo if repo is not None else tools
     changed = _gen_argv_status(repo) if repo is not None else None
@@ -966,36 +992,57 @@ def _gen_argv_class_failures(tools, repo=None):
                 failures.append("{}: the unknown-option child exited {} (97 is a blocked write, delete or child "
                                 "process); stderr {!r}".format(path.name, returncode, child_err[-300:]))
         failures.extend(restored)
-        # No argument: write mode, shown by the hook ending the child at a write rather than a process event, or,
-        # for a generator that writes only on a difference, exit 0 with nothing blocked and no refusal.
-        got = _gen_argv_child(path, [[]], True, cwd)
-        if isinstance(got, str):
-            failures.append(got)
-        else:
-            returncode, seen, child_err = got
-            blocked = [line[len("blocked: "):] for line in child_err.splitlines() if line.startswith("blocked: ")]
-            code, err = seen.get((), ("no result (child exit {})".format(returncode), ""))
-            wrote = returncode == 97 and blocked and blocked[-1] not in _GEN_ARGV_PROCESS_EVENTS
-            current = returncode == 0 and code == 0 and not _gen_argv_refusal(err, path.name)
-            if not (wrote or current):
-                failures.append("{} (no argument): expected write mode, ended by the hook at a write or (nothing to "
-                                "write) exit 0 with nothing blocked and no refusal; got child exit {}, blocked {}, "
-                                "exit {}, stderr {!r}, child stderr {!r}".format(
-                                    path.name, returncode, blocked, code, err[-200:], child_err[-200:]))
-        # --check: check mode, exit 0 or 1 with nothing blocked and no refusal.
-        got = _gen_argv_child(path, [["--check"]], True, cwd)
-        if isinstance(got, str):
-            failures.append(got)
-        else:
-            returncode, seen, child_err = got
-            code, err = seen.get(("--check",), ("no result (child exit {})".format(returncode), ""))
-            if returncode != 0 or code not in (0, 1) or _gen_argv_refusal(err, path.name):
-                failures.append("{} --check: expected check mode, exit 0 or 1 with nothing written and no refusal; "
-                                "got child exit {} (97 is a blocked write, delete or child process), exit {}, "
-                                "stderr {!r}, child stderr {!r}".format(path.name, returncode, code, err[-200:],
-                                                                        child_err[-200:]))
+        # The no-argument and --check cases on the current tree, then (for a generator with registry targets) on
+        # the stale tree, restored afterwards.
+        failures.extend(_gen_argv_mode_failures(path, cwd, False))
+        if targets:
+            stale = _gen_argv_stale(repo, targets)
+            if isinstance(stale, str):
+                failures.append(stale)
+            else:
+                failures.extend(_gen_argv_mode_failures(path, cwd, True))
+                failures.extend(_gen_argv_restore(stale, repo, "{} (no argument and --check on the stale tree)".format(
+                    path.name)))
         if repo is not None:
             failures.extend(_gen_argv_plain_failures(path, repo, changed, targets))
+    return failures
+
+
+def _gen_argv_mode_failures(path, cwd, stale):
+    """The no-argument and --check cases for the generator path, run in cwd under the hook: one failure line per
+    case it fails. With no argument the child must end at a write in its working directory (see
+    _GEN_ARGV_TREE_WRITE), or, on the current tree (stale false) only, exit 0 with nothing blocked and no refusal.
+    With --check it must exit 1 on the stale tree, or 0 or 1 on the current tree, with nothing blocked and no
+    refusal."""
+    failures = []
+    where = " on the stale tree" if stale else ""
+    got = _gen_argv_child(path, [[]], True, cwd)
+    if isinstance(got, str):
+        failures.append(got)
+    else:
+        returncode, seen, child_err = got
+        blocked = [line[len("blocked: "):] for line in child_err.splitlines() if line.startswith("blocked: ")]
+        code, err = seen.get((), ("no result (child exit {})".format(returncode), ""))
+        wrote = returncode == 97 and bool(blocked) and blocked[-1].endswith(_GEN_ARGV_TREE_WRITE)
+        current = not stale and returncode == 0 and code == 0 and not _gen_argv_refusal(err, path.name)
+        if not (wrote or current):
+            failures.append("{} (no argument){}: expected write mode, ended by the hook at a write in its working "
+                            "directory{}; got child exit {}, blocked {}, exit {}, stderr {!r}, child stderr "
+                            "{!r}".format(path.name, where, "" if stale else " or (nothing to write) exit 0 with "
+                                          "nothing blocked and no refusal", returncode, blocked, code, err[-200:],
+                                          child_err[-200:]))
+    got = _gen_argv_child(path, [["--check"]], True, cwd)
+    if isinstance(got, str):
+        failures.append(got)
+    else:
+        returncode, seen, child_err = got
+        code, err = seen.get(("--check",), ("no result (child exit {})".format(returncode), ""))
+        want = (1,) if stale else (0, 1)
+        if returncode != 0 or code not in want or _gen_argv_refusal(err, path.name):
+            failures.append("{} --check{}: expected check mode, exit {} with nothing written and no refusal; got "
+                            "child exit {} (97 is a blocked write, delete or child process), exit {}, stderr {!r}, "
+                            "child stderr {!r}".format(path.name, where, " or ".join(str(w) for w in want),
+                                                       returncode, code, err[-200:], child_err[-200:]))
     return failures
 
 
@@ -1218,9 +1265,12 @@ _GEN_ARGV_PLAIN_WRITER = ("import sys\nfrom pathlib import Path\n"
                           "if not sys.flags.isolated:\n"
                           "    Path(__file__).with_name('written.txt').write_text('x')\n"
                           + _GEN_ARGV_MODES.format(name="gen_plainwriter.py", writes="not sys.argv[1:]"))
-# Writes its registry target out.txt only when it differs, as reconcile does: gen_lateguard.py before its argument
-# guard (on a current tree that write never fires; on the stale tree it must be reported), gen_earlyguard.py after
-# it (it must pass on the stale tree).
+# Writes its registry target out.txt only when it differs: gen_lateguard.py before its argument guard (on a current
+# tree that write never fires; on the stale tree it must be reported). The _GEN_ARGV_RECONCILE_MODES generators
+# guard first, then on a difference exit 1 in check mode or write in write mode: gen_earlyguard.py runs write mode
+# with no argument and check mode under --check (it must pass); gen_noargcheck.py runs check mode with no argument
+# and gen_checkignorer.py runs write mode under --check (each passes on the current tree, and must be reported for
+# that case on the stale tree).
 _GEN_ARGV_RECONCILE = ("out = Path(__file__).resolve().parent.parent / 'out.txt'\n"
                        "if out.read_bytes() != b'generated\\n':\n"
                        "    out.write_bytes(b'generated\\n')\n")
@@ -1229,10 +1279,17 @@ _GEN_ARGV_GUARD = ("if sys.argv[1:] not in ([], ['--check']):\n"
                    "    sys.exit(2)\n")
 _GEN_ARGV_LATE_GUARD = ("import sys\nfrom pathlib import Path\n" + _GEN_ARGV_RECONCILE
                         + _GEN_ARGV_GUARD.format(name="gen_lateguard.py") + "sys.exit(0)\n")
-_GEN_ARGV_EARLY_GUARD = ("import sys\nfrom pathlib import Path\n" + _GEN_ARGV_GUARD.format(name="gen_earlyguard.py")
-                         + "if not sys.argv[1:]:\n"
-                         + "".join("    " + line + "\n" for line in _GEN_ARGV_RECONCILE.splitlines())
-                         + "sys.exit(0)\n")
+_GEN_ARGV_RECONCILE_MODES = ("import sys\nfrom pathlib import Path\n" + _GEN_ARGV_GUARD
+                             + "check = {check}\n"
+                             "out = Path(__file__).resolve().parent.parent / 'out.txt'\n"
+                             "if out.read_bytes() != b'generated\\n':\n"
+                             "    if check:\n"
+                             "        sys.exit(1)\n"
+                             "    out.write_bytes(b'generated\\n')\n"
+                             "sys.exit(0)\n")
+_GEN_ARGV_EARLY_GUARD = _GEN_ARGV_RECONCILE_MODES.format(name="gen_earlyguard.py", check="sys.argv[1:] == ['--check']")
+_GEN_ARGV_NOARG_CHECK = _GEN_ARGV_RECONCILE_MODES.format(name="gen_noargcheck.py", check="True")
+_GEN_ARGV_CHECK_IGNORER = _GEN_ARGV_RECONCILE_MODES.format(name="gen_checkignorer.py", check="False")
 
 
 def _gen_argv_class_check_failures():
@@ -1300,9 +1357,13 @@ def _gen_argv_class_check_failures():
         # In a git repository whose registry declares out.txt, current at the commit: a generator that writes it on
         # a difference before its argument guard must be reported for the refusal cases (the write blocked) and for
         # the plain form (the stale file rewritten), with out.txt back as committed; one that does so only after
-        # its guard must pass.
+        # its guard, in write mode with no argument and check mode under --check, must pass; one that runs check
+        # mode with no argument must be reported for exactly the no-argument case on the stale tree, and one whose
+        # --check runs write mode for exactly the --check case on the stale tree.
         for name, source, want in (("gen_lateguard.py", _GEN_ARGV_LATE_GUARD, True),
-                                   ("gen_earlyguard.py", _GEN_ARGV_EARLY_GUARD, False)):
+                                   ("gen_earlyguard.py", _GEN_ARGV_EARLY_GUARD, False),
+                                   ("gen_noargcheck.py", _GEN_ARGV_NOARG_CHECK, " (no argument) on the stale tree: "),
+                                   ("gen_checkignorer.py", _GEN_ARGV_CHECK_IGNORER, " --check on the stale tree: ")):
             repo = tmp / ("repo-" + name[:-3])
             (repo / "tools").mkdir(parents=True)
             (repo / ".aiqt").mkdir()
@@ -1317,10 +1378,17 @@ def _gen_argv_class_check_failures():
             rewrote = any(line.startswith(name + " --chek (plain form): the run changed the generated file "
                                           "out.txt") for line in got)
             intact = (repo / "out.txt").read_bytes() == b"generated\n"
-            if problem or not intact or ((not blocked or not rewrote) if want else got):
+            if want is True:
+                wrong, expected = not blocked or not rewrote, ("be reported for its write before the argument guard, "
+                                                               "blocked in the refusal cases and seen in the plain form")
+            elif want:
+                wrong = len(got) != 1 or not got[0].startswith(name + want)
+                expected = "be reported only by the line starting {!r}".format(name + want)
+            else:
+                wrong, expected = bool(got), "pass"
+            if problem or not intact or wrong:
                 failures.append("class-check control: on a stale tree, {} must {}; got {}, out.txt {}".format(
-                    name, "be reported for its write before the argument guard, blocked in the refusal cases and "
-                    "seen in the plain form" if want else "pass", got, "as committed" if intact else "changed"))
+                    name, expected, got, "as committed" if intact else "changed"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     # The real generators run only in a throwaway copy of the committed tree, never in the working tree.
@@ -2715,8 +2783,9 @@ def self_test_main():
     # A valued option never takes a following flag as its value (--root --chek is refused, not run).
     failures.extend(_valued_option_failures())
     # Every committed tools/gen_*.py refuses an unknown option with exit 2 and its usage line, writing nothing (red
-    # when any one committed generator's guard is reverted), and still runs write mode with no argument and check
-    # mode under --check; it runs in a throwaway copy of HEAD, never in the working tree.
+    # when any one committed generator's guard is reverted); on a tree made stale on purpose its no-argument run
+    # ends at a write in the copy and its --check run exits 1 with nothing blocked; it runs in a throwaway copy of
+    # HEAD, never in the working tree.
     failures.extend(_gen_argv_class_check_failures())
 
     if failures:
@@ -2735,8 +2804,9 @@ def self_test_main():
           "and goes red under the ASCII-only revert; {} parse-level revert(s) each go red; {} adopter-mode "
           "case(s) pass the placement gate and are refused by the pack reader, {} more are refused by both, "
           "and {} adopter-mode revert(s) each go red; an unknown option is exit 2 with the usage line and runs "
-          "nothing, here and in every tools/gen_*.py, each of which still runs write mode with no argument and "
-          "check mode under --check, and a valued option never takes a following flag as its value; "
+          "nothing, here and in every tools/gen_*.py, each of which, on a tree made stale on purpose, ends at a "
+          "write in its copy with no argument and exits 1 with nothing blocked under --check, and a valued option "
+          "never takes a following flag as its value; "
           "{}.".format(
               len(_MAP_KEYS_CONDITIONS), ", ".join(_MAP_KEYS_CONDITIONS),
               len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1, len(_PARSE_REVERTS), len(_ADOPTER_MODE_CASES),

@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "aa37fc3906631295c52c24a123aa5efbdfdd7b391ebae2b281625cbc4adeba53"
+tree-sha256 = "123d5c96547ec885d9d1d7933bc3a1b3caabcec6bf9a07429a212540b04feaa2"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4607,8 +4607,8 @@ sha256 = "261656f81c19a24605113a0afb39d242f23e0b005ce08561a5ef1a8370c5929c"
 
 [[sources]]
 path = "tools/gen_rules.py"
-bytes = 176217
-sha256 = "5d5f45ad3054a957f8a7c99d5d911b027d3da95ecb06d6b8c4e11de2d186772a"
+bytes = 180788
+sha256 = "d42f9e0704f89f210d169a5e9a2ec8d21906859b27c928fc70f1676ae7f9fe4d"
 
 [[sources]]
 path = "tools/gen_secret_patterns.py"
