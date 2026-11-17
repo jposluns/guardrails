@@ -116,8 +116,9 @@
 #                        its refusal holds only that action, that a reservation is settled only to the use that
 #                        store records, never to a use the assistant reports, that an action with no known
 #                        upper bound is withheld until the setter or a cap in the limit's own unit bounds it,
-#                        and that where the host provides no such check or store the limit still binds
-#                        (cnstpr.6 to cnstpr.14): measured PACK 136292 at the PR base 504f422d -> 137979 (+1687
+#                        that a host mechanism refusing or ending the action at the limit counts as that check
+#                        and cap, and that where the host provides no such check or store the limit still binds
+#                        (cnstpr.6 to cnstpr.15): measured PACK 136292 at the PR base 504f422d -> 137979 (+1687
 #                        units); rule files 119669 -> 121356; managed block 360 and file headers 16263
 #                        unchanged. The ratchet rises by the measured delta, 136304 + 1687 = 137991, keeping
 #                        the 12 units the ratchet already stood above PACK, within the maintainer's
