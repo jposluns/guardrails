@@ -32714,9 +32714,12 @@ def _main_isolated(monitor):
         # handler (_hook_cpu_timed: the thread clock, the cyclic collector held off) over 'sudo -E git
         # rebase x ...' and over 'sudo -E git rebase -x x ...', each padded to 65,536 characters and to
         # _CMTIDN_READ_LIMIT, the longest command the reader reads (131,072 characters): 0.5 s at 65,536 and 1 s at
-        # 131,072, the same bound per character, against about 0.29 s and 0.57 s measured for the first form and
-        # 0.39 s and 0.74 s for the -x form (the least of three in-process runs of the handler alone, on one shared
-        # host, 2026-11-17), a margin of only about 1.3 times. The run-line read is counted through a shim, so a
+        # 131,072, the same bound per character, against about 0.13 s and 0.26 s measured for the first form and
+        # 0.22 s and 0.43 s for the -x form (the least of three in-process runs of the handler alone, on one shared
+        # 96-CPU host at a load5 near 24, 2026-11-17), a margin of about 3.9 and 2.3 times; the raw-text identity
+        # search (_cmtidn_identity_set_ai) reads the raw words once per call and skips a word with no '=', where it
+        # had read them three times and searched every word four times (0.27 s and 0.36 s at 65,536 then; the fork
+        # point of this branch took 0.05 s and 0.12 s). The run-line read is counted through a shim, so a
         # handler that allows a long command without reading it fails too: every rebase of the command is read, and
         # in the -x form each one's exec line
         # is built. For each form the command at the limit runs only when the shorter one is within its bound, so a

@@ -5446,7 +5446,7 @@ _CMTIDN_SHELL_TEXT_ARITHMETIC_RE = re.compile(r"(?<![^\s;&|(){}!])(?:let|\[\[)(?
 _CMTIDN_CMD_SEPARATOR_RE = re.compile(r"[\n;()]|(?<!>)\||(?<![<>])&(?!>)")
 
 
-def _cmtidn_inexact(command):
+def _cmtidn_inexact(command, read=None):
     """The first construct in the raw command text that the value reader of _cmtidn_identity_set_ai cannot read
     exactly, as a short label, else None: a backslash right before a newline (which the reader drops, though an
     escaped backslash before it keeps the newline and shifts every later quote), an xargs replacement string,
@@ -5467,11 +5467,14 @@ def _cmtidn_inexact(command):
     command run from a prompt string or an arithmetic expression, so each of these makes the text inexact. A
     construct is sought lexically in the words of _cmtidn_raw_words, and a substitution, prompt-string expansion
     or arithmetic place in the whole text, so one inside a quoted string or a heredoc body counts as well, and so
-    does a $(( arithmetic expansion (a safe-direction over-deny)."""
+    does a $(( arithmetic expansion (a safe-direction over-deny). read, when given, is _cmtidn_read_words of
+    command, made once by the caller so the raw text is read once per call."""
     if "\\\n" in command:
         return "a backslash before a newline"
+    if read is None:
+        read = _cmtidn_read_words(command)
     xargs = False
-    for word, _doubtful in _cmtidn_raw_words(command):
+    for word, _doubtful in read[0]:
         bare = _CMTIDN_SET_UNREAD_RE.sub("", word)
         base = bare.rsplit("/", 1)[-1]
         if xargs and ((bare.startswith("-") and not bare.startswith("--") and ("I" in bare or "i" in bare))
@@ -5488,12 +5491,18 @@ def _cmtidn_inexact(command):
         return "a command or process substitution"
     if _CMTIDN_PROMPT_RE.search(command):
         return "a prompt-string expansion"
-    if _CMTIDN_ARITHMETIC_RE.search(command) or _cmtidn_arithmetic_word(command):
+    if _CMTIDN_ARITHMETIC_RE.search(command) or _cmtidn_arithmetic_word(command, read):
         return "an arithmetic expression that can run a command through an array subscript"
     return None
 
 
-def _cmtidn_arithmetic_word(command):
+def _cmtidn_read_words(text):
+    """(words, gaps): _cmtidn_raw_words of text with its gaps list, read once for each caller that shares it."""
+    gaps = []
+    return _cmtidn_raw_words(text, gaps), gaps
+
+
+def _cmtidn_arithmetic_word(command, read=None):
     """True when a word of the raw text (_cmtidn_raw_words) is a place where bash evaluates an arithmetic
     expression that depends on command position, read in one pass over the words. A word is in command position
     when it is the first word of a simple command: after the start of the text or a command separator
@@ -5510,9 +5519,9 @@ def _cmtidn_arithmetic_word(command):
     shell text (_CMTIDN_CMD_SHELL_TEXT: eval 'let X', trap, sh -c) or in a doubtful word, one the lexical
     reading may misread (_CMTIDN_SHELL_TEXT_ARITHMETIC_RE). A [ inside a quoted message ('[hooks] ...') or a
     glob in a path operand (.claude/rules/[a-z]*.md) and a let inside a quoted message ('let CLAUDE.md ...') are
-    not one. Each word is searched a fixed number of times, so the pass takes time linear in the text."""
-    gaps = []
-    words = _cmtidn_raw_words(command, gaps)
+    not one. Each word is searched a fixed number of times, so the pass takes time linear in the text. read,
+    when given, is _cmtidn_read_words of command."""
+    words, gaps = read if read is not None else _cmtidn_read_words(command)
     position = True  # the next word is in command position
     options = False  # a prefix word was read, so an option word keeps command position
     shell_text = False  # the command word runs its operands as shell text
@@ -5705,10 +5714,13 @@ def _cmtidn_identity_set_ai(command):
     dropped. Bounded: a command longer than _CMTIDN_READ_LIMIT is not searched here, since the
     too-long fallback already denies one that names an AI and holds any of these names
     (_commit_identity_fallback); the words are read in one pass and each word is searched a fixed number of
-    times."""
+    times. The raw words are read once here and shared with _cmtidn_inexact, which reads them only for a command
+    with no backslash-newline, the same text. A word with no '=' is not searched for an assignment, since each
+    assignment pattern matches a literal '=' and dropping characters from a word never adds one."""
     if len(command) > _CMTIDN_READ_LIMIT:
         return None
-    inexact = _cmtidn_inexact(command)
+    read = _cmtidn_read_words(command.replace("\\\n", ""))
+    inexact = _cmtidn_inexact(command, read)
     if inexact is not None:
         # The value reader cannot read this text exactly, so the AI-anywhere rule decides: any identity name or
         # GIT_CONFIG_KEY_<n>, GIT_CONFIG_VALUE_<n> or GIT_CONFIG_PARAMETERS name in an assignment form, beside an
@@ -5726,7 +5738,7 @@ def _cmtidn_identity_set_ai(command):
     places = {"{}"}  # the strings that xargs -I or -i, or find -exec, fill in at run time
     many = False  # more replacement strings than _CMTIDN_PLACES_MAX were read
     xargs = False
-    for word, doubtful in _cmtidn_raw_words(command.replace("\\\n", "")):
+    for word, doubtful in read[0]:
         bare = _CMTIDN_SET_UNREAD_RE.sub("", word)
         if xargs:
             m = _CMTIDN_XARGS_REPLACE_RE.match(bare)
@@ -5739,6 +5751,9 @@ def _cmtidn_identity_set_ai(command):
                 many = True  # past the bound every value counts as one the text does not spell (fail closed)
                 places = set()
         xargs = xargs or bare.rsplit("/", 1)[-1] == "xargs"
+        if "=" not in word:
+            previous = bare
+            continue
         for name, raw, dropped in _cmtidn_assigned_values(word, _CMTIDN_IDENTITY_SET_RE):
             ai = _cmtidn_value_ai(raw, dropped)
             if ai is not None:
