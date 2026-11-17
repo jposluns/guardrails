@@ -31329,6 +31329,79 @@ def _main_isolated(monitor):
                 ("(ci-idc-h-c6) xargs git config --get user.name from a here-string beside a CLAUDE.md message allows",
                  "xargs git config --get user.name <<< x; git commit -m 'docs: CLAUDE.md'")):
             ciexpect(_ci_label, _ci_cmd, "allow")
+        # Three routes the reader and the raw-text rule do not read (_cmtidn_unread_route_ai): an xargs argument
+        # file given as a process substitution feeding git config of an identity key (ci-idc-af1 to af6), a flock,
+        # su, runuser or script -c string running git config of an identity key with an AI value (ci-idc-cs1 to
+        # cs7), and an AI value joined from spelled identity-variable or GIT_CONFIG_VALUE_n assignments by +=
+        # (ci-idc-pj1 to pj5). Each deny vector allowed before this change; the controls set the maintainer's
+        # identity the same ways, read a key, or join a value that names no AI.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-af1) xargs -a of a process substitution naming an AI, feeding git config author.name, "
+                 "denies", "xargs -a <(echo Claude) git config author.name"),
+                ("(ci-idc-af2) xargs --arg-file= of a process substitution feeding git config user.name denies",
+                 "xargs --arg-file=<(printf 'Claude Code') git config user.name"),
+                ("(ci-idc-af3) xargs --arg-file of a process substitution feeding git config committer.email "
+                 "denies", "xargs --arg-file <(echo noreply@anthropic.com) git config committer.email"),
+                ("(ci-idc-af4) xargs -0a of a process substitution feeding git config --global user.name denies",
+                 "xargs -0a <(printf 'Claude\\0') git config --global user.name"),
+                ("(ci-idc-af5) xargs -a attached to a process substitution feeding git config set author.name "
+                 "denies", "xargs -a<(echo Claude) git config set author.name"),
+                ("(ci-idc-af6) xargs -a of a process substitution behind nice, before a commit, denies",
+                 "nice xargs -a <(echo Claude) git config user.name; git commit -m x"),
+                ("(ci-idc-cs1) flock -c running git config user.name with an AI value denies",
+                 "flock /tmp/l -c 'git config user.name Claude'"),
+                ("(ci-idc-cs2) su -c running git config author.email with an AI value denies",
+                 "su ci -c \"git config author.email noreply@anthropic.com\""),
+                ("(ci-idc-cs3) runuser -c running git config --global committer.name with an AI value denies",
+                 "runuser ci -c 'git config --global committer.name \"Claude Code\"'"),
+                ("(ci-idc-cs4) script -qc running git config user.email with an AI value denies",
+                 "script -qc 'git config user.email noreply@anthropic.com' /dev/null"),
+                ("(ci-idc-cs5) flock --command= running git config set author.name with an AI value denies",
+                 "flock --command='git config set author.name Claude' /tmp/l"),
+                ("(ci-idc-cs6) su with the -c string attached running git config user.name with an AI value denies",
+                 "su -c'git config user.name Claude' ci"),
+                ("(ci-idc-cs7) runuser -c running git config with an AI value between other commands denies",
+                 "runuser -u ci -c 'cd /repo && git config user.name Claude && git commit -m x'"),
+                ("(ci-idc-pj1) an AI EMAIL joined from two spelled assignments by += denies",
+                 "EMAIL=noreply@anthr; EMAIL+=opic.com; git commit -m x"),
+                ("(ci-idc-pj2) an AI GIT_AUTHOR_NAME joined by += in assignment words denies",
+                 "GIT_AUTHOR_NAME=Cla GIT_AUTHOR_NAME+=ude git commit -m x"),
+                ("(ci-idc-pj3) an exported GIT_COMMITTER_NAME joined by a quoted += denies",
+                 "export GIT_COMMITTER_NAME=Cl; GIT_COMMITTER_NAME+='aude Code'; git commit -m x"),
+                ("(ci-idc-pj4) an AI GIT_CONFIG_VALUE_0 joined by += for a user.name key denies",
+                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=Cla GIT_CONFIG_VALUE_0+=ude "
+                 "git commit -m x"),
+                ("(ci-idc-pj5) an AI EMAIL joined from three spelled assignments by += denies",
+                 "EMAIL=x; EMAIL+=@ant; EMAIL+=hropic.com; git commit -m x")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-af-c1) the maintainer's user.name in an xargs -a process substitution allows",
+                 "xargs -a <(echo 'Jeff Posluns') git config user.name"),
+                ("(ci-idc-af-c2) the maintainer's user.email in an xargs --arg-file= process substitution allows",
+                 "xargs --arg-file=<(echo jeff@posluns.ca) git config user.email"),
+                ("(ci-idc-af-c3) xargs -a of a process substitution naming .claude feeding git add allows",
+                 "xargs -a <(git ls-files .claude) git add"),
+                ("(ci-idc-af-c4) xargs -a of a process substitution naming CLAUDE.md feeding git config --get allows",
+                 "xargs -a <(echo CLAUDE.md) git config --get user.name"),
+                ("(ci-idc-cs-c1) flock -c setting the maintainer's user.name allows",
+                 "flock /tmp/l -c 'git config user.name \"Jeff Posluns\"'"),
+                ("(ci-idc-cs-c2) su -c setting the maintainer's user.email before a .claude/ commit allows",
+                 "su ci -c 'git config user.email jeff@posluns.ca && git commit -m \"regenerate .claude/rules\"'"),
+                ("(ci-idc-cs-c3) script -qc reading user.name beside a CLAUDE.md path allows",
+                 "script -qc 'git config --get user.name; cat CLAUDE.md' /dev/null"),
+                ("(ci-idc-pj-c1) the maintainer's EMAIL joined by += beside a CLAUDE.md message allows",
+                 "EMAIL=jeff@posluns; EMAIL+=.ca; git commit -m 'docs: CLAUDE.md'"),
+                ("(ci-idc-pj-c2) the maintainer's GIT_AUTHOR_NAME joined by += beside a .claude/ message allows",
+                 "GIT_AUTHOR_NAME=Jeff GIT_AUTHOR_NAME+=' Posluns' git commit -m 'rules: regenerate .claude/rules'"),
+                ("(ci-idc-pj-c3) the maintainer's GIT_CONFIG_VALUE_0 joined by += beside a CLAUDE.md message allows",
+                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=Jeff GIT_CONFIG_VALUE_0+=' Posluns' "
+                 "git commit -m 'docs: CLAUDE.md'"),
+                ("(ci-idc-pj-c4) a GIT_CONFIG_VALUE_0 joined into an AI name for a core.editor key allows",
+                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.editor GIT_CONFIG_VALUE_0=Cla GIT_CONFIG_VALUE_0+=ude "
+                 "git commit -m x"),
+                ("(ci-idc-pj-c5) git add of .claude/ and a heredoc commit message in a command substitution allows",
+                 "git add .claude/rules && git commit -m \"$(cat <<'EOF'\nrules: regenerate .claude/rules\nEOF\n)\"")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
         # A command whose text holds a construct the value reader cannot read exactly (a backslash before a
         # newline, an xargs replacement string attached or detached, a braced placeholder, a parallel word, a word
         # that starts with an expansion) is judged by the AI-anywhere rule, not by its values
@@ -32630,8 +32703,10 @@ def _main_isolated(monitor):
         # characters for the three forms below, and 9.1 s for the first at 32,768 in the review, past the
         # 8-second hook deadline). The bound is the CPU time the calling thread spends in the handler
         # (_hook_cpu_timed) over 'echo x=! x=! ...', '! ! ...' and 'echo [ [ ...', each padded to 16,384 characters
-        # and to _CMTIDN_READ_LIMIT: 0.375 s and 3 s, the same bound per character, against at most about 0.09 s
-        # and 0.75 s measured (the fastest of three runs, 2026-11-17), a margin of about 4 times. Each command
+        # and to _CMTIDN_READ_LIMIT: 0.375 s and 3 s, the same bound per character, against at most about 0.11 s
+        # and 0.87 s measured (the least of three in-process runs of the handler alone, in each of two samples on a
+        # shared 96-CPU host at a one-minute load average of about 55, Python 3.14.4, 2026-11-17), a margin of about
+        # 3.3 times. Each command
         # names no identity and allows. For each form the command at the limit runs only when the shorter one is
         # within its bound, so a quadratic search fails in seconds.
         for _ci_label, _ci_head, _ci_unit in (
@@ -32648,6 +32723,24 @@ def _main_isolated(monitor):
                                                         "; the longer command was not run"
                                                         if _ci_size == 16 << 10 else ""))
                     break
+        # The unread-route rule (_cmtidn_unread_route_ai) seeks an AI identity in the text once and hands the xargs
+        # stdin rule only the matched name, where handing it the whole text searched the text again for each
+        # simple command (about 67 s of the calling thread's CPU at _CMTIDN_READ_LIMIT characters for the form
+        # below, on one shared host, 2026-11-17). The bound is that of the rows above, 0.375 s at 16,384
+        # characters and 3 s at _CMTIDN_READ_LIMIT, against about 0.05 s and 0.44 s measured for the handler (the
+        # least of three in-process runs, 2026-11-17). The command names no AI identity and allows. The command at
+        # the limit runs only when the shorter one is within its bound.
+        for _ci_size, _ci_cap in ((16 << 10, 0.375), (aiqt_hooks._CMTIDN_READ_LIMIT, 3.0)):
+            _ci_unit = "xargs -a <(x) git config user.name;"
+            _ci_cmd = _ci_unit * (_ci_size // len(_ci_unit))
+            _ci_cmd += " " * (_ci_size - len(_ci_cmd))
+            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
+            if _ci_got != "allow" or _ci_spent > _ci_cap:
+                failures.append("(ci-idc-cpu4) 'xargs -a <(x) git config user.name; ...' over {} characters expected "
+                                "allow within {} s of CPU time, got {} after {:.2f} s{}".format(
+                                    len(_ci_cmd), _ci_cap, _ci_got, _ci_spent,
+                                    "; the longer command was not run" if _ci_size == 16 << 10 else ""))
+                break
         # Every co-author trailer name in a word is read, each with its own value of up to 160 characters, where the
         # reader read only the first trailer name of a word and the raw-string scan resumed its search after each
         # value. A second trailer on the same line after a first value of 140 characters, which ends inside it

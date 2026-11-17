@@ -6453,6 +6453,198 @@ def _cmtidn_raw_stdin_identity_ai(command):
     return _cmtidn_stdin_identity_ai(tokens, command) if tokens else None
 
 
+# The wrappers that run a command string given to their -c or --command option: flock FILE -c CMD, su USER -c
+# CMD, runuser USER -c CMD and script -c CMD FILE (_cmtidn_unread_route_ai).
+_CMTIDN_C_STRING_WRAPPERS = frozenset(("flock", "su", "runuser", "script"))
+# Their -c option: a short option cluster ending in c, whose string is the next word (-c, -qc), or with the
+# string attached after the c (-c'git config ...'); and --command or a prefix of it from --co, or su's
+# --session-command, with the string after = or as the next word.
+_CMTIDN_C_STRING_SHORT_RE = re.compile(r"-[A-Za-z]*c")
+_CMTIDN_C_STRING_ATTACHED_RE = re.compile(r"-[A-Za-z]*c(.+)", re.S)
+_CMTIDN_C_STRING_LONG_RE = re.compile(r"--(?:session-)?co(?:m(?:m(?:a(?:n(?:d)?)?)?)?)?(?:=(.*))?", re.S)
+# xargs's option that names the file it reads its arguments from: a short option cluster ending in a (-a,
+# -0a), or --arg-file or a prefix of it from --a (no other xargs long option starts so), with or without =.
+_CMTIDN_XARGS_FILE_RE = re.compile(r"-[A-Za-z0-9]*a|--a(?:r(?:g(?:-(?:f(?:i(?:l(?:e)?)?)?)?)?)?)?=?")
+# A command separator in the operator characters between two words, other than ( and ): a newline, ;, a |
+# that does not end a >| redirection operator, or a & that is not part of a redirection operator.
+_CMTIDN_PLAIN_SEPARATOR_RE = re.compile(r"[\n;]|(?<!>)\||(?<![<>])&(?!>)")
+# The characters at which _cmtidn_config_string_ai splits a command string into simple commands.
+_CMTIDN_STRING_SEGMENT_RE = re.compile(r"[\n;&|()]+")
+# An identity variable or GIT_CONFIG_VALUE_<n> name in an assignment form (=, += or :=), for the += join rule:
+# EMAIL as spelled, the git identity variables in any case, as _CMTIDN_IDENTITY_SET_RE reads them.
+_CMTIDN_JOIN_SET_RE = re.compile(r"(?<![A-Za-z0-9_])(EMAIL|(?i:GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL))"
+                                 r"|GIT_CONFIG_VALUE_[0-9]+)([+:]?=)")
+_CMTIDN_JOIN_KEY_RE = re.compile(r"(?<![A-Za-z0-9_])GIT_CONFIG_KEY_([0-9]+)[+:]?=")
+# The characters of a joined value that the += join rule keeps: an AI identity match that a += completes
+# holds an appended character and starts at most 13 characters before it (@anthropic.com, 14 characters, is
+# the longest name AI_IDENTITY_RE spells; a gpt-4 form already matched once its digit was read), so the last 16
+# characters, with one more before them for the word boundary, are enough, and each part is searched once.
+_CMTIDN_JOIN_TAIL = 17
+
+
+def _cmtidn_config_string_ai(text):
+    """(key, match) when a command string that a wrapper runs (text, its quote characters, backslashes and '$'
+    signs dropped, split into simple commands at each newline, ;, &, |, ( and )) holds a git config command
+    that sets a value (_cmtidn_config_setting) of a user, author or committer name or email key whose later
+    words in that simple command name an AI identity (git config user.name Claude, git config --global
+    author.email noreply@anthropic.com); else None."""
+    dropped = _CMTIDN_SET_UNREAD_RE.sub("", text)
+    if "config" not in dropped:
+        return None
+    for segment in _CMTIDN_STRING_SEGMENT_RE.split(dropped):
+        tokens = segment.split()
+        start = _cmtidn_config_setting(tokens)
+        if start is None:
+            continue
+        for j in range(start, len(tokens)):
+            if IDENTITY_CONF_NAME_RE.fullmatch(tokens[j]):
+                ai = AI_IDENTITY_RE.search(" ".join(tokens[j + 1:]))
+                if ai is not None:
+                    return tokens[j], ai
+                break
+    return None
+
+
+def _cmtidn_unread_route_ai(command):
+    """A hit label for three routes by which an identity value reaches git where the reader and the raw-text
+    rule (_cmtidn_identity_set_ai) do not read it, else None. Each is read in one pass over the raw words of
+    the text (_cmtidn_raw_words, a backslash-newline dropped first), each word with the characters of
+    _CMTIDN_SET_UNREAD_RE dropped:
+    (a) an xargs word whose argument-file option (_CMTIDN_XARGS_FILE_RE: -a, a cluster ending in a, --arg-file
+    or a prefix of it, attached or detached) is given a process substitution (xargs -a <(echo X) git config
+    user.name, xargs --arg-file=<(...) ...): the words of that simple command outside the substitution, the
+    option word dropped, are judged by the xargs stdin rule (_cmtidn_stdin_identity_ai), which denies when
+    xargs runs a git config that sets a user, author or committer name or email key and the command names an
+    AI identity anywhere, the substitution included, since xargs adds the words it reads from that file;
+    (b) a flock, su, runuser or script word (_CMTIDN_C_STRING_WRAPPERS) with a -c or --command option
+    (_CMTIDN_C_STRING_SHORT_RE, _CMTIDN_C_STRING_ATTACHED_RE, _CMTIDN_C_STRING_LONG_RE) whose command string
+    holds a git config command that sets such a key to a value that names an AI identity
+    (_cmtidn_config_string_ai: flock /tmp/l -c 'git config user.name Claude', su ci -c "git config
+    author.email noreply@anthropic.com", script -qc '...' /dev/null);
+    (c) spelled assignments of one identity variable or GIT_CONFIG_VALUE_<n> (_CMTIDN_JOIN_SET_RE), in text
+    order, the last =, := or a first += setting the value and each later += appending to it, whose joined value
+    names an AI identity (EMAIL=noreply@anthr; EMAIL+=opic.com, GIT_AUTHOR_NAME=Cla GIT_AUTHOR_NAME+=ude); a
+    GIT_CONFIG_VALUE_<n> counts only when a GIT_CONFIG_KEY_<n> assignment of the same n names such a key, and
+    a part that holds an expansion (_CMTIDN_EXPANSION_RE) stops the join for that name, since the raw-text rule
+    judges such a value as one the text does not spell.
+    A simple command ends at a newline, ;, | or & outside the substitution. Not read: any other route, which
+    the residue lists. Bounded as _cmtidn_identity_set_ai is: a command longer than _CMTIDN_READ_LIMIT is not
+    read here, and each word is searched a fixed number of times. Routes (a) and (b) need a config word and
+    an AI identity named in the text, as written or with those characters dropped (sought once, here, and
+    handed to the xargs stdin rule as the matched name, so that rule does not search the whole text again for
+    each simple command), and route (c) a += operator, so a text that holds none of them is not read further."""
+    if len(command) > _CMTIDN_READ_LIMIT:
+        return None
+    text = _CMTIDN_SET_UNREAD_RE.sub("", command.replace("\\\n", ""))
+    named = None
+    if "config" in text:
+        named = AI_IDENTITY_RE.search(command) or AI_IDENTITY_RE.search(text)
+    if named is None and "+=" not in command:
+        return None
+    gaps = []
+    words = _cmtidn_raw_words(command.replace("\\\n", ""), gaps)
+    outer = []  # (a) the words of the current simple command outside an argument-file process substitution
+    xargs = False  # (a) an xargs word is among them
+    file_subst = False  # (a) an xargs argument-file option was given a process substitution in this command
+    depth = 0  # the ( read in the operator characters between words and not yet closed
+    inside = None  # (a) the depth outside the argument-file process substitution while it is open
+    wrapper = False  # (b) a -c wrapper word was read in this simple command
+    string_next = False  # (b) the next word is the wrapper's command string
+    joined = {}  # (c) name -> the end of the joined spelled value so far (_CMTIDN_JOIN_TAIL characters), or
+    # None once a part is not spelled
+    keys = set()  # (c) the n of each GIT_CONFIG_KEY_<n> assignment that names an identity key
+    values = []  # (c) (name, joined value) for each GIT_CONFIG_VALUE_<n> join that names an AI identity
+    for k, (word, _doubtful) in enumerate(words):
+        gap = gaps[k]
+        for ch in gap:
+            if ch == "(":
+                depth += 1
+            elif ch == ")" and depth:
+                depth -= 1
+        if inside is not None and depth <= inside:
+            inside = None  # the argument-file process substitution has closed
+        if inside is None and _CMTIDN_PLAIN_SEPARATOR_RE.search(gap):
+            if file_subst and outer:
+                # The AI name was sought once above; the xargs stdin rule searches only that name here.
+                hit = _cmtidn_stdin_identity_ai(outer, named.group(0))
+                if hit is not None:
+                    return "xargs reading an argument file from a process substitution: " + hit
+            outer, xargs, file_subst, wrapper, string_next = [], False, False, False, False
+        bare = _CMTIDN_SET_UNREAD_RE.sub("", word)
+        if (named is not None and inside is None and xargs and gap.rstrip(" \t").endswith("<(") and outer
+                and _CMTIDN_XARGS_FILE_RE.fullmatch(outer[-1])):
+            outer.pop()  # the option's value is the substitution, so the option word is not an argument
+            file_subst = True
+            inside = depth - 1
+        if inside is None:
+            outer.append(bare)
+            xargs = xargs or bare.rsplit("/", 1)[-1] == "xargs"
+        # (b) a -c wrapper's command string
+        string = None
+        if named is None:
+            pass  # routes (a) and (b) need an AI identity named in the text
+        elif string_next:
+            string, string_next = word, False
+        elif wrapper and bare.startswith("-"):
+            long = _CMTIDN_C_STRING_LONG_RE.fullmatch(bare)
+            if long is not None:
+                if long.group(1) is None:
+                    string_next = True
+                else:
+                    string = long.group(1)
+            elif _CMTIDN_C_STRING_SHORT_RE.fullmatch(bare):
+                string_next = True
+            else:
+                attached = _CMTIDN_C_STRING_ATTACHED_RE.fullmatch(bare)
+                if attached is not None and not bare.startswith("--"):
+                    string = attached.group(1)
+        if bare.rsplit("/", 1)[-1] in _CMTIDN_C_STRING_WRAPPERS:
+            wrapper = True
+        if string is not None:
+            found = _cmtidn_config_string_ai(string)
+            if found is not None:
+                return ("git config of {!r} to a value that names an AI identity ({!r}) in the command string of a "
+                        "flock, su, runuser or script -c option".format(found[0], found[1].group(0)))
+        # (c) identity values joined by +=
+        if "=" not in word:
+            continue
+        dropped, at = _cmtidn_dequoted(word)
+        for m in _CMTIDN_JOIN_KEY_RE.finditer(dropped):
+            if IDENTITY_CONF_NAME_RE.match(dropped, m.end()):
+                keys.add(m.group(1))
+        for m in _CMTIDN_JOIN_SET_RE.finditer(dropped):
+            name = m.group(1) if m.group(1) == "EMAIL" else m.group(1).upper()
+            raw = word[at[m.end()]:]
+            value = dropped[m.end():]
+            if _CMTIDN_EXPANSION_RE.search(raw):
+                joined[name] = None
+                continue
+            if m.group(2) != "+=" or name not in joined:
+                joined[name] = value[-_CMTIDN_JOIN_TAIL:]
+                continue
+            if joined[name] is None:
+                continue
+            before = joined[name]
+            window = before + value
+            joined[name] = window[-_CMTIDN_JOIN_TAIL:]
+            ai = AI_IDENTITY_RE.search(window, 1 if len(before) == _CMTIDN_JOIN_TAIL else 0)
+            if ai is None:
+                continue
+            if not name.startswith("GIT_CONFIG_VALUE_"):
+                return ("identity assignments of {!r} joined by += into a value that names an AI identity ({!r})"
+                        .format(name, ai.group(0)))
+            values.append((name, ai))
+    if file_subst and outer:
+        hit = _cmtidn_stdin_identity_ai(outer, named.group(0))
+        if hit is not None:
+            return "xargs reading an argument file from a process substitution: " + hit
+    for name, ai in values:
+        if name[len("GIT_CONFIG_VALUE_"):] in keys:
+            return ("identity assignments of {!r} joined by += into a value that names an AI identity ({!r})"
+                    .format(name, ai.group(0)))
+    return None
+
+
 def _cmtidn_identity_word(command):
     """A word of command that can record an identity, as a match object: its first git word
     (_CMTIDN_GIT_WORD_RE), else its first GIT_AUTHOR_, GIT_COMMITTER_ or EMAIL variable name or user, author
@@ -6587,14 +6779,16 @@ def commit_identity(data):
                                            "identity (a co-author trailer, an --author value, a git identity "
                                            "variable, EMAIL, or a user, author or committer name or email "
                                            "value)")
-        hit = _cmtidn_identity_set_ai(command) or _cmtidn_raw_stdin_identity_ai(command)
+        hit = (_cmtidn_identity_set_ai(command) or _cmtidn_raw_stdin_identity_ai(command)
+               or _cmtidn_unread_route_ai(command))
         if hit is None:
             return _commit_identity_fallback(_hash_doubt_scan(command), str(exc))
         raw = True
     except ValueError as exc:
         # A command the tokenizer cannot parse (a here-string or heredoc feeding xargs) is judged by the xargs
         # stdin rule over its raw words as well (_cmtidn_raw_stdin_identity_ai).
-        hit = _cmtidn_identity_set_ai(command) or _cmtidn_raw_stdin_identity_ai(command)
+        hit = (_cmtidn_identity_set_ai(command) or _cmtidn_raw_stdin_identity_ai(command)
+               or _cmtidn_unread_route_ai(command))
         if hit is None:
             return _commit_identity_fallback(command, str(exc))
         raw = True
@@ -6602,7 +6796,7 @@ def commit_identity(data):
         # Nothing the reader judges sets an AI identity: the raw text decides next, failing closed when it
         # assigns an identity a value that names an AI, or a value it does not spell in a command that names an AI
         # anywhere (_cmtidn_identity_set_ai).
-        hit = _cmtidn_identity_set_ai(command)
+        hit = _cmtidn_identity_set_ai(command) or _cmtidn_unread_route_ai(command)
         raw = hit is not None
     if hit is None:
         if _SubstHeredocs.reads != reads:
