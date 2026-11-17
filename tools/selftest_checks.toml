@@ -5324,6 +5324,8 @@ expected-check-ids = [
   "diff/merge-base-not-base-tip",
   "diff/new-file-all-lines",
   "diff/pure-rename-silent",
+  "diff/rename-into-shipped-set-all-lines",
+  "diff/manifest-only-newly-shipped-all-lines",
   "diff/edited-rename-destination-only",
   "diff/equal-count-relocation-reported",
   "diff/crlf-and-missing-final-lf",

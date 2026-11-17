@@ -1073,7 +1073,13 @@ def _adopter_match_worker():
 # `--diff BASE` reports every built-in or adopter tracker-shape match on a line ADDED between the merge
 # base of BASE and HEAD, within HEAD's shipped set, whatever the ratchet baseline allows (an equal-count
 # relocation is still reported). Every input is read from the pinned HEAD commit (manifest, adopter
-# configuration, baseline, tree and blobs), never from the working tree or the index. It fails closed
+# configuration, baseline, tree and blobs), never from the working tree or the index. A path shipped at
+# HEAD whose content was not shipped at the merge base (its merge-base path, the rename source for a
+# rename, is outside the shipped set computed from the merge base's own manifest and tree, or it is
+# new) is wholly added: every line is reported, so a rename from an unshipped path into the shipped set
+# and a file that becomes shipped only through a manifest change (an ownership exclusion reaches this
+# set through the regenerated manifest) cannot hide a label. A merge base with no manifest ships
+# nothing; a rename within the shipped set still reports only its added lines. It fails closed
 # (exit 2) when BASE or HEAD cannot be read as a commit, the repository is shallow, there is no or more
 # than one merge base, git fails or times out, its output is malformed, a shipped path is absent from or
 # not a regular file in HEAD, a text-suffix blob is not UTF-8, or the HEAD configuration or baseline is
@@ -1137,8 +1143,9 @@ def _resolve_diff_commits(root, base):
     return ids[0], ids[1], found[0]
 
 
-def _head_tree(root, head):
-    """{relpath: (mode, type, object id)} for every entry of the HEAD commit's tree."""
+def _head_tree(root, head, empty_ok=False):
+    """{relpath: (mode, type, object id)} for every entry of the HEAD commit's tree (or of the merge
+    base's tree, which alone may be empty, with `empty_ok`)."""
     tree = {}
     for record in _git_ok(root, ["ls-tree", "-r", "-z", "--full-tree", head]).split(b"\x00"):
         if not record:
@@ -1148,7 +1155,7 @@ def _head_tree(root, head):
         if not sep or len(parts) != 3 or not _OBJECT_ID.match(parts[2]):
             raise OSError("git ls-tree printed a malformed record")
         tree[path.decode("utf-8")] = tuple(parts)
-    if not tree:
+    if not tree and not empty_ok:
         raise OSError("the HEAD tree lists no file; an empty tree is never assumed")
     return tree
 
@@ -1192,6 +1199,22 @@ def _read_head_tracker_inputs(root, head):
     if baseline is not None:
         _parse_tracker_baseline(baseline, shipped, [key for key, _label in registry])
     return tree, shipped, shapes, registry
+
+
+def _merge_base_shipped_set(root, merge_base):
+    """The shipped set at the merge base, from the merge base's own manifest and tree (the same rule
+    as HEAD's: manifest sources plus tracked .github/ and opf/ paths). A merge base with no manifest
+    ships nothing, so every path shipped at HEAD is wholly added (more lines reported, never fewer); a
+    manifest that is not a regular file, not UTF-8 or not a usable inventory raises OSError."""
+    tree = _head_tree(root, merge_base, empty_ok=True)
+    manifest = _head_blob(root, tree, TRACKER_MANIFEST_RELPATH, False)
+    if manifest is None:
+        return set()
+    try:
+        manifest_text = manifest.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise OSError("{} at the merge base is not valid UTF-8 ({})".format(TRACKER_MANIFEST_RELPATH, exc))
+    return set(_shipped_from_manifest(manifest_text, sorted(tree)))
 
 
 def _added_line_ranges(root, old, new):
@@ -1243,9 +1266,10 @@ def _added_line_ranges(root, old, new):
 
 
 def _diff_entries(root, merge_base, head):
-    """[(status, old mode, new mode, old id, new id, HEAD-side relpath)] from a NUL-delimited raw diff
-    of the merge base against HEAD with explicit rename detection (no copies); a malformed record or an
-    unsupported status raises OSError."""
+    """[(status, old mode, new mode, old id, new id, HEAD-side relpath, merge-base-side relpath)] from a
+    NUL-delimited raw diff of the merge base against HEAD with explicit rename detection (no copies);
+    the merge-base-side relpath is the rename source for a rename and the same path otherwise. A
+    malformed record or an unsupported status raises OSError."""
     out = _git_ok(root, ["diff", "--raw", "-z", "--no-abbrev", "-M", "--no-color", "--no-ext-diff",
                          "--no-textconv", merge_base, head])
     fields = out.split(b"\x00")
@@ -1264,7 +1288,8 @@ def _diff_entries(root, merge_base, head):
         if index + width >= len(fields):
             raise OSError("git diff --raw ended inside a record")
         path = fields[index + width].decode("utf-8")
-        entries.append((status[:1], parts[0], parts[1], parts[2], parts[3], path))
+        entries.append((status[:1], parts[0], parts[1], parts[2], parts[3], path,
+                        fields[index + 1].decode("utf-8")))
         index += width + 1
     return entries
 
@@ -1276,14 +1301,31 @@ def tracker_diff_main(root, base):
     try:
         _base_id, head, merge_base = _resolve_diff_commits(root, base)
         tree, shipped, shapes, registry = _read_head_tracker_inputs(root, head)
+        base_shipped = _merge_base_shipped_set(root, merge_base)
         frozen_map = dict(TRACKER_LABEL_FROZEN)
         shipped_set = set(shipped)
-        added = {}
-        for status, old_mode, new_mode, old_id, new_id, rel in _diff_entries(root, merge_base, head):
+        changed = {}
+        for status, old_mode, new_mode, old_id, new_id, rel, old_rel in _diff_entries(root, merge_base, head):
             if status == "D" or rel not in shipped_set or rel == TRACKER_BASELINE_RELPATH:
                 continue
             if new_mode not in _REGULAR_MODES:
                 raise OSError("shipped path {} is not a regular file in HEAD; fail closed".format(rel))
+            changed[rel] = (status, old_mode, old_id, new_id, old_rel)
+        added = {}
+        for rel in shipped:
+            if rel == TRACKER_BASELINE_RELPATH:
+                continue
+            entry = changed.get(rel)
+            # Newly shipped (wholly added): new at HEAD, or its merge-base path (the rename source for
+            # a rename, the same path otherwise, unchanged included) was not shipped at the merge base.
+            if entry is None:
+                newly = rel not in base_shipped
+                if not newly:
+                    continue
+                old_mode, old_id, new_id = None, None, tree[rel][2]
+            else:
+                status, old_mode, old_id, new_id, old_rel = entry
+                newly = status == "A" or old_rel not in base_shipped
             raw = _git_ok(root, ["cat-file", "blob", new_id])
             try:
                 text = raw.decode("utf-8")
@@ -1298,7 +1340,7 @@ def tracker_diff_main(root, base):
             lines = text.split("\n")
             if text.endswith("\n"):
                 lines.pop()
-            if status == "A" or old_mode not in _REGULAR_MODES:
+            if newly or old_mode not in _REGULAR_MODES:
                 numbers = list(range(1, len(lines) + 1))
             else:
                 numbers = _added_line_ranges(root, old_id, new_id)
@@ -2242,6 +2284,12 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
         write("docs/edit-name.md", "e {}\n".format(label) + body)
         write("docs/crlf.md", b"c1\r\nc2\r\n")
         write("notes/out.md", "z\n")
+        # Two unshipped files that become shipped on the branch without an edit: notes/promoted.md by a
+        # pure rename into the shipped set, notes/listed.md by the manifest alone. Each is newly shipped,
+        # so every line counts; without the merge-base shipped set both are silent.
+        write("notes/promoted.md", "p {}\n".format(label) + "".join(
+            "promoted line {}\n".format(i) for i in range(1, 21)))
+        write("notes/listed.md", "l1\nl2 {}\n".format(label))
         first = ["docs/crlf.md", "docs/edit-name.md", "docs/move.md", "docs/old-name.md", "docs/page.md"]
         write(".aiqt/manifest.toml", manifest_for(first))
         git("init", "-q", "-b", "main")
@@ -2256,6 +2304,7 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
         write("docs/move.md", "a\nb\nc {}\n".format(label))
         git("mv", "docs/old-name.md", "docs/new-name.md")
         git("mv", "docs/edit-name.md", "docs/edit-dest.md")
+        git("mv", "notes/promoted.md", "docs/promoted.md")
         write("docs/edit-dest.md", "e {}\n".format(label) + body + "r {}\n".format(label))
         write("docs/new.md", "n1\nn2 {}\n".format(label))
         # A lone carriage return inside the added last line (which has no final LF): git counts lines by
@@ -2264,7 +2313,8 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
         write("notes/out.md", "z {}\n".format(label))
         write(".aiqt/tracker-labels.toml", config_text([sample]))
         write(".aiqt/manifest.toml", manifest_for(["docs/crlf.md", "docs/edit-dest.md", "docs/move.md",
-                                                    "docs/new-name.md", "docs/new.md", "docs/page.md"]))
+                                                    "docs/new-name.md", "docs/new.md", "docs/page.md",
+                                                    "docs/promoted.md", "notes/listed.md"]))
         git("add", "-A")
         git("commit", "-q", "-m", "feature work")
         wrote = gate("--write-baseline")
@@ -2292,6 +2342,8 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
         check("diff/merge-base-not-base-tip", lacks("docs/page.md:2:"), detail)
         check("diff/new-file-all-lines", has("docs/new.md:2:"), detail)
         check("diff/pure-rename-silent", lacks("docs/new-name.md:1:"), detail)
+        check("diff/rename-into-shipped-set-all-lines", has("docs/promoted.md:1:"), detail)
+        check("diff/manifest-only-newly-shipped-all-lines", has("notes/listed.md:2:"), detail)
         check("diff/edited-rename-destination-only", has("docs/edit-dest.md:22:")
               and not any(item.startswith("docs/edit-dest.md:") and item != "docs/edit-dest.md:22:"
                           for item in reported), detail)
