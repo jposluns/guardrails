@@ -986,6 +986,26 @@ ALLOWLIST = (
     },
     {
         "side": "ci-only",
+        "identity": "tools/check_must_deliver.py --base <ref:origin/${GITHUB_BASE_REF}>",
+        "reason": (
+            "CI derives the list ratchet's comparison base from trusted event "
+            "context; the bare leg (default base: the merge base with "
+            "origin/main) runs on both sides."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
+        "identity": "tools/check_must_deliver.py --base HEAD^",
+        "reason": (
+            "The CI else-branch uses the history-relative literal base HEAD^ "
+            "when no pull-request target ref is available; there is no local "
+            "--base leg, so this literal form is CI-only by design."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
         "identity": (
             "tools/check_branch_root.py --protected <ref:origin/${GITHUB_BASE_REF}> --head <ref:$PR_HEAD_SHA> --max-lag 200"
         ),

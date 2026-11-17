@@ -6,8 +6,15 @@ The first-pin demonstration (tools/gen_first_pin_demo.py) DERIVES its delivered 
 that list shrinks silently when the rules grow and every byte-identity gate stays green: a rule can fall
 out of the delivered prefix with no check failing. This gate closes that gap for the rules a maintainer
 has declared must stay delivered. The list is hand-edited policy, like .aiqt/core/instruction-budget.toml:
-additions may be proposed in any PR; a removal is a reviewed change that this gate does not block (the
-schema has no field that could record an approval; see the disclosed residual below).
+additions may be proposed in any PR and stay free; a removal must be declared (see LIST RATCHET below).
+
+LIST RATCHET. The list is compared with the list at a comparison base: --base REF, or with no flag the
+merge base of HEAD and origin/main (no base that resolves is exit 2, never "nothing to compare"). The
+base file is read from the base commit through the same strict parser as the working file; a base
+commit without it, or with it as a symlink or malformed, is exit 2. A rule listed at the base and no
+longer listed is exit 1 naming it, unless a [[removal]] row (exactly id and reason) names it; each
+such removal is printed with its reason. A [[removal]] row that is duplicated, also listed in [[rule]],
+has an empty reason or carries an unknown key is exit 2. Removal rows may stay after the merge.
 
 The spans come from gen_first_pin_demo.measure, the ONE span algorithm the demonstration generator also
 uses: AGENTS.md must be byte-identical to a fresh composition of the rule corpus and the block registry
@@ -17,24 +24,29 @@ never reads the demonstration's own lists; it recomputes everything. The cap is 
 check_release_build.CAP_BYTES at call time, never copied here.
 
 The declared file carries exactly format-version, warn-margin-bytes and [[rule]] rows of exactly id and
-reason; every id must be a corpus-id with a measured span. An absent, unreadable, symlinked, non-UTF-8,
+reason, and optionally [[removal]] rows of exactly id and reason; every listed id must be a corpus-id
+with a measured span. An absent, unreadable, symlinked, non-UTF-8,
 malformed or EMPTY list is exit 2 (a missing input is a failure, never "nothing to check"), per the
 check-fails-closed-on-unreadable rule. The gate prints every listed rule's end offset and margin on every
 run, and a WARNING (still exit 0) when the tightest margin drops under warn-margin-bytes, so growth is
 visible before a listed rule falls out.
 
-DISCLOSED RESIDUAL (disclose-guard-residuals): a PR that removes a rule from the list passes this gate
-(review must judge the removal); a listed rule cut down to a stub still passes (content is not judged);
+DISCLOSED RESIDUAL (disclose-guard-residuals): a PR that removes a rule from the list AND adds a
+[[removal]] row for it passes this gate (the row turns a silent deletion into a named, reasoned record the
+gate prints; review must judge the removal itself); the ratchet sees only what changed since the base it
+is given, so it is as good as that base (a stale or wrong --base compares against the wrong list); a
+listed rule cut down to a stub still passes (content is not judged);
 the gate measures the repository file against the configured cap, not any platform's actual truncation
 behaviour or a budget other instruction files may share; and a client that checks AGENTS.md out with CRLF
 line endings inflates what a reader there receives, which this gate does not model (.gitattributes pins
 AGENTS.md to eol=lf).
 
-  check_must_deliver.py              check the live tree
-  check_must_deliver.py --self-test  build synthetic trees and assert each vector is discriminated
+  check_must_deliver.py [--base REF]  check the live tree (default base: merge base with origin/main)
+  check_must_deliver.py --self-test   build synthetic trees and assert each vector is discriminated
 
-Exit convention: 0 every listed rule is delivered; 1 a listed rule ends past the cap; 2 an unreadable,
-malformed or ambiguous input (fail-closed).
+Exit convention: 0 every listed rule is delivered and no rule left the list undeclared; 1 a listed rule
+ends past the cap, or a rule listed at the base is no longer listed with no [[removal]] row; 2 an
+unreadable, malformed or ambiguous input, or a comparison base that does not resolve (fail-closed).
 """
 import sys
 
@@ -52,6 +64,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import os
 import stat
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -63,7 +76,11 @@ import check_release_build  # noqa: E402  the cap, read as check_release_build.C
 
 DECL_REL = ".aiqt/core/must-deliver.toml"
 TOP_KEYS = frozenset({"format-version", "warn-margin-bytes", "rule"})
+OPTIONAL_TOP_KEYS = frozenset({"removal"})
 ROW_KEYS = frozenset({"id", "reason"})
+REMOVAL_KEYS = frozenset({"id", "reason"})
+DEFAULT_BASE_REMOTE = "origin/main"
+GIT_TIMEOUT = 60  # seconds per git call; a call that does not finish is exit 2, never a pass
 
 
 def _read_decl_bytes(path):
@@ -73,9 +90,9 @@ def _read_decl_bytes(path):
 
 
 def read_declared(path):
-    """The validated must-deliver list: ([rule ids], warn_margin_bytes). Absent, a symlink or
-    non-regular entry, unreadable, not UTF-8, not TOML, or outside the exact schema is a DemoError
-    (exit 2): the list is the gate's whole policy input, so nothing else may stand in for it."""
+    """The validated must-deliver list: ([rule ids], warn_margin_bytes, {removed id: reason}). Absent, a
+    symlink or non-regular entry, unreadable, not UTF-8, not TOML, or outside the exact schema is a
+    DemoError (exit 2): the list is the gate's whole policy input, so nothing else may stand in for it."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -88,46 +105,186 @@ def read_declared(path):
         raw = _read_decl_bytes(path)
     except OSError as exc:
         raise DemoError("{} is unreadable ({})".format(DECL_REL, exc))
+    return parse_declared(raw, DECL_REL)
+
+
+def parse_declared(raw, label):
+    """The one strict parser of the declaration's bytes, shared by the working file and the file at the
+    comparison base (label names which in every message). Returns ([rule ids], warn_margin_bytes,
+    {removed id: reason}); anything outside the exact schema is a DemoError (exit 2)."""
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise DemoError("{} is not valid UTF-8 ({})".format(DECL_REL, exc))
+        raise DemoError("{} is not valid UTF-8 ({})".format(label, exc))
     try:
         data = tomllib.loads(text)
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table; neither is a TOMLDecodeError.
     except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
-        raise DemoError("{} does not parse ({})".format(DECL_REL, exc))
-    if set(data) != TOP_KEYS:
-        raise DemoError("{} must carry exactly the keys {}, found {}".format(
-            DECL_REL, sorted(TOP_KEYS), sorted(data)))
+        raise DemoError("{} does not parse ({})".format(label, exc))
+    if not TOP_KEYS <= set(data) or not set(data) <= TOP_KEYS | OPTIONAL_TOP_KEYS:
+        raise DemoError("{} must carry exactly the keys {} (and optionally {}), found {}".format(
+            label, sorted(TOP_KEYS), sorted(OPTIONAL_TOP_KEYS), sorted(data)))
     version = data["format-version"]
     # The type is checked before the value: TOML 1.0 parses to a float that compares equal to 1, and a
     # bool is an int subclass.
     if isinstance(version, bool) or not isinstance(version, int) or version != 1:
-        raise DemoError("{}: format-version must be the integer 1, found {!r}".format(DECL_REL, version))
+        raise DemoError("{}: format-version must be the integer 1, found {!r}".format(label, version))
     warn = data["warn-margin-bytes"]
     if isinstance(warn, bool) or not isinstance(warn, int) or warn < 1:
-        raise DemoError("{}: warn-margin-bytes must be a positive integer, found {!r}".format(DECL_REL, warn))
+        raise DemoError("{}: warn-margin-bytes must be a positive integer, found {!r}".format(label, warn))
     rows = data["rule"]
     if not isinstance(rows, list) or not rows:
         raise DemoError("{}: rule must be a non-empty array of [[rule]] tables; an empty list is a "
-                        "failure, never \"nothing to check\"".format(DECL_REL))
+                        "failure, never \"nothing to check\"".format(label))
     ids = []
     for row in rows:
         if not isinstance(row, dict) or set(row) != ROW_KEYS:
             raise DemoError("{}: each [[rule]] row must carry exactly the keys {}, found {!r}".format(
-                DECL_REL, sorted(ROW_KEYS), row))
+                label, sorted(ROW_KEYS), row))
         rid, reason = row["id"], row["reason"]
         if not isinstance(rid, str) or not CID_RE.match(rid):
-            raise DemoError("{}: id {!r} is not a well-formed corpus-id".format(DECL_REL, rid))
+            raise DemoError("{}: id {!r} is not a well-formed corpus-id".format(label, rid))
         if not isinstance(reason, str) or not reason.strip():
-            raise DemoError("{}: rule {} must carry a non-empty reason string".format(DECL_REL, rid))
+            raise DemoError("{}: rule {} must carry a non-empty reason string".format(label, rid))
         if rid in ids:
-            raise DemoError("{}: rule {} is listed more than once".format(DECL_REL, rid))
+            raise DemoError("{}: rule {} is listed more than once".format(label, rid))
         ids.append(rid)
-    return ids, warn
+    removals = {}
+    if "removal" in data:
+        removal_rows = data["removal"]
+        if not isinstance(removal_rows, list) or not removal_rows:
+            raise DemoError("{}: removal must be a non-empty array of [[removal]] tables (omit the key "
+                            "when no removal is recorded)".format(label))
+        for row in removal_rows:
+            if not isinstance(row, dict) or set(row) != REMOVAL_KEYS:
+                raise DemoError("{}: each [[removal]] row must carry exactly the keys {}, found {!r}".format(
+                    label, sorted(REMOVAL_KEYS), row))
+            rid, reason = row["id"], row["reason"]
+            if not isinstance(rid, str) or not CID_RE.match(rid):
+                raise DemoError("{}: removal id {!r} is not a well-formed corpus-id".format(label, rid))
+            if not isinstance(reason, str) or not reason.strip():
+                raise DemoError("{}: removal {} must carry a non-empty reason string".format(label, rid))
+            if rid in removals:
+                raise DemoError("{}: removal {} is recorded more than once".format(label, rid))
+            if rid in ids:
+                raise DemoError("{}: removal {} is also listed in [[rule]]; a rule is either listed or "
+                                "removed".format(label, rid))
+            removals[rid] = reason
+    return ids, warn, removals
+
+
+# --- the comparison base (every git return code is checked; a nonzero exit is never an empty result) --
+
+def _git_env():
+    """The ambient environment without any GIT_-prefixed variable, so a GIT_DIR, GIT_INDEX_FILE or
+    GIT_OBJECT_DIRECTORY set by a hook or a wrapper cannot point the comparison at another repository,
+    with replace refs off so a replacement object cannot stand in for the base commit."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return env
+
+
+def _git(root, args):
+    """Run git -C root with args; returns the CompletedProcess (bytes). A missing git binary or a call
+    past GIT_TIMEOUT is a DemoError (exit 2): the comparison cannot run."""
+    try:
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, env=_git_env(),
+                              timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise DemoError("git {} could not run ({})".format(args[0], exc))
+
+
+def _git_err(proc):
+    return proc.stderr.decode("utf-8", "replace").strip() or "exit {}".format(proc.returncode)
+
+
+def _object_id(text):
+    """text as a full hexadecimal object id (SHA-1 or SHA-256), or None."""
+    oid = text.strip()
+    if len(oid) in (40, 64) and all(c in "0123456789abcdef" for c in oid):
+        return oid
+    return None
+
+
+def resolve_base(root, base):
+    """(commit, label) of the comparison base: the explicit ref, or with base None the merge base of
+    HEAD and origin/main. A base that does not resolve to one commit is a DemoError (exit 2), never
+    "nothing to compare"."""
+    if base is None:
+        proc = _git(root, ["merge-base", "HEAD", DEFAULT_BASE_REMOTE])
+        commit = _object_id(proc.stdout.decode("ascii", "replace")) if proc.returncode == 0 else None
+        if commit is None:
+            raise DemoError("no comparison base resolves: git merge-base HEAD {} failed ({}); pass "
+                            "--base REF or fetch {}".format(DEFAULT_BASE_REMOTE, _git_err(proc),
+                                                            DEFAULT_BASE_REMOTE))
+        return commit, "merge base of HEAD and {} ({})".format(DEFAULT_BASE_REMOTE, commit[:12])
+    if not base or base.startswith("-"):
+        raise DemoError("--base {!r} is not a ref".format(base))
+    proc = _git(root, ["rev-parse", "--verify", "--quiet", base + "^{commit}"])
+    commit = _object_id(proc.stdout.decode("ascii", "replace")) if proc.returncode == 0 else None
+    if commit is None:
+        raise DemoError("cannot resolve the comparison base {!r} to a commit".format(base))
+    return commit, "{} ({})".format(base, commit[:12])
+
+
+def read_base_declared(root, commit, label):
+    """The declaration as listed at the base commit, read through parse_declared. A base commit without
+    the file, or with it as anything but a regular blob (a symlink, a tree, a submodule), is a DemoError
+    (exit 2): the base list is the ratchet's whole reference, so its absence is never an empty list."""
+    where = "{} at the base {}".format(DECL_REL, label)
+    proc = _git(root, ["ls-tree", "-z", "--full-tree", commit, "--", DECL_REL])
+    if proc.returncode != 0:
+        raise DemoError("git ls-tree failed for {} ({})".format(where, _git_err(proc)))
+    entries = [e for e in proc.stdout.split(b"\0") if e]
+    if not entries:
+        raise DemoError("{} does not exist; the list at the base cannot be read".format(where))
+    meta, _tab, path = entries[0].partition(b"\t")
+    fields = meta.split()
+    if (len(entries) != 1 or path != DECL_REL.encode("ascii") or len(fields) != 3
+            or fields[0] not in (b"100644", b"100755") or fields[1] != b"blob"):
+        raise DemoError("{} is not a regular file (a symlink, directory or other entry)".format(where))
+    proc = _git(root, ["cat-file", "blob", fields[2].decode("ascii", "replace")])
+    if proc.returncode != 0:
+        raise DemoError("{} is unreadable ({})".format(where, _git_err(proc)))
+    return parse_declared(proc.stdout, where)
+
+
+def ratchet(root, base):
+    """Compare the working list with the list at the comparison base. Exit 0 when every rule listed at
+    the base is still listed or named by a [[removal]] row, 1 when one is neither (named), 2 when the
+    base does not resolve or either list cannot be read. Additions are free."""
+    try:
+        ids, _warn, removals = read_declared(root / DECL_REL)
+        commit, label = resolve_base(root, base)
+        base_ids, _base_warn, _base_removals = read_base_declared(root, commit, label)
+    except (ValueError, OSError, UnicodeError) as exc:
+        print("error: {}; fail-closed".format(exc), file=sys.stderr)
+        return 2
+    dropped = [rid for rid in base_ids if rid not in ids]
+    undeclared = [rid for rid in dropped if rid not in removals]
+    added = [rid for rid in ids if rid not in base_ids]
+    print("must-deliver: list ratchet against base {}: {} listed there, {} listed now ({} added, {} "
+          "removed)".format(label, len(base_ids), len(ids), len(added), len(dropped)))
+    for rid in dropped:
+        if rid in removals:
+            print("must-deliver: removal: rule {} left the list since the base; [[removal]] reason: {}".format(
+                rid, removals[rid]))
+    for rid in sorted(removals):
+        if rid not in dropped:
+            print("must-deliver: removal row kept: rule {} (not listed at the base); reason: {}".format(
+                rid, removals[rid]))
+    for rid in undeclared:
+        print("must-deliver: FAIL: rule {} is listed at the base {} and is no longer listed, with no "
+              "[[removal]] row naming it".format(rid, label))
+    return 1 if undeclared else 0
+
+
+def gate(root, base):
+    """The whole gate: the prefix check (run) and the list ratchet, both always run so every finding is
+    printed. The worse exit wins: 2 over 1 over 0."""
+    return max(run(root), ratchet(root, base))
 
 
 def run(root):
@@ -135,7 +292,7 @@ def run(root):
     listed rule ends past it, 2 on an unreadable, malformed or ambiguous input. Parameterized on root so
     the self-test drives it against synthetic trees, never the real repo."""
     try:
-        ids, warn = read_declared(root / DECL_REL)
+        ids, warn, _removals = read_declared(root / DECL_REL)
         agents, spans, _apex_id = measure(root)
     except (ValueError, OSError, UnicodeError) as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
@@ -179,7 +336,16 @@ def main():
     args = sys.argv[1:]
     if "--self-test" in args:
         return self_test_main()
-    return run(repo_root())
+    base = None
+    if len(args) == 2 and args[0] == "--base":
+        base = args[1]
+    elif len(args) == 1 and args[0].startswith("--base="):
+        base = args[0][len("--base="):]
+    elif args:
+        print("error: unknown arguments {}; usage: check_must_deliver.py [--base REF] | --self-test".format(
+            args), file=sys.stderr)
+        return 2
+    return gate(repo_root(), base)
 
 
 # --- self-test ------------------------------------------------------------------------------------
@@ -226,8 +392,30 @@ def main():
 #       offsets relative to the rule region, without the rules_start shift, passes);
 #   T13 the margin report: the unlisted-rule line, and a WARNING line under warn-margin-bytes that still
 #       exits 0 (a mutant whose warning exits non-zero, or margin off by one, fails).
+# The list ratchet (T14 to T20) runs gate() against temporary git repositories built with the same
+# helpers and committed through _git_fixture_env's hermetic environment:
+#   T14 the base lists ruleaa and the working list drops it with no [[removal]] row: exit 1 naming ruleaa
+#       (a mutant that never reads the base, comparing the working list with itself, passes);
+#   T15 the same drop with a [[removal]] row naming ruleaa: exit 0, the removal and its reason printed (a
+#       mutant that rejects every removal fails);
+#   T16 a [[removal]] row with an empty reason, an extra key, a duplicate, or an id also in [[rule]]: each
+#       exit 2 with its own message (a mutant without that one check exits 0);
+#   T17 a --base that does not resolve, and no origin/main with no --base: each exit 2; with origin/main
+#       present and no --base, the merge base is read and the drop is exit 1 (a mutant treating a missing
+#       base as nothing to compare passes the first two);
+#   T18 a base commit without the list, and one whose list is malformed: each exit 2 (a mutant treating an
+#       absent or unreadable base list as nothing to compare passes);
+#   T19 the working list adds an id the base does not list: exit 0 (a mutant failing on any difference
+#       between the two lists fails);
+#   T20 ruleaa grows past the cap, the working list drops it, and the first-pin demonstration is
+#       regenerated without it: exit 1 naming ruleaa from the ratchet, with no prefix FAIL line (a mutant
+#       comparing against the demonstration's delivered list instead of the base list passes).
 
 import gen_first_pin_demo as gfpd  # noqa: E402  fixture helpers (_write_tree, _tuned) and CAP_BYTES
+
+
+class _FixtureError(Exception):
+    """A self-test fixture's own git command failed: the vector cannot run (exit 2, never a pass)."""
 
 
 def _decl(root, rows, warn=512, raw=None):
@@ -248,6 +436,7 @@ def self_test_main():
     import shutil
     import tempfile
     from contextlib import redirect_stdout, redirect_stderr
+    from _git_fixture_env import git_fixture_env
 
     CAP = check_release_build.CAP_BYTES
 
@@ -257,8 +446,44 @@ def self_test_main():
             code = run(root)
         return code, buf.getvalue()
 
+    def capture_gate(root, base):
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(buf):
+            code = gate(root, base)
+        return code, buf.getvalue()
+
+    def fixture_git(root, *args):
+        env = git_fixture_env(GIT_AUTHOR_NAME="must-deliver self-test",
+                              GIT_AUTHOR_EMAIL="selftest@example.invalid",
+                              GIT_COMMITTER_NAME="must-deliver self-test",
+                              GIT_COMMITTER_EMAIL="selftest@example.invalid")
+        try:
+            proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True, env=env,
+                                  timeout=GIT_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise _FixtureError("fixture git {} could not run ({})".format(args[0], exc))
+        if proc.returncode != 0:
+            raise _FixtureError("fixture git {} failed in {}: {}".format(args[0], root, _git_err(proc)))
+        return proc.stdout.decode("utf-8", "replace").strip()
+
+    def commit_base(root):
+        """Commit the tree at root as the fixture's one commit; returns its object id."""
+        fixture_git(root, "init", "-q")
+        fixture_git(root, "add", "-A")
+        fixture_git(root, "commit", "-q", "-m", "fixture base")
+        return fixture_git(root, "rev-parse", "HEAD")
+
+    def raw_decl(rules, removals=(), extra=""):
+        lines = ["format-version = 1", "warn-margin-bytes = 512"]
+        for rid in rules:
+            lines += ["", "[[rule]]", 'id = "{}"'.format(rid), 'reason = "fixture rule"']
+        for rid, reason in removals:
+            lines += ["", "[[removal]]", 'id = "{}"'.format(rid), 'reason = "{}"'.format(reason)]
+        return "\n".join(lines) + "\n" + extra
+
     failures = []
     skipped = []
+    fixture_error = None
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-check-must-deliver-selftest-"))
     except OSError as exc:
@@ -534,6 +759,124 @@ def self_test_main():
         if code != 0 or "WARNING" in out:
             failures.append("T13: margin equal to warn-margin-bytes must not warn, got {}\n{}".format(
                 code, out))
+
+        # The list ratchet. Each fixture commits a base listing prjint1 and ruleaa (ruleaa CAP - 10),
+        # then edits the working list; the base is passed as its full object id unless stated.
+        drop_msg = "FAIL: rule ruleaa is listed at the base"
+
+        def ratchet_fixture(name, base_rules=("prjint1", "ruleaa")):
+            root = tmp / name
+            gfpd._tuned(root, base_specs, "ruleaa", CAP - 10)
+            _decl(root, [], raw=raw_decl(base_rules))
+            return root, commit_base(root)
+
+        # T14. Dropped with no [[removal]] row: exit 1 naming ruleaa.
+        t14, base14 = ratchet_fixture("t14")
+        _decl(t14, [], raw=raw_decl(["prjint1"]))
+        code, out = capture_gate(t14, base14)
+        if code != 1 or drop_msg not in out:
+            failures.append("T14: a rule dropped from the list with no [[removal]] row must be exit 1 "
+                            "naming it, got {}\n{}".format(code, out))
+
+        # T15. Dropped with a [[removal]] row: exit 0, the removal and its reason printed.
+        t15, base15 = ratchet_fixture("t15")
+        _decl(t15, [], raw=raw_decl(["prjint1"], [("ruleaa", "fixture removal reason")]))
+        code, out = capture_gate(t15, base15)
+        if (code != 0 or "removal: rule ruleaa left the list since the base; [[removal]] reason: "
+                         "fixture removal reason" not in out):
+            failures.append("T15: a drop with a [[removal]] row must be exit 0 printing the removal, got "
+                            "{}\n{}".format(code, out))
+
+        # T16. Malformed [[removal]] rows: each exit 2 with its own message.
+        t16, base16 = ratchet_fixture("t16")
+        bad_removals = (
+            ("empty reason", raw_decl(["prjint1"], [("ruleaa", " ")]),
+             "removal ruleaa must carry a non-empty reason"),
+            ("extra key", raw_decl(["prjint1"], [("ruleaa", "x")], extra="approved = true\n"),
+             "each [[removal]] row must carry exactly the keys"),
+            ("duplicate", raw_decl(["prjint1"], [("ruleaa", "x"), ("ruleaa", "y")]),
+             "removal ruleaa is recorded more than once"),
+            ("also in [[rule]]", raw_decl(["prjint1", "ruleaa"], [("ruleaa", "x")]),
+             "removal ruleaa is also listed in [[rule]]"),
+        )
+        for label, raw, want in bad_removals:
+            _decl(t16, [], raw=raw)
+            code, out = capture_gate(t16, base16)
+            if code != 2 or want not in out:
+                failures.append("T16 {}: expected exit 2 with {!r}, got {}\n{}".format(label, want, code, out))
+
+        # T17. An unresolvable --base, and no origin/main with no --base: each exit 2. With origin/main
+        # present and no --base, the merge base is the comparison base and the drop is caught.
+        t17, base17 = ratchet_fixture("t17")
+        _decl(t17, [], raw=raw_decl(["prjint1"]))
+        code, out = capture_gate(t17, "no-such-ref")
+        if code != 2 or "cannot resolve the comparison base 'no-such-ref'" not in out:
+            failures.append("T17: an unresolvable --base must be exit 2, got {}\n{}".format(code, out))
+        code, out = capture_gate(t17, None)
+        if code != 2 or "no comparison base resolves" not in out:
+            failures.append("T17: no origin/main and no --base must be exit 2, got {}\n{}".format(code, out))
+        fixture_git(t17, "update-ref", "refs/remotes/origin/main", base17)
+        code, out = capture_gate(t17, None)
+        if code != 1 or drop_msg not in out or "merge base of HEAD and origin/main" not in out:
+            failures.append("T17: with origin/main present the default base must catch the drop (exit 1), "
+                            "got {}\n{}".format(code, out))
+
+        # T18. A base commit without the list, and one whose list is malformed: each exit 2.
+        t18 = tmp / "t18"
+        gfpd._tuned(t18, base_specs, "ruleaa", CAP - 10)
+        base18 = commit_base(t18)  # no must-deliver.toml at the base
+        _decl(t18, [], raw=raw_decl(["prjint1", "ruleaa"]))
+        code, out = capture_gate(t18, base18)
+        if code != 2 or "at the base" not in out or "does not exist" not in out:
+            failures.append("T18: a base commit without the list must be exit 2, got {}\n{}".format(code, out))
+        _decl(t18, [], raw="format-version = 1\nwarn-margin-bytes = 512\nrule = []\n")
+        fixture_git(t18, "add", "-A")
+        fixture_git(t18, "commit", "-q", "-m", "fixture malformed base")
+        base18b = fixture_git(t18, "rev-parse", "HEAD")
+        _decl(t18, [], raw=raw_decl(["prjint1", "ruleaa"]))
+        code, out = capture_gate(t18, base18b)
+        if code != 2 or "at the base" not in out or "non-empty" not in out:
+            failures.append("T18: a malformed list at the base must be exit 2, got {}\n{}".format(code, out))
+
+        # T19. An addition is free: the base lists prjint1 only, the working list adds ruleaa.
+        t19, base19 = ratchet_fixture("t19", base_rules=("prjint1",))
+        _decl(t19, [], raw=raw_decl(["prjint1", "ruleaa"]))
+        code, out = capture_gate(t19, base19)
+        if code != 0 or "(1 added, 0 removed)" not in out:
+            failures.append("T19: adding a listed rule must be exit 0, got {}\n{}".format(code, out))
+
+        # T20. ruleaa grows past the cap; the working list drops it and the demonstration is regenerated
+        # without it, so every byte-identity surface agrees. Only the ratchet still fails, naming ruleaa.
+        t20 = tmp / "t20"
+        gfpd._tuned(t20, base_specs, "ruleaa", CAP - 10)
+        demo20 = t20 / Path(gfpd.DEMO_REL)
+        demo20.parent.mkdir(parents=True, exist_ok=True)
+        demo20.write_text(gfpd.build(t20), encoding="utf-8")
+
+        def demo_delivered():
+            """The demonstration's delivered list, or None when it does not parse (a T20 failure)."""
+            try:
+                return tomllib.loads(demo20.read_text(encoding="utf-8"))["delivered-prefix-obligations"]
+            except (ValueError, RecursionError, MemoryError, KeyError):
+                return None
+
+        delivered = demo_delivered()
+        if delivered is None or "ruleaa" not in delivered:
+            failures.append("T20: the base demonstration does not list ruleaa as delivered")
+        _decl(t20, [], raw=raw_decl(["prjint1", "ruleaa"]))
+        base20 = commit_base(t20)
+        gfpd._tuned(t20, base_specs, "ruleaa", CAP + 50)
+        demo20.write_text(gfpd.build(t20), encoding="utf-8")
+        _decl(t20, [], raw=raw_decl(["prjint1"]))
+        code, out = capture_gate(t20, base20)
+        delivered = demo_delivered()
+        if delivered is None or "ruleaa" in delivered:
+            failures.append("T20: the regenerated demonstration still lists ruleaa as delivered")
+        if code != 1 or drop_msg not in out or "FAIL: rule ruleaa ends at" in out:
+            failures.append("T20: a rule dropped from the list together with a regenerated demonstration "
+                            "must be exit 1 from the ratchet naming it, got {}\n{}".format(code, out))
+    except _FixtureError as exc:
+        fixture_error = str(exc)
     finally:
         for dirpath, _dirnames, filenames in os.walk(tmp):
             for fn in filenames:
@@ -543,6 +886,10 @@ def self_test_main():
                     pass
         shutil.rmtree(tmp, ignore_errors=True)
 
+    if fixture_error is not None:
+        print("SELF-TEST ERROR: a list-ratchet fixture could not be built ({}); cannot evaluate".format(
+            fixture_error), file=sys.stderr)
+        return 2
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
@@ -554,8 +901,12 @@ def self_test_main():
           "symlinked, unreadable (an injected read error) or unparseable list fail closed (exit 2); the "
           "demonstration's own lists are never read; an unknown or clause id fails closed naming it; the "
           "cap is read from check_release_build.CAP_BYTES at call time; a before-rules block moves the "
-          "spans it measures; and the margin report, the unlisted-rule line and the warn-margin WARNING "
-          "(still exit 0) are printed exactly. {}".format(
+          "spans it measures; the margin report, the unlisted-rule line and the warn-margin WARNING "
+          "(still exit 0) are printed exactly; and against a committed base, a rule dropped from the list "
+          "with no [[removal]] row fails naming it (also with the demonstration regenerated without it), "
+          "a declared removal passes and is printed, an addition passes, and a malformed removal row, an "
+          "unresolvable or missing base and an absent or malformed base list fail closed (exit 2). "
+          "{}".format(
               "SKIPPED on this runner: {}.".format("; ".join(skipped)) if skipped
               else "No case was skipped (the mode-000 list ran too)."))
     return 0
@@ -564,8 +915,9 @@ def self_test_main():
 # The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
 # tools/check_child_status_coverage.py pins this copy to by AST. The modules it imports hold child launch
 # and wait calls, which that gate's import scan counts, so under an ignored SIGCHLD a failing child they
-# start would read as a pass. This gate and its self-test start no child themselves; the guard runs at the
-# entry line, before main() dispatches either, so a launch added on either path later is covered.
+# start would read as a pass. The gate's list ratchet starts git children (the base reads) and its
+# self-test starts git children too (the fixture commits), each judged by its exit status; the guard runs
+# at the entry line, before main() dispatches either, so every launch on either path is covered.
 # The status the probe child exits with; any value other than 0 and the refusal exit would do.
 _CHILD_STATUS_PROBE_CODE = 77
 

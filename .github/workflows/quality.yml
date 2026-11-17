@@ -1070,9 +1070,22 @@ jobs:
       - name: Must-deliver prefix self-test
         shell: bash
         run: python3 -I -B tools/check_must_deliver.py --self-test
+      # The list ratchet's base follows the Version monotonicity step: a pull_request compares
+      # against origin/$GITHUB_BASE_REF; every other event passes HEAD^ when it resolves, otherwise
+      # the gate's own default base (the merge base with origin/main) decides.
       - name: Must-deliver prefix
         shell: bash
-        run: python3 -I -B tools/check_must_deliver.py
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 -I -B tools/check_must_deliver.py --base "origin/${GITHUB_BASE_REF}"
+          elif git rev-parse --verify --quiet "HEAD^" >/dev/null; then
+            python3 -I -B tools/check_must_deliver.py --base "HEAD^"
+          else
+            python3 -I -B tools/check_must_deliver.py
+          fi
 
       - name: Mappings page self-test
         shell: bash
