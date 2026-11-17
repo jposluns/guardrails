@@ -6390,6 +6390,69 @@ def _cmtidn_stdin_identity_ai(tokens, command):
             "identity ({!r})".format(ai.group(0)))
 
 
+# The blanks and shell operator characters at which _cmtidn_raw_stdin_identity_ai splits the text of a command
+# whose raw word reading is doubtful.
+_CMTIDN_RAW_SPLIT_RE = re.compile(r"[\s;&|<>()]+")
+
+
+def _cmtidn_raw_stdin_identity_ai(command):
+    """_cmtidn_stdin_identity_ai for a command the shared tokenizer cannot parse, such as a here-string or a
+    heredoc feeding xargs (xargs git config user.name <<< X, which _lex_command refuses), read over the raw
+    words of the text (_cmtidn_raw_words), each with the characters of _CMTIDN_SET_UNREAD_RE dropped; a hit
+    label, else None. The words are split into simple commands at each command separator between two words
+    (_CMTIDN_CMD_SEPARATOR_RE); a word that is the target of a redirection (after <, >, <&, >& or >|: a
+    here-string word, a heredoc delimiter, a file read by < F) and a file descriptor number written directly
+    before a redirection operator are dropped, as the tokenizer drops a redirection; and each simple command is
+    judged by _cmtidn_stdin_identity_ai, with the whole command as the text that must name an AI identity. When
+    a word is doubtful (the reading has passed a heredoc operator, a comment or another construct it may
+    misread, so it can join the words of several commands into one, as an apostrophe in a heredoc body does),
+    the text with a backslash-newline and those characters dropped is instead split at every blank and shell
+    operator character (_CMTIDN_RAW_SPLIT_RE) and its pieces searched in order: an xargs piece (or a path
+    ending in /xargs), a later config piece and a later user, author or committer name or email key piece
+    (IDENTITY_CONF_NAME_RE, any case) deny when the command names an AI identity anywhere, as written or once
+    those characters are dropped. Bounded as _cmtidn_identity_set_ai
+    is: a command longer than _CMTIDN_READ_LIMIT is not read here (the too-long fallback denies one that names
+    an AI and holds such a key), and the words are read in one pass. The cost is a safe-direction over-deny of
+    such a command that names an AI for another reason, a heredoc body line that reads as such a command
+    included."""
+    if len(command) > _CMTIDN_READ_LIMIT:
+        return None
+    gaps = []
+    words = _cmtidn_raw_words(command, gaps)
+    if any(doubtful for _word, doubtful in words):
+        text = _CMTIDN_SET_UNREAD_RE.sub("", command.replace("\\\n", ""))
+        want = 0  # 0: an xargs word, 1: a config word, 2: an identity key word
+        for bare in _CMTIDN_RAW_SPLIT_RE.split(text):
+            if want == 0 and bare.rsplit("/", 1)[-1] == "xargs":
+                want = 1
+            elif want == 1 and bare == "config":
+                want = 2
+            elif want == 2 and IDENTITY_CONF_NAME_RE.fullmatch(bare):
+                ai = AI_IDENTITY_RE.search(command) or AI_IDENTITY_RE.search(text)
+                if ai is None:
+                    return None
+                return ("xargs, git config and an identity config name in a command the check could not parse, "
+                        "whose value xargs may read from its input, in a command line that names an AI identity "
+                        "({!r})".format(ai.group(0)))
+        return None
+    tokens = []
+    for k, (word, _doubtful) in enumerate(words):
+        gap = gaps[k]
+        if _CMTIDN_CMD_SEPARATOR_RE.search(gap) and tokens:
+            hit = _cmtidn_stdin_identity_ai(tokens, command)
+            if hit is not None:
+                return hit
+            tokens = []
+        if gap.rstrip(" \t").endswith(("<", ">", "<&", ">&", ">|")):
+            continue  # the target of a redirection is not a word of the command
+        bare = _CMTIDN_SET_UNREAD_RE.sub("", word)
+        after = gaps[k + 1] if k + 1 < len(gaps) else ""
+        if bare.isdigit() and after.startswith(("<", ">")):
+            continue  # a file descriptor number written directly before a redirection operator
+        tokens.append(bare)
+    return _cmtidn_stdin_identity_ai(tokens, command) if tokens else None
+
+
 def _cmtidn_identity_word(command):
     """A word of command that can record an identity, as a match object: its first git word
     (_CMTIDN_GIT_WORD_RE), else its first GIT_AUTHOR_, GIT_COMMITTER_ or EMAIL variable name or user, author
@@ -6524,12 +6587,14 @@ def commit_identity(data):
                                            "identity (a co-author trailer, an --author value, a git identity "
                                            "variable, EMAIL, or a user, author or committer name or email "
                                            "value)")
-        hit = _cmtidn_identity_set_ai(command)
+        hit = _cmtidn_identity_set_ai(command) or _cmtidn_raw_stdin_identity_ai(command)
         if hit is None:
             return _commit_identity_fallback(_hash_doubt_scan(command), str(exc))
         raw = True
     except ValueError as exc:
-        hit = _cmtidn_identity_set_ai(command)
+        # A command the tokenizer cannot parse (a here-string or heredoc feeding xargs) is judged by the xargs
+        # stdin rule over its raw words as well (_cmtidn_raw_stdin_identity_ai).
+        hit = _cmtidn_identity_set_ai(command) or _cmtidn_raw_stdin_identity_ai(command)
         if hit is None:
             return _commit_identity_fallback(command, str(exc))
         raw = True

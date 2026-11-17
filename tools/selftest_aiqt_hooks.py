@@ -31287,6 +31287,48 @@ def _main_isolated(monitor):
                 ("(ci-idc-r-c1) xargs -I{} git add of .claude/ files allows",
                  "git ls-files .claude | xargs -I{} git add {}")):
             ciexpect(_ci_label, _ci_cmd, "allow")
+        # A here-string or a heredoc feeding xargs git config is a command the shared tokenizer cannot parse, so
+        # the xargs stdin rule is applied to its raw words as well (_cmtidn_raw_stdin_identity_ai), and to its
+        # dequoted text in order when a construct the raw reading may misread comes first (ci-idc-h9). ci-idc-h1 to
+        # h5 are the shapes the review of this rule listed as allowed, h6 to h10 further shapes of the same kind,
+        # and each of the ten allowed before this change; the controls feed the maintainer's identity the same
+        # ways, or read a key beside a CLAUDE.md message, and name no AI identity as a value.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-h1) a here-string AI user.name fed to xargs git config denies",
+                 "xargs git config user.name <<< Claude"),
+                ("(ci-idc-h2) a here-string AI committer.email fed to xargs git config denies",
+                 "xargs git config committer.email <<< noreply@anthropic.com"),
+                ("(ci-idc-h3) a here-string AI committer.email fed to xargs behind nice -n 5 denies",
+                 "nice -n 5 xargs git config committer.email <<< noreply@anthropic.com"),
+                ("(ci-idc-h4) a here-string AI author.name fed to xargs -a /dev/stdin git config denies",
+                 "xargs -a /dev/stdin git config author.name <<< Claude"),
+                ("(ci-idc-h5) an unquoted heredoc AI author.name fed to xargs git config denies",
+                 "xargs git config author.name <<EOF\nClaude\nEOF"),
+                ("(ci-idc-h6) a tab-stripped heredoc AI user.email fed to xargs git config denies",
+                 "xargs git config user.email <<-EOF\n\tnoreply@anthropic.com\nEOF"),
+                ("(ci-idc-h7) a quoted here-string AI committer.name fed to xargs behind sudo -u ci denies",
+                 "sudo -u ci xargs git config committer.name <<< 'Claude Code'"),
+                ("(ci-idc-h8) a here-string AI user.name fed to xargs git config before a commit denies",
+                 "xargs git config user.name <<< \"Claude\"; git commit -m x"),
+                ("(ci-idc-h9) a here-string AI user.name fed to xargs after a heredoc holding an apostrophe denies",
+                 "cat >/dev/null <<'A'\ndon't\nA\nxargs git config user.name <<< Claude"),
+                ("(ci-idc-h10) a here-string AI author.name fed to xargs git config before a comment denies",
+                 "xargs git config author.name <<< Claude # note")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-h-c1) the maintainer's user.name in a here-string fed to xargs git config allows",
+                 "xargs git config user.name <<< 'Jeff Posluns'"),
+                ("(ci-idc-h-c2) the maintainer's user.email in a here-string fed to xargs git config allows",
+                 "xargs git config user.email <<< jeff@posluns.ca"),
+                ("(ci-idc-h-c3) the maintainer's committer.email in a here-string fed to xargs behind nice allows",
+                 "nice -n 5 xargs git config committer.email <<< jeff@posluns.ca"),
+                ("(ci-idc-h-c4) the maintainer's author.email fed to xargs -a /dev/stdin git config allows",
+                 "xargs -a /dev/stdin git config author.email <<< jeff@posluns.ca"),
+                ("(ci-idc-h-c5) the maintainer's author.name in a heredoc fed to xargs git config allows",
+                 "xargs git config author.name <<EOF\nJeff Posluns\nEOF"),
+                ("(ci-idc-h-c6) xargs git config --get user.name from a here-string beside a CLAUDE.md message allows",
+                 "xargs git config --get user.name <<< x; git commit -m 'docs: CLAUDE.md'")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
         # A command whose text holds a construct the value reader cannot read exactly (a backslash before a
         # newline, an xargs replacement string attached or detached, a braced placeholder, a parallel word, a word
         # that starts with an expansion) is judged by the AI-anywhere rule, not by its values
@@ -32507,9 +32549,11 @@ def _main_isolated(monitor):
         # handler (_hook_cpu_timed: the thread clock, the cyclic collector held off) over 'sudo -E git
         # rebase x ...' and over 'sudo -E git rebase -x x ...', each padded to 65,536 characters and to
         # _CMTIDN_READ_LIMIT, the longest command the reader reads (131,072 characters): 0.5 s at 65,536 and 1 s at
-        # 131,072, the same bound per character, against at most about 0.035 s and 0.07 s measured, a margin of
-        # about 14 times. The run-line read is counted through a shim, so a handler that allows a long command
-        # without reading it fails too: every rebase of the command is read, and in the -x form each one's exec line
+        # 131,072, the same bound per character, against about 0.29 s and 0.57 s measured for the first form and
+        # 0.39 s and 0.74 s for the -x form (the least of three in-process runs of the handler alone, on one shared
+        # host, 2026-11-17), a margin of only about 1.3 times. The run-line read is counted through a shim, so a
+        # handler that allows a long command without reading it fails too: every rebase of the command is read, and
+        # in the -x form each one's exec line
         # is built. For each form the command at the limit runs only when the shorter one is within its bound, so a
         # quadratic reader fails in seconds.
         _ci_saved = aiqt_hooks._cmtidn_run_lines
