@@ -355,11 +355,14 @@ def _skill_drift(root, corpus):
     neither the reserved surface nor the plugin root. With no plugin root the plugin copy is never required
     (the plugin is opt-in).
 
-    Disclosed difference from gen_skill: this check accepts two shapes of the plugin copy that gen_skill
-    refuses (exit 2). A hard-linked copy passes here when its bytes match (gen_skill's reader requires exactly
-    one link), and a skills/ that is a symlink to a directory inside the root is followed here as
-    dir_chain_or_absent reads it (gen_skill opens every component with O_NOFOLLOW). The content is still
-    compared byte for byte, so neither shape hides drift."""
+    Disclosed difference from gen_skill: this check accepts shapes of the plugin copy that gen_skill refuses
+    (exit 2). A hard-linked copy passes here when its bytes match (gen_skill's reader requires exactly one
+    link). A symlink to a directory inside the root at ANY directory on the copy's path, plugin/, the plugin
+    root plugin/aiqt-guardrails-hooks/, skills/ or skills/aiqt/, is followed here as dir_chain_or_absent reads
+    it (gen_skill opens every component with O_NOFOLLOW). The copy's content is still compared byte for byte
+    in every one of these shapes, so none hides drift in the copy. The skills/ orphan scan (os.walk, which does
+    not descend a symlinked subdirectory) still covers a symlinked plugin/, plugin root or skills/, but not
+    the inside of a symlinked skills/aiqt/: an extra entry beside SKILL.md in its target is not named here."""
     reserved_dir = root.joinpath(*gen_skill.RESERVED_PARTS)
     # dir_chain_or_absent: the reserved subtree at every component under the root (site/ and site/downloads/,
     # which hold the standalone and zip outputs, too). gen_skill refuses a symlink at any of them, so one that

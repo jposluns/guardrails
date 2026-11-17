@@ -25,7 +25,10 @@ Outputs (all under the reserved site/downloads/aiqt/ subtree, plus the standalon
                                       Only where the hooks plugin is installed: the plugin root
                                       plugin/aiqt-guardrails-hooks/ is present, probed as gen_hooks probes
                                       it. This generator never creates the plugin root, so an adopter
-                                      who installs the skill without the opt-in plugin gets no plugin copy.
+                                      who installs the skill without the opt-in plugin gets no plugin copy,
+                                      and skills/ is orphan-scanned only where the plugin root is present.
+                                      A symlink at plugin/ or at the plugin root is refused without telling
+                                      the adopter to remove it: neither directory is this generator's.
 
 Latest only, allow-listed: only the current skill version is served, and the top
 level of site/downloads admits ONLY declared outputs: this generator's (aiqt-instructions.txt,
@@ -757,8 +760,21 @@ def latest_only_problems(root_fd, current_versioned, require_current):
     return problems
 
 
+# The directories above the plugin's skills/ subtree (plugin/ and plugin/aiqt-guardrails-hooks/) are not this
+# generator's: plugin/ is the adopter's, and the plugin root is gen_hooks'. A refusal at one of them never says to
+# remove it.
+_PLUGIN_ANCESTORS = frozenset("/".join(PLUGIN_ROOT_PARTS[:i]) for i in range(1, len(PLUGIN_ROOT_PARTS) + 1))
+
+
 def _refusal(rel_posix, comp_posix, kind):
-    """The shared fail-closed refusal for a component that is a symlink or not the expected kind."""
+    """The shared fail-closed refusal for a component that is a symlink or not the expected kind. At a plugin
+    ancestor directory (_PLUGIN_ANCESTORS), which this generator does not own, it says to make the entry a real
+    directory, never to remove it."""
+    if comp_posix in _PLUGIN_ANCESTORS:
+        return OSError("refusing {0}: {1} is a symlink or not a directory, so it is not written or read through; "
+                       "{1} is part of the hooks plugin's install path, not an output of this generator, so never "
+                       "git rm it: make it a real directory (for a symlink, the directory it points to), and "
+                       "rerun".format(rel_posix, comp_posix))
     return OSError("refusing {}: {} is a symlink or not a {}, so it is not written or read through "
                    "({}, and rerun)".format(rel_posix, comp_posix, kind, _remove_hint(comp_posix)))
 
@@ -1224,6 +1240,10 @@ def run_gen(root, check):
         # root is probed with dir_chain_or_absent, as gen_hooks.run probes it, so a root that is there but cannot
         # be read as a directory is refused (exit 2) and an absent root means no plugin copy is written or
         # required, and the plugin root is never created.
+        # The skills/ scan runs only where the plugin root is installed: with no root there is no skills/ under
+        # it to scan, and the scan's O_NOFOLLOW walk would otherwise refuse an adopter's own plugin/ that is a
+        # symlink to a directory inside the root, a tree that holds no hooks plugin (conformance and gen_hooks
+        # read it as no plugin, and self-test row 13l pins it).
         plugin_root = root.joinpath(*PLUGIN_ROOT_PARTS)
         plugin_installed, problem = dir_chain_or_absent(plugin_root, root)
         if problem is not None:
@@ -1231,8 +1251,11 @@ def run_gen(root, check):
         plugin_skill = root.joinpath(*PLUGIN_SKILLS_PARTS, *PLUGIN_SKILL_IN_TREE)
         plugin_allowed = ({PLUGIN_SKILL_IN_TREE[0], "/".join(PLUGIN_SKILL_IN_TREE)}
                           if reserved_map and plugin_installed else set())
+        scanned = [(RESERVED_PARTS, reserved_map)]
+        if plugin_installed:
+            scanned.append((PLUGIN_SKILLS_PARTS, plugin_allowed))
         orphans = []
-        for parts, allowed in ((RESERVED_PARTS, reserved_map), (PLUGIN_SKILLS_PARTS, plugin_allowed)):
+        for parts, allowed in scanned:
             rfd = _open_dir_fd(root_fd, parts, "/".join(parts))
             if rfd is None:
                 continue
@@ -3369,6 +3392,38 @@ def self_test_main():
                 failures.append("13k: a plugin root that is a regular file expected exit 2 (check={}) with the "
                                 "plugin-root refusal {!r}, writing nothing, got {}\n{}".format(
                                     check_, nf_refusal, code, out))
+
+        # 13l. As 13j, with the adopter's own plugin/ a symlink to a directory inside the root that holds no hooks
+        #      plugin: a generate and --check each exit 0, nothing is created under the link's target and the link
+        #      is kept (the skills/ orphan scan runs only where the plugin root is installed; red if it runs on
+        #      this tree, whose O_NOFOLLOW walk refuses the link). The flip: once the hooks plugin root is present
+        #      through that link, the link is refused in both modes (exit 2, every component is opened with
+        #      O_NOFOLLOW), and the refusal says never to git rm it and never names plugin/ for git rm or rm.
+        nl = tmp / "plugin-skill-linked-plugin"
+        nl.mkdir()
+        _write_fixture(nl, good_src)
+        nl_target = nl / "vendor-plugins"
+        nl_target.mkdir()
+        nl_link = nl / PLUGIN_ROOT_PARTS[0]
+        os.symlink(nl_target.name, str(nl_link))
+        code, out = capture(nl, False)
+        code2, out2 = capture(nl, True)
+        nl_listing = sorted(os.listdir(str(nl_target)))
+        if code != 0 or code2 != 0 or nl_listing or not os.path.islink(str(nl_link)):
+            failures.append("13l: plugin/ symlinked to a directory inside the root with no plugin root expected a "
+                            "generate exit 0 and --check 0, creating nothing under it and keeping the link, got {} "
+                            "and {} (target holds {!r}, link {})\n{}{}".format(
+                                code, code2, nl_listing, "kept" if os.path.islink(str(nl_link)) else "gone",
+                                out, out2))
+        nl_hooks = nl_target / PLUGIN_ROOT_PARTS[-1]
+        nl_hooks.mkdir(exist_ok=True)
+        for check_ in (True, False):
+            code, out = capture(nl, check_)
+            if (code != 2 or "never git rm it" not in out or "rm {}".format(PLUGIN_ROOT_PARTS[0]) in out
+                    or os.listdir(str(nl_hooks))):
+                failures.append("13l: the plugin root present through a symlinked plugin/ expected exit 2 (check={}) "
+                                "saying never to git rm it, never naming plugin/ for removal, writing nothing, got "
+                                "{}\n{}".format(check_, code, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -3419,7 +3474,9 @@ def self_test_main():
           "extra entry under skills/ (kept), a symlinked copy or skills/ directory, a hard-linked copy, a FIFO "
           "copy beside a drifted output and an absent corpus are each caught, with nothing deleted; the plugin "
           "copy is written and required only where the plugin root is present (no plugin root: no plugin/ "
-          "created, --check clean), and a plugin root that is not a directory is refused.")
+          "created, --check clean), and a plugin root that is not a directory is refused; a plugin/ symlinked to "
+          "a directory inside the root with no plugin root is clean (exit 0, nothing created, the link kept), "
+          "and with the plugin root present through it is refused without naming plugin/ for removal.")
     return 0
 
 
