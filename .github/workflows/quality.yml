@@ -2865,6 +2865,14 @@ jobs:
       - name: Internal-name leak scan
         shell: bash
         run: python3 -I -B tools/check_internal_names.py
+      # The gate derives the protected branch itself: origin/GITHUB_BASE_REF on a pull request, and on
+      # any other event origin/HEAD or, failing that, origin/GITHUB_REF_NAME (nothing added on main).
+      - name: Review-label self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite review-labels-selftest
+      - name: Review labels on added lines
+        shell: bash
+        run: python3 -I -B tools/check_review_labels.py
       - name: QA advisory digest (non-gating finding)
         shell: bash
         run: python3 -I -B tools/audit_reference.py --digest

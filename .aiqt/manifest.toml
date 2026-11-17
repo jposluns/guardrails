@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "2f4b5e870e15721bda2d5859cb49edd68c3595ab100cc1dfb7179bef4e27d88d"
+tree-sha256 = "ca076cbe064f949b1748b98b60f7370b3d3b8c30852c31204c15096a4d96c4ef"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 609615
-sha256 = "1551d3f462d00fd1aeadf1facadca4385d260c3d45501062a223d67ff2869585"
+bytes = 617290
+sha256 = "f776304df0e419f69a005cb7644d46e780f86a628e89bf1047329cfa122a8bda"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -132,8 +132,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 27947
-sha256 = "04a9d993087c20a840c70c1800aba3bd43a8bd6d13ff5ba30e3bab3a74af398a"
+bytes = 28360
+sha256 = "ae6a3c2d8ffcb78f59aa0e93c22021103a000288657cbd6f16a268001550ae97"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -142,8 +142,8 @@ sha256 = "7665572c121fb72a7493bbcff903b66e61dcd6255baf0b82c23dd3c47f2d0897"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 9605
-sha256 = "23df945ebc76d6964edccb9bd5f7815bb084b54556fd5d6bf9985348c06be90a"
+bytes = 9641
+sha256 = "90c3f59b4c2df93bd67e0f2d89ad2ce8bba42f6b0cc9717bb09bde4bc233ff06"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2317,8 +2317,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 54239
-sha256 = "1e16205d6b6825ea890abfde3210a0209ff8b48431b13ffeb0d42e8c1e3a71df"
+bytes = 54280
+sha256 = "761dda446555b6b45a84d5038234e3b0bd000aaa0e579ce279110bd9adebd493"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2428,7 +2428,7 @@ sha256 = "bae43dcfb3e30c428f59a243370f83e2835ef9706caa5692c83f9d7137964cb3"
 [[sources]]
 path = "README.md"
 bytes = 5216
-sha256 = "e0a69e6682dd7c66182a2973bc2674531ad822fbe7feeaeeadc4de60c15df368"
+sha256 = "ed54f4bb5d7639efd9625daf45a7624df8256d1857cec7270b01b74a51d7f0a0"
 
 [[sources]]
 path = "RELEASING.md"
@@ -4202,8 +4202,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 228797
-sha256 = "3d827064f1907da9a5c28b9bbbb0efd89c1505046fbb40fa9a84d35ee6d8c5fa"
+bytes = 228901
+sha256 = "2e619e5ffbcdf4e923ab9db70532aee0a4133ba096582d6971faa3f6c905b3f0"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4414,6 +4414,11 @@ sha256 = "be620c7108e6d70b5750dbc0c430adb62ea7a4f4d1c617c1197040afa3529765"
 path = "tools/check_relied_exit_pipes.py"
 bytes = 269049
 sha256 = "62cba7c3a3a459fbd31a27c52bc7ab11a792bd52189db8ba826e27c0327fd55b"
+
+[[sources]]
+path = "tools/check_review_labels.py"
+bytes = 103844
+sha256 = "a543baebdafac1982ed695b4cc22e8d9c2915cba4ec480794e1f6efa34c27ec4"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
@@ -4707,8 +4712,8 @@ sha256 = "2b1d57119dd5e8849a0b28d9c58e35f2cfb900742b738b787e68b28650b39c22"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 30042
-sha256 = "68072776ff631cb43dcc829b3b2f4fe709056ca22d512b1d7365bf8e3b81a038"
+bytes = 30650
+sha256 = "f90f0a1849091432399a001ca9eb63bca7cfb7e5e2aec46df5faab166cb42ad7"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -4722,8 +4727,8 @@ sha256 = "24ecc34c35ee84de1db28a1424ea7eff0c5ff5e721dda558f9342d0124faaec8"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 254789
-sha256 = "125a23d90d2ce9d2ef8a28deaa779abadc042793f1f96d73ed22f856de10b49f"
+bytes = 261274
+sha256 = "03ffdb18a03f6978ab103aaeefdde80c075ca4802f3161318c304a55ed927d8d"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
