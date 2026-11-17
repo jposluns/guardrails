@@ -3895,6 +3895,485 @@ def _ie_dispatch_failures():
     return out
 
 
+@contextlib.contextmanager
+def _cp_environ(pattern, posture=None, config=None):
+    """While the block runs, the console prefix settings in os.environ are exactly pattern and posture, and
+    CLAUDE_CONFIG_DIR is config (None removes one); the values before are put back after."""
+    names = (aiqt_hooks._CONSOLE_PREFIX_PATTERN_ENV, aiqt_hooks._CONSOLE_PREFIX_POSTURE_ENV,
+             aiqt_hooks._CONSOLE_PREFIX_CONFIG_ENV)
+    saved = {name: os.environ.get(name) for name in names}
+    try:
+        for name, value in zip(names, (pattern, posture, config)):
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+@contextlib.contextmanager
+def _cp_patched(name, value):
+    """While the block runs, aiqt_hooks.<name> is value (a mutant); the real one is put back after."""
+    real = getattr(aiqt_hooks, name)
+    setattr(aiqt_hooks, name, value)
+    try:
+        yield
+    finally:
+        setattr(aiqt_hooks, name, real)
+
+
+def _cp_line(kind, content, **extra):
+    """One synthetic transcript line: a user or assistant record carrying message.content."""
+    record = {"type": kind, "message": {"role": kind, "content": content}}
+    record.update(extra)
+    return json.dumps(record) + "\n"
+
+
+_CP_PATTERN = r"\[\d{4}-\d\d-\d\dT\d\d:\d\dZ\] "
+_CP_STAMPED = "[2026-11-16T10:00Z] working on it"
+_CP_UNSTAMPED = "working on it"
+
+
+def _test_console_prefix(failures, tmp):
+    """(cp-*) console_prefix_pretool, called directly over synthetic transcripts written under tmp; nothing
+    is executed and no live transcript is read. Each row pins the real handler's outcome, then the same row
+    under a mutant with the check that decides it removed (patched in through _cp_patched) must give a
+    different outcome, so the row is red without that check. The rows: stamped, unstamped (warn and deny),
+    no text, multiple blocks, malformed, oversized (the bounded read and a tail with no complete record),
+    missing file, the mode off (reading nothing, a missing or wrong event included), a pattern that matches
+    empty text, a final symlink, a FIFO, a relative path, a path outside the transcript directory, the
+    4096-character match cap, a non-string text, an unfinished last line, a bad pattern, a bad posture, the
+    wrong event, patterns matching every sample line, isMeta and API error records, a subagent's call, a
+    sibling directory, the transcript directory itself, a path ending in '..', a symlinked configuration
+    directory, a boundary with no content, a blank block, a prefix written mid-block, and a file that grew
+    after its size was read. The transcripts lie in projects/ under a synthetic CLAUDE_CONFIG_DIR, the platform
+    transcript directory the handler confines its read to."""
+    handler = aiqt_hooks.console_prefix_pretool
+    config = tmp / "console-prefix"
+    root = config / "projects" / "session"
+    root.mkdir(parents=True, exist_ok=True)
+    outside = tmp / "console-prefix-outside"
+    outside.mkdir(parents=True, exist_ok=True)
+    tool_result = _cp_line("user", [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}])
+    tool_use = _cp_line("assistant", [{"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "ls"}}])
+
+    def transcript(name, text, where=root):
+        path = where / name
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def payload(path, event=aiqt_hooks.PRETOOL):
+        data = {"tool_name": "Bash", "tool_input": {"command": "ls"}}
+        if event is not None:
+            data["hook_event_name"] = event
+        if path is not None:
+            data["transcript_path"] = path
+        return data
+
+    def outcome(path, pattern=_CP_PATTERN, posture=None, event=aiqt_hooks.PRETOOL, config_dir=None):
+        try:
+            with _cp_environ(pattern, posture, str(config_dir or config)):
+                code, stdout_obj, _stderr = handler(payload(path, event))
+        except Exception as exc:  # a mutant may crash; the real handler never may, and "error" fails its row
+            return "error", "{}: {}".format(type(exc).__name__, exc)
+        reduced = "hard-block" if code == 2 else _reduce_result(code, stdout_obj)
+        note = ""
+        if isinstance(stdout_obj, dict):
+            note = str(stdout_obj.get("systemMessage", ""))
+            specific = stdout_obj.get("hookSpecificOutput")
+            if isinstance(specific, dict):
+                note = str(specific.get("permissionDecisionReason", ""))
+        return reduced, note
+
+    def always(value):
+        return lambda _pattern, _text: value
+
+    def swallow_missing(path, limit):
+        try:
+            return real_read(path, limit)
+        except OSError:
+            return b"", False
+
+    real_read = aiqt_hooks._console_prefix_read_tail
+    stamped = transcript("stamped.jsonl", _cp_line("assistant", [{"type": "text", "text": _CP_UNSTAMPED}])
+                         + tool_result + _cp_line("assistant", [{"type": "text", "text": _CP_STAMPED}]) + tool_use)
+    unstamped = transcript("unstamped.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}]) + tool_use)
+    no_text = transcript("no-text.jsonl", _cp_line("assistant", [{"type": "text", "text": _CP_UNSTAMPED}])
+                         + tool_result + tool_use)
+    multiple = transcript("multiple.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}]) + _cp_line(
+        "assistant", [{"type": "text", "text": "  " + _CP_STAMPED}, {"type": "thinking", "thinking": "x"}])
+        + tool_use)
+    malformed = transcript("malformed.jsonl", tool_result + "{not json\n" + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_STAMPED}]) + tool_use)
+    window = aiqt_hooks._CONSOLE_PREFIX_TAIL_BYTES
+    # Far more than the window of earlier, unstamped records, then a span the window does reach.
+    filler = _cp_line("assistant", [{"type": "text", "text": "x" * 4000}])
+    oversized = transcript("oversized.jsonl", filler * (2 * window // len(filler) + 2) + tool_result
+                           + _cp_line("assistant", [{"type": "text", "text": _CP_UNSTAMPED}]) + tool_use)
+    one_line = transcript("one-line.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_STAMPED + "y" * (window + 4096)}]))
+    missing = str(root / "absent.jsonl")
+    unprefixed_note = "1 of 1 assistant text block(s)"
+    # A final symlink to the unstamped transcript, read only with O_NOFOLLOW removed.
+    final_link = root / "final-link.jsonl"
+    if not os.path.lexists(final_link):
+        os.symlink(unstamped, final_link)
+    # A FIFO: opened without blocking, it reads as empty, so only the regular-file check refuses it.
+    fifo = root / "fifo.jsonl"
+    if hasattr(os, "mkfifo") and not os.path.lexists(fifo):
+        os.mkfifo(fifo)
+    # The unstamped transcript named relative to the cwd: it resolves only with the absolute-path check removed.
+    relative = os.path.relpath(unstamped)
+    # A transcript outside the transcript directory, reached directly, through '..' and through a symlinked
+    # directory inside it.
+    elsewhere = transcript("elsewhere.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}]) + tool_use, where=outside)
+    dotdot = os.path.join(str(root), "..", "..", "..", outside.name, "elsewhere.jsonl")
+    link_dir = root / "link-dir"
+    if not os.path.lexists(link_dir):
+        os.symlink(outside, link_dir)
+    via_link = str(link_dir / "elsewhere.jsonl")
+    # The prefix appears only past the 4096-character match cap (a literal size, so a raised cap fails the row).
+    far = transcript("far.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": "x" * 5000 + "STAMP"}]) + tool_use)
+    near = transcript("near.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": "x" * 100 + "STAMP"}]) + tool_use)
+    capped = r"[\s\S]*STAMP"
+    non_string = transcript("non-string.jsonl", tool_result + _cp_line("assistant", [{"type": "text", "text": 5}])
+                            + tool_use)
+    # Complete records, then a last line still being written (no newline, not yet JSON).
+    unfinished_tail = '{"type": "assistant", "message": {"con'
+    unfinished = transcript("unfinished.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}]) + unfinished_tail)
+    unfinished_ok = transcript("unfinished-ok.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_STAMPED}]) + unfinished_tail)
+    no_newline = transcript("no-newline.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}]).rstrip("\n"))
+    unstamped_text = _cp_line("assistant", [{"type": "text", "text": _CP_UNSTAMPED}])
+    # An isMeta user record (injected context) after unstamped text, and isMeta assistant text: neither ends
+    # the span nor counts. A synthetic API error record carries text the model did not write.
+    meta_after = transcript("meta-after.jsonl", tool_result + unstamped_text
+                            + _cp_line("user", "<command-name>/x</command-name>", isMeta=True) + tool_use)
+    meta_text = transcript("meta-text.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_UNSTAMPED}], isMeta=True) + tool_use)
+    api_error = transcript("api-error.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": "API Error: overloaded"}], isApiErrorMessage=True) + tool_use)
+    # Sidechain (subagent) records in the main transcript: the main agent's unstamped text, its Task call, then
+    # a subagent's prompt, stamped text and tool call, the newest record. The twin ends at the main agent's
+    # own Task call after the same text.
+    task_use = _cp_line("assistant", [{"type": "tool_use", "id": "t3", "name": "Task", "input": {}}])
+    subagent_call = transcript("subagent-call.jsonl", tool_result + unstamped_text + task_use
+                               + _cp_line("user", "subagent prompt", isSidechain=True)
+                               + _cp_line("assistant", [{"type": "text", "text": _CP_STAMPED}], isSidechain=True)
+                               + _cp_line("assistant", [{"type": "tool_use", "id": "t4", "name": "Bash",
+                                                        "input": {}}], isSidechain=True))
+    main_task = transcript("main-task.jsonl", tool_result + unstamped_text + task_use)
+    # A sibling of the transcript directory whose name only starts with it, and a symlink to the configuration
+    # directory used as CLAUDE_CONFIG_DIR (the platform's path reaches the transcript through it).
+    sibling = config / "projects-evil"
+    sibling.mkdir(parents=True, exist_ok=True)
+    sibling_path = transcript("sibling.jsonl", tool_result + unstamped_text + tool_use, where=sibling)
+    config_link = tmp / "console-prefix-config-link"
+    if not os.path.lexists(config_link):
+        os.symlink(config, config_link)
+    via_config_link = str(config_link / "projects" / "session" / "unstamped.jsonl")
+    # A boundary record with no readable content, a whitespace-only block, and a prefix written mid-block.
+    no_content_boundary = transcript("no-content-boundary.jsonl", json.dumps({"type": "user"}) + "\n" + _cp_line(
+        "assistant", [{"type": "text", "text": _CP_STAMPED}]) + tool_use)
+    blank_block = transcript("blank-block.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": "  \n "}, {"type": "text", "text": _CP_STAMPED}]) + tool_use)
+    mid_prefix = transcript("mid-prefix.jsonl", tool_result + _cp_line(
+        "assistant", [{"type": "text", "text": "working " + _CP_STAMPED}]) + tool_use)
+
+    def searching(pattern, text):
+        """The search mutant: the prefix found anywhere in the block, not only at its start."""
+        return pattern.search(text.lstrip()[:aiqt_hooks._CONSOLE_PREFIX_MATCH_CHARS]) is not None
+
+    def by_text_prefix(root_dir, candidate):
+        """The text-prefix mutant: a sibling whose name starts with the directory's reads as inside."""
+        return candidate.startswith(root_dir)
+
+    def without_root_check(root_dir, candidate):
+        return os.path.commonpath([root_dir, candidate]) == root_dir
+
+    def pinned_lines(data, truncated):
+        """The pinned reader: only the first fragment dropped, an unfinished last line kept."""
+        lines = data.split(b"\n")
+        return [line for line in (lines[1:] if truncated else lines) if line.strip()], False
+
+    def unconfined(path, _environ):
+        return path
+    deny = {"posture": "deny"}
+
+    rows = (
+        ("(cp-stamped) a stamped block after the last tool result allows silently", stamped, {}, "allow", "",
+         ("_console_prefix_matches", always(False)), "allow-note"),
+        ("(cp-unstamped) an unstamped block warns", unstamped, {}, "allow-note", unprefixed_note,
+         ("_console_prefix_matches", always(True)), "allow"),
+        ("(cp-unstamped-deny) an unstamped block denies under the deny posture", unstamped,
+         {"posture": "deny"}, "deny", unprefixed_note,
+         ("_console_prefix_config", lambda env: (re.compile(_CP_PATTERN), "warn", None)), "allow-note"),
+        ("(cp-no-text) a span with only a tool call allows silently, the earlier text past the boundary unread",
+         no_text, {}, "allow", "", ("_console_prefix_is_boundary", lambda record: False), "allow-note"),
+        ("(cp-multiple) every block of the span is checked, the first unstamped one too", multiple, {},
+         "allow-note", "1 of 2 assistant text block(s)", ("_console_prefix_checked", lambda texts: texts[-1:]),
+         "allow"),
+        ("(cp-malformed) a line that is not JSON notes and never blocks", malformed, {"posture": "deny"},
+         "allow-note", "a transcript line is not JSON",
+         ("_console_prefix_record", lambda line: {} if line.startswith(b"{not") else json.loads(line)),
+         "allow"),
+        ("(cp-oversized) the bounded tail of an oversized transcript still decides on its span", oversized,
+         {}, "allow-note", unprefixed_note,
+         ("_console_prefix_is_boundary", lambda record: False), "allow-note"),
+        ("(cp-oversized-line) a tail holding no complete record notes", one_line, {"posture": "deny"},
+         "allow-note", "hold no complete record",
+         ("_console_prefix_lines", lambda data, truncated: ([line for line in data.split(b"\n") if line], False)),
+         "allow-note"),
+        ("(cp-missing) a missing transcript notes and never blocks", missing, {"posture": "deny"},
+         "allow-note", "did not run", ("_console_prefix_read_tail", swallow_missing), "allow"),
+        # The off switch itself is removed (not the whole settings reader): the unset pattern then reads as an
+        # empty one, which matches empty text, so the mutant notes instead of allowing silently.
+        ("(cp-off) with no pattern set the mode is off, an unstamped transcript included", unstamped,
+         {"pattern": None}, "allow", "", ("_console_prefix_is_off", lambda raw: False), "allow-note"),
+        ("(cp-off-unread) with no pattern set a missing transcript is never opened and nothing notes", missing,
+         {"pattern": None, "posture": "deny"}, "allow", "", ("_console_prefix_is_off", lambda raw: False),
+         "allow-note"),
+        ("(cp-off-no-event) with no pattern set a payload naming no event allows silently", stamped,
+         {"pattern": None, "event": None}, "allow", "", ("_console_prefix_is_off", lambda raw: False),
+         "hard-block"),
+        ("(cp-off-wrong-event) with no pattern set a PostToolUse payload allows silently", stamped,
+         {"pattern": None, "event": "PostToolUse"}, "allow", "", ("_console_prefix_is_off", lambda raw: False),
+         "hard-block"),
+        ("(cp-no-path) a payload with no transcript_path notes", None, {}, "allow-note",
+         "transcript_path is missing", ("_console_prefix_config", lambda env: (None, "warn", None)), "allow"),
+        # These three also match every sample line, so without the empty-text check the sample check refuses
+        # them, with its own note; cp-empty-end is decided by the empty-text check alone.
+        ("(cp-empty-star) a pattern matching empty text cannot be evaluated, noted under deny", unstamped,
+         {"pattern": "x*", "posture": "deny"}, "allow-note", "matches empty text",
+         ("_console_prefix_matches_empty", lambda pattern: False), "allow-note"),
+        ("(cp-empty-alt) an alternation with an empty branch cannot be evaluated", unstamped,
+         {"pattern": r"\[S\]|", "posture": "deny"}, "allow-note", "cannot evaluate",
+         ("_console_prefix_matches_empty", lambda pattern: False), "allow-note"),
+        ("(cp-empty-look) an empty lookahead cannot be evaluated", unstamped,
+         {"pattern": "(?=)", "posture": "deny"}, "allow-note", "matches empty text",
+         ("_console_prefix_matches_empty", lambda pattern: False), "allow-note"),
+        ("(cp-empty-end) a pattern matching only empty text cannot be evaluated", unstamped,
+         {"pattern": "$", "posture": "deny"}, "allow-note", "matches empty text",
+         ("_console_prefix_matches_empty", lambda pattern: False), "deny"),
+        ("(cp-symlink) a symlink as the final component is not followed, noted under deny", str(final_link), deny,
+         "allow-note", "did not run",
+         ("_CONSOLE_PREFIX_OPEN_FLAGS", aiqt_hooks._CONSOLE_PREFIX_OPEN_FLAGS & ~getattr(os, "O_NOFOLLOW", 0)),
+         "deny"),
+        ("(cp-relative) a relative transcript_path is never resolved against the cwd", relative, deny,
+         "allow-note", "not an absolute path", ("_console_prefix_is_absolute", lambda path: True), "deny"),
+        ("(cp-outside) a transcript outside the transcript directory is not read", elsewhere, deny,
+         "allow-note", "outside the platform transcript directory", ("_console_prefix_confined", unconfined),
+         "deny"),
+        ("(cp-outside-dotdot) '..' out of the transcript directory is not followed", dotdot, deny,
+         "allow-note", "outside the platform transcript directory", ("_console_prefix_confined", unconfined),
+         "deny"),
+        ("(cp-outside-link) a symlinked directory out of the transcript directory is not followed", via_link,
+         deny, "allow-note", "outside the platform transcript directory",
+         ("_console_prefix_confined", unconfined), "deny"),
+        ("(cp-match-cap) the pattern sees only the first 4096 characters of a block", far,
+         {"pattern": capped}, "allow-note", unprefixed_note, ("_CONSOLE_PREFIX_MATCH_CHARS", 1 << 40), "allow"),
+        ("(cp-non-string) a text block whose text is not a string notes, never crashes", non_string, deny,
+         "allow-note", "carries no text string", ("_console_prefix_text_string", lambda text: None), "error"),
+        ("(cp-unfinished) the complete records before an unfinished last line are judged", unfinished, deny,
+         "deny", "still being written", ("_console_prefix_lines", pinned_lines), "allow-note"),
+        ("(cp-unfinished-pass) a stamped span before an unfinished last line passes with a note", unfinished_ok,
+         deny, "allow-note", "still being written", ("_console_prefix_lines", pinned_lines), "allow-note"),
+        ("(cp-any-dot) a pattern matching any one character cannot be evaluated, noted under deny", unstamped,
+         {"pattern": ".", "posture": "deny"}, "allow-note", "unrelated sample lines",
+         ("_console_prefix_matches_arbitrary", lambda pattern: False), "allow"),
+        ("(cp-any-nonspace) a pattern matching any non-space character cannot be evaluated", unstamped,
+         {"pattern": r"\S", "posture": "deny"}, "allow-note", "cannot evaluate",
+         ("_console_prefix_matches_arbitrary", lambda pattern: False), "allow"),
+        ("(cp-any-look) a lookahead for any character cannot be evaluated", unstamped,
+         {"pattern": "(?=.)", "posture": "deny"}, "allow-note", "unrelated sample lines",
+         ("_console_prefix_matches_arbitrary", lambda pattern: False), "allow"),
+        ("(cp-any-two) a pattern matching any two characters cannot be evaluated", unstamped,
+         {"pattern": "..", "posture": "deny"}, "allow-note", "unrelated sample lines",
+         ("_console_prefix_matches_arbitrary", lambda pattern: False), "allow"),
+        ("(cp-meta-not-boundary) an isMeta user record after unstamped text does not end the span", meta_after,
+         deny, "deny", unprefixed_note, ("_console_prefix_is_meta", lambda record: False), "allow"),
+        ("(cp-meta-text) isMeta assistant text is not held to the prefix", meta_text, deny, "allow", "",
+         ("_console_prefix_is_meta", lambda record: False), "deny"),
+        ("(cp-api-error) a synthetic API error record is not held to the prefix", api_error, deny, "allow", "",
+         ("_console_prefix_is_api_error", lambda record: False), "deny"),
+        ("(cp-subagent-call) a subagent's tool call is not denied for the main agent's text", subagent_call, deny,
+         "allow", "", ("_console_prefix_is_subagent_record", lambda record: False), "deny"),
+        ("(cp-outside-sibling) a sibling directory whose name starts with projects is outside", sibling_path,
+         deny, "allow-note", "outside the platform transcript directory", ("_console_prefix_inside", by_text_prefix),
+         "deny"),
+        ("(cp-root-itself) the transcript directory itself is not a transcript", str(config / "projects"), deny,
+         "allow-note", "outside the platform transcript directory", ("_console_prefix_inside", without_root_check),
+         "allow-note"),
+        ("(cp-names-file) a transcript_path ending in '..' names no file", str(root) + "/..", deny, "allow-note",
+         "does not name a file", ("_console_prefix_names_file", lambda name: True), "allow-note"),
+        ("(cp-config-link) a symlinked configuration directory is resolved before the comparison",
+         via_config_link, {"posture": "deny", "config_dir": config_link}, "deny", unprefixed_note,
+         ("_console_prefix_real_root", lambda path: path), "allow-note"),
+        ("(cp-boundary-content) a boundary record with no readable content notes, never ends the span silently",
+         no_content_boundary, deny, "allow-note", "carries no message content",
+         ("_console_prefix_boundary_checked", lambda record: None), "allow"),
+        ("(cp-blank) a whitespace-only block is not held to the prefix", blank_block, deny, "allow", "",
+         ("_console_prefix_is_blank", lambda text: False), "deny"),
+        ("(cp-match-start) a prefix written after other text does not count", mid_prefix, deny, "deny",
+         unprefixed_note, ("_console_prefix_matches", searching), "allow"),
+    )
+    if hasattr(os, "mkfifo"):
+        # Without the regular-file check a FIFO still allows, but only because its seek fails (a different
+        # note): inside the transcript directory no seekable non-regular file can be made without privilege.
+        rows += (("(cp-fifo) a FIFO as the transcript is refused as not a regular file, noted under deny", str(fifo),
+                  deny, "allow-note", "not a regular file", ("_console_prefix_is_regular", lambda mode: True),
+                  "allow-note"),)
+    for label, path, settings, want, want_text, (mutant_name, mutant), flipped_want in rows:
+        got, note = outcome(path, **settings)
+        if got != want or want_text not in note:
+            failures.append("{}: expected {} with {!r} in its text, got {} with {!r}".format(
+                label, want, want_text, got, note))
+        with _cp_patched(mutant_name, mutant):
+            flipped, flipped_note = outcome(path, **settings)
+        if flipped == got and flipped_note == note:
+            failures.append("{}: the mutant of {} gave the same result ({}, {!r}), so the row does not show "
+                            "that check decides it".format(label, mutant_name, flipped, flipped_note))
+        elif flipped != flipped_want:
+            failures.append("{}: the mutant of {} must give {}, got {}".format(
+                label, mutant_name, flipped_want, flipped))
+
+    # (cp-no-quote) the note counts and places the missed block but never quotes the transcript's text.
+    got, note = outcome(unstamped)
+    if got != "allow-note" or _CP_UNSTAMPED in note or "block 1 of the span" not in note:
+        failures.append("(cp-no-quote) expected a note placing the block without its text, got {} with {!r}"
+                        .format(got, note))
+    # Passing twins: a prefix inside the match cap passes, a complete last line with no newline is judged,
+    # and a transcript inside the directory reached through no symlink is read.
+    for label, path, settings, want in (
+            ("(cp-match-cap-twin) a prefix inside the cap passes", near, {"pattern": capped}, "allow"),
+            ("(cp-no-newline-twin) a complete last line with no newline is judged", no_newline, deny, "deny"),
+            ("(cp-inside-twin) a transcript inside the directory is read and denied", unstamped, deny, "deny"),
+            ("(cp-subagent-main-twin) the main agent's own call after the same text is denied", main_task, deny,
+             "deny"),
+            ("(cp-meta-twin) a genuine prompt after unstamped text ends the span", transcript(
+                "prompt-after.jsonl", unstamped_text + _cp_line("user", "a real prompt") + tool_use), deny, "allow"),
+            ("(cp-api-error-twin) the same text without the API error mark is held to the prefix", transcript(
+                "api-error-twin.jsonl", tool_result + _cp_line(
+                    "assistant", [{"type": "text", "text": "API Error: overloaded"}]) + tool_use), deny, "deny"),
+            # The disclosed residual of the sample check: a pattern passing every block that starts with a word
+            # character matches no punctuation sample, so it is accepted and an unstamped word passes.
+            ("(cp-any-class-accepted) a class-wide pattern such as \\b is accepted (disclosed residual)", unstamped,
+             {"pattern": r"\b", "posture": "deny"}, "allow")):
+        got, note = outcome(path, **settings)
+        if got != want:
+            failures.append("{}: expected {}, got {} with {!r}".format(label, want, got, note))
+    # (cp-grown-bound) a file holding more than its fstat size (as a transcript that grew after its size was
+    # read does) is still read for at most the limit: /proc/self/status is a regular file whose fstat size is 0
+    # but which reads several hundred bytes, so the read must stop at the 64-byte limit, never run on to the end
+    # of the file. Where that file is absent or not of that shape (not Linux) the row is skipped.
+    grown = "/proc/self/status"
+    if os.path.isfile(grown) and os.stat(grown).st_size == 0:
+        data, truncated = aiqt_hooks._console_prefix_read_tail(grown, 64)
+        if len(data) != 64 or truncated:
+            failures.append("(cp-grown-bound) expected exactly 64 bytes read from a file holding more than its "
+                            "fstat size, got {} (truncated {})".format(len(data), truncated))
+    # (cp-off-reads-nothing) while off the transcript is never opened; the same payload with the pattern set
+    # opens it once.
+    opened = []
+
+    def counting(path, limit):
+        opened.append(path)
+        return real_read(path, limit)
+    with _cp_patched("_console_prefix_read_tail", counting):
+        outcome(unstamped, pattern=None)
+        off_reads = len(opened)
+        outcome(unstamped)
+    if off_reads != 0 or len(opened) != 1:
+        failures.append("(cp-off-reads-nothing) expected no read while off and one read when on, got {} and {}"
+                        .format(off_reads, len(opened) - off_reads))
+    # (cp-oversized-bound) the read takes at most the window from the end of an oversized transcript, and is
+    # red with the bound removed.
+    reads = []
+
+    def spy(path, limit):
+        data, truncated = real_read(path, limit)
+        reads.append((len(data), truncated))
+        return data, truncated
+    with _cp_patched("_console_prefix_read_tail", spy):
+        outcome(oversized)
+        bounded = list(reads)
+        reads.clear()
+        with _cp_patched("_CONSOLE_PREFIX_TAIL_BYTES", 1 << 40):
+            outcome(oversized)
+        unbounded = list(reads)
+    size = os.path.getsize(oversized)
+    if bounded != [(window, True)] or size <= window:
+        failures.append("(cp-oversized-bound) expected one read of exactly {} bytes from the end of a {}-byte "
+                        "transcript, got {!r}".format(window, size, bounded))
+    if unbounded == bounded or not unbounded or unbounded[0][0] != size:
+        failures.append("(cp-oversized-unbounded) with the bound removed the read must take the whole {}-byte file, "
+                        "got {!r}".format(size, unbounded))
+    # (cp-oversized-cost) the handler's own CPU time on the oversized transcript stays far inside the budget.
+    _result, spent = _hook_cpu_timed(lambda: outcome(oversized), bound=1.0)
+    if spent >= 1.0:
+        failures.append("(cp-oversized-cost) console_prefix_pretool used {:.2f}s of CPU on a {}-byte transcript; "
+                        "the bound is 1 s".format(spent, size))
+    # (cp-settings) a pattern that does not compile, an overlong pattern and an unknown posture each note.
+    for label, settings, want_text in (
+            ("(cp-bad-pattern)", {"pattern": "(["}, "does not compile"),
+            ("(cp-long-pattern)", {"pattern": "a" * (aiqt_hooks._CONSOLE_PREFIX_PATTERN_MAX + 1)},
+             "over the 512-character limit"),
+            ("(cp-bad-posture)", {"posture": "block"}, "neither warn nor deny")):
+        got, note = outcome(unstamped, **settings)
+        if got != "allow-note" or want_text not in note:
+            failures.append("{} expected allow-note with {!r}, got {} with {!r}".format(label, want_text, got, note))
+    got, note = outcome(stamped, posture="block")
+    if got != "allow-note" or "check passed" not in note:
+        failures.append("(cp-bad-posture-pass) expected allow-note naming the passed check, got {} with {!r}"
+                        .format(got, note))
+    # (cp-pattern-boundary) at the pattern length limit the pattern is used, one past it is refused.
+    limit = aiqt_hooks._CONSOLE_PREFIX_PATTERN_MAX
+    for label, length, want in (("just inside", limit - 1, "allow"), ("exactly at", limit, "allow"),
+                                ("just past", limit + 1, "allow-note")):
+        # A pattern of exactly `length` characters that matches the unstamped text: a one- or two-character
+        # start that matches its "w", then optional "o?" pairs.
+        start = "w" if length % 2 else "\\w"
+        pattern = start + "o?" * ((length - len(start)) // 2)
+        got, _note = outcome(unstamped, pattern=pattern)
+        if got != want or len(pattern) != length:
+            failures.append("(cp-pattern-boundary) a pattern {} the {}-character limit ({} characters) expected "
+                            "{}, got {}".format(label, limit, len(pattern), want, got))
+    # (cp-wrong-event) wired to another event it hard-blocks, the sibling convention.
+    got, _note = outcome(stamped, event="PostToolUse")
+    if got != "hard-block":
+        failures.append("(cp-wrong-event) expected a hard block on a PostToolUse payload, got {}".format(got))
+    # (cp-partial) a long span whose boundary lies before the window is checked as far as the window reaches.
+    partial = transcript("partial.jsonl", tool_result + filler * (window // len(filler) + 2)
+                         + _cp_line("assistant", [{"type": "text", "text": _CP_STAMPED}]))
+    got, note = outcome(partial, pattern=r"[x\[]")
+    if got != "allow-note" or "start of the span" not in note:
+        failures.append("(cp-partial) expected allow-note saying the span start was not reached, got {} with "
+                        "{!r}".format(got, note))
+    # (cp-sidechain-and-string) a sidechain record is passed over; string content counts as one text block.
+    side = transcript("side.jsonl", tool_result + _cp_line("assistant", _CP_UNSTAMPED, isSidechain=True)
+                      + _cp_line("assistant", _CP_STAMPED))
+    got, note = outcome(side)
+    if got != "allow":
+        failures.append("(cp-sidechain-and-string) expected a silent allow, got {} with {!r}".format(got, note))
+    # (cp-not-regular) a directory as the transcript notes.
+    got, note = outcome(str(root))
+    if got != "allow-note" or "did not run" not in note:
+        failures.append("(cp-not-regular) expected allow-note for a directory, got {} with {!r}".format(got, note))
+
+
 def _test_inline_errexit(failures, tmp):
     """(ie-*) inline_errexit, called directly; no submitted Bash command is executed. Each fire row must
     allow with the note and no decision, and each silent row must allow silently; each row must then flip
@@ -7603,6 +8082,7 @@ _DEADLINE_CASES = {
     "branch_root": ("heredocs", "git_push_words_unbal", "nest_parens", "procsubst_run_after"),
     "commit_identity": ("nest_parens", "git_words_unbal_dq"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
+    "console_prefix_pretool": ("git_words", "write_content"),
     "diff_source_pretool": ("git_words_in_dquotes", "cd_git_fetch_unbal", "git_words", "diff_after"),
     "future_stamp_write": ("fsw_store_past_appends", "fsw_store_past_appends_after", "fsw_open_substs_after",
                            "fsw_store_write_after", "fsw_literal_lines", "write_content", "nest_cmdsubst",
@@ -35694,6 +36174,7 @@ def _main_isolated(monitor):
         _test_malformed_bash_payload(failures)
         _test_nul_bash_command(failures)
         _test_inline_errexit(failures, tmp)
+        _test_console_prefix(failures, tmp)
         _test_pgrep_self_match(failures)
         _test_trkasy_no_amp(failures, tmp)
         _test_trkasy_heredoc_body_data(failures, tmp)

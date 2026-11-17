@@ -81,6 +81,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import html as _html
+import json
 import os
 import re
 import shutil
@@ -537,14 +538,18 @@ def _inline(site, value, cell=False):
 
 
 # The Claude Code hook count the pages state: the [[hook]] entries of the hooks manifest whose platform is
-# "claude-code" (the predicate tools/check_reference_facts.py counts for the README), rendered wherever the
-# $HOOK_COUNT token appears, so a hook added to or removed from the manifest drifts the pages that state it.
+# "claude-code" and whose registration is not "opt-in" (the predicate tools/check_reference_facts.py counts for
+# the README; gen_hooks leaves an opt-in control out of the plugin's hooks.json, so the plugin does not register
+# it), rendered wherever the $HOOK_COUNT token appears, so a hook added to or removed from the manifest drifts
+# the pages that state it. The self-test row hooks/live-count-matches-registration holds the live count to the
+# number of launchers the committed plugin hooks.json registers.
+HOOKS_JSON = "plugin/aiqt-guardrails-hooks/hooks/hooks.json"
 HOOKS_SOURCE = ".aiqt/core/hooks/manifest.toml"
 
 
 def hook_count(root=ROOT):
-    """The number of [[hook]] entries in the hooks manifest under root whose platform is "claude-code".
-    RefusedPage when the manifest cannot be read, when it is larger than MAX_PAGE_BYTES (the read stops
+    """The number of [[hook]] entries in the hooks manifest under root whose platform is "claude-code" and
+    whose registration is not "opt-in". RefusedPage when the manifest cannot be read, when it is larger than MAX_PAGE_BYTES (the read stops
     one byte past that bound), when it is not UTF-8 or not valid TOML, when its hook key is not an array
     of tables each with a string platform, or when it holds no Claude Code hook. Before the open, each
     directory on the manifest's path below root is checked with lstat, from root down, and refused unless
@@ -591,9 +596,12 @@ def hook_count(root=ROOT):
         raise RefusedPage("{}: cannot parse ({}: {})".format(HOOKS_SOURCE, type(exc).__name__, exc)) from exc
     hooks = doc.get("hook")
     if not isinstance(hooks, list) or not all(
-            isinstance(hook, dict) and isinstance(hook.get("platform"), str) for hook in hooks):
-        raise RefusedPage("{}: hook is not an array of tables each with a string platform".format(HOOKS_SOURCE))
-    count = sum(1 for hook in hooks if hook["platform"] == "claude-code")
+            isinstance(hook, dict) and isinstance(hook.get("platform"), str)
+            and isinstance(hook.get("registration", "plugin"), str) for hook in hooks):
+        raise RefusedPage("{}: hook is not an array of tables each with a string platform (and a string "
+                          "registration where one is given)".format(HOOKS_SOURCE))
+    count = sum(1 for hook in hooks
+                if hook["platform"] == "claude-code" and hook.get("registration", "plugin") != "opt-in")
     if not count:
         raise RefusedPage("{}: no hook has platform \"claude-code\"".format(HOOKS_SOURCE))
     return count
@@ -4970,6 +4978,12 @@ def _self_test():
                          ("site/install/details/index.html", "The {} Claude Code hooks")):
         expect("hooks/live-count-on-pages", wording.format(live_hooks) in live_outputs[rel], (rel, wording))
     expect("hooks/no-unrendered-token", not any("$HOOK_COUNT" in text for text in live_outputs.values()))
+    # The count the pages state equals the number of launchers the committed plugin hooks.json registers, so a
+    # control the plugin does not register (an opt-in one) can never be counted as shipped.
+    with open(ROOT / HOOKS_JSON, encoding="utf-8") as handle:
+        registered = json.load(handle)["hooks"]
+    launchers = sum(len(entry["hooks"]) for entries in registered.values() for entry in entries)
+    expect("hooks/live-count-matches-registration", live_hooks == launchers, (live_hooks, launchers))
     # A typed count: a number (digits or a number word) followed by "hooks" with at most 4 words between,
     # in any case, matched after TOML \u and \U escapes and HTML character references (&nbsp; among them)
     # are decoded, so neither a number word nor a no-break space hides a typed count. The pattern matches
@@ -5021,6 +5035,8 @@ def _self_test():
     for name, text, want in (
             ("hooks/count-claude-code-only", '[[hook]]\nplatform = "claude-code"\n[[hook]]\nplatform = "claude-code"\n'
              '[[hook]]\nplatform = "other"\n', 2),
+            ("hooks/count-opt-in-left-out", '[[hook]]\nplatform = "claude-code"\n[[hook]]\nplatform = "claude-code"\n'
+             'registration = "opt-in"\n[[hook]]\nplatform = "claude-code"\nregistration = "plugin"\n', 2),
             ("hooks/count-one", '[[hook]]\nplatform = "claude-code"\n', 1)):
         with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
             os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
@@ -5032,6 +5048,8 @@ def _self_test():
                        ("hooks/no-hooks-refused", 'format-version = 1\n'),
                        ("hooks/no-claude-code-hook-refused", '[[hook]]\nplatform = "other"\n'),
                        ("hooks/platform-missing-refused", '[[hook]]\nid = "x"\n'),
+                       ("hooks/registration-not-a-string-refused",
+                        '[[hook]]\nplatform = "claude-code"\nregistration = 3\n'),
                        ("hooks/hook-not-a-table-array-refused", 'hook = 3\n'),
                        ("hooks/missing-manifest-refused", None)):
         with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
