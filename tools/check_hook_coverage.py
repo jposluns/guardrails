@@ -520,14 +520,69 @@ def _guarded(thunk):
         return "raised " + type(exc).__name__
 
 
+def _swap(name, value):
+    """The module global name's current value, after storing value in its place. Each revertible global is
+    spelled as a literal key (tools/gen_renderers.py refuses a computed globals() key); any other name raises
+    KeyError, as a lookup of an absent global does."""
+    match name:
+        case "_same_matcher":
+            saved, globals()["_same_matcher"] = globals()["_same_matcher"], value
+        case "_same_command":
+            saved, globals()["_same_command"] = globals()["_same_command"], value
+        case "_same_event":
+            saved, globals()["_same_event"] = globals()["_same_event"], value
+        case "SETTINGS_NAMES":
+            saved, globals()["SETTINGS_NAMES"] = globals()["SETTINGS_NAMES"], value
+        case "_decode":
+            saved, globals()["_decode"] = globals()["_decode"], value
+        case "_NOFOLLOW":
+            saved, globals()["_NOFOLLOW"] = globals()["_NOFOLLOW"], value
+        case "_DIR_FLAGS":
+            saved, globals()["_DIR_FLAGS"] = globals()["_DIR_FLAGS"], value
+        case "_check_regular":
+            saved, globals()["_check_regular"] = globals()["_check_regular"], value
+        case "MAX_BYTES":
+            saved, globals()["MAX_BYTES"] = globals()["MAX_BYTES"], value
+        case "_expect":
+            saved, globals()["_expect"] = globals()["_expect"], value
+        case "_check_hook_type":
+            saved, globals()["_check_hook_type"] = globals()["_check_hook_type"], value
+        case "_json_constant":
+            saved, globals()["_json_constant"] = globals()["_json_constant"], value
+        case "_ABSENT":
+            saved, globals()["_ABSENT"] = globals()["_ABSENT"], value
+        case "_hooks_disabled":
+            saved, globals()["_hooks_disabled"] = globals()["_hooks_disabled"], value
+        case "_check_absolute":
+            saved, globals()["_check_absolute"] = globals()["_check_absolute"], value
+        case "_open_dir_nofollow":
+            saved, globals()["_open_dir_nofollow"] = globals()["_open_dir_nofollow"], value
+        case "_check_decl_nonempty":
+            saved, globals()["_check_decl_nonempty"] = globals()["_check_decl_nonempty"], value
+        case "_check_decl_has_key":
+            saved, globals()["_check_decl_has_key"] = globals()["_check_decl_has_key"], value
+        case "_check_decl_list":
+            saved, globals()["_check_decl_list"] = globals()["_check_decl_list"], value
+        case "_check_decl_value_types":
+            saved, globals()["_check_decl_value_types"] = globals()["_check_decl_value_types"], value
+        case "_check_decl_nonempty_fields":
+            saved, globals()["_check_decl_nonempty_fields"] = globals()["_check_decl_nonempty_fields"], value
+        case "_check_decl_keys":
+            saved, globals()["_check_decl_keys"] = globals()["_check_decl_keys"], value
+        case "_check_decl_scope":
+            saved, globals()["_check_decl_scope"] = globals()["_check_decl_scope"], value
+        case _:
+            raise KeyError(name)
+    return saved
+
+
 def _reverted(name, replacement, thunk):
     """thunk()'s result with the module global name temporarily replaced (a check reverted)."""
-    saved = globals()[name]
-    globals()[name] = replacement
+    saved = _swap(name, replacement)
     try:
         return thunk()
     finally:
-        globals()[name] = saved
+        _swap(name, saved)
 
 
 def _lenient_expect(value, kind, where):
