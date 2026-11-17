@@ -511,8 +511,8 @@ SUITE_ID = "hook-coverage-selftest"
 EXECUTED = []
 FAILURES = []
 
-GUARD_A = ("PreToolUse", "Bash", "python3 -I /opt/guard/a.py")
-GUARD_B = ("PreToolUse", "Write|Edit", "python3 -I /opt/guard/b.py")
+GUARD_A = ("PreToolUse", "Bash", "python3 -I /srv/guard/a.py")
+GUARD_B = ("PreToolUse", "Write|Edit", "python3 -I /srv/guard/b.py")
 
 
 def check(name, ok, detail=""):

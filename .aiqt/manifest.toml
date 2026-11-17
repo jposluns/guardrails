@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "180c76d39fbf2885c09bb465a402706332490cc375b78cd556dac6ed1b1780c4"
+tree-sha256 = "5d5ff85a89195209151832844e054737356a9181dbce3603da30ef524b985584"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4273,7 +4273,7 @@ sha256 = "7de00bde82268e3d13fe503a84ccbcbc1042cb96e9d91df6cd0781bee044b841"
 [[sources]]
 path = "tools/check_hook_coverage.py"
 bytes = 71747
-sha256 = "82fc43392d1393e5b65213d604798ca973c7f4c60924a9383ccc9232d3a5fe0a"
+sha256 = "b026f90bede2129db9dc2ef09a82ee4ff4885ca0829c2142b21721d957b0151a"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"
