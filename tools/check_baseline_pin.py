@@ -1793,7 +1793,9 @@ def _probe_cases():
             ("probe/broken-loose-ref-exits-2", "loose", ref, 2, broken),
             ("probe/broken-packed-ref-exits-2", "packed", ref, 2, broken),
             ("probe/dangling-symref-exits-2", "dangling", ref, 2, broken),
-            ("probe/packed-refs-directory-exits-2", "packed-dir", ref, 2, store),
+            # a packed-refs directory is fail-closed either way, whichever git reads it: a git that reads it as a
+            # clean miss (2.53) reaches the ref store check, and one whose for-each-ref refuses it (2.56) is broken
+            ("probe/packed-refs-directory-exits-2", "packed-dir", ref, 2, (store, broken)),
             ("probe/descendant-ref-namespace-exits-1-silent", "namespace", ref, 1, None),
             ("probe/loose-path-symlink-exits-2", "loose-link", ref, 2, store),
             ("probe/full-name-branch-shadow-exits-2", "shadow", ref, 2,
@@ -1866,8 +1868,8 @@ def _probe_cases():
               and "GATE FAILED" not in report, (got, report))
     got, report = runs.get("packed-dir", (None, ""))
     check("runner/packed-refs-directory-fails", got == 1 and note not in report
-          and "GATE FAILED: baseline-pin (check_baseline_pin.py --probe-local-base {} exit 2, stderr: {}".format(
-              ref, store) in report, (got, report))
+          and any("GATE FAILED: baseline-pin (check_baseline_pin.py --probe-local-base {} exit 2, stderr: {}".format(
+              ref, refused) in report for refused in (store, broken)), (got, report))
 
     # A genuine absence where the bare gate also fails (a copied file differs from its pin, so the scan fails): the
     # runner reports both failures but names baseline-pin once in its failed-gate list, not once for the failing gate
