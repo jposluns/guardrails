@@ -26,7 +26,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, reconcile, replace_block, target_dir_present  # noqa: E402
+from _gen_common import (repo_root, load_toml, reconcile, replace_block, target_dir_present,  # noqa: E402
+                         unknown_args_refused)
 
 
 class TargetError(Exception):
@@ -95,10 +96,11 @@ class BlockTarget:
         return target, new_text
 
 
-def run_generator(argv, *, source, targets, regen_hint, schema_excs):
+def run_generator(argv, *, source, targets, regen_hint, schema_excs, prog="the generator"):
     """Drive one generator: load source, render every target, reconcile each, and return the exit code.
 
-    argv is the process arguments after the program name (--check selects drift-report mode). source
+    argv is the process arguments after the program name (--check selects drift-report mode); any other token
+    is exit 2 with the usage line for prog on stderr, before the source is read or a target touched. source
     is the repo-relative TOML. targets is an ordered sequence of FileTarget/BlockTarget. regen_hint is
     the line printed under --check when drift is found. schema_excs is the exception tuple that means
     the source is missing or misuses a key (it differs per generator and is preserved exactly).
@@ -110,6 +112,8 @@ def run_generator(argv, *, source, targets, regen_hint, schema_excs):
     targets = tuple(targets)
     if not targets:
         raise ValueError("run_generator requires at least one target; got an empty target set")
+    if unknown_args_refused(argv, prog + " [--check]", flags=("--check",)):
+        return 2
     check = "--check" in argv
     root = repo_root()
     try:

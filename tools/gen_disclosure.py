@@ -57,7 +57,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
+from _gen_common import repo_root, load_toml, reconcile, unknown_args_refused  # noqa: E402
 
 EN, EM = "–", "—"
 PLACEHOLDER = "[[ARCHITECT"
@@ -496,6 +496,8 @@ def run(root, check):
 
 def main():
     args = sys.argv[1:]
+    if unknown_args_refused(args, "gen_disclosure.py [--check | --self-test]"):
+        return 2
     if "--self-test" in args:
         return _self_test()
     return run(repo_root(), "--check" in args)
