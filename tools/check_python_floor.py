@@ -4305,6 +4305,12 @@ def _rule_reverts(base):
 GATES_MANIFEST_REL = ".aiqt/core/gates/manifest.toml"
 GATE_SCRIPT_REL = "tools/check_python_floor.py"
 EXCLUDED_PHRASE_RE = re.compile(r"outside the excluded trees \(([^()]*)\)")
+# Every introduction of a parenthesised excluded-trees list, parsed by EXCLUDED_PHRASE_RE or not (nested
+# parentheses, odd spacing or capitals), so a second malformed occurrence counts toward "exactly once".
+EXCLUDED_PHRASE_START_RE = re.compile(r"outside\s+the\s+excluded\s+trees\s*\(", re.IGNORECASE)
+# The one list grammar: "A", "A and B" or "A, B and C" (more names add ", N" before " and "), a single
+# space after each comma and around "and", no comma before "and", and nothing else inside the parentheses.
+EXCLUDED_LIST_RE = re.compile(r"[^\s,]+(?:(?:, [^\s,]+)* and [^\s,]+)?")
 
 
 def _gate_residue(root):
@@ -4322,13 +4328,27 @@ def _gate_residue(root):
     return rows[0]["residue"]
 
 
+def _described_list(residue):
+    """The text inside the residue's one excluded-trees phrase, or None when the residue introduces that
+    phrase (EXCLUDED_PHRASE_START_RE) other than once or its one introduction does not parse."""
+    found = EXCLUDED_PHRASE_RE.findall(residue)
+    if len(found) != 1 or len(EXCLUDED_PHRASE_START_RE.findall(residue)) != 1:
+        return None
+    return found[0]
+
+
+def _list_items(listed):
+    """The names a list in EXCLUDED_LIST_RE's grammar holds, sorted, or None when listed is not in it."""
+    if not EXCLUDED_LIST_RE.fullmatch(listed):
+        return None
+    return sorted(re.split(r", | and ", listed))
+
+
 def _described_trees(residue):
     """The trees the residue's one excluded-trees phrase names ("A", "A and B" or "A, B and C"), sorted,
-    or None when the residue holds that phrase other than once."""
-    found = EXCLUDED_PHRASE_RE.findall(residue)
-    if len(found) != 1:
-        return None
-    return sorted(part.strip() for part in re.split(r",\s*|\s+and\s+", found[0]))
+    or None when the residue introduces that phrase other than once or lists them in another form."""
+    listed = _described_list(residue)
+    return None if listed is None else _list_items(listed)
 
 
 def _excluded_trees_phrase(trees):
@@ -4344,17 +4364,20 @@ def _excluded_trees_phrase(trees):
 
 def excluded_trees_drift(residue, trees):
     """Findings when the residue's excluded-trees phrase names other trees than trees (EXCLUDED_TREES).
-    A listed item that is empty or holds whitespace (an Oxford comma "A, B, and C", or "or" for "and")
-    is refused as a list form not understood. Limit: only the one parenthesised phrase is read; a second
-    list of trees worded another way elsewhere in the residue is not found and not checked."""
-    described = _described_trees(residue)
-    if described is None:
+    Every introduction of the phrase counts, parsed or not, so a second malformed one is refused. A list
+    outside EXCLUDED_LIST_RE's grammar ("A", "A and B" or "A, B and C", single spaces: so not all commas,
+    not "A and B and C", no Oxford comma, no "or") is refused as a list form not understood. Limit: only
+    the one parenthesised phrase is read; a second list of trees worded another way elsewhere in the
+    residue is not found and not checked."""
+    listed = _described_list(residue)
+    if listed is None:
         return ["{}: the {} residue does not hold the phrase 'outside the excluded trees (...)' exactly "
                 "once".format(GATES_MANIFEST_REL, GATE_SCRIPT_REL)]
-    if not all(part and not re.search(r"\s", part) for part in described):
+    described = _list_items(listed)
+    if described is None:
         return ["{}: the {} residue lists the excluded trees as ({}), a list form this check does not "
                 "understand; write 'A', 'A and B' or 'A, B and C'".format(
-                    GATES_MANIFEST_REL, GATE_SCRIPT_REL, EXCLUDED_PHRASE_RE.search(residue).group(1))]
+                    GATES_MANIFEST_REL, GATE_SCRIPT_REL, listed)]
     if described != sorted(trees):
         return ["{}: the {} residue names the excluded trees {}, but EXCLUDED_TREES is {}".format(
             GATES_MANIFEST_REL, GATE_SCRIPT_REL, described, sorted(trees))]
@@ -4394,7 +4417,23 @@ def _description_cases():
           [any("list form this check does not understand" in finding
                for finding in excluded_trees_drift("x outside the excluded trees ({}) y".format(listed),
                                                    ("a/", "b/", "c/")))
-           for listed in ("a/, b/, and c/", "a/, b/ or c/", "a/ or b/ or c/")], [True, True, True])
+           for listed in ("a/, b/, and c/", "a/, b/ or c/", "a/ or b/ or c/", "a/, b/, c/",
+                          "a/ and b/ and c/")], [True, True, True, True, True])
+    check("description/phrase-repeated-malformed-red",
+          [bool(excluded_trees_drift(fixture + " " + second, EXCLUDED_TREES)) for second in (
+              "outside the excluded trees (wrong/(nested)/)", "outside the excluded trees  (x/)",
+              "Outside the excluded trees (x/)")], [True, True, True])
+    check("description/tree-named-twice-red", bool(excluded_trees_drift(
+        "x " + _excluded_trees_phrase((EXCLUDED_TREES[0],) + EXCLUDED_TREES) + " y", EXCLUDED_TREES)), True)
+    check("description/trailing-slash-dropped-red", bool(excluded_trees_drift(
+        "x " + _excluded_trees_phrase(tuple(tree.rstrip("/") for tree in EXCLUDED_TREES)) + " y",
+        EXCLUDED_TREES)), True)
+    check("description/list-grammar-literal-forms",
+          [_described_trees("x outside the excluded trees ({}) y".format(listed)) for listed in (
+              "a/", "a/ and b/", "b/, c/ and a/", "a/, b/, c/ and d/", "a/, b/, c/", "a/ and b/ and c/",
+              "a/, b/ and c/ and d/", "a/,b/ and c/", "a/, b/  and c/", "a/\tand b/", " a/ and b/",
+              "a/ and b/ ", "a/ b/", "")],
+          [["a/"], ["a/", "b/"], ["a/", "b/", "c/"], ["a/", "b/", "c/", "d/"]] + [None] * 10)
     try:
         empty_phrase = _excluded_trees_phrase(())
     except Exception as exc:  # the row names what an empty list raises; only CannotEvaluate is clean

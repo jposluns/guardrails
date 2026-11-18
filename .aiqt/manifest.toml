@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "728e33aff90451e409832c98680e34d680ff8920002945b27e72a2137328280a"
+tree-sha256 = "d5a4a4039b7f6a080847afa563f5a7b409649cd4523499c8347c17defa5e32c3"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4367,8 +4367,8 @@ sha256 = "19f67b226034b74ec9c7e5499c2f02f8e96b3ed53c29bbec5b0ab3e7ef832c4f"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 286940
-sha256 = "b9808f7a23c304d71e018eb2516f9de63cb4a1fc950568f90179da1d2dd5580c"
+bytes = 289510
+sha256 = "69ab0b017ece695545448a12ea475e1704b1f757c52c7819b39c3215c00770f5"
 
 [[sources]]
 path = "tools/check_python_host_pin.py"
@@ -4727,8 +4727,8 @@ sha256 = "13fe112b30171fc85d2dd4bdf49a040978547f75d4cc023202378859533f6f2c"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 259229
-sha256 = "0935573c8bd287990ae62d90689c3e46fdc1c510c1a1fb7edf34e076d218d4c3"
+bytes = 259402
+sha256 = "40016f5ec505d93949566a0e94210a9b58741b95dbbd441d67ee99684dce8168"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
