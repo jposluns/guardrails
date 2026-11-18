@@ -32895,6 +32895,26 @@ def _main_isolated(monitor):
                                     len(_ci_cmd), _ci_cap, _ci_got, _ci_spent,
                                     "; the longer commands were not run" if _ci_reps != 8191 else ""))
                 break
+        # The raw word reader (_cmtidn_raw_words) keeps a count of the double quotes open on its nesting stack, so
+        # a single quote read right inside a ${...} body tests whether one is open in constant time, where a search
+        # of the stack for each such quote cost time in the stack's depth times the number of quotes. The commands
+        # are the review's: 'echo ' followed by N '${a-' openers, 5N/2 empty quotes '' and N '}', then ' +=', for N
+        # of 3,276, 6,552 and 13,104 (32,768 to 131,048 characters, the last below _CMTIDN_READ_LIMIT). Each names
+        # no AI identity and allows. With the change reverted the handler took about 0.77 s, 2.9 s and 15.3 s of
+        # the calling thread's CPU in-process, the last past the 8-second hook deadline, against about 0.06 s,
+        # 0.10 s and 0.20 s with it (the least of three runs each, one shared host, 2026-11-18). The bound is the
+        # per-character bound of the rows above (0.375 s at 16,384 characters). A longer command runs only when
+        # the shorter one is within its bound.
+        for _ci_depth in (3276, 6552, 13104):
+            _ci_cmd = "echo " + "${a-" * _ci_depth + "''" * (_ci_depth * 5 // 2) + "}" * _ci_depth + " +="
+            _ci_cap = 0.375 * len(_ci_cmd) / (16 << 10)
+            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
+            if _ci_got != "allow" or _ci_spent > _ci_cap:
+                failures.append("(ci-idc-cpu8) 'echo ${a-${a-...'''...}} +=' over {} characters expected allow "
+                                "within {:.2f} s of CPU time, got {} after {:.2f} s{}".format(
+                                    len(_ci_cmd), _ci_cap, _ci_got, _ci_spent,
+                                    "; the longer commands were not run" if _ci_depth != 13104 else ""))
+                break
         # Every co-author trailer name in a word is read, each with its own value of up to 160 characters, where the
         # reader read only the first trailer name of a word and the raw-string scan resumed its search after each
         # value. A second trailer on the same line after a first value of 140 characters, which ends inside it

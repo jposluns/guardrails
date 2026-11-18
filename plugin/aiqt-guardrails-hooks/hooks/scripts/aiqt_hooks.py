@@ -5586,6 +5586,7 @@ def _cmtidn_raw_words(text, gaps=None):
     start of each word, blanks and operator characters, are appended to it, one string per word in order."""
     words = []
     stack = []  # the open contexts: "'", '"', "{" (a ${ body), "(" (a $( body or a ( inside one), "`"
+    quoted = 0  # how many '"' contexts the stack holds, kept as it changes so no step searches the stack
     start = None
     last = 0  # where the characters between the previous word and the next one start
     doubt = False  # a construct the lexical reading may misread has been passed
@@ -5604,7 +5605,7 @@ def _cmtidn_raw_words(text, gaps=None):
             if ((c == "#" and (prev in _CMTIDN_WORD_STOPS or prev == "`"))
                     or (c == "<" and text.startswith("<<", i) and not text.startswith("<<<", i) and prev != "<")
                     or (c == "$" and text.startswith("$'", i))
-                    or (c == "'" and top == "{" and '"' in stack)
+                    or (c == "'" and top == "{" and quoted)
                     or (c == ")" and top is None and groups == 0)):
                 doubt = True
         if top is None and c in _CMTIDN_WORD_STOPS:
@@ -5630,8 +5631,10 @@ def _cmtidn_raw_words(text, gaps=None):
         elif c == '"':
             if top == '"':
                 stack.pop()
+                quoted -= 1
             else:
                 stack.append('"')
+                quoted += 1
         elif c == "`":
             if top == "`":
                 stack.pop()
