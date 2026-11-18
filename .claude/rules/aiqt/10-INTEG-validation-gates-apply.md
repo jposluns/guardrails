@@ -16,5 +16,5 @@ map-iso-42001-broad: [A.6.2.4]
 
 There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its
 source. Trust is never a substitute for the gate.
-A path that writes a record a later gate reads validates it with that gate's definition, or, where the
-definition is out of reach, a test holds the writer to refusing what the gate would refuse.
+A writer of a record validates it with the predicate of a later gate that reads it, one shared predicate,
+or, where that predicate is out of reach, a test holds the writer to refusing what the gate rejects.
