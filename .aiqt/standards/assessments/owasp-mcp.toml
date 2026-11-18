@@ -12,7 +12,7 @@ edition = "2025"
 source = "OWASP-MCP-Top-10-2025--full-text.md"
 source-sha256 = "f2f1c386d75ecef3d0eee2fcd931676bb6ef9dc4eaa050f40db2e3eee65e395b"
 locator = "MCP02:2025 Privilege Escalation via Scope Creep, description, remediations 1 to 8 and example attack scenarios A to C"
-text-location = "entry from its start to the last attack scenario at lines 178 to 250; description at lines 187 to 190; remediations at lines 213 to 238, with 3, 5 and 8 at lines 221 to 223, 227 to 229 and 236 to 238; attack scenarios at lines 241 to 250"
+text-location = "entry from its start to its end at lines 178 to 259; description at lines 187 to 190; remediations at lines 213 to 238, with 3, 5 and 8 at lines 221 to 223, 227 to 229 and 236 to 238; attack scenarios at lines 241 to 250; the impact list and the exposure checklist at lines 194 to 210 and the references at lines 253 to 259 add no elements"
 edition-check = "match"
 boundary = "the configuration that constrains the assistant, and the scope the assistant has been granted"
 core = "Narrow or temporary permissions of an agent or tool grow over time, through convenience or drift, until the agent holds broad privileges it can use without human review."
@@ -57,8 +57,8 @@ current-fit = "tight"
 edition = "2025"
 source = "OWASP-MCP-Top-10-2025--full-text.md"
 source-sha256 = "f2f1c386d75ecef3d0eee2fcd931676bb6ef9dc4eaa050f40db2e3eee65e395b"
-locator = "MCP07:2025 Insufficient Authentication and Authorization, description, prevention guidance 1 to 7 and attack scenarios 1 to 4"
-text-location = "lines 675 to 764; description at lines 676 to 689; prevention guidance at lines 713 to 748; scenarios at lines 752 to 764, with 3 and 4 at lines 760 to 764"
+locator = "MCP07:2025 Insufficient Authentication and Authorization, description, prevention guidance 1 to 7, attack scenarios 1 to 4, detection and immediate remediation"
+text-location = "entry from its start to its end at lines 666 to 791; description at lines 675 to 689; prevention guidance at lines 713 to 748; scenarios at lines 752 to 764, with 3 and 4 at lines 760 to 764; detection at lines 766 to 771; immediate remediation at lines 774 to 780; the impact list and the exposure checklist at lines 691 to 710 and the references and edit link at lines 782 to 791 add no elements"
 edition-check = "match"
 boundary = "messages and authority passed between orchestrator, peer and sub-agents"
 core = "Agents, tools and servers act without verified identity or proper authorization, so a caller can act with authority it was never given."
@@ -83,6 +83,13 @@ omits = [
   "central identity management (guidance 5)",
   "logging of authentication and authorization decisions (guidance 6)",
   "secure defaults on MCP endpoints: no guest or anonymous access, no public exposure of local test servers, and separate credentials per environment (guidance 7)",
+  "watching for tokens reused across agents or addresses, failed authentication followed by a privileged action that succeeds, a sudden rise in refused requests, and tokens used after they expire (detection points 1, 2, 4 and 5)",
+  "watching for actions by unknown or unregistered agent identities (detection point 3); the rule refuses to trust an agent whose identity is not verified, but does not detect or report such actions",
+  "revoking compromised or static tokens, rotating service credentials and giving each agent its own identity (immediate remediation points 1 and 2)",
+  "turning on mutual TLS and strict binding of API keys (immediate remediation point 3)",
+  "auditing the agents, tools and connectors already in place for excessive privileges, beyond giving a new sub-agent only the least tools it needs (immediate remediation point 4)",
+  "reviewing and patching authorization middleware so that it validates scopes (immediate remediation point 5)",
+  "temporary compensating controls: address restrictions and manual approval of sensitive actions (immediate remediation point 6)",
 ]
 label-a = "tight"
 label-b = "broad"
@@ -90,7 +97,7 @@ adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
 conventions = [4]
-rationale = "Verified identity and no inherited authority directly stop the spoofed agent and inherited token scenarios, on the reading of convention 4 stated below. Strong authentication, most of the authorization flaws the description names, fine grained authorization, most of least privilege, token lifecycle, central identity, logging, secure endpoint defaults and scenarios 1 and 2 are left out, so it is broad under B."
+rationale = "Verified identity and no inherited authority directly stop the spoofed agent and inherited token scenarios, on the reading of convention 4 stated below. Strong authentication, most of the authorization flaws the description names, fine grained authorization, most of least privilege, token lifecycle, central identity, logging, secure endpoint defaults, detection, immediate remediation and scenarios 1 and 2 are left out, so it is broad under B."
 assumptions = [
   "a rule acting on the messages and authority passed between agents can be tight to an entry whose main listed mitigations are checks on the server side and at the identity provider (convention 4); if it cannot, label-a is broad",
   "convention 3 is not engaged: the entry's object is MCP agents, tools and servers, and the assistant is itself an MCP client and agent",

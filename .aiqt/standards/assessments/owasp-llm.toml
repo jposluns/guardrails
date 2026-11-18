@@ -11,8 +11,8 @@ current-fit = "tight"
 edition = "2026"
 source = "OWASP-Top-10-for-LLM-Applications-2026--full-text.md"
 source-sha256 = "960f68a87fb9cede9c0ef9a497d6736f5e445cce2f8be3ea83fe2411d170e605"
-locator = "LLM07:2026 Misinformation, common examples 1 to 7 and prevention and mitigation strategies 1 to 10"
-text-location = "lines 1355 to 1414; examples at lines 1377 to 1396; strategies at lines 1398 to 1414, with 1 and 2 at lines 1398 to 1402"
+locator = "LLM07:2026 Misinformation, common examples 1 to 7, prevention and mitigation strategies 1 to 10 and example attack scenarios 1 to 7"
+text-location = "entry from its heading to its end at lines 1355 to 1442; examples at lines 1377 to 1396; strategies at lines 1398 to 1414, with 1 and 2 at lines 1398 to 1402; attack scenarios at lines 1421 to 1442"
 edition-check = "match"
 boundary = "claims about external facts that the assistant relies on or presents"
 core = "Model output that is false, unsupported or misleading is relied on for decisions or actions; the entry asks that claims be grounded in authoritative sources and checked before anything acts on them."
@@ -25,6 +25,9 @@ covers = [
   "a claim that a package, library or other dependency exists is an external fact, so it is checked before use (the dependency part of example 3)",
   "a false external claim induced by an attacker, or passed on by another agent, is corroborated against a source like any other (the false claim parts of examples 5 and 6)",
   "a weak or doubtful source needs more corroboration, which makes forged evidence harder to rely on (part of example 7)",
+  "a claim that a recommended package exists is an external fact, so it is checked against a source before it is presented (the dependency claim in attack scenario 1)",
+  "remediation steps planted on a public forum are a weak source, so they need more corroboration before they are repeated as a trusted recommendation (attack scenario 4)",
+  "a state another agent reports, such as a customer being verified, is corroborated before it is relied on, where the assistant is the agent that relies on it (the relying side of attack scenario 6)",
 ]
 omits = [
   "unsupported decision support that does not rest on an external fact, such as the assistant's own reasoning (the rest of example 1)",
@@ -43,6 +46,12 @@ omits = [
   "logging of claims, evidence and outcomes, and tests of adversarial scenarios (strategy 8)",
   "telling verified facts apart from assumptions across the whole output, beyond holding back an uncorroborated external claim from being presented as settled (strategy 9)",
   "regular adversarial testing of workflows against misleading inputs (strategy 10)",
+  "an attacker registering the hallucinated package name in advance, so that the package does exist and a check that it exists passes (the rest of attack scenario 1)",
+  "an agent misreading a policy it already holds and acting on its own reading (attack scenario 2)",
+  "a summary that leaves out a critical fact (attack scenario 3)",
+  "an agent misclassifying what it observes and acting on its own conclusion (attack scenario 5)",
+  "the reporting agent's own false account of a state it inferred (the rest of attack scenario 6)",
+  "an agent reporting its own task as done when it never ran (attack scenario 7)",
 ]
 label-a = "tight"
 label-b = "broad"
@@ -50,7 +59,7 @@ adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
 conventions = []
-rationale = "Corroboration before reliance is the entry's first two mitigations. The rule deals with claims about external facts only, meets five of the seven examples only in part and two not at all, and leaves out strategies 3 to 10, so it is broad under B. No open convention decides the row."
+rationale = "Corroboration before reliance is the entry's first two mitigations. The rule deals with claims about external facts only, meets five of the seven examples only in part and two not at all, meets attack scenario 4 and parts of scenarios 1 and 6 but not scenarios 2, 3, 5 and 7, and leaves out strategies 3 to 10, so it is broad under B. No open convention decides the row."
 assumptions = [
   "convention 3 is not engaged: the entry's object is an LLM or LLM-enabled application, which is a kind of software the assistant itself is, so the entry reaches the assistant's own output directly and no reading of what the system means is needed",
 ]

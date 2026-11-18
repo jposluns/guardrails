@@ -25,10 +25,22 @@ below.
 - **Main variant.** A variant the entry itself names: in its description, its numbered examples, its
   sub-techniques or its attack scenarios. A variant the assessor supplies from outside the entry does not
   count.
-- **Listed mitigations.** The entry's own prevention, mitigation, remediation or implementation guidance at
-  the location the record cites, item by item as the entry numbers or heads them. For a catalogue control
-  or a management system control, the statement is what counts; text in a separate discussion or
-  guidance part counts only as convention 6 below allows.
+- **Listed mitigations.** The entry's own prevention, mitigation, remediation (immediate or temporary
+  remediation included), detection or implementation guidance at the location the record cites, item by
+  item as the entry numbers or heads them. Detection guidance counts when it names signs of an attack to
+  watch for. For a catalogue control or a management system control, the statement is what counts; text
+  in a separate discussion or guidance part counts only as convention 6 below allows.
+- **Parts that add no elements.** An entry's impact list, its list of the vulnerabilities it prevents, a
+  checklist of the conditions under which a system is exposed (a "how to detect" or "is the application
+  vulnerable" list that names exposed conditions rather than signs of an attack), its references, further
+  reading, tool lists, pointers to other documents and links to suggest edits. They are read for the core,
+  but nothing in them is a main variant or a listed mitigation, and `omits` does not list them.
+- **At the rule's layer.** A listed mitigation applies at the rule's layer unless only a party other than
+  the one the rule binds can carry it out, such as the client that renders output, an identity provider,
+  or whoever runs the infrastructure or a service the assistant only calls. The party the rule binds is the
+  assistant, and also the product it builds where convention 8 is read that way. A mitigation at another
+  layer still goes into `omits`, but it is not essential under B; a record whose `label-b` would be broad
+  only because of such a mitigation says so.
 - **Essential element.** For a control or guidance entry, each lettered item and each verb of the
   normative statement. For a risk, technique or weakness entry, each main variant and each listed
   mitigation that applies at the rule's layer. An element the entry makes conditional is essential only as
@@ -55,7 +67,8 @@ A row is tight under B when A holds and also:
 - for a control or guidance entry, following the rule meets every element of the normative statement
   (each lettered item or each verb);
 - for a risk, technique or weakness entry, the rule covers the entry's main variants and the main lines of
-  its mitigations that apply at the rule's layer.
+  its mitigations that apply at the rule's layer, that is, each listed mitigation at the rule's layer as
+  the terms above define them.
 
 Leaving out any essential element makes the row broad under B.
 
@@ -64,9 +77,11 @@ Leaving out any essential element makes the row broad under B.
 Apply these in order for each row and write the outcome into the record.
 
 1. Read the entry's text in the pinned edition, at the location the record names. Never assess from the
-   title or from memory. For a numbered list of examples, mitigations or guidelines, read and cite the
-   whole list to its last item, and for a prose entry read to the next entry's heading; the record may name
-   narrower ranges inside that span, but `omits` is built against the whole of it.
+   title or from memory. Read the whole entry, from its first line to its last line before the next entry
+   starts (leaving out page numbers and running headers or footers of the reference copy), and cite that
+   whole span in `text-location`, naming where any parts that add no elements sit. For a catalogue
+   control the span is the statement parts, and the discussion part as well where the record relies on
+   it. The record may name narrower ranges inside that span, but `omits` is built against the whole of it.
 2. State the entry's core obligation or attack mechanism in your own words (`core`).
 3. Name the object or boundary the rule acts on, and check that it is the entry's object or boundary
    (`boundary`).
@@ -84,6 +99,11 @@ Apply these in order for each row and write the outcome into the record.
    convention whose other reading gives the same labels does not decide the row and is not named in
    `conventions`. If a label changes only when two conventions are both read the other way, name both, and
    say in `assumptions` that the label changes only when both are.
+9. If a label rests on a fact about how the rule is used rather than on the text of the rule or the entry
+   (for example whether the assistant holds context for more than one user or tenant), assess the row for
+   the case the rule's own text addresses, state that case in `assumptions` with the labels the row would
+   get where it does not hold, and do not name it in `conventions`: it is a premise, not an open
+   convention.
 
 ## Open conventions
 
@@ -95,35 +115,47 @@ The maintainer must settle these before a definition is adopted. A record that d
    "policies and procedures" an entry asks an organisation to have?
 3. **The assistant as the system.** When an entry is about a system that an organisation builds, deploys,
    operates or governs (its oversight, its level of automation, its tooling, its inventory of
-   components), does that system include the AI assistant and the tools it uses for the work, or only the
-   product being built? If it means only the product, a rule that meets the entry only through the
-   assistant or its tools does not act on the entry's object, and both labels are broad. Where this
-   result and convention 9 point different ways, convention 9 wins: if the entry's object takes in the
-   tooling used to build the system (in its statement, or in guidance as far as convention 6 allows), the
-   assistant's tools are that tooling on the product reading too, so the product reading alone does not
-   make the labels broad, and whether a rule on those tools acts on the entry's object is decided by
-   convention 9 (and by convention 6 when only guidance shows that the object takes in the tooling).
-   The result above stands for every other entry. This convention is engaged whenever the entry's object is such a system, AI or not, and the rule's boundary is the
-   assistant itself, its actions and decisions, or its tools. It is not engaged when the entry's object
-   is a kind of software the assistant itself is (an LLM or LLM-enabled application, an agent or agentic
-   component, an MCP client or server), as in the OWASP LLM, agentic and MCP lists, because the entry
-   then reaches the assistant directly. It is also not engaged when the entry acts where the assistant
-   would not be even if counted as part of the system, such as the inbound edge of a service the
-   assistant only calls. Two related questions are kept apart as conventions 8 and 9.
+   components, its applications), does that system include the AI assistant and the tools it uses for the
+   work, or only the product being built? If it means only the product, a rule that meets the entry only
+   through the assistant or its tools does not act on the entry's object, and both labels are broad, with
+   one exception. Where the entry's object takes in the tooling used to build the system, the assistant's
+   tools are that tooling on the product reading too, so a rule on those tools still acts on the entry's
+   object. Whether the object takes in that tooling is read from the entry's statement, or from its
+   guidance as far as convention 6 allows. The exception holds for every entry, AI or not; when the system
+   is an AI system, whether a rule on the tooling for any product acts on tooling for an AI system is then
+   the question of convention 9.
+
+   To decide whether this convention is engaged, ask these questions in order and stop at the first one
+   that answers. (a) Is the entry's object named as a kind of software the assistant is by its nature (an
+   LLM or LLM-enabled application, an agent or agentic component, an MCP client or server), as in the
+   OWASP LLM, agentic and MCP lists? Then it is not engaged, because the entry reaches the assistant
+   directly. A class that takes in software of every kind (a system, its components, applications,
+   services, infrastructure) is not such a kind, even though the assistant falls inside it: whether the
+   class takes in the assistant is the question this convention asks. (b) Does the entry act only where
+   the assistant would not be even if counted as part of the system, such as the inbound edge of a service
+   the assistant only calls? Then it is not engaged. (c) Is the entry's object a system, AI or not, that
+   an organisation builds, deploys, operates or governs, and is the rule's boundary the assistant itself,
+   its actions and decisions, or its tools? Then it is engaged. (d) Otherwise it is not engaged. Two
+   related questions are kept apart as conventions 8 and 9.
 4. **Layer and boundary.** Can a rule that acts at the assistant's or the application's layer be tight
    to an entry whose mechanism or main control sits at another layer (the service's inbound edge, the
    client that renders output, the infrastructure, the authorization server)? This convention is engaged
    when the entry's object and the rule's object are the same kind of thing but the entry's main
    mitigations act at a different layer. A difference of scope alone (one change against the whole
    architecture, one application against an organisation's whole estate) is not a difference of layer:
-   Definition A treats scope as secondary, so it does not engage this convention. When the objects
-   differ, the question is convention 3, 8 or 9, or no fit.
+   Definition A treats scope as secondary, so it does not engage this convention. For a control or
+   guidance entry, the layer is where its statement places the obligation; when the statement names the
+   rule's layer among others (applications as well as infrastructure, for example), the other layers are a
+   difference of scope, not of layer, and this convention is not engaged. When the objects differ, the
+   question is convention 3, 8 or 9, or no fit.
 5. **Conditional elements.** Does an element the entry makes conditional ("as necessary", "where
    appropriate") count as essential under B?
 6. **Discussion and guidance text.** Can a mitigation named only in a control's discussion part or in
    separate implementation guidance (for example the SP 800-53 discussion, or ISO/IEC 42001 Annex B)
-   satisfy test 5 under A? Do the items such guidance lists count as essential elements under B? In this
-   pass both are read as: guidance may show the match under A, and its items are not essential under B.
+   satisfy test 5 under A? Can such guidance show what the entry's object takes in (test 3), as the
+   tooling exception of convention 3 asks? Do the items such guidance lists count as essential elements
+   under B? In this pass all three are read as: guidance may show the match under A and what the object
+   takes in, and its items are not essential under B.
 7. **Human roles filled by an AI pass.** When an entry asks for people in a role (an independent
    assessor, an expert who did not build the system, a reviewer), can a check that a rule requires, and
    that may be run by another AI model, fill that role?
@@ -139,8 +171,8 @@ The maintainer must settle these before a definition is adopted. A record that d
    an entry about an AI system is met only by a rule aimed at what makes a system AI (its models, its
    data or its AI behaviour); a rule that applies to any product alike shares only the theme, and both
    labels are broad. This convention is engaged when the entry's object is an AI system and the rule's
-   boundary is the work product or the tooling used to build it. Where it and convention 3 point
-   different ways, this convention wins, as convention 3 states.
+   boundary is the work product or the tooling used to build it, including the assistant's tools where
+   convention 3 is read as meaning only the product and its tooling exception applies.
 
 ## Record schema
 
@@ -204,7 +236,7 @@ representative sample. All 20 are tight in frontmatter today.
 | 16 | threat-model-boundaries | owasp-proactive | C4 | tight | broad | none |
 | 17 | guardrail-config-integrity | owasp-mcp | MCP02 | tight | broad | 4 |
 | 18 | inter-agent-trust | owasp-mcp | MCP07 | tight | broad | 4 |
-| 19 | no-cross-context-bleed | csa-ccm | I&S-06 | tight | broad | 3, 4 |
+| 19 | no-cross-context-bleed | csa-ccm | I&S-06 | tight | broad | 3 |
 | 20 | synthetic-fixture-data | nist-80053 | SA-3(2) | tight | broad | 6 |
 
 Totals for these 20 rows, under the readings the records state:
@@ -212,21 +244,35 @@ Totals for these 20 rows, under the readings the records state:
 - Definition A: 18 tight, 2 broad.
 - Definition B: 3 tight (rows 4, 6 and 9), 17 broad.
 
-These totals depend on conventions 3, 8 and 9, each in its own way:
+These totals depend on conventions 1, 2, 3, 4, 6, 7, 8 and 9. Each item below says what changes when
+that convention is read the other way and every other convention is read as the records state:
 
+- Convention 1: if an informative annex entry cannot be tight, rows 1 and 2 are broad under both
+  definitions.
+- Convention 2: if a pack rule is not one of an organisation's policies, procedures or processes, rows 3
+  to 7 are broad under both definitions.
 - Convention 3: if the system an entry is about means only the product being built, rows 1 to 7, row
   10 and row 19 are broad under both definitions. Row 19 is broad on that reading only while the no
   cross context bleed rule is read, as recorded, as binding only the assistant (convention 8); read as
   also binding the product, it stays tight under A.
-- Convention 9: if an entry about an AI system is met only by a rule aimed at what makes a system AI,
-  row 8 is broad under both definitions.
-- Conventions 3 and 9 together, with 6: row 9 is broad under both definitions only if convention 3 is
-  read the other way and convention 9 or convention 6 is too. On the product reading of convention 3
-  the assistant's tools are tooling for an AI system only as tooling used to build it, which convention
-  9 counts and which only the Annex B guidance shows (convention 6), so convention 9 decides as
-  convention 3 states.
+- Convention 4: if a rule cannot be tight to an entry whose mechanism or main control sits at another
+  layer, rows 12, 17 and 18 are broad under A.
+- Convention 6: if only a control's statement can show the match, row 20 is broad under A; if the items
+  of implementation guidance are essential elements, row 9 is broad under B.
+- Convention 7: if the entry's role needs a person, row 8 is broad under both definitions.
 - Convention 8: if the resource bounds rule is read as also binding the services of the product the
   assistant builds, rows 13 and 14 are tight under A.
+- Convention 9: if an entry about an AI system is met only by a rule aimed at what makes a system AI,
+  row 8 is broad under both definitions.
+- Convention 3 together with convention 9 or convention 6: row 9 is broad under both definitions only if
+  convention 3 is read the other way and convention 9 or convention 6 is too. On the product reading of
+  convention 3 the assistant's tools are tooling for the AI system only through that convention's
+  tooling exception, which rests on the Annex B guidance showing that the control's tooling takes in
+  tools used to build the system (convention 6) and on a register kept for any product counting for an AI
+  product (convention 9).
+
+Convention 5 decides no row: the one record that names a conditional element (row 8) gives the same
+labels on either reading.
 
 The records are in [atlas.toml](atlas.toml), [csa-ccm.toml](csa-ccm.toml),
 [iso-23894.toml](iso-23894.toml), [iso-42001.toml](iso-42001.toml), [nist-80053.toml](nist-80053.toml),

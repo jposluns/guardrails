@@ -30,11 +30,11 @@ adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
 conventions = [4]
-rationale = "The entry names HTML tags as a variant, and encoding for the HTML sink breaks that variant, so the rule interrupts the core mechanism for one main variant. It does not control fetching or destinations, so it is broad under B."
+rationale = "The entry names HTML tags as a variant, and encoding for the HTML sink breaks that variant, so the rule interrupts the core mechanism for one main variant. The markdown variant is left out, which alone makes it broad under B; destination control and detection of private data in output are left out as well."
 assumptions = [
   "breaking one named variant at the sink counts as interrupting the core mechanism (test 5)",
   "a rule at the producing side can be tight to a technique completed by the rendering client (convention 4); if it cannot, label-a is broad",
-  "convention 3 is not engaged: the technique's object is an LLM and the application that presents its responses, which is a kind of software the assistant itself is, so the technique reaches the assistant's own output directly",
+  "convention 3 is not engaged: the technique's object is the LLM whose response carries the private data, a kind of software the assistant itself is, so the technique reaches the assistant's own output directly; the client application that renders the response is the user's, not the assistant, and the layer it acts at is the question of convention 4",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"

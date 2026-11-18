@@ -12,7 +12,7 @@ edition = "2023"
 source = "ISO-IEC-42001-2023--AI-management-system--full-text.md"
 source-sha256 = "658324d724e9615369ba331eb54f3cdf4e40c4486dd4c81cec9ed06cd31d77df"
 locator = "Annex A, control A.4.4 Tooling resources; Annex B, B.4.4 implementation guidance"
-text-location = "control text at lines 1391 to 1393; Annex B guidance at lines 1939 to 1955; the text printed under the A.4.4 heading at lines 1379 to 1381 belongs to A.4.3"
+text-location = "control text at lines 1391 to 1393; Annex B entry at lines 1939 to 1959, with the guidance at lines 1943 to 1955 and the other information at lines 1956 to 1959, which only points to ISO/IEC 23053 and adds no elements; the text printed under the A.4.4 heading at lines 1379 to 1381 belongs to A.4.3"
 edition-check = "match"
 boundary = "AI tools, models and servers used for project work"
 core = "When it identifies its resources, the organisation records the tooling used for the AI system. The control has that one element; the Annex B guidance gives examples of what the tooling can include, but its list is guidance, not part of the control."
@@ -35,11 +35,11 @@ adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
 conventions = [3, 6, 9]
-rationale = "The control has a single element, documenting the tooling resources, and the register carries it out for the AI tools the assistant relies on, which count as tooling for an AI system on the reading of convention 3 stated below and, on its product reading, as tooling used to build one under conventions 9 and 6, which then decide as convention 3 states. The Annex B list is read as guidance and not counted as elements under B (convention 6); each item the register does not meet in full is recorded in omits for that reason and does not decide B."
+rationale = "The control has a single element, documenting the tooling resources, and the register carries it out for the AI tools the assistant relies on, which count as tooling for an AI system on the reading of convention 3 stated below and, on its product reading, as tooling used to build one under the tooling exception of convention 3, which here rests on conventions 6 and 9. The Annex B list is read as guidance and not counted as elements under B (convention 6); each item the register does not meet in full is recorded in omits for that reason and does not decide B."
 assumptions = [
-  "the assistant and its tools are part of the AI system, so the tools are tooling for it (convention 3); on the product reading they are instead tooling used to build the product, and because the control's object takes in such tooling, convention 3 gives way to convention 9 as the rubric states, so the product reading alone does not make the labels broad",
+  "the assistant and its tools are part of the AI system, so the tools are tooling for it (convention 3); on the product reading they are instead tooling used to build the product, and because the control's object takes in such tooling, the tooling exception of convention 3 applies, so the product reading alone does not make the labels broad",
   "a register kept for whatever product is built, AI or not, documents tooling for an AI system whenever the product is one (convention 9)",
-  "on the product reading of convention 3, only the Annex B guidance shows that the tooling takes in tools that aid model development and software for design, development and deployment; the control's statement alone is not read as showing it, so on that reading label-a also rests on guidance showing the match under A (convention 6)",
+  "on the product reading of convention 3, only the Annex B guidance shows that the control's tooling takes in tools that aid model development and software for design, development and deployment; the control's statement alone is not read as showing it, so on that reading the tooling exception, and with it label-a, rests on guidance showing what the control's object takes in (convention 6)",
   "label-a and label-b change only when convention 3 is read the other way together with convention 9 or with convention 6: if the AI system means only the product being built, and either an entry about an AI system is met only by a rule aimed at what makes a system AI or guidance cannot show the match under A, both labels are broad",
   "the items of the Annex B implementation guidance are not essential elements under B (convention 6); if they are, label-b is broad",
   "the reference copy's Annex A table is extracted out of order, so the control text was read where it actually sits, not under the printed heading",
