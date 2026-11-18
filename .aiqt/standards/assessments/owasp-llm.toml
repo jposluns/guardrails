@@ -11,8 +11,8 @@ current-fit = "tight"
 edition = "2026"
 source = "OWASP-Top-10-for-LLM-Applications-2026--full-text.md"
 source-sha256 = "960f68a87fb9cede9c0ef9a497d6736f5e445cce2f8be3ea83fe2411d170e605"
-locator = "LLM07:2026 Misinformation, common examples and prevention strategies 1 and 2"
-text-location = "lines 1355 to 1405; examples at lines 1377 to 1396; strategies 1 and 2 at lines 1398 to 1402"
+locator = "LLM07:2026 Misinformation, common examples and prevention and mitigation strategies 1 to 10"
+text-location = "lines 1355 to 1414; examples at lines 1377 to 1396; strategies at lines 1398 to 1414, with 1 and 2 at lines 1398 to 1402"
 edition-check = "match"
 boundary = "claims about external facts that the assistant relies on or presents"
 core = "Model output that is false, unsupported or misleading is relied on for decisions or actions; the entry asks that claims be grounded in authoritative sources and checked before anything acts on them."
@@ -20,11 +20,18 @@ covers = [
   "grounding claims in a source before they are relied on (strategy 1)",
   "checking a claim before acting on it (strategy 2)",
   "more corroboration for a weaker source",
+  "an external claim not yet corroborated is not presented as settled (part of strategy 9)",
 ]
 omits = [
   "misleading summaries and critical omissions (example 4)",
   "incorrect inference that a workflow condition has been met (example 2)",
   "tool call validation and verification signals (strategies 3 and 4)",
+  "approval workflows and system checks at run time for high impact actions (strategy 5)",
+  "structured output with required fields to catch omissions (strategy 6)",
+  "least privilege, sandboxing and rate limits to contain the blast radius (strategy 7)",
+  "logging of claims, evidence and outcomes, and tests of adversarial scenarios (strategy 8)",
+  "telling verified facts apart from assumptions across the whole output, beyond holding back an uncorroborated external claim from being presented as settled (strategy 9)",
+  "regular adversarial testing of workflows against misleading inputs (strategy 10)",
 ]
 label-a = "tight"
 label-b = "broad"
@@ -32,7 +39,7 @@ adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
 conventions = []
-rationale = "Corroboration before reliance is the entry's first two mitigations. The rule deals with claims about external facts only, not omissions or state inference, so it is broad under B."
+rationale = "Corroboration before reliance is the entry's first two mitigations. The rule deals with claims about external facts only, not omissions or state inference, and leaves out strategies 3 to 10, so it is broad under B."
 assumptions = []
 assessor = "first-pass review"
 date = "2026-11-18"

@@ -11,20 +11,26 @@ current-fit = "tight"
 edition = "2026"
 source = "OWASP-Top-10-for-Agentic-Applications-2026--full-text.md"
 source-sha256 = "024fd8cc24db4722da325f37a2c6a63b3d1f354250327a451ad1c40010bb30df"
-locator = "ASI08 Cascading Failures, description and prevention guidelines 6 and 7"
-text-location = "description at lines 1160 to 1173; guidelines at lines 1245 to 1263, with 6 and 7 at lines 1259 to 1261"
+locator = "ASI08 Cascading Failures, description and prevention and mitigation guidelines 1 to 10"
+text-location = "entry from heading to last guideline at lines 1160 to 1271; description at lines 1160 to 1189; guidelines at lines 1245 to 1271, with 6 and 7 at lines 1259 to 1261"
 edition-check = "match"
 boundary = "the assistant's own loops, tool calls, budgets and calls to dependencies"
 core = "A single fault spreads across agents, tools and workflows and grows into harm across the whole system; the entry is about the spread and amplification, not the first fault."
 covers = [
-  "rate limits and a fail safe stop when a bound is reached (guideline 6)",
-  "quotas, progress caps and a circuit breaker on a failing dependency (guideline 7)",
+  "budgets on tool call depth, recursion, tokens and cost, and limits and timeouts on loops, which are the quotas and progress caps of guideline 7",
+  "a cap on the assistant's own request rate and a fail safe stop when a bound is reached, which limit how fast a runaway loop can spread work (the throttling part of guideline 6, for the assistant's own output only)",
+  "a circuit breaker that stops calls to a failing downstream dependency, which keeps one degraded component from becoming a wider outage (part of the fault tolerance of guideline 1)",
 ]
 omits = [
+  "design of the whole application to tolerate the loss of model, agent and external components, beyond the breaker on a failing dependency (the rest of guideline 1)",
   "isolation and trust boundaries between agents (guideline 2)",
   "short lived, task scoped access and independent policy enforcement (guidelines 3 and 4)",
   "output validation and human gates before output moves downstream (guideline 5)",
+  "detection of commands that spread fast, and throttling or pausing on such anomalies (the rest of guideline 6)",
+  "circuit breakers placed between the planner and the executor (the rest of guideline 7); the rule's breaker sits on a failing dependency, not on that link",
   "behaviour and governance drift detection (guideline 8)",
+  "replaying recorded agent actions in an isolated copy of production and gating policy changes on the result (guideline 9)",
+  "tamper evident logs of messages, decisions and outcomes bound to agent identity, with lineage for every propagated action (guideline 10)",
 ]
 label-a = "tight"
 label-b = "broad"
@@ -32,7 +38,7 @@ adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
 conventions = []
-rationale = "Bounds and circuit breakers directly stop a fault from amplifying, which is the core of the entry and two of its listed mitigations. The other main lines of mitigation are left out, so it is broad under B."
+rationale = "Quotas and progress caps on the assistant's own loops directly stop a fault from amplifying, which is the core of the entry and part of guideline 7. The rule meets guidelines 1, 6 and 7 only in part and leaves out the other main lines of mitigation, so it is broad under B."
 assumptions = []
 assessor = "first-pass review"
 date = "2026-11-18"

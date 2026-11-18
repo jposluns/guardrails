@@ -54,25 +54,25 @@ locator = "SA-3(2) Use of Live or Operational Data, statement items (a) and (b) 
 text-location = "catalogue parts sa-3.2_smt.a, sa-3.2_smt.b and sa-3.2_gdn"
 edition-check = "match"
 boundary = "test fixtures, seed data, examples and documentation"
-core = "Approve, document and control any use of live data in preproduction environments, and protect those environments at the level of the live data they hold; the discussion points to test or dummy data as the way to reduce the risk."
+core = "Where operational data is used before production (in development, test or integration), that use is signed off, recorded and kept under control, and the environment holding it gets protection matching that data's impact or classification. The discussion part adds that building and testing with made up data lowers the risk."
 covers = [
   "real personal data and production records are kept out of fixtures, examples and documentation",
-  "synthetic data or validated anonymization is used instead, as the discussion suggests",
+  "synthetic data or validated anonymization is used instead, the risk reduction the discussion part suggests",
 ]
 omits = [
-  "item (a): approving and documenting any use of live data that does happen",
-  "item (b): protecting preproduction environments at the live data's level",
-  "preproduction environments beyond fixtures, examples and documentation",
+  "item (a): sign off, a record and ongoing control for any operational data that is used before production",
+  "item (b): protection of development, test and integration environments that matches the operational data they hold",
+  "development, test and integration environments beyond fixtures, examples and documentation",
 ]
 label-a = "tight"
 label-b = "broad"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = []
-rationale = "Keeping live data out of preproduction material is the direct mitigation the control's discussion names. The rule does not approve, document or protect any live data use, so it is broad under B."
+conventions = [6]
+rationale = "Keeping operational data out of material used before production is the direct mitigation the control's discussion part names, which shows the match under A on the reading of convention 6 this record takes. The rule does not sign off, record or protect any operational data use, so it is broad under B."
 assumptions = [
-  "a mitigation named in the control's discussion counts as visible in the control's text for test 5",
+  "a mitigation named only in the control's discussion part can satisfy test 5 under A (convention 6); if only the statement counts, label-a is broad",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"

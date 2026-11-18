@@ -17,12 +17,13 @@ edition-check = "match"
 boundary = "the configuration that constrains the assistant, and the scope the assistant has been granted"
 core = "Narrow or temporary permissions of an agent or tool grow over time, through convenience or drift, until the agent holds broad privileges it can use without human review."
 covers = [
-  "a widening of scope the human did not ask for is surfaced for renewed approval, not used (remediation 5)",
+  "a widening of scope the human did not ask for is surfaced for renewed approval, not used (the approval part of remediation 5)",
   "a weakening change is never self applied and needs explicit human authorization, which separates the authority to grant from the actor (remediation 8)",
   "the approval gate for elevation (the approval part of remediation 3)",
 ]
 omits = [
   "expiry of scopes and tokens and just in time access (the rest of remediation 3)",
+  "entitlement audits run on a schedule and on each change to find scope that has grown, and a written justification for each increase (the rest of remediation 5, most of it)",
   "per agent identity and credential binding (remediation 4)",
   "policy as code, runtime enforcement and least privilege design (remediations 1, 2 and 6)",
   "change records and tamper evident audit trails (remediation 7)",
@@ -33,7 +34,7 @@ adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
 conventions = [4]
-rationale = "Surfacing an unrequested widening for renewed approval, and keeping the assistant from granting itself scope, directly interrupt scope creep. Expiry, identity and audit lines are left out, so it is broad under B."
+rationale = "Surfacing an unrequested widening for renewed approval, and keeping the assistant from granting itself scope, directly interrupt scope creep. Expiry, periodic entitlement audits, identity and audit trail lines are left out, so it is broad under B."
 assumptions = [
   "a rule on the assistant's own guardrail configuration can be tight to an entry framed around MCP agent and tool permissions (convention 4)",
 ]
@@ -65,14 +66,17 @@ omits = [
   "server side validation of every token and per request authorization (guidance 1 and 2)",
   "central identity management (guidance 5)",
   "logging of authentication and authorization decisions (guidance 6)",
+  "secure defaults on MCP endpoints: no guest or anonymous access, no public exposure of local test servers, and separate credentials per environment (guidance 7)",
 ]
 label-a = "tight"
 label-b = "broad"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = []
-rationale = "Verified identity and no inherited authority directly stop the spoofed agent and inherited token scenarios. Token lifecycle, server side checks and logging are left out, so it is broad under B."
-assumptions = []
+conventions = [4]
+rationale = "Verified identity and no inherited authority directly stop the spoofed agent and inherited token scenarios, on the reading of convention 4 stated below. Token lifecycle, server side checks, central identity, logging and secure endpoint defaults are left out, so it is broad under B."
+assumptions = [
+  "a rule acting on the messages and authority passed between agents can be tight to an entry whose main listed mitigations are checks on the server side and at the identity provider (convention 4); if it cannot, label-a is broad",
+]
 assessor = "first-pass review"
 date = "2026-11-18"

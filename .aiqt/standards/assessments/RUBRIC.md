@@ -17,7 +17,24 @@ below.
 - A link that rests only on a shared theme, a precondition, or a downstream impact is broad.
 - A link where the rule mitigates no mechanism of the entry is a candidate for removal.
 - Neither definition limits how many ids one rule may map as tight. Either one, once adopted, replaces the
-  "one-to-one" wording in the standards README and on the public mappings page (`site/mappings.html`).
+  "one-to-one" wording in the standards README and the "1-to-1" wording on the public mappings page
+  (`site/mappings/index.html`, generated from `site/draft-src/mappings.toml`).
+
+### Terms used in both definitions
+
+- **Main variant.** A variant the entry itself names: in its description, its numbered examples, its
+  sub-techniques or its attack scenarios. A variant the assessor supplies from outside the entry does not
+  count.
+- **Listed mitigations.** The entry's own prevention, mitigation, remediation or implementation guidance at
+  the location the record cites, item by item as the entry numbers or heads them. For a catalogue control
+  or a management system control, the statement is what counts; text in a separate discussion or
+  guidance part counts only as convention 6 below allows.
+- **Essential element.** For a control or guidance entry, each lettered item and each verb of the
+  normative statement. For a risk, technique or weakness entry, each main variant and each listed
+  mitigation that applies at the rule's layer. An element the entry makes conditional is essential only as
+  convention 5 decides; an item of a discussion or guidance part is essential only as convention 6 decides.
+  Every essential element the rule does not meet in full goes into `omits`, with the part it does meet
+  named in `covers`.
 
 ### Definition A: direct mitigation
 
@@ -47,7 +64,9 @@ Leaving out any essential element makes the row broad under B.
 Apply these in order for each row and write the outcome into the record.
 
 1. Read the entry's text in the pinned edition, at the location the record names. Never assess from the
-   title or from memory.
+   title or from memory. For a numbered list of examples, mitigations or guidelines, read and cite the
+   whole list to its last item, and for a prose entry read to the next entry's heading; the record may name
+   narrower ranges inside that span, but `omits` is built against the whole of it.
 2. State the entry's core obligation or attack mechanism in your own words (`core`).
 3. Name the object or boundary the rule acts on, and check that it is the entry's object or boundary
    (`boundary`).
@@ -59,7 +78,9 @@ Apply these in order for each row and write the outcome into the record.
 7. If the only link is a theme, a precondition or an impact, both labels are broad. If no mechanism is
    mitigated at all, record `remove` and give the reason.
 8. If an open convention below decides the label, name it in `conventions`, label by the reading stated in
-   the record, and say so in `rationale`.
+   the record, and say so in `rationale`. A convention decides a label when the other reading of it would
+   give a different `label-a` or `label-b`. Name it even when the record's reading is the one the
+   assessor finds more likely, and state in `assumptions` which label the other reading would give.
 
 ## Open conventions
 
@@ -70,12 +91,27 @@ The maintainer must settle these before a definition is adopted. A record that d
 2. **Rules as policies and procedures.** Does a pack rule, followed by an assistant, count as one of the
    "policies and procedures" an entry asks an organisation to have?
 3. **What "the AI system" means.** Is it the product being built, or the AI assistant and tools used to
-   build it? If it means only the product, rows that act on the assistant's own work are broad.
+   build it? If it means only the product, rows that act on the assistant's own work are broad. The same
+   question arises from the rule's side: a rule worded about the assistant's own conduct may or may not
+   also bind the product the assistant builds. This convention is engaged whenever the entry's object is
+   an AI system or service that an organisation builds, deploys, operates or governs, and the rule's
+   boundary is the assistant's own actions, work or consumption. It is not engaged when the entry's
+   object is any agent, agentic component or MCP client or server, as in the OWASP agentic and MCP lists,
+   because the assistant is itself one of those.
 4. **Layer and boundary.** Can a rule that acts at the assistant's or the application's layer be tight
    to an entry whose mechanism or main control sits at another layer (the service's inbound edge, the
-   client that renders output, the infrastructure, the authorization server)?
+   client that renders output, the infrastructure, the authorization server)? This convention is engaged
+   when the entry's object and the rule's object are the same kind of thing but the entry's main
+   mitigations act at a different layer; when the objects differ, the question is convention 3 or no fit.
 5. **Conditional elements.** Does an element the entry makes conditional ("as necessary", "where
    appropriate") count as essential under B?
+6. **Discussion and guidance text.** Can a mitigation named only in a control's discussion part or in
+   separate implementation guidance (for example the SP 800-53 discussion, or ISO/IEC 42001 Annex B)
+   satisfy test 5 under A? Do the items such guidance lists count as essential elements under B? In this
+   pass both are read as: guidance may show the match under A, and its items are not essential under B.
+7. **Human roles filled by an AI pass.** When an entry asks for people in a role (an independent
+   assessor, an expert who did not build the system, a reviewer), can a check that a rule requires, and
+   that may be run by another AI model, fill that role?
 
 ## Record schema
 
@@ -121,31 +157,35 @@ representative sample. All 20 are tight in frontmatter today.
 
 | row | rule | framework | id | label-a | label-b | conventions |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | human-oversight-and-autonomy-threshold | iso-23894 | B.4 | tight | broad | 1 |
-| 2 | human-authorization | iso-23894 | B.4 | tight | broad | 1 |
-| 3 | decision-classification-before-enacting | nist-airmf | MAP 3.5 | tight | broad | 2 |
-| 4 | decision-classification-before-enacting | nist-airmf | GOVERN 3.2 | tight | tight | 2 |
-| 5 | human-oversight-and-autonomy-threshold | nist-airmf | MAP 3.5 | tight | broad | 2 |
-| 6 | human-oversight-and-autonomy-threshold | nist-airmf | GOVERN 3.2 | tight | tight | 2 |
-| 7 | human-authorization | nist-airmf | MAP 3.5 | tight | broad | 2 |
-| 8 | high-assurance-verification | nist-airmf | MEASURE 1.3 | tight | broad | 3, 5 |
-| 9 | ai-toolchain-register | iso-42001 | A.4.4 | tight | tight | 3 |
+| 1 | human-oversight-and-autonomy-threshold | iso-23894 | B.4 | tight | broad | 1, 3 |
+| 2 | human-authorization | iso-23894 | B.4 | tight | broad | 1, 3 |
+| 3 | decision-classification-before-enacting | nist-airmf | MAP 3.5 | tight | broad | 2, 3 |
+| 4 | decision-classification-before-enacting | nist-airmf | GOVERN 3.2 | tight | tight | 2, 3 |
+| 5 | human-oversight-and-autonomy-threshold | nist-airmf | MAP 3.5 | tight | broad | 2, 3 |
+| 6 | human-oversight-and-autonomy-threshold | nist-airmf | GOVERN 3.2 | tight | tight | 2, 3 |
+| 7 | human-authorization | nist-airmf | MAP 3.5 | tight | broad | 2, 3 |
+| 8 | high-assurance-verification | nist-airmf | MEASURE 1.3 | tight | broad | 3, 5, 7 |
+| 9 | ai-toolchain-register | iso-42001 | A.4.4 | tight | tight | 3, 6 |
 | 10 | ai-toolchain-register | nist-80053 | CM-8 | tight | broad | none |
 | 11 | corroborate-external-claims | owasp-llm | LLM07 | tight | broad | none |
 | 12 | output-encoding | atlas | AML.T0077 | tight | broad | 4 |
-| 13 | resource-bounds | atlas | AML.T0029 | broad | broad | 4 |
-| 14 | resource-bounds | atlas | AML.T0034.000 | broad | broad | 4 |
+| 13 | resource-bounds | atlas | AML.T0029 | broad | broad | 3 |
+| 14 | resource-bounds | atlas | AML.T0034.000 | broad | broad | 3 |
 | 15 | resource-bounds | owasp-asi | ASI08 | tight | broad | none |
 | 16 | threat-model-boundaries | owasp-proactive | C4 | tight | broad | 4 |
 | 17 | guardrail-config-integrity | owasp-mcp | MCP02 | tight | broad | 4 |
-| 18 | inter-agent-trust | owasp-mcp | MCP07 | tight | broad | none |
+| 18 | inter-agent-trust | owasp-mcp | MCP07 | tight | broad | 4 |
 | 19 | no-cross-context-bleed | csa-ccm | I&S-06 | tight | broad | 4 |
-| 20 | synthetic-fixture-data | nist-80053 | SA-3(2) | tight | broad | none |
+| 20 | synthetic-fixture-data | nist-80053 | SA-3(2) | tight | broad | 6 |
 
-Totals for these 20 rows:
+Totals for these 20 rows, under the readings the records state:
 
 - Definition A: 18 tight, 2 broad.
 - Definition B: 3 tight (rows 4, 6 and 9), 17 broad.
+
+These totals depend on convention 3 in both directions. If "the AI system" means only the product being
+built, rows 1 to 9 are broad under both definitions. If the resource bounds rule is read as also binding
+the services of the product the assistant builds, rows 13 and 14 are tight under A.
 
 The records are in [atlas.toml](atlas.toml), [csa-ccm.toml](csa-ccm.toml),
 [iso-23894.toml](iso-23894.toml), [iso-42001.toml](iso-42001.toml), [nist-80053.toml](nist-80053.toml),

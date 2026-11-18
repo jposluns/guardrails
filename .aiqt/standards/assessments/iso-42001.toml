@@ -15,22 +15,25 @@ locator = "Annex A, control A.4.4 Tooling resources; Annex B, B.4.4 implementati
 text-location = "control text at lines 1391 to 1393; Annex B guidance at lines 1939 to 1955; the text printed under the A.4.4 heading at lines 1379 to 1381 belongs to A.4.3"
 edition-check = "match"
 boundary = "AI tools, models and servers used for project work"
-core = "As part of identifying resources, the organisation documents the tooling resources used for the AI system; the guidance lists model types, data tools, optimisation and evaluation methods, provisioning tools, development aids and the software and hardware for design, development and deployment."
+core = "When it identifies its resources, the organisation records the tools the AI system relies on. The control has that one element; the Annex B guidance gives examples of what the tooling can include, but its list is guidance, not part of the control."
 covers = [
   "every AI tool, model and server in use is entered in a register before it is relied on",
   "each entry names what it is, why it is authorized and who approved it",
   "the register is reconciled with what is actually in use",
 ]
-omits = []
+omits = [
+  "guidance only, not an element under the reading of convention 6 this record takes: tooling in the Annex B list that is not an AI tool, model or server, such as tools and processes that prepare data, methods for tuning and for evaluating models, tools that set up resources, and the hardware used to design, build and deploy the system",
+]
 label-a = "tight"
 label-b = "tight"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = [3]
-rationale = "The control has a single element, documenting the tooling resources, and the register carries it out for the tools the assistant relies on."
+conventions = [3, 6]
+rationale = "The control has a single element, documenting the tooling resources, and the register carries it out for the tools the assistant relies on. The Annex B list is read as guidance and not counted as elements under B (convention 6); the tooling it names that the register leaves out is recorded in omits for that reason and does not decide B."
 assumptions = [
   "the assistant and its tools count as tooling for the AI system (convention 3); if the AI system means only an AI product being built, both labels are broad",
+  "the items of the Annex B implementation guidance are not essential elements under B (convention 6); if they are, label-b is broad",
   "the reference copy's Annex A table is extracted out of order, so the control text was read where it actually sits, not under the printed heading",
 ]
 assessor = "first-pass review"

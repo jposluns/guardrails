@@ -15,7 +15,7 @@ locator = "MAP function, subcategory MAP 3.5"
 text-location = "lines 1240 to 1242"
 edition-check = "match"
 boundary = "decisions the assistant could enact, and which of them go to a human"
-core = "Processes for human oversight are defined, assessed and documented in line with the organisation's governance policies."
+core = "The organisation has a way for people to oversee the AI system; that way is set out, written down and checked for whether it works, consistently with the policies the governance function issues."
 covers = [
   "defines an oversight process: each decision is classified as the assistant's, the maintainer's, or blocked",
   "the classification is recorded before acting",
@@ -30,10 +30,11 @@ label-b = "broad"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = [2]
-rationale = "The rule defines and documents an oversight process, which carries out the core. Nothing in it assesses the process or ties it to governance policy, so it is broad under B."
+conventions = [2, 3]
+rationale = "Reading a pack rule as a process (convention 2) and the AI system as including the assistant (convention 3), the rule defines and documents an oversight process, which carries out the core. Nothing in it assesses the process or ties it to governance policy, so it is broad under B."
 assumptions = [
-  "a pack rule counts as a defined and documented process (convention 2)",
+  "a pack rule counts as a defined and documented process (convention 2); if it does not, both labels are broad",
+  "the AI system to be overseen includes the assistant whose decisions the rule classifies (convention 3); if it means only the product being built, both labels are broad",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -52,10 +53,11 @@ locator = "GOVERN function, subcategory GOVERN 3.2"
 text-location = "lines 1030 to 1031"
 edition-check = "match"
 boundary = "decision rights between the assistant and the human maintainer"
-core = "Policies and procedures define and separate the roles and responsibilities of humans and AI in human and AI configurations, and in oversight of AI systems."
+core = "The organisation's policy and procedure both set out what people and what AI are each charged with, and keep those two sets of duties distinct, where humans and AI work together and where people oversee AI."
 covers = [
-  "splits decision rights into the assistant's, the maintainer's, and blocked",
-  "a recorded maintainer ruling outranks a predicted one",
+  "setting out the duties (the entry's first verb): the rule names three kinds of decision right, the assistant's own, the maintainer's, and blocked",
+  "keeping them distinct (the entry's second verb): every decision is placed in exactly one of those kinds, and the placement is recorded before acting",
+  "a recorded maintainer ruling outranks a predicted one, so the human's part cannot be taken over by the assistant's guess",
 ]
 omits = []
 label-a = "tight"
@@ -63,10 +65,11 @@ label-b = "tight"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = [2]
-rationale = "The rule is a procedure whose whole purpose is to separate what the AI decides from what the human decides, which is the single element of the entry."
+conventions = [2, 3]
+rationale = "The statement has two verbs, setting out the human and AI duties and keeping them distinct. The rule does both for the assistant and the maintainer, so nothing essential is left out, on the readings of conventions 2 and 3 stated below."
 assumptions = [
   "a pack rule counts as one of the policies and procedures the entry asks for (convention 2); if it does not, both labels are broad",
+  "the AI in the entry's human and AI configurations includes the assistant the rule governs (convention 3); if it means only the product being built, both labels are broad",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -85,7 +88,7 @@ locator = "MAP function, subcategory MAP 3.5"
 text-location = "lines 1240 to 1242"
 edition-check = "match"
 boundary = "the autonomy threshold for the assistant's actions"
-core = "Processes for human oversight are defined, assessed and documented in line with the organisation's governance policies."
+core = "The organisation has a way for people to oversee the AI system; that way is set out, written down and checked for whether it works, consistently with the policies the governance function issues."
 covers = [
   "defines an oversight process: an autonomy threshold set by consequence and reversibility",
   "holds for a human when in doubt",
@@ -100,10 +103,11 @@ label-b = "broad"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = [2]
-rationale = "Same reading as the decision classification row: an oversight process is defined and documented, but not assessed or tied to governance policy."
+conventions = [2, 3]
+rationale = "Same readings of conventions 2 and 3 as the decision classification row: an oversight process for the assistant is defined and documented, but not assessed or tied to governance policy."
 assumptions = [
-  "a pack rule counts as a defined and documented process (convention 2)",
+  "a pack rule counts as a defined and documented process (convention 2); if it does not, both labels are broad",
+  "the AI system to be overseen includes the assistant whose autonomy the rule bounds (convention 3); if it means only the product being built, both labels are broad",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -122,10 +126,10 @@ locator = "GOVERN function, subcategory GOVERN 3.2"
 text-location = "lines 1030 to 1031"
 edition-check = "match"
 boundary = "responsibility between the assistant and the human for consequential actions"
-core = "Policies and procedures define and separate the roles and responsibilities of humans and AI in human and AI configurations, and in oversight of AI systems."
+core = "The organisation's policy and procedure both set out what people and what AI are each charged with, and keep those two sets of duties distinct, where humans and AI work together and where people oversee AI."
 covers = [
-  "the autonomy threshold separates what the assistant may do alone from what a human must authorize",
-  "the threshold is set by consequence and reversibility, not by confidence",
+  "setting out the duties (the entry's first verb): high consequence, irreversible or outward facing actions are the human's to authorize, and the rest the assistant may do alone",
+  "keeping them distinct (the entry's second verb): the threshold between the two is set by consequence and reversibility, not by confidence; a doubtful case holds for the human and a timeout never picks the risky path",
 ]
 omits = []
 label-a = "tight"
@@ -133,10 +137,11 @@ label-b = "tight"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = [2]
-rationale = "The authorization threshold is the separation of AI and human responsibility the entry asks for."
+conventions = [2, 3]
+rationale = "The statement has two verbs, setting out the human and AI duties and keeping them distinct. The autonomy threshold does both for consequential actions, so nothing essential is left out, on the readings of conventions 2 and 3 stated below."
 assumptions = [
   "a pack rule counts as one of the policies and procedures the entry asks for (convention 2); if it does not, both labels are broad",
+  "the AI in the entry's human and AI configurations includes the assistant the rule governs (convention 3); if it means only the product being built, both labels are broad",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -155,7 +160,7 @@ locator = "MAP function, subcategory MAP 3.5"
 text-location = "lines 1240 to 1242"
 edition-check = "match"
 boundary = "consequential actions that need human authorization"
-core = "Processes for human oversight are defined, assessed and documented in line with the organisation's governance policies."
+core = "The organisation has a way for people to oversee the AI system; that way is set out, written down and checked for whether it works, consistently with the policies the governance function issues."
 covers = [
   "defines an oversight process: consequential actions need explicit, informed human authorization",
   "holds when authorization is missing or ambiguous",
@@ -170,10 +175,11 @@ label-b = "broad"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = [2]
-rationale = "Same reading as the other two MAP 3.5 rows: defined and documented, not assessed or tied to governance policy."
+conventions = [2, 3]
+rationale = "Same readings of conventions 2 and 3 as the other two MAP 3.5 rows: defined and documented, not assessed or tied to governance policy."
 assumptions = [
-  "a pack rule counts as a defined and documented process (convention 2)",
+  "a pack rule counts as a defined and documented process (convention 2); if it does not, both labels are broad",
+  "the AI system to be overseen includes the assistant whose actions the rule gates (convention 3); if it means only the product being built, both labels are broad",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -192,24 +198,26 @@ locator = "MEASURE function, subcategory MEASURE 1.3"
 text-location = "lines 1340 to 1345"
 edition-check = "match"
 boundary = "each substantive change before it integrates"
-core = "People who did not build the system, or independent assessors, take part in regular assessments and updates; domain experts, users, outside AI actors and affected communities are consulted as needed for the organisation's risk tolerance."
+core = "The system is evaluated, and its evaluations revised, at set intervals with people who stand apart from its building: staff experts who were not its front line builders, or outside assessors. Where the organisation's appetite for risk calls for it, those evaluations also draw on specialists, users, AI actors from outside the building team, and the communities the system affects."
 covers = [
-  "an independent pass, briefed to refute rather than confirm, checks every substantive change",
+  "an independent pass, briefed to refute rather than confirm, checks every substantive change; the rule does not say whether a person or another AI model runs that pass",
 ]
 omits = [
-  "regular assessment of the AI system as a whole, rather than of single changes",
-  "consultation of domain experts, users, outside AI actors and affected communities, which the entry makes conditional",
+  "people in the independent role: the entry asks for staff experts or outside assessors, and the rule's pass may be run by a model (see convention 7)",
+  "evaluation of the system as a whole at set intervals, rather than of single changes",
+  "input from specialists, users, outside AI actors and affected communities, which the entry makes conditional",
 ]
 label-a = "tight"
 label-b = "broad"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = [3, 5]
-rationale = "Independent review is the core of the entry and the rule requires it. Under B the rule checks single changes, not the system at regular intervals, so it is broad. The consultation element is conditional in the entry, so it does not by itself decide B."
+conventions = [3, 5, 7]
+rationale = "Independent review is the core of the entry, and the rule requires an independent pass, read here as able to fill the entry's role for people (convention 7). Under B the rule checks single changes, not the system at set intervals, so it is broad. The consultation element is conditional in the entry, so it does not by itself decide B."
 assumptions = [
   "the work product the assistant changes counts as the AI system (convention 3); if the AI system means only an AI product, both labels are broad",
   "an element the entry makes conditional is not essential under B (convention 5)",
+  "an independent pass that another AI model may run can fill the entry's role for staff experts or outside assessors (convention 7); if the role needs a person, both labels are broad",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"

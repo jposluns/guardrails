@@ -30,10 +30,11 @@ label-b = "broad"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = [1]
-rationale = "The rule directly decides the level of automation by consequence, which is the core of the entry. It does not deal with the readiness or attention of the person who takes over, so it is broad under B."
+conventions = [1, 3]
+rationale = "Reading the entry's AI system as including the assistant (convention 3) and an informative annex entry as able to be tight (convention 1), the rule directly decides the level of automation by consequence, which is the core of the entry. It does not deal with the readiness or attention of the person who takes over, so it is broad under B."
 assumptions = [
-  "an informative annex entry that lists a risk source can be tight (convention 1)",
+  "an informative annex entry that lists a risk source can be tight (convention 1); if it cannot, both labels are broad",
+  "the AI system whose level of automation the entry discusses includes the assistant whose actions the rule governs (convention 3); if it means only the product being built, both labels are broad",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -68,10 +69,11 @@ label-b = "broad"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = [1]
-rationale = "Same reading as the human oversight rule: the rule fixes where automation stops for consequential actions, which is the core of the entry, but leaves the handover risks themselves unaddressed."
+conventions = [1, 3]
+rationale = "Same readings of conventions 1 and 3 as the human oversight row: the rule fixes where the assistant's automation stops for consequential actions, which is the core of the entry, but leaves the handover risks themselves unaddressed."
 assumptions = [
-  "an informative annex entry that lists a risk source can be tight (convention 1)",
+  "an informative annex entry that lists a risk source can be tight (convention 1); if it cannot, both labels are broad",
+  "the AI system whose level of automation the entry discusses includes the assistant whose actions the rule governs (convention 3); if it means only the product being built, both labels are broad",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
