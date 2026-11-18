@@ -99,8 +99,9 @@ it is validated before any scan and fails closed (exit 2) when malformed, over a
 when a regex does not compile, a red fixture misses, a green fixture hits or a match is zero-width.
 Adopter regexes run only in a worker subprocess under ADOPTER_MATCH_BUDGET_SECONDS (a timeout or worker
 failure is exit 2). `--diff BASE` reports every shape match on a line added between the merge base of
-BASE and HEAD in HEAD's shipped set, independent of the baseline, reading only the HEAD commit (see
-tracker_diff_main and docs/tracker-labels.md); exit 0 clean, 1 on a finding, 2 when it cannot evaluate.
+BASE and HEAD in HEAD's shipped set, independent of the baseline, reading its inputs only from the HEAD
+and merge-base commits, never the working tree or the index (see tracker_diff_main and
+docs/tracker-labels.md); exit 0 clean, 1 on a finding, 2 when it cannot evaluate.
 
 SWEPT-PATH ZERO-TOLERANCE LAYER (scan_swept_labels). A tracked file under a SWEPT_PREFIXES prefix (an
 area already swept clean of review-round labels) tolerates NO match of the SWEPT_LABELS rows: a
@@ -1074,7 +1075,11 @@ def _adopter_match_worker():
 # base of BASE and HEAD, within HEAD's shipped set, whatever the ratchet baseline allows (an equal-count
 # relocation is still reported). Every input is read from a commit, never from the working tree or the
 # index: HEAD supplies the manifest, adopter configuration, baseline, tree and blobs, and the merge base
-# supplies its own manifest and tree and the old blobs each change is compared against. A path shipped at
+# supplies its own manifest and tree and the old blobs each change is compared against. Every git read
+# ignores refs/replace objects and any grafts file (_git_read), so neither can stand in for an object or
+# move the merge base; a forged commit-graph file in the local object directory is NOT neutralized and
+# might change the parents git reads (inferred, not tested), a disclosed residual that, like a grafts
+# file, needs write access to the local repository. A path shipped at
 # HEAD whose content was not shipped at the merge base (its merge-base path, the rename source for a
 # rename, is outside the shipped set computed from the merge base's own manifest and tree, or it is
 # new) is wholly added: every line is reported, so a rename from an unshipped path into the shipped set
@@ -1096,11 +1101,14 @@ def _git_read(root, args):
     """One git read under tracked_files' discipline (GIT_* environment dropped, core.fsmonitor=false,
     protocol.allow=never, GIT_NO_LAZY_FETCH=1, a 120-second timeout) plus the three automatic-maintenance
     pins in option position (gc.auto=0, gc.autoDetach=false, maintenance.auto=false), the spelling the
-    maintenance-pin scan resolves for a funnel whose subcommand is a parameter, and --no-replace-objects
-    (a local refs/replace object can never stand in for a commit, tree or blob this check reads);
-    returns the CompletedProcess and raises OSError when git cannot run or times out."""
+    maintenance-pin scan resolves for a funnel whose subcommand is a parameter, --no-replace-objects
+    (a local refs/replace object can never stand in for a commit, tree or blob this check reads) and
+    GIT_GRAFT_FILE set to a path that cannot exist (a child of the null device, so no info/grafts line
+    can rewrite a commit's parents and move the merge base); returns the CompletedProcess and raises
+    OSError when git cannot run or times out."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_NO_LAZY_FETCH"] = "1"
+    env["GIT_GRAFT_FILE"] = os.path.join(os.devnull, "aiqt-no-grafts")
     try:
         return subprocess.run(["git", "--no-replace-objects", "-C", str(root), "-c", "core.fsmonitor=false",
                                "-c", "protocol.allow=never",
@@ -2380,11 +2388,28 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
         check("diff/replace-objects-ignored",
               built and all(r == 0 for _c, r, _e in steps[replace_steps:]) and swapped[0] == rc == 1
               and swapped_reported == reported and "docs/new.md:2:" in swapped_reported, (swapped, rc, steps))
+        # A legacy .git/info/grafts line cannot rewrite a commit's parents for this check: giving main the
+        # feature tip as its parent makes HEAD the merge base (the fixture's own git, which honours the
+        # file, must say so), so a read that honours it reports nothing and exits 0; with GIT_GRAFT_FILE
+        # pointed at a path that cannot exist the report is unchanged.
+        info = repo / ".git" / "info"
+        graft_steps = len(steps)
+        head_id = git("rev-parse", "HEAD")
+        info.mkdir(exist_ok=True)
+        (info / "grafts").write_text("{} {}\n".format(git("rev-parse", "main"), head_id), encoding="utf-8")
+        honoured = git("merge-base", "main", "HEAD") == head_id
+        grafted = gate("--diff", "main")
+        (info / "grafts").unlink()
+        grafted_reported = {line.strip().split(" ")[0] for line in grafted[1].splitlines()
+                            if line.startswith("  ")}
+        check("diff/grafts-file-ignored",
+              built and honoured and all(r == 0 for _c, r, _e in steps[graft_steps:]) and grafted[0] == rc == 1
+              and grafted_reported == reported and "docs/new.md:2:" in grafted_reported,
+              (honoured, grafted, rc, steps[graft_steps:]))
         # Ordinary user or repository git configuration cannot change which lines count as added. Each
         # row sets one setting in the fixture repository and expects the same report; with
         # diff.interHunkContext the two changes of docs/move.md (lines 1 and 3) would otherwise share
         # one hunk with a context line, which the parser refuses.
-        info = repo / ".git" / "info"
         for row_id, settings, attributes in (
                 ("diff/user-config-no-prefix", (("diff.noprefix", "true"),), None),
                 ("diff/user-config-colour", (("color.ui", "always"), ("color.diff", "always")), None),

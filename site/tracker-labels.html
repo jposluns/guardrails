@@ -104,7 +104,7 @@ green = ["References TASK-next here."]
 <li>If a shape matches shipped text, narrow the shape, or remove the label from your own tracked file under <code>.github/</code>. To report labels only on lines a branch adds, use <code>--diff BASE</code>, which ignores the baseline.</li>
 </ul>
 <p>In this repository, where the baseline is authored, regenerate it with <code>python3 -I -B tools/check_internal_names.py --write-baseline</code> after a change that legitimately moves a count. Treat both the configuration change and the regenerated baseline as reviewed policy changes.</p>
-<p>The configuration file has no filename exemption. If the release inventory lists it, it is scanned like any shipped file, so its red fixtures count and need reviewed baseline entries.</p>
+<p>The configuration file has no filename exemption. If the release inventory listed it, it would be scanned like any shipped file: its red fixture lines, which its own shapes can match, would count and need reviewed baseline entries, which only this repository, where the baseline is authored, can add. The release inventory does not list it, and its path is outside <code>.github/</code> and <code>opf/</code>, so it is not shipped and the adopter procedure above needs no baseline entry for it.</p>
 </section>
 
 <section class="wrap">
