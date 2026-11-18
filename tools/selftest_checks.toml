@@ -6742,6 +6742,7 @@ expected-check-ids = [
   "pass/baseline-source-commit-unreachable-unchanged",
   "flip/baseline-source-commit-always-checked",
   "fail-closed/baseline-source-commit-not-ancestor",
+  "review/not-ancestor-names-writer",
   "flip/baseline-source-commit-accepted",
   "refuse/baseline-file-judged",
   "flip/baseline-file-excluded",
@@ -6799,6 +6800,30 @@ expected-check-ids = [
   "flip/write-hashes-decoded-text",
   "refuse/write-baseline-bad-args",
   "flip/write-baseline-lenient-args",
+  # a deleted baselined line credits only its own file, so it is never spent twice
+  "refuse/baseline-deletion-credits-once",
+  "flip/baseline-deletion-credits-twice",
+  "refuse/baseline-deletion-credits-once-sorted-after",
+  "write/pinned-deletion-reports-growth",
+  "flip/write-deletion-credits-twice",
+  "pass/baseline-dropped-entry-unpins-move",
+  "flip/baseline-every-deletion-pinned",
+  # control bytes in a listed line are escaped in the gate's and the writer's listing
+  "review/listing-escapes-control-bytes",
+  "review/write-listing-escapes-control-bytes",
+  "flip/listing-control-bytes-raw",
+  # the merge base's baseline is checked for structure only
+  "pass/baseline-shape-retired-with-its-entry",
+  "flip/baseline-merge-base-held-to-retired-shape",
+  "pass/baseline-path-excluded-with-its-entry",
+  "flip/baseline-merge-base-held-to-new-exclusion",
+  # the merge base's committed blob: mode and size refusals
+  "fail-closed/baseline-merge-base-link-canonical",
+  "flip/baseline-merge-base-link-mode-unchecked",
+  "fail-closed/baseline-merge-base-oversized-unread",
+  "flip/baseline-merge-base-size-unchecked",
+  # the rows that predate the baseline, run again with an empty canonical baseline committed
+  "pass/existing-rows-with-empty-baseline",
 ]
 
 [[suite]]

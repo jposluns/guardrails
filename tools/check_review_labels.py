@@ -18,7 +18,8 @@ file, staged or not) unless --head names a commit, in which case it is that comm
 already sits on the merge base, a line the change deletes, and a file the change only renames are not
 judged. An added line whose bytes are exactly those of a line the same diff deletes, in any file but an
 excluded one (whose deleted lines credit nothing), is a
-moved or reordered line and is not charged either: each deleted line credits one identical added line,
+moved or reordered line and is not charged either (a line deleted from a file whose baseline entry has
+its digest credits only that same file; see BASELINE): each deleted line credits one identical added line,
 so a line copied more times than it is deleted is charged for each extra copy, and an edited label line
 (any byte changed, its indentation included) is charged. Every other added line is searched for each
 label shape in .aiqt/review-labels.toml (a tracked TOML file: a test name numbered after a review cycle,
@@ -86,7 +87,8 @@ zip archive) is read as raw lines like any other and counted in the summary, so 
 uncompressed is caught, but compressed or encoded content (UTF-16 aside) is not readable and a shape
 that happens to appear in its bytes is a false positive; the excluded paths above are not judged at
 all; a moved line is credited by exact bytes, so deleting a label line from any judged file lets the
-same line be added once anywhere else; an untracked file is not judged; a label outside the configured
+same line be added once anywhere else (in that same file only, when the baseline has an entry for the
+line there); an untracked file is not judged; a label outside the configured
 shapes is not matched, among them a look-alike letter outside the CONFUSABLES table, punctuation the
 shapes do not allow, a parenthesised tag with nothing after its number or with a comma after it, a
 lower-case backlog id, a number written as a word, a cycle tag written after the word review (an
@@ -114,7 +116,9 @@ messages and pull request text are outside this gate.
 
 BASELINE (shrink-only). .aiqt/review-label-baseline.toml grandfathers imported finding lines; it adds an
 exemption source and replaces nothing, and an absent file is the empty baseline, which behaves exactly
-as the gate did without one. Its closed schema is byte-exact to its own canonical render: the fixed
+as the gate did without one. A grandfathered line is not the only line it lets pass: the partition below
+counts the lines its file holds, so the moved-line credit is pinned to keep one deleted line from
+counting twice. Its closed schema is byte-exact to its own canonical render: the fixed
 header, format-version = 1, source-commit (a full lower-case commit id) and one [[entry]] table per key
 with path, line-sha256, shape and count, sorted by (path, line-sha256, shape), no duplicate, no comment,
 LF line ends. A path must be normalized (the exclude-paths rules), printable ASCII without a quote or
@@ -125,7 +129,19 @@ never a folded or decoded view. It is read from the working tree (lstat a regula
 blocking or following a link, at most MAX_BASELINE_BYTES) or, with --head, from that commit's blob (mode
 100644 or 100755), and the merge base's copy from the merge-base commit. A present file that is
 malformed, non-canonical, not a regular file, oversized or not UTF-8 is cannot-evaluate at either
-revision. After the moved-line credit and the allow-marker (both unchanged), for each key m(k) is the
+revision. The merge base's copy is checked for structure only: its shapes and paths are not held to the
+candidate's configuration, so a change that retires a shape or excludes a baselined path while dropping
+those entries is judged (RELEASED), not refused; the candidate's copy is held to that configuration.
+PINNED MOVE CREDIT: a line deleted from a file for which the candidate baseline has an entry with that
+line's digest (under any shape) credits only an identical line added to that same file, never one in
+another file, and an added line takes such a same-file credit before an unpinned one; every other
+deleted line credits as described above. Without the pin one deletion counts twice: as the move credit
+for a copy added elsewhere, and as room under the entry (m(k) falls by one) for a copy added again in its
+own file, so an extra copy of a baselined line passes. With it, a deleted baselined line either credits
+a copy added to its own file (m(k) unchanged) or is left unspent, which happens only when every
+identical line added to its file was credited, so no charged copy can use the room it leaves. Dropping the entry in the same change unpins the line, so a baselined line
+moved to another file with its entry dropped is still a credited move. After the moved-line credit and
+the allow-marker, for each key m(k) is the
 number of finding lines with that digest and shape in the candidate file (one diff from the empty tree
 with the gate's own diff options and parser, so core.autocrlf and filters give the same clean bytes) and
 n(k) the candidate entry's count:
@@ -138,10 +154,15 @@ n(k) the candidate entry's count:
     last ones in diff order, and the rest are grandfathered (a NOTE line each); a line matching two
     shapes is charged for each shape that has no entry;
   - SOURCE COMMIT: only when the candidate baseline bytes differ from the merge base's, it must be the
-    candidate commit or an ancestor of it, else cannot-evaluate; an unchanged baseline is not checked,
-    so a squash merge that drops it from history blocks no later change.
+    candidate commit or an ancestor of it, else cannot-evaluate, the message naming the --write-baseline
+    run that records the candidate; an unchanged baseline is not checked, so a squash merge that drops
+    it from history blocks no later change.
 The review listing prints a BASELINE header, then GROWTH path:line: shape (description): excerpt [digest
 count old to new] once per current occurrence, STALE and RELEASED lines; a digest is never shown alone.
+In every listing line (the gate's FAIL, GROWTH, STALE, RELEASED and NOTE lines and --write-baseline's)
+each byte below 0x20 (a tab and a carriage return included) and DEL is printed as \\xNN and every
+non-ASCII character as its backslash escape, so a terminal control sequence in a line cannot hide the
+path or the label the maintainer authorizes from.
 --write-baseline reads committed objects only (B..C and C's blobs; the configuration, like the gate's,
 from the working tree): each key with a finding on a line B..C adds gets its count in C, every other
 entry of C's baseline is carried at min(its count, its count in C), zeros dropped, and the canonical
@@ -165,7 +186,8 @@ a file cannot be grandfathered; (R9) digests are not secret: a known label line 
 matched; (R10) editing a shape's regex can make entries stale, forcing a baseline shrink in the same
 change; (R11) the gate's trust in origin/main carries over to the merge-base baseline; (R12) a malformed
 baseline on main is cannot-evaluate for every branch based on it; (R13) the cost of the extra diff is
-unmeasured.
+unmeasured; (R14) the pinned move credit makes a baselined line moved to another file with its entry
+kept a charged line there as well as a stale entry, until the entry is dropped in the same change.
 """
 import sys
 
@@ -660,14 +682,45 @@ def _credits(deleted, excluded):
     return credits
 
 
+def _pinned_lines(baseline):
+    """The (path, line-sha256) pairs the candidate baseline has an entry for, under any shape: a line
+    deleted from such a file with such a digest is a pinned credit (see _move_credits)."""
+    if baseline is None:
+        return frozenset()
+    return frozenset((path, digest) for path, digest, _shape in baseline.entries)
+
+
+def _move_credits(deleted, excluded, pinned):
+    """The moved-line credits with the baseline's pin applied. A deleted line whose (path, digest) the
+    candidate baseline has an entry for credits only an added line of exactly the same bytes in that same
+    file (a Counter key (path, bytes)); every other deleted line outside the excluded files credits one
+    in any file (a key of the bytes alone, from _credits). The partition counts a baselined file's
+    deleted line as room under its entry, so the pin keeps one deletion from being spent twice: once as
+    a move credit for a copy in another file and again as room for a copy in its own file."""
+    free = Counter({key: count for key, count in deleted.items()
+                    if (key[0], _line_digest(key[1])) not in pinned})
+    credits = _credits(free, excluded)
+    for (path, raw), count in deleted.items():
+        if (path, _line_digest(raw)) in pinned and not _excluded(path, excluded):
+            credits[(path, raw)] += count
+    return credits
+
+
 def credit_moves(added, deleted):
     """(charged, moved): the added lines left after each deleted line credits one added line of exactly
-    the same bytes, in diff order, and the number credited (a moved or reordered line)."""
+    the same bytes, in diff order, and the number credited (a moved or reordered line). A credit keyed
+    (path, bytes) is pinned to that file and is taken before an unpinned credit of the same bytes, so a
+    pinned credit is never left unspent while an identical line added to its file is charged."""
     left, charged, moved = Counter(deleted), [], 0
     for line in added:
-        if line.kind == "+" and left[line.raw] > 0:
-            left[line.raw] -= 1
-            moved += 1
+        if line.kind == "+":
+            for key in ((line.path, line.raw), line.raw):
+                if left[key] > 0:
+                    left[key] -= 1
+                    moved += 1
+                    break
+            else:
+                charged.append(line)
             continue
         charged.append(line)
     return charged, moved
@@ -747,7 +800,8 @@ def render_baseline(source, entries):
 
 def parse_baseline(data, where, config):
     """The Baseline held in the bytes `data`; CannotEvaluate on anything off its closed schema or not
-    byte-exact to its own canonical render."""
+    byte-exact to its own canonical render. With `config` None (the merge base's copy) the checks that
+    read a configuration (a shape id of it, a path it excludes) are skipped: structure only."""
     if len(data) > MAX_BASELINE_BYTES:
         raise CannotEvaluate("{} is larger than {} bytes".format(where, MAX_BASELINE_BYTES))
     try:
@@ -770,7 +824,8 @@ def parse_baseline(data, where, config):
     rows = doc.get("entry", [])
     if not isinstance(rows, list):
         raise CannotEvaluate("{}: entry must be an array of [[entry]] tables".format(where))
-    shape_ids = {shape.id for shape in config.shapes}
+    shape_ids = None if config is None else {shape.id for shape in config.shapes}
+    excluded = frozenset() if config is None else config.excluded
     entries = {}
     for index, row in enumerate(rows, 1):
         label = "{}: entry {}".format(where, index)
@@ -784,12 +839,14 @@ def parse_baseline(data, where, config):
         if not isinstance(path, str) or not _baseline_path_ok(path):
             raise CannotEvaluate("{}: path must be printable ASCII with no quote or backslash".format(label))
         _parse_excluded([path], label)
-        if path in config.excluded or path == BASELINE_RELPATH:
+        if path in excluded or path == BASELINE_RELPATH:
             raise CannotEvaluate("{}: path {!r} names an excluded file or the baseline itself".format(
                 label, path))
         if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
             raise CannotEvaluate("{}: line-sha256 must be 64 lower-case hex digits".format(label))
-        if not isinstance(shape, str) or shape not in shape_ids:
+        if not isinstance(shape, str) or not SHAPE_ID_RE.fullmatch(shape):
+            raise CannotEvaluate("{}: shape {!r} is not a shape id".format(label, shape))
+        if shape_ids is not None and shape not in shape_ids:
             raise CannotEvaluate("{}: shape {!r} names no shape of the configuration".format(label, shape))
         if type(count) is not int or count < 1:
             raise CannotEvaluate("{}: count must be an integer of at least 1".format(label))
@@ -938,23 +995,33 @@ def _baseline_changed(candidate, prior):
 
 def _require_source_ancestor(root, source, head_sha):
     """CannotEvaluate unless the baseline's source commit is the candidate commit or an ancestor of it."""
+    rewrite = ("; print the baseline again with python3 -I -B tools/check_review_labels.py --write-baseline "
+               "--head {}, which records the candidate as its source-commit".format(head_sha[:12]))
     proc = _git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", source + "^{commit}")
     if proc.returncode != 0:
-        raise CannotEvaluate("{} names source-commit {} that is not a commit here".format(
-            BASELINE_RELPATH, source[:12]))
+        raise CannotEvaluate("{} names source-commit {} that is not a commit here{}".format(
+            BASELINE_RELPATH, source[:12], rewrite))
     proc = _git(root, "merge-base", "--is-ancestor", source, head_sha)
     if proc.returncode == 1:
-        raise CannotEvaluate("{} names source-commit {} that is not an ancestor of the candidate {}".format(
-            BASELINE_RELPATH, source[:12], head_sha[:12]))
+        raise CannotEvaluate("{} names source-commit {} that is not an ancestor of the candidate {}{}".format(
+            BASELINE_RELPATH, source[:12], head_sha[:12], rewrite))
     if proc.returncode != 0:
         raise CannotEvaluate("git merge-base --is-ancestor exited {} ({})".format(
             proc.returncode, _stderr(proc)))
 
 
-def apply_baseline(root, config, base, head_sha, head, findings):
-    """(charged findings, Ledger): the baseline steps of the gate (the docstring's BASELINE section)."""
-    candidate = read_baseline(root, None if head is None else head_sha, config)
-    prior = read_baseline(root, base, config)
+def _merge_base_config(config):
+    """The configuration the merge base's baseline is checked against: none, so it is checked for
+    structure only (schema, canonical render, paths, digests, counts). Its shapes and paths are not held
+    to the candidate's configuration, so a change that retires a shape or excludes a baselined path
+    while dropping those entries is judged rather than refused."""
+    return None
+
+
+def apply_baseline(root, config, base, head_sha, head, findings, candidate):
+    """(charged findings, Ledger): the baseline steps of the gate (the docstring's BASELINE section),
+    given the candidate's baseline as already read for the moved-line credit."""
+    prior = read_baseline(root, base, _merge_base_config(config))
     changed = _baseline_changed(candidate, prior)
     if candidate is not None and changed:
         _require_source_ancestor(root, candidate.source, head_sha)
@@ -978,28 +1045,30 @@ def apply_baseline(root, config, base, head_sha, head, findings):
 
 def _review_lines(ledger):
     """The review listing of the baseline: each growing key once per current occurrence (path, line,
-    shape and excerpt beside its digest), each stale entry and each released count."""
+    shape and excerpt beside its digest), each stale entry and each released count. Every text field is
+    escaped (_escaped), so a control byte in a line, a path or a description cannot rewrite the listing."""
     lines = []
     for (path, digest, shape), old, new, items in ledger.growth:
         for item in items:
             lines.append("  GROWTH {}:{}: {} ({}): {} [{} count {} to {}]".format(
-                _printable(item.path), item.number, item.shape, item.description, _printable(item.text),
-                digest[:12], old, new))
+                _printable(item.path), item.number, _escaped(item.shape), _escaped(item.description),
+                _printable(item.text), digest[:12], old, new))
         if not items:
             lines.append("  GROWTH {}: {} [{} count {} to {}], no such line in the file".format(
-                path, shape, digest[:12], old, new))
+                _escaped(path), _escaped(shape), digest[:12], old, new))
     for (path, digest, shape), count, found in ledger.stale:
         lines.append("  STALE {}: {} {} count {}, {} found: lower to {} or drop the entry".format(
-            path, shape, digest[:12], count, found, found))
+            _escaped(path), _escaped(shape), digest[:12], count, found, found))
     for (path, digest, shape), old, new in ledger.released:
-        lines.append("  RELEASED {}: {} {} {} to {}".format(path, shape, digest[:12], old, new))
+        lines.append("  RELEASED {}: {} {} {} to {}".format(_escaped(path), _escaped(shape), digest[:12],
+                                                             old, new))
     return lines
 
 
 def _grandfathered_lines(ledger):
     return ["NOTE: review-label gate: grandfathered by {}: {}:{}: {} ({}): {}".format(
-        BASELINE_RELPATH, _printable(item.path), item.number, item.shape, item.description,
-        _printable(item.text)) for item in ledger.grandfathered]
+        BASELINE_RELPATH, _printable(item.path), item.number, _escaped(item.shape),
+        _escaped(item.description), _printable(item.text)) for item in ledger.grandfathered]
 
 
 def _write_revision(head_sha):
@@ -1022,15 +1091,16 @@ def propose_baseline(root, protected=None, head=None, environ=None):
     revision = _write_revision(head_sha)
     diff = added_lines(read_diff(root, base, revision))
     judged = [line for line in diff.added if not _excluded(line.path, config.excluded)]
-    judged, _moved = credit_moves(judged, _credits(diff.deleted, config.excluded))
+    current = read_baseline(root, head_sha, config)
+    judged, _moved = credit_moves(judged, _move_credits(diff.deleted, config.excluded,
+                                                        _pinned_lines(current)))
     findings = judge(judged, config)
     for item in findings:
         if not _baseline_path_ok(item.path) or item.path == BASELINE_RELPATH:
             raise CannotEvaluate("{}:{} cannot be baselined (a path that is not printable ASCII, holds a "
                                  "quote or backslash, or is the baseline itself)".format(
                                      _printable(item.path), item.number))
-    current = read_baseline(root, head_sha, config)
-    prior = read_baseline(root, base, config)
+    prior = read_baseline(root, base, _merge_base_config(config))
     old = {} if current is None else current.entries
     before = {} if prior is None else prior.entries
     found = occurrences(root, revision, {item.path for item in findings} | {key[0] for key in old}, config)
@@ -1079,8 +1149,10 @@ def evaluate(root, protected=None, head=None, environ=None):
     diff = added_lines(read_diff(root, base, None if head is None else head_sha))
     judged = [line for line in diff.added if not _excluded(line.path, config.excluded)]
     skipped = len(diff.added) - len(judged)
-    judged, moved = credit_moves(judged, _credits(diff.deleted, config.excluded))
-    findings, ledger = apply_baseline(root, config, base, head_sha, head, judge(judged, config))
+    candidate = read_baseline(root, None if head is None else head_sha, config)
+    judged, moved = credit_moves(judged, _move_credits(diff.deleted, config.excluded,
+                                                       _pinned_lines(candidate)))
+    findings, ledger = apply_baseline(root, config, base, head_sha, head, judge(judged, config), candidate)
     summary = "{} added line(s) in {} file(s) judged against merge base {} of {} (from {}){}{}{}{}{}".format(
         len(judged), len({line.path for line in judged}), base[:12], ref, source,
         "" if head is None else ", candidate {}".format(head_sha[:12]),
@@ -1094,11 +1166,20 @@ def evaluate(root, protected=None, head=None, environ=None):
     return Evaluation(findings, summary, config.marker, note, ledger)
 
 
+def _escaped(text):
+    """The text with every character outside printable ASCII escaped: a non-ASCII character as Python's
+    backslash escape, and a control character (below 0x20, a tab and a carriage return included) or DEL
+    as \\xNN, so no terminal control sequence (an erase-line escape, a carriage return that rewinds the
+    line) reaches a listing line."""
+    return "".join(ch if 0x20 <= ord(ch) < 0x7F else "\\x{:02x}".format(ord(ch)) if ord(ch) < 0x80
+                   else ch.encode("ascii", "backslashreplace").decode("ascii") for ch in text)
+
+
 def _printable(text):
     text = text.strip()
     if len(text) > MAX_EXCERPT:
         text = text[:MAX_EXCERPT] + "..."
-    return text.encode("ascii", "backslashreplace").decode("ascii")
+    return _escaped(text)
 
 
 def run(root, protected=None, head=None, environ=None):
@@ -1117,8 +1198,8 @@ def run(root, protected=None, head=None, environ=None):
         if findings:
             print("FAIL: {} review or work label(s) on added lines ({}):".format(len(findings), summary))
             for item in findings:
-                print("  {}:{}: {} ({}): {}".format(_printable(item.path), item.number, item.shape,
-                                                    item.description, _printable(item.text)))
+                print("  {}:{}: {} ({}): {}".format(_printable(item.path), item.number, _escaped(item.shape),
+                                                    _escaped(item.description), _printable(item.text)))
         if ledger.growth or ledger.stale:
             print("FAIL: review-label baseline: {} key(s) grow against the merge base and {} entr(ies) are "
                   "stale ({}); growth needs the maintainer's recorded authorization, and a stale entry is "
@@ -1287,8 +1368,16 @@ def _base_repo(tmp, name):
     _write(repo, "seed.py", "a = 1\nb = 2\n{}\n".format(labels["round-number"]))
     _write(repo, "old.py", "keep = 1\n{}\nkeep2 = 2\n".format(labels["finding-number"]))
     _write(repo, "moved.py", "{}\nvalue = 3\n".format(labels["backlog-id"]))
-    _commit_all(repo, "base")
+    first = _commit_all(repo, "base")
+    if _FIXTURE_EMPTY_BASELINE:
+        _write_bytes(repo, BASELINE_RELPATH, render_baseline(first, {}))
+        _commit_all(repo, "an empty canonical baseline")
     return repo
+
+
+# When true, every fixture _base_repo builds also commits an empty canonical baseline on main (the
+# section 8 accounting row runs the rows that predate the baseline again this way).
+_FIXTURE_EMPTY_BASELINE = False
 
 
 def _self_test():
@@ -1333,6 +1422,22 @@ def _self_test():
 
 
 def _rows(tmp):
+    labels = _label_lines()
+    start = len(EXECUTED)
+    _existing_rows(tmp)
+    existing = EXECUTED[start:]
+    _baseline_rows(tmp, labels)
+    _baseline_fail_closed_rows(tmp, labels)
+    _baseline_write_rows(tmp, labels)
+    _baseline_pin_rows(tmp, labels)
+    _baseline_listing_rows(tmp, labels)
+    _baseline_config_change_rows(tmp, labels)
+    _baseline_merge_base_read_rows(tmp)
+    _existing_rows_with_empty_baseline(tmp, existing)
+
+
+def _existing_rows(tmp):
+    """The rows that predate the baseline."""
     labels = _label_lines()
     marker = load_config(ROOT / CONFIG_RELPATH).marker
     twins = _twin_lines(marker)
@@ -1452,9 +1557,6 @@ def _rows(tmp):
     _replace_ref_rows(tmp, labels)
     _git_output_rows()
     _bound_and_cli_rows()
-    _baseline_rows(tmp, labels)
-    _baseline_fail_closed_rows(tmp, labels)
-    _baseline_write_rows(tmp, labels)
 
 
 # --- self-test: the baseline ---------------------------------------------------------------------------
@@ -1768,7 +1870,8 @@ def _baseline_rows(tmp, labels):
         code, out = _gate(repo)
     check("flip/baseline-counted-from-raw-worktree", code == 1 and "STALE w.py" in out, out)
 
-    # An entry's line moved to another file (credited as moved) leaves the entry stale.
+    # An entry's line moved to another file with its entry kept leaves the entry stale (m counted in the
+    # candidate); the pinned move credit also charges the copy in the other file (R14).
     repo, base = _baseline_repo(tmp, "baseline-moved")
     _write(repo, "a.py", "x = 1\n" + la + "\n")
     _put_baseline(repo, base, {("a.py", la_raw, "backlog-id"): 1})
@@ -1778,10 +1881,11 @@ def _baseline_rows(tmp, labels):
     _write(repo, "g.py", la + "\n")
     _commit_all(repo, "the line moved")
     code, out = _gate(repo)
-    check("refuse/baseline-moved-away-stale", code == 1 and "STALE a.py" in out and "  g.py:" not in out, out)
+    check("refuse/baseline-moved-away-stale", code == 1 and "STALE a.py" in out
+          and "  g.py:1: backlog-id" in out, out)
     with _patched(_occurrence_revision=lambda base_sha, head_sha, head: base_sha):
         code, out = _gate(repo)
-    check("flip/baseline-counted-at-merge-base", code == 0, out)
+    check("flip/baseline-counted-at-merge-base", "STALE a.py" not in out, out)
 
     # Absent, deleted and empty baselines.
     repo, base = _baseline_repo(tmp, "baseline-absent")
@@ -1835,6 +1939,8 @@ def _baseline_rows(tmp, labels):
     _commit_all(repo, "a changed baseline naming the side commit")
     code, out = _gate(repo)
     check("fail-closed/baseline-source-commit-not-ancestor", code == 2 and "not an ancestor" in out, out)
+    check("review/not-ancestor-names-writer", code == 2 and "--write-baseline --head {}".format(
+        _fx_git(repo, "rev-parse", "HEAD")[:12]) in out, out)
     with _patched(_require_source_ancestor=lambda root, source, head_sha: None):
         code, out = _gate(repo)
     check("flip/baseline-source-commit-accepted", code == 1, out)
@@ -2066,6 +2172,216 @@ def _baseline_write_rows(tmp, labels):
                   _parse_options=lambda argv: {}):
         got = [_main_exit(argv) for argv in bad]
     check("flip/write-baseline-lenient-args", got == [98] * len(bad), got)
+
+
+_REAL_GIT = _git
+
+
+def _no_pins(baseline):
+    """A flip of _pinned_lines: no line is pinned, so a deleted baselined line credits any file."""
+    return frozenset()
+
+
+def _all_pinned_credits(deleted, excluded, pinned):
+    """A flip of _move_credits: every deleted line credits only its own file, baselined or not."""
+    credits = Counter()
+    for (path, raw), count in deleted.items():
+        if not _excluded(path, excluded):
+            credits[(path, raw)] += count
+    return credits
+
+
+def _baseline_pin_rows(tmp, labels):
+    """A deleted line of a file whose baseline entry has its digest credits only that file, so it cannot
+    be spent twice: as the move credit for a copy in another file and as room under the entry."""
+    la = labels["backlog-id"]
+    la_raw = la.encode("utf-8")
+    # The layout of the case: zz/F.py holds the line with an entry of count 1; the branch deletes it,
+    # adds it back lower in F and adds a copy in a second file, which sorts before F (aa/G.py, first in
+    # diff order) or after it (zzz/G.py).
+    repos = {}
+    for other in ("aa/G.py", "zzz/G.py"):
+        repo, base = _baseline_repo(tmp, "baseline-pin-" + other.split("/")[0])
+        _write(repo, "zz/F.py", "a = 1\n" + la + "\nb = 2\n")
+        _put_baseline(repo, base, {("zz/F.py", la_raw, "backlog-id"): 1})
+        _commit_all(repo, "a baselined line")
+        _fx_git(repo, "checkout", "-q", "-b", "work")
+        _write(repo, "zz/F.py", "a = 1\nb = 2\n" + la + "\n")
+        _write(repo, other, la + "\n")
+        _commit_all(repo, "the line moved lower in its file and copied into another")
+        repos[other] = repo
+    code, out = _gate(repos["aa/G.py"])
+    check("refuse/baseline-deletion-credits-once", code == 1 and "  aa/G.py:1: backlog-id" in out
+          and "  zz/F.py:" not in out and "grandfathered" not in out and "STALE" not in out, out)
+    with _patched(_pinned_lines=_no_pins):
+        code, out = _gate(repos["aa/G.py"])
+    check("flip/baseline-deletion-credits-twice", code == 0 and "grandfathered by" in out, out)
+    code, out = _gate(repos["zzz/G.py"])
+    check("refuse/baseline-deletion-credits-once-sorted-after", code == 1
+          and "  zzz/G.py:1: backlog-id" in out and "  zz/F.py:" not in out and "grandfathered" not in out
+          and "STALE" not in out, out)
+    code, out, err = _write_exit(repos["aa/G.py"])
+    check("write/pinned-deletion-reports-growth", code == 1 and "  GROWTH aa/G.py:1: backlog-id" in err,
+          (code, out, err))
+    with _patched(_pinned_lines=_no_pins):
+        code, out, err = _write_exit(repos["aa/G.py"])
+    check("flip/write-deletion-credits-twice", code == 0 and "GROWTH aa/G.py" not in err, (code, err))
+
+    # Dropping the entry in the same change unpins the line: moved to another file, it is credited.
+    repo, base = _baseline_repo(tmp, "baseline-pin-dropped")
+    _write(repo, "zz/F.py", "a = 1\n" + la + "\n")
+    _put_baseline(repo, base, {("zz/F.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "a baselined line")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "zz/F.py", "a = 1\n")
+    _write(repo, "aa/G.py", la + "\n")
+    _put_baseline(repo, base, {})
+    _commit_all(repo, "the line moved to another file, its entry dropped")
+    code, out = _gate(repo)
+    check("pass/baseline-dropped-entry-unpins-move", code == 0 and "1 moved line(s) not charged" in out
+          and "RELEASED zz/F.py: backlog-id" in out, out)
+    with _patched(_move_credits=_all_pinned_credits):
+        code, out = _gate(repo)
+    check("flip/baseline-every-deletion-pinned", code == 1 and "  aa/G.py:1: backlog-id" in out, out)
+
+
+def _ascii_only_escaped(text):
+    """A flip of _escaped: only non-ASCII characters are escaped, control bytes pass raw."""
+    return text.encode("ascii", "backslashreplace").decode("ascii")
+
+
+def _baseline_listing_rows(tmp, labels):
+    """A carriage return and an erase-line escape in a listed line are escaped in the gate's listing and
+    in --write-baseline's, never printed raw."""
+    la = labels["backlog-id"]
+    hidden = la.encode("utf-8") + b"\r\x1b[2Kvalue = 1"
+    shown = la + "\\x0d\\x1b[2Kvalue = 1"
+    repo, base = _baseline_repo(tmp, "baseline-listing")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write_bytes(repo, "c.py", hidden + b"\n")
+    _put_baseline(repo, base, {("c.py", hidden, "backlog-id"): 1})
+    _commit_all(repo, "a line holding a carriage return and an erase-line escape, with its entry")
+    code, out = _gate(repo)
+    _wcode, _wout, err = _write_exit(repo)
+    check("review/listing-escapes-control-bytes", code == 1 and "  GROWTH c.py:1: backlog-id" in out
+          and shown in out and "\r" not in out and "\x1b" not in out, out)
+    check("review/write-listing-escapes-control-bytes", "  GROWTH c.py:1: backlog-id" in err and shown in err
+          and "\r" not in err and "\x1b" not in err, err)
+    with _patched(_escaped=_ascii_only_escaped):
+        code, out = _gate(repo)
+        _wcode, _wout, err = _write_exit(repo)
+    check("flip/listing-control-bytes-raw", "\x1b" in out and "\x1b" in err, (out, err))
+
+
+SHAPE_BLOCK_RE = r'(?ms)^\[\[shape\]\]\nid = "{}"\n.*?(?=^\[\[shape\]\]|\Z)'
+
+
+def _config_without_shape(shape_id):
+    """The shipped configuration text with the [[shape]] table of `shape_id` removed."""
+    text, count = re.subn(SHAPE_BLOCK_RE.format(re.escape(shape_id)), "", _config_text())
+    if count != 1:
+        raise RuntimeError("the shipped configuration has no single shape {}".format(shape_id))
+    return text
+
+
+def _baseline_config_change_rows(tmp, labels):
+    """The merge base's baseline is checked for structure only: a change that retires a shape, or
+    excludes a baselined path, while dropping those entries is judged, not refused."""
+    la = labels["backlog-id"]
+    la_raw = la.encode("utf-8")
+    excluded = sorted(_REAL_LOAD_CONFIG(ROOT / CONFIG_RELPATH).excluded)
+    for check_id, flip_id, config_text, needle in (
+            ("pass/baseline-shape-retired-with-its-entry", "flip/baseline-merge-base-held-to-retired-shape",
+             _config_without_shape("backlog-id"), "names no shape"),
+            ("pass/baseline-path-excluded-with-its-entry", "flip/baseline-merge-base-held-to-new-exclusion",
+             _config_with_excluded(excluded + ["a.py"]), "excluded file or the baseline itself")):
+        repo, base = _baseline_repo(tmp, "baseline-" + check_id.split("/")[1])
+        _write(repo, "a.py", la + "\n")
+        _put_baseline(repo, base, {("a.py", la_raw, "backlog-id"): 1})
+        main = _commit_all(repo, "a baselined line")
+        _fx_git(repo, "checkout", "-q", "-b", "work")
+        _write(repo, CONFIG_RELPATH, config_text)
+        _put_baseline(repo, main, {})
+        _commit_all(repo, "the configuration changed and the entry dropped")
+        code, out = _gate(repo)
+        check(check_id, code == 0 and "RELEASED a.py: backlog-id" in out, out)
+        with _patched(_merge_base_config=lambda config: config):
+            code, out = _gate(repo)
+        check(flip_id, code == 2 and needle in out, out)
+
+
+def _ls_tree_link_as_regular(root, *args):
+    """A flip of the committed baseline's mode check: git ls-tree reports a symlink blob as mode 100644."""
+    proc = _REAL_GIT(root, *args)
+    if args[:1] == ("ls-tree",):
+        proc = subprocess.CompletedProcess(proc.args, proc.returncode,
+                                           proc.stdout.replace(b"120000 blob ", b"100644 blob "), proc.stderr)
+    return proc
+
+
+def _small_blob_size(root, *args):
+    """A flip of the committed baseline's size pre-check: git cat-file -s reports every blob as 1 byte."""
+    proc = _REAL_GIT(root, *args)
+    if args[:2] == ("cat-file", "-s"):
+        proc = subprocess.CompletedProcess(proc.args, proc.returncode, b"1\n", proc.stderr)
+    return proc
+
+
+def _baseline_merge_base_read_rows(tmp):
+    """The merge base's committed baseline: a symlink blob is refused even when its bytes are a canonical
+    baseline, and an oversized blob is refused from its size before its bytes are read."""
+    repo, base = _baseline_repo(tmp, "baseline-merge-base-link-canonical")
+    blob = _fx_git(repo, "hash-object", "-w", "--stdin", stdin_text=render_baseline(base, {}).decode("ascii"))
+    _fx_git(repo, "update-index", "--add", "--cacheinfo", "120000,{},{}".format(blob, BASELINE_RELPATH))
+    _fx_git(repo, "commit", "-q", "-m", "a symlink blob whose bytes are a canonical baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _fx_git(repo, "rm", "-q", "--cached", BASELINE_RELPATH)
+    _write(repo, "clean.py", "value = 1\n")
+    _commit_all(repo, "baseline removed, a clean line added")
+    code, out = _gate(repo)
+    check("fail-closed/baseline-merge-base-link-canonical", code == 2 and "mode 120000" in out, out)
+    with _patched(_git=_ls_tree_link_as_regular):
+        code, out = _gate(repo)
+    check("flip/baseline-merge-base-link-mode-unchecked", code == 0, out)
+
+    repo, base = _baseline_repo(tmp, "baseline-merge-base-oversized")
+    _write_bytes(repo, BASELINE_RELPATH, render_baseline(base, {}) + b"#" * MAX_BASELINE_BYTES)
+    _commit_all(repo, "an oversized baseline on main")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _fx_git(repo, "rm", "-q", BASELINE_RELPATH)
+    _write(repo, "clean.py", "value = 1\n")
+    _commit_all(repo, "baseline removed, a clean line added")
+    for check_id, flip, expect_read in (
+            ("fail-closed/baseline-merge-base-oversized-unread", None, False),
+            ("flip/baseline-merge-base-size-unchecked", _small_blob_size, True)):
+        calls = []
+        inner = _REAL_GIT if flip is None else flip
+
+        def recording(root, *args):
+            calls.append(args)
+            return inner(root, *args)
+        with _patched(_git=recording):
+            code, out = _gate(repo)
+        read = any(args[:2] == ("cat-file", "blob") for args in calls)
+        check(check_id, code == 2 and "larger than" in out and read == expect_read, (read, out))
+
+
+def _existing_rows_with_empty_baseline(tmp, existing):
+    """The section 8 accounting: every row that predates the baseline, run again with an empty canonical
+    baseline committed on main in each fixture, gives the same result as without one."""
+    results = {}
+
+    def collect(name, ok, detail=""):
+        results.setdefault(name, []).append((ok, detail))
+    sub = Path(tmp) / "existing-with-empty-baseline"
+    os.makedirs(sub)
+    with _patched(check=collect, _FIXTURE_EMPTY_BASELINE=True):
+        _existing_rows(sub)
+    committed = _fx_git(sub / "refused", "ls-tree", "--name-only", "main", "--", BASELINE_RELPATH)
+    failed = sorted(name for name, runs in results.items() if not all(ok for ok, _detail in runs))
+    check("pass/existing-rows-with-empty-baseline", committed == BASELINE_RELPATH and not failed
+          and sorted(results) == sorted(existing), (committed, failed, [results[name] for name in failed],
+                                                    sorted(set(existing) ^ set(results))))
 
 
 def _fail_closed_rows(tmp, labels):
