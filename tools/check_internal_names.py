@@ -110,23 +110,34 @@ digits or not), a QA round number with a
 family after it, a bare QA round number (with or without the round word) that is not a path or
 pattern segment, a family next to a round number, a family next to a mutation, mutant or flip word,
 a bare round number that is not a loop count (right after "retry", or followed by "of"; an
-underscore separates like a space, so one inside an identifier is a hit), a model
+underscore separates like a space, so one inside an identifier is a hit, and one followed by "_of"
+is a loop count), a model
 identifier (a family or vendor prefix, a hyphen and a version digit) that does not open a quoted
 string, a family used as an attribution (before a colon or a slash, or a possessive followed within
-one word by review vocabulary), a review finding or item (numbered or not, "peer" or not) followed by
+one word by review vocabulary, or directly by notes, points, flags or reports), a review finding or
+item (numbered or not, "peer" or not) followed by
 a parenthesised upper-case grade or a false-deny-style verdict, or preceded by an upper-case grade
-word or id, or by a grade word in any case and the word "review", and a review-round-derived test_r
+word that is not a SemVer class (BLOCKER, BLOCKING, CRITICAL, MEDIUM, MED, HIGH, LOW or NIT), by an
+upper-case id or MAJOR or MINOR and then "review" or "peer", or by a grade word in any case and the
+word "review", and a review-round-derived test_r
 test name; the family and the review words match in any case, the grade words in upper case only
 except before "review".
 The narrowing keeps some ordinary prose and command data out of these rows: a family's reasoning
 effort written in lower case, a family's possessive before an ordinary noun (or before an ordinary
-noun and a verb such as notes, points, flags or reports, which are not review vocabulary here), a
-loop count, a quoted model setting and a process-search pattern token are not hits of this layer.
+noun and a verb such as notes, points, flags or reports, which are review vocabulary only directly
+after the possessive), a loop count, a quoted model setting, a process-search pattern token, and a
+one-letter rule id or a SemVer class (MAJOR, MINOR) directly before finding or item are not hits of
+this layer.
 That is all the narrowing claims. The rows still flag other ordinary prose and command data under a
 swept path (an over-block, not a miss): a family before a colon or a slash in a URL, a path or a
 settings line, a round number in prose that is neither right after "retry" nor followed by "of", a
-QA token in a process-search argument with no slash after it, and a model identifier unquoted or
-inside a longer quoted string. And a swept file that is also a shipped source is read by the
+QA token in a process-search argument with no slash after it, a model identifier unquoted or
+inside a longer quoted string, one of the upper-case grade words BLOCKER, BLOCKING, CRITICAL,
+MEDIUM, MED, HIGH, LOW or NIT used as ordinary prose directly before finding or item (a capitalised
+heading word, say), a rule id or SemVer class followed by "review" or "peer" and then finding or
+item, a one-letter rule id in parentheses right after finding or item ("the numbered items (S3)"),
+and a family possessive directly before notes, points, flags or reports used as a verb. And a
+swept file that is also a shipped source is read by the
 tracker-label ratchet above as well; a preview file has no baseline entry, so a lower-case effort
 word after a family and a loop count with the round word next to its digit are still ratchet hits
 there, and the real gate fails them. Each line is also read joined to the
@@ -139,8 +150,10 @@ runs beside the preview-only _PREVIEW_LABELS patterns of scan_scope, which keep 
 line exemption; a swept-path hit has none, so a test_r name on an internal-allow line is still a
 finding here. DISCLOSED LIMITS: a label written outside these shapes (a family name alone, a bare
 grade word, a grade word in lower case after a family name, a grade word in lower case before
-finding or item with no "review" between, a family possessive before a word that is not review
-vocabulary, a round-derived helper or fixture name with no round word (a bare r or state number),
+finding or item with no "review" between, a one-letter id or MAJOR or MINOR before finding or item
+with no "review" or "peer" between, a family possessive before a word that is not review
+vocabulary (notes, points, flags or reports one word after it included), a round-derived helper
+or fixture name with no round word (a bare r or state number),
 a round number after "retry" or before "of", a model identifier opening a
 quoted string, a QA round number written as a path or pattern segment, a label split across more
 than one line break, inside a word or with other punctuation at the break, or encoded) is not
@@ -494,8 +507,16 @@ _SWEPT_ROUND = r"rou" + r"nds?"
 # "... answer flags nothing", "... log reports the code") are left out, so that ordinary prose stays legal.
 _SWEPT_REVIEW_NOUN = (r"(?:find" + r"ings?|reviews?|repros?|reproductions?|verdicts?|mutants?|mutations?"
                       r"|objections?|catch(?:es)?)")
+# Nouns that attribute only DIRECTLY after the possessive ("<family>'s report says", "<family>'s notes:");
+# one word later they are usually verbs ("<family>'s reply notes the date") and stay legal there.
+_SWEPT_DIRECT_REVIEW_NOUN = r"(?:notes?|points?|flags?|reports?)"
 # A grade word in any case, used only where the word "review" must follow it.
 _SWEPT_GRADE_WORD_ANY_CASE = r"(?i:blocker|blocking|critical|major|medium|med|minor|high|low|nit)"
+# The upper-case grade words that may stand bare before finding or item: not a SemVer class (MAJOR,
+# MINOR) and not a one-letter rule id ("a C3 finding", "never a MINOR finding" are ordinary prose).
+_SWEPT_GRADE_STRONG = r"(?:BLOCKER|BLOCKING|CRITICAL|MEDIUM|MED|HIGH|LOW|NIT)"
+# "review", "peer" or "peer review", then a separator.
+_SWEPT_REVIEW_WORD = r"(?i:(?:peer[ -])?review|peer)[ -]"
 SWEPT_LABELS = (
     # a reviewer family (any case) directly before an upper-case grade word or a one-letter grade id,
     # optionally numbered with a hyphen and digits ("<family> MEDIUM-1")
@@ -518,11 +539,11 @@ SWEPT_LABELS = (
      "a reviewer family before a mutation word"),
     # a bare round number ("n" after the round word with one space, hyphen or underscore), except a
     # loop count: one right after "retry" or one followed by "of" (a retry count, or a count "of the
-    # loop"). An underscore separates like a space, so a round number inside an identifier is one; the
-    # round word must not continue a longer word ("playground") and the number must not run into a
-    # letter or digit.
+    # loop"). An underscore separates like a space, so a round number inside an identifier is one (and
+    # one followed by "_of" is a loop count like one followed by " of"); the round word must not
+    # continue a longer word ("playground") and the number must not run into a letter or digit.
     (re.compile(r"(?<!retry )(?<!retry-)(?<!retry_)(?<![^\W_])" + _SWEPT_ROUND + r"[ _-][0-9]+(?![^\W_])"
-                r"(?!\s+of\b)", re.IGNORECASE),
+                r"(?!(?:\s+|_)of(?![^\W_]))", re.IGNORECASE),
      "a bare review-round number"),
     # a model identifier: a family or vendor model prefix, a hyphen, an optional tier word and a
     # version digit (a dotted path segment such as a settings directory is not one, and nor is one
@@ -531,17 +552,22 @@ SWEPT_LABELS = (
                 re.IGNORECASE),
      "a model identifier"),
     # a reviewer family used as an attribution: directly before a colon or a slash, or a possessive
-    # followed (at most one word later) by review vocabulary ("Claude's context window" is not one)
-    (re.compile(r"(?<![\w.$])" + _SWEPT_FAM + r"(?::|/|'s\s+(?:\w+\s+)?" + _SWEPT_REVIEW_NOUN + r"\b)",
-                re.IGNORECASE),
+    # followed (at most one word later) by review vocabulary ("Claude's context window" is not one),
+    # or directly by a notes, points, flags or reports noun ("<family>'s report says")
+    (re.compile(r"(?<![\w.$])" + _SWEPT_FAM + r"(?::|/|'s\s+(?:(?:\w+\s+)?" + _SWEPT_REVIEW_NOUN
+                + r"|" + _SWEPT_DIRECT_REVIEW_NOUN + r")\b)", re.IGNORECASE),
      "a reviewer family used as an attribution"),
     # a numbered or unnumbered review finding or item followed by a parenthesised upper-case grade or
     # a verdict ("finding 3 (MED)", "item 1 (BLOCKING)", "peer finding (HIGH)", "item 3 (false deny)"),
-    # or preceded by its grade: an upper-case grade word or id ("MAJOR finding", "HIGH review item"),
-    # or a grade word in any case followed by the word review ("a blocking review finding")
+    # or preceded by its grade: an upper-case grade word that is not a SemVer class, bare or with
+    # review or peer between ("MEDIUM finding", "HIGH review item"), an upper-case id or MAJOR or MINOR
+    # only with review or peer between ("MAJOR peer item", "M3 review finding"; "a C3 finding" and
+    # "never a MINOR finding" are ordinary prose), or a grade word in any case followed by the word
+    # review ("a blocking review finding")
     (re.compile(r"(?i:\b(?:peer[ -])?(?:find" + r"ing|item)s?)(?:[ -]?[0-9]+[a-z]?)?\s*\(\s*(?:"
                 + _SWEPT_GRADE + r"(?![\w-])|(?i:false[ -](?:deny|allow|positive|negative|block)\b))"
-                r"|\b(?:" + _SWEPT_GRADE + r"[ -](?i:(?:peer|review)[ -])?|" + _SWEPT_GRADE_WORD_ANY_CASE
+                r"|\b(?:" + _SWEPT_GRADE_STRONG + r"[ -](?:" + _SWEPT_REVIEW_WORD + r")?|" + _SWEPT_GRADE
+                + r"[ -]" + _SWEPT_REVIEW_WORD + r"|" + _SWEPT_GRADE_WORD_ANY_CASE
                 + r"[ -](?i:peer[ -])?(?i:review)[ -])(?i:find" + r"ing|item)s?\b"),
      "a review finding or item with a grade"),
     # a review-round-derived test name, here with no internal-allow exemption
@@ -3936,7 +3962,7 @@ def _self_test(caller_env=None):
                 (8, "swept/row-review-peer-finding", "peer fin" + "ding (HI" + "GH): x"),
                 (8, "swept/row-review-item-verdict", "it" + "em 3 (false" + " deny): x"),
                 (8, "swept/row-review-grade-before-finding", "a blocking review fin" + "ding (x): y"),
-                (8, "swept/row-review-upper-grade-before-item", "a MAJ" + "OR it" + "em: y"),
+                (8, "swept/row-review-upper-grade-before-item", "a MAJ" + "OR peer it" + "em: y"),
                 (9, "swept/row-review-test-name", "def test" + "_r13_case(self):  # internal" + "-allow")):
             key = SWEPT_ROW_KEYS[row]
             intact = _swept_hits("a {} b\n".format(vector))[key]
@@ -4006,7 +4032,25 @@ def _self_test(caller_env=None):
             ("review-item-grade", "a fin" + "ding (see below) is printed", "fin" + "ding 1 (HI" + "GH): x"),
             ("review-test-name", "def test" + "_rerun_7_times(self):", "def test" + "_r7_rerun(self):"),
             ("family-attribution", fam_c + "'s reply notes the date in the header",
-             fam_c + "'s review notes the date in the header"))
+             fam_c + "'s review notes the date in the header"),
+            # a one-letter rule id or a SemVer class directly before finding or item is ordinary
+            # prose; with review or peer between, or with a grade word that is not a SemVer class,
+            # it is a label
+            ("review-item-grade", "a C" + "3 fin" + "ding adds a WARN", "a C" + "3 review fin" + "ding adds a WARN"),
+            ("review-item-grade", "never a MIN" + "OR fin" + "ding", "never a MED" + "IUM fin" + "ding"),
+            ("review-item-grade", "the Q" + "3 fin" + "dings", "the Q" + "3 peer fin" + "dings"),
+            ("review-item-grade", "MIN" + "OR it" + "ems in the changelog",
+             "MIN" + "OR review it" + "ems in the changelog"),
+            # a notes, points, flags or reports noun directly after the possessive is an attribution,
+            # while the same word one word later is a verb (the possessive-verb controls)
+            ("family-attribution", fam_x + "'s log reports the exit code", fam_x + "'s rep" + "ort says the lock leaks"),
+            ("family-attribution", fam_c + "'s reply notes the date", fam_c + "'s no" + "tes: a missing guard"),
+            ("family-attribution", "Gem" + "ini's answer flags nothing",
+             "Gem" + "ini's fl" + "ags were all false positives"),
+            ("family-attribution", fam_x + "'s output points at the file", fam_x + "'s poi" + "nts 1 and 2 are fixed"),
+            # a round number followed by "of" is a loop count with an underscore separator as with a
+            # space, while one followed by another identifier part is still a hit
+            ("bare-round", "n = " + rnd_w + "_3_of_9", "n = " + rnd_w + "_3_offset"))
         narrow_flagged = [c for _k, c, _t in swept_narrow
                           if any(_swept_hits("a {} b\n".format(c))[key] for key in SWEPT_ROW_KEYS)]
         check("swept/narrowed-controls-unflagged", not narrow_flagged, narrow_flagged)
