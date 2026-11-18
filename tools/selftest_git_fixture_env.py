@@ -718,17 +718,18 @@ CONFIG_EXCLUSIONS = {
             " lane still enters that self-test's own entry point without any launcher sanitizing"
             " the environment first.",
         ("tools/check_selftest_removal.py",):
-            "A bare launch is the real gate, which needs the triggering event's arguments"
-            " (--protected, and --base where the event takes one) and a derivable base, neither of"
-            " which a config lane provides, so the lane cannot run it as a gate (a push or manual"
-            " run refuses the missing arguments with exit 2, and without event context the base"
-            " derivation depends on the checkout's origin/HEAD); its git reads (imported from"
+            "A bare launch is the real gate, which needs a derivable base and, in a push, manual or"
+            " scheduled run, the triggering event's arguments (--protected, and --base on a push; a"
+            " pull_request run refuses both and derives its target from GITHUB_BASE_REF), neither of"
+            " which a config lane provides, so the lane cannot run it as a gate (a push, manual or"
+            " scheduled run refuses the missing arguments with exit 2, and without event context the"
+            " base derivation depends on the checkout's origin/HEAD); its git reads (imported from"
             " tools/check_release_cut.py) are already isolated: every GIT_* variable is dropped,"
             " the system and global configuration are off, and HOME and XDG_CONFIG_HOME"
-            " point at an empty location; its self-test, which exercises those reads under a"
-            " poisoned caller environment, runs in these lanes as the direct self-test launch"
-            " CONFIG_DIRECT_SELFTESTS keeps, without any launcher sanitizing the environment"
-            " first, and as the selftest-removal-selftest suite step.",
+            " point at an empty location; its self-test, which exercises those reads with the caller's"
+            " HOME, XDG_CONFIG_HOME and GIT_CONFIG_GLOBAL poisoned, runs in these lanes as the direct"
+            " self-test launch CONFIG_DIRECT_SELFTESTS keeps, without any launcher sanitizing the"
+            " environment first, and as the selftest-removal-selftest suite step.",
         ("tools/check_review_labels.py",):
             "A bare launch is the real gate over this checkout, not a self-test: it diffs this"
             " checkout's working tree against its merge base with the protected branch, so its result"
