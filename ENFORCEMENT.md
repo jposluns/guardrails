@@ -50,7 +50,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Commit identity | `cmtidn` | Hook-linked | `hook:commit-identity`, class b |
 | A consumer follows its producer | `cnsprd` | No control | No shipped control cites this rule. |
 | Bind to the explicit target, not the ambient context | `expbnd` | Hook-linked | `hook:git-discard`, class b; `hook:git-explicit-binding`, class b; `hook:git-stash-ref`, class b; `hook:orch-dispatch-ledger`, class c |
-| Gate discipline | `gatdis` | Gate-linked (class c only) | `gate:ci-parity`, class c; `gate:relied-exit-pipes`, class c; `gate:selftest-removal`, class c; `hook:gate-weakening-guard`, class b |
+| Gate discipline | `gatdis` | Gate-linked (class c only) | `gate:ci-parity`, class c; `gate:push-gate-record`, class c; `gate:relied-exit-pipes`, class c; `gate:selftest-removal`, class c; `hook:gate-weakening-guard`, class b |
 | A generated artefact is changed only through its source | `gensrc` | Gate-linked (class a) | `gate:adapters-drift`, class a; `gate:agents-drift`, class a; `gate:changelog-drift`, class a; `gate:char-policy-drift`, class a; `gate:claude-drift`, class a; `gate:crosswalk-schema-drift`, class a; `gate:cursor-drift`, class a; `gate:disclosure-drift`, class a; `gate:draft-site-drift`, class a; `gate:enforceability-drift`, class a; `gate:enforcement-register-drift`, class a; `gate:first-pin-demo-drift`, class a; `gate:gensrc-failclose`, class a; `gate:gensrc-registry-drift`, class a; `gate:hooks-drift`, class a; `gate:manifest-gen-drift`, class a; `gate:mappings-page-drift`, class a; `gate:notice-drift`, class a; `gate:reference-roster-drift`, class a; `gate:renderers-drift`, class a; `gate:roadmap-drift`, class a; `gate:rules-drift`, class a; `gate:secret-patterns-drift`, class a; `gate:skill-drift`, class a; `gate:worker-pack-drift`, class a; `hook:gensrc-edit-guard`, class c |
 | Verify licence compatibility before introducing third-party material | `liccmp` | No control | No shipped control cites this rule. |
 | No concealed failure | `nocncl` | Hook-linked | `hook:inline-errexit`, class b; `hook:orch-truncation-guard`, class b |
@@ -527,6 +527,20 @@ Technical limits (from the enforcement ledger):
 
 ```
 A byte-identity drift gate over the artefact tools/gen_notice.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.
+```
+
+### `gate:push-gate-record`
+
+- Platform: `ci`
+- Default: `block`
+- Entry point: `tools/check_push_gate_record.py`
+- Class: `c`
+- Channel: `repository gate`
+
+Technical limits (from the enforcement ledger):
+
+```
+Its --pre-push mode, installed by an adopter as a git pre-push hook (the shim --print-pre-push-hook prints), refuses (exit 1) each branch update whose pushed commit has no record at <git-common-dir>/aiqt-gate-records/<full oid>.jsonl, or whose record is a symbolic link, not a regular file, over 1 MiB, changed while read, not UTF-8, not strict JSON Lines ending in LF (a duplicate, unknown or missing key, a boolean for an integer, a carriage return), not a start line first and a terminal line last with nothing after it, not version 1, mismatched in run_id, bound to another commit at start, at the terminal or in head_at_end, not clean at start and at end, recording no gate or a gate count other than its gate lines, nonzero in status, or status 0 beside a nonzero gate line; it exits 2 on a malformed stdin line or an unreadable records directory, and lists every gate line and the terminal line it read. Its --supervise mode runs tools/run_all_checks.sh from a clean tree, removes any earlier record for the commit, and publishes the record by an atomic rename only after the runner exits, with the runner's own exit status. In this repository only its self-test runs (CI and the local runner); the push check itself is adopter-installed. Local hooks are bypassable: --no-verify, an uninstalled or non-executable hook, a core.hooksPath override, and pushes outside git's hook path (an API, a web editor, another client) are not checked. The record is written by the same actor and is not an attestation: it catches a push made before its run finished or after it failed, not a forged or hand-written record. Rerun semantics: a run removes any earlier record for its commit and publishes atomically on exit, so a pending rerun refuses the push, and of two concurrent runs on one commit the last rename wins; a supervisor killed mid-run leaves no record and may leave its temporary file. Clean-tree checks at start and end do not prove the tree never changed during the run. Only refs/heads destinations are checked; tag pushes and other destinations are not. No remote CI result is checked; the event-trigger paragraph of the rule still governs that in prose. Per-gate lines are parsed from the runner's printed output for display only, so a gate that prints a look-alike line can add one; the verdict is the supervised process's exit status. Parent directories of the records directory are followed; only its final component and the record are opened without following a link. The runner inherits the caller's environment unchanged. The supervisor refuses to run when SIGCHLD is ignored in its own process (a disposition read, not the canonical fork-and-wait guard), so it is listed as a direct-launch residual of the child-status coverage gate.
 ```
 
 ### `gate:python-launcher-isolation`

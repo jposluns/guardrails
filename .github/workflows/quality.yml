@@ -1148,6 +1148,16 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_brief_capability.py --self-test
 
+      # A branch push is refused by an adopter-installed pre-push hook unless the pushed commit has a
+      # complete, passing gate record; here only the check's self-test and its execution set run.
+      - name: Push gate record self-test
+        shell: bash
+        run: python3 -I -B tools/check_push_gate_record.py --self-test --red-on-revert
+
+      - name: Push gate record self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite push-gate-record-selftest
+
       - name: NOTICE drift
         shell: bash
         run: python3 -I -B tools/gen_notice.py --check

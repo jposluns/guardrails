@@ -875,6 +875,7 @@ tools/check_opf_enforce_residuals.py text eol=lf
 tools/check_opf_standalone_closure.py text eol=lf
 tools/check_overclaim.py text eol=lf
 tools/check_portability.py text eol=lf
+tools/check_push_gate_record.py text eol=lf
 tools/check_python_floor.py text eol=lf
 tools/check_python_host_pin.py text eol=lf
 tools/check_python_launcher_isolation.py text eol=lf
