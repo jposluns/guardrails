@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "8e36afbd4337a67fce3db112a282e159c441078fc14fc48a8a5ddc6b7260dd0b"
+tree-sha256 = "e3e9d707faa3530475fe094d1985b312bf37b9b988dfb94080f5b79f93fb1b97"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -867,13 +867,13 @@ sha256 = "ce143791554930f8e5c87adaecb7aa295afb1d17bddf9defaa3c7131f1a63f8a"
 
 [[sources]]
 path = ".aiqt/standards/assessments/RUBRIC.md"
-bytes = 32939
-sha256 = "2f642abcf28ecfcff1bb3d2cf87642528a81b0b3fa9709e7987414228b65bc2e"
+bytes = 34185
+sha256 = "bd0e33c3406c3849c352b16da513719168af9e236914e4ec47ea7011c838c747"
 
 [[sources]]
 path = ".aiqt/standards/assessments/atlas.toml"
-bytes = 15670
-sha256 = "7bc917c78535933e9e3fb27d4844c52e6cfc923048f875fb2c2309b13eb15d03"
+bytes = 16651
+sha256 = "5fe17f22b2e62ceb234fe57ec1ddc5739ce5095cb246c2d130990a379bc5de5d"
 
 [[sources]]
 path = ".aiqt/standards/assessments/csa-ccm.toml"

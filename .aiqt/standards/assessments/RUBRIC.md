@@ -72,18 +72,17 @@ in the mappings or on the site; that is a later change.
   where the assistant is that party, for the sub-agents it starts and the tools it hands on to them, where
   granting and auditing those permissions, and keeping the records of the grants it makes and of changes
   to them, are at the rule's layer, since the assistant can record its own grants with what it holds, as
-  it can log its own trust decisions; enforcing access, mutual
-  authentication or address restrictions at a server, tool, endpoint or network, keeping tamper evident
-  logs there, and watching those logs for signs of attack (whoever runs the servers, the network or the
-  infrastructure); and rendering output (the client). Holding its own actions for human
-  approval, limiting the tools it hands on, refusing authority it cannot verify, storing the secrets it
-  holds, and watching its own actions and the messages it receives are at the rule's layer. A mitigation
-  that asks for several acts is split, and each act is marked on its own. The same act gets the same
-  marking wherever it appears, in every record. Under the adopted Definition B the marking does not make
-  a mitigation non-essential: a requirement a project cannot meet at its own layer is still part of the
-  control, and leaving it out weighs against tight. The marking records where the mitigation sits, which
-  convention 4 reads under A, so records that name convention 4 mark each listed mitigation in `omits`
-  that sits at another layer.
+  it can log its own trust decisions; enforcing access, mutual authentication or address restrictions at
+  a server, tool, endpoint or network, keeping tamper evident logs there, and watching those logs for
+  signs of attack (whoever runs the servers, the network or the infrastructure); and rendering output
+  (the client). Holding its own actions for human approval, limiting the tools it hands on, refusing
+  authority it cannot verify, storing the secrets it holds, and watching its own actions and the messages
+  it receives are at the rule's layer. A mitigation that asks for several acts is split, and each act is
+  marked on its own. The same act gets the same marking wherever it appears, in every record. Under the
+  adopted Definition B the marking does not make a mitigation non-essential: a requirement a project
+  cannot meet at its own layer is still part of the control, and leaving it out weighs against tight. The
+  marking records where the mitigation sits, which convention 4 reads under A, so records that name
+  convention 4 mark each listed mitigation in `omits` that sits at another layer.
 - **Essential element.** For a control or guidance entry, each lettered item, each verb and each object
   of the normative statement, for the whole of each object it names: an element the rule meets for only
   part of its object (one of several systems or configurations, or a subset of the components or tooling)
@@ -261,15 +260,27 @@ proposal, not a decision. A record names every convention that decides one of it
     links run from a mitigation to a parent technique that has sub-techniques; 15 are repeated on every
     one of its sub-techniques, 18 on some of them and 12 on none. Of the 70 sub-techniques, 40 have no
     mitigation linked to them directly, but 27 of those have a parent with no linked mitigation either,
-    so only 13 bear on the question. For the reading taken: whether a sub-technique repeats its parent's
-    links follows when the sub-technique was created, by the `created-date` the release records for it.
-    Counting each parent link once for each of the parent's sub-techniques, those created in 2021 repeat
-    48 of their parents' 92 links, and those created in 2026 repeat 2 of 22. The three AML.T0034
-    sub-techniques were created on 2026-03-30 (line 1999 for AML.T0034.000), after AML.M0004 and
-    AML.M0019 were last modified on 2025-12-23 (lines 4864 and 5164), so the links missing from them fit
-    a gap in a new entry's links as well as they fit a deliberate choice. The relations themselves carry
-    no dates, so when any one link was added cannot be told. This convention is engaged when a row maps
-    to a sub-technique whose parent has a linked mitigation that the sub-technique does not repeat.
+    so only 13 bear on the question. For the reading taken: counting each parent link once for each of
+    the parent's sub-techniques, and grouping the sub-techniques by the `created-date` the release
+    records for each, those created in 2021 repeat 48 of their parents' 92 links, those created in 2023
+    repeat 6 of 14, in 2024 0 of 3, in 2025 17 of 26 and in 2026 2 of 22. The pattern is mixed, not a
+    steady fall with age: the 2025 sub-techniques repeat a larger share than the 2021 ones, and the 2024
+    and 2026 ones the smallest shares. The 2026 figure includes the three AML.T0034 sub-techniques, the
+    case in question, which repeat neither of their parent's two links; without them it is 2 of 16. Those
+    three were created on 2026-03-30 (line 1999 for AML.T0034.000), after the `modified-date` of
+    2025-12-23 that AML.M0004 and AML.M0019 both carry (lines 4864 and 5164), so the links missing from
+    them fit a gap in a new entry's links as well as they fit a deliberate choice. A `modified-date` says
+    little about when an entry was last looked at, since most entries share one: 26 of the 35 mitigations
+    carry 2025-12-23, and 170 of the 173 techniques carry 2026-05-27, the three AML.T0034 sub-techniques
+    among them. Against the reading taken, on the same dates: AML.M0019 was created on 2024-01-12 (line
+    5163), after the 11 sub-techniques created in 2021 of the parents it is linked to (AML.T0005,
+    AML.T0024 and AML.T0043), so if that date is when it entered the release, its links to those parents
+    were added while those sub-techniques existed. It is repeated on 1 of those 11, and on 1 of the 17
+    sub-techniques of all the parents it is linked to, while AML.M0004, created on 2023-04-12 (line
+    4863), is repeated on 6 of the same 11. Its absence from AML.T0034.000 then fits the way AML.M0019 is
+    linked across the release as well as it fits the sub-technique being new. The relations themselves
+    carry no dates, so when any one link was added cannot be told. This convention is engaged when a row
+    maps to a sub-technique whose parent has a linked mitigation that the sub-technique does not repeat.
 
 ## Record schema
 
