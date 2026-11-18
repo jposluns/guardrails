@@ -32910,7 +32910,7 @@ def _main_isolated(monitor):
             _ci_cap = 0.375 * len(_ci_cmd) / (16 << 10)
             _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
             if _ci_got != "allow" or _ci_spent > _ci_cap:
-                failures.append("(ci-idc-cpu8) 'echo ${a-${a-...'''...}} +=' over {} characters expected allow "
+                failures.append("(ci-idc-cpu8) 'echo ${{a-${{a-...'''...}}}} +=' over {} characters expected allow "
                                 "within {:.2f} s of CPU time, got {} after {:.2f} s{}".format(
                                     len(_ci_cmd), _ci_cap, _ci_got, _ci_spent,
                                     "; the longer commands were not run" if _ci_depth != 13104 else ""))
