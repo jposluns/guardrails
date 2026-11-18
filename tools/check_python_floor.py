@@ -3997,6 +3997,7 @@ def _self_test_cases(base):
     check("claims/operator-major-near-misses-pass", evaluate(_fixture(base, files={
         DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nPython 4 or newer; Python >= 3.14; "
         "run check.py 3 times; py3 wheels; python3 tools/x.py 2; Python 3.14.4; spec >= 1.2.0.\n"}))[0], 0)
+    _description_cases()
 
     _red_on_revert(base, good)
     _rule_reverts(base)
@@ -4297,6 +4298,147 @@ def _rule_reverts(base):
         check(check_id, (code, marker is None or _has(lines, marker), module.evaluate(root)[0]),
               (want, True, 1 if want == 0 else 0))
     check("revert/every-rule-exercised", exercised == RULES, True)
+
+
+# The gates manifest whose python-floor row describes, in its residue, the trees this gate skips: the one
+# phrase "outside the excluded trees (A, B and C)" must name exactly EXCLUDED_TREES (the two once drifted).
+GATES_MANIFEST_REL = ".aiqt/core/gates/manifest.toml"
+GATE_SCRIPT_REL = "tools/check_python_floor.py"
+EXCLUDED_PHRASE_RE = re.compile(r"outside the excluded trees \(([^()]*)\)")
+# Every introduction of a parenthesised excluded-trees list, parsed by EXCLUDED_PHRASE_RE or not (nested
+# parentheses, odd spacing or capitals), so a second malformed occurrence counts toward "exactly once".
+EXCLUDED_PHRASE_START_RE = re.compile(r"outside\s+the\s+excluded\s+trees\s*\(", re.IGNORECASE)
+# The one list grammar: "A", "A and B" or "A, B and C" (more names add ", N" before " and "), a single
+# space after each comma and around "and", no comma before "and", and nothing else inside the parentheses.
+EXCLUDED_LIST_RE = re.compile(r"[^\s,]+(?:(?:, [^\s,]+)* and [^\s,]+)?")
+
+
+def _gate_residue(root):
+    """The residue of the one GATES_MANIFEST_REL gate row whose script is this gate, or CannotEvaluate."""
+    try:
+        data = tomllib.loads(_read_text(root / GATES_MANIFEST_REL))
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{}: does not parse: {}".format(GATES_MANIFEST_REL, exc))
+    gates = data.get("gate")
+    rows = [row for row in gates if isinstance(row, dict) and row.get("script") == GATE_SCRIPT_REL] \
+        if isinstance(gates, list) else []
+    if len(rows) != 1 or not isinstance(rows[0].get("residue"), str):
+        raise CannotEvaluate("{}: want one gate row for {} with a string residue, found {}".format(
+            GATES_MANIFEST_REL, GATE_SCRIPT_REL, len(rows)))
+    return rows[0]["residue"]
+
+
+def _described_list(residue):
+    """The text inside the residue's one excluded-trees phrase, or None when the residue introduces that
+    phrase (EXCLUDED_PHRASE_START_RE) other than once or its one introduction does not parse."""
+    found = EXCLUDED_PHRASE_RE.findall(residue)
+    if len(found) != 1 or len(EXCLUDED_PHRASE_START_RE.findall(residue)) != 1:
+        return None
+    return found[0]
+
+
+def _list_items(listed):
+    """The names a list in EXCLUDED_LIST_RE's grammar holds, sorted, or None when listed is not in it."""
+    if not EXCLUDED_LIST_RE.fullmatch(listed):
+        return None
+    return sorted(re.split(r", | and ", listed))
+
+
+def _described_trees(residue):
+    """The trees the residue's one excluded-trees phrase names ("A", "A and B" or "A, B and C"), sorted,
+    or None when the residue introduces that phrase other than once or lists them in another form."""
+    listed = _described_list(residue)
+    return None if listed is None else _list_items(listed)
+
+
+def _excluded_trees_phrase(trees):
+    """The excluded-trees phrase naming trees, in the residue's list form; CannotEvaluate when trees is
+    empty (so a one-tree EXCLUDED_TREES, which leaves nothing to name once its tree is dropped, refuses)."""
+    names = list(trees)
+    if not names:
+        raise CannotEvaluate("the excluded-trees phrase needs at least one tree: the dropped-tree rows need "
+                             "EXCLUDED_TREES to name two or more, found {}".format(len(EXCLUDED_TREES)))
+    listed = names[0] if len(names) < 2 else "{} and {}".format(", ".join(names[:-1]), names[-1])
+    return "outside the excluded trees ({})".format(listed)
+
+
+def excluded_trees_drift(residue, trees):
+    """Findings when the residue's excluded-trees phrase names other trees than trees (EXCLUDED_TREES).
+    Every introduction of the phrase counts, parsed or not, so a second malformed one is refused. A list
+    outside EXCLUDED_LIST_RE's grammar ("A", "A and B" or "A, B and C", single spaces: so not all commas,
+    not "A and B and C", no Oxford comma, no "or") is refused as a list form not understood. Limit: only
+    the one parenthesised phrase is read; a second list of trees worded another way elsewhere in the
+    residue is not found and not checked."""
+    listed = _described_list(residue)
+    if listed is None:
+        return ["{}: the {} residue does not hold the phrase 'outside the excluded trees (...)' exactly "
+                "once".format(GATES_MANIFEST_REL, GATE_SCRIPT_REL)]
+    described = _list_items(listed)
+    if described is None:
+        return ["{}: the {} residue lists the excluded trees as ({}), a list form this check does not "
+                "understand; write 'A', 'A and B' or 'A, B and C'".format(
+                    GATES_MANIFEST_REL, GATE_SCRIPT_REL, listed)]
+    if described != sorted(trees):
+        return ["{}: the {} residue names the excluded trees {}, but EXCLUDED_TREES is {}".format(
+            GATES_MANIFEST_REL, GATE_SCRIPT_REL, described, sorted(trees))]
+    return []
+
+
+def _description_cases():
+    """The python-floor gate row's description of the skipped trees agrees with EXCLUDED_TREES, and the
+    comparison is red, on fixture text rather than the live description, when one tree is dropped from
+    either side or renamed in the description."""
+    residue = _gate_residue(ROOT)
+    check("description/excluded-trees-match-gate-row", excluded_trees_drift(residue, EXCLUDED_TREES), [])
+    check("description/parser-list-forms",
+          [_described_trees("x " + _excluded_trees_phrase(trees) + " y")
+           for trees in (("a/",), ("b/", "a/"), ("c/", "a/", "b/"))],
+          [["a/"], ["a/", "b/"], ["a/", "b/", "c/"]])
+    fixture = "x " + _excluded_trees_phrase(EXCLUDED_TREES) + " y"
+    dropped_description = []
+    dropped_trees = []
+    renamed_description = []
+    for tree in EXCLUDED_TREES:
+        rest = tuple(item for item in EXCLUDED_TREES if item != tree)
+        shortened = "x " + _excluded_trees_phrase(rest) + " y"
+        dropped_description.append(bool(excluded_trees_drift(shortened, EXCLUDED_TREES)))
+        dropped_trees.append(bool(excluded_trees_drift(fixture, rest)))
+        renamed = tuple(item.rstrip("/") + "s/" if item == tree else item for item in EXCLUDED_TREES)
+        renamed_description.append(bool(excluded_trees_drift(
+            "x " + _excluded_trees_phrase(renamed) + " y", EXCLUDED_TREES)))
+    check("description/tree-dropped-from-description-red", dropped_description,
+          [True] * len(EXCLUDED_TREES))
+    check("description/tree-dropped-from-excluded-trees-red", dropped_trees, [True] * len(EXCLUDED_TREES))
+    check("description/tree-renamed-same-count-red", renamed_description, [True] * len(EXCLUDED_TREES))
+    check("description/phrase-absent-or-repeated-red",
+          [bool(excluded_trees_drift(text, EXCLUDED_TREES)) for text in (
+              "no phrase", 2 * (_excluded_trees_phrase(EXCLUDED_TREES) + ". "))], [True, True])
+    check("description/list-form-not-understood-red",
+          [any("list form this check does not understand" in finding
+               for finding in excluded_trees_drift("x outside the excluded trees ({}) y".format(listed),
+                                                   ("a/", "b/", "c/")))
+           for listed in ("a/, b/, and c/", "a/, b/ or c/", "a/ or b/ or c/", "a/, b/, c/",
+                          "a/ and b/ and c/")], [True, True, True, True, True])
+    check("description/phrase-repeated-malformed-red",
+          [bool(excluded_trees_drift(fixture + " " + second, EXCLUDED_TREES)) for second in (
+              "outside the excluded trees (wrong/(nested)/)", "outside the excluded trees  (x/)",
+              "Outside the excluded trees (x/)")], [True, True, True])
+    check("description/tree-named-twice-red", bool(excluded_trees_drift(
+        "x " + _excluded_trees_phrase((EXCLUDED_TREES[0],) + EXCLUDED_TREES) + " y", EXCLUDED_TREES)), True)
+    check("description/trailing-slash-dropped-red", bool(excluded_trees_drift(
+        "x " + _excluded_trees_phrase(tuple(tree.rstrip("/") for tree in EXCLUDED_TREES)) + " y",
+        EXCLUDED_TREES)), True)
+    check("description/list-grammar-literal-forms",
+          [_described_trees("x outside the excluded trees ({}) y".format(listed)) for listed in (
+              "a/", "a/ and b/", "b/, c/ and a/", "a/, b/, c/ and d/", "a/, b/, c/", "a/ and b/ and c/",
+              "a/, b/ and c/ and d/", "a/,b/ and c/", "a/, b/  and c/", "a/\tand b/", " a/ and b/",
+              "a/ and b/ ", "a/ b/", "")],
+          [["a/"], ["a/", "b/"], ["a/", "b/", "c/"], ["a/", "b/", "c/", "d/"]] + [None] * 10)
+    try:
+        empty_phrase = _excluded_trees_phrase(())
+    except Exception as exc:  # the row names what an empty list raises; only CannotEvaluate is clean
+        empty_phrase = type(exc).__name__
+    check("description/empty-tree-list-refused", empty_phrase, "CannotEvaluate")
 
 
 def _expected_check_ids():
