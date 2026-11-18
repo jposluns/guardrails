@@ -359,9 +359,12 @@ def _skill_drift(root, corpus):
         return (MALFORMED, "cannot regenerate the chat skill: {}".format(exc))
     drift = []
     try:
+        # Every text output is compared on its raw bytes against the rendered string's UTF-8 bytes, as
+        # gen_skill compares them (it decodes the raw bytes, never a newline-translating text read): a
+        # read_text would turn CRLF into LF and pass a CRLF copy that gen_skill --check names as drift.
         for path, content in standalone:
-            current = path.read_text(encoding="utf-8") if path.exists() else None
-            if current != content:
+            current = path.read_bytes() if path.exists() else None
+            if current != content.encode("utf-8"):
                 drift.append(path.relative_to(root).as_posix())
         for path, content in binary:
             current = path.read_bytes() if path.exists() else None
@@ -369,8 +372,8 @@ def _skill_drift(root, corpus):
                 drift.append(path.relative_to(root).as_posix())
         for name, content in sorted(reserved_map.items()):
             target = reserved_dir / name
-            current = target.read_text(encoding="utf-8") if target.exists() else None
-            if current != content:
+            current = target.read_bytes() if target.exists() else None
+            if current != content.encode("utf-8"):
                 drift.append((reserved_dir / name).relative_to(root).as_posix())
         # Orphan scan over the reserved subtree (100% generated); os.walk(onerror=raise), not rglob.
         for dirpath, _dirs, filenames in os.walk(reserved_dir, onerror=_walk_raise):
@@ -404,13 +407,38 @@ def _plugin_skill_drift(root, corpus):
     The copy is compared on raw bytes (never a newline-translating text read). A directory on the path that
     is a symlink resolving outside the root, dangling or not a directory, a copy that is a symlink or not a
     regular file, an unreadable tree, or a skill that cannot be rendered while a skills/ tree is installed,
-    is MALFORMED (fail closed)."""
+    is MALFORMED (fail closed).
+
+    skills/ and skills/aiqt/ are refused (MALFORMED) when either is a symlink, even one to a directory inside
+    the root: gen_skill alone writes that tree and opens both with O_NOFOLLOW, refusing such a link, so this
+    check refuses the same layouts instead of reading through the link. The components above skills/
+    (plugin/ and the plugin root) keep the inside-root symlink policy of _reachable, because they belong to
+    the hooks plugin surface that C5 judges as gen_hooks does (rows 19c and 19g read an inside-root link at
+    plugin/); gen_skill is stricter at those two components than this check, a disclosed difference.
+
+    A plugin-only tree (the hooks plugin with its skills/ tree installed, but no chat-skill source at
+    .aiqt/core/skill/skill-source.md) cannot be checked, because the expected copy cannot be rendered, and
+    gen_skill cannot regenerate it either: it is MALFORMED (exit 2), and the message tells the adopter what to
+    do: install the chat-skill source (with the rules it cites) and regenerate with tools/gen_skill.py, or, if
+    the chat skill is not used, remove the plugin's skills/ folder (plugin/aiqt-guardrails-hooks/skills/)."""
     plugin_root = root.joinpath(*gen_skill.PLUGIN_ROOT_PARTS)
     present, err = _reachable(plugin_root, root, dir_chain_or_absent)
     if err:
         return (MALFORMED, err)
     if not present:
         return (NA, "hooks plugin not installed, so no plugin copy of the chat skill to check")
+    for depth in (len(gen_skill.PLUGIN_SKILLS_PARTS), len(gen_skill.PLUGIN_SKILL_PARTS) - 1):
+        comp = root.joinpath(*gen_skill.PLUGIN_SKILL_PARTS[:depth])
+        try:
+            is_link = stat.S_ISLNK(os.lstat(comp).st_mode)
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            return (MALFORMED, "cannot read {}: {}".format(comp, exc))
+        if is_link:
+            return (MALFORMED, "refusing {}: it is a symlink, which gen_skill refuses there (it alone writes the "
+                               "plugin skills/ tree); replace the link with a real directory".format(
+                                   comp.relative_to(root).as_posix()))
     skills_dir = root.joinpath(*gen_skill.PLUGIN_SKILLS_PARTS)
     skills_present, err = _reachable(skills_dir, root, dir_chain_or_absent)
     if err:
@@ -427,7 +455,17 @@ def _plugin_skill_drift(root, corpus):
     try:
         reserved_map, _standalone, _binary = gen_skill.build_outputs(root)
     except (ValueError, OSError) as exc:
-        return (MALFORMED, "cannot regenerate the plugin copy of the chat skill: {}".format(exc))
+        src_rel = "/".join(gen_skill.SKILL_SRC_PARTS)
+        skills_rel = "/".join(gen_skill.PLUGIN_SKILLS_PARTS) + "/"
+        if os.path.lexists(src):
+            todo = ("repair the chat-skill source {} (and the rules it cites) so it renders, then run "
+                    "tools/gen_skill.py; or, if you do not use the chat skill, remove that source and the plugin's "
+                    "skills/ folder {}".format(src_rel, skills_rel))
+        else:
+            todo = ("install the chat-skill source {} (with the rules it cites), then run tools/gen_skill.py; or, "
+                    "if you do not use the chat skill, remove the plugin's skills/ folder {}".format(
+                        src_rel, skills_rel))
+        return (MALFORMED, "cannot regenerate the plugin copy of the chat skill: {}; to fix, {}".format(exc, todo))
     desired = gen_skill.plugin_skill_map(reserved_map)
     allowed = set(desired)
     for rel in desired:
@@ -798,6 +836,8 @@ def main():
 #   5. a typo'd --root fails closed (exit 2), not a hollow all-absent pass,
 #   16n/16o. gen_skill leaves an adopter tree without the hooks plugin at C5 NOT APPLICABLE, and an installed
 #      plugin's copy of the chat skill is checked (C2 plugin-skill).
+#   16p-16r. CRLF in one download copy only fails C2 skill; a plugin copy with no skill source is MALFORMED with
+#      the remedy named; a skills/ or skills/aiqt/ symlink inside the root is refused as gen_skill refuses it.
 
 _APEX = """---
 corpus-id: apex01
@@ -1714,6 +1754,73 @@ def self_test_main():
                 failures.append("16o {}: expected exit 1, C2 FAIL with plugin-skill FAIL naming {}:\n{}".format(
                     label, named.as_posix(), out))
 
+        def _plugin_skill_tree(name):
+            """A conformant tree with the hooks plugin and the chat skill installed, its plugin copy included."""
+            t = tmp / name
+            t.mkdir()
+            _build_conformant(t)
+            _build_hooks(t)
+            _add_skill_surface(t)
+            _write_surfaces(t)
+            return t
+
+        # 16p. CRLF line ends in ONE download copy only (site/downloads/aiqt/SKILL.md, or the standalone
+        #      aiqt-instructions.txt), the plugin copy untouched: exit 1, C2 FAIL with the skill surface FAIL naming
+        #      the file, as gen_skill --check names it. Red when _skill_drift compares a newline-translating text
+        #      read (read_text turns CRLF into LF, so the CRLF copy passed).
+        for label, parts in (("skill-md", gen_skill.RESERVED_PARTS + ("SKILL.md",)),
+                             ("instructions", gen_skill.INSTRUCTIONS_PARTS)):
+            ctree = _plugin_skill_tree("download-crlf-" + label)
+            cfile = ctree.joinpath(*parts)
+            raw = cfile.read_bytes()
+            cfile.write_bytes(raw.replace(b"\n", b"\r\n"))
+            code, out = run_capture(ctree)
+            named = "/".join(parts)
+            if (b"\n" not in raw or code != 1 or status_of(out, "C2") != FAIL or "; skill: FAIL" not in out
+                    or named not in out or "plugin-skill: PASS" not in out):
+                failures.append("16p {}: CRLF in the download copy {} only expected exit 1, C2 FAIL with skill FAIL "
+                                "naming it and plugin-skill PASS:\n{}".format(label, named, out))
+
+        # 16q. The hooks plugin and its copy of the skill installed but the chat-skill source removed (with the
+        #      download surface kept, and in a plugin-only tree with site/ removed too): the copy cannot be
+        #      rendered, so it is exit 2, C2 MALFORMED with plugin-skill MALFORMED, and the message says what to do
+        #      (install the skill source, or remove the plugin's skills/ folder). Red when that branch degrades to
+        #      NOT APPLICABLE (a hand-edited or planted copy would pass again) or the message drops the remedy.
+        for label, drop_site in (("source-removed", False), ("plugin-only", True)):
+            mtree = _plugin_skill_tree("plugin-skill-nosource-" + label)
+            mtree.joinpath(*gen_skill.SKILL_SRC_PARTS).unlink()
+            if drop_site:
+                shutil.rmtree(mtree / "site")
+            code, out = run_capture(mtree)
+            if (code != 2 or status_of(out, "C2") != MALFORMED or "plugin-skill: MALFORMED" not in out
+                    or "install the chat-skill source " + "/".join(gen_skill.SKILL_SRC_PARTS) not in out
+                    or "remove the plugin's skills/ folder " + "/".join(gen_skill.PLUGIN_SKILLS_PARTS) not in out):
+                failures.append("16q {}: the plugin copy installed with no chat-skill source expected exit 2, C2 "
+                                "MALFORMED with plugin-skill MALFORMED saying to install the skill source or remove "
+                                "the plugin's skills/ folder:\n{}".format(label, out))
+
+        # 16r. skills/ or skills/aiqt/ in the plugin that is a symlink to the directory moved elsewhere INSIDE the
+        #      root: gen_skill refuses it (O_NOFOLLOW on every component, exit 2), so conformance refuses it too:
+        #      exit 2, plugin-skill MALFORMED naming the link, never read through. Red when the check follows an
+        #      inside-root link there (the target is the conformant copy, so following it passes).
+        for label, parts in (("skills", gen_skill.PLUGIN_SKILLS_PARTS),
+                             ("skills-aiqt", gen_skill.PLUGIN_SKILL_PARTS[:-1])):
+            ltree = _plugin_skill_tree("plugin-skill-link-" + label)
+            link = ltree.joinpath(*parts)
+            target = ltree / "shared" / label
+            target.parent.mkdir(exist_ok=True)
+            shutil.move(str(link), str(target))
+            link.symlink_to(os.path.relpath(target, link.parent))
+            code, out = run_capture(ltree)
+            gbuf = io.StringIO()
+            with redirect_stdout(gbuf), redirect_stderr(io.StringIO()):
+                gcode = gen_skill.run_gen(ltree, True)
+            if (code != 2 or status_of(out, "C2") != MALFORMED or "plugin-skill: MALFORMED" not in out
+                    or "refusing {}: it is a symlink".format("/".join(parts)) not in out or gcode != 2):
+                failures.append("16r {}: {} as a symlink inside the root expected conformance exit 2 with plugin-skill "
+                                "MALFORMED naming it (gen_skill --check exit 2 too, got {}):\n{}\n{}".format(
+                                    label, "/".join(parts), gcode, out, gbuf.getvalue()))
+
         # 16g. A dangling symlink at .claude must fail closed via C2 and C3 MALFORMED (exit 2), as
         #      check_rule_placement refuses the same tree: it never reads as an absent surface (NOT
         #      APPLICABLE, a false clean). A live link to a directory inside the root is read (19i).
@@ -2126,7 +2233,9 @@ def self_test_main():
           "orphan, or an orphaned surface with no source; an adopter tree without the plugin run through "
           "gen_skill keeps C5 and the plugin-skill surface NOT APPLICABLE with nothing written under plugin/, "
           "and an installed plugin's skills/aiqt/SKILL.md must equal the rendered skill (a hand edit, CRLF "
-          "line ends, a missing copy and a planted skills/rogue/SKILL.md fail C2); an adopter rule with CRLF "
+          "line ends, a missing copy and a planted skills/rogue/SKILL.md fail C2); CRLF in one download copy "
+          "only fails C2 skill; a plugin copy with no skill source, or a skills/ or skills/aiqt/ symlink inside "
+          "the root, is MALFORMED (the former naming the remedy); an adopter rule with CRLF "
           "line endings or a "
           "frontmatter comment line passes C3; absent input (corpus, "
           ".claude/rules) degrades to NOT APPLICABLE; malformed manifests, unreadable input dirs "

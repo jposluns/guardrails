@@ -11,7 +11,8 @@ corpus (via gen_rules.load_corpus). An id that does not resolve is a fail-closed
 never cite a rule that does not exist. The rendered body is time-independent (the build date lives
 only in the manifest and provenance), so --check is a pure byte comparison like the sibling gates.
 
-Outputs (all under the reserved site/downloads/aiqt/ subtree, plus the standalone instructions file):
+Outputs (three in the reserved site/downloads/aiqt/ subtree, the standalone instructions file and the two zips
+beside it in site/downloads/, and the hooks plugin's copy of SKILL.md, written only when the plugin root exists):
   site/downloads/aiqt/SKILL.md        the generated skill body (the text the zip carries)
   site/downloads/aiqt/manifest.json   version, date, source-corpus hash, included corpus-ids
   site/downloads/aiqt/provenance.md   human-readable provenance for the same facts
