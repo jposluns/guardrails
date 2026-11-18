@@ -6820,9 +6820,20 @@ expected-check-ids = [
   "write/rename-transferred-allowance-is-growth",
   "flip/write-carry-uncapped",
   "review/growth-without-line-listed-once",
+  # the writer round-trips by construction, checked by the gate's own predicate, bounds from the keys
+  "write/roundtrip-five-files-carried-pins",
+  "fail-closed/write-passes-bound",
+  "write/roundtrip-three-files-partial-allowance",
+  "write/roundtrip-pin-chain-30",
+  "write/roundtrip-pin-chain-31",
+  "fail-closed/write-proposal-checked-by-gate",
+  "flip/write-proposal-unchecked",
   # a cannot-evaluate message is escaped like a listing line
   "review/cannot-evaluate-message-escaped",
   "flip/cannot-evaluate-message-raw",
+  # the protected ref is escaped in the summary and the NOTE line
+  "review/protected-ref-escaped",
+  "flip/protected-ref-raw",
   # control bytes in a listed line are escaped in the gate's and the writer's listing
   "review/listing-escapes-control-bytes",
   "review/write-listing-escapes-control-bytes",

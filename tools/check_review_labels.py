@@ -141,11 +141,10 @@ own file, so an extra copy of a baselined line passes. With it, a deleted baseli
 a copy added to its own file (m(k) unchanged) or is left unspent, which happens only when every
 identical line added to its file was credited, so no charged copy can use the room it leaves. Dropping
 the entry in the same change unpins the line, so a baselined line moved to another file with its entry
-dropped is still a credited move. After the moved-line credit and
-the allow-marker, for each key m(k) is the
-number of finding lines with that digest and shape in the candidate file (one diff from the empty tree
-with the gate's own diff options and parser, so core.autocrlf and filters give the same clean bytes) and
-n(k) the candidate entry's count:
+dropped is still a credited move. After the moved-line credit and the allow-marker, for each key m(k) is
+the number of finding lines with that digest and shape in the candidate file (one diff from the empty
+tree with the gate's own diff options and parser, so core.autocrlf and filters give the same clean
+bytes) and n(k) the candidate entry's count:
   - STALE: m(k) < n(k) is a finding (exit 1) for every entry, changed path or not;
   - GROWTH: a candidate count above the merge base's count for the same key (0 when absent there) is a
     finding (exit 1), key by key and never netted across keys; the header and source-commit are outside
@@ -163,22 +162,33 @@ The review listing prints a BASELINE header, then for each growing key GROWTH pa
 file holds no finding line with that key (an entry written for a line that is not there, also STALE),
 one GROWTH path: shape [digest count old to new], no such line in the file, with no line number,
 description or excerpt; then STALE and RELEASED lines; a digest is never shown alone. In every listing
-line (the gate's FAIL, GROWTH, STALE, RELEASED and NOTE lines and --write-baseline's) and every CANNOT
-EVALUATE message (git's stderr and a path decoded from the diff included) each byte below 0x20 (a tab
-and a carriage return included) and DEL is printed as \\xNN and every non-ASCII character as its
-backslash escape, so a terminal control sequence in a line cannot hide the path or the label the
-maintainer authorizes from.
+line (the gate's FAIL, PASS, GROWTH, STALE, RELEASED and NOTE lines, the protected ref in the summary and
+the NOTE line included, and --write-baseline's) and every CANNOT EVALUATE message (git's stderr and a
+path decoded from the diff included) each byte below 0x20 (a tab and a carriage return included) and
+DEL is printed as \\xNN and every non-ASCII character as its backslash escape, so a terminal control
+sequence in a line cannot hide the path or the label the maintainer authorizes from.
 --write-baseline reads committed objects only (B..C and C's blobs; the configuration, like the gate's,
-from the working tree) and proposes the fixed point of the pinned move credit, not C's own pins: from
-no pinned line, each round credits moves with the lines the proposal so far has entries for, then adds
-to the proposal each key with a finding on a charged line B..C adds, at its count in C, and every entry
-of C's baseline carried at the least of its count, its count in C and its count at the merge base
+from the working tree) and proposes the fixed point of the pinned move credit, not C's own pins. A pass
+starts from no pinned line; each round credits moves with the lines the proposal so far has entries
+for, then adds to the proposal each key with a finding on a charged line B..C adds, at its count in C,
+and every carried entry, at the least of its count, its count in C and its count at the merge base
 (zeros dropped, so a carried entry is never stale and never growth); a round only adds a key or raises
-a count, and the rounds stop when one adds nothing (a proposal still changing after WRITER_ROUNDS
-rounds is cannot-evaluate). Committed on top of C, the proposal leaves the gate no charged finding and
-no stale entry (R8 aside), only growth, and the writer run there again proposes the same entries. Its
-canonical render with source-commit = C goes to stdout only when it is at most MAX_BASELINE_BYTES (the
-gate's own read limit), else cannot-evaluate with nothing printed; no file is written. BOOTSTRAP: commit
+a count, and the pass ends when a round adds nothing. The first pass carries C's baseline; each later
+pass carries the proposal of the pass before it, as a writer run with that proposal committed as C's
+baseline would, and the passes stop when one proposes the same entries as the pass before it, so the
+writer run on the proposal committed proposes the same entries by construction. For K candidate keys
+(the keys of the findings on the lines B..C adds and of C's baseline) a pass runs at most 2K+1 rounds
+and the writer at most K+2 passes (writer_round_bound and writer_pass_bound give the reasoning); a pass
+or the passes still changing at their bound is cannot-evaluate. The settled proposal is then judged by
+the gate's own predicate (baseline_verdict, the function the gate calls) with its entries as the
+candidate baseline, on the same B..C diff: a charged finding or a stale entry is cannot-evaluate, so a
+proposal is printed only when, committed on top of C, it leaves the gate only the growth it lists (R8
+aside: the check reads the baseline file's own lines as they are at C). A ROUND TRIP line on stderr
+says so, with the passes and rounds run against their bounds. The proposal is not guaranteed minimal: a
+key a round adds stays even when the final pins no longer need it, so a smaller baseline that passes
+can exist and the GROWTH listing then asks for more than the change needs (R15). Its canonical render
+with source-commit = C goes to stdout only when it is at most MAX_BASELINE_BYTES (the gate's own read
+limit), else cannot-evaluate with nothing printed; no file is written. BOOTSTRAP: commit
 the import at C, run python3 -I -B tools/check_review_labels.py --write-baseline --head C, redirect its
 stdout into the baseline and commit it; the gate then fails on the pull request with GROWTH lines, which
 are the review artefact, and the maintainer records an authorization naming the baseline's sha256 and
@@ -203,7 +213,11 @@ baseline on main is cannot-evaluate for every branch based on it; (R13) the cost
 unmeasured; (R14) the pinned move credit makes a baselined line moved to another file with its entry
 kept a charged line there as well as a stale entry, until the entry is dropped in the same change;
 --write-baseline drops it once its file holds no copy of the line, but carries it while the file still
-holds copies, so a move of some of a file's copies to another file is proposed as growth there.
+holds copies, so a move of some of a file's copies to another file is proposed as growth there; (R15)
+the writer's proposal is not guaranteed minimal (see --write-baseline above), and a chain of moves can
+turn one new copy into one GROWTH key per file in the chain: when N files each move an unbaselined
+identical line within themselves and one new copy is added in diff order before them, every pin moves
+the charge to the previous file, so the proposal has N+1 keys for one added line.
 """
 import sys
 
@@ -298,10 +312,6 @@ Finding = namedtuple("Finding", ("path", "number", "shape", "description", "text
 # The shrink-only finding baseline (see the docstring's BASELINE section).
 BASELINE_RELPATH = ".aiqt/review-label-baseline.toml"
 MAX_BASELINE_BYTES = 1048576
-# The most rounds --write-baseline runs to reach its fixed point. A round can only add a key or raise a
-# count, each bounded by the candidate's finding lines, so a pin chain this long is not expected; a
-# proposal still changing after it is cannot-evaluate rather than printed.
-WRITER_ROUNDS = 32
 BASELINE_KEYS = frozenset(("format-version", "source-commit", "entry"))
 BASELINE_ENTRY_KEYS = frozenset(("path", "line-sha256", "shape", "count"))
 DIGEST_RE = re.compile(r"[0-9a-f]{64}", re.ASCII)
@@ -316,6 +326,9 @@ Baseline = namedtuple("Baseline", ("source", "entries", "data"))
 Occurrence = namedtuple("Occurrence", ("path", "number", "shape", "description", "text"))
 # growth: (key, old count, new count, occurrences); stale: (key, count, found); released: (key, old, new).
 Ledger = namedtuple("Ledger", ("header", "growth", "stale", "released", "grandfathered"))
+# The gate's predicate on a candidate baseline (baseline_verdict): the added lines the move credit leaves
+# and the number it credits, the findings on those lines, their partition, and the growing and stale keys.
+Verdict = namedtuple("Verdict", ("lines", "moved", "findings", "charged", "grandfathered", "growth", "stale"))
 Evaluation = namedtuple("Evaluation", ("findings", "summary", "marker", "note", "ledger"))
 
 
@@ -560,7 +573,7 @@ def _position_note(ref, protected_sha, base, head_sha, head, added):
     judged = ("the commit --head names is judged on no line" if head is not None
               else "only the working tree's uncommitted edits are judged, against {}".format(base[:12]))
     return "the candidate {} is {} {}, so it has no committed line of its own and {}{}".format(
-        head_sha[:12], where, ref, judged,
+        head_sha[:12], where, _shown_ref(ref), judged,
         "; no line is added, so there is nothing to judge" if head is None and not added else "")
 
 
@@ -1038,9 +1051,24 @@ def _merge_base_config(config):
     return None
 
 
-def apply_baseline(root, config, base, head_sha, head, findings, candidate):
-    """(charged findings, Ledger): the baseline steps of the gate (the docstring's BASELINE section),
-    given the candidate's baseline as already read for the moved-line credit."""
+def baseline_verdict(judged, deleted, config, entries, before, counts):
+    """The gate's predicate on the candidate baseline entries `entries` (the docstring's PINNED MOVE
+    CREDIT and BASELINE steps), as a Verdict: the move credit pinned by those entries, the findings on the
+    added lines it leaves, their partition, and the keys that grow against `before` (the merge base's
+    entries) or are stale against `counts` (m(k)). The gate judges a candidate with this function and
+    --write-baseline checks its proposal with it, so there is one copy of the predicate, not two."""
+    lines, moved = credit_moves(judged, _move_credits(deleted, config.excluded,
+                                                      _pinned_lines(Baseline(None, entries, None))))
+    findings = judge(lines, config)
+    charged, grandfathered = partition(findings, entries, counts)
+    return Verdict(lines, moved, findings, charged, grandfathered, baseline_growth(entries, before),
+                   stale_entries(entries, counts, findings))
+
+
+def apply_baseline(root, config, base, head_sha, head, judged, deleted, candidate):
+    """(Verdict, Ledger): the moved-line credit and the baseline steps of the gate (the docstring's
+    BASELINE section) on the judged added lines and the deleted lines of the diff, given the candidate's
+    baseline as read."""
     prior = read_baseline(root, base, _merge_base_config(config))
     changed = _baseline_changed(candidate, prior)
     if candidate is not None and changed:
@@ -1049,18 +1077,17 @@ def apply_baseline(root, config, base, head_sha, head, findings, candidate):
     before = {} if prior is None else prior.entries
     found = occurrences(root, _occurrence_revision(base, head_sha, head), {key[0] for key in entries}, config)
     counts = {key: _occurrence_count(items) for key, items in found.items()}
-    growth = [(key, before.get(key, 0), entries[key], found.get(key, []))
-              for key in baseline_growth(entries, before)]
-    stale = [(key, entries[key], counts.get(key, 0)) for key in stale_entries(entries, counts, findings)]
+    verdict = baseline_verdict(judged, deleted, config, entries, before, counts)
+    growth = [(key, before.get(key, 0), entries[key], found.get(key, [])) for key in verdict.growth]
+    stale = [(key, entries[key], counts.get(key, 0)) for key in verdict.stale]
     released = [(key, count, entries.get(key, 0)) for key, count in sorted(before.items())
                 if entries.get(key, 0) < count]
-    charged, grandfathered = partition(findings, entries, counts)
     header = None
     if changed or entries:
         header = "{} source-commit {}, {} entr(ies) in the candidate, {} at the merge base".format(
             BASELINE_RELPATH, "none" if candidate is None else candidate.source[:12], len(entries),
             len(before))
-    return charged, Ledger(header, growth, stale, released, grandfathered)
+    return verdict, Ledger(header, growth, stale, released, verdict.grandfathered)
 
 
 def _review_lines(ledger):
@@ -1131,13 +1158,49 @@ def _merged(proposal, found):
     return merged
 
 
+def writer_round_bound(keys):
+    """The most rounds one pass of --write-baseline runs for `keys` candidate keys (the keys of the
+    findings on the judged added lines and of C's baseline): 2 * keys + 1. Within a pass a key's proposed
+    count only rises, and only from 0 to its carried count and then to its count in C, so each round that
+    changes the proposal takes one of at most 2 * keys steps, and one more round finds no change."""
+    return 2 * keys + 1
+
+
+def writer_pass_bound(keys):
+    """The most passes --write-baseline runs for `keys` candidate keys: keys + 2. Each pass after the
+    first carries the entries of the proposal before it (_carried); a key's carried count never falls
+    from one pass to the next and can rise only once, to the least of its count in C and at the merge
+    base, so after the first pass and at most `keys` rises a pass carries what the one before it carried
+    and proposes the same entries."""
+    return keys + 2
+
+
+def _writer_pass(judged, deleted, config, by_line, counts, carried, limit):
+    """(proposal, rounds run): one pass of the writer, from no pinned line, _writer_round repeated
+    (_merged) until a round adds nothing; CannotEvaluate when the proposal still changes after `limit`
+    rounds."""
+    proposal = {}
+    for done in range(1, limit + 1):
+        following = _merged(proposal, _writer_round(judged, deleted, config, proposal, by_line, counts,
+                                                    carried))
+        if following == proposal:
+            return proposal, done
+        proposal = following
+    raise CannotEvaluate("the proposal still changed after {} rounds of the pinned move credit; no "
+                         "baseline is proposed".format(limit))
+
+
 def propose_baseline(root, protected=None, head=None, environ=None):
     """(canonical bytes, review lines, growth keys) of the baseline --write-baseline proposes for the
-    candidate commit C, the fixed point the docstring describes: from no pinned line, each round pins the
-    lines the proposal so far has entries for, credits moves, and adds each key a charged finding has (at
-    its count in C) and every carried entry of C's baseline (_carried); the rounds stop when one adds
-    nothing, and a proposal still changing after WRITER_ROUNDS rounds, or one whose render is larger than
-    MAX_BASELINE_BYTES, is CannotEvaluate (nothing is printed)."""
+    candidate commit C, the fixed point the docstring describes. A pass (_writer_pass) starts from no
+    pinned line; each round pins the lines the proposal so far has entries for, credits moves, and adds
+    each key a charged finding has (at its count in C) and every carried entry (_carried). The first pass
+    carries C's baseline, each later one the proposal of the pass before it, as a further writer run with
+    that proposal committed would, and the passes stop when one proposes what the pass before it did.
+    The proposal is then judged by the gate's own predicate (baseline_verdict) with its entries as the
+    candidate baseline. A pass still changing after writer_round_bound rounds, passes still changing
+    after writer_pass_bound passes, a proposal that predicate charges a finding for or finds an entry of
+    stale, or one whose render is larger than MAX_BASELINE_BYTES, is CannotEvaluate (nothing is printed)."""
     environ = os.environ if environ is None else environ
     config = load_config(Path(root) / CONFIG_RELPATH)
     require_excluded_files(root, config.excluded)
@@ -1157,33 +1220,44 @@ def propose_baseline(root, protected=None, head=None, environ=None):
     found = occurrences(root, revision, {item.path for items in by_line.values() for item in items}
                         | {key[0] for key in old}, config)
     counts = {key: _occurrence_count(items) for key, items in found.items()}
-    carried = _carried(old, before, counts)
-    proposal = {}
-    for _round in range(WRITER_ROUNDS):
-        following = _merged(proposal, _writer_round(judged, diff.deleted, config, proposal, by_line, counts,
-                                                    carried))
+    keys = len({_finding_key(item) for items in by_line.values() for item in items} | set(old))
+    rounds, passes = writer_round_bound(keys), writer_pass_bound(keys)
+    proposal, most = None, 0
+    for done in range(1, passes + 1):
+        carried = _carried(old if proposal is None else proposal, before, counts)
+        following, used = _writer_pass(judged, diff.deleted, config, by_line, counts, carried, rounds)
+        most = max(most, used)
         if following == proposal:
             break
         proposal = following
     else:
-        raise CannotEvaluate("the proposal still changed after {} rounds of the pinned move credit; no "
-                             "baseline is proposed".format(WRITER_ROUNDS))
+        raise CannotEvaluate("a writer run with the proposal committed as the candidate's baseline still "
+                             "proposed other entries after {} passes; no baseline is proposed".format(passes))
+    verdict = baseline_verdict(judged, diff.deleted, config, proposal, before, counts)
+    if verdict.charged or verdict.stale:
+        raise CannotEvaluate("committed on top of the candidate, the proposal would leave the gate {} "
+                             "charged finding(s) and {} stale entr(ies); no baseline is proposed".format(
+                                 len(verdict.charged), len(verdict.stale)))
     data = render_baseline(head_sha, proposal)
     if len(data) > MAX_BASELINE_BYTES:
         raise CannotEvaluate("the proposed baseline is {} bytes ({} entr(ies)), larger than the {} bytes the "
                              "gate reads; it is not printed".format(len(data), len(proposal),
                                                                     MAX_BASELINE_BYTES))
-    growth = baseline_growth(proposal, before)
+    growth = verdict.growth
     ledger = Ledger(None, [(key, before.get(key, 0), proposal[key], found.get(key, [])) for key in growth],
                     [], [(key, count, proposal.get(key, 0)) for key, count in sorted(before.items())
                          if proposal.get(key, 0) < count], [])
-    return data, _review_lines(ledger), growth
+    checked = ("ROUND TRIP: settled in {} pass(es) (bound {}), the longest {} round(s) (bound {}), for {} "
+               "candidate key(s); committed, the gate's own predicate charges no finding and finds no stale "
+               "entry, and a further writer run proposes the same entries".format(done, passes, most, rounds,
+                                                                                 keys))
+    return data, _review_lines(ledger) + [checked], growth
 
 
 def write_baseline(root, protected=None, head=None, environ=None):
-    """--write-baseline: the proposal on stdout (no file is written), its review listing on stderr; exit
-    1 when it grows against the merge base's baseline, 0 otherwise, 2 when it cannot evaluate (an
-    oversized or unsettled proposal included, with nothing on stdout)."""
+    """--write-baseline: the proposal on stdout (no file is written), its review listing and its ROUND
+    TRIP line on stderr; exit 1 when it grows against the merge base's baseline, 0 otherwise, 2 when it
+    cannot evaluate (an oversized, unsettled or unchecked proposal included, with nothing on stdout)."""
     try:
         data, review, growth = propose_baseline(root, protected, head, environ)
     except CannotEvaluate as exc:
@@ -1212,11 +1286,10 @@ def evaluate(root, protected=None, head=None, environ=None):
     judged = [line for line in diff.added if not _excluded(line.path, config.excluded)]
     skipped = len(diff.added) - len(judged)
     candidate = read_baseline(root, None if head is None else head_sha, config)
-    judged, moved = credit_moves(judged, _move_credits(diff.deleted, config.excluded,
-                                                       _pinned_lines(candidate)))
-    findings, ledger = apply_baseline(root, config, base, head_sha, head, judge(judged, config), candidate)
+    verdict, ledger = apply_baseline(root, config, base, head_sha, head, judged, diff.deleted, candidate)
+    findings, judged, moved = verdict.charged, verdict.lines, verdict.moved
     summary = "{} added line(s) in {} file(s) judged against merge base {} of {} (from {}){}{}{}{}{}".format(
-        len(judged), len({line.path for line in judged}), base[:12], ref, source,
+        len(judged), len({line.path for line in judged}), base[:12], _shown_ref(ref), _shown_ref(source),
         "" if head is None else ", candidate {}".format(head_sha[:12]),
         "; {} moved line(s) not charged".format(moved) if moved else "",
         "; {} line(s) in excluded file(s) not judged".format(skipped) if skipped else "",
@@ -1235,6 +1308,13 @@ def _escaped(text):
     line) reaches a listing line."""
     return "".join(ch if 0x20 <= ord(ch) < 0x7F else "\\x{:02x}".format(ord(ch)) if ord(ch) < 0x80
                    else ch.encode("ascii", "backslashreplace").decode("ascii") for ch in text)
+
+
+def _shown_ref(ref):
+    """The protected ref (and the name of its source) as the summary and the NOTE line print them:
+    escaped like a listing line (_escaped). --protected takes any revision git resolves, and one such as
+    main^{/text} can hold a control byte or a non-ASCII character."""
+    return _escaped(ref)
 
 
 def _message(exc):
@@ -1392,6 +1472,7 @@ _REAL_ADDED_LINES = added_lines
 _REAL_READ_BASELINE = read_baseline
 _REAL_PARSE_BASELINE = parse_baseline
 _REAL_RENDER_BASELINE = render_baseline
+_REAL_BASELINE_VERDICT = baseline_verdict
 
 
 # The label lines the refused rows add, assembled at run time so that no contiguous label sits in this
@@ -1500,7 +1581,9 @@ def _rows(tmp):
     _baseline_write_rows(tmp, labels)
     _baseline_pin_rows(tmp, labels)
     _baseline_writer_fixpoint_rows(tmp, labels)
+    _baseline_writer_roundtrip_rows(tmp, labels)
     _message_rows(tmp)
+    _ref_rows(tmp)
     _baseline_listing_rows(tmp, labels)
     _baseline_config_change_rows(tmp, labels)
     _baseline_merge_base_read_rows(tmp)
@@ -2396,9 +2479,9 @@ def _baseline_writer_fixpoint_rows(tmp, labels):
     # The rounds are bounded: that layout settles on its third round, so a bound of two refuses it with
     # nothing printed and a bound of three proposes it; rounds that replace the proposal instead of adding
     # to it alternate between the two keys and are refused the same way.
-    with _patched(WRITER_ROUNDS=2):
+    with _patched(writer_round_bound=lambda keys: 2):
         code_2, out_2, err_2 = _write_exit(repo, head=reorder_head)
-    with _patched(WRITER_ROUNDS=3):
+    with _patched(writer_round_bound=lambda keys: 3):
         code_3, out_3, _err_3 = _write_exit(repo, head=reorder_head)
     check("fail-closed/write-rounds-bound", code_2 == 2 and out_2 == "" and "still changed after 2 rounds"
           in err_2 and code_3 == 1 and out_3 == reorder_out, (code_2, out_2, err_2, code_3, out_3))
@@ -2494,6 +2577,152 @@ def _baseline_writer_fixpoint_rows(tmp, labels):
           and listed in gate_out and "STALE x.py: backlog-id" in gate_out, gate_out)
 
 
+def _moved_within(label, *rest):
+    """A file's text before and after a move of `label` within it: the label and the lines `rest` on main,
+    then `rest` followed by the label, so git's diff deletes the label and adds it back (the three other
+    lines are the longest common run)."""
+    body = "".join(line + "\n" for line in ("a = 1", "b = 2", "c = 3"))
+    return label + "\n" + body + "".join(line + "\n" for line in rest), body + "".join(
+        line + "\n" for line in rest) + label + "\n"
+
+
+def _chain_repo(tmp, name, label, files):
+    """A pin chain: `files` files each hold one unbaselined `label` on main, the branch moves it within
+    every one of them and adds one new copy in aa/first.py, which sorts before them in diff order."""
+    repo, _base = _baseline_repo(tmp, name)
+    paths = ["chain/{:02d}.py".format(index) for index in range(files)]
+    for path in paths:
+        _write(repo, path, _moved_within(label)[0])
+    _commit_all(repo, "one label line in each file of the chain")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    for path in paths:
+        _write(repo, path, _moved_within(label)[1])
+    _write(repo, "aa/first.py", label + "\n")
+    _commit_all(repo, "the label moved within every file and one new copy added")
+    return repo, paths
+
+
+def _without_path(path):
+    """A flip of _writer_round: the round never proposes a key of `path`, so the pass settles on a
+    proposal the gate still charges a finding for."""
+    real = _writer_round
+
+    def broken(*args):
+        return {key: count for key, count in real(*args).items() if key[0] != path}
+    return broken
+
+
+def _uncharged_verdict(*args):
+    """A flip of baseline_verdict: no finding is ever charged and no entry is stale."""
+    return _REAL_BASELINE_VERDICT(*args)._replace(charged=[], stale=[])
+
+
+def _baseline_writer_roundtrip_rows(tmp, labels):
+    """--write-baseline round-trips by construction: its passes carry their own proposal as C's baseline
+    until it stops changing, the gate's own predicate checks the result before it is printed, and the
+    round and pass bounds come from the number of candidate keys."""
+    la = labels["backlog-id"]
+    la_raw = la.encode("utf-8")
+    config = _REAL_LOAD_CONFIG(ROOT / CONFIG_RELPATH)
+    charged_text = "review or work label(s) on added lines"
+
+    def key(path):
+        return (path, _sha(la_raw), "backlog-id")
+
+    # A five-file layout: main holds the label twice in cc/C.py and twice in dd/D.py, each with an entry
+    # of count 1. The branch deletes the baseline, adds two copies in aa/A.py, moves one copy within C,
+    # deletes both copies in D and adds one back, and adds ee/E.py with one copy. The first pass proposes
+    # C at 2 (D's pin takes D's deletions from the shared pool); carried as C's baseline, C's own pin
+    # credits its move, so the writer proposes C at 1 and only A and E grow.
+    repo, base = _baseline_repo(tmp, "baseline-writer-five-files")
+    _write(repo, "cc/C.py", la + "\na = 1\nb = 2\nc = 3\n" + la + "\n")
+    _write(repo, "dd/D.py", la + "\n" + la + "\na = 1\nb = 2\nc = 3\n")
+    _put_baseline(repo, base, {("cc/C.py", la_raw, "backlog-id"): 1, ("dd/D.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "two baselined files")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _fx_git(repo, "rm", "-q", BASELINE_RELPATH)
+    _write(repo, "aa/A.py", la + "\n" + la + "\n")
+    _write(repo, "cc/C.py", "a = 1\nb = 2\nc = 3\n" + la + "\n" + la + "\n")
+    _write(repo, "dd/D.py", "a = 1\nb = 2\nc = 3\n" + la + "\n")
+    _write(repo, "ee/E.py", la + "\n")
+    five_head = _commit_all(repo, "the baseline deleted, copies added and moved")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/roundtrip-five-files-carried-pins", code == 1
+          and entries == {key("aa/A.py"): 2, key("cc/C.py"): 1, key("dd/D.py"): 1, key("ee/E.py"): 1}
+          and "GROWTH cc/C.py" not in err and "ROUND TRIP: settled in 3 pass(es)" in err and gate_code == 1
+          and charged_text not in gate_out and "STALE" not in gate_out and "GROWTH cc/C.py" not in gate_out
+          and gate_out.count("  GROWTH aa/A.py:") == 2 and gate_out.count("  GROWTH ") == 3 and code2 == 1
+          and _entries_text(out2) == _entries_text(out),
+          (code, err, entries, gate_code, gate_out, code2, out2))
+
+    # The passes are bounded: that layout settles on its third pass, so a bound of two refuses it with
+    # nothing printed and a bound of three proposes it.
+    with _patched(writer_pass_bound=lambda keys: 2):
+        code_2, out_2, err_2 = _write_exit(repo, head=five_head)
+    with _patched(writer_pass_bound=lambda keys: 3):
+        code_3, out_3, _err_3 = _write_exit(repo, head=five_head)
+    check("fail-closed/write-passes-bound", code_2 == 2 and out_2 == "" and "other entries after 2 passes"
+          in err_2 and code_3 == 1 and out_3 == out, (code_2, out_2, err_2, code_3, out_3))
+
+    # A three-file layout: main holds the label twice in 1.py with an entry of count 1 and once in 2.py
+    # with none. The branch deletes the baseline, moves one copy within each file and copies the label
+    # into a new 0.py. The writer proposes 1.py at 1, not 2, and committed the gate lists no 1.py growth.
+    repo, base = _baseline_repo(tmp, "baseline-writer-three-files")
+    _write(repo, "1.py", _moved_within(la, la)[0])
+    _write(repo, "2.py", _moved_within(la)[0])
+    _put_baseline(repo, base, {("1.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "a partial allowance in 1.py, none in 2.py")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _fx_git(repo, "rm", "-q", BASELINE_RELPATH)
+    _write(repo, "1.py", _moved_within(la, la)[1])
+    _write(repo, "2.py", _moved_within(la)[1])
+    _write(repo, "0.py", la + "\n")
+    _commit_all(repo, "the baseline deleted, each label moved within its file, a copy in 0.py")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/roundtrip-three-files-partial-allowance", code == 1
+          and entries == {key("0.py"): 1, key("1.py"): 1, key("2.py"): 1} and "GROWTH 1.py" not in err
+          and "ROUND TRIP: " in err and gate_code == 1 and charged_text not in gate_out
+          and "STALE" not in gate_out and "GROWTH 1.py" not in gate_out and code2 == 1
+          and _entries_text(out2) == _entries_text(out),
+          (code, err, entries, gate_code, gate_out, code2, out2))
+
+    # Pin chains of 30 and 31 files: one new copy becomes one key per file in the chain plus its own, and
+    # the bounds come from the 31 or 32 candidate keys (63 or 65 rounds), so both settle (a fixed bound of
+    # 32 rounds refused the longer one) and both round-trip.
+    for check_id, files in (("write/roundtrip-pin-chain-30", 30), ("write/roundtrip-pin-chain-31", 31)):
+        repo, paths = _chain_repo(tmp, "baseline-writer-chain-{}".format(files), la, files)
+        code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+        check(check_id, code == 1
+              and entries == {key(path): 1 for path in paths + ["aa/first.py"]}
+              and "the longest {} round(s) (bound {}), for {} candidate key(s)".format(
+                  files + 2, 2 * (files + 1) + 1, files + 1) in err
+              and gate_code == 1 and charged_text not in gate_out and "STALE" not in gate_out
+              and gate_out.count("  GROWTH ") == files + 1 and code2 == 1
+              and _entries_text(out2) == _entries_text(out), (code, err, entries, gate_code, gate_out, code2))
+
+    # The settled proposal is judged by the gate's own predicate before it is printed: rounds that never
+    # propose aa/G.py's key settle on F's alone, which the gate would charge G's copy under, so the writer
+    # exits 2 with nothing printed; with that check removed it prints the short proposal.
+    repo, base = _baseline_repo(tmp, "baseline-writer-gate-check")
+    _write(repo, "zz/F.py", _moved_within(la)[0])
+    _commit_all(repo, "a label line on main, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "zz/F.py", _moved_within(la)[1])
+    _write(repo, "aa/G.py", la + "\n")
+    _commit_all(repo, "the line moved in its file and copied into another")
+    code, out, _err = _write_exit(repo)
+    with _patched(_writer_round=_without_path("aa/G.py")):
+        code_c, out_c, err_c = _write_exit(repo)
+        with _patched(baseline_verdict=_uncharged_verdict):
+            code_f, out_f, _err_f = _write_exit(repo)
+    check("fail-closed/write-proposal-checked-by-gate", code == 1
+          and _proposed_entries(out, config) == {key("zz/F.py"): 1, key("aa/G.py"): 1} and code_c == 2
+          and out_c == "" and "would leave the gate 1 charged finding(s) and 0 stale entr(ies)" in err_c,
+          (code, out, code_c, out_c, err_c))
+    check("flip/write-proposal-unchecked", code_f == 1 and _proposed_entries(out_f, config) == {
+        key("zz/F.py"): 1}, (code_f, out_f))
+
+
 def _cannot_evaluate_outputs(repo):
     """The gate's and the writer's output for a diff that ends inside a hunk of a quoted path holding an
     escape byte, and for a git merge-base whose stderr holds a title-setting sequence."""
@@ -2530,6 +2759,22 @@ def _message_rows(tmp):
     with _patched(_message=str):
         results = _cannot_evaluate_outputs(repo)
     check("flip/cannot-evaluate-message-raw", all("\x1b" in text for _code, text in results), results)
+
+
+def _ref_rows(tmp):
+    """The protected ref is escaped in the summary and the NOTE line: --protected main^{/text} resolves
+    through a commit message, so it can hold an escape byte and a non-ASCII character."""
+    repo, _base = _baseline_repo(tmp, "protected-ref-escaped")
+    _fx_git(repo, "commit", "-q", "--allow-empty", "-m", "tip \x1bQ \xe9")
+    ref = "main^{/\x1bQ \xe9}"
+    results = [_gate(repo, protected=ref)]
+    with _patched(_shown_ref=lambda text: text):
+        results.append(_gate(repo, protected=ref))
+    (code, out), (_code_f, out_f) = results
+    check("review/protected-ref-escaped", code == 0 and "\x1b" not in out and "\xe9" not in out
+          and "NOTE: review-label gate: the candidate" in out and out.count("main^{/\\x1bQ \\xe9}") == 2,
+          out)
+    check("flip/protected-ref-raw", "\x1b" in out_f and "\xe9" in out_f, out_f)
 
 
 def _ascii_only_escaped(text):
