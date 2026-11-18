@@ -106,27 +106,29 @@
 #                        delta, 135529 + 775 = 136304, leaving the 370 units that remain of the headroom
 #                        recorded in the 2026-10-29 entry, within the maintainer's authorization of 2026-11-08
 #                        for raises up to 148000.
-#                        Raised 136304 -> 136987 on 2026-11-18 under the maintainer's recorded decision of
+#                        Raised 136304 -> 137149 on 2026-11-18 under the maintainer's recorded decision of
 #                        2026-10-31 to raise the ratchet by exactly the measured delta, when
 #                        standing-constraints-persist gained its sentences that, where an upper limit whose
 #                        value the operator or a governing rule has set, not the assistant under the
 #                        bounded-consumption rule, is enforced at that value or a stricter one by a check the
 #                        assistant cannot change, the assistant takes an action the limit covers only as that
-#                        check admits it; that the assistant withholds only the action that check does not
-#                        admit; that only a grant recorded where that check reads the limit raises it; and
-#                        that a limit with no such check, whether it has a host store alone, a count kept by
-#                        hand, or neither, is a residual those sentences do not reach and still persists as a
-#                        standing constraint (cnstpr.6 to cnstpr.9): measured PACK 136292 at the PR base
-#                        504f422d -> 136975 (+683 units); rule files 119669 -> 120352; managed block 360 and
-#                        file headers 16263 unchanged. The ratchet rises by the measured delta, 136304 + 683 =
-#                        136987, keeping the 12 units the ratchet already stood above PACK, within the
-#                        maintainer's authorization of 2026-11-08 for raises up to 148000.
+#                        check admits it; that the limit gives no reason to withhold an action that check
+#                        admits, and the assistant does not retry an action that check refuses or route around
+#                        the refusal; that only a grant the limit's setter records where that check reads the
+#                        limit raises it, so a record the assistant can write cannot raise it; and that a
+#                        limit with no such check, whether it has a host store alone, a count kept by hand, or
+#                        neither, is a residual those sentences do not reach and still persists as a standing
+#                        constraint (cnstpr.6 to cnstpr.9): measured PACK 136292 at the PR base 504f422d ->
+#                        137137 (+845 units); rule files 119669 -> 120514; managed block 360 and file headers
+#                        16263 unchanged. The ratchet rises by the measured delta, 136304 + 845 = 137149,
+#                        keeping the 12 units the ratchet already stood above PACK, within the maintainer's
+#                        authorization of 2026-11-08 for raises up to 148000.
 #   ceiling             a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 136987
+ratchet = 137149
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
