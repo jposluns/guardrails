@@ -1217,15 +1217,6 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_hooks_preview.py
 
-      # The pre-launch hook-coverage gate judges a launch directory the orchestrator names before it
-      # starts a session; the repository holds no launch to judge, so CI runs its self-test only.
-      - name: Hook coverage self-test (execution-reconciled)
-        shell: bash
-        run: python3 -I -B tools/check_selftest_execution.py --suite hook-coverage-selftest
-      - name: Hook coverage self-test
-        shell: bash
-        run: python3 -I -B tools/check_hook_coverage.py --self-test
-
   selftest-execution:
     name: Execution-reconciled self-tests
     if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))

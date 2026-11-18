@@ -257,8 +257,6 @@ run_gate "char-policy-selftest" python3 -I -B tools/gen_char_policy.py --self-te
 run_gate "char-policy-drift" python3 -I -B tools/gen_char_policy.py --check
 run_gate "hooks-preview-selftest" python3 -I -B tools/check_hooks_preview.py --self-test
 run_gate "hooks-preview" python3 -I -B tools/check_hooks_preview.py
-run_gate "hook-coverage-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite hook-coverage-selftest
-run_gate "hook-coverage-selftest" python3 -I -B tools/check_hook_coverage.py --self-test  # no launch directory in the repository to judge
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
