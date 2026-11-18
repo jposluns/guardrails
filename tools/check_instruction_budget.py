@@ -1572,7 +1572,8 @@ def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
     `#   ceiling` line, or the declaration is malformed. The candidate is compared in two parts, the lines
     above its one `#   ceiling` line and the rest, each with the matching part of the base (its ratchet
     value replaced by the candidate's). Lines appended at the end of the upper part are the new entries
-    (_entry_findings); after a replacement there, the lines beyond the ones it pairs one for one. Every
+    (_entry_findings); after a replacement there, the lines beyond the ones it pairs one for one, or, for a
+    raise, from the first line there opening `Raised OLD -> ` (OLD the base ratchet) if earlier. Every
     other changed line is a finding naming the line (_line_report), unless a declaration bound to these
     exact base and head bytes covers it; a declaration never waives the entry rules. A candidate without
     exactly one `#   ceiling` line is compared whole and has no entry block. A candidate without exactly
@@ -1601,11 +1602,19 @@ def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
         above = _opcodes(expected[:ceiling_at], head[:at])
         block, start = [], at
         tag, i1, i2, j1, j2 = above[-1] if above else ("equal", 0, 0, 0, 0)
-        if tag in ("insert", "replace") and (i2, j2) == (ceiling_at, at) and j2 - j1 > i2 - i1:
-            # Appended at the end of the upper part: past the lines a replacement pairs one for one.
-            start = j1 + (i2 - i1)
-            block = head[start:j2]
-            above[-1] = ("replace" if i2 > i1 else "equal", i1, i2, j1, start)
+        if tag in ("insert", "replace") and (i2, j2) == (ceiling_at, at):
+            # Appended at the end of the upper part: past the lines a replacement pairs one for one, or, for
+            # a raise, from the change's first line that opens `Raised OLD -> ` (OLD the base ratchet) when
+            # that is earlier, so a declared deletion just before the entry cannot hide it.
+            opener = "Raised {} -> ".format(old)
+            starts = [j for j in range(j1, j2) if new > old and head[j][:1] == "#"
+                      and head[j][1:].lstrip(" ").startswith(opener)][:1]
+            if j2 - j1 > i2 - i1:
+                starts.append(j1 + (i2 - i1))
+            if starts:
+                start = min(starts)
+                block = head[start:j2]
+                above[-1] = ("replace" if i2 > i1 else "equal", i1, i2, j1, start)
         changed = (_line_report(above, base, head, 0, 0)
                    + _line_report(_opcodes(expected[ceiling_at:], head[at:]), base, head, ceiling_at, at))
     else:
@@ -3331,6 +3340,17 @@ def self_test(report_path=None):
         check("shape/declared-edit-before-entry-0",
               (shape(base_shape, edited), shape(base_shape, edited, declare(base_shape, edited))),
               ((1, ["4"]), (0, [])))
+        # A declared deletion of the old line just before an appended entry leaves the final replacement no
+        # longer than the base lines it replaces; the entry is still found and read as the entry. A raise
+        # with such a deletion and no entry stays refused.
+        deleted = [raised(base_shape, new_entry).replace(old_entry, "")
+                   for new_entry in (entry, entry + entry_line("(rows a.1 to a.3)."))]
+        check("shape/declared-deletion-before-entry-0",
+              [(shape(base_shape, head), shape(base_shape, head, declare(base_shape, head))) for head in deleted],
+              [((1, ["base 4"]), (0, []))] * 2)
+        bare = [missing.replace(old_entry, ""), missing.replace(old_entry, old_entry.replace(" rule ", " rule  "))]
+        check("shape/declared-deletion-raise-without-entry-1",
+              [shape(base_shape, head, declare(base_shape, head)) for head in bare], [(1, [])] * 2)
         check("shape/declaration-blank-reason-2",
               (shape(base_shape, version_bump, declare(base_shape, version_bump, reason="   ")),
                shape(base_shape, version_bump, declare(base_shape, version_bump) + 'extra = "x"\n')),
@@ -3467,6 +3487,10 @@ def self_test(report_path=None):
         check("revert/shape-declared-edit-before-entry-red",
               shape(base_shape, edited, declare(base_shape, edited), module=_mutant(
                   tmp, '        if tag in ("insert", "replace") and', '        if tag in ("insert",) and'))[0], 1)
+        check("revert/shape-declared-deletion-before-entry-red",
+              [shape(base_shape, head, declare(base_shape, head), module=_mutant(
+                  tmp, 'if new > old and head[j][:1] == "#"', 'if False and head[j][:1] == "#"'))[0]
+               for head in deleted], [1, 1])
         check("revert/shape-declaration-reason-red",
               shape(base_shape, version_bump, declare(base_shape, version_bump, reason="   "), module=_mutant(
                   tmp, '    if not isinstance(data["reason"], str) or not data["reason"].strip():',
