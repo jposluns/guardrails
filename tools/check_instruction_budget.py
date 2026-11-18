@@ -1514,9 +1514,10 @@ def _history_findings(base, head, parts, fresh):
     new entries directly above the `#   ceiling` line. Every base history line (_history_lines of the
     base) must be matched unchanged by the diff, so a removal, edit, move or re-indent of one is a finding,
     and two base history lines that are adjacent in the base must stay adjacent, so a line inserted between
-    them is a finding. Every other head line the diff does not match that reads as history in the head
-    (_history_lines of the head: an opener at any indentation, or a line continuing one) is a finding
-    unless it is one of the new entries."""
+    them is a finding. Every other head line that reads as history in the head (_history_lines of the
+    head: an opener at any indentation, or a line continuing one) is a finding unless it is one of the new
+    entries or the diff matches it to a base history line, so an unchanged line that reads as history only
+    in the head (a note an old entry absorbs when a separator line between them is removed) is one too."""
     matched = {}
     for ops, base_at, head_at in parts:
         for op, a1, a2, b1, b2 in ops:
@@ -1529,7 +1530,9 @@ def _history_findings(base, head, parts, fresh):
     for i in history:
         if i + 1 in kept and i in matched and i + 1 in matched:
             inside.update(range(matched[i] + 1, matched[i + 1]))
-    taken, read = set(matched.values()), set(_history_lines(head))
+    read = set(_history_lines(head))
+    # A matched head line that reads as history counts as taken only when its base line was history too.
+    taken = {j for i, j in matched.items() if i in kept or j not in read}
     for j in range(len(head)):
         if j not in taken and j not in fresh and (j in read or j in inside):
             findings.append("line {}: a ratchet history line added other than as a new entry directly above "
@@ -3525,6 +3528,8 @@ def self_test(report_path=None):
         # below the `#   ceiling` line (unchanged, edited, beside a raise, or re-indented) is a finding no
         # declaration waives, for the moved base line (base 4) and the added history line (line 5 or 6). A
         # base whose history already sits below the line compares unchanged, but an edit there is refused.
+        # Round 9: re-indented to the `#   ` column, the moved opener also makes the unchanged line below it
+        # read as its continuation, a history line added (line 6).
         def counting(text):
             return text.replace("counting rule", "counting  rule")
 
@@ -3533,7 +3538,7 @@ def self_test(report_path=None):
                        base_shape.replace(old_entry, "").replace(ceiling, ceiling + "#   " + old_entry[len(indent):])]
         check("shape/declared-history-moved-1",
               [shape(base_shape, head, declare(base_shape, head)) for head in moved_heads],
-              [(1, ["base 4", "5"]), (1, ["base 4", "5"]), (1, ["base 4", "6"]), (1, ["base 4", "5"])])
+              [(1, ["base 4", "5"]), (1, ["base 4", "5"]), (1, ["base 4", "6"]), (1, ["base 4", "5", "6"])])
         moved_edit = counting(raised(moved_below))
         check("shape/declared-moved-history-edit-1",
               (shape(moved_below, moved_edit, declare(moved_below, moved_edit)), shape(moved_below, moved_below)),
@@ -3543,12 +3548,15 @@ def self_test(report_path=None):
         # indentation: 24 spaces, 23 (which passed declared in round 6), 3, or none. The last continuation of
         # the history moved below the ceiling line, edited (148000 to 149000, which passed declared in round
         # 6) or not, is a moved history line (base 6). A line inserted between two adjacent history lines,
-        # free text or a continuation, is a finding too (line 6). No declaration waives any of these.
-        below_openers = [base_shape.replace(ceiling, ceiling + "#" + " " * width
+        # free text or a continuation, is a finding too (line 6). No declaration waives any of these. Round 9:
+        # at 3 spaces or none the opener also makes the unchanged line below it read as its continuation, a
+        # history line added (line 7).
+        below_openers =[base_shape.replace(ceiling, ceiling + "#" + " " * width
                                             + "Raised 100 -> 101 on 2026-11-16 for review fixture.\n")
                          for width in (24, 23, 3, 0)]
         check("shape/declared-opener-below-ceiling-1",
-              [shape(base_shape, head, declare(base_shape, head)) for head in below_openers], [(1, ["6"])] * 4)
+              [shape(base_shape, head, declare(base_shape, head)) for head in below_openers],
+              [(1, ["6"])] * 2 + [(1, ["6", "7"])] * 2)
         moved_tails = [repeat_base.replace(tail, "").replace(ceiling, ceiling + tail.replace("148000", "149000")),
                        repeat_base.replace(tail, "").replace(ceiling, ceiling + tail)]
         check("shape/declared-moved-continuation-1",
@@ -3558,6 +3566,17 @@ def self_test(report_path=None):
                     repeat_base.replace(cont, cont + entry_line("a continuation between two history lines."))]
         check("shape/declared-history-insert-1",
               [shape(repeat_base, head, declare(repeat_base, head)) for head in inserted], [(1, ["6"])] * 2)
+        # Round 9, MINOR 1 (the reviewer's fixture G1): with a blank `#` separator (base line 5) between an old
+        # entry and a note at entry indentation, the history is base lines 4 and 7. Removing the separator
+        # leaves the note unchanged but makes it read as a continuation of the old entry (line 5), a history
+        # line added away from the new entries, which no declaration waives.
+        joined_base = base_shape.replace(ceiling, "#\n" + entry_line("A note on the figures below.")
+                                         + entry_line("Raised 100 -> 110 on 2026-10-15 for a review fixture.")
+                                         + ceiling)
+        joined = joined_base.replace(old_entry + "#\n", old_entry)
+        check("shape/declared-separator-removal-joins-entry-1",
+              (shape(joined_base, joined), shape(joined_base, joined, declare(joined_base, joined))),
+              ((1, ["base 5", "5"]), (1, ["5"])))
         # Round 7, replacing the round 6 fold-cost allowance: a queued fold's measured cost is recorded in the
         # next raise entry. Recorded there it is accepted, beside an inviting entry that is the last one or
         # not; a line recording it inserted into an old entry (line 6) or appended without a raise (line 7,

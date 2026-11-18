@@ -2887,6 +2887,7 @@ expected-check-ids = [
   "shape/declared-opener-below-ceiling-1",
   "shape/declared-moved-continuation-1",
   "shape/declared-history-insert-1",
+  "shape/declared-separator-removal-joins-entry-1",
   "shape/fold-cost-in-next-raise-0",
   "shape/declared-fold-cost-in-old-entry-1",
   "shape/declaration-blank-reason-2",
