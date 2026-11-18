@@ -3631,6 +3631,7 @@ expected-check-ids = [
   "stdin/malformed-line-2",
   "stdin/empty-allows",
   "scope/delete-skipped",
+  "scope/leading-zero-oid-checked",
   "scope/non-branch-ref-noted",
   "stdin/over-size-cannot-evaluate",
   "stdin/no-final-lf-cannot-evaluate",
@@ -3723,11 +3724,24 @@ expected-check-ids = [
   "supervise/rename-failure-publishes-nothing",
   "supervise/sync-failure-after-rename-says-published",
   "supervise/inherited-git-vars-dropped",
+  "supervise/git-env-pins",
+  "supervise/export-step-failure-cannot-evaluate",
+  "supervise/export-head-mismatch-cannot-evaluate",
+  "supervise/gitlink-cannot-evaluate",
+  "supervise/no-upstream-cannot-evaluate",
+  "supervise/export-flags-and-locations",
   # ---------- the real runner child ----------
   "child/real-runner-status-signal-and-link",
+  "child/runner-env-drops-git-bash-env-and-functions",
   # ---------- real git ----------
   "realgit/hidden-local-change-not-recorded-as-pass",
   "realgit/pass-recorded-and-push-allowed",
+  "realgit/orphaned-branch-not-recorded-as-pass",
+  "realgit/detached-head-compares-with-upstream",
+  "realgit/no-upstream-cannot-evaluate",
+  "realgit/gitlink-refused-and-staged-gitlink-dirty",
+  "realgit/global-config-and-attributes-do-not-shape-export",
+  "realgit/end-of-run-reads-in-export",
   # ---------- the hook shim ----------
   "hook/shim-execs-and-propagates",
 ]

@@ -10,19 +10,33 @@ malformed result as unverified. This tool makes that checkable at push time for 
       Export HEAD's commit into a fresh temporary directory, run tools/run_all_checks.sh there under
       supervision and publish a record bound to HEAD's full object id at
       <git-common-dir>/aiqt-gate-records/<oid>.jsonl. Exits with the runner's own exit status (a
-      signal n reads as 128+n); 2 when the tree is dirty, HEAD or the git directory cannot be read or
-      the commit cannot be exported (no record is written then).
+      signal n reads as 128+n); 2 when the tree is dirty, HEAD, the git directory or the caller's
+      origin remote-tracking refs cannot be read (or there is no refs/remotes/origin/HEAD), the
+      commit holds a gitlink or the commit cannot be exported (no record is written then).
 
 EXPORT. The runner never runs in the caller's work tree: the supervisor makes a private clone of the
 repository (git clone --shared --no-checkout, objects borrowed through alternates, no hooks template)
 in a fresh temporary directory, detaches its HEAD at the commit, builds a fresh index from the
 commit's tree (read-tree) and writes every file from that index (checkout-index), so the files the
 runner reads are the commit's by construction, whatever the caller's index flags (assume-unchanged,
-skip-worktree), ignored files or uncommitted edits hide. head_at_end and clean_at_end are read in
-that export. The export is removed when the run ends. Cost: one full checkout per run (disk and
-time proportional to the tree), and the runner sees no untracked or ignored local file (a gate that
-needs one fails), no local branch (the export's branches are the caller's as remote-tracking refs
-under origin/) and none of the caller's per-repository configuration.
+skip-worktree), ignored files or uncommitted edits hide. Every git step of the supervisor (the
+caller's reads, the export and every status read) runs with system and global configuration off
+(GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null) and with core.attributesFile and
+core.excludesFile pinned to /dev/null, so no filter, line-ending or attribute setting from them can
+shape the exported files and no global ignore pattern can hide a file from a status read. A commit
+whose tree holds a gitlink (a submodule) is refused (cannot evaluate), because the export cannot
+hold the submodule's files. Refs: the clone's own branches (the caller's local branches, which clone
+writes under refs/heads/ and refs/remotes/origin/) are all deleted, and refs/remotes/origin/* and the
+refs/remotes/origin/HEAD symbolic ref are written from the caller's own remote-tracking refs
+(refs/remotes/origin/* and its origin/HEAD), so a gate that compares HEAD with origin/HEAD or
+origin/<branch> compares it with the caller's upstream, never with the commit's own branch. When
+the caller has no refs/remotes/origin/HEAD naming one of its refs/remotes/origin/* refs the run is
+refused (cannot evaluate; git remote set-head origin --auto sets one). head_at_end and clean_at_end
+are read in that export. The export is removed when the run ends. Cost: one full checkout per run
+(disk and time proportional to the tree), and the runner sees no untracked or ignored local file (a
+gate that needs one fails), no local branch and none of the caller's per-repository configuration;
+the export's origin remote is still the caller's repository itself (clone --shared), so a runner
+that fetches from origin brings the caller's local branches back under refs/remotes/origin/.
   check_push_gate_record.py --pre-push --records DIR REMOTE URL
       Read git's pre-push lines on stdin and refuse (exit 1) every branch update whose pushed commit has
       no acceptable record in DIR; exit 2 on a malformed stdin line or an unreadable DIR; exit 0 when
@@ -58,9 +72,12 @@ DECIDED WHERE THE PLAN LEFT IT OPEN (fail closed): a records directory that is i
 is refused (cannot evaluate, exit 2); a stdin that is not UTF-8, lacks its final LF or exceeds
 MAX_STDIN_BYTES is malformed (exit 2); a carriage return anywhere in a record line refuses the record;
 a supervised run whose end-of-run HEAD or tree status cannot be read publishes no record; the
-supervisor's git reads drop every inherited GIT_* variable, keep the caller's HOME and on-disk config
-(the trust surface a real checkout needs), disable optional locks, replace objects and terminal
-prompts, and carry the automatic-maintenance pins in option position; --supervise refuses (exit 2,
+supervisor's git reads drop every inherited GIT_* variable, read only the repository's own
+configuration (system and global configuration off, so a caller whose repository is trusted only
+through a global safe.directory entry, or whose global ignore patterns hide local files, is refused
+as cannot evaluate or as not clean), disable optional locks, replace objects and terminal prompts,
+and carry the automatic-maintenance and attribute/ignore-file pins in option position; --supervise
+refuses (exit 2,
 no record) when SIGCHLD is ignored in its process, because the runner's exit status could then read
 as 0. That is a disposition read only, not the canonical fork-and-wait guard copy, so
 tools/check_child_status_coverage.py lists this entry point as a direct-launch residual.
@@ -78,8 +95,9 @@ RESIDUALS (what this check does not catch):
     leave its private temporary file in the records directory and its export directory, named
     aiqt-push-gate-export-*, in the temporary directory).
   - The record binds the commit's exported files, not the process that ran: the runner can still
-    read outside the export (an absolute path, the network, the caller's home and global git
-    configuration, the borrowed object store), a change to the export during the run is caught
+    read outside the export (an absolute path, the network, the caller's home, and the caller's
+    global git configuration for any git command the runner itself launches, the borrowed object
+    store), a change to the export during the run is caught
     only when it is still visible to git status at the end, and the caller's own work tree is
     checked only by a git status read at the start (its index flags can hide an edit there,
     which the export makes harmless to the record).
@@ -91,8 +109,11 @@ RESIDUALS (what this check does not catch):
   - Parent directories of the records directory are followed as the path resolves; only its final
     component and the record itself are opened without following a link.
   - The runner inherits the caller's environment except every GIT_* variable (so an inherited
-    GIT_DIR or GIT_WORK_TREE cannot point it back at the caller's tree); the supervisor does not
-    otherwise harden it.
+    GIT_DIR or GIT_WORK_TREE cannot point it back at the caller's tree), BASH_ENV, ENV and every
+    exported bash function (BASH_FUNC_*), so no startup file or inherited function runs inside it;
+    the supervisor does not otherwise harden it (PATH, HOME and the rest are the caller's).
+  - The export's remote-tracking refs are the caller's as last fetched: a stale
+    refs/remotes/origin/* makes the history gates compare with that stale upstream.
   - Only the pushed tip commit of each branch update is checked; the intermediate commits of a
     multi-commit push need no record.
   - A pending rerun refuses the push only until some run publishes: an earlier concurrent run on the
@@ -151,6 +172,13 @@ UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # The automatic-maintenance pins, in option position on every git launch: a status or rev-parse never
 # needs a gc, so none may start one in the caller's repository.
 GIT_PINS = ("-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false")
+# The supervisor's own git launches also pin the attribute and ignore files: with global configuration
+# off, git still reads the default per-user files ($XDG_CONFIG_HOME/git/attributes and .../ignore),
+# which could change the exported bytes (eol, working-tree-encoding) or hide a file from git status.
+SUPERVISOR_PINS = ("-c", "core.attributesFile=" + os.devnull, "-c", "core.excludesFile=" + os.devnull)
+UPSTREAM_PREFIX = "refs/remotes/origin/"
+UPSTREAM_HEAD = "refs/remotes/origin/HEAD"
+GITLINK_MODE = b"160000"
 
 START_KEYS = frozenset(("type", "v", "run_id", "commit", "object_format", "clean_at_start", "started_utc"))
 GATE_KEYS = frozenset(("type", "name", "exit"))
@@ -223,7 +251,8 @@ def _is_hex(text, lengths=(40, 64)):
 
 
 def _is_zero_oid(text):
-    return bool(text) and all(c == "0" for c in text)
+    """True only for the all-zero object id (git's deletion marker) of a supported length."""
+    return _is_hex(text) and text == "0" * len(text)
 
 
 def _utc_ok(value):
@@ -563,19 +592,25 @@ def check_push(stdin_bytes, records_dir, out):
 # The supervisor
 # ---------------------------------------------------------------------------------------------------
 
-def _git_env():
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+def _git_env(source=None):
+    """The environment of every supervisor git launch: source (os.environ when None; the self-test
+    passes a hermetic one) without any GIT_* variable, with system and global configuration off."""
+    source = os.environ if source is None else source
+    env = {key: value for key, value in source.items() if not key.startswith("GIT_")}
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_OPTIONAL_LOCKS"] = "0"
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
     return env
 
 
-def _git_query(root, args, env=None):
-    """(exit status, stdout bytes) of one git call in root; CannotEvaluate when git cannot be launched.
-    env None is _git_env(); the self-test passes a hermetic environment."""
+def _git_query(root, args, env=None, data=None):
+    """(exit status, stdout bytes) of one git call in root, with data (bytes) on its stdin when given;
+    CannotEvaluate when git cannot be launched. env None is _git_env()."""
+    feed = {"stdin": subprocess.DEVNULL} if data is None else {"input": data}
     try:
-        done = subprocess.run(["git", *GIT_PINS, "-C", str(root), *args], stdin=subprocess.DEVNULL,
+        done = subprocess.run(["git", *GIT_PINS, *SUPERVISOR_PINS, "-C", str(root), *args], **feed,
                               capture_output=True, timeout=GIT_EXPORT_TIMEOUT if args[:1] == ("clone",)
                               else GIT_TIMEOUT, env=_git_env() if env is None else env)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -608,32 +643,85 @@ def _clean(git, root):
     return out == b""
 
 
-def _export(git, root, oid, dest):
+def _ref_lines(out, what):
+    try:
+        text = out.decode("utf-8")
+    except UnicodeDecodeError:
+        raise CannotEvaluate("{} are not UTF-8".format(what))
+    if text and not text.endswith("\n"):
+        raise CannotEvaluate("{} cannot be read (no final LF)".format(what))
+    return text.split("\n")[:-1] if text else []
+
+
+def _upstream(git, root):
+    """The caller's remote-tracking refs: ({refname: oid} under refs/remotes/origin/ without origin/HEAD,
+    the refname origin/HEAD names); CannotEvaluate when there are none or origin/HEAD names none of them."""
+    code, out = git(root, ("for-each-ref", "--format=%(objectname) %(refname)", UPSTREAM_PREFIX.rstrip("/")))
+    if code != 0:
+        raise CannotEvaluate("the remote-tracking refs cannot be read (git exit {})".format(code))
+    refs = {}
+    for line in _ref_lines(out, "the remote-tracking refs"):
+        oid, _, name = line.partition(" ")
+        if not _is_hex(oid) or not name.startswith(UPSTREAM_PREFIX) or " " in name:
+            raise CannotEvaluate("unexpected remote-tracking ref line {!r}".format(line))
+        if name != UPSTREAM_HEAD:
+            refs[name] = oid
+    code, out = git(root, ("symbolic-ref", "--quiet", UPSTREAM_HEAD))
+    target = out[:-1].decode("utf-8", "replace") if code == 0 and out.endswith(b"\n") else None
+    if not refs or target not in refs:
+        raise CannotEvaluate("the caller has no {} naming one of its {}* refs, so the history gates "
+                             "would have no upstream to compare with (run git fetch origin and "
+                             "git remote set-head origin --auto)".format(UPSTREAM_HEAD, UPSTREAM_PREFIX))
+    return refs, target
+
+
+def _export(git, root, oid, dest, upstream):
     """Write the commit oid's tree into dest (a path that does not exist yet) as a private clone of
-    root's repository with HEAD detached at oid, a fresh index from oid's tree and every file
-    written from that index; CannotEvaluate when a step fails or the export's HEAD is not oid."""
-    steps = (
-        (root, ("clone", "--quiet", "--shared", "--no-checkout", "--template=", "--", str(root), str(dest))),
-        (dest, ("update-ref", "--no-deref", "HEAD", oid)),
-        (dest, ("read-tree", "--end-of-options", oid)),
-        (dest, ("checkout-index", "--all", "--force", "--index")),
-    )
-    for where, args in steps:
-        code, _out = git(where, args)
+    root's repository with HEAD detached at oid, a fresh index from oid's tree, every file written
+    from that index, the clone's branches deleted and refs/remotes/origin/* and origin/HEAD set from
+    upstream (_upstream); CannotEvaluate when a step fails, the tree holds a gitlink or the export's
+    HEAD is not oid."""
+    refs, target = upstream
+
+    def step(where, args, data=None):
+        code, out = git(where, args, data=data) if data is not None else git(where, args)
         if code != 0:
             raise CannotEvaluate("the commit cannot be exported (git {} exit {})".format(args[0], code))
+        return out
+
+    step(root, ("clone", "--quiet", "--shared", "--no-checkout", "--template=", "--", str(root), str(dest)))
+    step(dest, ("update-ref", "--no-deref", "HEAD", oid))
+    step(dest, ("read-tree", "--end-of-options", oid))
+    for entry in step(dest, ("ls-files", "--stage", "-z")).split(b"\0"):
+        if entry.split(b" ", 1)[0] == GITLINK_MODE:
+            raise CannotEvaluate("the commit holds a gitlink (submodule) at {}; its files cannot be "
+                                 "exported".format(entry.partition(b"\t")[2].decode("utf-8", "replace")))
+    step(dest, ("checkout-index", "--all", "--force", "--index"))
+    cloned = _ref_lines(step(dest, ("for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes")),
+                        "the export's refs")
+    if cloned:
+        step(dest, ("update-ref", "--no-deref", "--stdin"),
+             data="".join("delete {}\n".format(name) for name in cloned).encode("utf-8"))
+    step(dest, ("update-ref", "--no-deref", "--stdin"),
+         data="".join("create {} {}\n".format(name, refs[name]) for name in sorted(refs)).encode("utf-8"))
+    step(dest, ("symbolic-ref", UPSTREAM_HEAD, target))
     exported, _fmt = _head(git, dest)
     if exported != oid:
         raise CannotEvaluate("the export's HEAD {} is not the commit {}".format(exported, oid))
 
 
+RUNNER_ENV_DROPPED = frozenset(("BASH_ENV", "ENV"))
+
+
 def _runner_env():
-    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    """The caller's environment without any GIT_* variable, BASH_ENV, ENV or exported bash function."""
+    return {key: value for key, value in os.environ.items()
+            if not key.startswith(("GIT_", "BASH_FUNC_")) and key not in RUNNER_ENV_DROPPED}
 
 
 class _RunnerChild:
     """The real runner: bash tools/run_all_checks.sh in root (the export), stdout and stderr merged,
-    read to EOF, with every inherited GIT_* variable dropped."""
+    read to EOF, in _runner_env()."""
 
     def __init__(self, root):
         runner = root / RUNNER_REL
@@ -720,6 +808,7 @@ def supervise(cwd, out, err, git=_git_query, start_runner=_start_runner, replace
         clean_start = _clean(git, root)
         common = _one_line(git, root, ("rev-parse", "--path-format=absolute", "--git-common-dir"),
                            "the git common directory")
+        upstream = _upstream(git, root)
     except CannotEvaluate as exc:
         print("CANNOT_EVALUATE: {}; no record written".format(exc), file=err)
         return EXIT_CANNOT_EVALUATE
@@ -754,7 +843,7 @@ def supervise(cwd, out, err, git=_git_query, start_runner=_start_runner, replace
             try:
                 export_parent = tempfile.mkdtemp(prefix=EXPORT_PREFIX)
                 tree = Path(export_parent) / "tree"
-                _export(git, root, head, tree)
+                _export(git, root, head, tree, upstream)
                 clean_start = clean_start and _clean(git, tree)
             except (OSError, CannotEvaluate) as exc:
                 print("CANNOT_EVALUATE: {}; no record written".format(exc), file=err)
@@ -873,8 +962,10 @@ def main(argv):
 # SELF-TEST: production code ends here. Every fixture lives in a temporary directory. Most supervisor
 # rows inject a fake git and a fake runner through supervise()'s parameters (never through the command
 # line); the child/ rows run the real runner child, and the realgit/ rows and the hook shim row run
-# real git in repositories made with git init, under a hermetic git environment (_hermetic_git_env),
-# so the git-fixture-env config lanes' poisoned caller configuration never reaches them. Each case asserts through the check() choke point; the executed id set is reconciled
+# real git in repositories made with git init, under a hermetic git environment (_hermetic_git_env;
+# the supervisor's git calls get the production _git_env() built from it, and two realgit/ rows build
+# it from a deliberately poisoned home instead), so the git-fixture-env config lanes' poisoned caller
+# configuration never reaches them. Each case asserts through the check() choke point; the executed id set is reconciled
 # against tools/selftest_checks.toml (suite push-gate-record-selftest) by tools/check_selftest_execution.py.
 # A revert/ case switches one RULES entry off (_reverted) and requires the same fixture to flip: to
 # acceptance where the rule is the record's only defect, otherwise to a refusal by a later reason, which
@@ -974,15 +1065,32 @@ class _FakeGit:
     """Answers the supervisor's git calls from fixed values. HEAD answers (start in the work tree, then
     in the export after it is made, then in the export at the end) and status answers (the work tree,
     the export at the start, the export at the end) are consumed in order, the last one repeating; a
-    HEAD answer of None is a failed read. The export steps succeed and make the export directory."""
+    HEAD answer of None is a failed read. The export steps succeed and make the export directory, unless
+    fail(where, args) is true for the call (exit 128). upstream is the caller's for-each-ref answer and
+    origin_head its origin/HEAD symbolic ref (None: none); stage is the export's ls-files answer."""
 
-    def __init__(self, root, common, heads=(OID,), fmt="sha1", statuses=(b"",)):
+    def __init__(self, root, common, heads=(OID,), fmt="sha1", statuses=(b"",), fail=None,
+                 upstream=(OTHER + " " + UPSTREAM_HEAD + "\n" + OTHER + " refs/remotes/origin/main\n").encode(),
+                 origin_head=b"refs/remotes/origin/main\n", stage=b""):
         self.root, self.common, self.fmt = root, common, fmt
         self.heads, self.statuses = list(heads), list(statuses)
+        self.fail, self.upstream, self.origin_head, self.stage = fail, upstream, origin_head, stage
         self.calls = []
 
-    def __call__(self, where, args):
-        self.calls.append((Path(where), tuple(args)))
+    def __call__(self, where, args, data=None):
+        self.calls.append((Path(where), tuple(args), data))
+        if self.fail is not None and self.fail(Path(where), tuple(args)):
+            return 128, b""
+        if args[0] == "for-each-ref":
+            if "%(objectname)" in args[1]:
+                return 0, self.upstream
+            return 0, b"refs/heads/main\nrefs/remotes/origin/HEAD\nrefs/remotes/origin/main\n"
+        if args[:2] == ("symbolic-ref", "--quiet"):
+            return (1, b"") if self.origin_head is None else (0, self.origin_head)
+        if args[0] == "ls-files":
+            return 0, self.stage
+        if args[0] == "symbolic-ref":
+            return 0, b""
         if args == ("rev-parse", "--show-toplevel"):
             return 0, (str(self.root) + "\n").encode()
         if args[:2] == ("rev-parse", "--verify"):
@@ -1027,7 +1135,7 @@ PASS_OUTPUT = (b"--- a ---\n", b"ok\n", b"\n", b"--- b ---\n", b"\n", b"RESULT: 
 
 def _supervise_case(base, name, lines=PASS_OUTPUT, status=0, statuses=(b"",), during=None,
                     raise_at=None, replace=os.replace, prior=None, heads=(OID,), sync_dir=_sync_dir,
-                    records_link=False, messages=None):
+                    records_link=False, messages=None, git_kw=None, fakes=None):
     root = Path(base) / name
     common = root / ".git"
     common.mkdir(parents=True)
@@ -1048,15 +1156,18 @@ def _supervise_case(base, name, lines=PASS_OUTPUT, status=0, statuses=(b"",), du
         return child
 
     out, err = io.BytesIO(), io.StringIO()
-    code = supervise(root, out, err, git=_FakeGit(root, common, heads=heads, statuses=statuses),
-                     start_runner=fake_runner, replace=replace, sync_dir=sync_dir)
+    fake = _FakeGit(root, common, heads=heads, statuses=statuses, **(git_kw or {}))
+    if fakes is not None:
+        fakes.append(fake)
+    code = supervise(root, out, err, git=fake, start_runner=fake_runner, replace=replace, sync_dir=sync_dir)
     if messages is not None:
         messages.append(err.getvalue())
     return code, records, final, spawned, out.getvalue()
 
 
 def _hermetic_git_env(base):
-    """The environment of every real git call the self-test makes: built from nothing but PATH, with
+    """The environment of the self-test's real git calls (the source of _git_env() for the supervisor's
+    own calls; _poisoned_home derives a poisoned one from it): built from nothing but PATH, with
     HOME and XDG_CONFIG_HOME at an empty private directory, system and global configuration off and
     no inherited GIT_* variable, so a poisoned caller configuration (the git-fixture-env config
     lanes) never reaches a fixture."""
@@ -1075,8 +1186,15 @@ def _git_fixture(env, repo, *args):
                           capture_output=True, timeout=GIT_TIMEOUT, check=True).stdout
 
 
-def _real_repo(base, name, files, env):
-    """A real repository made with git init, holding files {relative path: text} in one commit."""
+def _set_upstream(env, repo, oid):
+    """The caller's remote-tracking refs: refs/remotes/origin/main at oid and origin/HEAD naming it."""
+    _git_fixture(env, repo, "update-ref", "refs/remotes/origin/main", oid)
+    _git_fixture(env, repo, "symbolic-ref", UPSTREAM_HEAD, "refs/remotes/origin/main")
+
+
+def _real_repo(base, name, files, env, upstream=True):
+    """A real repository made with git init, holding files {relative path: text} in one commit; with
+    upstream, refs/remotes/origin/main is that commit and origin/HEAD names it."""
     repo = Path(base) / name
     repo.mkdir()
     _git_fixture(env, repo, "init", "--quiet", "--template=")
@@ -1086,14 +1204,33 @@ def _real_repo(base, name, files, env):
         path.write_text(text, encoding="utf-8")
     _git_fixture(env, repo, "add", "--all")
     _git_fixture(env, repo, "commit", "--quiet", "--no-verify", "-m", "fixture")
-    return repo, _git_fixture(env, repo, "rev-parse", "HEAD").decode().strip()
+    oid = _git_fixture(env, repo, "rev-parse", "HEAD").decode().strip()
+    if upstream:
+        _set_upstream(env, repo, oid)
+    return repo, oid
 
 
 def _real_supervise(repo, env):
-    """supervise() with real git (hermetic) and the real runner child; (exit, stdout bytes, err text)."""
+    """supervise() with real git and the real runner child; (exit, stdout bytes, err text). git runs in
+    the production _git_env() built from env (the hermetic one, or a poisoned home's) instead of
+    os.environ."""
     out, err = io.BytesIO(), io.StringIO()
-    code = supervise(repo, out, err, git=lambda where, args: _git_query(where, args, env=env))
+    code = supervise(repo, out, err,
+                     git=lambda where, args, data=None: _git_query(where, args, env=_git_env(env), data=data))
     return code, out.getvalue(), err.getvalue()
+
+
+def _poisoned_home(base, env):
+    """env with HOME and XDG_CONFIG_HOME at a home whose global configuration defines a smudge/clean
+    filter (no -> yes) and whose per-user attribute and ignore files set flag.txt to CRLF line endings
+    and ignore stray.txt; the supervisor's git must read none of them."""
+    home = Path(base) / "poisoned-home"
+    (home / "xdg" / "git").mkdir(parents=True)
+    (home / ".gitconfig").write_text(
+        '[filter "poison"]\n\tsmudge = sed s/no/yes/\n\tclean = sed s/yes/no/\n', encoding="utf-8")
+    (home / "xdg" / "git" / "attributes").write_text("flag.txt text eol=crlf\n", encoding="utf-8")
+    (home / "xdg" / "git" / "ignore").write_text("stray.txt\n", encoding="utf-8")
+    return dict(env, HOME=str(home), XDG_CONFIG_HOME=str(home / "xdg"))
 
 
 def _real_records(repo):
@@ -1170,6 +1307,12 @@ def self_test(red_on_revert, report_path=None):
         check("stdin/empty-allows", cases.push("")[0], 0)
         deletion = "(delete) {} refs/heads/old {}\n".format("0" * 40, OTHER)
         check("scope/delete-skipped", cases.push(deletion)[0], 0)
+        # Only the all-zero id is a deletion: a pushed commit whose id merely starts with (or is mostly)
+        # zeros, without a record, is refused.
+        check("scope/leading-zero-oid-checked",
+              (cases.push(_branch_line("0" + "3f" * 19 + "e"))[0], cases.push(_branch_line("0" * 39 + "1"))[0],
+               cases.push(_branch_line("0" * 64))[0]),
+              (1, 1, 0))
         tag = "refs/tags/v1 {} refs/tags/v1 {}\n".format(OID, "0" * 40)
         code, text = cases.push(tag)
         check("scope/non-branch-ref-noted", (code, "NOTE: refs/tags/v1" in text), (0, True))
@@ -1516,6 +1659,74 @@ def self_test(red_on_revert, report_path=None):
         check("supervise/inherited-git-vars-dropped",
               ("GIT_DIR" in git_env, "GIT_DIR" in runner_env, git_env.get("GIT_OPTIONAL_LOCKS")),
               (False, False, "0"))
+        pinned = _git_env({"PATH": os.defpath, "GIT_DIR": "x", "GIT_CONFIG_GLOBAL": "/poison",
+                           "GIT_CONFIG_SYSTEM": "/poison", "GIT_CONFIG_COUNT": "1"})
+        check("supervise/git-env-pins",
+              {key: value for key, value in pinned.items() if key.startswith("GIT_")},
+              {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_OPTIONAL_LOCKS": "0",
+               "GIT_TERMINAL_PROMPT": "0", "GIT_NO_REPLACE_OBJECTS": "1"})
+
+        # Every export step's exit status is read: a failure of any one refuses before the runner starts.
+        failing_steps = {
+            "clone": lambda where, args: args[0] == "clone",
+            "detach": lambda where, args: args[:3] == ("update-ref", "--no-deref", "HEAD"),
+            "read-tree": lambda where, args: args[0] == "read-tree",
+            "ls-files": lambda where, args: args[0] == "ls-files",
+            "checkout-index": lambda where, args: args[0] == "checkout-index",
+            "export-refs": lambda where, args: args[0] == "for-each-ref" and where.name == "tree",
+            "ref-writes": lambda where, args: args[:3] == ("update-ref", "--no-deref", "--stdin"),
+            "origin-head": lambda where, args: args[0] == "symbolic-ref" and where.name == "tree",
+        }
+        step_rows = {}
+        for step_name, predicate in failing_steps.items():
+            code, records, final, spawned, shown = _supervise_case(base, "step-" + step_name,
+                                                                   git_kw={"fail": predicate})
+            step_rows[step_name] = (code, len(spawned), final.exists())
+        check("supervise/export-step-failure-cannot-evaluate", step_rows,
+              {step_name: (2, 0, False) for step_name in failing_steps})
+        code, records, final, spawned, shown = _supervise_case(base, "export-head", heads=(OID, OTHER))
+        check("supervise/export-head-mismatch-cannot-evaluate", (code, len(spawned), final.exists()),
+              (2, 0, False))
+        gitlink_stage = b"100644 " + OID.encode() + b" 0\ta\0" + b"160000 " + OTHER.encode() + b" 0\tsub\0"
+        messages = []
+        code, records, final, spawned, shown = _supervise_case(base, "export-gitlink", messages=messages,
+                                                               git_kw={"stage": gitlink_stage})
+        check("supervise/gitlink-cannot-evaluate",
+              (code, len(spawned), final.exists(), "gitlink (submodule) at sub" in messages[0]),
+              (2, 0, False, True))
+
+        # The caller's remote-tracking refs: none, no origin/HEAD, or an origin/HEAD naming no listed ref.
+        upstream_rows = []
+        for name, kw in (("no-upstream", {"upstream": b""}), ("no-origin-head", {"origin_head": None}),
+                         ("dangling-origin-head", {"origin_head": b"refs/remotes/origin/gone\n"})):
+            code, records, final, spawned, shown = _supervise_case(base, name, git_kw=kw)
+            upstream_rows.append((code, len(spawned), final.exists()))
+        check("supervise/no-upstream-cannot-evaluate", upstream_rows, [(2, 0, False)] * 3)
+
+        # Where and how each git step runs: the clone's flags, the status flags, the end-of-run reads in
+        # the export, and the export's refs rewritten from the caller's remote-tracking refs.
+        fakes = []
+        code, records, final, spawned, shown = _supervise_case(base, "flags", fakes=fakes)
+        calls, tree = fakes[0].calls, spawned[0] if spawned else None
+        root = Path(base) / "flags"
+        clone_args = [args for where, args, data in calls if args[0] == "clone"]
+        status_calls = [(where, args) for where, args, data in calls if args[0] == "status"]
+        ref_writes = [(args[0], args[-1] if args[0] == "symbolic-ref" else data)
+                      for where, args, data in calls
+                      if where == tree and (args[:3] == ("update-ref", "--no-deref", "--stdin")
+                                            or args[0] == "symbolic-ref")]
+        check("supervise/export-flags-and-locations",
+              (code, len(clone_args) == 1 and {"--shared", "--no-checkout", "--template="} <= set(clone_args[0]),
+               [where for where, args in status_calls],
+               all("--untracked-files=all" in args and "--ignore-submodules=none" in args
+                   for where, args in status_calls),
+               [where for where, args, data in calls if args[:2] == ("rev-parse", "--verify")],
+               ref_writes),
+              (0, True, [root, tree, tree], True, [root, tree, tree],
+               [("update-ref", b"delete refs/heads/main\ndelete refs/remotes/origin/HEAD\n"
+                               b"delete refs/remotes/origin/main\n"),
+                ("update-ref", "create refs/remotes/origin/main {}\n".format(OTHER).encode()),
+                ("symbolic-ref", "refs/remotes/origin/main")]))
 
         # ---------- the real runner child ----------
         def real_child(name, script, link=False):
@@ -1540,6 +1751,27 @@ def self_test(red_on_revert, report_path=None):
             child_rows = ("child run failed: {}".format(exc),)
         check("child/real-runner-status-signal-and-link", child_rows,
               ((3, b"x\n"), (128 + signal.SIGKILL, b"x\n"), "cannot evaluate"))
+
+        # The real launch's environment: an inherited GIT_DIR, BASH_ENV (a startup file), ENV and an
+        # exported bash function must none of them reach the runner.
+        startup = Path(base) / "bash-env.sh"
+        startup.write_text("MARK=from-bash-env\n", encoding="utf-8")
+        poison_env = {"GIT_DIR": str(Path(base) / "inherited-git-dir"), "BASH_ENV": str(startup),
+                      "ENV": str(startup), "BASH_FUNC_probe%%": "() {  echo poisoned\n}"}
+        saved_env = {key: os.environ.get(key) for key in poison_env}
+        os.environ.update(poison_env)
+        try:
+            env_row = real_child("child-env", "printf '%s|%s|%s|%s\\n' \"${GIT_DIR-unset}\" \"${MARK-unset}\" "
+                                 "\"${ENV-unset}\" \"$(type -t probe || echo none)\"\nexit 0\n")
+        except (OSError, subprocess.SubprocessError) as exc:
+            env_row = "child run failed: {}".format(exc)
+        finally:
+            for key, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        check("child/runner-env-drops-git-bash-env-and-functions", env_row, (0, b"unset|unset|unset|none\n"))
 
         # ---------- real git (repositories made with git init, hermetic git environment) ----------
         genv = _hermetic_git_env(base)
@@ -1576,6 +1808,99 @@ def self_test(red_on_revert, report_path=None):
         except (OSError, subprocess.SubprocessError, IndexError) as exc:
             real_pass = ("real git fixture failed: {}".format(exc),)
         check("realgit/pass-recorded-and-push-allowed", real_pass, (0, 0, True, False))
+
+        # History gates: the runner reads origin/HEAD the way branch-root and mistakes-register do. It
+        # must name the caller's upstream (refs/remotes/origin/main), never the commit's own branch.
+        history = ("printf -- '--- history ---\\n'\n"
+                   "export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null\n"
+                   "t=$(git symbolic-ref refs/remotes/origin/HEAD) || exit 5\n"
+                   "[ \"$t\" = refs/remotes/origin/main ] || exit 6\n"
+                   "git merge-base --is-ancestor refs/remotes/origin/HEAD HEAD || exit 7\n"
+                   "exit 0\n")
+        try:
+            # An orphaned feature branch: the caller's upstream main shares no history with HEAD.
+            repo, oid = _real_repo(base, "real-orphan", {RUNNER_REL: history}, genv, upstream=False)
+            empty = _git_fixture(genv, repo, "mktree").decode().strip()
+            upstream_oid = _git_fixture(genv, repo, "commit-tree", empty, "-m", "upstream").decode().strip()
+            _set_upstream(genv, repo, upstream_oid)
+            code, shown, said = _real_supervise(repo, genv)
+            orphan = (code, _judge_path(_real_records(repo), oid))
+        except (OSError, subprocess.SubprocessError) as exc:
+            orphan = ("real git fixture failed: {}".format(exc),)
+        check("realgit/orphaned-branch-not-recorded-as-pass", orphan, (7, (1, "status-zero")))
+        try:
+            # A detached caller HEAD one commit ahead of its upstream main.
+            repo, base_oid = _real_repo(base, "real-detached", {RUNNER_REL: history}, genv)
+            (repo / "more.txt").write_text("more\n", encoding="utf-8")
+            _git_fixture(genv, repo, "add", "more.txt")
+            _git_fixture(genv, repo, "commit", "--quiet", "--no-verify", "-m", "ahead")
+            _git_fixture(genv, repo, "checkout", "--quiet", "--detach")
+            oid = _git_fixture(genv, repo, "rev-parse", "HEAD").decode().strip()
+            code, shown, said = _real_supervise(repo, genv)
+            detached = (code, oid != base_oid, _judge_path(_real_records(repo), oid))
+        except (OSError, subprocess.SubprocessError) as exc:
+            detached = ("real git fixture failed: {}".format(exc),)
+        check("realgit/detached-head-compares-with-upstream", detached, (0, True, (0, None)))
+        try:
+            repo, oid = _real_repo(base, "real-no-upstream", {RUNNER_REL: "printf -- '--- a ---\\n'\nexit 0\n"},
+                                   genv, upstream=False)
+            code, shown, said = _real_supervise(repo, genv)
+            no_upstream = (code, shown, _judge_path(_real_records(repo), oid))
+        except (OSError, subprocess.SubprocessError) as exc:
+            no_upstream = ("real git fixture failed: {}".format(exc),)
+        check("realgit/no-upstream-cannot-evaluate", no_upstream, (2, b"", (1, "record-present")))
+
+        # Submodules: a committed gitlink is refused; a staged one makes the caller's tree dirty.
+        ok_runner = {RUNNER_REL: "printf -- '--- a ---\\n'\nexit 0\n"}
+        try:
+            repo, first = _real_repo(base, "real-gitlink", ok_runner, genv)
+            (repo / "sub").mkdir()
+            _git_fixture(genv, repo, "update-index", "--add", "--cacheinfo", "160000,{},sub".format(first))
+            _git_fixture(genv, repo, "commit", "--quiet", "--no-verify", "-m", "gitlink")
+            oid = _git_fixture(genv, repo, "rev-parse", "HEAD").decode().strip()
+            code, shown, said = _real_supervise(repo, genv)
+            committed = (code, "gitlink (submodule) at sub" in said, _judge_path(_real_records(repo), oid))
+            repo, oid = _real_repo(base, "real-staged-gitlink", ok_runner, genv)
+            (repo / "sub").mkdir()
+            _git_fixture(genv, repo, "update-index", "--add", "--cacheinfo", "160000,{},sub".format(oid))
+            code, shown, said = _real_supervise(repo, genv)
+            staged = (code, "is not clean" in said, _judge_path(_real_records(repo), oid))
+            gitlink_rows = (committed, staged)
+        except (OSError, subprocess.SubprocessError) as exc:
+            gitlink_rows = ("real git fixture failed: {}".format(exc),)
+        check("realgit/gitlink-refused-and-staged-gitlink-dirty", gitlink_rows,
+              ((2, True, (1, "record-present")), (2, True, (1, "record-present"))))
+
+        # A global smudge/clean filter and per-user attribute file must not change the exported bytes.
+        poisoned = _poisoned_home(base, genv)
+        try:
+            repo, oid = _real_repo(base, "real-filter", {
+                RUNNER_REL: "printf -- '--- a ---\\n'\ncase \"$(cat flag.txt)\" in no) exit 7;; esac\nexit 0\n",
+                "flag.txt": "no\n", ".gitattributes": "flag.txt filter=poison\n"}, genv)
+            code, shown, said = _real_supervise(repo, poisoned)
+            filtered = (code, _judge_path(_real_records(repo), oid))
+        except (OSError, subprocess.SubprocessError) as exc:
+            filtered = ("real git fixture failed: {}".format(exc),)
+        check("realgit/global-config-and-attributes-do-not-shape-export", filtered, (7, (1, "status-zero")))
+
+        # The end-of-run reads happen in the export: a runner that leaves a file (one a per-user ignore
+        # file would hide) or moves the export's HEAD gets no passing record.
+        try:
+            repo, oid = _real_repo(base, "real-stray", {
+                RUNNER_REL: "printf -- '--- a ---\\n'\nprintf 'x\\n' > stray.txt\nexit 0\n"}, genv)
+            code, shown, said = _real_supervise(repo, poisoned)
+            stray = (code, _judge_path(_real_records(repo), oid))
+            repo, oid = _real_repo(base, "real-moved", {
+                RUNNER_REL: "printf -- '--- a ---\\n'\nexport GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null\n"
+                            "git -c user.name=f -c user.email=f@example.invalid commit --quiet --no-verify "
+                            "--allow-empty -m moved || exit 9\nexit 0\n"}, genv)
+            code, shown, said = _real_supervise(repo, genv)
+            moved = (code, _judge_path(_real_records(repo), oid))
+            end_rows = (stray, moved)
+        except (OSError, subprocess.SubprocessError) as exc:
+            end_rows = ("real git fixture failed: {}".format(exc),)
+        check("realgit/end-of-run-reads-in-export", end_rows,
+              ((0, (1, "clean-at-end")), (0, (1, "head-at-end-bind"))))
 
         # ---------- the hook shim ----------
         hook_base = Path(base) / "hook"

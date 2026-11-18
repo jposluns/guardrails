@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "199cae7dbc273ccea44e4376e53b77039a9aefebd744d3f217d0ecf360a5ae00"
+tree-sha256 = "92677efb87bb5fe08319dddc1f19183f1cb837f71613c61b4150840df7462fa2"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4367,8 +4367,8 @@ sha256 = "19f67b226034b74ec9c7e5499c2f02f8e96b3ed53c29bbec5b0ab3e7ef832c4f"
 
 [[sources]]
 path = "tools/check_push_gate_record.py"
-bytes = 77919
-sha256 = "24e927c9684c091c576ecad613d64eec292cf4f07e1c20df2afb26fabd95f933"
+bytes = 99800
+sha256 = "3ff6b429d420b2cd0632a17ddd859ebfdb0a700ba22c693cee0ce573b4ffaa73"
 
 [[sources]]
 path = "tools/check_python_floor.py"
@@ -4737,8 +4737,8 @@ sha256 = "233a3f5c13f63863c1eeb98878aecca0828e4b1877934ece950d4ad5321c768d"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 270116
-sha256 = "f1782c480a51fbfa2c604a995e0eb2d32fe6c2d8801099073c12cee31599e29f"
+bytes = 270759
+sha256 = "b1b7890a71be131fbd5ff4151554ec188997ddb496bafd8b91b1e9448065b656"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
