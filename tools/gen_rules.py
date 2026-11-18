@@ -850,8 +850,13 @@ def _valued_option_failures():
 #   posix.mkfifo, which the os.mkfifo wrapper does not reach, or an extension module's own I/O) is not seen by the
 #   hook, and the status comparison sees it only when it changes a file in the copy: such a write of identical
 #   bytes, or one to a path outside the copy, would pass this check; so would such a write by the allowed git read;
-# - the copy needs a git that archives HEAD with no caller configuration, so a checkout trusted only through the
-#   caller's own safe.directory setting cannot be copied; the check then reports that it built no copy;
+# - the copy is read from the real checkout by `git archive HEAD` in the fixture environment (no caller HOME, XDG
+#   or system configuration is read), with one command-line safe.directory entry naming exactly that checkout, so a
+#   checkout owned by another uid is still copied (_gen_argv_head_copy); that entry trusts the checkout whatever
+#   the caller's own safe.directory setting says, which extends no trust this run had not already extended, since
+#   the self-test is code loaded from that checkout; the foreign-owner row (_gen_argv_foreign_owner_failures)
+#   stands in for the other uid with git's GIT_TEST_ASSUME_DIFFERENT_OWNER switch, so a git that ignores that
+#   switch is reported, not passed;
 # - only files matching gen_*.py directly in tools/ are enumerated, so a generator nested in a subdirectory or
 #   named otherwise is not checked.
 _GEN_ARGV_CLASS_CASES = (["--chek"], ["--check", "--chek"], ["--self-test", "--chek"], ["--help"], ["check"],
@@ -1132,15 +1137,16 @@ def _gen_argv_restore(stale, repo, label):
     return failures
 
 
-def _gen_argv_git(cwd, *args):
+def _gen_argv_git(cwd, *args, **overrides):
     """Run git in cwd with the fixture environment (_git_fixture_env.git_fixture_env: no GIT_* variable of the
-    caller, a scratch HOME, global and system configuration pinned to os.devnull) and pinned options."""
+    caller, a scratch HOME, global and system configuration pinned to os.devnull) and pinned options. overrides
+    are git_fixture_env's keyword overrides (only the foreign-owner row passes one)."""
     import subprocess
     from _git_fixture_env import git_fixture_env
     return subprocess.run(["git", "-C", str(cwd), "-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null",
                            "-c", "user.name=aiqt-selftest", "-c", "user.email=selftest@invalid",
                            "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", *args],
-                          capture_output=True, timeout=300, env=git_fixture_env())
+                          capture_output=True, timeout=300, env=git_fixture_env(**overrides))
 
 
 def _gen_argv_status(repo):
@@ -1195,14 +1201,20 @@ def _gen_argv_bytecode(rel):
     return len(parts) >= 2 and parts[-2] == "__pycache__" and parts[-1].endswith(".pyc")
 
 
-def _gen_argv_head_copy(root, dest):
+def _gen_argv_head_copy(root, dest, **overrides):
     """Build at dest (which must not exist) a throwaway git repository holding the committed tree of root's HEAD:
     `git archive HEAD` of root, extracted into dest, then git init, add and commit there. Return None, or a
-    failure line when the copy could not be built."""
+    failure line when the copy could not be built.
+    The archive read is the one git call here on a checkout this self-test did not create. It keeps the fixture
+    environment, so no caller or system configuration is read, and carries exactly one command-line safe.directory
+    entry, naming root and nothing else, so a root owned by another uid is still read (git honours safe.directory
+    given on the command line). The fixture calls in dest carry no such entry. overrides go to the archive read's
+    environment only (the foreign-owner row)."""
     import tarfile
     dest.mkdir()
     tar = dest.parent / (dest.name + ".tar")
-    done = _gen_argv_git(root, "archive", "--format=tar", "-o", str(tar), "HEAD")
+    done = _gen_argv_git(root, "-c", "safe.directory=" + str(Path(root).resolve()), "archive", "--format=tar", "-o",
+                         str(tar), "HEAD", **overrides)
     if done.returncode != 0:
         return "class check: built no copy, git archive HEAD of {} failed (exit {}): {!r}".format(
             root, done.returncode, done.stderr.decode("utf-8", "replace")[-300:])
@@ -1227,6 +1239,71 @@ def _gen_argv_commit(dest):
             return "class check: built no copy, git {} failed in {} (exit {}): {!r}".format(
                 args[0], dest, done.returncode, done.stderr.decode("utf-8", "replace")[-300:])
     return None
+
+
+# The foreign-owner row: the class check's read of the real checkout must work on a checkout owned by another uid
+# (git refuses such a checkout as of dubious ownership unless protected configuration names it in safe.directory,
+# and the fixture environment pins away the caller's global configuration where that entry usually lives). The
+# self-test cannot change a file's owner, so git's own test switch GIT_TEST_ASSUME_DIFFERENT_OWNER=1 (git's ownership
+# check then treats the checkout as another uid's) stands in, given to the archive read only. A control shows the
+# switch bites on this git: the same read with no safe.directory entry must be refused for dubious ownership, so a
+# git that ignores the switch is reported rather than passed. Then _gen_argv_head_copy must build the copy (red when
+# its safe.directory entry is removed), with exactly one safe.directory entry, naming that checkout, on the archive
+# read and none on any fixture call.
+_GEN_ARGV_FOREIGN_OWNER = {"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}
+
+
+def _gen_argv_foreign_owner_failures():
+    """The foreign-owner row (see the comment above): one failure line per broken expectation."""
+    import shutil
+    import tempfile
+    failures = []
+    real = _gen_argv_git
+    calls = []
+
+    def recording(cwd, *args, **overrides):
+        calls.append((Path(cwd), args, overrides))
+        return real(cwd, *args, **overrides)
+
+    tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-argv-owner-"))
+    try:
+        source = tmp / "checkout"
+        source.mkdir()
+        (source / "seed.txt").write_text("seed\n", encoding="utf-8")
+        problem = _gen_argv_commit(source)
+        if problem:
+            return ["foreign-owner row: " + problem]
+        trust = "safe.directory=" + str(source.resolve())
+        control = real(source, "archive", "--format=tar", "-o", str(tmp / "control.tar"), "HEAD",
+                       **_GEN_ARGV_FOREIGN_OWNER)
+        control_err = control.stderr.decode("utf-8", "replace")
+        if control.returncode == 0 or "dubious ownership" not in control_err:
+            failures.append("foreign-owner control: under {} the archive read with no safe.directory entry must be "
+                            "refused for dubious ownership, or the row proves nothing; got exit {}, stderr "
+                            "{!r}".format(_GEN_ARGV_FOREIGN_OWNER, control.returncode, control_err[-300:]))
+        copy = tmp / "copy"
+        globals()["_gen_argv_git"] = recording
+        try:
+            got = _gen_argv_head_copy(source, copy, **_GEN_ARGV_FOREIGN_OWNER)
+        finally:
+            globals()["_gen_argv_git"] = real
+        seed = copy / "seed.txt"
+        if got is not None or not seed.is_file() or seed.read_text(encoding="utf-8") != "seed\n":
+            failures.append("foreign-owner row: the copy of a checkout git treats as another uid's must be built "
+                            "with its committed files; got {!r}, seed.txt {}".format(
+                                got, "present" if seed.is_file() else "absent"))
+        archives = [call for call in calls if "archive" in call[1]]
+        entries = [[arg for arg in args if arg.startswith("safe.directory")] for _cwd, args, _env in calls]
+        expected = [[trust]] + [[]] * (len(calls) - 1)
+        if (len(archives) != 1 or calls[:1] != archives or archives[0][0] != source
+                or archives[0][2] != _GEN_ARGV_FOREIGN_OWNER or entries != expected
+                or any(overrides for _cwd, _args, overrides in calls[1:])):
+            failures.append("foreign-owner row: expected the archive read of {} first, with the one entry {!r} and "
+                            "the owner switch, then only fixture calls with no safe.directory entry and no override; "
+                            "got {!r}".format(source, trust, calls))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return failures
 
 
 def _gen_argv_refusal(err, name):
@@ -2793,6 +2870,9 @@ def self_test_main():
     # ends at a write in the copy and its --check run exits 1 with nothing blocked; it runs in a throwaway copy of
     # HEAD, never in the working tree.
     failures.extend(_gen_argv_class_check_failures())
+    # The class check's real-checkout read still copies a checkout owned by another uid, trusting that checkout
+    # alone (red when the read's safe.directory entry is removed).
+    failures.extend(_gen_argv_foreign_owner_failures())
 
     if failures:
         print("SELF-TEST FAIL:")
