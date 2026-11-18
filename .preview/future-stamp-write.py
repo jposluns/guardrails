@@ -2394,7 +2394,7 @@ def _target_status(w, cwds, ctx, budget=None):
     if budget is not None:
         budget.spend(CWD_COST * (len(cwds) + 1))
     if ctx.names(w):
-        return "store"  # a store path token anywhere in the word (the lexical rule of every earlier round)
+        return "store"  # a store path token anywhere in the word (the lexical rule of every earlier version of this hook)
     if w.startswith("/"):
         return "other"
     if w.startswith("~"):

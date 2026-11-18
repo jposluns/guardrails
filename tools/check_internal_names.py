@@ -105,18 +105,31 @@ docs/tracker-labels.md); exit 0 clean, 1 on a finding, 2 when it cannot evaluate
 
 SWEPT-PATH ZERO-TOLERANCE LAYER (scan_swept_labels). A tracked file under a SWEPT_PREFIXES prefix (an
 area already swept clean of review-round labels) tolerates NO match of the SWEPT_LABELS rows: a
-reviewer family next to an upper-case grade word or one-letter grade id, a QA round number with a
+reviewer family next to an upper-case grade word or one-letter grade id (numbered with a hyphen and
+digits or not), a QA round number with a
 family after it, a bare QA round number (with or without the round word) that is not a path or
 pattern segment, a family next to a round number, a family next to a mutation, mutant or flip word,
-a bare round number that is not a loop count (right after "retry", or followed by "of"), a model
+a bare round number that is not a loop count (right after "retry", or followed by "of"; an
+underscore separates like a space, so one inside an identifier is a hit), a model
 identifier (a family or vendor prefix, a hyphen and a version digit) that does not open a quoted
 string, a family used as an attribution (before a colon or a slash, or a possessive followed within
 one word by review vocabulary), a review finding or item (numbered or not, "peer" or not) followed by
-a parenthesised upper-case grade or a false-deny-style verdict, and a review-round-derived test_r
-test name; the family and the review words match in any case, the grade words in upper case only.
-The narrowing keeps ordinary prose and command data legal under a swept path: a family's reasoning
-effort written in lower case, a family's possessive before an ordinary noun, a loop count, a quoted
-model setting and a process-search pattern token are not hits. Each line is also read joined to the
+a parenthesised upper-case grade or a false-deny-style verdict, or preceded by an upper-case grade
+word or id, or by a grade word in any case and the word "review", and a review-round-derived test_r
+test name; the family and the review words match in any case, the grade words in upper case only
+except before "review".
+The narrowing keeps some ordinary prose and command data out of these rows: a family's reasoning
+effort written in lower case, a family's possessive before an ordinary noun (or before an ordinary
+noun and a verb such as notes, points, flags or reports, which are not review vocabulary here), a
+loop count, a quoted model setting and a process-search pattern token are not hits of this layer.
+That is all the narrowing claims. The rows still flag other ordinary prose and command data under a
+swept path (an over-block, not a miss): a family before a colon or a slash in a URL, a path or a
+settings line, a round number in prose that is neither right after "retry" nor followed by "of", a
+QA token in a process-search argument with no slash after it, and a model identifier unquoted or
+inside a longer quoted string. And a swept file that is also a shipped source is read by the
+tracker-label ratchet above as well; a preview file has no baseline entry, so a lower-case effort
+word after a family and a loop count with the round word next to its digit are still ratchet hits
+there, and the real gate fails them. Each line is also read joined to the
 next one (the break, the next line's indentation and comment or quote leader collapsed to one space),
 so a label wrapped across a line break is a hit on the line where it starts. A hit is a finding (exit
 1), never a ratcheted count, there is no baseline, no allowlist and no line marker, and the rows are
@@ -125,8 +138,10 @@ digit stays legal only OUTSIDE a swept path). Unswept areas are untouched by thi
 runs beside the preview-only _PREVIEW_LABELS patterns of scan_scope, which keep their internal-allow
 line exemption; a swept-path hit has none, so a test_r name on an internal-allow line is still a
 finding here. DISCLOSED LIMITS: a label written outside these shapes (a family name alone, a bare
-grade word, a grade word in lower case after a family name, a family possessive before a word that
-is not review vocabulary, a round number after "retry" or before "of", a model identifier opening a
+grade word, a grade word in lower case after a family name, a grade word in lower case before
+finding or item with no "review" between, a family possessive before a word that is not review
+vocabulary, a round-derived helper or fixture name with no round word (a bare r or state number),
+a round number after "retry" or before "of", a model identifier opening a
 quoted string, a QA round number written as a path or pattern segment, a label split across more
 than one line break, inside a word or with other punctuation at the break, or encoded) is not
 matched, and SWEPT_PREFIXES is hand-grown, so an area is covered only once a sweep adds it.
@@ -475,11 +490,16 @@ _SWEPT_FAM_ANY_CASE = r"(?i:" + _SWEPT_FAM[3:]
 _SWEPT_GRADE = r"(?:BLOCKER|BLOCKING|CRITICAL|MAJOR|MEDIUM|MED|MINOR|HIGH|LOW|NIT|[A-UW-Z][0-9]+)"
 _SWEPT_ROUND = r"rou" + r"nds?"
 # The review vocabulary an attributing possessive must reach within one word ("<family>'s exact repro").
+# Words that are as often verbs as nouns ("<family>'s reply notes the date", "... output points at",
+# "... answer flags nothing", "... log reports the code") are left out, so that ordinary prose stays legal.
 _SWEPT_REVIEW_NOUN = (r"(?:find" + r"ings?|reviews?|repros?|reproductions?|verdicts?|mutants?|mutations?"
-                      r"|objections?|catch(?:es)?|notes?|points?|flags?|reports?)")
+                      r"|objections?|catch(?:es)?)")
+# A grade word in any case, used only where the word "review" must follow it.
+_SWEPT_GRADE_WORD_ANY_CASE = r"(?i:blocker|blocking|critical|major|medium|med|minor|high|low|nit)"
 SWEPT_LABELS = (
-    # a reviewer family (any case) directly before an upper-case grade word or a one-letter grade id
-    (re.compile(r"\b" + _SWEPT_FAM_ANY_CASE + r"[ -]?" + _SWEPT_GRADE + r"(?![\w-])"),
+    # a reviewer family (any case) directly before an upper-case grade word or a one-letter grade id,
+    # optionally numbered with a hyphen and digits ("<family> MEDIUM-1")
+    (re.compile(r"\b" + _SWEPT_FAM_ANY_CASE + r"[ -]?" + _SWEPT_GRADE + r"(?:-[0-9]+)?(?![\w-])"),
      "a reviewer family before a grade"),
     # a QA round number with a reviewer family after it
     (re.compile(r"\bQA[ -]?[0-9]+\W{0,3}" + _SWEPT_FAM + r"\b", re.IGNORECASE),
@@ -496,9 +516,13 @@ SWEPT_LABELS = (
     # a reviewer family next to a mutation, mutant or flip word
     (re.compile(r"\b" + _SWEPT_FAM + r"[ -]?(?:mutation|mutant|flip)s?\b", re.IGNORECASE),
      "a reviewer family before a mutation word"),
-    # a bare round number ("n" after the round word with one space or hyphen), except a loop count:
-    # one right after "retry" or one followed by "of" (a retry count, or a count "of the loop")
-    (re.compile(r"(?<!retry )(?<!retry-)\b" + _SWEPT_ROUND + r"[ -][0-9]+\b(?!\s+of\b)", re.IGNORECASE),
+    # a bare round number ("n" after the round word with one space, hyphen or underscore), except a
+    # loop count: one right after "retry" or one followed by "of" (a retry count, or a count "of the
+    # loop"). An underscore separates like a space, so a round number inside an identifier is one; the
+    # round word must not continue a longer word ("playground") and the number must not run into a
+    # letter or digit.
+    (re.compile(r"(?<!retry )(?<!retry-)(?<!retry_)(?<![^\W_])" + _SWEPT_ROUND + r"[ _-][0-9]+(?![^\W_])"
+                r"(?!\s+of\b)", re.IGNORECASE),
      "a bare review-round number"),
     # a model identifier: a family or vendor model prefix, a hyphen, an optional tier word and a
     # version digit (a dotted path segment such as a settings directory is not one, and nor is one
@@ -512,9 +536,13 @@ SWEPT_LABELS = (
                 re.IGNORECASE),
      "a reviewer family used as an attribution"),
     # a numbered or unnumbered review finding or item followed by a parenthesised upper-case grade or
-    # a verdict ("finding 3 (MED)", "item 1 (BLOCKING)", "peer finding (HIGH)", "item 3 (false deny)")
+    # a verdict ("finding 3 (MED)", "item 1 (BLOCKING)", "peer finding (HIGH)", "item 3 (false deny)"),
+    # or preceded by its grade: an upper-case grade word or id ("MAJOR finding", "HIGH review item"),
+    # or a grade word in any case followed by the word review ("a blocking review finding")
     (re.compile(r"(?i:\b(?:peer[ -])?(?:find" + r"ing|item)s?)(?:[ -]?[0-9]+[a-z]?)?\s*\(\s*(?:"
-                + _SWEPT_GRADE + r"(?![\w-])|(?i:false[ -](?:deny|allow|positive|negative|block)\b))"),
+                + _SWEPT_GRADE + r"(?![\w-])|(?i:false[ -](?:deny|allow|positive|negative|block)\b))"
+                r"|\b(?:" + _SWEPT_GRADE + r"[ -](?i:(?:peer|review)[ -])?|" + _SWEPT_GRADE_WORD_ANY_CASE
+                + r"[ -](?i:peer[ -])?(?i:review)[ -])(?i:find" + r"ing|item)s?\b"),
      "a review finding or item with a grade"),
     # a review-round-derived test name, here with no internal-allow exemption
     (re.compile(r"\btest_r" + r"[0-9]+[a-z]?_"), "a review-round test name"),
@@ -3894,6 +3922,7 @@ def _self_test(caller_env=None):
         for row, check_id, vector in (
                 (0, "swept/row-family-grade", "codex" + " MED" + "IUM"),
                 (0, "swept/row-family-letter-grade", "claude" + " M3"),
+                (0, "swept/row-family-numbered-grade", "(cla" + "ude MED" + "IUM-1): x"),
                 (1, "swept/row-qa-then-family", "QA" + "21 codex"),
                 (2, "swept/row-bare-qa-round", "qa" + "8 P1"),
                 (2, "swept/row-qa-round-word", "QA rou" + "nd 24"),
@@ -3901,10 +3930,13 @@ def _self_test(caller_env=None):
                 (4, "swept/row-family-mutation", "codex" + " mutant 1"),
                 (5, "swept/row-bare-round", "Rou" + "nd 31"),
                 (5, "swept/row-bare-round-hyphen", "rou" + "nd-7"),
+                (5, "swept/row-bare-round-identifier", "def test_39_rou" + "nd_9_x(self):"),
                 (8, "swept/row-review-finding-grade", "fin" + "ding 3 (MED)"),
                 (8, "swept/row-review-item-blocking", "it" + "em 1 (BLOCK" + "ING): x"),
                 (8, "swept/row-review-peer-finding", "peer fin" + "ding (HI" + "GH): x"),
                 (8, "swept/row-review-item-verdict", "it" + "em 3 (false" + " deny): x"),
+                (8, "swept/row-review-grade-before-finding", "a blocking review fin" + "ding (x): y"),
+                (8, "swept/row-review-upper-grade-before-item", "a MAJ" + "OR it" + "em: y"),
                 (9, "swept/row-review-test-name", "def test" + "_r13_case(self):  # internal" + "-allow")):
             key = SWEPT_ROW_KEYS[row]
             intact = _swept_hits("a {} b\n".format(vector))[key]
@@ -3944,7 +3976,14 @@ def _self_test(caller_env=None):
         swept_clean = ("rou" + "nd-trip", "rou" + "nding to 2 places", "Claude 5", "QA", "codex",
                        "a fable retold", "gemini", "the final rou" + "nd", "quality assurance",
                        "~/.claude/rules/x.md", "$CLAUDE" + "_PROJECT_DIR/records", "Claude Code's Edit",
-                       "Claude 3 Opus", "the final rou" + "nd\n# of checks")
+                       "Claude 3 Opus", "the final rou" + "nd\n# of checks",
+                       # a possessive before an ordinary noun and a verb, a round word inside a longer
+                       # word or identifier, a retry counter, a hyphenated word after a grade, and a
+                       # grade word before finding or item with no review word between
+                       "Claude's output points at the file", "Claude's answer flags nothing here",
+                       "Claude's log reports the exit code", "playground_3", "def test_rou" + "nd_trip(self):",
+                       "retry_rou" + "nd_2 = 0", "co" + "dex MED" + "IUM-sized", "a blocking call",
+                       "each minor it" + "em is listed", "the review fin" + "ding format")
         swept_flagged = [v for v in swept_clean
                         if any(_swept_hits("a {} b\n".format(v))[key] for key in SWEPT_ROW_KEYS)]
         check("swept/clean-controls-unflagged", not swept_flagged, swept_flagged)
@@ -3965,7 +4004,9 @@ def _self_test(caller_env=None):
              "q" + "a2451 asked for this guard"),
             ("review-item-grade", "each it" + "em (high or low) is checked", "it" + "em 1 (BLOCK" + "ING): x"),
             ("review-item-grade", "a fin" + "ding (see below) is printed", "fin" + "ding 1 (HI" + "GH): x"),
-            ("review-test-name", "def test" + "_rerun_7_times(self):", "def test" + "_r7_rerun(self):"))
+            ("review-test-name", "def test" + "_rerun_7_times(self):", "def test" + "_r7_rerun(self):"),
+            ("family-attribution", fam_c + "'s reply notes the date in the header",
+             fam_c + "'s review notes the date in the header"))
         narrow_flagged = [c for _k, c, _t in swept_narrow
                           if any(_swept_hits("a {} b\n".format(c))[key] for key in SWEPT_ROW_KEYS)]
         check("swept/narrowed-controls-unflagged", not narrow_flagged, narrow_flagged)
@@ -3987,16 +4028,20 @@ def _self_test(caller_env=None):
         finally:
             shutil.rmtree(swlab, ignore_errors=True)
         # The same controls and twins through the REAL gate entry point (run_gate, in process) on a
-        # fixture git repository whose one tracked file is .preview/hook.py, so the swept layer, the
-        # scoped preview patterns and every other layer read it as they read a real preview hook: each
-        # control line exits 0 and each twin exits 1 with a swept-path finding on line 1. The test-name
-        # pair carries the internal-allow marker on both lines, so the twin is caught by the swept row
-        # alone (the scoped preview pattern honours that marker).
+        # fixture git repository whose one tracked file is .preview/hook.py, listed as a shipped source
+        # in the fixture manifest with no baseline entry (as every real preview file is), so the swept
+        # layer, the shipped tracker-label ratchet, the scoped preview patterns and every other layer
+        # read it as they read a real preview hook. Each twin exits 1 with a swept-path finding on line
+        # 1. Each control draws no swept-path finding; most exit 0, but the lower-case effort word after
+        # a family and the loop count are still tracker-ratchet hits (a disclosed false positive of that
+        # layer), so those two controls exit 1 with ratchet findings only. The test-name pair carries
+        # the internal-allow marker on both lines, so the twin is caught by the swept row alone (the
+        # scoped preview pattern honours that marker).
         swwired = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-swept-wired-"))
         try:
             (swwired / ".aiqt").mkdir()
-            (swwired / ".aiqt" / "manifest.toml").write_text("format-version = 1\nsources = []\n",
-                                                             encoding="utf-8")
+            (swwired / ".aiqt" / "manifest.toml").write_text(
+                'format-version = 1\n\n[[sources]]\npath = ".preview/hook.py"\n', encoding="utf-8")
             (swwired / ".preview").mkdir()
             hook = swwired / ".preview" / "hook.py"
             hook.write_text("# a plain hook\n", encoding="utf-8")
@@ -4014,24 +4059,32 @@ def _self_test(caller_env=None):
                     sw_rc = run_gate(at)
                 return sw_rc, sw_out.getvalue() + sw_err.getvalue()
 
-            for control_id, twin_id, control, twin in (
+            def ratchet_only(rc, out):
+                lines = [ln for ln in out.splitlines() if ".preview/hook.py" in ln]
+                return (rc == 1 and "(zero tolerance under a swept path)" not in out
+                        and any("exceeds its ratchet baseline 0" in ln for ln in lines))
+
+            for control_id, twin_id, control, twin, tracker_hit in (
                     ("swept/wired-control-context-window-passes", "swept/wired-twin-context-window-flagged",
-                     "# " + swept_narrow[0][1], "# " + swept_narrow[0][2]),
-                    ("swept/wired-control-effort-passes", "swept/wired-twin-effort-flagged",
-                     "# " + swept_narrow[1][1], "# " + swept_narrow[1][2]),
-                    ("swept/wired-control-loop-count-passes", "swept/wired-twin-loop-count-flagged",
-                     "# " + swept_narrow[2][1], "# " + swept_narrow[2][2]),
+                     "# " + swept_narrow[0][1], "# " + swept_narrow[0][2], False),
+                    ("swept/wired-control-effort-ratchet-only", "swept/wired-twin-effort-flagged",
+                     "# " + swept_narrow[1][1], "# " + swept_narrow[1][2], True),
+                    ("swept/wired-control-loop-count-ratchet-only", "swept/wired-twin-loop-count-flagged",
+                     "# " + swept_narrow[2][1], "# " + swept_narrow[2][2], True),
                     ("swept/wired-control-model-setting-passes", "swept/wired-twin-model-setting-flagged",
-                     swept_narrow[4][1], "# " + swept_narrow[4][2]),
+                     swept_narrow[4][1], "# " + swept_narrow[4][2], False),
                     ("swept/wired-control-process-search-passes", "swept/wired-twin-process-search-flagged",
-                     'CMD = "' + swept_narrow[5][1] + '"', "# " + swept_narrow[5][2]),
+                     'CMD = "' + swept_narrow[5][1] + '"', "# " + swept_narrow[5][2], False),
                     ("swept/wired-control-review-item-passes", "swept/wired-twin-review-item-flagged",
-                     "# " + swept_narrow[6][1], "# " + swept_narrow[6][2]),
+                     "# " + swept_narrow[6][1], "# " + swept_narrow[6][2], False),
                     ("swept/wired-control-test-name-passes", "swept/wired-twin-test-name-flagged",
-                     "    " + swept_narrow[8][1] + marker, "    " + swept_narrow[8][2] + marker)):
+                     "    " + swept_narrow[8][1] + marker, "    " + swept_narrow[8][2] + marker, False),
+                    ("swept/wired-control-possessive-verb-passes", "swept/wired-twin-possessive-verb-flagged",
+                     "# " + swept_narrow[9][1], "# " + swept_narrow[9][2], False)):
                 hook.write_text(control + "\n", encoding="utf-8")
                 rc_c, out_c = swept_gate(swwired)
-                check(control_id, sw_built and rc_c == 0, (control, rc_c, out_c))
+                check(control_id, sw_built and (ratchet_only(rc_c, out_c) if tracker_hit else rc_c == 0),
+                      (control, rc_c, out_c))
                 hook.write_text(twin + "\n", encoding="utf-8")
                 rc_t, out_t = swept_gate(swwired)
                 check(twin_id, sw_built and rc_t == 1 and ".preview/hook.py:1: " in out_t
@@ -4967,11 +5020,15 @@ def _self_test(caller_env=None):
           "across one line break in a comment, a docstring and adjacent string literals is caught (and "
           "missed with the joined read disabled) while a one-line label counts once on its own line, "
           "the clean controls stay unflagged and only files under a swept prefix are read, a review "
-          "finding or item with a grade and a review-round test name on an internal-allow line are "
-          "caught, and ordinary prose and command data the narrowed rows leave alone (a lower-case "
-          "effort word, a possessive before an ordinary noun, a loop count, a quoted model setting, a "
-          "process-search pattern token) pass the real gate in a tracked preview file while each "
-          "label-shaped twin fails it; and the PNG "
+          "finding or item with a grade after it or before it, a family before a hyphen-numbered "
+          "grade, a round number inside an identifier and a review-round test name on an "
+          "internal-allow line are caught, and ordinary prose and command data the narrowed rows leave "
+          "alone (a lower-case effort word, a possessive before an ordinary noun or a verb, a loop "
+          "count, a quoted model setting, a process-search pattern token) draw no swept-path finding "
+          "from the real gate in a tracked preview file listed as a shipped source with no baseline "
+          "entry, where all but two pass it outright and the effort word and the loop count fail it "
+          "on the tracker ratchet alone, while each label-shaped twin fails it on the swept layer; "
+          "and the PNG "
           "rule passes a clean minimal tracked .png, refuses (exit 2) a bad signature, "
           "a bad CRC, a truncated chunk, a missing IEND, bytes after IEND, IHDR out of place or of the wrong "
           "length, IEND carrying data, a chunk type that is not four letters, a tEXt with no NUL "
