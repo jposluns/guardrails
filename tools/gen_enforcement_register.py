@@ -84,7 +84,7 @@ import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import linked_dir_failures, repo_root, load_toml, reconcile  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, load_toml, reconcile, unknown_args_refused  # noqa: E402
 from _standards import dir_or_absent, dir_present, LINK_OUTSIDE_ROOT  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 from gen_agents import sort_key  # noqa: E402  canonical AIQT-priority rule order (as gen_mappings uses)
@@ -889,6 +889,8 @@ def run(root, check):
 
 def main():
     args = sys.argv[1:]
+    if unknown_args_refused(args, "gen_enforcement_register.py [--check | --self-test]"):
+        return 2
     if "--self-test" in args:
         return self_test_main()
     return run(repo_root(), "--check" in args)
