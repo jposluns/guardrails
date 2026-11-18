@@ -107,7 +107,7 @@ import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import linked_dir_failures, repo_root, load_toml, reconcile, unknown_args_refused  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, load_toml, reconcile  # noqa: E402
 from _standards import dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 from gen_hooks import (load_manifest, ID_RE, CID_RE, KNOWN_EVENTS,  # noqa: E402  reuse the hooks loader and shapes
@@ -663,8 +663,6 @@ def run(root, check):
 
 def main():
     args = sys.argv[1:]
-    if unknown_args_refused(args, "gen_enforceability.py [--check | --self-test]"):
-        return 2
     if "--self-test" in args:
         return self_test_main()
     return run(repo_root(), "--check" in args)

@@ -35,7 +35,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import linked_dir_failures, repo_root, reconcile, target_dir_present, unknown_args_refused  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile, target_dir_present  # noqa: E402
 from gen_rules import parse_source, load_corpus, CID_RE, SLUG_RE  # noqa: E402
 
 SOURCE_REL = ".aiqt/core/profiles/worker-pack.md"
@@ -129,8 +129,6 @@ def run(root, check):
 
 def main():
     argv = sys.argv[1:]
-    if unknown_args_refused(argv, "gen_worker_pack.py [--check | --self-test]"):
-        return 2
     if "--self-test" in argv:
         return self_test_main()
     return run(repo_root(), "--check" in argv)

@@ -71,7 +71,7 @@ import tokenize
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import linked_dir_failures, repo_root, reconcile, unknown_args_refused  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile  # noqa: E402
 from gen_rules import SLUG_RE  # noqa: E402  the authoritative renderer-id slug syntax
 import gen_gensrc  # noqa: E402  reuse its validated GENSRC_OUTPUTS loader, never a second parser
 
@@ -734,13 +734,15 @@ def run(root, check):
 
 def main():
     args = sys.argv[1:]
-    if unknown_args_refused(args, "gen_renderers.py [--check] [--root DIR] | --self-test", valued=("--root",)):
-        return 2
     if "--self-test" in args:
         return self_test_main()
     root = repo_root()
     if "--root" in args:
-        root = Path(args[args.index("--root") + 1]).resolve()  # the guard above refused a --root with no value
+        i = args.index("--root")
+        if i + 1 >= len(args):
+            print("usage: gen_renderers.py [--check] [--root DIR] | --self-test", file=sys.stderr)
+            return 2
+        root = Path(args[i + 1]).resolve()
     return run(root, "--check" in args)
 
 

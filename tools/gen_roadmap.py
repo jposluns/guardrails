@@ -65,7 +65,6 @@ def main():
         ),
         regen_hint="run tools/gen_roadmap.py to regenerate",
         schema_excs=(KeyError, TypeError),
-        prog="gen_roadmap.py",
     )
 
 

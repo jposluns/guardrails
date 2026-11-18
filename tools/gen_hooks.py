@@ -86,7 +86,7 @@ from fractions import Fraction
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, unknown_args_refused  # noqa: E402
+from _gen_common import repo_root, load_toml  # noqa: E402
 from _standards import dir_chain_or_absent, dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 # The pack-version alignment rule shared with the chat skill: one first-version constant for both components.
@@ -847,8 +847,6 @@ def run(root, check, project_ids=PROJECT_HOOK_IDS):
 
 def main():
     args = sys.argv[1:]
-    if unknown_args_refused(args, "gen_hooks.py [--check | --self-test]"):
-        return 2
     if "--self-test" in args:
         # The whole self-test runs inside the fixture git lifecycle, so the code under test
         # (gen_skill.authoring_marker_tracked's git ls-files, which strips GIT_* and so drops the scrub's config

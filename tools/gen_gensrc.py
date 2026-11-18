@@ -64,7 +64,7 @@ import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import linked_dir_failures, repo_root, reconcile, unknown_args_refused  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile  # noqa: E402
 
 # The registry this tool renders, repo-root-relative. It is listed in its own output (below), so the
 # inventory is complete: the registry names itself alongside every other generated artefact.
@@ -516,8 +516,6 @@ def run(root, check):
 
 def main():
     args = sys.argv[1:]
-    if unknown_args_refused(args, "gen_gensrc.py [--check | --self-test]"):
-        return 2
     if "--self-test" in args:
         return self_test_main()
     return run(repo_root(), "--check" in args)

@@ -121,9 +121,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
     os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile, unknown_args_refused  # noqa: E402
-
-_USAGE = "gen_site.py [--check | --self-test]"
+from _gen_common import repo_root, reconcile  # noqa: E402
 
 # The gensrc registry declaration. Only the pilot page is generated today; later PRs add the other
 # docs/*.md -> site/*.html pairs, each as its own row, so the registry lists every generated page
@@ -766,12 +764,6 @@ def _discover_md(docs_root, root):
 
 
 def main(argv):
-    # The unknown-option guard runs here as well as in the __main__ block, so an in-process caller that passes an
-    # unknown option is refused too, never run as a write; --self-test is dispatched here too, never run as a write.
-    if unknown_args_refused(argv, _USAGE):
-        return 2
-    if "--self-test" in argv:
-        return _self_test()
     check = "--check" in argv
     root = repo_root()
     docs_root = root / DOCS_DIR
@@ -1481,8 +1473,6 @@ def _self_test():
 
 
 if __name__ == "__main__":
-    if unknown_args_refused(sys.argv[1:], _USAGE):
-        sys.exit(2)
     if "--self-test" in sys.argv[1:]:
         sys.exit(_self_test())
     sys.exit(main(sys.argv[1:]))

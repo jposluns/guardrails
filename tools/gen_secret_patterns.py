@@ -51,7 +51,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hashlib  # noqa: E402
 
-from _gen_common import linked_dir_failures, repo_root, target_dir_present, unknown_args_refused  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, target_dir_present  # noqa: E402
 
 # The source of truth and the render target, repo-root-relative.
 SOURCE_REL = "tools/check_secrets.py"
@@ -252,8 +252,6 @@ def self_test_main():
 
 
 def main():
-    if unknown_args_refused(sys.argv[1:], "gen_secret_patterns.py [--check | --self-test]"):
-        return 2
     if "--self-test" in sys.argv[1:]:
         return self_test_main()
     return run(repo_root(), "--check" in sys.argv[1:])

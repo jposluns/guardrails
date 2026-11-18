@@ -44,7 +44,7 @@ import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import linked_dir_failures, repo_root, reconcile, target_dir_present, unknown_args_refused  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile, target_dir_present  # noqa: E402
 from _standards import load_manifests, ManifestError, natkey, withdrawn_finding  # noqa: E402
 import gen_rules  # noqa: E402  (reuse the one frontmatter parser + full corpus validation)
 from gen_agents import sort_key  # noqa: E402  (canonical AIQT priority order for the rules)
@@ -498,8 +498,6 @@ def run(root, check):
 
 def main():
     args = sys.argv[1:]
-    if unknown_args_refused(args, "gen_mappings.py [--check | --self-test]"):
-        return 2
     if "--self-test" in args:
         return self_test_main()
     return run(repo_root(), "--check" in args)

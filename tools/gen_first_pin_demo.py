@@ -68,7 +68,7 @@ import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import linked_dir_failures, repo_root, reconcile, unknown_args_refused  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile  # noqa: E402
 from _standards import dir_or_absent, dir_present, LINK_OUTSIDE_ROOT  # noqa: E402
 from gen_rules import load_corpus, CID_RE  # noqa: E402
 import gen_agents  # noqa: E402  the AGENTS.md ordering and body transform (sort_key, body_of, HEADER)
@@ -245,11 +245,6 @@ def run(root, check):
 
 def main():
     args = sys.argv[1:]
-    # Unknown-option rejection precedes every dispatch: main() defines only --check and --self-test, so any other
-    # token (a misspelled --chek, a stray --help, a positional) is exit 2 with the usage line on stderr, never a
-    # fall-through to a write-mode run.
-    if unknown_args_refused(args, "gen_first_pin_demo.py [--check | --self-test]"):
-        return 2
     if "--self-test" in args:
         return self_test_main()
     return run(repo_root(), "--check" in args)
@@ -282,8 +277,7 @@ def main():
 #   8. a rule corpus symlinked to a directory inside the root is read, while one symlinked outside the root
 #      fails closed (exit 2) with nothing written;
 #   9. .aiqt/release/ symlinked outside the root fails closed (exit 2) in --check and write mode with the
-#      demonstration there untouched, while one symlinked inside the root is followed and the file rewritten;
-#  10. an unknown option (--chek, --help, a positional) is exit 2 with the usage line and runs nothing.
+#      demonstration there untouched, while one symlinked inside the root is followed and the file rewritten.
 
 _APEX = "---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
 _RULE = "---\ncorpus-id: {cid}\norigin: pack\nfamily: aiqt\ntier: 10\nfacet: ACCUR\nslug: {slug}\n---\n"
@@ -665,10 +659,6 @@ def self_test_main():
                 except OSError:
                     pass
         shutil.rmtree(tmp, ignore_errors=True)
-    # 10. An unknown option is exit 2 with the usage line and runs nothing (red when main()'s guard is reverted):
-    #     gen_rules._argv_guard_failures drives main() with run and repo_root stood in for, touching no file.
-    from gen_rules import _argv_guard_failures
-    failures.extend(_argv_guard_failures(globals(), "gen_first_pin_demo.py"))
 
     if failures:
         print("SELF-TEST FAIL:")
@@ -686,8 +676,7 @@ def self_test_main():
           "every span by exactly the bytes it adds and can push a rule past the cap, and an after-rules block "
           "is never read as rule text; a rule corpus symlinked inside the root is read, and one symlinked "
           "outside the root fails closed (exit 2) with nothing written; an .aiqt/release/ symlinked outside the "
-          "root fails closed (exit 2) with the demonstration there untouched, and one inside the root is followed; "
-          "an unknown option is exit 2 with the usage line and runs nothing.")
+          "root fails closed (exit 2) with the demonstration there untouched, and one inside the root is followed.")
     return 0
 
 
