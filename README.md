@@ -5,8 +5,9 @@
 AIQT Guardrails holds your AI assistant to one standard: **A**ccuracy, **I**ntegrity, **Q**uality, and
 **T**rust. More than guidance: these principles outrank progress, speed, and cost. In chat, the standard
 guides your assistant. In this repository, CI gates run on each batch of changes before it merges
-into main, and on each push to main. Some check the changes against the rules they cite, a subset of
-the standard, and some only test themselves. Open source, and built to be read.
+into main, though a batch that changes only the website skips the heavier gates. Every gate runs on
+each push to main. Some check the changes against the rules they cite, a subset of the standard, and
+some only test themselves. Open source, and built to be read.
 
 <!-- COUNTS-PROOF:BEGIN (generated) -->
 **133 rules. 130 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml). 34 Claude Code hooks shipped as an opt-in plugin. Mapped to 17 frameworks.**
