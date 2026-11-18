@@ -5863,6 +5863,119 @@ def baseline_probe_problems(text):
     return problems
 
 
+# The CI baseline-pin step (quality.yml's "Site baseline pin"). The ALLOWLIST rows admit
+# its three gate forms (--base HEAD^1, --base <ref:$PUSH_BEFORE>, --base HEAD^), but
+# parity reconciles forms only, not which event selects each; that choice is the step's
+# run block. baseline_base_selection_problems reads the step from the workflow text,
+# requires its header (shell and the two env bindings the block reads) to be exactly
+# BASELINE_BASE_STEP_HEADER, and runs its run block under the Actions bash options with
+# the runner stubs (_prepare_stubs, every gate stub passing) once per
+# BASELINE_BASE_SCENARIOS row (vector 48). The stubs hold no history, so the multi-commit
+# push row is a before SHA that is not HEAD^ (and holds zero digits, so only an all-zero
+# SHA reads as none): it requires the gate's base to be that exact SHA, never HEAD^.
+BASELINE_BASE_STEP_NAME = "      - name: Site baseline pin"
+BASELINE_BASE_STEP_HEADER = (
+    "        " + STEP_SHELL_LINE,
+    "        env:",
+    "          EVENT_NAME: ${{ github.event_name }}",
+    "          PUSH_BEFORE: ${{ github.event.before }}",
+    "        run: |",
+)
+BASELINE_BASE_RUN_INDENT = "          "
+BASELINE_BASE_GATE = "python3 -I -B tools/check_baseline_pin.py --base "
+BASELINE_BASE_BEFORE = "1f0e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+BASELINE_BASE_CANNOT = (
+    "CANNOT EVALUATE: the push event names no commit before the pushed range")
+# (label, EVENT_NAME, PUSH_BEFORE, the one gate call expected or None, exit status
+# expected). None means the step prints one BASELINE_BASE_CANNOT line and fails closed
+# before any gate runs.
+BASELINE_BASE_SCENARIOS = (
+    ("pull request", "pull_request", "", BASELINE_BASE_GATE + "HEAD^1", 0),
+    ("pull request carrying a before SHA", "pull_request", BASELINE_BASE_BEFORE,
+     BASELINE_BASE_GATE + "HEAD^1", 0),
+    ("multi-commit push", "push", BASELINE_BASE_BEFORE,
+     BASELINE_BASE_GATE + BASELINE_BASE_BEFORE, 0),
+    ("manual run", "workflow_dispatch", "", BASELINE_BASE_GATE + "HEAD^", 0),
+    ("push with a missing before SHA", "push", "", None, 1),
+    ("push with an all-zero before SHA", "push", "0" * 40, None, 1),
+)
+
+
+def _baseline_base_selection_block(text):
+    """Return (header lines, run block) of the one BASELINE_BASE_STEP_NAME step in
+    workflow text read_runner_text returned, the run block dedented by
+    BASELINE_BASE_RUN_INDENT with trailing blank lines dropped; or (None, why) when the
+    step does not occur exactly once or has no run: | line in its own keys."""
+    lines = text.splitlines()
+    starts = [index for index, line in enumerate(lines)
+              if line == BASELINE_BASE_STEP_NAME]
+    if len(starts) != 1:
+        return None, "the step {!r} occurs {} times".format(
+            BASELINE_BASE_STEP_NAME.strip(), len(starts))
+    header = []
+    index = starts[0] + 1
+    while index < len(lines) and lines[index].startswith("        "):
+        header.append(lines[index])
+        index += 1
+        if header[-1] == "        run: |":
+            break
+    else:
+        return None, "the step has no run: | line among its own keys"
+    body = []
+    for line in lines[index:]:
+        if line.strip() and not line.startswith(BASELINE_BASE_RUN_INDENT):
+            break
+        body.append(line[len(BASELINE_BASE_RUN_INDENT):] if line.strip() else "")
+    while body and not body[-1]:
+        body.pop()
+    return tuple(header), "\n".join(body) + "\n"
+
+
+def baseline_base_selection_problems(text):
+    """Run the CI baseline-pin step of workflow text once per BASELINE_BASE_SCENARIOS
+    row; return the problems, empty when every event selects its reviewed base. The
+    step header must be BASELINE_BASE_STEP_HEADER exactly (the env the stubs stand in
+    for); each row's run must record exactly its expected gate call (no other python3
+    call), exit with its expected status, and print one BASELINE_BASE_CANNOT line only
+    when it expects no gate call."""
+    import tempfile
+
+    header, block = _baseline_base_selection_block(text)
+    if header is None:
+        return ["step: " + block]
+    problems = []
+    if header != BASELINE_BASE_STEP_HEADER:
+        problems.append("step header {!r}, expected {!r}".format(
+            header, BASELINE_BASE_STEP_HEADER))
+    with tempfile.TemporaryDirectory(prefix="ci-parity-base-") as shared:
+        stubs = _prepare_stubs(Path(shared))
+        try:
+            for label, event, before, want_call, want_rc in BASELINE_BASE_SCENARIOS:
+                # The Actions shell: bash runs the step as bash -e -o pipefail; the
+                # env: bindings arrive as exported variables.
+                script = ("set -eo pipefail\n"
+                          "export EVENT_NAME=" + shlex.quote(event) + "\n"
+                          "export PUSH_BEFORE=" + shlex.quote(before) + "\n" + block)
+                try:
+                    rc, lines, calls = _run_runner_copy(script, stubs)
+                except Exception as exc:  # no bash, a scratch-tree error, or a timeout
+                    problems.append("{}: step copy did not complete: {!r}".format(
+                        label, exc))
+                    continue
+                if calls != ([want_call] if want_call else []):
+                    problems.append("{}: gate calls {!r}, expected {!r}".format(
+                        label, calls, [want_call] if want_call else []))
+                if rc != want_rc:
+                    problems.append("{}: exit {}, expected {}".format(label, rc, want_rc))
+                cannot = [line for line in lines if line.startswith("CANNOT EVALUATE:")]
+                if (len(cannot) == 1 and cannot[0].startswith(BASELINE_BASE_CANNOT)
+                        ) != (want_call is None) or len(cannot) > 1:
+                    problems.append("{}: CANNOT EVALUATE lines {!r}".format(label, cannot))
+        finally:
+            stubs[0].chmod(0o700)  # so the shared directory can be removed
+    return problems
+
+
 # Process-wide audit hook (CPython cannot remove one), inert unless a recorder is
 # registered in _WRITE_RECORDERS; the same shape as tools/selftest_git_fixture_env.py.
 _WRITE_RECORDERS = []
@@ -7830,6 +7943,9 @@ def self_test():
             # Splits runner text read_runner_text already returned, to find the
             # absent-branch line of the one exact baseline-pin probe block.
             ("_baseline_absent_lines", "splitlines"): 1,
+            # Splits quality.yml text read_runner_text already returned, to find
+            # the one CI baseline-pin step and its run block (vector 48).
+            ("_baseline_base_selection_block", "splitlines"): 1,
             # Splits runner text read_runner_text already returned, to run
             # its pass summary echo and every line after it.
             ("_passing_status", "splitlines"): 1,
@@ -10970,6 +11086,58 @@ def self_test():
                        and "occurs 2 times" in diagnostic.message
                        for diagnostic in extract_local(duplicated).diagnostics):
                 failures.append("47 duplicate guard admitted a second copy of the block")
+
+    # 48: the CI baseline-pin step's base selection. The ALLOWLIST rows admit its three
+    # gate forms, but which event selects each is the step's run block, so the live
+    # quality.yml step is run, stubbed, for a pull request (with and without a before
+    # SHA), a multi-commit push, a manual run, and a push whose before SHA is missing
+    # or all zero (BASELINE_BASE_SCENARIOS). Each mutant is one routing change, made
+    # inside that step only, and must be caught on the scenario it breaks: the push
+    # branch disabled (a push falls through to HEAD^, the finding this vector closes),
+    # the pull_request branch disabled, the all-zero test weakened to an empty test,
+    # and the step's env rebinding EVENT_NAME. Before this vector, parity passed the
+    # push-disabled mutant with no diagnostic.
+    count += 1
+    base_ci, base_diagnostic = read_runner_text(CI_PATH, CI_SOURCE)
+    if base_diagnostic is not None:
+        failures.append("48 cannot read {}: {!r}".format(CI_SOURCE, base_diagnostic))
+    else:
+        live_base = baseline_base_selection_problems(base_ci)
+        if live_base:
+            failures.append("48 live workflow: {}".format(live_base))
+        step_start = base_ci.find("\n" + BASELINE_BASE_STEP_NAME + "\n")
+        step_end = base_ci.find("\n      - ", step_start + 1)
+        base_mutants = (
+            ("push branch disabled (a push falls through to HEAD^)",
+             'if [ "$EVENT_NAME" = "push" ]; then',
+             'if [ "$EVENT_NAME" = "push-disabled" ]; then',
+             "multi-commit push: "),
+            ("pull_request branch disabled",
+             'if [ "$EVENT_NAME" = "pull_request" ]; then',
+             'if [ "$EVENT_NAME" = "pull_request-disabled" ]; then',
+             "pull request: "),
+            ("all-zero before SHA read as a base",
+             'if [ -z "${PUSH_BEFORE//0/}" ]; then',
+             'if [ -z "${PUSH_BEFORE}" ]; then',
+             "push with an all-zero before SHA: "),
+            ("EVENT_NAME rebound in the step env",
+             "EVENT_NAME: ${{ github.event_name }}",
+             "EVENT_NAME: ${{ github.event.action }}",
+             "step header "),
+        )
+        for label, old, new, want_prefix in base_mutants:
+            if step_start == -1 or step_end == -1:
+                failures.append("48 fixture drift: " + label)
+                continue
+            step = base_ci[step_start:step_end]
+            if step.count(old) != 1:
+                failures.append("48 fixture drift: " + label)
+                continue
+            mutant = base_ci[:step_start] + step.replace(old, new, 1) + base_ci[step_end:]
+            got = baseline_base_selection_problems(mutant)
+            if not any(problem.startswith(want_prefix) for problem in got):
+                failures.append("48 runtime mutant was not caught: {} (got {!r})".format(
+                    label, got))
 
     if failures:
         print("SELF-TEST FAIL:")
