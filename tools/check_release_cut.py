@@ -23,6 +23,14 @@ When neither snapshot holds a record, nothing changes. The list is hand-kept,
 so it shows currency for the items it names, never completeness of what is
 wrong.
 
+The appended release entry, the one being cut, must carry a date that is a
+real calendar date written YYYY-MM-DD (a TOML local date also passes); a
+missing date, the "YYYY-MM-DD" placeholder, any other string and an impossible
+date such as 2026-02-30 are refused (exit 1). A date later than the run day is
+not refused: the verdict stays a function of the repository bytes alone, not of
+the clock or time zone of the run. Dates of releases already in the base are
+never judged, and an edit that cuts nothing does not read any date.
+
 A declaration is author-controlled intent, not authorization or readiness.
 This reusable pack author tool is opt-in for adopters of this changelog schema.
 For pull_request events or when GITHUB_BASE_REF is set, require a merge HEAD
@@ -109,6 +117,9 @@ DECL_KEYS = {
 }
 PENDING_KEYS = {"schema", "release", "fix"}
 PENDING_STATES = ("open", "done", "deferred")
+# The cut release's date form. date.fromisoformat alone also takes the basic and week
+# forms (20261115, 2026-W46-7), so the shape is matched first, then the calendar.
+RELEASE_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
 class CannotEvaluate(ValueError):
@@ -225,6 +236,28 @@ def parse_pending(raw, label="pending fixes"):
     return dict(data)
 
 
+def release_date_refusal(row):
+    """Return why the cut release's date is not a real YYYY-MM-DD calendar date, else None.
+
+    A date after the run day is not refused, so the verdict never depends on the clock."""
+    value = row.get("date")
+    if type(value) is datetime.date:
+        return None
+    if isinstance(value, str) and RELEASE_DATE.fullmatch(value) is not None:
+        try:
+            datetime.date.fromisoformat(value)
+        except ValueError:
+            pass
+        else:
+            return None
+    # The diagnostic stays total for any value, even with a guard above mutated away.
+    shown = ("no date" if value is None else
+             "date " + (json.dumps(value, ensure_ascii=True) if isinstance(value, str) else str(value)))
+    return ("the appended release " + row["version"] + " has " + shown
+            + "; a cut needs a real calendar date in YYYY-MM-DD form (replace any placeholder"
+            " with the release day)")
+
+
 def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
                         base_decl, head_decl, base_pending=None, head_pending=None):
     """Return (exit_code, detail). Only the caller can prove that None is absence."""
@@ -262,6 +295,10 @@ def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
     )
     if not authorized:
         return 1, "missing, unchanged or mismatched release declaration"
+    # Only the appended entry is judged: dates of releases already in the base are never read.
+    date_refusal = release_date_refusal(head[-1])
+    if date_refusal is not None:
+        return 1, "release date refused: " + date_refusal
     if head_pending is not None:
         # The record proves currency only for the one cut it names, never completeness.
         if head_pending["release"] != after[-1]:
@@ -871,6 +908,37 @@ def test_cases():
         add(name, 2, tweak=name)
     add("protected-tip", 1, after=cut, tweak="protected")
     add("staged-hidden", 1, tweak="staged")
+    # The appended entry's date: every refused form, then dates that pass. Only the last
+    # (appended) entry changes; the base entry keeps its fixture date.
+    stem = cut[:cut.rindex(b'date = "2000-01-01"')]
+    tail = cut[len(stem):].replace(b'date = "2000-01-01"\n', b"", 1)
+
+    def cut_dated(line):
+        return stem + line + tail
+    for name, line in (("placeholder", b'date = "YYYY-MM-DD"\n'),
+                       ("text", b'date = "TBD"\n'),
+                       ("empty", b'date = ""\n'),
+                       ("impossible", b'date = "2026-02-30"\n'),
+                       ("basic-form", b'date = "20261115"\n'),
+                       ("week-form", b'date = "2026-W46-7"\n'),
+                       ("padded", b'date = " 2026-11-15"\n'),
+                       ("missing", b"")):
+        add("cut-date-" + name, 1, after=cut_dated(line), new=declaration)
+    placeholder_cut = cut_dated(b'date = "YYYY-MM-DD"\n')
+    add("cut-date-placeholder-initialize", 1, before=None,
+        after=fixture_changelog(["1.0.0"]).replace(b'"2000-01-01"', b'"YYYY-MM-DD"'),
+        new=fixture_declaration(None, following="1.0.0"))
+    for tweak in ("ci-merge", "push-protected", "tip-dispatch", "tip-schedule", "local-base"):
+        add("cut-date-placeholder-" + tweak, 1, after=placeholder_cut, new=declaration, tweak=tweak)
+    add("cut-date-valid", 0, after=cut_dated(b'date = "2024-02-29"\n'), new=declaration)
+    add("cut-date-native", 0, after=cut_dated(b"date = 2026-11-15\n"), new=declaration)
+    add("cut-date-future", 0, after=cut_dated(b'date = "2999-12-31"\n'), new=declaration)
+    # A placeholder left on an earlier release is not judged: only the appended entry is.
+    add("cut-date-earlier-placeholder", 0,
+        before=base.replace(b'"2000-01-01"', b'"YYYY-MM-DD"'),
+        after=cut.replace(b'"2000-01-01"', b'"YYYY-MM-DD"', 1),
+        new=fixture_declaration(base.replace(b'"2000-01-01"', b'"YYYY-MM-DD"')))
+    add("date-placeholder-no-cut", 0, after=base.replace(b'"2000-01-01"', b'"YYYY-MM-DD"'))
     return cases
 
 
@@ -4652,6 +4720,11 @@ def _self_test_isolated(red_on_revert):
                 check("unreadable-read-boundary",
                       any("injected unreadable working file" in row["detail"]
                           for row in report["snapshots"]))
+            if case_id.startswith("cut-date-") and cases[case_id][0] == 1:
+                check(case_id + "-names-date",
+                      any("release date refused: the appended release " in row["detail"]
+                          and ('"YYYY-MM-DD"' in row["detail"] if "placeholder" in case_id else True)
+                          for row in report["snapshots"]))
             print("PASS " + case_id)
         _close_stage(parent, script)
         stage_failures = _close_stage_mapping_check(parent, script)
@@ -4937,6 +5010,28 @@ def _self_test_isolated(red_on_revert):
                  "require(isinstance(item[key], str) and bool(item[key].strip()),",
                  "require(isinstance(item[key], str) and bool(item[key]),",
                  "head-fix-space-id", 0),
+            ) + tuple(
+                # With the date refusal reverted, every refused date form and mode is accepted.
+                ("release-date-" + case_id[len("cut-date-"):], "if date_refusal is not None:",
+                 "if False:", case_id, 0)
+                for case_id in cases if case_id.startswith("cut-date-") and cases[case_id][0] == 1
+            ) + (
+                ("release-date-shape",
+                 "if isinstance(value, str) and RELEASE_DATE.fullmatch(value) is not None:",
+                 "if isinstance(value, str):", "cut-date-basic-form", 0),
+                ("release-date-shape-week",
+                 "if isinstance(value, str) and RELEASE_DATE.fullmatch(value) is not None:",
+                 "if isinstance(value, str):", "cut-date-week-form", 0),
+                ("release-date-refuses-valid", "date_refusal = release_date_refusal(head[-1])",
+                 'date_refusal = "every date"', "cut-date-valid", 1),
+                ("release-date-native", "if type(value) is datetime.date:\n        return None",
+                 "if False:\n        return None", "cut-date-native", 1),
+                ("release-date-future",
+                 "            datetime.date.fromisoformat(value)\n        except ValueError:",
+                 "            if datetime.date.fromisoformat(value) > datetime.date.today():\n"
+                 "                raise ValueError\n        except ValueError:", "cut-date-future", 1),
+                ("release-date-earlier", "date_refusal = release_date_refusal(head[-1])",
+                 "date_refusal = release_date_refusal(head[0])", "cut-date-earlier-placeholder", 1),
             )
             parser_bytes = (script.parents[1] / "opf" / "tools" / "_semver.py").read_bytes()
             for name, old, new, case_id, mutated_code in mutations:
