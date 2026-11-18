@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "0b1146f27fb0434c34b2536b60c4c4ec15d85138de8f52e3bf1034df0562d233"
+tree-sha256 = "7675cf362946aa8ec105e292fc53b995617a06139a33b3272841d856fe5de54d"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -867,18 +867,18 @@ sha256 = "ce143791554930f8e5c87adaecb7aa295afb1d17bddf9defaa3c7131f1a63f8a"
 
 [[sources]]
 path = ".aiqt/standards/assessments/RUBRIC.md"
-bytes = 26843
-sha256 = "0bf920ee11df4726543ae6527edbb23c6bfd85f954cbe0f7c62bd5f56fd2e32e"
+bytes = 29581
+sha256 = "2591faf3624e98b5a6529661c76093cd6fe744a9041e544f3786bd9fc72e91c3"
 
 [[sources]]
 path = ".aiqt/standards/assessments/atlas.toml"
-bytes = 8413
-sha256 = "41968eeeceb02ced565ab351ac60ad4847e6b771507843f1f1ed9c37191d918f"
+bytes = 12965
+sha256 = "5552902271c363b22aca25f25611fdd9b76b468c192084e91ec6627452f2aaf9"
 
 [[sources]]
 path = ".aiqt/standards/assessments/csa-ccm.toml"
-bytes = 4366
-sha256 = "ecd0e094761c5cba2aefdc24a9a16b707cd4759114c5eb1e9c1c10f7f7a03a2e"
+bytes = 4552
+sha256 = "da9961b55e43b77402a0a6c2335a2d28c22788daa16124a3e9afc3b79896d295"
 
 [[sources]]
 path = ".aiqt/standards/assessments/iso-23894.toml"
@@ -887,18 +887,18 @@ sha256 = "5935799f8f2b720a61458fc9a6c6ff446bc1ead3862734ac205d3db55fd037e3"
 
 [[sources]]
 path = ".aiqt/standards/assessments/iso-42001.toml"
-bytes = 6259
-sha256 = "8fdcc7ad59f6d71ea9f2bfca856975d0bdca95777f108a9c682f4a6004cc1248"
+bytes = 7684
+sha256 = "0771fd141d68597005bcecde50212b0b27dd05ca49f86a75cd06ed8ac0018358"
 
 [[sources]]
 path = ".aiqt/standards/assessments/nist-80053.toml"
-bytes = 8101
-sha256 = "c6c7f8bdbf344a079d59e560b8010a4dc66217b4f6a390bb0fc2c5047c26c5af"
+bytes = 8933
+sha256 = "8ad69a489793490f9bc8c90fd7534c21a358b3b0ee00f121006edea8dca8fdb3"
 
 [[sources]]
 path = ".aiqt/standards/assessments/nist-airmf.toml"
-bytes = 16858
-sha256 = "c3e9b20c649d11cc1ba310d45f68ab1d29f65fa9d46c7613f5973c6114143c7b"
+bytes = 17889
+sha256 = "ee0248bbad60874ea0a6d0a51b4c23a4bb6d28b12d72ee0f41ab73d6f8c467c3"
 
 [[sources]]
 path = ".aiqt/standards/assessments/owasp-asi.toml"
@@ -912,13 +912,13 @@ sha256 = "8d0d83671c7ab9e5d2826bcd3740322b67eb3339dc394545468becf55d9fb895"
 
 [[sources]]
 path = ".aiqt/standards/assessments/owasp-mcp.toml"
-bytes = 17111
-sha256 = "cd7010e45bb71c0a67a8716f1a9a8b604f869854afff767051afe3f61b239c5c"
+bytes = 17894
+sha256 = "1280e7adbe6fabe25488765f8796a04923bb50b29974f94e35ab15367a2723c5"
 
 [[sources]]
 path = ".aiqt/standards/assessments/owasp-proactive.toml"
-bytes = 5106
-sha256 = "abc8cb7587b0f917645e501b728483fbbcd0944d2226973d12bc495429ae7932"
+bytes = 5369
+sha256 = "c091f15de38cbc5d27f9ddfbcec62b96e58dd459a0c240efb673ee621df37a44"
 
 [[sources]]
 path = ".aiqt/standards/atlas.toml"

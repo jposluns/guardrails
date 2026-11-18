@@ -24,6 +24,7 @@ covers = [
 omits = [
   "assessment of whether the oversight process works",
   "a link to organisational policies set by the governance function",
+  "processes for human oversight of AI systems other than the assistant, such as an AI product the organisation builds or runs: the entry's object is human oversight of the AI system, and the rule sets a process for the assistant alone (the whole of the object, met for one AI system only)",
 ]
 label-a = "tight"
 label-b = "broad"
@@ -31,7 +32,7 @@ adopted = "B"
 proposed = "broad"
 review-state = "assessed"
 conventions = [2, 3]
-rationale = "Reading a pack rule as a process (convention 2) and the AI system as including the assistant (convention 3), the rule defines and documents an oversight process, which carries out the core. Nothing in it assesses the process or ties it to governance policy, so it is broad under B."
+rationale = "Reading a pack rule as a process (convention 2) and the AI system as including the assistant (convention 3), the rule defines and documents an oversight process, which carries out the core. Nothing in it assesses the process or ties it to governance policy, and it sets oversight for the assistant alone, not for every AI system the organisation has, so it is broad under B."
 assumptions = [
   "a pack rule counts as a defined and documented process (convention 2); if it does not, both labels are broad",
   "the AI system to be overseen includes the assistant whose decisions the rule classifies (convention 3); if it means only the product being built, both labels are broad",
@@ -102,6 +103,7 @@ covers = [
 omits = [
   "assessment of whether the oversight process works",
   "a link to organisational policies set by the governance function",
+  "processes for human oversight of AI systems other than the assistant, such as an AI product the organisation builds or runs: the entry's object is human oversight of the AI system, and the rule sets a process for the assistant alone (the whole of the object, met for one AI system only)",
 ]
 label-a = "tight"
 label-b = "broad"
@@ -109,7 +111,7 @@ adopted = "B"
 proposed = "broad"
 review-state = "assessed"
 conventions = [2, 3]
-rationale = "Same readings of conventions 2 and 3 as the decision classification row: an oversight process for the assistant is defined and documented, but not assessed or tied to governance policy."
+rationale = "Same readings of conventions 2 and 3 as the decision classification row: an oversight process for the assistant is defined and documented, but not assessed, not tied to governance policy and not set for any other AI system."
 assumptions = [
   "a pack rule counts as a defined and documented process (convention 2); if it does not, both labels are broad",
   "the AI system to be overseen includes the assistant whose autonomy the rule bounds (convention 3); if it means only the product being built, both labels are broad",
@@ -180,6 +182,7 @@ covers = [
 omits = [
   "assessment of whether the oversight process works",
   "a link to organisational policies set by the governance function",
+  "processes for human oversight of AI systems other than the assistant, such as an AI product the organisation builds or runs: the entry's object is human oversight of the AI system, and the rule sets a process for the assistant alone (the whole of the object, met for one AI system only)",
 ]
 label-a = "tight"
 label-b = "broad"
@@ -187,7 +190,7 @@ adopted = "B"
 proposed = "broad"
 review-state = "assessed"
 conventions = [2, 3]
-rationale = "Same readings of conventions 2 and 3 as the other two MAP 3.5 rows: defined and documented, not assessed or tied to governance policy."
+rationale = "Same readings of conventions 2 and 3 as the other two MAP 3.5 rows: defined and documented for the assistant alone, not assessed or tied to governance policy."
 assumptions = [
   "a pack rule counts as a defined and documented process (convention 2); if it does not, both labels are broad",
   "the AI system to be overseen includes the assistant whose actions the rule gates (convention 3); if it means only the product being built, both labels are broad",

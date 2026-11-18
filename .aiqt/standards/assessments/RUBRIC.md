@@ -33,11 +33,20 @@ in the mappings or on the site; that is a later change.
   sub-techniques or its attack scenarios. A variant the assessor supplies from outside the entry does not
   count.
 - **Listed mitigations.** The entry's own prevention, mitigation, remediation (immediate or temporary
-  remediation included), detection or implementation guidance at the location the record cites, item by
-  item as the entry numbers or heads them, with detection guidance as defined here. Detection guidance
-  is any part or item that names signs of an attack or failure to watch for,
-  where the entry heads or numbers it as detection guidance or otherwise presents those signs as
-  something to detect (calling them detection hooks or signals, for example), wherever in the entry they
+  remediation included), detection or implementation guidance, item by item as the entry numbers or heads
+  them, with detection guidance as defined here. They are read from the whole entry as the pinned edition
+  presents it, never from one part of it: where an edition carries an entry across more than one file or
+  part (the ATLAS release, for example, gives a technique's text in its techniques file and links its
+  mitigations to it only through `mitigates` relations in its YAML copy), every part is read, and a record
+  never narrows the control by citing only one of them. For a technique, each mitigation the edition links
+  to it is a listed mitigation. A sub-technique takes in every mitigation the edition links to its parent
+  technique as well as those linked to it directly, because the edition records it as a specialization of
+  the parent and a mitigation of the parent's behaviour applies to each way of carrying that behaviour out;
+  it does not take in its sibling sub-techniques or mitigations linked only to them. This rule on
+  sub-techniques is the assessor's decision in this pass; the record it decides (row 14) states the label
+  the other reading would give. Detection guidance is any part or item that names signs of an attack or
+  failure to watch for, where the entry heads or numbers it as detection guidance or otherwise presents
+  those signs as something to detect (calling them detection hooks or signals, for example), wherever in the entry they
   sit, the prose of the description included; each sign it names counts. Signs the prose names without
   presenting them as something to detect are read for the core and the main variants only. For a
   catalogue control or a management system control, the statement is what counts; text in a separate
@@ -45,11 +54,12 @@ in the mappings or on the site; that is a later change.
 - **Exposure checklists.** A checklist of the conditions under which a system is exposed (a "how to
   detect" or "is the application vulnerable" list that names exposed conditions rather than signs of an
   attack) is part of the control under B when the entry presents its conditions as requirements: that is,
-  when it says that any one of them that holds makes the system vulnerable or exposed, so that each must
-  be absent. Each condition is then weighed. A condition that restates a listed mitigation is recorded with
-  that mitigation; a condition that asks for something no listed mitigation states is an essential element
-  of its own. A checklist that the entry presents only as examples, without saying that any one condition
-  makes the system exposed, adds no elements.
+  when it says that any one of them that holds makes, or may make, the system vulnerable, or leaves it
+  likely exposed (the MCP02 and MCP07 checklists use those two forms), so that each is to be absent.
+  Each condition is then weighed. A condition that restates a listed mitigation is recorded with that
+  mitigation; a condition that asks for something no listed mitigation states is an essential element of
+  its own. A checklist that the entry presents only as examples, without tying exposure or possible
+  exposure to any one condition, adds no elements.
 - **Parts that add no elements.** An entry's impact list, its list of the vulnerabilities it prevents, its
   references, further reading, tool lists, pointers to other documents and links to suggest edits. They
   are read for the core, but nothing in them is a main variant or a listed mitigation, and `omits` does
@@ -62,10 +72,12 @@ in the mappings or on the site; that is a later change.
   another layer, and the record names that party. These acts are at another layer wherever they appear:
   issuing, expiring, rotating, revoking or binding credentials, tokens, keys or certificates (the issuer
   or the identity provider); granting an agent's permissions, auditing the permissions granted, and
-  keeping the records of changes to them (the party that grants them and holds those records); enforcing
-  access, mutual authentication or address restrictions at a server, tool, endpoint or network, keeping
-  tamper evident logs there, and watching those logs for signs of attack (whoever runs the servers, the
-  network or the infrastructure); and rendering output (the client). Holding its own actions for human
+  keeping the records of changes to them (the party that grants them and holds those records), except
+  where the assistant is that party, for the sub-agents it starts and the tools it hands on to them, where
+  granting and auditing those permissions are at the rule's layer; enforcing access, mutual
+  authentication or address restrictions at a server, tool, endpoint or network, keeping tamper evident
+  logs there, and watching those logs for signs of attack (whoever runs the servers, the network or the
+  infrastructure); and rendering output (the client). Holding its own actions for human
   approval, limiting the tools it hands on, refusing authority it cannot verify, storing the secrets it
   holds, and watching its own actions and the messages it receives are at the rule's layer. A mitigation
   that asks for several acts is split, and each act is marked on its own. The same act gets the same
@@ -147,10 +159,10 @@ Apply these in order for each row and write the outcome into the record.
 
 ## Open conventions
 
-Choosing Definition B did not settle these. Conventions 1 to 5 stay open. Convention 6 is settled for its
-third question only, as stated in it, because that question asks what the whole control holds under B;
-its first two questions, and conventions 7, 8 and 9, are read as stated below and have not been settled
-by the maintainer either. A record names every convention that decides one of its labels (test 8).
+Choosing Definition B did not settle these, and the maintainer has settled none of them. All nine stay
+open, all three questions of convention 6 included. Conventions 6 to 9 are read in this pass as stated
+below; those readings are the assessor's proposals, not decisions. A record names every convention that
+decides one of its labels (test 8).
 
 1. **Informative annexes.** Can a row that maps to an informative annex (for example ISO/IEC 23894
    Annex B, which lists risk sources rather than requirements) be tight at all?
@@ -202,17 +214,21 @@ by the maintainer either. A record names every convention that decides one of it
    separate implementation guidance (for example the SP 800-53 discussion, or ISO/IEC 42001 Annex B)
    satisfy test 5 under A? Can such guidance show what the entry's object takes in (test 3), as the
    tooling exception of convention 3 asks? Do the items such guidance lists count as essential elements
-   under B? The first two questions stay open, and in this pass they are read as: guidance may show the
-   match under A and what the object takes in. The third is settled by the choice of B, which reads the
-   whole control: an item of a discussion or guidance part is an essential element under B when, and only
-   when, the source presents it as a requirement of the control. A heading that calls the guidance
-   normative is weighed with what the source says the guidance is for. ISO/IEC 42001 heads Annex B
-   "(normative)", but its B.1 says the guidance supports implementation, need not be documented or
-   justified in the statement of applicability, is not always suitable or sufficient, and can be extended,
-   modified or replaced by the organisation's own implementation, and clause 6.1.3 asks the organisation
-   to consider it; B.4.4 also presents its list as examples of what tooling can include. So the heading
-   makes considering the guidance a requirement, not each item, and the B.4.4 items are not essential
-   elements under B. Row 9 no longer rests on this question for its B label (see its record).
+   under B? All three questions stay open. In this pass the first two are read as: guidance may show the
+   match under A and what the object takes in. The third is not settled by the choice of B: B reads the
+   whole control, but whether a guidance part is part of the control is the question itself. The
+   assessor's proposed reading is that an item of a discussion or guidance part is an essential element
+   under B when, and only when, the source presents it as a requirement of the control, and that a heading
+   that calls the guidance normative is weighed with what the source says the guidance is for. On that
+   reading, ISO/IEC 42001 heads Annex B "(normative)", but its B.1 says the guidance supports
+   implementation, need not be documented or justified in the statement of applicability, is not always
+   suitable or sufficient, and can be extended, modified or replaced by the organisation's own
+   implementation, and clause 6.1.3 asks the organisation to consider it; B.4.4 also presents its list as
+   examples of what tooling can include. So the heading makes considering the guidance a requirement, not
+   each item, and the B.4.4 items are not essential elements under B. No label depends on this third
+   question today: row 9 is broad under B on its statement's object, row 10 leaves lettered items of the
+   CM-8 statement out, and row 20 leaves both items of the SA-3(2) statement out, so each is broad under
+   B whether guidance items are essential elements or not (see their records).
 7. **Human roles filled by an AI pass.** When an entry asks for people in a role (an independent
    assessor, an expert who did not build the system, a reviewer), can a check that a rule requires, and
    that may be run by another AI model, fill that role?
@@ -235,7 +251,10 @@ by the maintainer either. A record names every convention that decides one of it
 
 One file per framework, named after the framework's manifest, holding one `[[row]]` table per
 (rule, framework, id). The records never quote control text. Exact wording stays in the source, reached
-through `source`, `text-location` and `source-sha256`; the records use own words only.
+through `source`, `text-location` and `source-sha256`; the records use own words only. Where a record
+also reads a second reference copy of the same edition (the ATLAS YAML copy, for the `mitigates` and
+`specializes` relations its techniques file does not carry), `text-location` names that copy, its SHA-256
+and the lines read.
 
 | field | meaning |
 | --- | --- |
@@ -287,8 +306,8 @@ representative sample. All 20 are tight in frontmatter today.
 | 10 | ai-toolchain-register | nist-80053 | CM-8 | tight | broad | B | 3 |
 | 11 | corroborate-external-claims | owasp-llm | LLM07 | tight | broad | B | none |
 | 12 | output-encoding | atlas | AML.T0077 | tight | broad | B | 4 |
-| 13 | resource-bounds | atlas | AML.T0029 | broad | broad | B pending convention 8 | 8 |
-| 14 | resource-bounds | atlas | AML.T0034.000 | broad | broad | B pending convention 8 | 8 |
+| 13 | resource-bounds | atlas | AML.T0029 | broad | broad | B | 8 |
+| 14 | resource-bounds | atlas | AML.T0034.000 | broad | broad | B | 8 |
 | 15 | resource-bounds | owasp-asi | ASI08 | tight | broad | B | none |
 | 16 | threat-model-boundaries | owasp-proactive | C4 | tight | broad | B | none |
 | 17 | guardrail-config-integrity | owasp-mcp | MCP02 | tight | broad | B | 4 |
@@ -302,13 +321,19 @@ Totals for these 20 rows, under the readings the records state:
 - Definition B, as chosen: 0 tight, 20 broad. Rows 4, 6 and 9, tight under B in the earlier rounds,
   are broad once B is read over the whole control: rows 4 and 6 count the objects of GOVERN 3.2 as well as
   its verbs, and row 9 counts the whole of the tooling the A.4.4 statement names (see their records).
-- The B label is settled for 18 rows. For rows 13 and 14 it depends on convention 8, which is open: on
-  the other reading of it both rows are tight under B as well as under A.
+- The B label holds on every reading of every open convention for all 20 rows. Rows 13 and 14, which
+  earlier rounds left waiting on convention 8, are broad under B on either reading of it once their
+  listed mitigations are read from the whole technique: the ATLAS release links access control on the
+  model's API (AML.M0019) to the Denial of AI Service technique and to the parent of the Excessive Queries
+  sub-technique, and the resource bounds rule does not meet it on either reading (see their records).
+  Row 14's B label also rests on the rule above that a sub-technique takes in its parent's mitigations:
+  on the other reading of that rule, row 14 would be tight under B where convention 8 is read the other
+  way.
 
-The A totals depend on conventions 1, 2, 3, 4, 6, 7, 8 and 9; the B totals depend only on convention 8,
-because in every other row the omissions that make the row broad under B stand on every reading. Each
-item below says what changes when that convention is read the other way and every other convention is
-read as the records state:
+The A totals depend on conventions 1, 2, 3, 4, 6, 7, 8 and 9; the B totals depend on no open
+convention, because in every row the omissions that make the row broad under B stand on every reading.
+Each item below says what changes when that convention is read the other way and every other convention
+is read as the records state:
 
 - Convention 1: if an informative annex entry cannot be tight, rows 1 and 2 are broad under A as well.
 - Convention 2: if a pack rule is not one of an organisation's policies, procedures or processes, rows 3
@@ -319,10 +344,15 @@ read as the records state:
   binding the product, it stays tight under A.
 - Convention 4: if a rule cannot be tight to an entry whose mechanism or main control sits at another
   layer, rows 12, 17 and 18 are broad under A as well.
-- Convention 6: if only a control's statement can show the match, row 20 is broad under A as well.
+- Convention 6, first question: if only a control's statement can show the match, row 20 is broad under
+  A as well.
+- Convention 6, third question: no label changes. The assessor's proposed reading, that a guidance item
+  is an essential element under B only where the source presents it as a requirement, is the reading
+  rows 9 and 10 state; if every item of a discussion or guidance part were an essential element under B, rows 9,
+  10 and 20 would be broad under B as they are.
 - Convention 7: if the entry's role needs a person, row 8 is broad under A as well.
 - Convention 8: if the resource bounds rule is read as also binding the services of the product the
-  assistant builds, rows 13 and 14 are tight under A and under B.
+  assistant builds, rows 13 and 14 are tight under A; they stay broad under B.
 - Convention 9: if an entry about an AI system is met only by a rule aimed at what makes a system AI,
   row 8 is broad under A as well.
 - Convention 3 together with convention 9 or convention 6: row 9 is broad under A as well only if

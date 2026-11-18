@@ -31,6 +31,7 @@ omits = [
   "choice and upkeep of third party components",
   "enforcement of stated trust relationships by controls such as gateways, and validation at each step, beyond carrying mitigations into a change's acceptance criteria (the rest of the trust relationships section)",
   "choosing and applying a known secure architecture pattern (the architecture patterns section)",
+  "addressing security across the whole architecture of the application, beyond the single change that brings a new external interface, privileged operation, untrusted data flow or trust boundary (the whole of the control's object, met for single changes only)",
 ]
 label-a = "tight"
 label-b = "broad"
