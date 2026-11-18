@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "bea19426384c65ecdc836b3a816c1b4860909fb288baf79c2bf9858e3bf60d00"
+tree-sha256 = "aa9ac7f9c122bc6ea4f25893abcccad0ac18ac552218e0b46186a049d090cd4c"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4212,8 +4212,8 @@ sha256 = "2e619e5ffbcdf4e923ab9db70532aee0a4133ba096582d6971faa3f6c905b3f0"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 496583
-sha256 = "758c872e792d286c94a1cef7bab876337e75207ed045d2228e7226191ec2725f"
+bytes = 496639
+sha256 = "3fa3868bbea5b3d5c727931bded7e57171cb34ac7d3b4a8464dd407eb064807d"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
