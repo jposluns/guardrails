@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "2402be7b5dad847c6ba22107635da41bfafd060ac3f24e30b7ab55d85ad28079"
+tree-sha256 = "e060b98eb4910115452f3268095f69b1018f0d2094f36e8476e4bb4229e63a12"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4187,8 +4187,8 @@ sha256 = "670497debf8f21b516b24f4d4647f9ac0f2b165a7cd930f7a5d67e3c8f7b5ed0"
 
 [[sources]]
 path = "tools/check_baseline_pin.py"
-bytes = 168517
-sha256 = "30c3defbcbd2cfaf29ad494eaf9f99f2f64ee1677703f1ecffe7f4d69a0813f7"
+bytes = 168886
+sha256 = "8b78622d9ec3d9fd29b45b5f9f1b0374f1c8638468143caa0b199f1a47abc2a6"
 
 [[sources]]
 path = "tools/check_branch_root.py"

@@ -1617,12 +1617,16 @@ def _coupling_cases():
         with open(xdg / "git" / "config", "xb") as handle:
             handle.write(b"[poisoned\n")
         bare = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        # The controls read the poisoned global or XDG config, but no system git config: like the leg's own reads
+        # (_git_env) they run with GIT_CONFIG_NOSYSTEM=1, in one shared environment whose HOME and XDG_CONFIG_HOME each
+        # control sets in turn. GIT_CONFIG_GLOBAL stays unset, so the poison is still read.
+        control_env = dict(bare, GIT_CONFIG_NOSYSTEM="1")
         controls = []
         for env_home, env_xdg in ((home, empty), (empty, xdg)):
+            control_env.update(HOME=str(env_home), XDG_CONFIG_HOME=str(env_xdg))
             try:
                 controls.append(subprocess.run(["git", "-C", tmp, "rev-parse", "--verify", "HEAD"], capture_output=True,
-                                               env=dict(bare, HOME=str(env_home), XDG_CONFIG_HOME=str(env_xdg)),
-                                               timeout=GIT_TIMEOUT, check=False).returncode)
+                                               env=control_env, timeout=GIT_TIMEOUT, check=False).returncode)
             except (OSError, subprocess.TimeoutExpired) as exc:
                 controls.append(repr(exc))
         got, out, err = _probe_child(tmp, "base", env=dict(bare, HOME=str(home), XDG_CONFIG_HOME=str(xdg)),
