@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "8158da1b5a820c1dcfd7b67ab93c7ba7d61ca6b687c19183d9dac3ccb9fc1261"
+tree-sha256 = "72d624bc4f360768b751e93ae533f419825f59acec93f61888405d9052b8de29"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4062,8 +4062,8 @@ sha256 = "6696c185e28c0bdbb3628ef259291cbecc81553f7074539a919f2a7eba3bbc5d"
 
 [[sources]]
 path = "site/sitemap.xml"
-bytes = 1394
-sha256 = "ac9de65a36e827611bdce499dd9dc66e91eaf4420ba24806773238ce076425a6"
+bytes = 1491
+sha256 = "c0402bd8eefbdea30d79a35f2aa4390732fd505033ec65ea2b9733e8176bb377"
 
 [[sources]]
 path = "site/standard/index.html"
