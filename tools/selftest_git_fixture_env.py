@@ -746,6 +746,14 @@ CONFIG_EXCLUSIONS = {
             " launch/no-arguments-exit-2); its self-test stays in this roster as the direct"
             " --self-test launch, registered in both CI and the standalone runner, and as the"
             " ci-site-scope-selftest suite step.",
+        ("tools/check_push_gate_record.py",):
+            "A bare launch is a usage error by design, not a self-test: the tool runs only with a"
+            " mode flag, so with none it prints its usage and exits 2 (cannot evaluate) in every"
+            " lane and under any configuration, running no git; its self-test stays in this roster"
+            " twice: as the push-gate-record-selftest suite step, whose launcher sanitizes the child"
+            " environment, and as the direct --self-test --red-on-revert launch"
+            " CONFIG_DIRECT_SELFTESTS keeps, so each poisoned lane still enters that self-test's own"
+            " entry point, whose real git fixtures run under a hermetic git environment.",
     },
     "archive": {
         ("tools/check_release_build.py", "--self-test"):
@@ -782,6 +790,7 @@ CONFIG_DIRECT_SELFTESTS = {
     "internal-names-selftest": ("tools/check_internal_names.py", "--self-test"),
     "selftest-removal-selftest": ("tools/check_selftest_removal.py", "--self-test"),
     "review-labels-selftest": ("tools/check_review_labels.py", "--self-test"),
+    "push-gate-record-selftest": ("tools/check_push_gate_record.py", "--self-test", "--red-on-revert"),
 }
 
 

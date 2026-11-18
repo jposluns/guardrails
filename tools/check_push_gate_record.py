@@ -7,10 +7,22 @@ malformed result as unverified. This tool makes that checkable at push time for 
 (tools/run_all_checks.sh), in four modes:
 
   check_push_gate_record.py --supervise
-      Run tools/run_all_checks.sh under supervision from a clean work tree and publish a record bound
-      to HEAD's full object id at <git-common-dir>/aiqt-gate-records/<oid>.jsonl. Exits with the
-      runner's own exit status (a signal n reads as 128+n); 2 when the tree is dirty or HEAD or the
-      git directory cannot be read (no record is written then).
+      Export HEAD's commit into a fresh temporary directory, run tools/run_all_checks.sh there under
+      supervision and publish a record bound to HEAD's full object id at
+      <git-common-dir>/aiqt-gate-records/<oid>.jsonl. Exits with the runner's own exit status (a
+      signal n reads as 128+n); 2 when the tree is dirty, HEAD or the git directory cannot be read or
+      the commit cannot be exported (no record is written then).
+
+EXPORT. The runner never runs in the caller's work tree: the supervisor makes a private clone of the
+repository (git clone --shared --no-checkout, objects borrowed through alternates, no hooks template)
+in a fresh temporary directory, detaches its HEAD at the commit, builds a fresh index from the
+commit's tree (read-tree) and writes every file from that index (checkout-index), so the files the
+runner reads are the commit's by construction, whatever the caller's index flags (assume-unchanged,
+skip-worktree), ignored files or uncommitted edits hide. head_at_end and clean_at_end are read in
+that export. The export is removed when the run ends. Cost: one full checkout per run (disk and
+time proportional to the tree), and the runner sees no untracked or ignored local file (a gate that
+needs one fails), no local branch (the export's branches are the caller's as remote-tracking refs
+under origin/) and none of the caller's per-repository configuration.
   check_push_gate_record.py --pre-push --records DIR REMOTE URL
       Read git's pre-push lines on stdin and refuse (exit 1) every branch update whose pushed commit has
       no acceptable record in DIR; exit 2 on a malformed stdin line or an unreadable DIR; exit 0 when
@@ -63,15 +75,28 @@ RESIDUALS (what this check does not catch):
   - Rerun semantics: a supervised run removes any earlier record for its commit before it starts and
     publishes atomically on exit, so a pending rerun refuses the push; of two concurrent runs on one
     commit the last rename wins. A supervisor killed mid-run leaves no record for the commit (and may
-    leave its private temporary file in the records directory).
-  - The clean-tree checks at the start and the end do not prove the tree never changed during the run.
+    leave its private temporary file in the records directory and its export directory, named
+    aiqt-push-gate-export-*, in the temporary directory).
+  - The record binds the commit's exported files, not the process that ran: the runner can still
+    read outside the export (an absolute path, the network, the caller's home and global git
+    configuration, the borrowed object store), a change to the export during the run is caught
+    only when it is still visible to git status at the end, and the caller's own work tree is
+    checked only by a git status read at the start (its index flags can hide an edit there,
+    which the export makes harmless to the record).
   - Only refs/heads/ destinations are checked; a tag push or any other destination is not.
   - No remote CI result is checked; the event-trigger paragraph of the rule still governs that in prose.
-  - Per-gate lines are parsed from the runner's printed output for display only (a gate that prints a
-    look-alike line can add one); the verdict is the supervised process's exit status.
+  - Per-gate lines are parsed from the runner's printed output (a gate that prints a look-alike line
+    can add one); the verdict is the supervised process's exit status, and the parsed lines can only
+    add refusals (gates-nonzero, no-contradiction), never a pass.
   - Parent directories of the records directory are followed as the path resolves; only its final
     component and the record itself are opened without following a link.
-  - The runner inherits the caller's environment unchanged; the supervisor does not harden it.
+  - The runner inherits the caller's environment except every GIT_* variable (so an inherited
+    GIT_DIR or GIT_WORK_TREE cannot point it back at the caller's tree); the supervisor does not
+    otherwise harden it.
+  - Only the pushed tip commit of each branch update is checked; the intermediate commits of a
+    multi-commit push need no record.
+  - A pending rerun refuses the push only until some run publishes: an earlier concurrent run on the
+    same commit that publishes after the rerun removed the old record makes the push pass on it.
 
 Exit codes: 0 pass, 1 refusal or self-test failure, 2 cannot evaluate (usage, malformed input, an
 unreadable git state or a self-test harness error). Stdlib only.
@@ -97,6 +122,7 @@ import io
 import json
 import os
 import secrets
+import shutil
 import signal
 import stat
 import subprocess
@@ -117,6 +143,8 @@ RECORD_SUFFIX = ".jsonl"
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_STDIN_BYTES = 1024 * 1024
 GIT_TIMEOUT = 60
+GIT_EXPORT_TIMEOUT = 600
+EXPORT_PREFIX = "aiqt-push-gate-export-"
 HEX = frozenset("0123456789abcdef")
 OID_LENGTHS = {"sha1": 40, "sha256": 64}
 UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -327,7 +355,7 @@ def _validate_line(number, obj):
         raise Refusal("schema", "{}: commit is not a full lowercase object id".format(where))
     if kind == "start":
         fmt = obj["object_format"]
-        if fmt not in OID_LENGTHS or len(obj["commit"]) != OID_LENGTHS[fmt]:
+        if not isinstance(fmt, str) or fmt not in OID_LENGTHS or len(obj["commit"]) != OID_LENGTHS[fmt]:
             raise Refusal("schema", "{}: object_format does not match the commit id".format(where))
         _bool_field(obj, "clean_at_start", where)
         if not _utc_ok(obj["started_utc"]):
@@ -342,8 +370,9 @@ def _validate_line(number, obj):
         raise Refusal("schema", "{}: ended_utc is not {}".format(where, UTC_FORMAT))
 
 
-def _parse(data):
-    """The record's (line number, object) pairs, or Refusal."""
+def _parse(data, objs):
+    """Append the record's (line number, object) pairs to objs and return it, or Refusal; the lines
+    parsed before a refusal stay in objs for the diagnostics."""
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -355,7 +384,6 @@ def _parse(data):
             raise Refusal("final-lf", "the record's last line does not end in LF")
         text += "\n"
     lines = text.split("\n")[:-1] if text else []
-    objs = []
     for number, line in enumerate(lines, 1):
         try:
             if "\r" in line:
@@ -431,7 +459,7 @@ def evaluate(dir_fd, oid):
         data = _read_bytes(dir_fd, oid + RECORD_SUFFIX)
         if data is None:
             return Verdict(True)
-        objs = _parse(data)
+        _parse(data, objs)
         gate_lines, term = _judge(objs, oid)
         return Verdict(True, gate_lines=gate_lines, terminal=term)
     except Refusal as exc:
@@ -543,11 +571,13 @@ def _git_env():
     return env
 
 
-def _git_query(root, args):
-    """(exit status, stdout bytes) of one git read in root; CannotEvaluate when git cannot be launched."""
+def _git_query(root, args, env=None):
+    """(exit status, stdout bytes) of one git call in root; CannotEvaluate when git cannot be launched.
+    env None is _git_env(); the self-test passes a hermetic environment."""
     try:
         done = subprocess.run(["git", *GIT_PINS, "-C", str(root), *args], stdin=subprocess.DEVNULL,
-                              capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
+                              capture_output=True, timeout=GIT_EXPORT_TIMEOUT if args[:1] == ("clone",)
+                              else GIT_TIMEOUT, env=_git_env() if env is None else env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise CannotEvaluate("git cannot be run: {}".format(exc))
     return done.returncode, done.stdout
@@ -578,8 +608,32 @@ def _clean(git, root):
     return out == b""
 
 
+def _export(git, root, oid, dest):
+    """Write the commit oid's tree into dest (a path that does not exist yet) as a private clone of
+    root's repository with HEAD detached at oid, a fresh index from oid's tree and every file
+    written from that index; CannotEvaluate when a step fails or the export's HEAD is not oid."""
+    steps = (
+        (root, ("clone", "--quiet", "--shared", "--no-checkout", "--template=", "--", str(root), str(dest))),
+        (dest, ("update-ref", "--no-deref", "HEAD", oid)),
+        (dest, ("read-tree", "--end-of-options", oid)),
+        (dest, ("checkout-index", "--all", "--force", "--index")),
+    )
+    for where, args in steps:
+        code, _out = git(where, args)
+        if code != 0:
+            raise CannotEvaluate("the commit cannot be exported (git {} exit {})".format(args[0], code))
+    exported, _fmt = _head(git, dest)
+    if exported != oid:
+        raise CannotEvaluate("the export's HEAD {} is not the commit {}".format(exported, oid))
+
+
+def _runner_env():
+    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+
 class _RunnerChild:
-    """The real runner: bash tools/run_all_checks.sh in root, stdout and stderr merged, read to EOF."""
+    """The real runner: bash tools/run_all_checks.sh in root (the export), stdout and stderr merged,
+    read to EOF, with every inherited GIT_* variable dropped."""
 
     def __init__(self, root):
         runner = root / RUNNER_REL
@@ -591,7 +645,8 @@ class _RunnerChild:
             raise CannotEvaluate("{} is not a regular file".format(RUNNER_REL))
         try:
             self.proc = subprocess.Popen(["bash", RUNNER_REL], cwd=str(root), stdin=subprocess.DEVNULL,
-                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                         env=_runner_env())
         except OSError as exc:
             raise CannotEvaluate("the runner cannot be launched: {}".format(exc))
 
@@ -640,9 +695,19 @@ def _dump(obj):
     return json.dumps(obj, ensure_ascii=True, separators=(",", ":"), sort_keys=False) + "\n"
 
 
-def supervise(cwd, out, err, git=_git_query, start_runner=_start_runner, replace=os.replace):
-    """Run the runner under supervision and publish its record; return the exit code (see the module
-    docstring). out receives the runner's bytes; err is a text stream for the supervisor's own lines."""
+def _sync_dir(path):
+    dir_fd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def supervise(cwd, out, err, git=_git_query, start_runner=_start_runner, replace=os.replace,
+              sync_dir=_sync_dir):
+    """Export the commit, run the runner there under supervision and publish its record; return the
+    exit code (see the module docstring). out receives the runner's bytes; err is a text stream for
+    the supervisor's own lines."""
     if _on("supervise-sigchld") and signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN:
         # With SIGCHLD ignored the kernel reaps the runner and its exit status cannot be read, so a failed
         # run would read as a pass. Refuse by name instead of publishing such a status.
@@ -683,13 +748,22 @@ def supervise(cwd, out, err, git=_git_query, start_runner=_start_runner, replace
     run_id = secrets.token_hex(16)
     child = None
     published = False
+    export_parent = None
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            try:
+                export_parent = tempfile.mkdtemp(prefix=EXPORT_PREFIX)
+                tree = Path(export_parent) / "tree"
+                _export(git, root, head, tree)
+                clean_start = clean_start and _clean(git, tree)
+            except (OSError, CannotEvaluate) as exc:
+                print("CANNOT_EVALUATE: {}; no record written".format(exc), file=err)
+                return EXIT_CANNOT_EVALUATE
             handle.write(_dump({"type": "start", "v": 1, "run_id": run_id, "commit": head, "object_format": fmt,
                                 "clean_at_start": clean_start, "started_utc": _utc_now()}))
             handle.flush()
             try:
-                child = start_runner(root)
+                child = start_runner(tree)
             except CannotEvaluate as exc:
                 print("CANNOT_EVALUATE: {}; no record written".format(exc), file=err)
                 return EXIT_CANNOT_EVALUATE
@@ -706,8 +780,8 @@ def supervise(cwd, out, err, git=_git_query, start_runner=_start_runner, replace
             status = child.wait()
             child = None
             try:
-                head_end, _fmt = _head(git, root)
-                clean_end = _clean(git, root)
+                head_end, _fmt = _head(git, tree)
+                clean_end = _clean(git, tree)
             except CannotEvaluate as exc:
                 print("ERROR: {} after the run; no record published (the push stays refused)".format(exc),
                       file=err)
@@ -719,16 +793,18 @@ def supervise(cwd, out, err, git=_git_query, start_runner=_start_runner, replace
             os.fsync(handle.fileno())
         try:
             replace(tmp, final)
-            published = True
-            dir_fd = os.open(str(records), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
         except OSError as exc:
             print("ERROR: the record could not be published: {} (the push stays refused)".format(
                 exc.strerror or exc), file=err)
             return status
+        published = True
+        try:
+            sync_dir(records)
+        except OSError as exc:
+            # The rename has happened, so the record is in place and the pre-push check reads it; only
+            # its durability across a crash is unconfirmed.
+            print("WARNING: the record {} is published but the records directory could not be synced: {} "
+                  "(a crash may still lose it)".format(final, exc.strerror or exc), file=err)
         print("RECORD: {} status {} ({} gate line(s))".format(final, status, gates), file=err)
         return status
     finally:
@@ -738,6 +814,8 @@ def supervise(cwd, out, err, git=_git_query, start_runner=_start_runner, replace
         if not published:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
+        if export_parent is not None:
+            shutil.rmtree(export_parent, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -792,9 +870,11 @@ def main(argv):
     return EXIT_CANNOT_EVALUATE
 
 
-# SELF-TEST: production code ends here. Every fixture below is synthetic (temporary directories, fake
-# object ids, a fake git and a fake runner injected through supervise()'s parameters, never through the
-# command line). Each case asserts through the check() choke point; the executed id set is reconciled
+# SELF-TEST: production code ends here. Every fixture lives in a temporary directory. Most supervisor
+# rows inject a fake git and a fake runner through supervise()'s parameters (never through the command
+# line); the child/ rows run the real runner child, and the realgit/ rows and the hook shim row run
+# real git in repositories made with git init, under a hermetic git environment (_hermetic_git_env),
+# so the git-fixture-env config lanes' poisoned caller configuration never reaches them. Each case asserts through the check() choke point; the executed id set is reconciled
 # against tools/selftest_checks.toml (suite push-gate-record-selftest) by tools/check_selftest_execution.py.
 # A revert/ case switches one RULES entry off (_reverted) and requires the same fixture to flip: to
 # acceptance where the rule is the record's only defect, otherwise to a refusal by a later reason, which
@@ -891,23 +971,34 @@ def _branch_line(oid=OID, ref="refs/heads/main"):
 
 
 class _FakeGit:
-    """Answers the supervisor's git reads from fixed values; status answers are consumed in order."""
+    """Answers the supervisor's git calls from fixed values. HEAD answers (start in the work tree, then
+    in the export after it is made, then in the export at the end) and status answers (the work tree,
+    the export at the start, the export at the end) are consumed in order, the last one repeating; a
+    HEAD answer of None is a failed read. The export steps succeed and make the export directory."""
 
-    def __init__(self, root, common, head=OID, fmt="sha1", statuses=(b"", b"")):
-        self.root, self.common, self.head, self.fmt = root, common, head, fmt
-        self.statuses = list(statuses)
+    def __init__(self, root, common, heads=(OID,), fmt="sha1", statuses=(b"",)):
+        self.root, self.common, self.fmt = root, common, fmt
+        self.heads, self.statuses = list(heads), list(statuses)
+        self.calls = []
 
     def __call__(self, where, args):
+        self.calls.append((Path(where), tuple(args)))
         if args == ("rev-parse", "--show-toplevel"):
             return 0, (str(self.root) + "\n").encode()
         if args[:2] == ("rev-parse", "--verify"):
-            return 0, (self.head + "\n").encode()
+            head = self.heads.pop(0) if len(self.heads) > 1 else self.heads[0]
+            return (128, b"") if head is None else (0, (head + "\n").encode())
         if args == ("rev-parse", "--show-object-format"):
             return 0, (self.fmt + "\n").encode()
         if args[:2] == ("rev-parse", "--path-format=absolute"):
             return 0, (str(self.common) + "\n").encode()
         if args[0] == "status":
             return 0, self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+        if args[0] == "clone":
+            Path(args[-1]).mkdir()
+            return 0, b""
+        if args[0] in ("update-ref", "read-tree", "checkout-index"):
+            return 0, b""
         return 128, b""
 
 
@@ -934,13 +1025,18 @@ class _FakeChild:
 PASS_OUTPUT = (b"--- a ---\n", b"ok\n", b"\n", b"--- b ---\n", b"\n", b"RESULT: PASS\n")
 
 
-def _supervise_case(base, name, lines=PASS_OUTPUT, status=0, statuses=(b"", b""), during=None,
-                    raise_at=None, replace=os.replace, prior=None):
+def _supervise_case(base, name, lines=PASS_OUTPUT, status=0, statuses=(b"",), during=None,
+                    raise_at=None, replace=os.replace, prior=None, heads=(OID,), sync_dir=_sync_dir,
+                    records_link=False, messages=None):
     root = Path(base) / name
     common = root / ".git"
     common.mkdir(parents=True)
     records = common / RECORDS_DIR_NAME
     final = records / (OID + RECORD_SUFFIX)
+    if records_link:
+        elsewhere = root / "elsewhere"
+        elsewhere.mkdir()
+        os.symlink(elsewhere, records)
     if prior is not None:
         records.mkdir()
         final.write_bytes(prior)
@@ -952,9 +1048,56 @@ def _supervise_case(base, name, lines=PASS_OUTPUT, status=0, statuses=(b"", b"")
         return child
 
     out, err = io.BytesIO(), io.StringIO()
-    code = supervise(root, out, err, git=_FakeGit(root, common, statuses=statuses), start_runner=fake_runner,
-                     replace=replace)
+    code = supervise(root, out, err, git=_FakeGit(root, common, heads=heads, statuses=statuses),
+                     start_runner=fake_runner, replace=replace, sync_dir=sync_dir)
+    if messages is not None:
+        messages.append(err.getvalue())
     return code, records, final, spawned, out.getvalue()
+
+
+def _hermetic_git_env(base):
+    """The environment of every real git call the self-test makes: built from nothing but PATH, with
+    HOME and XDG_CONFIG_HOME at an empty private directory, system and global configuration off and
+    no inherited GIT_* variable, so a poisoned caller configuration (the git-fixture-env config
+    lanes) never reaches a fixture."""
+    home = Path(base) / "git-home"
+    home.mkdir(exist_ok=True)
+    return {"PATH": os.environ.get("PATH", os.defpath), "HOME": str(home),
+            "XDG_CONFIG_HOME": str(home / "xdg"), "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C",
+            "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}
+
+
+def _git_fixture(env, repo, *args):
+    """One setup git call in a real fixture repository; raises on failure."""
+    return subprocess.run(["git", *GIT_PINS, "-C", str(repo), *args], env=env, stdin=subprocess.DEVNULL,
+                          capture_output=True, timeout=GIT_TIMEOUT, check=True).stdout
+
+
+def _real_repo(base, name, files, env):
+    """A real repository made with git init, holding files {relative path: text} in one commit."""
+    repo = Path(base) / name
+    repo.mkdir()
+    _git_fixture(env, repo, "init", "--quiet", "--template=")
+    for rel, text in files.items():
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    _git_fixture(env, repo, "add", "--all")
+    _git_fixture(env, repo, "commit", "--quiet", "--no-verify", "-m", "fixture")
+    return repo, _git_fixture(env, repo, "rev-parse", "HEAD").decode().strip()
+
+
+def _real_supervise(repo, env):
+    """supervise() with real git (hermetic) and the real runner child; (exit, stdout bytes, err text)."""
+    out, err = io.BytesIO(), io.StringIO()
+    code = supervise(repo, out, err, git=lambda where, args: _git_query(where, args, env=env))
+    return code, out.getvalue(), err.getvalue()
+
+
+def _real_records(repo):
+    return repo / ".git" / RECORDS_DIR_NAME
 
 
 def _stray(records):
@@ -971,27 +1114,35 @@ def _judge_path(records, oid=OID):
     return (0, None) if verdict.ok else (1, verdict.rule)
 
 
-def _run_hook_shim(base):
-    """Run the printed shim with stub git and python3 on PATH; return (exit, argv seen, exit when git fails)."""
+def _run_hook_shim(base, env):
+    """Run the printed shim with real git (hermetic env) and a stub python3 first on PATH, inside a
+    real repository made with git init and then outside any repository; return (exit, argv seen,
+    expected records directory, exit when git fails)."""
     stubs = Path(base) / "stubs"
     stubs.mkdir()
     shim = Path(base) / "pre-push"
     shim.write_text(HOOK_SHIM, encoding="utf-8")
     seen = Path(base) / "argv.txt"
-    git_stub = stubs / "git"
     py_stub = stubs / "python3"
-    git_stub.write_text("#!/bin/sh\necho /fixture/common\n", encoding="utf-8")
     py_stub.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 7\n".format(seen), encoding="utf-8")
-    os.chmod(git_stub, 0o755)
     os.chmod(py_stub, 0o755)
-    env = {"PATH": str(stubs)}
-    first = subprocess.run(["/bin/sh", str(shim), "origin", "https://example.invalid/repo"], cwd=str(base),
-                           env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+    real_git = shutil.which("git", path=env["PATH"])
+    if real_git is None:
+        raise OSError(errno.ENOENT, "git not found on PATH")
+    repo = Path(base) / "repo"
+    repo.mkdir()
+    _git_fixture(env, repo, "init", "--quiet", "--template=")
+    shim_env = dict(env, PATH=str(stubs) + os.pathsep + str(Path(real_git).parent),
+                    GIT_CEILING_DIRECTORIES=str(base))
+    first = subprocess.run(["/bin/sh", str(shim), "origin", "https://example.invalid/repo"], cwd=str(repo),
+                           env=shim_env, stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
     argv = seen.read_text(encoding="utf-8").splitlines() if seen.exists() else None
-    git_stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-    second = subprocess.run(["/bin/sh", str(shim), "origin", "https://example.invalid/repo"], cwd=str(base),
-                            env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
-    return first.returncode, argv, second.returncode
+    outside = Path(base) / "outside"
+    outside.mkdir()
+    second = subprocess.run(["/bin/sh", str(shim), "origin", "https://example.invalid/repo"],
+                            cwd=str(outside), env=shim_env, stdin=subprocess.DEVNULL, capture_output=True,
+                            timeout=60)
+    return first.returncode, argv, os.path.realpath(repo / ".git" / RECORDS_DIR_NAME), second.returncode
 
 
 def self_test(red_on_revert, report_path=None):
@@ -1022,6 +1173,13 @@ def self_test(red_on_revert, report_path=None):
         tag = "refs/tags/v1 {} refs/tags/v1 {}\n".format(OID, "0" * 40)
         code, text = cases.push(tag)
         check("scope/non-branch-ref-noted", (code, "NOTE: refs/tags/v1" in text), (0, True))
+        # Each of these would be accepted (a run of deletions, or a deletion) were its limit dropped.
+        many = deletion * (MAX_STDIN_BYTES // len(deletion) + 1)
+        check("stdin/over-size-cannot-evaluate",
+              check_push(many.encode("utf-8"), str(cases.fresh()), io.StringIO()), 2)
+        check("stdin/no-final-lf-cannot-evaluate", cases.push(_branch_line()[:-1])[0], 2)
+        not_utf8 = "(delete) {} refs/heads/old {}\n".format("0" * 40, OTHER).encode().replace(b"old", b"\xff")
+        check("stdin/not-utf8-cannot-evaluate", check_push(not_utf8, str(cases.fresh()), io.StringIO()), 2)
         if red_on_revert:
             with _reverted("stdin-well-formed"):
                 check("revert/stdin-well-formed-goes-red", cases.push(malformed)[0], 0)
@@ -1081,6 +1239,29 @@ def self_test(red_on_revert, report_path=None):
         check("read/unknown-key-refuses", cases.judge(unknown), (1, "no-unknown-keys"))
         check("read/no-final-lf-refuses", cases.judge(no_lf), (1, "final-lf"))
         check("read/trailing-after-terminal-refuses", cases.judge(trailing), (1, "nothing-after-terminal"))
+
+        def unreadable(records):
+            path = records / (OID + RECORD_SUFFIX)
+            path.write_bytes(good)
+            os.chmod(path, 0)
+
+        check("read/unreadable-refuses", cases.judge(setup=unreadable), (1, "unreadable"))
+        carriage = good.replace(b'"name":"a"', b'"name":\r"a"')
+        check("read/carriage-return-refuses", cases.judge(carriage), (1, "json-lines"))
+        linked_target = cases.fresh()
+        (linked_target / (OID + RECORD_SUFFIX)).write_bytes(good)
+        linked_dir = Path(base) / "records-link"
+        os.symlink(linked_target, linked_dir)
+        check("lookup/records-dir-symlink-cannot-evaluate",
+              cases.push(_branch_line(), records=linked_dir)[0], 2)
+        closed_dir = cases.fresh()
+        (closed_dir / (OID + RECORD_SUFFIX)).write_bytes(good)
+        os.chmod(closed_dir, 0)
+        try:
+            closed = cases.push(_branch_line(), records=closed_dir)[0]
+        finally:
+            os.chmod(closed_dir, 0o700)
+        check("lookup/unreadable-records-dir-cannot-evaluate", closed, 2)
         if red_on_revert:
             with _reverted("record-present"):
                 check("revert/record-present-goes-red", cases.judge(), (0, None))
@@ -1119,6 +1300,17 @@ def self_test(red_on_revert, report_path=None):
         check("shape/first-not-start-refuses", cases.judge(first_not_start), (1, "first-is-start"))
         check("shape/last-not-terminal-refuses", cases.judge(seed), (1, "last-is-terminal"))
         check("shape/run-id-mismatch-refuses", cases.judge(run_id), (1, "run-id-match"))
+        check("shape/two-starts-refuses", cases.judge(_encode(objs[:1] + objs)), (1, "one-start"))
+        format_types = []
+        for bad_format in ([], {}):
+            records = cases.fresh()
+            (records / (OID + RECORD_SUFFIX)).write_bytes(_encode(_lines(start={"object_format": bad_format})))
+            try:
+                code, text = cases.push(_branch_line(), records=records)
+                format_types.append((code, "REFUSED: refs/heads/main" in text, ": schema: " in text))
+            except Exception as exc:  # the defect this row pins: a crash instead of a refusal
+                format_types.append(type(exc).__name__)
+        check("shape/object-format-type-refuses", format_types, [(1, True, True), (1, True, True)])
         if red_on_revert:
             with _reverted("version"):
                 check("revert/version-goes-red", cases.judge(version), (0, None))
@@ -1202,6 +1394,11 @@ def self_test(red_on_revert, report_path=None):
               (code, "gate lines read: a exit 0, b exit 1" in text, "terminal status 1, gates 2" in text,
                "terminal line missing" in text),
               (1, True, True, True))
+        records = cases.fresh()
+        (records / (OID + RECORD_SUFFIX)).write_bytes(_encode(_lines()[:2]) + b'{"type":\n')
+        code, text = cases.push(_branch_line(), records=records)
+        check("report/gate-lines-kept-after-malformed-line",
+              (code, ": json-lines: line 3" in text, "gate lines read: a exit 0" in text), (1, True, True))
 
         # ---------- the supervisor ----------
         code, records, final, spawned, shown = _supervise_case(
@@ -1270,16 +1467,126 @@ def self_test(red_on_revert, report_path=None):
         code, records, final, spawned, shown = _supervise_case(base, "publish", replace=recording_replace)
         check("supervise/publish-is-rename",
               (code, renames == [(records, final)], _judge_path(records)), (0, True, (0, None)))
+        ran_in = spawned[0] if spawned else None
+        check("supervise/runner-runs-in-removed-export",
+              (ran_in is not None and ran_in != Path(base) / "publish" and ran_in.name == "tree"
+               and ran_in.parent.name.startswith(EXPORT_PREFIX), ran_in is not None and ran_in.exists()),
+              (True, False))
+
+        code, records, final, spawned, shown = _supervise_case(base, "head-moved", heads=(OID, OID, OTHER))
+        check("supervise/head-at-end-recorded", (code, _judge_path(records)), (0, (1, "head-at-end-bind")))
+        code, records, final, spawned, shown = _supervise_case(base, "dirty-end", statuses=(b"", b"", b"?? y\0"))
+        check("supervise/clean-at-end-recorded", (code, _judge_path(records)), (0, (1, "clean-at-end")))
+        code, records, final, spawned, shown = _supervise_case(base, "end-unread", heads=(OID, OID, None))
+        check("supervise/end-read-failure-publishes-nothing", (code, final.exists(), _stray(records)),
+              (0, False, []))
+        code, records, final, spawned, shown = _supervise_case(base, "records-link", records_link=True)
+        check("supervise/records-dir-symlink-refuses",
+              (code, spawned, sorted(os.listdir(Path(base) / "records-link" / "elsewhere"))), (2, [], []))
+
+        def failing_replace(src, dst):
+            raise OSError(errno.EIO, "injected rename failure")
+
+        messages = []
+        code, records, final, spawned, shown = _supervise_case(base, "rename-fails", replace=failing_replace,
+                                                               messages=messages)
+        check("supervise/rename-failure-publishes-nothing",
+              (code, final.exists(), _stray(records), "could not be published" in messages[0]),
+              (0, False, [], True))
+
+        def failing_sync(path):
+            raise OSError(errno.EIO, "injected directory sync failure")
+
+        messages = []
+        code, records, final, spawned, shown = _supervise_case(base, "sync-fails", sync_dir=failing_sync,
+                                                               messages=messages)
+        check("supervise/sync-failure-after-rename-says-published",
+              (code, _judge_path(records), "is published" in messages[0], "stays refused" in messages[0]),
+              (0, (0, None), True, False))
+
+        saved_git_dir = os.environ.get("GIT_DIR")
+        os.environ["GIT_DIR"] = str(Path(base) / "inherited-git-dir")
+        try:
+            git_env, runner_env = _git_env(), _runner_env()
+        finally:
+            if saved_git_dir is None:
+                del os.environ["GIT_DIR"]
+            else:
+                os.environ["GIT_DIR"] = saved_git_dir
+        check("supervise/inherited-git-vars-dropped",
+              ("GIT_DIR" in git_env, "GIT_DIR" in runner_env, git_env.get("GIT_OPTIONAL_LOCKS")),
+              (False, False, "0"))
+
+        # ---------- the real runner child ----------
+        def real_child(name, script, link=False):
+            where = Path(base) / name
+            (where / "tools").mkdir(parents=True)
+            target = where / "tools" / ("elsewhere.sh" if link else "run_all_checks.sh")
+            target.write_text(script, encoding="utf-8")
+            if link:
+                os.symlink(target, where / RUNNER_REL)
+            try:
+                child = _RunnerChild(where)
+            except CannotEvaluate:
+                return "cannot evaluate"
+            shown = b"".join(child.lines())
+            return child.wait(), shown
+
+        try:
+            child_rows = (real_child("child-exit", "printf 'x\\n'\nexit 3\n"),
+                          real_child("child-signal", "printf 'x\\n'\nkill -KILL $$\n"),
+                          real_child("child-link", "exit 0\n", link=True))
+        except (OSError, subprocess.SubprocessError) as exc:
+            child_rows = ("child run failed: {}".format(exc),)
+        check("child/real-runner-status-signal-and-link", child_rows,
+              ((3, b"x\n"), (128 + signal.SIGKILL, b"x\n"), "cannot evaluate"))
+
+        # ---------- real git (repositories made with git init, hermetic git environment) ----------
+        genv = _hermetic_git_env(base)
+        gated = "printf -- '--- a ---\\n'\nif [ -f local.flag ]; then exit 0; fi\nexit 7\n"
+        files = {RUNNER_REL: gated, ".gitignore": "local.flag\n"}
+
+        def hidden(name, how):
+            repo, oid = _real_repo(base, name, files, genv)
+            if how == "ignored":
+                (repo / "local.flag").write_text("x\n", encoding="utf-8")
+            else:
+                _git_fixture(genv, repo, "update-index", how, RUNNER_REL)
+                (repo / RUNNER_REL).write_text("printf -- '--- a ---\\n'\nexit 0\n", encoding="utf-8")
+            hidden_status = _git_fixture(genv, repo, "status", "--porcelain", "--untracked-files=all")
+            code, shown, said = _real_supervise(repo, genv)
+            return hidden_status, code, _judge_path(_real_records(repo), oid)
+
+        try:
+            hidden_rows = (hidden("real-assume", "--assume-unchanged"), hidden("real-skip", "--skip-worktree"),
+                           hidden("real-ignored", "ignored"))
+        except (OSError, subprocess.SubprocessError) as exc:
+            hidden_rows = ("real git fixture failed: {}".format(exc),)
+        check("realgit/hidden-local-change-not-recorded-as-pass", hidden_rows,
+              ((b"", 7, (1, "status-zero")),) * 3)
+
+        try:
+            repo, oid = _real_repo(base, "real-pass", {RUNNER_REL: "printf -- '--- a ---\\n'\npwd\nexit 0\n"},
+                                   genv)
+            code, shown, said = _real_supervise(repo, genv)
+            ran = Path(shown.decode("utf-8", "replace").splitlines()[-1])
+            buffer = io.StringIO()
+            pushed = check_push(_branch_line(oid).encode("utf-8"), str(_real_records(repo)), buffer)
+            real_pass = (code, pushed, ran != repo and ran.name == "tree", ran.exists())
+        except (OSError, subprocess.SubprocessError, IndexError) as exc:
+            real_pass = ("real git fixture failed: {}".format(exc),)
+        check("realgit/pass-recorded-and-push-allowed", real_pass, (0, 0, True, False))
 
         # ---------- the hook shim ----------
         hook_base = Path(base) / "hook"
         hook_base.mkdir()
         try:
-            shim = _run_hook_shim(hook_base)
+            code, argv, want_dir, failed = _run_hook_shim(hook_base, genv)
+            shim = (code, argv, failed)
         except (OSError, subprocess.SubprocessError) as exc:
-            shim = ("shim run failed: {}".format(exc),)
+            shim, want_dir = ("shim run failed: {}".format(exc),), None
         check("hook/shim-execs-and-propagates", shim,
-              (7, ["-I", "-B", TOOL_REL, "--pre-push", "--records", "/fixture/common/" + RECORDS_DIR_NAME,
+              (7, ["-I", "-B", TOOL_REL, "--pre-push", "--records", want_dir,
                    "origin", "https://example.invalid/repo"], 2))
 
     if FAILURES:

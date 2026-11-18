@@ -3632,6 +3632,9 @@ expected-check-ids = [
   "stdin/empty-allows",
   "scope/delete-skipped",
   "scope/non-branch-ref-noted",
+  "stdin/over-size-cannot-evaluate",
+  "stdin/no-final-lf-cannot-evaluate",
+  "stdin/not-utf8-cannot-evaluate",
   "revert/stdin-well-formed-goes-red",
   "revert/delete-exempt-goes-red",
   "revert/branch-scope-goes-red",
@@ -3648,6 +3651,10 @@ expected-check-ids = [
   "read/unknown-key-refuses",
   "read/no-final-lf-refuses",
   "read/trailing-after-terminal-refuses",
+  "read/unreadable-refuses",
+  "read/carriage-return-refuses",
+  "lookup/records-dir-symlink-cannot-evaluate",
+  "lookup/unreadable-records-dir-cannot-evaluate",
   "revert/record-present-goes-red",
   "revert/no-symlink-goes-red",
   "revert/regular-file-goes-red",
@@ -3664,6 +3671,8 @@ expected-check-ids = [
   "shape/first-not-start-refuses",
   "shape/last-not-terminal-refuses",
   "shape/run-id-mismatch-refuses",
+  "shape/two-starts-refuses",
+  "shape/object-format-type-refuses",
   "revert/version-goes-red",
   "revert/first-is-start-goes-red",
   "revert/last-is-terminal-goes-red",
@@ -3695,6 +3704,7 @@ expected-check-ids = [
   # ---------- multiple refs and the report ----------
   "multi/one-bad-of-two-refuses-naming-it",
   "report/lists-every-gate-exit-read",
+  "report/gate-lines-kept-after-malformed-line",
   # ---------- the supervisor ----------
   "supervise/exit-propagated",
   "supervise/no-final-name-while-running",
@@ -3705,6 +3715,19 @@ expected-check-ids = [
   "supervise/ignored-sigchld-refuses",
   "revert/supervise-sigchld-goes-red",
   "supervise/publish-is-rename",
+  "supervise/runner-runs-in-removed-export",
+  "supervise/head-at-end-recorded",
+  "supervise/clean-at-end-recorded",
+  "supervise/end-read-failure-publishes-nothing",
+  "supervise/records-dir-symlink-refuses",
+  "supervise/rename-failure-publishes-nothing",
+  "supervise/sync-failure-after-rename-says-published",
+  "supervise/inherited-git-vars-dropped",
+  # ---------- the real runner child ----------
+  "child/real-runner-status-signal-and-link",
+  # ---------- real git ----------
+  "realgit/hidden-local-change-not-recorded-as-pass",
+  "realgit/pass-recorded-and-push-allowed",
   # ---------- the hook shim ----------
   "hook/shim-execs-and-propagates",
 ]
