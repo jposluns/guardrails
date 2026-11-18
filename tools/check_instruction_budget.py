@@ -263,7 +263,9 @@ one exception is a reviewed declaration, .aiqt/core/instruction-budget-exception
 holding exactly `base-sha256` and `head-sha256` (the SHA-256 of the exact base and candidate bytes of the
 budget source) and a non-blank `reason`; when both digests match, the other changed lines are reported as
 declared instead of failing, and a declaration bound to other bytes excuses nothing. A declaration never
-waives the entry rules, the validation of either side, or what the candidate needs to serve as a later
+waives the entry rules (every added line in the history run directly above the `#   ceiling` line is read
+as part of the entry block, whatever the ratchet direction, so a declaration can excuse a removed old
+history line there but never an added or edited one), the validation of either side, or what the candidate needs to serve as a later
 comparison's base (exactly one `#   ceiling` line and the ratchet written as exactly one `ratchet = N`
 line, one space each side of `=`), and it records intent, not authorization: the
 review of the change that adds it is the authorization. Nothing removes a declaration once its change has
@@ -1572,10 +1574,9 @@ def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
     `#   ceiling` line, or the declaration is malformed. The candidate is compared in two parts, the lines
     above its one `#   ceiling` line and the rest, each with the matching part of the base (its ratchet
     value replaced by the candidate's). The lines the base does not match in the history run directly above
-    the `#   ceiling` line, whatever their text, are the new entries (_entry_findings): from the earliest one
-    that opens an entry block accepted for this ratchet move, past only lines that each replace one removed
-    base line, or else from the first one, which keeps every added line there a finding no declaration
-    waives when the ratchet is unchanged or lowered.
+    the `#   ceiling` line, whatever their text, are the new entries (_entry_findings): the block opens at
+    the first of them whatever the ratchet direction and whether or not the entries are valid, so every
+    added line there is validated as an entry and none is a declarable change.
     The base lines the entries displace are reported removed. Every
     other changed line is a finding naming the line (_line_report), unless a declaration bound to these
     exact base and head bytes covers it; a declaration never waives the entry rules. A candidate without
@@ -1609,33 +1610,17 @@ def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
         # or that the base does not match. Its added lines (each line in it the diff does not match to a base
         # line) are found whatever their text, OLD value, ratchet direction or line growth, so neither a
         # declared deletion nor an entry line that repeats a base line (which moves the diff's alignment) can
-        # hide one. The entry block runs from the earliest added line from which _entry_findings accepts the
-        # lines through to the `#   ceiling` line for this comparison's ratchet move, with above it only added
-        # lines that each stand one for one in place of a removed base line (a declarable edit of an old line).
-        # Without such a block it opens at the first added line, so with the ratchet unchanged or lowered every
-        # added line is part of an entry without a raise, which no declaration waives; with a raise those edits
-        # are passed over and the raise is still refused (its entry block is empty or malformed).
+        # hide one. The entry block opens at the first added line of the run and runs through to the
+        # `#   ceiling` line, whatever the ratchet direction and whether or not _entry_findings accepts it: the
+        # boundary never depends on validation, so every added line there is validated as part of an entry,
+        # which no declaration waives. A declaration waives only the base lines the block displaces (reported
+        # removed below); an edit of an old history line is therefore refused here.
         added = {j for op in above if op[0] != "equal" for j in range(op[3], op[4])}
-        paired = {j for op in above if op[0] != "equal" for j in range(op[3], min(op[4], op[3] + op[2] - op[1]))}
         run = at
         while run > 0 and (run - 1 in added or head[run - 1].startswith("#" + " " * SHAPE_ENTRY_INDENT_WIDTH)):
             run -= 1
         fresh = [j for j in range(run, at) if j in added]
-        edits = 0
-        while edits < len(fresh) and fresh[edits] in paired:
-            edits += 1
-        if fresh and new <= old:
-            start = fresh[0]
-        elif fresh:
-            start = fresh[edits] if edits < len(fresh) else at
-            for j in fresh[:edits + 1]:
-                try:
-                    accepted = not _entry_findings(head[j:at], j + 1, old, new, dated, today)
-                except GateError:
-                    accepted = False
-                if accepted:
-                    start = j
-                    break
+        start = fresh[0] if fresh else at
         if start < at:
             block = head[start:at]
             # Every base line the block displaces is reported removed; head lines above it as before.
@@ -3366,18 +3351,25 @@ def self_test(report_path=None):
         check("shape/removed-line-reported-1", shape(base_shape, removed), (1, ["base 6"]))
         check("shape/added-line-reported-1", shape(base_shape, added), (1, ["2"]))
         # An entry placed away from the ceiling line is an added line, never read as the entry, also when a
-        # declaration covers it; an edit of the last old line before an appended entry can be declared.
+        # declaration covers it.
         misplaced = missing.replace("#\n#   ratchet", "#\n" + entry + "#   ratchet")
         check("shape/declared-misplaced-entry-1",
               (shape(base_shape, misplaced), shape(base_shape, misplaced, declare(base_shape, misplaced))),
               ((1, ["3"]), (1, [])))
+        # Changed from shape/declared-edit-before-entry-0 (which expected the declared edit to pass): an edit
+        # of the last old line before an appended entry is an added line in the history run, so it opens the
+        # entry block and is validated as an entry (`Raised 90 -> 100` does not join the base value, line 4),
+        # which no declaration waives. An old-history edit now needs the edited line removed and the corrected
+        # text placed through the normal history rules, or no edit at all.
         edited = raised(base_shape).replace(old_entry, old_entry.replace(" rule ", " rule  "))
-        check("shape/declared-edit-before-entry-0",
+        check("shape/declared-edit-before-entry-1",
               (shape(base_shape, edited), shape(base_shape, edited, declare(base_shape, edited))),
-              ((1, ["4"]), (0, [])))
+              ((1, ["base 4", "4"]), (1, ["4"])))
         # A declared deletion of the old line just before an appended entry leaves the final replacement no
         # longer than the base lines it replaces; the entry is still found and read as the entry. A raise
-        # with such a deletion and no entry stays refused.
+        # with such a deletion and no entry stays refused. Changed in shape/declared-deletion-raise-without-
+        # entry-1: the declared edit of that old line is now read as the entry block (line 4, whose OLD does
+        # not join the base value), where it was passed over and the raise refused as having no entry.
         deleted = [raised(base_shape, new_entry).replace(old_entry, "")
                    for new_entry in (entry, entry + entry_line("(rows a.1 to a.3)."))]
         check("shape/declared-deletion-before-entry-0",
@@ -3385,11 +3377,13 @@ def self_test(report_path=None):
               [((1, ["base 4"]), (0, []))] * 2)
         bare = [missing.replace(old_entry, ""), missing.replace(old_entry, old_entry.replace(" rule ", " rule  "))]
         check("shape/declared-deletion-raise-without-entry-1",
-              [shape(base_shape, head, declare(base_shape, head)) for head in bare], [(1, [])] * 2)
+              [shape(base_shape, head, declare(base_shape, head)) for head in bare], [(1, []), (1, ["4"])])
         # An appended entry line that repeats a base line beside a declared deletion moves the diff's
         # alignment (the final opcode becomes equal, a delete, or an insert after the opener); the entry is
         # still read from the candidate text and the base lines it displaces are reported removed. An opener
-        # naming another OLD is no entry: that line is reported changed and the raise stays refused.
+        # naming another OLD stays refused. Changed in shape/repeated-line-wrong-old-1: that opener now opens
+        # the entry block (an entry finding, line 5, which the declaration does not waive, and base lines 5
+        # and 6 reported removed) instead of being reported as a changed line beside a raise with no entry.
         cont, tail = entry_line("(rows a.1 to a.3)."), entry_line("for raises up to 148000.")
         repeat_base = base_shape.replace(ceiling, cont + tail + ceiling)
         repeated = [raised(base_shape, entry + tail), raised(base_shape, entry + cont),
@@ -3400,7 +3394,7 @@ def self_test(report_path=None):
         wrong_old = raised(base_shape, opened(text="Raised 99 -> 150 on {}") + tail)
         check("shape/repeated-line-wrong-old-1",
               (shape(repeat_base, wrong_old), shape(repeat_base, wrong_old, declare(repeat_base, wrong_old))),
-              ((1, ["5"]), (1, [])))
+              ((1, ["base 5", "base 6", "5"]), (1, ["5"])))
         # With the ratchet unchanged or lowered, an entry appended in place of a declared deletion of the
         # last old line (an opener or a continuation) is still read as the entry, so it is an entry without
         # a raise, which no declaration waives; the deleted base line is reported removed.
@@ -3446,6 +3440,29 @@ def self_test(report_path=None):
         valid_swap = replaced(entry, 150)
         check("shape/declared-deletion-valid-raise-0",
               (shape(repeat_base, valid_swap), shape(repeat_base, valid_swap, declare(repeat_base, valid_swap))),
+              ((1, ["base 6"]), (0, [])))
+        # With a raise, a malformed opener appended above a valid entry in place of a declared deletion of the
+        # last old line opens the entry block (the boundary never depends on the entries validating): an
+        # opener naming another OLD or a lowercase `raised` is an entry finding (line 6) and an opener NEW of
+        # 20 digits is cannot-evaluate, none waived by the declaration. A two-entry raise there is accepted.
+        malformed_raises = {kind: replaced(entry_line(text) + entry, 150) for kind, text in (
+            ("wrong-old", "Raised 99 -> 150 on 2026-11-16 for a review fixture."),
+            ("lowercase", "raised 100 -> 150 on 2026-11-16 for a review fixture."),
+            ("oversized", "Raised 100 -> 1" + "0" * 19 + " on 2026-11-16 for a review fixture."))}
+        check("shape/declared-deletion-wrong-old-raise-1",
+              [shape(repeat_base, head, declare(repeat_base, head)) for head in (malformed_raises["wrong-old"],)],
+              [(1, ["6", "7"])])
+        check("shape/declared-deletion-lowercase-raise-1",
+              [shape(repeat_base, head, declare(repeat_base, head)) for head in (malformed_raises["lowercase"],)],
+              [(1, ["6"])])
+        check("shape/declared-deletion-oversized-raise-2",
+              [shape(repeat_base, head, declare(repeat_base, head)) for head in (malformed_raises["oversized"],)],
+              [(2, [])])
+        two_entry_swap = replaced(entry_line("Raised 100 -> 120 on 2026-11-15 for a review fixture.")
+                                  + entry_line("Raised 120 -> 150 on 2026-11-16 for a review fixture."), 150)
+        check("shape/declared-deletion-two-entry-raise-0",
+              (shape(repeat_base, two_entry_swap), shape(repeat_base, two_entry_swap,
+                                                         declare(repeat_base, two_entry_swap))),
               ((1, ["base 6"]), (0, [])))
         check("shape/declaration-blank-reason-2",
               (shape(base_shape, version_bump, declare(base_shape, version_bump, reason="   ")),
@@ -3580,34 +3597,12 @@ def self_test(report_path=None):
         check("revert/shape-added-line-red",
               shape(base_shape, added, module=_mutant(tmp, '        report += ["line {}: added: {!r}"',
                                                        '        report += [] and ["line {}: added: {!r}"'))[0], 0)
-        check("revert/shape-declared-edit-before-entry-red",
-              shape(base_shape, edited, declare(base_shape, edited), module=_mutant(
-                  tmp, "        while edits < len(fresh) and fresh[edits] in paired:\n", "        while False:\n"))[0],
-              1)
-        check("revert/shape-declared-deletion-before-entry-red",
-              [shape(base_shape, head, declare(base_shape, head), module=_mutant(
-                  tmp, "                    accepted = not _entry_findings(head[j:at], j + 1, old, new, dated, today)\n",
-                  "                    accepted = False\n"))[0]
-               for head in deleted], [1, 1])
-        raise_only = _mutant(tmp, "        if fresh and new <= old:\n", "        if False:\n")
-        check("revert/shape-declared-deletion-entry-without-raise-red",
-              [shape(before, head, declare(before, head), module=raise_only)[0]
-               for before, head, _, _ in unraised_swaps + lowered_swaps], [0, 0, 0, 0])
-        final_only = _mutant(tmp, "        fresh = [j for j in range(run, at) if j in added]\n",
-                             '        fresh = [j for j in range(above[-1][3], at) if above[-1][0] != "equal"]\n')
-        check("revert/shape-declared-repeated-line-entry-red",
-              [shape(repeat_base, head, declare(repeat_base, head), module=final_only)[0] for head in repeated],
-              [1, 1, 1])
-        # The previous discovery restored (an exact `Raised OLD -> ` opener, or the growth of a final
-        # replacement): every added line beside a declared deletion with the ratchet unchanged or lowered is
-        # waived again, and the valid raise beside it is still accepted.
-        by_opener = _mutant(tmp, "".join((
-            "        added = {j for op in above if op[0] != \"equal\" for j in range(op[3], op[4])}\n",
+        # The previous boundary restored (with a raise, the block opened at the earliest added line from which
+        # _entry_findings accepted the rest, past added lines paired one for one with removed base lines): a
+        # declared edit of the old line before an entry passes again, and each malformed opener above a valid
+        # entry beside a declared deletion is waived again.
+        prior_boundary = _mutant(tmp, "        start = fresh[0] if fresh else at\n", "".join((
             "        paired = {j for op in above if op[0] != \"equal\" for j in range(op[3], min(op[4], op[3] + op[2] - op[1]))}\n",
-            "        run = at\n",
-            "        while run > 0 and (run - 1 in added or head[run - 1].startswith(\"#\" + \" \" * SHAPE_ENTRY_INDENT_WIDTH)):\n",
-            "            run -= 1\n",
-            "        fresh = [j for j in range(run, at) if j in added]\n",
             "        edits = 0\n",
             "        while edits < len(fresh) and fresh[edits] in paired:\n",
             "            edits += 1\n",
@@ -3622,7 +3617,36 @@ def self_test(report_path=None):
             "                    accepted = False\n",
             "                if accepted:\n",
             "                    start = j\n",
-            "                    break\n",
+            "                    break\n")))
+        check("revert/shape-declared-edit-before-entry-red",
+              shape(base_shape, edited, declare(base_shape, edited), module=prior_boundary)[0], 0)
+        check("revert/shape-declared-deletion-malformed-opener-red",
+              [shape(repeat_base, malformed_raises[kind], declare(repeat_base, malformed_raises[kind]),
+                     module=prior_boundary)[0] for kind in ("wrong-old", "lowercase", "oversized")], [0, 0, 0])
+        check("revert/shape-declared-deletion-before-entry-red",
+              [shape(base_shape, head, declare(base_shape, head), module=_mutant(
+                  tmp, "        start = fresh[0] if fresh else at\n", "        start = at\n"))[0]
+               for head in deleted], [1, 1])
+        raise_only = _mutant(tmp, "        start = fresh[0] if fresh else at\n",
+                             "        start = fresh[0] if fresh and new > old else at\n")
+        check("revert/shape-declared-deletion-entry-without-raise-red",
+              [shape(before, head, declare(before, head), module=raise_only)[0]
+               for before, head, _, _ in unraised_swaps + lowered_swaps], [0, 0, 0, 0])
+        final_only = _mutant(tmp, "        fresh = [j for j in range(run, at) if j in added]\n",
+                             '        fresh = [j for j in range(above[-1][3], at) if above[-1][0] != "equal"]\n')
+        check("revert/shape-declared-repeated-line-entry-red",
+              [shape(repeat_base, head, declare(repeat_base, head), module=final_only)[0] for head in repeated],
+              [1, 1, 1])
+        # The previous discovery restored (an exact `Raised OLD -> ` opener, or the growth of a final
+        # replacement): every added line beside a declared deletion with the ratchet unchanged or lowered is
+        # waived again, and the valid raise beside it is still accepted.
+        by_opener = _mutant(tmp, "".join((
+            "        added = {j for op in above if op[0] != \"equal\" for j in range(op[3], op[4])}\n",
+            "        run = at\n",
+            "        while run > 0 and (run - 1 in added or head[run - 1].startswith(\"#\" + \" \" * SHAPE_ENTRY_INDENT_WIDTH)):\n",
+            "            run -= 1\n",
+            "        fresh = [j for j in range(run, at) if j in added]\n",
+            "        start = fresh[0] if fresh else at\n",
             "        if start < at:\n")), "".join((
             "        tag, i1, i2, j1, j2 = above[-1] if above else (\"equal\", 0, 0, 0, 0)\n",
             "        final = tag in (\"insert\", \"replace\") and (i2, j2) == (ceiling_at, at)\n",
