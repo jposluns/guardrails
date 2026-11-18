@@ -33,7 +33,7 @@ review-state = "assessed"
 conventions = [4]
 rationale = "Keeping each tenant's context apart is tenant segregation inside the application, which carries out the core. Monitoring, restriction and infrastructure segmentation are left out, so it is broad under B."
 assumptions = [
-  "segregation inside the application can be tight to a control that also covers infrastructure (convention 4)",
+  "segregation inside the application can be tight to a control that also covers infrastructure (convention 4); if it cannot, label-a is broad",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"

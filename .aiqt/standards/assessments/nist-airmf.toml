@@ -204,20 +204,22 @@ covers = [
 ]
 omits = [
   "people in the independent role: the entry asks for staff experts or outside assessors, and the rule's pass may be run by a model (see convention 7)",
-  "evaluation of the system as a whole at set intervals, rather than of single changes",
-  "input from specialists, users, outside AI actors and affected communities, which the entry makes conditional",
+  "evaluation of the system as a whole at set intervals, rather than of single changes (the regular part of the entry's assessments)",
+  "updating the assessments themselves over time, beyond checking each change once",
+  "input from specialists, users, outside AI actors and affected communities, which the entry makes conditional (see convention 5)",
 ]
 label-a = "tight"
 label-b = "broad"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = [3, 5, 7]
-rationale = "Independent review is the core of the entry, and the rule requires an independent pass, read here as able to fill the entry's role for people (convention 7). Under B the rule checks single changes, not the system at set intervals, so it is broad. The consultation element is conditional in the entry, so it does not by itself decide B."
+conventions = [7, 9]
+rationale = "Independent review is the core of the entry, and the rule requires an independent pass on the work product, read here as acting on the AI system when the product is one (convention 9) and as able to fill the entry's role for people (convention 7). Under B the rule checks single changes, not the system at set intervals, so it is broad whatever the reading of convention 5, which is therefore not named."
 assumptions = [
-  "the work product the assistant changes counts as the AI system (convention 3); if the AI system means only an AI product, both labels are broad",
-  "an element the entry makes conditional is not essential under B (convention 5)",
+  "a rule whose independent pass checks every product the assistant changes, AI or not, acts on the AI system the entry is about, because AI products are among those it checks (convention 9); if an entry about an AI system is met only by a rule aimed at what makes a system AI, both labels are broad",
   "an independent pass that another AI model may run can fill the entry's role for staff experts or outside assessors (convention 7); if the role needs a person, both labels are broad",
+  "convention 3 is not engaged: the rule's boundary is the change to the work product, not the assistant or its tools",
+  "convention 5 does not decide this row: the consultation element is conditional, but label-b is broad on the regular whole system assessment alone, so either reading of convention 5 gives the same labels",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"

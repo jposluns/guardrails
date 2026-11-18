@@ -11,20 +11,31 @@ current-fit = "tight"
 edition = "2026"
 source = "OWASP-Top-10-for-LLM-Applications-2026--full-text.md"
 source-sha256 = "960f68a87fb9cede9c0ef9a497d6736f5e445cce2f8be3ea83fe2411d170e605"
-locator = "LLM07:2026 Misinformation, common examples and prevention and mitigation strategies 1 to 10"
+locator = "LLM07:2026 Misinformation, common examples 1 to 7 and prevention and mitigation strategies 1 to 10"
 text-location = "lines 1355 to 1414; examples at lines 1377 to 1396; strategies at lines 1398 to 1414, with 1 and 2 at lines 1398 to 1402"
 edition-check = "match"
 boundary = "claims about external facts that the assistant relies on or presents"
 core = "Model output that is false, unsupported or misleading is relied on for decisions or actions; the entry asks that claims be grounded in authoritative sources and checked before anything acts on them."
 covers = [
-  "grounding claims in a source before they are relied on (strategy 1)",
-  "checking a claim before acting on it (strategy 2)",
+  "grounding claims about external facts in a source before they are relied on (strategy 1, for its authoritative part)",
+  "checking a claim before acting on it (the verification part of strategy 2)",
   "more corroboration for a weaker source",
   "an external claim not yet corroborated is not presented as settled (part of strategy 9)",
+  "decision support that rests on an external fact is corroborated first (the external fact part of example 1)",
+  "a claim that a package, library or other dependency exists is an external fact, so it is checked before use (the dependency part of example 3)",
+  "a false external claim induced by an attacker, or passed on by another agent, is corroborated against a source like any other (the false claim parts of examples 5 and 6)",
+  "a weak or doubtful source needs more corroboration, which makes forged evidence harder to rely on (part of example 7)",
 ]
 omits = [
-  "misleading summaries and critical omissions (example 4)",
+  "unsupported decision support that does not rest on an external fact, such as the assistant's own reasoning (the rest of example 1)",
   "incorrect inference that a workflow condition has been met (example 2)",
+  "incorrect code recommendations (the rest of example 3)",
+  "misleading summaries and critical omissions (example 4)",
+  "omission of critical facts induced by an attacker (the rest of example 5)",
+  "incorrect outputs that spread across agents and workflows other than as external claims (the rest of example 6)",
+  "detecting fabricated or manipulated evidence as such, beyond asking more corroboration of a weak source (the rest of example 7)",
+  "requiring the sources to be current (the rest of strategy 1)",
+  "separating generation from execution (the rest of strategy 2)",
   "tool call validation and verification signals (strategies 3 and 4)",
   "approval workflows and system checks at run time for high impact actions (strategy 5)",
   "structured output with required fields to catch omissions (strategy 6)",
@@ -39,7 +50,9 @@ adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
 conventions = []
-rationale = "Corroboration before reliance is the entry's first two mitigations. The rule deals with claims about external facts only, not omissions or state inference, and leaves out strategies 3 to 10, so it is broad under B."
-assumptions = []
+rationale = "Corroboration before reliance is the entry's first two mitigations. The rule deals with claims about external facts only, meets five of the seven examples only in part and two not at all, and leaves out strategies 3 to 10, so it is broad under B. No open convention decides the row."
+assumptions = [
+  "convention 3 is not engaged: the entry's object is an LLM or LLM-enabled application, which is a kind of software the assistant itself is, so the entry reaches the assistant's own output directly and no reading of what the system means is needed",
+]
 assessor = "first-pass review"
 date = "2026-11-18"

@@ -32,10 +32,11 @@ label-b = "broad"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = []
-rationale = "The register is a component inventory with accountability for the AI tool subset, which carries out the core. Several lettered items are left out, so it is broad under B."
+conventions = [3]
+rationale = "Reading the system as including the assistant and the tools it uses (convention 3), the register is a component inventory with accountability for the AI tool subset, which carries out the core. Several lettered items are left out, so it is broad under B."
 assumptions = [
   "the register is treated as the inventory for this component class",
+  "the AI tools, models and servers the assistant uses count as components of the system whose inventory the control asks for (convention 3); if the system means only the product being built, they are tools used to build it rather than its components, and both labels are broad",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"

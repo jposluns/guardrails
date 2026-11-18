@@ -33,7 +33,7 @@ conventions = [4]
 rationale = "The entry names HTML tags as a variant, and encoding for the HTML sink breaks that variant, so the rule interrupts the core mechanism for one main variant. It does not control fetching or destinations, so it is broad under B."
 assumptions = [
   "breaking one named variant at the sink counts as interrupting the core mechanism (test 5)",
-  "a rule at the producing side can be tight to a technique completed by the rendering client (convention 4)",
+  "a rule at the producing side can be tight to a technique completed by the rendering client (convention 4); if it cannot, label-a is broad",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -66,10 +66,11 @@ label-b = "broad"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = [3]
-rationale = "Read as binding only the assistant's own consumption (convention 3), the rule does not act on requests coming into the AI service the technique floods, so it shares the theme but not the object and both labels are broad. Read as also binding the services of the product the assistant builds, it would limit inbound load and be tight under A."
+conventions = [8]
+rationale = "Read as binding only the assistant's own consumption (convention 8), the rule does not act on requests coming into the AI service the technique floods, so it shares the theme but not the object and both labels are broad. Read as also binding the services of the product the assistant builds, it would limit inbound load and be tight under A."
 assumptions = [
-  "the rule binds only the assistant's own consumption, not the services of the product it builds (convention 3); the other reading gives label-a tight, and it is the reading the rule's tight mappings to SC-5, API4, CWE-400 and CWE-770, all about inbound limits, rely on",
+  "the rule binds only the assistant's own consumption, not the services of the product it builds (convention 8); the other reading gives label-a tight, and it is the reading the rule's tight mappings to SC-5, API4, CWE-400 and CWE-770, all about inbound limits, rely on",
+  "convention 3 is not engaged: the technique acts on the inbound edge of the AI service it floods, and the rule's bounds sit on what the assistant sends out, so counting the assistant as part of the system would not put the rule on that edge",
   "convention 4 is not what decides this row: under the recorded reading the rule and the technique act on different objects, not on the same object at different layers",
 ]
 assessor = "first-pass review"
@@ -102,10 +103,11 @@ label-b = "broad"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = [3]
-rationale = "Same reading of convention 3 as the Denial of AI Service row: the technique acts on the service's inbound edge and the rule, read as binding only the assistant, bounds the assistant's own outbound use, so both labels are broad. Read as also binding the product's services, it would be tight under A."
+conventions = [8]
+rationale = "Same reading of convention 8 as the Denial of AI Service row: the technique acts on the service's inbound edge and the rule, read as binding only the assistant, bounds the assistant's own outbound use, so both labels are broad. Read as also binding the product's services, it would be tight under A."
 assumptions = [
-  "the rule binds only the assistant's own consumption, not the services of the product it builds (convention 3); the other reading gives label-a tight, and it is the reading the rule's tight mappings to SC-5, API4, CWE-400 and CWE-770, all about inbound limits, rely on",
+  "the rule binds only the assistant's own consumption, not the services of the product it builds (convention 8); the other reading gives label-a tight, and it is the reading the rule's tight mappings to SC-5, API4, CWE-400 and CWE-770, all about inbound limits, rely on",
+  "convention 3 is not engaged: the technique acts on the inbound edge of the AI system it overwhelms, and the rule's bounds sit on what the assistant sends out, so counting the assistant as part of the system would not put the rule on that edge",
   "convention 4 is not what decides this row: under the recorded reading the rule and the technique act on different objects, not on the same object at different layers",
 ]
 assessor = "first-pass review"

@@ -36,7 +36,8 @@ review-state = "assessed"
 conventions = [4]
 rationale = "Surfacing an unrequested widening for renewed approval, and keeping the assistant from granting itself scope, directly interrupt scope creep. Expiry, periodic entitlement audits, identity and audit trail lines are left out, so it is broad under B."
 assumptions = [
-  "a rule on the assistant's own guardrail configuration can be tight to an entry framed around MCP agent and tool permissions (convention 4)",
+  "a rule on the assistant's own guardrail configuration and granted scope can be tight to an entry whose main remediations act in the identity, policy and pipeline layers that grant and enforce MCP agent and tool permissions (convention 4); if it cannot, label-a is broad",
+  "convention 3 is not engaged: the entry's object is an MCP agent or tool, and the assistant is itself one",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -51,18 +52,24 @@ current-fit = "tight"
 edition = "2025"
 source = "OWASP-MCP-Top-10-2025--full-text.md"
 source-sha256 = "f2f1c386d75ecef3d0eee2fcd931676bb6ef9dc4eaa050f40db2e3eee65e395b"
-locator = "MCP07:2025 Insufficient Authentication and Authorization, prevention guidance and attack scenarios 3 and 4"
-text-location = "lines 675 to 764; prevention guidance at lines 713 to 748; scenarios 3 and 4 at lines 760 to 764"
+locator = "MCP07:2025 Insufficient Authentication and Authorization, description, prevention guidance 1 to 7 and attack scenarios 1 to 4"
+text-location = "lines 675 to 764; description at lines 676 to 689; prevention guidance at lines 713 to 748; scenarios at lines 752 to 764, with 3 and 4 at lines 760 to 764"
 edition-check = "match"
 boundary = "messages and authority passed between orchestrator, peer and sub-agents"
 core = "Agents, tools and servers act without verified identity or proper authorization, so a caller can act with authority it was never given."
 covers = [
-  "agent identity is verified rather than assumed, which stops a spoofed agent (scenario 3)",
-  "a sub-agent inherits no authority and gets only the least tools it needs (scenario 4, guidance 4)",
-  "an agent cannot grant privileges to itself or another agent",
+  "agent identity is verified rather than assumed, which stops a spoofed agent (scenario 3) and an agent trusting unverified caller identity",
+  "a sub-agent inherits no authority and gets only the least tools it needs (scenario 4, and the first point of guidance 4)",
+  "an agent cannot grant privileges to itself or another agent, which keeps agents from acting beyond their intended privileges in that way",
 ]
 omits = [
-  "token lifecycle: expiry, rotation, revocation and replay detection (guidance 3)",
+  "mutual TLS between clients, agents and servers, short lived scoped tokens tied to a session, and binding tokens to agent identity (the rest of guidance 1)",
+  "role based or attribute based access control, and blocking any unrecognised agent or scope by default (the rest of guidance 2)",
+  "splitting high privilege operations into separate workflows with human review, and keeping admin or system tokens out of development and shared contexts (the second and third points of guidance 4)",
+  "missing or optional token validation, shared hard coded secrets, static credentials in configuration or logs, and weakly issued tokens (the insecure authentication variants of the description)",
+  "a stolen static token replayed against another server (scenario 1)",
+  "a test agent holding the same scope as production (scenario 2)",
+  "token lifecycle: expiry, rotation, revocation, secure storage and replay detection (guidance 3)",
   "server side validation of every token and per request authorization (guidance 1 and 2)",
   "central identity management (guidance 5)",
   "logging of authentication and authorization decisions (guidance 6)",
@@ -74,9 +81,10 @@ adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
 conventions = [4]
-rationale = "Verified identity and no inherited authority directly stop the spoofed agent and inherited token scenarios, on the reading of convention 4 stated below. Token lifecycle, server side checks, central identity, logging and secure endpoint defaults are left out, so it is broad under B."
+rationale = "Verified identity and no inherited authority directly stop the spoofed agent and inherited token scenarios, on the reading of convention 4 stated below. Strong authentication, fine grained authorization, most of least privilege, token lifecycle, central identity, logging, secure endpoint defaults and scenarios 1 and 2 are left out, so it is broad under B."
 assumptions = [
   "a rule acting on the messages and authority passed between agents can be tight to an entry whose main listed mitigations are checks on the server side and at the identity provider (convention 4); if it cannot, label-a is broad",
+  "convention 3 is not engaged: the entry's object is MCP agents, tools and servers, and the assistant is itself an MCP client and agent",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"

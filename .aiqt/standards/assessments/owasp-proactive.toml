@@ -36,10 +36,10 @@ label-b = "broad"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = [4]
-rationale = "Threat modelling a trust boundary before it is built is the core of addressing security from the start. The design principles, the enforcement side of trust relationships and the architecture patterns the control lists are not part of the rule, so it is broad under B."
+conventions = []
+rationale = "Threat modelling a trust boundary before it is built is the core of addressing security from the start. The design principles, the enforcement side of trust relationships and the architecture patterns the control lists are not part of the rule, so it is broad under B. No open convention decides the row."
 assumptions = [
-  "a rule that acts per change can be tight to a control framed at the level of the whole architecture (convention 4)",
+  "the rule acts on each change while the control is framed at the level of the whole architecture; both act on the same application at the same layer, so this is a difference of scope, which Definition A treats as secondary, and convention 4 is not engaged",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"

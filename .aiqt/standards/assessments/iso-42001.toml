@@ -22,17 +22,24 @@ covers = [
   "the register is reconciled with what is actually in use",
 ]
 omits = [
-  "guidance only, not an element under the reading of convention 6 this record takes: tooling in the Annex B list that is not an AI tool, model or server, such as tools and processes that prepare data, methods for tuning and for evaluating models, tools that set up resources, and the hardware used to design, build and deploy the system",
+  "guidance only, not an element under the reading of convention 6 this record takes: algorithm types and models other than the AI models in use (the first Annex B item, beyond the register's models)",
+  "guidance only: tools or processes that condition data (the second Annex B item)",
+  "guidance only: optimization methods and evaluation methods (the third and fourth Annex B items)",
+  "guidance only: tools that provision resources (the fifth Annex B item)",
+  "guidance only: tools that aid model development but are not AI tools, models or servers (the sixth Annex B item, beyond the register's AI tools)",
+  "guidance only: software that is not an AI tool, model or server, and all hardware, used to design, develop and deploy the AI system (the seventh Annex B item)",
 ]
 label-a = "tight"
 label-b = "tight"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = [3, 6]
-rationale = "The control has a single element, documenting the tooling resources, and the register carries it out for the tools the assistant relies on. The Annex B list is read as guidance and not counted as elements under B (convention 6); the tooling it names that the register leaves out is recorded in omits for that reason and does not decide B."
+conventions = [3, 6, 9]
+rationale = "The control has a single element, documenting the tooling resources, and the register carries it out for the AI tools the assistant relies on, which count as tooling for an AI system on the readings of conventions 3 and 9 stated below. The Annex B list is read as guidance and not counted as elements under B (convention 6); each item the register does not meet in full is recorded in omits for that reason and does not decide B."
 assumptions = [
-  "the assistant and its tools count as tooling for the AI system (convention 3); if the AI system means only an AI product being built, both labels are broad",
+  "the assistant and its tools are part of the AI system, so the tools are tooling for it (convention 3); on the product reading they are instead tooling used to build the product, which still counts under the reading of convention 9 below",
+  "a register kept for whatever product is built, AI or not, documents tooling for an AI system whenever the product is one, and the Annex B guidance counts tools that aid model development and software for design, development and deployment as tooling (convention 9)",
+  "label-a and label-b change only when conventions 3 and 9 are both read the other way: if the AI system means only the product being built and an entry about an AI system is met only by a rule aimed at what makes a system AI, both labels are broad",
   "the items of the Annex B implementation guidance are not essential elements under B (convention 6); if they are, label-b is broad",
   "the reference copy's Annex A table is extracted out of order, so the control text was read where it actually sits, not under the printed heading",
 ]
