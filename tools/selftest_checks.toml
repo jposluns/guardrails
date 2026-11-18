@@ -6808,6 +6808,21 @@ expected-check-ids = [
   "flip/write-deletion-credits-twice",
   "pass/baseline-dropped-entry-unpins-move",
   "flip/baseline-every-deletion-pinned",
+  # the writer proposes the fixed point of the pinned move credit: round trips, bounds, renames
+  "write/roundtrip-move-drops-entry",
+  "write/roundtrip-reorder-and-copy",
+  "fail-closed/write-rounds-bound",
+  "flip/write-rounds-replace-proposal",
+  "fail-closed/write-oversized-proposal-refused",
+  "write/partial-move-carries-entry",
+  "write/roundtrip-absent-candidate-baseline",
+  "pass/baseline-pure-rename-drops-stale-entry",
+  "write/rename-transferred-allowance-is-growth",
+  "flip/write-carry-uncapped",
+  "review/growth-without-line-listed-once",
+  # a cannot-evaluate message is escaped like a listing line
+  "review/cannot-evaluate-message-escaped",
+  "flip/cannot-evaluate-message-raw",
   # control bytes in a listed line are escaped in the gate's and the writer's listing
   "review/listing-escapes-control-bytes",
   "review/write-listing-escapes-control-bytes",
