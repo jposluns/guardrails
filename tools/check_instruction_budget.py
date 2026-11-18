@@ -275,8 +275,11 @@ line's column or further right continues it. Every base history line must stay u
 with no line inserted between two adjacent ones, and a history line may be added only as a new entry
 directly above the `#   ceiling` line; a removal, edit, move or re-indent of a history line, or a history
 line added anywhere else at any indentation, is a finding. A queued fold's measured cost is recorded in the
-next raise entry, not by editing an old one. Nothing removes a declaration once its change has
-landed, so a later change recreating the same base and candidate bytes is excused again. The base is the
+next raise entry, not by editing an old one. So is a held, not raised, record or a late record of an
+earlier change, since a change that does not raise the ratchet may add no history line: after the next
+entry's `Raised` line, as continuation lines of that entry (none opening with "raised"). Nothing
+removes a declaration once its change has landed, so a later change recreating the same base and
+candidate bytes is excused again. The base is the
 one tools/check_release_cut.py binds for the event, read with that gate's hardened git: in pull_request
 CI the merge commit's raw first parent, which must be origin/$GITHUB_BASE_REF; on a push (--protected and
 --base) the event's before commit, so the whole pushed range is one comparison; in a workflow_dispatch run
