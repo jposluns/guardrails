@@ -92,6 +92,17 @@ directly before a version digit (ordinary product-version prose included) is a f
 positive this shape layer cannot avoid, absorbed by its path's baseline entry rather than exempted by
 line; and archive contents are not unpacked.
 
+ADOPTER SHAPES AND --diff BASE. An adopter-owned closed configuration, TRACKER_CONFIG_RELPATH
+(.aiqt/tracker-labels.toml, tracked here with no shape and not shipped), adds shapes, each a name, a regex and required red
+and green fixtures, counted in the same ratchet under "adopter-<name>" after the four built-in keys;
+it is validated before any scan and fails closed (exit 2) when malformed, over a bound, off-schema, or
+when a regex does not compile, a red fixture misses, a green fixture hits or a match is zero-width.
+Adopter regexes run only in a worker subprocess under ADOPTER_MATCH_BUDGET_SECONDS (a timeout or worker
+failure is exit 2). `--diff BASE` reports every shape match on a line added between the merge base of
+BASE and HEAD in HEAD's shipped set, independent of the baseline, reading its inputs only from the HEAD
+and merge-base commits, never the working tree or the index (see tracker_diff_main and
+docs/tracker-labels.md); exit 0 clean, 1 on a finding, 2 when it cannot evaluate.
+
 SWEPT-PATH ZERO-TOLERANCE LAYER (scan_swept_labels). A tracked file under a SWEPT_PREFIXES prefix (an
 area already swept clean of review-round labels) tolerates NO match of the SWEPT_LABELS rows: a
 reviewer family next to an upper-case grade word or one-letter grade id, a QA round number with a
@@ -220,6 +231,8 @@ a complete set:
   "cases 19 to 23 and 25 (the child sentinel matched the parent pid)"
   "case 23 (the inherited-probe sentinel matched the parent pid)"
   "case 25 (an unreadable file could not be planted: permissions do not bind here)"
+  "case 34 diff/grafts-file-ignored (this git does not honour a grafts file)"
+  "case 34 diff/commit-graph-file-ignored (this git does not honour a forged commit-graph file)"
 """
 import sys
 
@@ -235,6 +248,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import json
 import os
 import re
 import stat
@@ -569,13 +583,25 @@ def scan_swept_labels(root, tracked):
 def _tracker_hits(text, labels=None):
     """Per-shape 1-based line numbers of every match in `text` (a line number repeats when one line
     carries two matches of one shape, so counts are match counts). No internal-allow exemption: this
-    layer honours no line marker. `labels` lets the self-test show each pattern row is load-bearing."""
+    layer honours no line marker. `labels` lets the self-test show each pattern row is load-bearing.
+    Only the built-in shapes are matched here; adopter shapes run in _run_adopter_matcher."""
     rows = TRACKER_LABELS if labels is None else labels
     hits = {key: [] for key in TRACKER_SHAPE_KEYS}
     for number, line in enumerate(text.splitlines(), 1):
         for key, (pattern, _label) in zip(TRACKER_SHAPE_KEYS, rows):
             hits[key] += [number for _ in pattern.finditer(line)]
     return hits
+
+
+def _tracker_registry(shapes=()):
+    """The ordered shape registry as ((key, diagnostic label), ...): the four built-in shapes first in
+    TRACKER_SHAPE_KEYS order, then the validated adopter shapes sorted by name. Every count, baseline
+    key, comparison and render walks this one registry, never a positional zip that could drop a row."""
+    rows = [(key, label) for key, (_pattern, label) in zip(TRACKER_SHAPE_KEYS, TRACKER_LABELS)]
+    if len(rows) != len(TRACKER_SHAPE_KEYS):
+        raise OSError("the built-in tracker shape keys and patterns differ in number")
+    rows += [(shape["key"], shape["label"]) for shape in shapes]
+    return tuple(rows)
 
 
 def _shipped_tracker_set(root, tracked):
@@ -587,6 +613,12 @@ def _shipped_tracker_set(root, tracked):
     manifest = _read_present_text(root / TRACKER_MANIFEST_RELPATH)
     if manifest is None:
         raise OSError("{} is missing; the shipped set cannot be read".format(TRACKER_MANIFEST_RELPATH))
+    return _shipped_from_manifest(manifest, tracked)
+
+
+def _shipped_from_manifest(manifest, tracked):
+    """_shipped_tracker_set over manifest TEXT already read (from the working tree, or from the HEAD
+    tree in the --diff mode) and a tracked-path list."""
     try:
         data = tomllib.loads(manifest)
     except (ValueError, RecursionError, MemoryError) as exc:
@@ -611,19 +643,28 @@ def _shipped_tracker_set(root, tracked):
     return sorted(shipped)
 
 
-def load_tracker_baseline(root, shipped):
+def load_tracker_baseline(root, shipped, keys=None):
     """The ratchet baseline as {relpath: {shape key: count}}. An ABSENT baseline is an empty one (every
     path then has zero); a PRESENT baseline is validated CLOSED: only format-version = 1 and [[path]]
-    entries, each entry a path plus at least one shape-count key from TRACKER_SHAPE_KEYS with an integer
+    entries, each entry a path plus at least one shape-count key from the registry (`keys`: the
+    built-in TRACKER_SHAPE_KEYS, then any adopter keys) with an integer
     count of one or more, and the whole file must be the BYTE-EXACT canonical render of those entries
     (render_tracker_baseline over its own counts, the exact --write-baseline output), because the parser
     drops a TOML comment and normalizes an alternate integer spelling, so the closed schema alone can
     never see text riding in the one shipped file this layer skips by name. A malformed file, an unknown
-    key, a duplicate path, an entry for a path outside the shipped set, or a non-canonical byte raises
+    key (an adopter key whose shape was removed from the configuration among them), a duplicate path,
+    an entry for a path outside the shipped set, or a non-canonical byte raises
     OSError to the fail-closed caller (exit 2), never a silent default."""
     raw = _read_present_bytes(root / TRACKER_BASELINE_RELPATH)
     if raw is None:
         return {}
+    return _parse_tracker_baseline(raw, shipped, keys)
+
+
+def _parse_tracker_baseline(raw, shipped, keys=None):
+    """load_tracker_baseline over baseline BYTES already read (the working-tree file, or the HEAD-tree
+    blob in the --diff mode)."""
+    keys = TRACKER_SHAPE_KEYS if keys is None else tuple(keys)
 
     def refuse(reason):
         raise OSError("{}: {}".format(TRACKER_BASELINE_RELPATH, reason))
@@ -655,7 +696,7 @@ def load_tracker_baseline(root, shipped):
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or not entry["path"]:
             refuse("a [[path]] entry carries no string path")
         rel = entry["path"]
-        unknown = set(entry) - ({"path"} | set(TRACKER_SHAPE_KEYS))
+        unknown = set(entry) - ({"path"} | set(keys))
         if unknown:
             refuse("entry {}: unknown key {!r}".format(rel, sorted(unknown)[0]))
         if rel in baseline:
@@ -663,7 +704,7 @@ def load_tracker_baseline(root, shipped):
         if rel not in shipped_set:
             refuse("entry for {}, which is not a shipped path".format(rel))
         row = {}
-        for key in TRACKER_SHAPE_KEYS:
+        for key in keys:
             if key in entry:
                 value = entry[key]
                 if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -674,7 +715,7 @@ def load_tracker_baseline(root, shipped):
             refuse("entry {} carries no shape count; drop the entry".format(rel))
         baseline[rel] = row
     canonical = render_tracker_baseline(
-        {rel: {key: range(count) for key, count in row.items()} for rel, row in baseline.items()})
+        {rel: {key: range(count) for key, count in row.items()} for rel, row in baseline.items()}, keys)
     if content != canonical:
         refuse("not the byte-exact canonical render of its own entries; regenerate it with "
                "--write-baseline (a comment, an alternate integer spelling or a reordering could "
@@ -682,7 +723,7 @@ def load_tracker_baseline(root, shipped):
     return baseline
 
 
-def _collect_tracker_counts(root, tracked, frozen, history):
+def _collect_tracker_counts(root, tracked, frozen, history, shapes=()):
     """{relpath: per-shape line lists} over the shipped set. Every listed path but one must be PRESENT
     and a REGULAR file before any suffix or decode decision: an absent or non-regular shipped path
     raises OSError (fail closed, exit 2) whatever its suffix. The one exception is the baseline file
@@ -693,10 +734,13 @@ def _collect_tracker_counts(root, tracked, frozen, history):
     (the committed .zip archives), the role rule's existing decode-then-skip rule, so a decodable file
     is scanned whatever its suffix, while a non-UTF-8 text-suffix shipped file raises to the same
     fail-closed caller. A frozen-allowlisted path whose RAW on-disk bytes still hash to its recorded
-    sha256, and a history-allowlisted path, are skipped."""
+    sha256, and a history-allowlisted path, are skipped. Validated adopter `shapes` (load_tracker_shapes)
+    are matched over the same lines in one budgeted worker run (_run_adopter_matcher), which also
+    re-checks their fixtures, so a slow, failing or misbehaving adopter regex raises OSError (exit 2)."""
     import hashlib
     frozen_map = dict(frozen)
     counts = {}
+    texts = {}
     for rel in _shipped_tracker_set(root, tracked):
         if rel == TRACKER_BASELINE_RELPATH:
             # The baseline itself is a shipped file whose shape-key-next-to-count lines would match the
@@ -721,21 +765,31 @@ def _collect_tracker_counts(root, tracked, frozen, history):
         if rel in history:
             continue
         counts[rel] = _tracker_hits(text)
+        texts[rel] = text
+    if shapes:
+        items = [[rel, [[number, line] for number, line in enumerate(texts[rel].splitlines(), 1)]]
+                 for rel in sorted(texts)]
+        adopter = _run_adopter_matcher(shapes, items)
+        for rel in counts:
+            for shape in shapes:
+                counts[rel][shape["key"]] = adopter.get(rel, {}).get(shape["key"], [])
     return counts
 
 
-def _tracker_compare(counts, baseline):
+def _tracker_compare(counts, baseline, registry=None):
     """The ratchet findings: per (shipped path, shape), a match count above its baseline (zero when the
     path has no entry) names the path, the shape and each matching line; a count below its baseline asks
     for the baseline to be lowered to the new count, so the baseline stays exact in both directions and
-    moves only through a deliberate regeneration (--write-baseline).
+    moves only through a deliberate regeneration (--write-baseline). `registry` is _tracker_registry's
+    ordered (key, label) rows, the built-in shapes alone by default.
     A label moved between shapes or between lines within one per-file count is a disclosed non-finding."""
-    labels = dict(zip(TRACKER_SHAPE_KEYS, (label for _pattern, label in TRACKER_LABELS)))
+    registry = _tracker_registry() if registry is None else registry
+    labels = dict(registry)
     findings = []
     for rel in sorted(set(counts) | set(baseline)):
         hits = counts.get(rel, {})
         base = baseline.get(rel, {})
-        for key in TRACKER_SHAPE_KEYS:
+        for key, _label in registry:
             lines = hits.get(key, [])
             have = len(lines)
             allowed = base.get(key, 0)
@@ -750,22 +804,29 @@ def _tracker_compare(counts, baseline):
     return findings
 
 
-def scan_shipped_tracker_labels(root, tracked, frozen=None, history=None):
-    """The shipped tracker-label layer: count the four label shapes over the shipped set and hold every
-    per-file per-shape count exactly to the ratchet baseline. `tracked` is the tracked-file list run_gate
-    already read; `frozen` and `history` default to the shipped (empty) path-only allowlists and are
-    parameters so the self-test can show each exemption honoured and bounded."""
+def scan_shipped_tracker_labels(root, tracked, frozen=None, history=None, shapes=None):
+    """The shipped tracker-label layer: count the four built-in label shapes and every validated adopter
+    shape (.aiqt/tracker-labels.toml, read through load_tracker_shapes before any scan) over the shipped
+    set and hold every per-file per-shape count exactly to the ratchet baseline. `tracked` is the
+    tracked-file list run_gate already read; `frozen` and `history` default to the shipped (empty)
+    path-only allowlists and are parameters so the self-test can show each exemption honoured and
+    bounded; `shapes` defaults to the configuration read from `root`."""
     frozen = TRACKER_LABEL_FROZEN if frozen is None else frozen
     history = TRACKER_LABEL_HISTORY if history is None else history
-    counts = _collect_tracker_counts(root, tracked, frozen, history)
-    baseline = load_tracker_baseline(root, _shipped_tracker_set(root, tracked))
-    return _tracker_compare(counts, baseline)
+    shapes = load_tracker_shapes(root) if shapes is None else shapes
+    registry = _tracker_registry(shapes)
+    keys = tuple(key for key, _label in registry)
+    counts = _collect_tracker_counts(root, tracked, frozen, history, shapes)
+    baseline = load_tracker_baseline(root, _shipped_tracker_set(root, tracked), keys)
+    return _tracker_compare(counts, baseline, registry)
 
 
-def render_tracker_baseline(counts):
+def render_tracker_baseline(counts, keys=None):
     """The canonical baseline text for `counts`: a fixed header, then one [[path]] entry per path that
-    carries any hit, paths sorted, shape keys in TRACKER_SHAPE_KEYS order, zero counts omitted. The
-    delivered baseline file must be byte-identical to this render over a real scan."""
+    carries any hit, paths sorted, shape keys in registry order (`keys`: TRACKER_SHAPE_KEYS, then any
+    adopter keys sorted by name), zero counts omitted. With no adopter shape the render is unchanged.
+    The delivered baseline file must be byte-identical to this render over a real scan."""
+    keys = TRACKER_SHAPE_KEYS if keys is None else tuple(keys)
     lines = [
         "# Ratchet baseline for the shipped tracker-label layer of tools/check_internal_names.py.",
         "# Generated by: python3 -I -B tools/check_internal_names.py --write-baseline",
@@ -775,14 +836,14 @@ def render_tracker_baseline(counts):
         "format-version = 1",
     ]
     for rel in sorted(counts):
-        if not any(counts[rel].get(key) for key in TRACKER_SHAPE_KEYS):
+        if not any(counts[rel].get(key) for key in keys):
             continue
         if '"' in rel or "\\" in rel or not all(" " <= ch <= "~" for ch in rel):
             raise OSError("shipped path {!r} cannot be rendered as a plain TOML string".format(rel))
         lines.append("")
         lines.append("[[path]]")
         lines.append('path = "{}"'.format(rel))
-        for key in TRACKER_SHAPE_KEYS:
+        for key in keys:
             if counts[rel].get(key):
                 lines.append("{} = {}".format(key, len(counts[rel][key])))
     return "\n".join(lines) + "\n"
@@ -792,14 +853,537 @@ def write_baseline_main(root):
     """`--write-baseline`: print the canonical ratchet baseline from a real scan of the shipped set
     (exit 0), or fail closed (exit 2) on any input this layer cannot read."""
     try:
+        shapes = load_tracker_shapes(root)
         counts = _collect_tracker_counts(root, tracked_files(root), TRACKER_LABEL_FROZEN,
-                                         TRACKER_LABEL_HISTORY)
-        rendered = render_tracker_baseline(counts)
+                                         TRACKER_LABEL_HISTORY, shapes)
+        rendered = render_tracker_baseline(counts, [key for key, _label in _tracker_registry(shapes)])
     except (OSError, UnicodeDecodeError) as exc:
         print("error: cannot read a required input for --write-baseline ({}); fail-closed".format(exc),
               file=sys.stderr)
         return 2
     sys.stdout.write(rendered)
+    return 0
+
+
+# --- adopter tracker shapes (.aiqt/tracker-labels.toml) ------------------------------------------------
+# An adopter-owned, CLOSED configuration of extra tracker-label shapes, joining the per-file ratchet
+# above under the baseline key "adopter-<name>". This repository tracks it with no shape and does not
+# ship it (an .aiqt/core/ownership.toml exclusion). An ABSENT file
+# means no extra shape; a PRESENT file that is not a regular file, over ADOPTER_CONFIG_MAX_BYTES, not
+# valid UTF-8, not valid TOML, or off the schema fails closed (exit 2), and so does a shape whose regex
+# does not compile, whose red fixture is not matched, whose green fixture is matched, or whose match is
+# zero-width. Adopter regexes are compiled, checked against their fixtures and matched ONLY inside one
+# terminable worker subprocess under a wall-clock budget (ADOPTER_MATCH_BUDGET_SECONDS for the whole
+# adopter-pattern phase of one run); a timeout, a worker failure or malformed worker output is exit 2,
+# never a slow shape dropped and the scan continued clean. The budget is sized from one measurement:
+# the worker alone, over this repository's shipped set (926 decodable files, 721140 lines, 48318983
+# bytes), with ADOPTER_MAX_SHAPES linear-time shapes of the form \bZQX00-[0-9]+\b, took 39.6 seconds
+# on one shared and loaded host (1 shape 2.6 s, 4 shapes 6.4 s, so about 1.2 s per shape); 300
+# seconds leaves about 7.5 times that figure. It is one host's figure, not a performance guarantee:
+# a slower host, a larger shipped set or a costlier regex can still exceed it and fail closed. The
+# other limits are proposed bounds, not measured.
+TRACKER_CONFIG_RELPATH = ".aiqt/tracker-labels.toml"
+ADOPTER_KEY_PREFIX = "adopter-"
+ADOPTER_CONFIG_MAX_BYTES = 64 * 1024
+ADOPTER_MAX_SHAPES = 32
+ADOPTER_MAX_NAME_CHARS = 48
+ADOPTER_MAX_REGEX_CHARS = 512
+ADOPTER_MAX_FIXTURES = 16
+ADOPTER_MAX_FIXTURE_CHARS = 4096
+ADOPTER_MATCH_BUDGET_SECONDS = 300
+_ADOPTER_NAME = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
+_ADOPTER_WORKER_FLAG = "--adopter-match-worker"
+
+
+def parse_tracker_config(raw):
+    """The adopter shapes in configuration BYTES `raw`, as a list of {name, key, label, regex, red,
+    green} sorted by name, after the closed-schema checks (no regex is compiled or run here; that is
+    the budgeted worker's job). Every refusal raises OSError naming its guard."""
+    def refuse(reason):
+        raise OSError("{}: {}".format(TRACKER_CONFIG_RELPATH, reason))
+
+    if len(raw) > ADOPTER_CONFIG_MAX_BYTES:
+        refuse("larger than ADOPTER_CONFIG_MAX_BYTES ({} bytes)".format(ADOPTER_CONFIG_MAX_BYTES))
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        refuse("not valid UTF-8 ({})".format(exc))
+    try:
+        data = tomllib.loads(content)
+    except (ValueError, RecursionError, MemoryError) as exc:
+        raise OSError("{}: malformed TOML ({!r})".format(TRACKER_CONFIG_RELPATH, exc))
+    unknown = set(data) - {"format-version", "shape"}
+    if unknown:
+        refuse("unknown top-level key {!r}".format(sorted(unknown)[0]))
+    version = data.get("format-version")
+    if type(version) is not int or version != 1:
+        refuse("format-version must be the integer 1")
+    entries = data.get("shape", [])
+    if not isinstance(entries, list):
+        refuse("[[shape]] is not an array")
+    if len(entries) > ADOPTER_MAX_SHAPES:
+        refuse("more than ADOPTER_MAX_SHAPES ({}) shapes".format(ADOPTER_MAX_SHAPES))
+    shapes, names = [], set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            refuse("a [[shape]] entry is not a table")
+        missing = {"name", "regex", "red", "green"} - set(entry)
+        extra = set(entry) - {"name", "regex", "red", "green"}
+        if missing or extra:
+            refuse("a [[shape]] entry must carry exactly name, regex, red and green ({} {!r})".format(
+                "missing" if missing else "unknown field", sorted(missing or extra)[0]))
+        name = entry["name"]
+        if (not isinstance(name, str) or len(name) > ADOPTER_MAX_NAME_CHARS
+                or not _ADOPTER_NAME.match(name)):
+            refuse("shape name {!r} is not a lower-case ASCII identifier of at most {} characters".format(
+                name, ADOPTER_MAX_NAME_CHARS))
+        if name in names:
+            refuse("duplicate shape name {!r}".format(name))
+        names.add(name)
+        regex = entry["regex"]
+        if not isinstance(regex, str) or not regex:
+            refuse("shape {}: regex must be a nonempty string".format(name))
+        if len(regex) > ADOPTER_MAX_REGEX_CHARS:
+            refuse("shape {}: regex longer than ADOPTER_MAX_REGEX_CHARS ({})".format(
+                name, ADOPTER_MAX_REGEX_CHARS))
+        for colour in ("red", "green"):
+            fixtures = entry[colour]
+            if not isinstance(fixtures, list) or not fixtures:
+                refuse("shape {}: {} must be a nonempty array of fixture strings".format(name, colour))
+            if len(fixtures) > ADOPTER_MAX_FIXTURES:
+                refuse("shape {}: more than ADOPTER_MAX_FIXTURES ({}) {} fixtures".format(
+                    name, ADOPTER_MAX_FIXTURES, colour))
+            for fixture in fixtures:
+                if (not isinstance(fixture, str) or not fixture or "\n" in fixture or "\r" in fixture
+                        or len(fixture) > ADOPTER_MAX_FIXTURE_CHARS):
+                    refuse("shape {}: each {} fixture must be a nonempty single-line string of at most "
+                           "{} characters".format(name, colour, ADOPTER_MAX_FIXTURE_CHARS))
+        shapes.append({"name": name, "key": ADOPTER_KEY_PREFIX + name,
+                       "label": "adopter tracker shape {}".format(name), "regex": regex,
+                       "red": list(entry["red"]), "green": list(entry["green"])})
+    return sorted(shapes, key=lambda shape: shape["name"])
+
+
+def load_tracker_shapes(root):
+    """The schema-checked adopter shapes of `root`'s configuration ([] when the file is absent), read
+    before any scan. Every caller with a nonempty result runs the budgeted worker once, even with
+    nothing to match, and the worker compiles each regex and checks its own fixtures BEFORE it matches
+    a line, so a bad configuration fails closed and compilation, fixtures and matching share one budget."""
+    raw = _read_present_bytes(root / TRACKER_CONFIG_RELPATH)
+    if raw is None:
+        return []
+    return parse_tracker_config(raw)
+
+
+def validate_tracker_shapes(shapes, budget=None):
+    """Compile every adopter regex and check its red and green fixtures in the budgeted worker (no lines
+    to match); raises OSError on any refusal, a timeout or a worker failure."""
+    if shapes:
+        _run_adopter_matcher(shapes, [], budget)
+
+
+def _run_adopter_matcher(shapes, items, budget=None, stand_in=None):
+    """Run the adopter-pattern phase in a terminable worker subprocess (this script, launched with -I
+    and _ADOPTER_WORKER_FLAG, structured JSON on stdin and stdout, no shell): the worker compiles every
+    shape, re-checks its fixtures and then matches `items` ([[relpath, [[line number, line], ...]], ...])
+    and returns {relpath: {key: [line numbers]}} (a number repeats per match). The whole phase runs under
+    one wall-clock `budget` (ADOPTER_MATCH_BUDGET_SECONDS by default); a timeout (the worker is killed),
+    a nonzero worker exit, malformed worker output or a refusal the worker reports raises OSError.
+    `stand_in` (self-test only) is the path of a script run as `sys.executable -I <script>` in the real
+    worker's place, so the self-test can stand a failing worker in; it has its own launch, and both
+    launches spell a literal list argv headed by sys.executable. json is imported at module top, before
+    any sys.path change, so a sibling json.py can never shadow it here."""
+    budget = ADOPTER_MATCH_BUDGET_SECONDS if budget is None else budget
+    payload = json.dumps({"shapes": [{k: shape[k] for k in ("name", "key", "regex", "red", "green")}
+                                     for shape in shapes], "items": items}).encode("utf-8")
+    try:
+        if stand_in is None:
+            proc = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()), _ADOPTER_WORKER_FLAG],
+                                  input=payload, capture_output=True, timeout=budget)
+        else:
+            proc = subprocess.run([sys.executable, "-I", str(stand_in)],
+                                  input=payload, capture_output=True, timeout=budget)
+    except subprocess.TimeoutExpired:
+        raise OSError("the adopter tracker shapes did not finish within the {}-second budget; the "
+                      "worker was stopped (a slow adopter regex fails closed)".format(budget))
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError("the adopter tracker-shape worker could not run ({})".format(exc))
+    if proc.returncode != 0:
+        raise OSError("the adopter tracker-shape worker exited {} ({})".format(
+            proc.returncode, proc.stderr.decode("utf-8", "replace").strip()[-400:]))
+    try:
+        result = json.loads(proc.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise OSError("the adopter tracker-shape worker printed malformed output ({!r})".format(exc))
+    if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
+        raise OSError("the adopter tracker-shape worker printed malformed output")
+    if not result["ok"]:
+        raise OSError("{}: {}".format(TRACKER_CONFIG_RELPATH, result.get("error")))
+    hits = result.get("hits")
+    keys = {shape["key"] for shape in shapes}
+    rels = {item[0] for item in items}
+    if (not isinstance(hits, dict) or not set(hits) <= rels
+            or not all(isinstance(row, dict) and set(row) <= keys
+                       and all(isinstance(v, list) and all(type(n) is int for n in v) for v in row.values())
+                       for row in hits.values())):
+        raise OSError("the adopter tracker-shape worker printed malformed output")
+    return hits
+
+
+def _adopter_match_worker():
+    """The worker side of _run_adopter_matcher (entered by _ADOPTER_WORKER_FLAG): read the JSON request
+    on stdin, compile and check every shape, match the lines, and print one JSON result. A refusal is
+    reported as {"ok": false, "error": ...}; the parent decides the exit."""
+    request = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+
+    def answer(result):
+        sys.stdout.write(json.dumps(result))
+        return 0
+
+    compiled = []
+    for shape in request["shapes"]:
+        name = shape["name"]
+        try:
+            pattern = re.compile(shape["regex"])
+        except (re.error, RecursionError, OverflowError, ValueError) as exc:
+            return answer({"ok": False, "error": "shape {}: regex does not compile ({})".format(name, exc)})
+        for fixture in shape["red"]:
+            found = list(pattern.finditer(fixture))
+            if not found:
+                return answer({"ok": False, "error": "shape {}: red fixture {!r} is not matched".format(
+                    name, fixture)})
+            if any(m.start() == m.end() for m in found):
+                return answer({"ok": False, "error": "shape {}: zero-width match on red fixture {!r}".format(
+                    name, fixture)})
+        for fixture in shape["green"]:
+            if pattern.search(fixture) is not None:
+                return answer({"ok": False, "error": "shape {}: green fixture {!r} is matched".format(
+                    name, fixture)})
+        compiled.append((shape["key"], name, pattern))
+    hits = {}
+    for rel, lines in request["items"]:
+        for number, line in lines:
+            for key, name, pattern in compiled:
+                for m in pattern.finditer(line):
+                    if m.start() == m.end():
+                        return answer({"ok": False, "error": "shape {}: zero-width match at {}:{}".format(
+                            name, rel, number)})
+                    hits.setdefault(rel, {}).setdefault(key, []).append(number)
+    return answer({"ok": True, "hits": hits})
+
+
+# --- the --diff BASE added-line mode --------------------------------------------------------------------
+# `--diff BASE` reports every built-in or adopter tracker-shape match on a line ADDED between the merge
+# base of BASE and HEAD, within HEAD's shipped set, whatever the ratchet baseline allows (an equal-count
+# relocation is still reported). Every input is read from a commit, never from the working tree or the
+# index: HEAD supplies the manifest, adopter configuration, baseline, tree and blobs, and the merge base
+# supplies its own manifest and tree and the old blobs each change is compared against. Every git read
+# ignores refs/replace objects, any grafts file and any commit-graph file (_git_read), so none of them can
+# stand in for an object or change the parents git reads and move the merge base. A path shipped at
+# HEAD whose content was not shipped at the merge base (its merge-base path, the rename source for a
+# rename, is outside the shipped set computed from the merge base's own manifest and tree, or it is
+# new) is wholly added: every line is reported, so a rename from an unshipped path into the shipped set
+# and a file that becomes shipped only through a manifest change (an ownership exclusion reaches this
+# set through the regenerated manifest) cannot hide a label. A merge base with no manifest ships
+# nothing; a rename within the shipped set still reports only its added lines. It fails closed
+# (exit 2) when BASE or HEAD cannot be read as a commit, the repository is shallow, there is no or more
+# than one merge base, git fails or times out, its output is malformed, a shipped path is absent from or
+# not a regular file in HEAD, a text-suffix blob is not UTF-8, the HEAD configuration or baseline is
+# invalid (even when no line was added), or a manifest present at the merge base is not a regular file,
+# not UTF-8 or not a usable inventory. It never fetches and never falls back to an empty diff. It is
+# an extra check: it compares no count, and a clean result does not mean the full gate passes.
+_REGULAR_MODES = ("100644", "100755")
+_HUNK_HEADER = re.compile(rb"@@ -([0-9]+)(?:,([0-9]+))? \+([0-9]+)(?:,([0-9]+))? @@")
+_OBJECT_ID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+
+
+def _git_read(root, args):
+    """One git read under tracked_files' discipline (GIT_* environment dropped, core.fsmonitor=false,
+    protocol.allow=never, GIT_NO_LAZY_FETCH=1, a 120-second timeout) plus the three automatic-maintenance
+    pins in option position (gc.auto=0, gc.autoDetach=false, maintenance.auto=false), the spelling the
+    maintenance-pin scan resolves for a funnel whose subcommand is a parameter, --no-replace-objects
+    (a local refs/replace object can never stand in for a commit, tree or blob this check reads),
+    GIT_GRAFT_FILE set to a path that cannot exist (a child of the null device, so no info/grafts line
+    can rewrite a commit's parents and move the merge base) and core.commitGraph=false (the control
+    tools/check_release_delta.py's _stage1_git uses, so a forged commit-graph file in the local object
+    directory cannot supply a commit's parents either; every commit is parsed from its object); returns
+    the CompletedProcess and raises OSError when git cannot run or times out."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    env["GIT_GRAFT_FILE"] = os.path.join(os.devnull, "aiqt-no-grafts")
+    try:
+        return subprocess.run(["git", "--no-replace-objects", "-C", str(root), "-c", "core.fsmonitor=false",
+                               "-c", "core.commitGraph=false", "-c", "protocol.allow=never",
+                               "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                               *args], capture_output=True, timeout=120, env=env)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError("git {} could not run ({})".format(args[0], exc))
+
+
+def _git_ok(root, args):
+    proc = _git_read(root, args)
+    if proc.returncode != 0:
+        raise OSError("git {} failed (exit {}): {}".format(
+            args[0], proc.returncode, proc.stderr.decode("utf-8", "replace").strip()))
+    return proc.stdout
+
+
+def _resolve_diff_commits(root, base):
+    """(base id, HEAD id, merge-base id), each resolved once to a full commit id. Refuses an operand that
+    is empty or starts with '-', a shallow repository, a revision that is not a readable commit, and a
+    pair with no or with several merge bases (never one chosen arbitrarily)."""
+    if not base or base.startswith("-") or "\x00" in base:
+        raise OSError("BASE {!r} is not a usable revision operand".format(base))
+    if _git_ok(root, ["rev-parse", "--is-shallow-repository"]).strip() != b"false":
+        raise OSError("the repository is shallow, so the merge base cannot be trusted; fetch the full "
+                      "history (this check never fetches)")
+    ids = []
+    for rev in (base, "HEAD"):
+        proc = _git_read(root, ["rev-parse", "--verify", "--quiet", rev + "^{commit}"])
+        out = proc.stdout.decode("ascii", "replace").strip()
+        if proc.returncode != 0 or not _OBJECT_ID.match(out):
+            raise OSError("{} cannot be read as a commit".format("BASE " + repr(base) if rev == base else rev))
+        ids.append(out)
+    proc = _git_read(root, ["merge-base", "--all", ids[0], ids[1]])
+    found = proc.stdout.decode("ascii", "replace").split()
+    if proc.returncode == 1 and not found:
+        raise OSError("BASE and HEAD have no common ancestor")
+    if proc.returncode != 0:
+        raise OSError("git merge-base failed (exit {})".format(proc.returncode))
+    if len(found) != 1 or not _OBJECT_ID.match(found[0]):
+        raise OSError("BASE and HEAD have {} merge bases; refusing to choose one".format(len(found)))
+    return ids[0], ids[1], found[0]
+
+
+def _head_tree(root, head, empty_ok=False):
+    """{relpath: (mode, type, object id)} for every entry of the HEAD commit's tree (or of the merge
+    base's tree, which alone may be empty, with `empty_ok`)."""
+    tree = {}
+    for record in _git_ok(root, ["ls-tree", "-r", "-z", "--full-tree", head]).split(b"\x00"):
+        if not record:
+            continue
+        meta, sep, path = record.partition(b"\t")
+        parts = meta.decode("ascii", "replace").split(" ")
+        if not sep or len(parts) != 3 or not _OBJECT_ID.match(parts[2]):
+            raise OSError("git ls-tree printed a malformed record")
+        tree[path.decode("utf-8")] = tuple(parts)
+    if not tree and not empty_ok:
+        raise OSError("the HEAD tree lists no file; an empty tree is never assumed")
+    return tree
+
+
+def _head_blob(root, tree, rel, required):
+    """The bytes of `rel` in the HEAD tree; None when absent and not `required`. A present entry that
+    is not a regular-file blob (a symlink, a submodule) raises OSError."""
+    entry = tree.get(rel)
+    if entry is None:
+        if required:
+            raise OSError("{} is absent from the HEAD tree; fail closed".format(rel))
+        return None
+    if entry[1] != "blob" or entry[0] not in _REGULAR_MODES:
+        raise OSError("{} is not a regular file in the HEAD tree (mode {}); fail closed".format(rel, entry[0]))
+    return _git_ok(root, ["cat-file", "blob", entry[2]])
+
+
+def _read_head_tracker_inputs(root, head):
+    """(tree, shipped set, adopter shapes, registry) read from the HEAD commit alone: the manifest
+    (required), the shipped set (manifest sources plus HEAD's tracked .github/ and opf/ paths, each of
+    which must be a regular file in HEAD), the adopter configuration (optional) and the baseline
+    (optional, validated closed against HEAD's registry but compared with nothing)."""
+    tree = _head_tree(root, head)
+    manifest = _head_blob(root, tree, TRACKER_MANIFEST_RELPATH, True)
+    try:
+        manifest_text = manifest.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise OSError("{} in HEAD is not valid UTF-8 ({})".format(TRACKER_MANIFEST_RELPATH, exc))
+    shipped = _shipped_from_manifest(manifest_text, sorted(tree))
+    for rel in shipped:
+        if rel != TRACKER_BASELINE_RELPATH:
+            entry = tree.get(rel)
+            if entry is None:
+                raise OSError("shipped path {} is absent from the HEAD tree; fail closed".format(rel))
+            if entry[1] != "blob" or entry[0] not in _REGULAR_MODES:
+                raise OSError("shipped path {} is not a regular file in HEAD; fail closed".format(rel))
+    config = _head_blob(root, tree, TRACKER_CONFIG_RELPATH, False)
+    shapes = [] if config is None else parse_tracker_config(config)
+    registry = _tracker_registry(shapes)
+    baseline = _head_blob(root, tree, TRACKER_BASELINE_RELPATH, False)
+    if baseline is not None:
+        _parse_tracker_baseline(baseline, shipped, [key for key, _label in registry])
+    return tree, shipped, shapes, registry
+
+
+def _merge_base_shipped_set(root, merge_base):
+    """The shipped set at the merge base, from the merge base's own manifest and tree (the same rule
+    as HEAD's: manifest sources plus tracked .github/ and opf/ paths). A merge base with no manifest
+    ships nothing, so every path shipped at HEAD is wholly added (more lines reported, never fewer); a
+    manifest that is not a regular file, not UTF-8 or not a usable inventory raises OSError."""
+    tree = _head_tree(root, merge_base, empty_ok=True)
+    manifest = _head_blob(root, tree, TRACKER_MANIFEST_RELPATH, False)
+    if manifest is None:
+        return set()
+    try:
+        manifest_text = manifest.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise OSError("{} at the merge base is not valid UTF-8 ({})".format(TRACKER_MANIFEST_RELPATH, exc))
+    return set(_shipped_from_manifest(manifest_text, sorted(tree)))
+
+
+def _added_line_ranges(root, old, new):
+    """The HEAD-side line numbers added from blob `old` to blob `new` (1-based, LF-delimited), from a
+    zero-context blob diff with a fixed algorithm, no whitespace ignoring, no external diff, no text
+    conversion and --text (so a binary attribute cannot hide a change). Each option that user or
+    repository configuration could otherwise change is given on the command line, which outranks
+    that configuration: --no-color (color.ui, color.diff), --no-ext-diff (diff.external and a diff
+    driver's command), --no-textconv (a textconv driver), explicit a/ and b/ prefixes
+    (diff.noprefix, diff.mnemonicPrefix) and --inter-hunk-context=0 (diff.interHunkContext, which
+    would otherwise merge nearby hunks with context lines between them). Each hunk is consumed by its
+    header's own counts, so content that looks like a patch line is never parsed as one; a malformed
+    hunk raises OSError."""
+    out = _git_ok(root, ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "-U0",
+                         "--inter-hunk-context=0", "--src-prefix=a/", "--dst-prefix=b/",
+                         "--diff-algorithm=myers", "--no-indent-heuristic", old, new])
+    lines = out.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()
+    added, index = [], 0
+    while index < len(lines) and not lines[index].startswith(b"@@ "):
+        if not lines[index].startswith((b"diff --git ", b"index ", b"--- ", b"+++ ", b"old mode ", b"new mode ")):
+            raise OSError("git diff printed an unexpected header line")
+        index += 1
+    while index < len(lines):
+        header = _HUNK_HEADER.match(lines[index])
+        if header is None:
+            raise OSError("git diff printed a malformed hunk header")
+        old_count = 1 if header.group(2) is None else int(header.group(2))
+        start = int(header.group(3))
+        new_count = 1 if header.group(4) is None else int(header.group(4))
+        index += 1
+        for prefix, count in ((b"-", old_count), (b"+", new_count)):
+            taken = 0
+            while taken < count:
+                if index >= len(lines):
+                    raise OSError("git diff ended inside a hunk")
+                if lines[index].startswith(b"\\"):
+                    index += 1
+                    continue
+                if not lines[index].startswith(prefix):
+                    raise OSError("git diff printed a hunk whose lines disagree with its header")
+                taken += 1
+                index += 1
+            while index < len(lines) and lines[index].startswith(b"\\"):
+                index += 1
+        added += range(start, start + new_count)
+    return added
+
+
+def _diff_entries(root, merge_base, head):
+    """[(status, old mode, new mode, old id, new id, HEAD-side relpath, merge-base-side relpath)] from a
+    NUL-delimited raw diff of the merge base against HEAD with explicit rename detection (no copies);
+    the merge-base-side relpath is the rename source for a rename and the same path otherwise. A
+    malformed record or an unsupported status raises OSError."""
+    out = _git_ok(root, ["diff", "--raw", "-z", "--no-abbrev", "-M", "--no-color", "--no-ext-diff",
+                         "--no-textconv", merge_base, head])
+    fields = out.split(b"\x00")
+    if fields and fields[-1] == b"":
+        fields.pop()
+    entries, index = [], 0
+    while index < len(fields):
+        meta = fields[index].decode("ascii", "replace")
+        parts = meta[1:].split(" ") if meta.startswith(":") else []
+        if len(parts) != 5:
+            raise OSError("git diff --raw printed a malformed record")
+        status = parts[4]
+        width = 2 if status[:1] == "R" else 1
+        if status[:1] not in ("A", "D", "M", "T", "R"):
+            raise OSError("git diff --raw printed an unsupported status {!r}".format(status))
+        if index + width >= len(fields):
+            raise OSError("git diff --raw ended inside a record")
+        path = fields[index + width].decode("utf-8")
+        entries.append((status[:1], parts[0], parts[1], parts[2], parts[3], path,
+                        fields[index + 1].decode("utf-8")))
+        index += width + 1
+    return entries
+
+
+def tracker_diff_main(root, base):
+    """`--diff BASE`: the added-line tracker-label check (see the section comment above). Exit 0 for
+    no label on an added line, 1 for at least one, 2 when the check cannot be evaluated."""
+    import hashlib
+    try:
+        _base_id, head, merge_base = _resolve_diff_commits(root, base)
+        tree, shipped, shapes, registry = _read_head_tracker_inputs(root, head)
+        base_shipped = _merge_base_shipped_set(root, merge_base)
+        frozen_map = dict(TRACKER_LABEL_FROZEN)
+        shipped_set = set(shipped)
+        changed = {}
+        for status, old_mode, new_mode, old_id, new_id, rel, old_rel in _diff_entries(root, merge_base, head):
+            if status == "D" or rel not in shipped_set or rel == TRACKER_BASELINE_RELPATH:
+                continue
+            if new_mode not in _REGULAR_MODES:
+                raise OSError("shipped path {} is not a regular file in HEAD; fail closed".format(rel))
+            changed[rel] = (status, old_mode, old_id, new_id, old_rel)
+        added = {}
+        for rel in shipped:
+            if rel == TRACKER_BASELINE_RELPATH:
+                continue
+            entry = changed.get(rel)
+            # Newly shipped (wholly added): new at HEAD, or its merge-base path (the rename source for
+            # a rename, the same path otherwise, unchanged included) was not shipped at the merge base.
+            if entry is None:
+                newly = rel not in base_shipped
+                if not newly:
+                    continue
+                old_mode, old_id, new_id = None, None, tree[rel][2]
+            else:
+                status, old_mode, old_id, new_id, old_rel = entry
+                newly = status == "A" or old_rel not in base_shipped
+            raw = _git_ok(root, ["cat-file", "blob", new_id])
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                suffix = Path(rel).suffix
+                if suffix and suffix not in TEXT_SUFFIXES:
+                    continue
+                raise OSError("shipped path {} is not valid UTF-8 in HEAD ({}); fail closed".format(rel, exc))
+            if rel in TRACKER_LABEL_HISTORY or (rel in frozen_map
+                                                and hashlib.sha256(raw).hexdigest() == frozen_map[rel]):
+                continue
+            lines = text.split("\n")
+            if text.endswith("\n"):
+                lines.pop()
+            if newly or old_mode not in _REGULAR_MODES:
+                numbers = list(range(1, len(lines) + 1))
+            else:
+                numbers = _added_line_ranges(root, old_id, new_id)
+            if any(n < 1 or n > len(lines) for n in numbers):
+                raise OSError("git diff named a line outside {} in HEAD".format(rel))
+            if numbers:
+                added[rel] = [[n, lines[n - 1]] for n in numbers]
+        labels = dict(registry)
+        findings = []
+        for rel in sorted(added):
+            for number, line in added[rel]:
+                for key, (pattern, _label) in zip(TRACKER_SHAPE_KEYS, TRACKER_LABELS):
+                    findings += [(rel, number, key) for _ in pattern.finditer(line)]
+        if shapes:
+            hits = _run_adopter_matcher(shapes, [[rel, added[rel]] for rel in sorted(added)])
+            for rel, row in hits.items():
+                for key, numbers in row.items():
+                    findings += [(rel, number, key) for number in numbers]
+    except (OSError, UnicodeDecodeError) as exc:
+        print("error: the tracker-label diff check cannot evaluate --diff {!r} ({}); fail-closed".format(
+            base, exc), file=sys.stderr)
+        return 2
+    if findings:
+        print("FAIL: tracker-label diff check: {} label match(es) on lines added between merge base {} "
+              "and HEAD {} in the shipped set (reported whatever the ratchet baseline allows)".format(
+                  len(findings), merge_base, head))
+        for rel, number, key in sorted(set(findings), key=lambda f: (f[0], f[1], f[2])):
+            print("  {}:{}: {} ({}) on an added line".format(rel, number, key, labels[key]))
+        return 1
+    print("PASS: tracker-label diff check: no tracker label on a line added between merge base {} and "
+          "HEAD {} in the shipped set (the full gate is still required)".format(merge_base, head))
     return 0
 
 
@@ -1306,12 +1890,26 @@ def main():
             and argv[:-2] in ([], ["--self-test"]):
         report_path, argv = argv[-1], ["--self-test"]
     # UNKNOWN-OPTION REJECTION precedes the dispatch: this gate accepts only --self-test, --write-baseline
-    # alone, the --execution-report form above, or no args for a real scan, so any other token (a
+    # alone, --diff BASE, the --execution-report form above, no args for a real scan, and the internal
+    # --adopter-match-worker entry (alone; the worker _run_adopter_matcher launches, which reads JSON on
+    # stdin and exits 0 whenever it prints its JSON result, a refusal it reports as {"ok": false}
+    # included; the parent turns a reported refusal, a nonzero worker exit, malformed output or a timeout
+    # into exit 2), so any other token (a
     # misspelled --self-testx, a stray flag) is a LOUD exit 2, never a silent fall-through to the default
     # scan path that would exit without running the self-test the caller asked for (which would let
     # --self-testx masquerade as --self-test in CI parity).
     if argv == ["--write-baseline"]:
         return write_baseline_main(root)
+    if argv == [_ADOPTER_WORKER_FLAG]:
+        # The budgeted adopter-regex worker launched by _run_adopter_matcher (JSON on stdin and stdout).
+        return _adopter_match_worker()
+    # --diff BASE: exactly one operand and no other option (a missing operand or a combination with
+    # --self-test, --write-baseline or the execution report is refused below as an unknown option).
+    if len(argv) == 2 and argv[0] == "--diff":
+        return tracker_diff_main(root, argv[1])
+    if argv == ["--diff"]:
+        print("error: --diff needs exactly one BASE revision operand; fail closed", file=sys.stderr)
+        return 2
     unknown = [a for a in argv if a != "--self-test"]
     if unknown or len(argv) > 1:
         print("error: unrecognized option {!r}; fail closed".format(
@@ -1429,6 +2027,555 @@ def _load_ratchet_mutant(source, directory, tag):
     return module
 
 
+def _self_test_adopter_and_diff(failures, not_run, tempfile, shutil, git_env_module):
+    """Self-test case 34: the adopter shape configuration (schema, limits, fixtures, the budgeted
+    worker), its place in the ratchet, and the --diff BASE mode on a fixture git repository. Each check
+    turns red with its feature reverted: without the configuration no adopter count, key or refusal
+    exists; without the worker budget the slow fixture never returns; without the merge base, the
+    added-line filter, rename detection or the HEAD-only read a listed line is reported or missed.
+    Its check() is the same instrumented choke point as _self_test's: each call records its literal id
+    in EXECUTED and a failed one lands in the caller's `failures`. A row whose premise this host's git
+    cannot provide (it does not honour a grafts file or a commit-graph file at all) is not called: its
+    reason lands in the caller's `not_run` (so the run exits 3, cannot evaluate, never 0 and never a
+    spurious 1) and its id is returned in the set of rows not evaluated."""
+    import hashlib
+    import struct
+    import time
+
+    unevaluated = set()
+
+    def check(check_id, ok, detail=""):
+        EXECUTED.append(check_id)
+        if not ok:
+            failures.append("{}: {!r}".format(check_id, detail))
+
+    sample = {"name": "plan-section", "regex": r"\bplan section\b",
+              "red": ["see plan section 4"], "green": ["the planned sectional"]}
+
+    def config_text(shapes, version="1"):
+        out = ["format-version = {}".format(version)]
+        for shape in shapes:
+            out += ["", "[[shape]]"]
+            for field, value in shape.items():
+                if isinstance(value, list):
+                    out.append("{} = [{}]".format(field, ", ".join("'{}'".format(v) for v in value)))
+                else:
+                    out.append("{} = '{}'".format(field, value))
+        return "\n".join(out) + "\n"
+
+    def refusal(text):
+        try:
+            parse_tracker_config(text.encode("utf-8") if isinstance(text, str) else text)
+        except OSError as exc:
+            return str(exc)
+        return None
+
+    lab = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-adopter-"))
+    try:
+        (lab / ".aiqt").mkdir()
+        absent = load_tracker_shapes(lab)
+        counts = {"docs/a.md": {"qa-" + "round": [1]}}
+        check("adopter/config-absent-no-shapes",
+              absent == [] and render_tracker_baseline(counts) == render_tracker_baseline(
+                  counts, [k for k, _l in _tracker_registry(absent)]), absent)
+        second = dict(sample, name="backlog-id", regex=r"\bTASK-[0-9]+\b", red=["see TASK-12"],
+                      green=["TASK-next"])
+        (lab / ".aiqt" / "tracker-labels.toml").write_text(config_text([sample, second]), encoding="utf-8")
+        loaded = load_tracker_shapes(lab)
+        check("adopter/config-valid-sorted-keys",
+              [s["key"] for s in loaded] == ["adopter-backlog-id", "adopter-plan-section"]
+              and [k for k, _l in _tracker_registry(loaded)][:4] == list(TRACKER_SHAPE_KEYS), loaded)
+        misnamed = [(text, want) for text, want in (
+            ("format-version = 1\nshape = [\n", "malformed TOML"),
+            ("format-version = 2\n", "must be the integer 1"),
+            ("format-version = true\n", "must be the integer 1"),
+            ("format-version = 1\nextra = 1\n", "unknown top-level key"),
+            (config_text([dict(sample, colour="x")]), "unknown field"),
+            (config_text([{k: v for k, v in sample.items() if k != "green"}]), "missing"),
+            (config_text([dict(sample, name="Plan")]), "lower-case ASCII identifier"),
+            (config_text([sample, sample]), "duplicate shape name"),
+            ("format-version = 1\n\n[[shape]]\nname = 'a'\nregex = 3\nred = ['x']\ngreen = ['y']\n",
+             "regex must be a nonempty string"),
+            ("format-version = 1\n\n[[shape]]\nname = 'a'\nregex = 'x'\nred = []\ngreen = ['y']\n",
+             "nonempty array"),
+            ('format-version = 1\n\n[[shape]]\nname = "a"\nregex = "x"\nred = ["x\\ny"]\ngreen = ["y"]\n',
+             "single-line"),
+            (b"format-version = 1\n\xff\n", "not valid UTF-8"),
+        ) if want not in (refusal(text) or "")]
+        check("adopter/config-schema-refusals-named", not misnamed, misnamed)
+
+        def shapes_n(n):
+            return [dict(sample, name="s{}".format(i)) for i in range(n)]
+
+        limits = {
+            "shapes": (refusal(config_text(shapes_n(ADOPTER_MAX_SHAPES))),
+                       refusal(config_text(shapes_n(ADOPTER_MAX_SHAPES + 1)))),
+            "regex": (refusal(config_text([dict(sample, regex="a" * ADOPTER_MAX_REGEX_CHARS)])),
+                      refusal(config_text([dict(sample, regex="a" * (ADOPTER_MAX_REGEX_CHARS + 1))]))),
+            "fixtures": (refusal(config_text([dict(sample, red=["x"] * ADOPTER_MAX_FIXTURES)])),
+                         refusal(config_text([dict(sample, red=["x"] * (ADOPTER_MAX_FIXTURES + 1))]))),
+            "fixture-chars": (refusal(config_text([dict(sample, red=["x" * ADOPTER_MAX_FIXTURE_CHARS])])),
+                              refusal(config_text([dict(sample, red=["x" * (ADOPTER_MAX_FIXTURE_CHARS + 1)])]))),
+            "bytes": (refusal(b"format-version = 1\n" + b"#" * (ADOPTER_CONFIG_MAX_BYTES - 20) + b"\n"),
+                      refusal(b"format-version = 1\n" + b"#" * (ADOPTER_CONFIG_MAX_BYTES - 18) + b"\n")),
+        }
+        check("adopter/config-limits-at-and-beyond",
+              all(at is None and beyond is not None for at, beyond in limits.values()), limits)
+
+        def worker_refusal(shape, budget=None, stand_in=None, items=()):
+            try:
+                _run_adopter_matcher(parse_tracker_config(config_text([shape]).encode("utf-8")),
+                                     list(items), budget, stand_in)
+            except OSError as exc:
+                return str(exc)
+            return None
+
+        check("adopter/fixture-valid-passes", worker_refusal(sample) is None, worker_refusal(sample))
+        bad_regex = worker_refusal(dict(sample, regex="plan (section"))
+        check("adopter/fixture-invalid-regex-refused",
+              bad_regex is not None and "does not compile" in bad_regex, bad_regex)
+        red_miss = worker_refusal(dict(sample, red=["no such text"]))
+        check("adopter/fixture-red-miss-refused",
+              red_miss is not None and "red fixture" in red_miss and "not matched" in red_miss, red_miss)
+        green_hit = worker_refusal(dict(sample, green=["a plan section here"]))
+        check("adopter/fixture-green-hit-refused",
+              green_hit is not None and "green fixture" in green_hit, green_hit)
+        zero_fix = worker_refusal(dict(sample, regex=r"plan section|(?=q)", red=["q"]))
+        zero_scan = worker_refusal(dict(sample, regex=r"plan section|(?=q)"),
+                                   items=[["docs/z.md", [[1, "q"]]]])
+        check("adopter/zero-width-refused",
+              zero_fix is not None and "zero-width" in zero_fix
+              and zero_scan is not None and "zero-width" in zero_scan, (zero_fix, zero_scan))
+        slow = dict(sample, regex=r"(a+)+$", red=["a" * 48 + "!"], green=["b"])
+        started = time.monotonic()
+        timed_out = worker_refusal(slow, budget=2)
+        elapsed = time.monotonic() - started
+        check("adopter/worker-budget-enforced",
+              timed_out is not None and "budget" in timed_out and elapsed < 30, (timed_out, elapsed))
+        failing = lab / "failing_worker.py"
+        failing.write_text("raise SystemExit(4)\n", encoding="utf-8")
+        garbled = lab / "garbled_worker.py"
+        garbled.write_text("print('not json')\n", encoding="utf-8")
+        fail_exit = worker_refusal(sample, stand_in=failing)
+        fail_out = worker_refusal(sample, stand_in=garbled)
+        check("adopter/worker-failure-refused",
+              fail_exit is not None and "exited 4" in fail_exit
+              and fail_out is not None and "malformed output" in fail_out, (fail_exit, fail_out))
+        # The shape-count limit under the shipped budget: ADOPTER_MAX_SHAPES linear-time shapes over one
+        # eighth of the measured shipped-set volume (90000 lines of about 67 characters) finish, and in
+        # under an eighth of the budget, the headroom the budget comment states. Red when the budget is
+        # cut back below what the limit needs or the worker slows by that factor.
+        limit_shapes = [dict(sample, name="limit{}".format(i), regex=r"\bZQX{:02d}-[0-9]+\b".format(i),
+                             red=["ZQX{:02d}-1".format(i)], green=["ZQX"])
+                        for i in range(ADOPTER_MAX_SHAPES)]
+        volume = [["docs/v{}.md".format(f), [[n, "volume line {} of a realistic shipped page, nothing "
+                                              "to match here {}".format(n, f)] for n in range(1, 901)]]
+                  for f in range(100)]
+        started = time.monotonic()
+        try:
+            _run_adopter_matcher(parse_tracker_config(config_text(limit_shapes).encode("utf-8")), volume)
+            at_limit = None
+        except OSError as exc:
+            at_limit = str(exc)
+        elapsed = time.monotonic() - started
+        check("adopter/limit-shapes-within-budget",
+              at_limit is None and elapsed * 8 < ADOPTER_MATCH_BUDGET_SECONDS, (at_limit, elapsed))
+
+        # The ratchet: adopter counts held at, above and below the baseline beside the built-in shapes,
+        # two matches on one line both counted, an overlapping built-in match counted independently,
+        # the canonical render round-tripping with adopter keys, a stale adopter key refused, and the
+        # configuration file itself scanned like any shipped file.
+        (lab / "docs").mkdir()
+        manifest = lab / ".aiqt" / "manifest.toml"
+        manifest.write_text('format-version = 1\n\n[[sources]]\npath = "docs/a.md"\n', encoding="utf-8")
+        qa_vec = "QA" + "26"
+        overlap = dict(sample, name="qa-token", regex=r"\bQA[0-9]+\b", red=["x " + qa_vec], green=["QA"])
+        shapes = parse_tracker_config(config_text([sample, overlap]).encode("utf-8"))
+        keys = [k for k, _l in _tracker_registry(shapes)]
+        (lab / "docs" / "a.md").write_text("plan section a, plan section b {}\n".format(qa_vec),
+                                           encoding="utf-8")
+        base_path = lab / ".aiqt" / "tracker-label-baseline.toml"
+        counts = _collect_tracker_counts(lab, [], (), (), shapes)
+        check("adopter/same-line-and-overlap-counted",
+              counts["docs/a.md"]["adopter-plan-section"] == [1, 1]
+              and counts["docs/a.md"]["adopter-qa-token"] == [1]
+              and counts["docs/a.md"]["qa-" + "round"] == [1], counts)
+        rendered = render_tracker_baseline(counts, keys)
+        base_path.write_text(rendered, encoding="utf-8")
+        equal = scan_shipped_tracker_labels(lab, [], shapes=shapes)
+        (lab / "docs" / "a.md").write_text("plan section a, plan section b {}\nplan section c\n".format(
+            qa_vec), encoding="utf-8")
+        above = scan_shipped_tracker_labels(lab, [], shapes=shapes)
+        (lab / "docs" / "a.md").write_text("plan section a {}\n".format(qa_vec), encoding="utf-8")
+        below = scan_shipped_tracker_labels(lab, [], shapes=shapes)
+        check("adopter/ratchet-equal-above-below",
+              not equal and any("adopter-plan-section count 3 exceeds its ratchet baseline 2" in f
+                                and "lines 1, 2" in f for f in above)
+              and any("adopter-plan-section count 1 is below its ratchet baseline 2" in f for f in below),
+              (equal, above, below))
+        reparsed = _parse_tracker_baseline(rendered.encode("utf-8"), ["docs/a.md"], keys)
+        qa_key = "qa-" + "round"
+        check("adopter/baseline-round-trip-registry-order",
+              reparsed == {"docs/a.md": dict(((qa_key, 1), ("adopter-plan-section", 2),
+                                              ("adopter-qa-token", 1)))}
+              and rendered.index("qa-" + "round =") < rendered.index("adopter-plan-section =")
+              < rendered.index("adopter-qa-token ="), rendered)
+        try:
+            scan_shipped_tracker_labels(lab, [], shapes=[])
+            stale = None
+        except OSError as exc:
+            stale = str(exc)
+        check("adopter/stale-adopter-key-refused", stale is not None and "unknown key" in stale, stale)
+        base_path.unlink()
+        (lab / "docs" / "a.md").write_text("clean\n", encoding="utf-8")
+        (lab / ".aiqt" / "tracker-labels.toml").write_text(config_text([overlap]), encoding="utf-8")
+        manifest.write_text('format-version = 1\n\n[[sources]]\npath = "docs/a.md"\n\n[[sources]]\n'
+                            'path = ".aiqt/tracker-labels.toml"\n', encoding="utf-8")
+        own = scan_shipped_tracker_labels(lab, [])
+        check("adopter/config-file-scanned-no-exemption",
+              any(f.startswith(".aiqt/tracker-labels.toml: adopter-qa-token count") for f in own)
+              and any(f.startswith(".aiqt/tracker-labels.toml: qa-" + "round count") for f in own), own)
+        # The supported adopter procedure: the baseline is pack content, so an adopter shape must match
+        # nothing in the shipped set; then the pack's own baseline render (built-in keys only) is
+        # byte-identical with or without the shape, and the gate passes against it unchanged.
+        manifest.write_text('format-version = 1\n\n[[sources]]\npath = "docs/a.md"\n', encoding="utf-8")
+        (lab / ".aiqt" / "tracker-labels.toml").write_text(config_text([sample]), encoding="utf-8")
+        (lab / "docs" / "a.md").write_text("clean {}\n".format(qa_vec), encoding="utf-8")
+        adopter_shapes = load_tracker_shapes(lab)
+        pack_render = render_tracker_baseline(_collect_tracker_counts(lab, [], (), (), []))
+        with_shape = render_tracker_baseline(_collect_tracker_counts(lab, [], (), (), adopter_shapes),
+                                             [k for k, _l in _tracker_registry(adopter_shapes)])
+        base_path.write_text(pack_render, encoding="utf-8")
+        unchanged = scan_shipped_tracker_labels(lab, [])
+        check("adopter/zero-hit-shape-keeps-pack-baseline",
+              adopter_shapes and pack_render == with_shape and "adopter-" not in with_shape
+              and qa_key + " = 1" in pack_render and unchanged == [], (pack_render, with_shape, unchanged))
+        # The documented example follows that procedure on its own page: the one configuration block of
+        # docs/tracker-labels.md is a valid configuration (the worker checks its fixtures), and its shapes,
+        # matched by the worker line by line as the full gate does, match nothing in that page or in its
+        # generated site page. Red when the example's own fixture text matches its regex again. The pages
+        # are read only when this script sits in the tools/ directory of a tree that has them; a scratch
+        # copy of this script (a lane launched by another case) has neither, so the row is reported not
+        # run there, never passed.
+        import html
+        doc_root = Path(__file__).resolve().parents[1]
+        doc_rels = ("docs/tracker-labels.md", "site/tracker-labels.html")
+        if Path(__file__).resolve().parent.name != "tools" or not all(
+                (doc_root / rel).is_file() for rel in doc_rels):
+            not_run.append("case 34 adopter/documented-example-matches-no-docs-page (the documented pages "
+                           "are not beside this script)")
+            unevaluated.add("adopter/documented-example-matches-no-docs-page")
+        else:
+            blocks, doc_hits = [], None
+            try:
+                doc_texts = {rel: (doc_root / rel).read_bytes().decode("utf-8") for rel in doc_rels}
+                blocks = re.findall(r"<pre><code>(format-version = .*?)</code></pre>", doc_texts[doc_rels[0]],
+                                    re.S)
+                if len(blocks) == 1:
+                    example = parse_tracker_config(html.unescape(blocks[0]).encode("utf-8"))
+                    if example:
+                        doc_hits = _run_adopter_matcher(example, [
+                            [rel, [[number, line] for number, line in enumerate(doc_texts[rel].splitlines(), 1)]]
+                            for rel in doc_rels])
+            except (OSError, UnicodeDecodeError) as exc:
+                doc_hits = str(exc)
+            check("adopter/documented-example-matches-no-docs-page", doc_hits == {}, (doc_hits, blocks))
+    finally:
+        shutil.rmtree(lab, ignore_errors=True)
+
+    # The --diff BASE mode and the full gate with an adopter shape, through a copy of this gate run with
+    # arguments in a fixture git repository (these runs never re-enter the self-test).
+    selfdir = Path(__file__).resolve().parent
+    repo = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-diff-"))
+    try:
+        (repo / "tools").mkdir()
+        (repo / "docs").mkdir()
+        (repo / "notes").mkdir()
+        (repo / ".aiqt").mkdir()
+        for name in ("check_leaks.py", "_walk.py", "check_internal_names.py"):
+            shutil.copy(str(selfdir / name), str(repo / "tools" / name))
+        env = git_env_module.git_fixture_env()
+        steps = []
+
+        def git(*args):
+            proc = subprocess.run(["git", "-C", str(repo), "-c", "user.name=fixture",
+                                   "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                                   *args], capture_output=True, text=True, env=env, timeout=60)
+            steps.append((args[0], proc.returncode, proc.stderr[-200:]))
+            return proc.stdout.strip()
+
+        def gate(*args):
+            try:
+                proc = subprocess.run([sys.executable, "-I", "-B", str(repo / "tools" / "check_internal_names.py"),
+                                       *args], capture_output=True, text=True, env=dict(os.environ),
+                                      timeout=180)
+            except subprocess.TimeoutExpired:
+                return None, "", "timed out"
+            return proc.returncode, proc.stdout, proc.stderr
+
+        def write(rel, data):
+            target = repo / rel
+            if isinstance(data, bytes):
+                target.write_bytes(data)
+            else:
+                target.write_text(data, encoding="utf-8", newline="")
+
+        def manifest_for(rels):
+            return "format-version = 1\n" + "".join(
+                '\n[[sources]]\npath = "{}"\n'.format(rel) for rel in rels)
+
+        label = "rou" + "nd-7"
+        body = "".join("body line {}\n".format(i) for i in range(1, 21))
+        # Line 1 of docs/page.md and of the edited rename's source carries a label and stays unchanged
+        # context, so reporting every line of a changed file (or of an edited rename's destination)
+        # turns the added-line and edited-rename rows red.
+        write("docs/page.md", "one {0}\ntwo {0}\nthree\n".format(label))
+        write("docs/move.md", "a {}\nb\nc\n".format(label))
+        write("docs/old-name.md", "x {}\n".format(label) + body)
+        write("docs/edit-name.md", "e {}\n".format(label) + body)
+        write("docs/crlf.md", b"c1\r\nc2\r\n")
+        write("notes/out.md", "z\n")
+        # Two unshipped files that become shipped on the branch without an edit: notes/promoted.md by a
+        # pure rename into the shipped set, notes/listed.md by the manifest alone. Each is newly shipped,
+        # so every line counts; without the merge-base shipped set both are silent.
+        write("notes/promoted.md", "p {}\n".format(label) + "".join(
+            "promoted line {}\n".format(i) for i in range(1, 21)))
+        write("notes/listed.md", "l1\nl2 {}\n".format(label))
+        first = ["docs/crlf.md", "docs/edit-name.md", "docs/move.md", "docs/old-name.md", "docs/page.md"]
+        write(".aiqt/manifest.toml", manifest_for(first))
+        git("init", "-q", "-b", "main")
+        git("add", "-A")
+        git("commit", "-q", "-m", "fork point")
+        git("switch", "-q", "-c", "feature")
+        git("switch", "-q", "main")
+        write("docs/page.md", "one {}\nthree\n".format(label))
+        git("commit", "-q", "-a", "-m", "main drops a line")
+        git("switch", "-q", "feature")
+        write("docs/page.md", "one {0}\ntwo {0}\nthree\nfour {0}\nper plan section 2\n".format(label))
+        write("docs/move.md", "a\nb\nc {}\n".format(label))
+        git("mv", "docs/old-name.md", "docs/new-name.md")
+        git("mv", "docs/edit-name.md", "docs/edit-dest.md")
+        git("mv", "notes/promoted.md", "docs/promoted.md")
+        write("docs/edit-dest.md", "e {}\n".format(label) + body + "r {}\n".format(label))
+        write("docs/new.md", "n1\nn2 {}\n".format(label))
+        # A lone carriage return inside the added last line (which has no final LF): git counts lines by
+        # LF only, so str.splitlines() would split it and miss the label on line 3.
+        write("docs/crlf.md", "c1\r\nc2\r\nc3\rc4 {}".format(label).encode("utf-8"))
+        write("notes/out.md", "z {}\n".format(label))
+        write(".aiqt/tracker-labels.toml", config_text([sample]))
+        write(".aiqt/manifest.toml", manifest_for(["docs/crlf.md", "docs/edit-dest.md", "docs/move.md",
+                                                    "docs/new-name.md", "docs/new.md", "docs/page.md",
+                                                    "docs/promoted.md", "notes/listed.md"]))
+        git("add", "-A")
+        git("commit", "-q", "-m", "feature work")
+        wrote = gate("--write-baseline")
+        check("adopter/wired-write-baseline-carries-adopter-key",
+              wrote[0] == 0 and "adopter-plan-section = 1" in wrote[1], wrote)
+        full = gate()
+        check("adopter/wired-full-gate-counts-adopter-shape",
+              full[0] == 1 and "docs/page.md: adopter-plan-section count 1 exceeds its ratchet baseline 0"
+              in full[1], full)
+        # The working tree then differs from HEAD; the diff mode must not read it.
+        write("docs/page.md", "dirty {}\n".format(label))
+        built = all(rc == 0 for _cmd, rc, _err in steps)
+        rc, out, err = gate("--diff", "main")
+        reported = {line.strip().split(" ")[0] for line in out.splitlines() if line.startswith("  ")}
+
+        def has(*items):
+            return built and rc == 1 and all(item in reported for item in items)
+
+        def lacks(*items):
+            return built and rc == 1 and not any(item in reported for item in items)
+
+        detail = (steps, rc, out, err)
+        check("diff/added-line-reported-context-not",
+              has("docs/page.md:4:") and lacks("docs/page.md:1:", "docs/page.md:3:"), detail)
+        check("diff/merge-base-not-base-tip", lacks("docs/page.md:2:"), detail)
+        check("diff/new-file-all-lines", has("docs/new.md:2:"), detail)
+        check("diff/pure-rename-silent", lacks("docs/new-name.md:1:"), detail)
+        check("diff/rename-into-shipped-set-all-lines", has("docs/promoted.md:1:"), detail)
+        check("diff/manifest-only-newly-shipped-all-lines", has("notes/listed.md:2:"), detail)
+        check("diff/edited-rename-destination-only", has("docs/edit-dest.md:22:")
+              and not any(item.startswith("docs/edit-dest.md:") and item != "docs/edit-dest.md:22:"
+                          for item in reported), detail)
+        check("diff/equal-count-relocation-reported", has("docs/move.md:3:") and lacks("docs/move.md:1:"),
+              detail)
+        check("diff/crlf-and-missing-final-lf", has("docs/crlf.md:3:"), detail)
+        check("diff/head-not-working-tree", lacks("docs/page.md:1:") and "dirty" not in out, detail)
+        check("diff/out-of-scope-not-reported", lacks("notes/out.md:1:"), detail)
+        check("diff/adopter-shape-on-added-line",
+              has("docs/page.md:5:") and "adopter-plan-section" in out, detail)
+        # HEAD, not the working tree, supplies the configuration, the manifest and the baseline: break
+        # all three on disk (a configuration whose green fixture is matched, a manifest that is not
+        # TOML, a baseline that is not canonical) and the diff check reports exactly as before.
+        write(".aiqt/tracker-labels.toml", config_text([dict(sample, green=["a plan section"])]))
+        write(".aiqt/manifest.toml", "not = [toml\n")
+        write(".aiqt/tracker-label-baseline.toml", "# not canonical\n")
+        disk = gate("--diff", "main")
+        git("checkout", "-q", "--", ".aiqt/tracker-labels.toml", ".aiqt/manifest.toml")
+        (repo / ".aiqt" / "tracker-label-baseline.toml").unlink()
+        disk_reported = {line.strip().split(" ")[0] for line in disk[1].splitlines() if line.startswith("  ")}
+        check("diff/head-inputs-not-working-tree",
+              built and disk[0] == rc == 1 and disk_reported == reported, (disk, rc))
+        # A local refs/replace object cannot stand in for what HEAD holds: replace docs/new.md's HEAD
+        # blob (label on line 2) with main's docs/page.md blob (no label on line 2) and the report is
+        # unchanged; without --no-replace-objects the replacement drops docs/new.md:2:.
+        replace_steps = len(steps)
+        git("replace", git("rev-parse", "HEAD:docs/new.md"), git("rev-parse", "main:docs/page.md"))
+        swapped = gate("--diff", "main")
+        git("replace", "-d", git("rev-parse", "HEAD:docs/new.md"))
+        swapped_reported = {line.strip().split(" ")[0] for line in swapped[1].splitlines()
+                            if line.startswith("  ")}
+        check("diff/replace-objects-ignored",
+              built and all(r == 0 for _c, r, _e in steps[replace_steps:]) and swapped[0] == rc == 1
+              and swapped_reported == reported and "docs/new.md:2:" in swapped_reported, (swapped, rc, steps))
+        # A legacy .git/info/grafts line cannot rewrite a commit's parents for this check: giving main the
+        # feature tip as its parent makes HEAD the merge base (the fixture's own git, which honours the
+        # file, must say so), so a read that honours it reports nothing and exits 0; with GIT_GRAFT_FILE
+        # pointed at a path that cannot exist the report is unchanged. A git that does not honour a grafts
+        # file at all (the merge base stays the fork point, every step succeeding) cannot evaluate this
+        # row: it is reported not run (exit 3), never a spurious red.
+        info = repo / ".git" / "info"
+        graft_steps = len(steps)
+        head_id = git("rev-parse", "HEAD")
+        fork_id = git("merge-base", "main", "HEAD")
+        info.mkdir(exist_ok=True)
+        (info / "grafts").write_text("{} {}\n".format(git("rev-parse", "main"), head_id), encoding="utf-8")
+        graft_base = git("merge-base", "main", "HEAD")
+        honoured = graft_base == head_id
+        grafted = gate("--diff", "main") if honoured else (None, "", "")
+        (info / "grafts").unlink()
+        graft_ran = built and all(r == 0 for _c, r, _e in steps[graft_steps:])
+        if graft_ran and fork_id and fork_id != head_id and graft_base == fork_id:
+            not_run.append("case 34 diff/grafts-file-ignored (this git does not honour a grafts file)")
+            unevaluated.add("diff/grafts-file-ignored")
+        else:
+            grafted_reported = {line.strip().split(" ")[0] for line in grafted[1].splitlines()
+                                if line.startswith("  ")}
+            check("diff/grafts-file-ignored",
+                  graft_ran and honoured and grafted[0] == rc == 1
+                  and grafted_reported == reported and "docs/new.md:2:" in grafted_reported,
+                  (honoured, grafted, rc, steps[graft_steps:]))
+        # A forged commit-graph file cannot rewrite a commit's parents for this check either: on a branch
+        # one commit past main, the graph entry for main is given HEAD as its parent (git parses the branch
+        # tip from its object but main from the graph), which makes HEAD the merge base for the fixture's
+        # own git, so a read that honours the graph reports nothing and exits 0; with core.commitGraph=false
+        # the report is unchanged. A git that writes no graph this row can forge, or does not honour the
+        # forged graph (the merge base stays the fork point, every step succeeding), cannot evaluate this
+        # row: it is reported not run (exit 3), never a spurious red.
+        graph_steps = len(steps)
+        main_id = git("rev-parse", "main")
+        past_id = git("commit-tree", git("rev-parse", "main^{tree}"), "-p", main_id, "-m", "past main")
+        git("branch", "graphed", past_id)
+        git("-c", "commitGraph.generationVersion=1", "commit-graph", "write", "--reachable")
+        graph_file = repo / ".git" / "objects" / "info" / "commit-graph"
+        forged = False
+        try:
+            # The commit-graph format: a CGPH header (version, hash version, chunk count), a chunk
+            # table of 4-byte ids and 8-byte offsets, OIDL (sorted object ids) and CDAT (per commit:
+            # tree id, first and second parent positions, then generation << 34 | commit time), and a
+            # trailing checksum of the hash in use (generation version 1 writes no GDA2 chunk).
+            data = bytearray(graph_file.read_bytes())
+            hash_size, digest = {1: (20, hashlib.sha1), 2: (32, hashlib.sha256)}[data[5]]
+            if data[:5] != b"CGPH\x01":
+                raise ValueError("not a version-1 commit-graph file")
+            table = {bytes(data[8 + 12 * i:12 + 12 * i]): struct.unpack(">Q", data[12 + 12 * i:20 + 12 * i])[0]
+                     for i in range(data[6] + 1)}
+            oidl, cdat, width = table[b"OIDL"], table[b"CDAT"], hash_size + 16
+            oids = [bytes(data[oidl + hash_size * i:oidl + hash_size * (i + 1)]).hex()
+                    for i in range((cdat - oidl) // hash_size)]
+            record = {oid: cdat + width * pos for pos, oid in enumerate(oids)}
+
+            def generation_word(oid):
+                at = record[oid] + hash_size + 8
+                return at, struct.unpack(">Q", data[at:at + 8])[0]
+
+            def set_generation(oid, value):
+                at, word = generation_word(oid)
+                data[at:at + 8] = struct.pack(">Q", (value << 34) | (word & (2 ** 34 - 1)))
+
+            at = record[main_id] + hash_size
+            data[at:at + 4] = struct.pack(">I", oids.index(head_id))
+            set_generation(main_id, (generation_word(head_id)[1] >> 34) + 1)
+            set_generation(past_id, (generation_word(main_id)[1] >> 34) + 1)
+            data[-hash_size:] = digest(bytes(data[:-hash_size])).digest()
+            graph_file.chmod(0o644)
+            graph_file.write_bytes(bytes(data))
+            forged = True
+        except (OSError, KeyError, ValueError, IndexError, struct.error) as exc:
+            forged = repr(exc)
+        graph_base = git("merge-base", "graphed", "HEAD")
+        graph_honoured = forged is True and graph_base == head_id
+        graphed = gate("--diff", "graphed") if graph_honoured else (None, "", "")
+        if graph_file.exists():
+            graph_file.unlink()
+        git("branch", "-D", "graphed")
+        graph_ran = built and all(r == 0 for _c, r, _e in steps[graph_steps:])
+        if graph_ran and forged is not True:
+            not_run.append("case 34 diff/commit-graph-file-ignored (this git wrote no commit-graph file "
+                           "this row can forge: {})".format(forged))
+            unevaluated.add("diff/commit-graph-file-ignored")
+        elif graph_ran and fork_id and fork_id != head_id and graph_base == fork_id:
+            not_run.append("case 34 diff/commit-graph-file-ignored (this git does not honour a forged "
+                           "commit-graph file)")
+            unevaluated.add("diff/commit-graph-file-ignored")
+        else:
+            graphed_reported = {line.strip().split(" ")[0] for line in graphed[1].splitlines()
+                                if line.startswith("  ")}
+            check("diff/commit-graph-file-ignored",
+                  graph_ran and graph_honoured and graphed[0] == rc == 1
+                  and graphed_reported == reported and "docs/new.md:2:" in graphed_reported,
+                  (forged, graph_base, graphed, rc, steps[graph_steps:]))
+        # Ordinary user or repository git configuration cannot change which lines count as added. Each
+        # row sets one setting in the fixture repository and expects the same report; with
+        # diff.interHunkContext the two changes of docs/move.md (lines 1 and 3) would otherwise share
+        # one hunk with a context line, which the parser refuses.
+        for row_id, settings, attributes in (
+                ("diff/user-config-no-prefix", (("diff.noprefix", "true"),), None),
+                ("diff/user-config-colour", (("color.ui", "always"), ("color.diff", "always")), None),
+                ("diff/user-config-external-diff", (("diff.external", "false"),), None),
+                ("diff/user-config-textconv", (("diff.conv.textconv", "printf x"),), "* diff=conv\n"),
+                ("diff/user-config-inter-hunk-context", (("diff.interHunkContext", "2"),), None)):
+            for key, value in settings:
+                git("config", key, value)
+            if attributes is not None:
+                info.mkdir(exist_ok=True)
+                (info / "attributes").write_text(attributes, encoding="utf-8")
+            configured = gate("--diff", "main")
+            for key, _value in settings:
+                git("config", "--unset", key)
+            if attributes is not None:
+                (info / "attributes").unlink()
+            configured_reported = {line.strip().split(" ")[0] for line in configured[1].splitlines()
+                                   if line.startswith("  ")}
+            check(row_id, built and configured[0] == rc == 1 and configured_reported == reported,
+                  (settings, configured, rc))
+        refused = {}
+        for name, args in (("missing-operand", ("--diff",)), ("option-operand", ("--diff", "--self-test")),
+                           ("combined", ("--diff", "main", "--write-baseline")),
+                           ("combined-self-test", ("--self-test", "--diff")),
+                           ("unknown-base", ("--diff", "no-such-revision"))):
+            refused[name] = gate(*args)
+        check("diff/cli-refusals-exit-2", all(r[0] == 2 for r in refused.values())
+              and "not a usable revision operand" in refused["option-operand"][2]
+              and "cannot be read as a commit" in refused["unknown-base"][2], refused)
+        lone = git("commit-tree", git("rev-parse", "HEAD^{tree}"), "-m", "unrelated root")
+        git("branch", "lone", lone)
+        unrelated = gate("--diff", "lone")
+        check("diff/no-merge-base-exit-2", unrelated[0] == 2 and "no common ancestor" in unrelated[2],
+              (steps[-3:], unrelated))
+        git("checkout", "-q", "--", "docs/page.md")
+        write(".aiqt/tracker-labels.toml", config_text([dict(sample, green=["a plan section"])]))
+        git("commit", "-q", "-a", "-m", "a bad configuration")
+        empty = gate("--diff", "HEAD")
+        write(".aiqt/tracker-labels.toml", config_text([sample]))
+        check("diff/invalid-head-config-exit-2-on-empty-diff",
+              empty[0] == 2 and "green fixture" in empty[2], (steps[-3:], empty))
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+    return unevaluated
+
+
 # --- self-test --------------------------------------------------------------------------------------
 def _self_test(caller_env=None):
     import hashlib
@@ -1438,6 +2585,9 @@ def _self_test(caller_env=None):
     failures = []
     # Each case this run does not run, with the reason; the full PASS text is printed only when it is empty.
     not_run = []
+    # The registered check ids a row reported not run instead of calling check() (case 34's rows whose
+    # premise this host's git cannot provide); the in-run reconcile below excuses exactly these.
+    unevaluated = set()
 
     def check(check_id, ok, detail=""):
         # The instrumented choke point for the tracker-label cases (27 to 31): every call records its
@@ -3660,6 +4810,11 @@ def _self_test(caller_env=None):
                   seen[:2] == ["clean", "clean"] and "font.woff2" + woff2_rule + reason in seen[2], seen)
         finally:
             shutil.rmtree(pngdir, ignore_errors=True)
+
+        # 34. DISCRIMINATING (adopter tracker shapes and the --diff BASE mode). Every vector is synthetic
+        #     and assembled at run time where a built-in shape would otherwise match this source; the
+        #     adopter shapes below are fixtures only (this repository ships the configuration with none).
+        unevaluated = _self_test_adopter_and_diff(failures, not_run, tempfile, shutil, _git_fixture_env)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -3686,10 +4841,14 @@ def _self_test(caller_env=None):
             if expected is None:
                 failures.append("execution-set/registry: missing or malformed suite {!r} in {}".format(
                     SUITE_ID, registry))
-            elif len(set(EXECUTED)) != len(EXECUTED) or set(EXECUTED) != expected:
+            elif len(set(EXECUTED)) != len(EXECUTED) or set(EXECUTED) | unevaluated != expected \
+                    or set(EXECUTED) & unevaluated:
+                # A row reported not run is missing from EXECUTED by design; the run already exits 3 for
+                # it, so it is excused here (only when registered and never also executed), never passed.
                 failures.append("execution-set/reconciled: missing={} extra={} duplicates={}".format(
-                    sorted(expected - set(EXECUTED)), sorted(set(EXECUTED) - expected),
-                    len(EXECUTED) - len(set(EXECUTED))))
+                    sorted(expected - set(EXECUTED) - unevaluated),
+                    sorted((set(EXECUTED) | unevaluated) - expected),
+                    len(EXECUTED) - len(set(EXECUTED)) + len(set(EXECUTED) & unevaluated)))
 
     # A failure outranks a skip: a run that failed a case exits 1 even when it also skipped one, and lists
     # the cases it did not run.
