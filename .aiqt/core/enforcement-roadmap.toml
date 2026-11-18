@@ -200,7 +200,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "gatdis"
 status = "enforced"
-mechanisms = ["gate:ci-parity", "gate:relied-exit-pipes", "gate:selftest-removal", "hook:gate-weakening-guard"]
+mechanisms = ["gate:ci-parity", "gate:push-gate-record", "gate:relied-exit-pipes", "gate:selftest-removal", "hook:gate-weakening-guard"]
 
 [[rule]]
 corpus-id = "gensrc"
