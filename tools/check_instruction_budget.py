@@ -1573,7 +1573,9 @@ def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
     above its one `#   ceiling` line and the rest, each with the matching part of the base (its ratchet
     value replaced by the candidate's). Lines appended at the end of the upper part are the new entries
     (_entry_findings); after a replacement there, the lines beyond the ones it pairs one for one, or, for a
-    raise, from the first line there opening `Raised OLD -> ` (OLD the base ratchet) if earlier. Every
+    raise, from the first line the base does not match that opens `Raised OLD -> ` (OLD the base ratchet),
+    in that change or in the run of entry-indented lines directly above the `#   ceiling` line, if earlier.
+    The base lines the entries displace are reported removed. Every
     other changed line is a finding naming the line (_line_report), unless a declaration bound to these
     exact base and head bytes covers it; a declaration never waives the entry rules. A candidate without
     exactly one `#   ceiling` line is compared whole and has no entry block. A candidate without exactly
@@ -1602,19 +1604,38 @@ def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
         above = _opcodes(expected[:ceiling_at], head[:at])
         block, start = [], at
         tag, i1, i2, j1, j2 = above[-1] if above else ("equal", 0, 0, 0, 0)
-        if tag in ("insert", "replace") and (i2, j2) == (ceiling_at, at):
-            # Appended at the end of the upper part: past the lines a replacement pairs one for one, or, for
-            # a raise, from the change's first line that opens `Raised OLD -> ` (OLD the base ratchet) when
-            # that is earlier, so a declared deletion just before the entry cannot hide it.
-            opener = "Raised {} -> ".format(old)
-            starts = [j for j in range(j1, j2) if new > old and head[j][:1] == "#"
-                      and head[j][1:].lstrip(" ").startswith(opener)][:1]
-            if j2 - j1 > i2 - i1:
-                starts.append(j1 + (i2 - i1))
-            if starts:
-                start = min(starts)
-                block = head[start:j2]
-                above[-1] = ("replace" if i2 > i1 else "equal", i1, i2, j1, start)
+        final = tag in ("insert", "replace") and (i2, j2) == (ceiling_at, at)
+        # Appended at the end of the upper part: past the lines a final replacement pairs one for one, or,
+        # for a raise, from the first line the base does not match that opens `Raised OLD -> ` (OLD the base
+        # ratchet) when that is earlier. That opener is read from the candidate text, across diff opcodes:
+        # in the final change, or in the run of lines indented as entry lines directly above the
+        # `#   ceiling` line, so neither a declared deletion just before the entry nor an entry line that
+        # repeats a base line (which moves the diff's alignment) can hide it.
+        run = at
+        while run > 0 and head[run - 1].startswith("#" + " " * SHAPE_ENTRY_INDENT_WIDTH):
+            run -= 1
+        floor = min(run, j1) if final else run
+        fresh = [j for op in above if op[0] != "equal" for j in range(op[3], op[4])]
+        opener = "Raised {} -> ".format(old)
+        starts = [j for j in fresh if new > old and head[j][:1] == "#" and j >= floor
+                  and head[j][1:].lstrip(" ").startswith(opener)][:1]
+        if final and j2 - j1 > i2 - i1:
+            starts.append(j1 + (i2 - i1))
+        if starts:
+            start = min(starts)
+            block = head[start:at]
+            # Every base line the block displaces is reported removed; head lines above it as before.
+            cut = []
+            for op, a1, a2, b1, b2 in above:
+                if b2 <= start:
+                    cut.append((op, a1, a2, b1, b2))
+                elif b1 < start and op == "equal":
+                    cut += [("equal", a1, a1 + start - b1, b1, start), ("delete", a1 + start - b1, a2, start, start)]
+                elif b1 < start:
+                    cut.append(("replace" if a2 > a1 else "insert", a1, a2, b1, start))
+                elif a2 > a1:
+                    cut.append(("delete", a1, a2, start, start))
+            above = cut
         changed = (_line_report(above, base, head, 0, 0)
                    + _line_report(_opcodes(expected[ceiling_at:], head[at:]), base, head, ceiling_at, at))
     else:
@@ -3351,6 +3372,21 @@ def self_test(report_path=None):
         bare = [missing.replace(old_entry, ""), missing.replace(old_entry, old_entry.replace(" rule ", " rule  "))]
         check("shape/declared-deletion-raise-without-entry-1",
               [shape(base_shape, head, declare(base_shape, head)) for head in bare], [(1, [])] * 2)
+        # An appended entry line that repeats a base line beside a declared deletion moves the diff's
+        # alignment (the final opcode becomes equal, a delete, or an insert after the opener); the entry is
+        # still read from the candidate text and the base lines it displaces are reported removed. An opener
+        # naming another OLD is no entry: that line is reported changed and the raise stays refused.
+        cont, tail = entry_line("(rows a.1 to a.3)."), entry_line("for raises up to 148000.")
+        repeat_base = base_shape.replace(ceiling, cont + tail + ceiling)
+        repeated = [raised(base_shape, entry + tail), raised(base_shape, entry + cont),
+                    raised(base_shape, entry + tail + entry_line("and its probe."))]
+        check("shape/declared-repeated-line-entry-0",
+              [(shape(repeat_base, head), shape(repeat_base, head, declare(repeat_base, head))) for head in repeated],
+              [((1, ["base 5", "base 6"]), (0, []))] * 3)
+        wrong_old = raised(base_shape, opened(text="Raised 99 -> 150 on {}") + tail)
+        check("shape/repeated-line-wrong-old-1",
+              (shape(repeat_base, wrong_old), shape(repeat_base, wrong_old, declare(repeat_base, wrong_old))),
+              ((1, ["5"]), (1, [])))
         check("shape/declaration-blank-reason-2",
               (shape(base_shape, version_bump, declare(base_shape, version_bump, reason="   ")),
                shape(base_shape, version_bump, declare(base_shape, version_bump) + 'extra = "x"\n')),
@@ -3486,11 +3522,18 @@ def self_test(report_path=None):
                                                        '        report += [] and ["line {}: added: {!r}"'))[0], 0)
         check("revert/shape-declared-edit-before-entry-red",
               shape(base_shape, edited, declare(base_shape, edited), module=_mutant(
-                  tmp, '        if tag in ("insert", "replace") and', '        if tag in ("insert",) and'))[0], 1)
+                  tmp, '        final = tag in ("insert", "replace") and', '        final = tag in ("insert",) and',
+                  'fresh = [j for op in above if op[0] != "equal"', 'fresh = [j for op in above if op[0] == "insert"'))[0],
+              1)
         check("revert/shape-declared-deletion-before-entry-red",
               [shape(base_shape, head, declare(base_shape, head), module=_mutant(
                   tmp, 'if new > old and head[j][:1] == "#"', 'if False and head[j][:1] == "#"'))[0]
                for head in deleted], [1, 1])
+        final_only = _mutant(tmp, "        floor = min(run, j1) if final else run\n",
+                             "        floor = j1 if final else at\n")
+        check("revert/shape-declared-repeated-line-entry-red",
+              [shape(repeat_base, head, declare(repeat_base, head), module=final_only)[0] for head in repeated],
+              [1, 1, 1])
         check("revert/shape-declaration-reason-red",
               shape(base_shape, version_bump, declare(base_shape, version_bump, reason="   "), module=_mutant(
                   tmp, '    if not isinstance(data["reason"], str) or not data["reason"].strip():',
