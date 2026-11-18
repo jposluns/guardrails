@@ -138,6 +138,9 @@ GENSRC_OUTPUTS = (
     {"target": "site/evidence.html", "kind": "file",
      "sources": ("docs/_shell.html", "docs/evidence.md"),
      "regenerate": "python3 tools/gen_site.py"},
+    {"target": "site/tracker-labels.html", "kind": "file",
+     "sources": ("docs/_shell.html", "docs/tracker-labels.md"),
+     "regenerate": "python3 tools/gen_site.py"},
 )
 
 DOCS_DIR = "docs"

@@ -84,6 +84,10 @@ reason = "Repository-local configuration of the label shapes and the allow-marke
 path = ".aiqt/opf-consumer-switch.toml"
 reason = "Repository-local switch list of this repository's own record readers under tools/, read by tools/check_record_readers.py; tracked, not shipped, like .aiqt/newtab.toml. An adopter has no such tools; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 
+[[exclusion]]
+path = ".aiqt/tracker-labels.toml"
+reason = "Repository-local adopter tracker-label shape configuration read by tools/check_internal_names.py (docs/tracker-labels.md); tracked, not shipped. Adopters own their roots (an absent file applies no extra shape), like .aiqt/newtab.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
+
 # The authoring-only roster (tools/gen_hooks.py AUTHORING_ONLY_REL): tracked here, never shipped. gen_manifest
 # refuses either path a release class, requires both tracked together under these exact literals, and allows
 # this one exclusion over a gensrc-registered kind=file target; every other gensrc target stays refused.
@@ -236,7 +240,7 @@ class = "pack-immutable"
 [[release-class]]
 path = ".aiqt/tracker-label-baseline.toml"
 class = "pack-immutable"
-note = "The per-file ratchet baseline of the shipped tracker-label layer in tools/check_internal_names.py: per-shape hit counts for shipped paths, always the exact output of --write-baseline, regenerated in the reviewed change that legitimately moves a count (lowered as labels are removed; raised, under review policy the gate does not itself enforce, only by a refresh that merges upstream files already carrying labels, the movement visible whole in the regenerated file's diff and recounted against the merge parent in review). Shipped so the gate holds in an adopter tree, where the same shipped files carry the same counts."
+note = "The per-file ratchet baseline of the shipped tracker-label layer in tools/check_internal_names.py: per-shape hit counts for shipped paths, always the exact output of --write-baseline, regenerated in the reviewed change that legitimately moves a count (lowered as labels are removed; raised, under review policy the gate does not itself enforce, only by a refresh that merges upstream files already carrying labels, the movement visible whole in the regenerated file's diff and recounted against the merge parent in review). Shipped so the gate holds in an adopter tree, where the same shipped files carry the same counts. Pack content an adopter does not change: the supported adopter procedure (docs/tracker-labels.md) is an adopter tracker shape that matches nothing in the shipped set, which leaves this file byte-identical."
 
 [[release-class]]
 path = ".aiqt/record-sections.toml.example"
@@ -370,6 +374,10 @@ class = "pack-immutable"
 
 [[release-class]]
 path = "site/evidence.html"
+class = "pack-immutable"
+
+[[release-class]]
+path = "site/tracker-labels.html"
 class = "pack-immutable"
 
 [[release-class]]

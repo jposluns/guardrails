@@ -635,6 +635,15 @@
         "site/draft-src/teams.toml"
       ],
       "target": "site/teams/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "docs/_shell.html",
+        "docs/tracker-labels.md"
+      ],
+      "target": "site/tracker-labels.html"
     }
   ],
   "version": 1
