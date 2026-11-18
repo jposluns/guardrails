@@ -12,26 +12,29 @@ LIST RATCHET. The list is compared with the list at a comparison base: --base RE
 merge base of HEAD and origin/main (no base that resolves is exit 2, never "nothing to compare"). The
 default is the merge base, not the origin/main tip, on purpose: it is the commit this branch forked
 from, so the comparison sees only the list changes made on this branch, and a rule added to
-origin/main after the fork is not reported as dropped by a branch that has not merged it yet. A remote
-base is read as its fully qualified ref, never by short name: the default reads exactly
-refs/remotes/origin/main, and a --base naming a remote-tracking branch (REF starts with refs/remotes/,
-read as REF, or with a configured remote's name and a slash, read as refs/remotes/<REF>; nothing else
-names one) is read as exactly that ref, so a tag or a local branch of the same short name, which
-git's short-name search order prefers, cannot stand in for it (an absent remote-tracking ref is exit
-2). Any other --base (a full or abbreviated object id, HEAD, any other name or expression) is resolved
-as git resolves it, after git is asked which ref it resolves the value, and each name leading a ~, ^
-or @{ in it, through (git rev-parse --symbolic-full-name with core.warnAmbiguousRefs off, so git names
-the ref its own search takes, by whichever of its name rules, refs/remotes/<name>/HEAD included): it
-is exit 2 when that ref is under refs/remotes/, or is where a symbolic ref under refs/remotes/ also
-ends (git names only the end of a symbolic chain), so a ref under refs/remotes/, plain or symbolic,
-cannot stand in for it (remotes/origin/main, which git reads as refs/remotes/origin/main, is exit 2
-too); it is also exit 2 as ambiguous when refs/remotes/<REF>, or refs/remotes/<name> for the name
-leading an expression, exists, and a full object id whose object does not exist is exit 2. A --base
-that is a bare remote name (origin), alone or leading a revision expression (origin~1), and a
-revision expression whose leading name is a remote-tracking branch that does not exist (origin/gone~0)
-or is shadowed by refs/<name>, refs/tags/<name> or refs/heads/<name> (origin/main~1 with a tag
-origin/main), are exit 2: pass the remote-tracking branch, its fully qualified form
-(refs/remotes/origin/main~1) or a commit id instead. Every git read runs with replace objects and
+origin/main after the fork is not reported as dropped by a branch that has not merged it yet.
+--base REF is a closed grammar (an allowlist that fails closed): REF is accepted only as a full 40-hex
+object id that exists, HEAD, or refs/remotes/<name> or <configured remote>/<name> where git
+check-ref-format accepts the ref (refs/remotes/<name> as written, or refs/remotes/<REF> for the
+configured-remote form), each optionally followed by a run of ~N or ^N suffixes (N digits, possibly
+empty), and every other value (an abbreviated object id, a describe form, a bare remote name, a local
+branch or tag name, remotes/origin/main, any brace, @{, : or other revision syntax) is exit 2 with a
+message naming the accepted forms, before git resolves anything. Within the grammar: a remote base is
+read as its fully qualified ref, never by short name: the default reads exactly
+refs/remotes/origin/main, and a remote-tracking --base without suffixes is read as exactly that ref,
+so a tag or a local branch of the same short name, which git's short-name search order prefers,
+cannot stand in for it (an absent remote-tracking ref is exit 2); a remote-tracking name leading a
+suffix run is exit 2 when that remote-tracking ref does not exist (origin/gone~0) or is shadowed by
+refs/<name>, refs/tags/<name> or refs/heads/<name> (origin/main~1 with a tag origin/main): pass the
+fully qualified form (refs/remotes/origin/main~1) or a commit id instead. A full object id or HEAD,
+alone or leading a suffix run, is resolved as git resolves it, after git is asked which ref it
+resolves the value, and the name leading the suffix run, through (git rev-parse --symbolic-full-name
+with core.warnAmbiguousRefs off, so git names the ref its own search takes, by whichever of its name
+rules, refs/remotes/<name>/HEAD included): it is exit 2 when that ref is under refs/remotes/, or is
+where a symbolic ref under refs/remotes/ also ends (git names only the end of a symbolic chain), so a
+ref under refs/remotes/, plain or symbolic, cannot stand in for it; it is also exit 2 as ambiguous
+when refs/remotes/<REF>, or refs/remotes/<name> for the name leading the suffix run, exists, and a
+full object id whose object does not exist is exit 2. Every git read runs with replace objects and
 grafts off.
 tools/run_all_checks.sh runs the bare form, so a
 local run compares with that default; CI passes --base (the pull request's target branch, a push's
@@ -61,15 +64,16 @@ DISCLOSED RESIDUAL (disclose-guard-residuals): a PR that removes a rule from the
 [[removal]] row for it passes this gate (the row turns a silent deletion into a named, reasoned record the
 gate prints; review must judge the removal itself); the ratchet sees only what changed since the base it
 is given, so it is as good as that base (a stale or wrong --base compares against the wrong list; an
-unshadowed revision expression such as origin/main~1 is still resolved by git's own short-name order,
-so a pseudo-ref file of its leading name directly under the git directory, which git tries first, is
-not checked; an abbreviated object id is resolved by git, which prefers a ref of the same name outside
-refs/remotes/ (refs/<name>, a tag, a branch or a pseudo-ref file; only one git resolves through
-refs/remotes/ is refused); a ref git names that a symbolic ref under refs/remotes/ also ends at is
-refused even when git reached it directly, an over-refusal; a --base or expression led by a local
-branch or tag name, not a remote-tracking one, gets git's tag-before-branch order; and grafts are off
-but a .git/shallow file, which also cuts a commit's parents, is read as git reads it, so a write into
-the git directory can still move the merge base or a ~ or ^ base through it); a
+unshadowed remote-tracking name leading a suffix run, such as origin/main~1, is still resolved by
+git's own short-name order, so a pseudo-ref file of its leading name directly under the git
+directory, which git tries first, is not checked; the grammar refuses values git would resolve as
+meant (an abbreviated object id, a local branch or tag name), an over-refusal: pass a full object id;
+a full object id, which git reads as that object, is still refused when refs/remotes/<id> exists or
+when git names a ref under refs/remotes/ for it (refs/remotes/<id>/HEAD), an over-refusal a ref
+written there can use to fail a push's base closed; a ref git names that a symbolic ref under
+refs/remotes/ also ends at is refused even when git reached it directly, an over-refusal; and grafts
+are off but a .git/shallow file, which also cuts a commit's parents, is read as git reads it, so a
+write into the git directory can still move the merge base or a ~ or ^ base through it); a
 listed rule cut down to a stub still passes (content is not judged);
 the gate measures the repository file against the configured cap, not any platform's actual truncation
 behaviour or a budget other instruction files may share; and a client that checks AGENTS.md out with CRLF
@@ -439,9 +443,40 @@ def _peel_commit(root, rev):
     return _object_id(proc.stdout.decode("ascii", "replace")) if proc.returncode == 0 else None
 
 
+ACCEPTED_BASE_FORMS = ("a full 40-hex object id that exists, HEAD, or refs/remotes/<name> or "
+                       "<configured remote>/<name> where git check-ref-format accepts the ref, each "
+                       "optionally followed by a run of ~N or ^N suffixes (N digits, possibly empty)")
+
+
+def _grammar_refusal(root, base):
+    """Why base is outside the closed --base grammar (ACCEPTED_BASE_FORMS), or None when it is inside it.
+    The grammar is an allowlist that fails closed: base is cut at its first ~ or ^, the rest must be a run
+    of ~N or ^N suffixes (N ASCII digits, possibly empty), and what leads it must be a full 40-hex object
+    id (lower case), HEAD, or a name starting with refs/remotes/ or with a configured remote's name and a
+    slash whose fully qualified ref (the name itself, or refs/remotes/<name>) git check-ref-format
+    accepts. Every other value, whatever name form git might read it by, is refused (exit 2) before git
+    resolves anything; whether an accepted value resolves is left to resolve_base's refusals."""
+    cut = min([i for i in (base.find("~"), base.find("^")) if i >= 0] or [len(base)])
+    core, suffixes = base[:cut], base[cut:]
+    if not all(c in "~^0123456789" for c in suffixes):
+        why = "{!r} after {!r} is not a run of ~N or ^N suffixes".format(suffixes, core)
+    elif (len(core) == 40 and all(c in "0123456789abcdef" for c in core)) or core == "HEAD":
+        return None
+    elif core.startswith(REMOTE_REF_PREFIX) or any(core.startswith(r + "/") for r in _remotes(root)):
+        full = core if core.startswith(REMOTE_REF_PREFIX) else REMOTE_REF_PREFIX + core
+        if _git(root, ["check-ref-format", full]).returncode == 0:
+            return None
+        why = "git check-ref-format does not accept {}".format(full)
+    else:
+        why = "{!r} is not a full 40-hex object id, HEAD, refs/remotes/<name> or " \
+              "<configured remote>/<name>".format(core)
+    return "it is not one of the accepted --base forms ({}); {}".format(ACCEPTED_BASE_FORMS, why)
+
+
 def resolve_base(root, base):
     """(commit, label) of the comparison base: the explicit ref, or with base None the merge base of
-    HEAD and refs/remotes/origin/main. A remote base is read as its fully qualified ref with show-ref
+    HEAD and refs/remotes/origin/main. An explicit base outside the closed grammar (_grammar_refusal,
+    ACCEPTED_BASE_FORMS) is refused first. A remote base is read as its fully qualified ref with show-ref
     --verify, so a tag or a local branch of the same short name (refs/tags/origin/main,
     refs/heads/origin/main), which git's short-name search order prefers, cannot stand in for it. Any
     other base is resolved as git resolves it, except that one (or the name leading it) for which
@@ -466,6 +501,9 @@ def resolve_base(root, base):
         return commit, "merge base of HEAD and {} ({}, {})".format(DEFAULT_BASE_REMOTE, full, commit[:12])
     if not base or base.startswith("-"):
         raise DemoError("--base {!r} is not a ref".format(base))
+    refusal = _grammar_refusal(root, base)
+    if refusal is not None:
+        raise DemoError("cannot resolve the comparison base {!r}: {}".format(base, refusal))
     full = _remote_tracking_ref(root, base)
     if full is not None:
         tip = _exact_ref_oid(root, full)
@@ -652,7 +690,7 @@ def main():
 #       offsets relative to the rule region, without the rules_start shift, passes);
 #   T13 the margin report: the unlisted-rule line, and a WARNING line under warn-margin-bytes that still
 #       exits 0 (a mutant whose warning exits non-zero, or margin off by one, fails).
-# The list ratchet (T14 to T35) runs gate() against temporary git repositories built with the same
+# The list ratchet (T14 to T38) runs gate() against temporary git repositories built with the same
 # helpers and committed through _git_fixture_env's hermetic environment, the whole self-test inside
 # fixture_git_lifecycle so the gate's own base reads see no caller git configuration either:
 #   T14 the base lists ruleaa and the working list drops it with no [[removal]] row: exit 1 naming ruleaa
@@ -693,8 +731,9 @@ def main():
 #       reading the id as that commit, is exit 1 and fails too);
 #   T28 refs/remotes/origin/main (and origin/HEAD) is the base listing ruleaa under a configured remote
 #       origin, and HEAD drops it: --base origin/main~0 is exit 1 unshadowed; with a tag origin at HEAD,
-#       --base origin and origin~0 are exit 2 naming the bare remote name (a mutant without that refusal
-#       lets the tag stand in and passes); with a branch and then also a tag origin/main at HEAD,
+#       --base origin and origin~0, outside the grammar, are exit 2 naming the accepted forms (a mutant
+#       without the grammar refuses them only by the bare-remote check, without that message, and fails);
+#       with a branch and then also a tag origin/main at HEAD,
 #       origin/main~0 and origin/main^0 are exit 2 naming the shadow (a mutant without the shadow
 #       refusal lets the branch or tag stand in and passes);
 #   T29 the configured-remote fallback: origin is configured, refs/remotes/origin/gone is absent and a tag
@@ -704,20 +743,19 @@ def main():
 #       planted at HEAD, which drops ruleaa, exit 2 naming it ambiguous (a mutant treating a name with a
 #       ref under refs/remotes/ as remote-tracking reads HEAD's list and passes);
 #   T31 HEAD lists ruleaa and the working list drops it: --base HEAD is exit 1; with refs/remotes/HEAD
-#       planted at a commit that drops ruleaa, --base HEAD is exit 2 naming it ambiguous (the same mutant
-#       reads the planted commit and passes);
-#   T32 an abbreviated id of the base, with HEAD dropping ruleaa: exit 1; with refs/remotes/<abbreviation>
-#       planted at HEAD, the abbreviation and <abbreviation>~0 are each exit 2 naming it ambiguous (the
-#       same mutant passes the first; one checking the whole value but not the name leading an
-#       expression lets git prefer the planted ref for the second and passes);
-#   T33 an abbreviated id of the base, with HEAD dropping ruleaa: with refs/remotes/<abbreviation>/HEAD
-#       planted at HEAD, the abbreviation, <abbreviation>~0 and <abbreviation>^0 are each exit 2 naming
-#       that ref; the describe form x-0-g<abbreviation> is exit 1 unplanted and exit 2 with
-#       refs/remotes/x-0-g<abbreviation>/HEAD planted; with refs/remotes/<abbreviation>/HEAD a symbolic
-#       ref to a branch at HEAD, the abbreviation and <abbreviation>~0 are each exit 2 naming it (a
-#       mutant without _resolved_ref_refusal lets git take the planted ref and passes every case; one
-#       refusing only a ref git names under refs/remotes/, without the symbolic-ref check, passes the
-#       symbolic cases);
+#       planted at a commit that drops ruleaa, --base HEAD and HEAD~0 are each exit 2 naming it ambiguous
+#       (the same mutant reads the planted commit and passes the first; one checking the whole value but
+#       not the name leading a suffix run reads HEAD~0 and exits 1);
+#   T32 an abbreviated id of the base, with HEAD dropping ruleaa, is outside the grammar: unplanted, and
+#       with refs/remotes/<abbreviation> planted at HEAD, the abbreviation and <abbreviation>~0 are each
+#       exit 2 naming the accepted forms (a mutant without the grammar reads the unplanted abbreviation
+#       as git does and exits 1, and refuses the planted one only as ambiguous);
+#   T33 the base's full id, with HEAD dropping ruleaa: with refs/remotes/<id>/HEAD planted at HEAD, <id>,
+#       <id>~0 and <id>^0 are each exit 2 naming that ref, and with it a symbolic ref to a branch at HEAD,
+#       <id> and <id>~0 are each exit 2 naming it (git reads a full id as the object, so these are the
+#       fail-closed over-refusals the docstring discloses; a mutant without _resolved_ref_refusal exits 1
+#       on every case; one refusing only a ref git names under refs/remotes/, without the symbolic-ref
+#       check, exits 1 on the symbolic cases);
 #   T34 origin is configured, refs/remotes/origin/absent is absent and refs/remotes/origin/absent/HEAD is
 #       planted at HEAD, which drops ruleaa: origin/absent~0 and origin/absent^0 are each exit 2 naming
 #       the absent remote-tracking ref (a mutant without the leading-ref existence check lets git take
@@ -725,7 +763,21 @@ def main():
 #   T35 a grafts file gives the base (refs/remotes/origin/main) and HEAD, which drops ruleaa, one
 #       parentless commit that drops ruleaa as their parent: with no --base and with --base HEAD^, the
 #       base is still read as committed and the drop is exit 1 (a mutant that leaves grafts on reads
-#       the grafted commit as the merge base or HEAD^ and passes).
+#       the grafted commit as the merge base or HEAD^ and passes);
+#   T36 a '{' in the leading name (round 6 F1-r6a): with refs/remotes/<name>/HEAD planted at HEAD, which
+#       drops ruleaa, a{b~0 and x{-0-g<abbreviation>~0 are each exit 2 naming the accepted forms (a mutant
+#       without the grammar lets the brace hide the ~ from the leading-name checks, so git takes the
+#       planted ref and the gate passes);
+#   T37 a remote-tracking name git check-ref-format rejects (round 6 F1-r6b): origin is configured, and
+#       with refs/remotes/origin/x./HEAD planted at HEAD, which drops ruleaa, origin/x. and origin/x.~0,
+#       and with refs/remotes/refs/remotes/x./HEAD planted, refs/remotes/x. and refs/remotes/x.~0, are
+#       each exit 2 naming the check-ref-format refusal (a mutant without the grammar skips both the
+#       exact read and the resolved-ref check, so git takes the planted ref and the gate passes);
+#   T38 a sample of forms outside the grammar, each of which git resolves to the base, which lists
+#       ruleaa while HEAD drops it: an abbreviated id, the describe form x-0-g<abbreviation> and
+#       <id>^{commit} are each exit 2 naming the accepted forms (a mutant without the grammar reads the
+#       base and exits 1), while the accepted HEAD^, HEAD~ (N empty) and <id>~0^0 read the base and the
+#       drop is exit 1 (a grammar refusing an empty N or a mixed suffix run fails).
 
 import gen_first_pin_demo as gfpd  # noqa: E402  fixture helpers (_write_tree, _tuned) and CAP_BYTES
 
@@ -1303,6 +1355,7 @@ def _self_test_main_isolated():
             return fixture_git(root, "rev-parse", "HEAD")
 
         ambiguous = "is ambiguous"
+        outside = "it is not one of the accepted --base forms"
 
         # T27. A full object id is that commit; with refs/remotes/<base id> planted at HEAD (which drops
         # ruleaa) the base is ambiguous and refused, so the planted ref never stands in for it.
@@ -1318,8 +1371,8 @@ def _self_test_main_isolated():
             failures.append("T27: with refs/remotes/<base id> planted, --base <base id> must be exit 2 naming "
                             "it ambiguous, got {}\n{}".format(code, out))
 
-        # T28. A bare remote name, and a revision expression whose leading remote-tracking name is
-        # shadowed by a branch or tag of the same short name, are refused (exit 2).
+        # T28. A bare remote name (outside the grammar), and a revision expression whose leading
+        # remote-tracking name is shadowed by a branch or tag of the same short name, are refused (exit 2).
         t28, base28 = ratchet_fixture("t28")
         fixture_git(t28, "remote", "add", "origin", str(tmp / "t28-nowhere"))
         fixture_git(t28, "update-ref", "refs/remotes/origin/main", base28)
@@ -1332,9 +1385,9 @@ def _self_test_main_isolated():
         fixture_git(t28, "update-ref", "refs/tags/origin", head28)
         for base in ("origin", "origin~0"):
             code, out = capture_gate(t28, base)
-            if code != 2 or "is the bare remote name 'origin'" not in out:
-                failures.append("T28: with a tag origin, --base {!r} must be exit 2 naming the bare remote "
-                                "name, got {}\n{}".format(base, code, out))
+            if code != 2 or outside not in out:
+                failures.append("T28: with a tag origin, --base {!r} (a bare remote name) must be exit 2 "
+                                "naming the accepted forms, got {}\n{}".format(base, code, out))
         fixture_git(t28, "update-ref", "-d", "refs/tags/origin")
         for shadow in ("refs/heads/origin/main", "refs/tags/origin/main"):
             fixture_git(t28, "update-ref", shadow, head28)
@@ -1380,57 +1433,46 @@ def _self_test_main_isolated():
             failures.append("T31: unplanted, --base HEAD must read HEAD and the drop be exit 1, got {}\n{}"
                             .format(code, out))
         fixture_git(t31, "update-ref", REMOTE_REF_PREFIX + "HEAD", drop31)
-        code, out = capture_gate(t31, "HEAD")
-        if code != 2 or ambiguous not in out or REMOTE_REF_PREFIX + "HEAD" not in out:
-            failures.append("T31: with refs/remotes/HEAD planted, --base HEAD must be exit 2 naming it "
-                            "ambiguous, got {}\n{}".format(code, out))
+        for base in ("HEAD", "HEAD~0"):
+            code, out = capture_gate(t31, base)
+            if code != 2 or ambiguous not in out or REMOTE_REF_PREFIX + "HEAD" not in out:
+                failures.append("T31: with refs/remotes/HEAD planted, --base {!r} must be exit 2 naming it "
+                                "ambiguous, got {}\n{}".format(base, code, out))
 
-        # T32. An abbreviated id of the base is read as git reads it; with refs/remotes/<abbreviation>
-        # planted at HEAD (which drops ruleaa) the abbreviation, alone or leading an expression, is
-        # ambiguous and refused.
+        # T32. An abbreviated id is outside the grammar: unplanted, and with refs/remotes/<abbreviation>
+        # planted at HEAD (which drops ruleaa), the abbreviation, alone or leading a suffix run, is refused
+        # naming the accepted forms, never read.
         t32, base32 = ratchet_fixture("t32")
         head32 = drop_at_head(t32)
         abbrev32 = base32[:12]
-        code, out = capture_gate(t32, abbrev32)
-        if code != 1 or drop_msg not in out:
-            failures.append("T32: unplanted, --base <abbreviated id> must read the base and the drop be "
-                            "exit 1, got {}\n{}".format(code, out))
-        fixture_git(t32, "update-ref", REMOTE_REF_PREFIX + abbrev32, head32)
-        for base in (abbrev32, abbrev32 + "~0"):
-            code, out = capture_gate(t32, base)
-            if code != 2 or ambiguous not in out or REMOTE_REF_PREFIX + abbrev32 not in out:
-                failures.append("T32: with refs/remotes/<abbreviated id> planted, --base {!r} must be exit 2 "
-                                "naming it ambiguous, got {}\n{}".format(base, code, out))
+        for planted in (False, True):
+            if planted:
+                fixture_git(t32, "update-ref", REMOTE_REF_PREFIX + abbrev32, head32)
+            for base in (abbrev32, abbrev32 + "~0"):
+                code, out = capture_gate(t32, base)
+                if code != 2 or outside not in out:
+                    failures.append("T32: {}, --base {!r} (an abbreviated id) must be exit 2 naming the "
+                                    "accepted forms, got {}\n{}".format(
+                                        "with refs/remotes/<abbreviated id> planted" if planted
+                                        else "unplanted", base, code, out))
 
-        # T33. refs/remotes/<name>/HEAD, plain or symbolic, cannot stand in for an abbreviated id or a
-        # describe form: git is asked which ref it takes, and one under refs/remotes/ is refused.
+        # T33. refs/remotes/<id>/HEAD, plain or symbolic, refuses the full id: git is asked which ref it
+        # takes, and one under refs/remotes/ is refused (git reads a full id as the object, so this is the
+        # disclosed fail-closed over-refusal).
         through = "through a ref under refs/remotes/"
         t33, base33 = ratchet_fixture("t33")
         head33 = drop_at_head(t33)
-        abbrev33 = base33[:12]
-        plant33 = REMOTE_REF_PREFIX + abbrev33 + "/HEAD"
+        plant33 = REMOTE_REF_PREFIX + base33 + "/HEAD"
         fixture_git(t33, "update-ref", plant33, head33)
-        for base in (abbrev33, abbrev33 + "~0", abbrev33 + "^0"):
+        for base in (base33, base33 + "~0", base33 + "^0"):
             code, out = capture_gate(t33, base)
             if code != 2 or through not in out or plant33 not in out:
                 failures.append("T33: with {} planted, --base {!r} must be exit 2 naming it, got {}\n{}".format(
                     plant33, base, code, out))
         fixture_git(t33, "update-ref", "-d", plant33)
-        describe33 = "x-0-g" + abbrev33
-        code, out = capture_gate(t33, describe33)
-        if code != 1 or drop_msg not in out:
-            failures.append("T33: unplanted, the describe form {!r} must read the base and the drop be exit 1, "
-                            "got {}\n{}".format(describe33, code, out))
-        plant33d = REMOTE_REF_PREFIX + describe33 + "/HEAD"
-        fixture_git(t33, "update-ref", plant33d, head33)
-        code, out = capture_gate(t33, describe33)
-        if code != 2 or through not in out or plant33d not in out:
-            failures.append("T33: with {} planted, --base {!r} must be exit 2 naming it, got {}\n{}".format(
-                plant33d, describe33, code, out))
-        fixture_git(t33, "update-ref", "-d", plant33d)
         fixture_git(t33, "update-ref", "refs/heads/qa-drop", head33)
         fixture_git(t33, "symbolic-ref", plant33, "refs/heads/qa-drop")
-        for base in (abbrev33, abbrev33 + "~0"):
+        for base in (base33, base33 + "~0"):
             code, out = capture_gate(t33, base)
             if code != 2 or through not in out or plant33 not in out:
                 failures.append("T33: with {} a symbolic ref to a branch at HEAD, --base {!r} must be exit 2 "
@@ -1467,6 +1509,49 @@ def _self_test_main_isolated():
             if code != 1 or drop_msg not in out or label not in out:
                 failures.append("T35: with a grafts file, base {!r} must be read as committed and the drop be "
                                 "exit 1, got {}\n{}".format(base, code, out))
+
+        # T36. (round 6 F1-r6a) A '{' in the leading name is outside the grammar, so a planted
+        # refs/remotes/<name>/HEAD cannot stand in for the base.
+        t36, base36 = ratchet_fixture("t36")
+        head36 = drop_at_head(t36)
+        for name in ("a{b", "x{-0-g" + base36[:12]):
+            plant36 = REMOTE_REF_PREFIX + name + "/HEAD"
+            fixture_git(t36, "update-ref", plant36, head36)
+            code, out = capture_gate(t36, name + "~0")
+            if code != 2 or outside not in out:
+                failures.append("T36: with {} planted, --base {!r} must be exit 2 naming the accepted forms, "
+                                "got {}\n{}".format(plant36, name + "~0", code, out))
+            fixture_git(t36, "update-ref", "-d", plant36)
+
+        # T37. (round 6 F1-r6b) A name written as remote-tracking whose ref git check-ref-format rejects is
+        # outside the grammar, so a planted refs/remotes/<name>/HEAD cannot stand in for the base.
+        t37, _base37 = ratchet_fixture("t37")
+        fixture_git(t37, "remote", "add", "origin", str(tmp / "t37-nowhere"))
+        head37 = drop_at_head(t37)
+        for name, plant37 in (("origin/x.", "refs/remotes/origin/x./HEAD"),
+                              ("refs/remotes/x.", "refs/remotes/refs/remotes/x./HEAD")):
+            fixture_git(t37, "update-ref", plant37, head37)
+            for base in (name, name + "~0"):
+                code, out = capture_gate(t37, base)
+                if code != 2 or outside not in out or "git check-ref-format does not accept" not in out:
+                    failures.append("T37: with {} planted, --base {!r} must be exit 2 naming the accepted forms "
+                                    "and the check-ref-format refusal, got {}\n{}".format(plant37, base, code, out))
+            fixture_git(t37, "update-ref", "-d", plant37)
+
+        # T38. A sample of forms outside the grammar that git resolves to the base (an abbreviated id, a
+        # describe form, a brace) is refused; accepted suffix runs still read the base.
+        t38, base38 = ratchet_fixture("t38")
+        drop_at_head(t38)
+        for base in (base38[:12], "x-0-g" + base38[:12], base38 + "^{commit}"):
+            code, out = capture_gate(t38, base)
+            if code != 2 or outside not in out:
+                failures.append("T38: --base {!r} must be exit 2 naming the accepted forms, got {}\n{}".format(
+                    base, code, out))
+        for base in ("HEAD^", "HEAD~", base38 + "~0^0"):
+            code, out = capture_gate(t38, base)
+            if code != 1 or drop_msg not in out or base38[:12] not in out:
+                failures.append("T38: --base {!r}, inside the grammar, must read the base and the drop be "
+                                "exit 1, got {}\n{}".format(base, code, out))
     except _FixtureError as exc:
         fixture_error = str(exc)
     finally:
@@ -1500,17 +1585,18 @@ def _self_test_main_isolated():
           "a declared removal passes and is printed, an addition passes, and a malformed removal row, an "
           "unresolvable or missing base and an absent or malformed base list fail closed (exit 2); a "
           "branch or tag shadowing origin/main, a GIT_DIR in the environment and a replace ref do not "
-          "change the base read, a full or abbreviated object id and HEAD are read as git reads them, "
-          "a full object id whose object does not exist fails closed, and a planted refs/remotes/<id>, "
-          "refs/remotes/<abbreviation> or refs/remotes/HEAD makes the base ambiguous (exit 2), never the "
-          "base read; a planted refs/remotes/<abbreviation>/HEAD makes the abbreviation, <abbreviation>~0 "
-          "and <abbreviation>^0 exit 2, and as a symbolic ref to a branch the abbreviation and "
-          "<abbreviation>~0, and one for a describe form makes that form exit 2, never the base read; a "
-          "grafts file does not change the base read, "
-          "with no --base or --base HEAD^; and a symlinked base list, a --base starting with -, a bare "
-          "remote name, an expression led by a shadowed remote-tracking name, an absent remote-tracking "
-          "ref of a configured remote, and an expression led by one (also with its /HEAD planted) fail "
-          "closed. "
+          "change the base read, a full object id and HEAD are read as git reads them, "
+          "a full object id whose object does not exist fails closed, and a planted refs/remotes/<id> or "
+          "refs/remotes/HEAD makes the base (also HEAD~0) ambiguous (exit 2), never the base read; a "
+          "planted refs/remotes/<id>/HEAD makes <id>, <id>~0 and <id>^0 exit 2, and as a symbolic ref to "
+          "a branch <id> and <id>~0, never the base read; a grafts file does not change the base read, "
+          "with no --base or --base HEAD^; --base is a closed grammar: an abbreviated id (also with "
+          "refs/remotes/<abbreviation> planted), a describe form, a brace, a bare remote name, and, each "
+          "with its /HEAD planted, a '{{' in a leading name and a remote-tracking name check-ref-format "
+          "rejects fail closed naming the accepted forms, while HEAD^, HEAD~ and <id>~0^0 read the base; "
+          "and a symlinked base list, a --base starting with -, an expression led by a shadowed "
+          "remote-tracking name, an absent remote-tracking ref of a configured remote, and an expression "
+          "led by one (also with its /HEAD planted) fail closed. "
           "{}".format(
               "SKIPPED on this runner: {}.".format("; ".join(skipped)) if skipped
               else "No case was skipped (the mode-000 list ran too)."))
