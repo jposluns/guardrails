@@ -1120,11 +1120,12 @@ were gone. Where an upper limit, such as one on rounds, retries, spend, or concu
 operator or a governing rule has set, not the assistant under the bounded-consumption rule (secres), is
 enforced at that value or a stricter one by a check the assistant cannot change, the assistant takes an
 action the limit covers only as that check admits it. The limit gives no reason to withhold an action that
-check admits, and the assistant does not retry an action that check refuses or route around the refusal.
-Only a grant the limit's setter records where that check reads the limit raises it, so a record the
-assistant can write cannot raise it. A limit with no such check, whether it has a host store alone, a
-count kept by hand, or neither, is a residual the limit sentences above do not reach; as a standing
-constraint it still persists.
+check admits, and the assistant does not repeat an action that check refuses while nothing the check reads
+has changed, and does not route around the refusal. Only a grant the limit's setter records where that
+check reads the limit raises it, so a grant the assistant writes, or one its setter did not record where
+that check reads, cannot raise it. A limit without such a check that meters every action the limit covers,
+such as one with a host store alone, a count kept by hand, or neither, is a residual the limit sentences
+above do not reach; as a standing constraint it still persists.
 
 ## Trust recovery and escalation
 
