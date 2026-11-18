@@ -34,6 +34,7 @@ rationale = "The entry names HTML tags as a variant, and encoding for the HTML s
 assumptions = [
   "breaking one named variant at the sink counts as interrupting the core mechanism (test 5)",
   "a rule at the producing side can be tight to a technique completed by the rendering client (convention 4); if it cannot, label-a is broad",
+  "convention 3 is not engaged: the technique's object is an LLM and the application that presents its responses, which is a kind of software the assistant itself is, so the technique reaches the assistant's own output directly",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"

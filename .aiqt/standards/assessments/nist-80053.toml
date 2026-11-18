@@ -74,6 +74,7 @@ conventions = [6]
 rationale = "Keeping operational data out of material used before production is the direct mitigation the control's discussion part names, which shows the match under A on the reading of convention 6 this record takes. The rule does not sign off, record or protect any operational data use, so it is broad under B."
 assumptions = [
   "a mitigation named only in the control's discussion part can satisfy test 5 under A (convention 6); if only the statement counts, label-a is broad",
+  "convention 3 is not engaged: the rule's boundary is the fixtures, examples and documentation of the work product, not the assistant or its tools",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"

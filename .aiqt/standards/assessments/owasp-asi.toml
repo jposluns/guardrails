@@ -50,7 +50,7 @@ adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
 conventions = []
-rationale = "Quotas and progress caps on the assistant's own loops directly stop a fault from amplifying, which is the core of the entry and part of guideline 7. The rule meets guidelines 1, 6 and 7 and examples 4 and 7 only in part, and leaves out the other examples, the attack scenarios and the other main lines of mitigation, so it is broad under B. No open convention decides the row."
+rationale = "Quotas and progress caps on the assistant's own loops directly stop a fault from amplifying, which is the core of the entry and part of guideline 7. The rule meets guidelines 1, 6 and 7, examples 4 and 7 and attack scenario 7 only in part, and leaves out the other examples, the other attack scenarios and the other main lines of mitigation, so it is broad under B. No open convention decides the row."
 assumptions = [
   "convention 3 is not engaged: the entry's object is agents and agentic workflows, and the assistant is itself an agent",
 ]

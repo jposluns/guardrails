@@ -97,8 +97,13 @@ The maintainer must settle these before a definition is adopted. A record that d
    operates or governs (its oversight, its level of automation, its tooling, its inventory of
    components), does that system include the AI assistant and the tools it uses for the work, or only the
    product being built? If it means only the product, a rule that meets the entry only through the
-   assistant or its tools does not act on the entry's object, and both labels are broad. This convention
-   is engaged whenever the entry's object is such a system, AI or not, and the rule's boundary is the
+   assistant or its tools does not act on the entry's object, and both labels are broad. Where this
+   result and convention 9 point different ways, convention 9 wins: if the entry's object takes in the
+   tooling used to build the system (in its statement, or in guidance as far as convention 6 allows), the
+   assistant's tools are that tooling on the product reading too, so the product reading alone does not
+   make the labels broad, and whether a rule on those tools acts on the entry's object is decided by
+   convention 9 (and by convention 6 when only guidance shows that the object takes in the tooling).
+   The result above stands for every other entry. This convention is engaged whenever the entry's object is such a system, AI or not, and the rule's boundary is the
    assistant itself, its actions and decisions, or its tools. It is not engaged when the entry's object
    is a kind of software the assistant itself is (an LLM or LLM-enabled application, an agent or agentic
    component, an MCP client or server), as in the OWASP LLM, agentic and MCP lists, because the entry
@@ -134,7 +139,8 @@ The maintainer must settle these before a definition is adopted. A record that d
    an entry about an AI system is met only by a rule aimed at what makes a system AI (its models, its
    data or its AI behaviour); a rule that applies to any product alike shares only the theme, and both
    labels are broad. This convention is engaged when the entry's object is an AI system and the rule's
-   boundary is the work product or the tooling used to build it.
+   boundary is the work product or the tooling used to build it. Where it and convention 3 point
+   different ways, this convention wins, as convention 3 states.
 
 ## Record schema
 
@@ -198,7 +204,7 @@ representative sample. All 20 are tight in frontmatter today.
 | 16 | threat-model-boundaries | owasp-proactive | C4 | tight | broad | none |
 | 17 | guardrail-config-integrity | owasp-mcp | MCP02 | tight | broad | 4 |
 | 18 | inter-agent-trust | owasp-mcp | MCP07 | tight | broad | 4 |
-| 19 | no-cross-context-bleed | csa-ccm | I&S-06 | tight | broad | 4 |
+| 19 | no-cross-context-bleed | csa-ccm | I&S-06 | tight | broad | 3, 4 |
 | 20 | synthetic-fixture-data | nist-80053 | SA-3(2) | tight | broad | 6 |
 
 Totals for these 20 rows, under the readings the records state:
@@ -208,12 +214,17 @@ Totals for these 20 rows, under the readings the records state:
 
 These totals depend on conventions 3, 8 and 9, each in its own way:
 
-- Convention 3: if the system an entry is about means only the product being built, rows 1 to 7 and
-  row 10 are broad under both definitions.
+- Convention 3: if the system an entry is about means only the product being built, rows 1 to 7, row
+  10 and row 19 are broad under both definitions. Row 19 is broad on that reading only while the no
+  cross context bleed rule is read, as recorded, as binding only the assistant (convention 8); read as
+  also binding the product, it stays tight under A.
 - Convention 9: if an entry about an AI system is met only by a rule aimed at what makes a system AI,
   row 8 is broad under both definitions.
-- Conventions 3 and 9 together: row 9 is broad under both definitions only if both are read the other
-  way, because either reading as recorded makes the assistant's tools tooling for an AI system.
+- Conventions 3 and 9 together, with 6: row 9 is broad under both definitions only if convention 3 is
+  read the other way and convention 9 or convention 6 is too. On the product reading of convention 3
+  the assistant's tools are tooling for an AI system only as tooling used to build it, which convention
+  9 counts and which only the Annex B guidance shows (convention 6), so convention 9 decides as
+  convention 3 states.
 - Convention 8: if the resource bounds rule is read as also binding the services of the product the
   assistant builds, rows 13 and 14 are tight under A.
 

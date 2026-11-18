@@ -14,7 +14,7 @@ source-sha256 = "81f3035d039dd7f6f257d91f6d6cfd5e6cf4512e8454a0650c7a51fddaf9576
 locator = "Infrastructure Security domain, control I&S-06 Segmentation and Segregation"
 text-location = "lines 535 to 538"
 edition-check = "match"
-boundary = "context assembled for one task, user, tenant or trust boundary inside the application"
+boundary = "context the assistant assembles for one task, user, tenant or trust boundary, across its own tasks, sessions and responses"
 core = "Applications and infrastructure are designed, built, deployed and configured so that each tenant's access is segmented and segregated, and is monitored and restricted."
 covers = [
   "context for one tenant or authorization is never carried into another",
@@ -30,10 +30,13 @@ label-b = "broad"
 adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
-conventions = [4]
-rationale = "Keeping each tenant's context apart is tenant segregation inside the application, which carries out the core. Monitoring, restriction and infrastructure segmentation are left out, so it is broad under B."
+conventions = [3, 4]
+rationale = "Read as binding the assistant's own context, with the assistant counted as one of the applications the control is about (convention 3), keeping each tenant's context apart is tenant segregation inside an application, which carries out the core. Monitoring, restriction and infrastructure segmentation are left out, so it is broad under B."
 assumptions = [
-  "segregation inside the application can be tight to a control that also covers infrastructure (convention 4); if it cannot, label-a is broad",
+  "the rule binds the assistant's own tasks, sessions and responses, not the services of the product it builds, which is the plain reading of its text and the reading the resource bounds rows take (convention 8); the other reading puts the rule on tenant context inside the product's application, which also gives label-a tight while convention 3 is read as recorded, so convention 8 does not decide this row and is not listed in conventions",
+  "the assistant, serving work for more than one user, tenant or authorization, is one of the applications whose tenant access the control asks to be segregated (convention 3); if the applications mean only the product being built, the rule, read as binding only the assistant, does not act on the control's object and both labels are broad",
+  "on the product reading of convention 3 the labels turn on convention 8: read as also binding the product's services, the rule acts on the product's tenant context and label-a stays tight",
+  "segregation inside an application can be tight to a control that also covers infrastructure (convention 4); if it cannot, label-a is broad",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
