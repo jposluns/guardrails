@@ -429,10 +429,16 @@ def splice(text, start_line, replacement):
 
 
 def _roster_text(entries, extra=()):
-    """The real roster with its gate lines replaced by fixture launches, so the loader's grammar holds."""
+    """The real roster with its gate lines replaced by fixture launches, so the loader's grammar holds. The
+    reviewed baseline-pin probe block (check_ci_parity.BASELINE_PROBE_BLOCK) is dropped whole as well: its two
+    run_gate lines are indented inside its if branches, so the run_gate line filter keeps them, and the loader
+    would list tools/check_baseline_pin.py as a launch of every fixture tree, which holds no such file."""
     lines = (ROOT / ROSTER_REL).read_text(encoding="ascii").splitlines()
+    executable = [(index, check_ci_parity._strip_comment(line).strip()) for index, line in enumerate(lines)]
+    probe, _count = check_ci_parity._baseline_probe_lines([(index, code) for index, code in executable if code])
     first = next(index for index, line in enumerate(lines) if line.startswith('run_gate "'))
-    kept = [line for line in lines if not line.startswith('run_gate "')]
+    kept = [line for index, line in enumerate(lines)
+            if not line.startswith('run_gate "') and index not in probe]
     launches = ['run_gate "fixture-{}" python3 -I -B {}'.format(number, rel)
                 for number, rel in enumerate(entries, 1)]
     return "\n".join(kept[:first] + launches + list(extra) + kept[first:]) + "\n"
