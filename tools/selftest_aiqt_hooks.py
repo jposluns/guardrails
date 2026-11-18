@@ -7607,6 +7607,7 @@ def _orch_detach_lex_failures(tmp, count=3000, seed=20261117):
         texts.append("".join(rng.choice(_LEX_SKIP_ALPHABET) for _ in range(rng.randint(0, 10))))
     seen = set()
     wrong = 0
+    grouped_wrong = 0
     skip_all_caught = False
     for text in texts:
         grouped = []
@@ -7617,8 +7618,8 @@ def _orch_detach_lex_failures(tmp, count=3000, seed=20261117):
             wrong += 1
             out.append("(dl-orch-detach-lex) _orch_lexed_detach({!r}) gave (lexed, grouped) {!r}, want {!r}"
                        .format(text, got, want))
-        if want[1] and aiqt_hooks._orch_bg_poll_loop(text) != "indeterminate" and wrong < 3:
-            wrong += 1
+        if want[1] and aiqt_hooks._orch_bg_poll_loop(text) != "indeterminate" and grouped_wrong < 3:
+            grouped_wrong += 1
             out.append("(dl-orch-detach-lex-grouped) every reading of {!r} holds a '(' or ')' separator "
                        "but _orch_bg_poll_loop gave {!r}, not 'indeterminate'".format(
                            text, aiqt_hooks._orch_bg_poll_loop(text)))
