@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "53154b69178ac8cb17283c2819be7b47b94d5f53a0645a4909a17020e557730d"
+tree-sha256 = "ab654f87ff5a1b240abb3bc8b70e733b22dc4aaca57d5c6f664f500e4dfe3c4b"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -112,8 +112,8 @@ sha256 = "023eed17aa108a377a7c8b1c4f07882064e5e67c2b43ccd88a58be5bfeea8ea8"
 
 [[sources]]
 path = ".aiqt/core/instruction-budget.toml"
-bytes = 11325
-sha256 = "85e95279ae612dec87941675bd2024a6c430c6766632fa6c5921455cd1b8ecd0"
+bytes = 11373
+sha256 = "d5f23eb62745951a50118ab321ecf3dd7e8f4f689feb3c1c2b7329481e48758c"
 
 [[sources]]
 path = ".aiqt/core/migration/crosswalk-schema.toml"
@@ -4277,8 +4277,8 @@ sha256 = "8dfc2f59805c973c295196b7bf618cb6c938da109e7a0fc3544449a8ab99fc49"
 
 [[sources]]
 path = "tools/check_instruction_budget.py"
-bytes = 314699
-sha256 = "80925f3d7b12a8af2ab5f719620bd1c5cd1484c11cc853de72b75e0c8f106bd6"
+bytes = 307033
+sha256 = "e07371783fb49c90c7920b0c2f54960d0ef2e8bcde085dd35b50a6cf8cfeb4fb"
 
 [[sources]]
 path = "tools/check_internal_names.py"
@@ -4722,8 +4722,8 @@ sha256 = "13fe112b30171fc85d2dd4bdf49a040978547f75d4cc023202378859533f6f2c"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 258833
-sha256 = "0f1bcdb352eccea070f298b6d9fec86eabedbe55d5e2c29a0d26141e341e444a"
+bytes = 258651
+sha256 = "6adb6491324541228b3918fb800dd62bafeab577b488aae5a3b46a3bd67094ef"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
