@@ -19,23 +19,25 @@ check-ref-format accepts the ref (refs/remotes/<name> as written, or refs/remote
 configured-remote form), each optionally followed by a run of ~N or ^N suffixes (N digits, possibly
 empty), and every other value (an abbreviated object id, a describe form, a bare remote name, a local
 branch or tag name, remotes/origin/main, any brace, @{, : or other revision syntax) is exit 2 with a
-message naming the accepted forms, before git resolves anything. Within the grammar: a remote base is
-read as its fully qualified ref, never by short name: the default reads exactly
-refs/remotes/origin/main, and a remote-tracking --base without suffixes is read as exactly that ref,
-so a tag or a local branch of the same short name, which git's short-name search order prefers,
-cannot stand in for it (an absent remote-tracking ref is exit 2); a remote-tracking name leading a
-suffix run is exit 2 when that remote-tracking ref does not exist (origin/gone~0) or is shadowed by
-refs/<name>, refs/tags/<name> or refs/heads/<name> (origin/main~1 with a tag origin/main): pass the
-fully qualified form (refs/remotes/origin/main~1) or a commit id instead. A full object id or HEAD,
-alone or leading a suffix run, is resolved as git resolves it, after git is asked which ref it
-resolves the value, and the name leading the suffix run, through (git rev-parse --symbolic-full-name
-with core.warnAmbiguousRefs off, so git names the ref its own search takes, by whichever of its name
-rules, refs/remotes/<name>/HEAD included): it is exit 2 when that ref is under refs/remotes/, or is
-where a symbolic ref under refs/remotes/ also ends (git names only the end of a symbolic chain), so a
-ref under refs/remotes/, plain or symbolic, cannot stand in for it; it is also exit 2 as ambiguous
-when refs/remotes/<REF>, or refs/remotes/<name> for the name leading the suffix run, exists, and a
-full object id whose object does not exist is exit 2. Every git read runs with replace objects and
-grafts off.
+message naming the accepted forms, before git resolves anything. Within the grammar git is never
+handed a short name: a remote base is read as its fully qualified ref with show-ref --verify: the
+default reads exactly refs/remotes/origin/main, and a remote-tracking --base without suffixes is read
+as exactly that ref, so a tag, a local branch or a pseudo-ref file of the same short name, which git's
+short-name search order prefers, cannot stand in for it (an absent remote-tracking ref is exit 2); a
+remote-tracking name leading a suffix run is exit 2 when that remote-tracking ref does not exist
+(origin/gone~0) or is shadowed by refs/<name>, refs/tags/<name> or refs/heads/<name> (origin/main~1
+with a tag origin/main): pass the fully qualified form (refs/remotes/origin/main~1) or a commit id
+instead; otherwise git is handed the object id that ref holds followed by the suffixes. HEAD, alone
+or leading a suffix run, is read as HEAD (show-ref --verify HEAD) before any remote name is
+considered, so a remote named HEAD does not change it, and git is handed the object id it holds
+followed by the suffixes; a full object id is handed to git as written. Before that, git is asked
+which ref it resolves a full object id or HEAD, and the value with each part of its suffix run,
+through (git rev-parse --symbolic-full-name with core.warnAmbiguousRefs off, so git names the ref its
+own search takes, by whichever of its name rules, refs/remotes/<name>/HEAD included): it is exit 2
+when that ref is under refs/remotes/, or is where a symbolic ref under refs/remotes/ also ends (git
+names only the end of a symbolic chain); it is also exit 2 as ambiguous when refs/remotes/<id> or
+refs/remotes/HEAD exists for the id or HEAD leading the value, and a full object id whose object does
+not exist is exit 2. Every git read runs with replace objects, grafts and the commit-graph file off.
 tools/run_all_checks.sh runs the bare form, so a
 local run compares with that default; CI passes --base (the pull request's target branch, a push's
 before SHA, or HEAD^ for any other event when it resolves). The
@@ -63,17 +65,16 @@ visible before a listed rule falls out.
 DISCLOSED RESIDUAL (disclose-guard-residuals): a PR that removes a rule from the list AND adds a
 [[removal]] row for it passes this gate (the row turns a silent deletion into a named, reasoned record the
 gate prints; review must judge the removal itself); the ratchet sees only what changed since the base it
-is given, so it is as good as that base (a stale or wrong --base compares against the wrong list; an
-unshadowed remote-tracking name leading a suffix run, such as origin/main~1, is still resolved by
-git's own short-name order, so a pseudo-ref file of its leading name directly under the git
-directory, which git tries first, is not checked; the grammar refuses values git would resolve as
-meant (an abbreviated object id, a local branch or tag name), an over-refusal: pass a full object id;
-a full object id, which git reads as that object, is still refused when refs/remotes/<id> exists or
-when git names a ref under refs/remotes/ for it (refs/remotes/<id>/HEAD), an over-refusal a ref
+is given, so it is as good as that base (a stale or wrong --base compares against the wrong list;
+the grammar refuses values git would resolve as meant (an abbreviated object id, a local branch or
+tag name), an over-refusal: pass a full object id; a full object id, which git reads as that object,
+and HEAD, which is read exactly, are still refused when refs/remotes/<id> or refs/remotes/HEAD exists
+or when git names a ref under refs/remotes/ for them (refs/remotes/<id>/HEAD), an over-refusal a ref
 written there can use to fail a push's base closed; a ref git names that a symbolic ref under
 refs/remotes/ also ends at is refused even when git reached it directly, an over-refusal; and grafts
-are off but a .git/shallow file, which also cuts a commit's parents, is read as git reads it, so a
-write into the git directory can still move the merge base or a ~ or ^ base through it); a
+and the commit-graph file are off but a .git/shallow file, which also cuts a commit's parents, is
+read as git reads it, so a write into the git directory can still move the merge base or a ~ or ^
+base through it); a
 listed rule cut down to a stub still passes (content is not judged);
 the gate measures the repository file against the configured cap, not any platform's actual truncation
 behaviour or a budget other instruction files may share; and a client that checks AGENTS.md out with CRLF
@@ -226,8 +227,9 @@ def _git_env():
     GIT_OBJECT_DIRECTORY set by a hook or a wrapper cannot point the comparison at another repository,
     with replace refs off so a replacement object cannot stand in for the base commit, and grafts off
     (GIT_GRAFT_FILE names NO_GRAFT_FILE, a path that cannot exist, so <git dir>/info/grafts is never read)
-    so a graft cannot give the base, HEAD or origin/main other parents. A .git/shallow file is still read
-    as git reads it (the disclosed residual in the module docstring)."""
+    so a graft cannot give the base, HEAD or origin/main other parents (the commit-graph file is
+    switched off in _git's argv). A .git/shallow file is still read as git reads it (the disclosed
+    residual in the module docstring)."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
     env["GIT_GRAFT_FILE"] = NO_GRAFT_FILE
@@ -235,15 +237,18 @@ def _git_env():
 
 
 def _git(root, args):
-    """Run git -C root with args; returns the CompletedProcess (bytes). The three `-c` pairs in option
-    position switch off automatic gc and maintenance (tools/_git_fixture_env.py _NO_AUTO_MAINTENANCE),
-    the posture tools/check_no_dashes.py takes for its own git reads, so no call here can leave a
-    detached repack behind. A missing git binary or a call past GIT_TIMEOUT is a DemoError (exit 2):
-    the comparison cannot run."""
+    """Run git -C root with args; returns the CompletedProcess (bytes). The first three `-c` pairs in
+    option position switch off automatic gc and maintenance (tools/_git_fixture_env.py
+    _NO_AUTO_MAINTENANCE), the posture tools/check_no_dashes.py takes for its own git reads, so no call
+    here can leave a detached repack behind. The fourth, core.commitGraph=false (the control
+    tools/check_release_delta.py _stage1_git uses), makes git read every commit's parents from the
+    commit object, never from a commit-graph file, so a forged graph cannot give a commit other parents
+    and move the merge base or a ~ or ^ base. A missing git binary or a call past GIT_TIMEOUT is a
+    DemoError (exit 2): the comparison cannot run."""
     try:
         return subprocess.run(["git", "-C", str(root), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
-                               "-c", "maintenance.auto=false", *args], capture_output=True,
-                              env=_git_env(), timeout=GIT_TIMEOUT)
+                               "-c", "maintenance.auto=false", "-c", "core.commitGraph=false", *args],
+                              capture_output=True, env=_git_env(), timeout=GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise DemoError("git {} could not run ({})".format(args[0], exc))
 
@@ -275,70 +280,31 @@ def _remotes(root):
     return [r for r in proc.stdout.decode("utf-8", "replace").splitlines() if r]
 
 
-def _remote_tracking_ref(root, base):
-    """refs/remotes/<base> (or base itself when it already starts with refs/remotes/) when base names a
-    remote-tracking branch, otherwise None. base names one ONLY when it starts with refs/remotes/ or with
-    a configured remote's name and a slash; a ref existing under refs/remotes/ never makes a name
-    remote-tracking, so a ref planted at refs/remotes/<name> cannot turn a full or abbreviated object id,
-    HEAD or any other name into one (resolve_base refuses such a name as ambiguous,
-    _ambiguous_base_refusal). A revision expression that is not a valid ref name (origin/main~1) is not
-    a branch name and is left to resolve_base's refusals and then git's own resolution."""
-    if base.startswith(REMOTE_REF_PREFIX):
-        full = base
-    elif any(base.startswith(r + "/") for r in _remotes(root)):
-        full = REMOTE_REF_PREFIX + base
-    else:
-        return None
-    return full if _git(root, ["check-ref-format", full]).returncode == 0 else None
-
-
-REV_OPERATORS = ("~", "^", ":", "@{")
-
-
-def _leading_name(base):
-    """The ref name leading base: base up to its first revision operator (origin/main of origin/main~1)."""
-    cut = min([i for i in (base.find(op) for op in REV_OPERATORS) if i >= 0] or [len(base)])
-    return base[:cut]
-
-
-def _ambiguous_base_refusal(root, base):
-    """Why base, which names no remote-tracking branch, is ambiguous, or None when it is not. Any such
-    value is resolved as git resolves it, and git's short-name search also tries refs/remotes/<name>
-    (and prefers a ref over an abbreviated object id), so when refs/remotes/<base>, or refs/remotes/<name>
-    for the name leading a revision expression when that name is not itself remote-tracking, exists,
-    that ref could stand in for the object id, HEAD or name meant: the base is refused (exit 2), never
-    resolved either way."""
-    for name in dict.fromkeys((base, _leading_name(base))):
-        if not name or _remote_tracking_ref(root, name) is not None:
-            continue  # a remote-tracking leading name is _short_name_refusal's to judge
-        full = REMOTE_REF_PREFIX + name
-        if _exact_ref_oid(root, full) is not None:
-            return "{} also exists, so {!r} is ambiguous (that ref could stand in for it); a " \
-                   "remote-tracking base is passed as <configured remote>/<branch> or " \
-                   "refs/remotes/<remote>/<branch>".format(full, name)
+def _ambiguous_base_refusal(root, core):
+    """Why the full object id or HEAD leading the base (core) is ambiguous, or None when it is not. git's
+    short-name search also tries refs/remotes/<name>, so when refs/remotes/<core> exists that ref is
+    taken as a sign the value was meant as something else: the base is refused (exit 2), never resolved
+    either way. git reads a full object id as the object and resolve_base reads HEAD exactly, so this is
+    the fail-closed over-refusal the module docstring discloses."""
+    full = REMOTE_REF_PREFIX + core
+    if _exact_ref_oid(root, full) is not None:
+        return "{} also exists, so {!r} is ambiguous (that ref could stand in for it); a " \
+               "remote-tracking base is passed as <configured remote>/<branch> or " \
+               "refs/remotes/<remote>/<branch>".format(full, core)
     return None
 
 
-def _short_name_refusal(root, base):
-    """Why base, which names no remote-tracking branch itself, cannot be left to git's short-name search
-    order, or None when it can. git resolves a bare remote name (origin) as refs/remotes/origin/HEAD only
-    after refs/origin, refs/tags/origin and refs/heads/origin, and a revision expression
-    (origin/main~1) through its leading ref name in the same order, so a tag or branch of that short name
-    would stand in for the remote-tracking ref. A bare remote name (alone or leading an expression) is
-    always refused; an expression whose leading name is a remote-tracking branch is refused when that
-    remote-tracking ref does not exist (git would then resolve the name through any other ref its search
-    finds, refs/remotes/<name>/HEAD included), and when refs/<name>, refs/tags/<name> or
-    refs/heads/<name> exists."""
-    cut = min([i for i in (base.find(op) for op in REV_OPERATORS) if i >= 0] or [len(base)])
-    lead = base[:cut]
+def _short_name_refusal(root, base, lead, full):
+    """Why base, a remote-tracking name (lead, whose fully qualified ref is full) leading a run of ~N or
+    ^N suffixes, is refused, or None when it is not. resolve_base hands git the object id full holds,
+    never the short name, so git's short-name search never runs for it; these refusals keep the
+    fail-closed posture of the short form: lead is refused when it is itself a configured remote's name
+    (possible only for a remote whose name contains a slash), when full does not exist, and, for the
+    <configured remote>/<name> form, when refs/<name>, refs/tags/<name> or refs/heads/<name> exists, a
+    ref of the same short name that git's short-name search order would prefer."""
     if lead in _remotes(root):
         return "{!r} is the bare remote name {!r}, which a tag or branch of that name would shadow; " \
                "pass the remote-tracking branch, such as {}/main".format(base, lead, lead)
-    if lead == base or not lead:
-        return None
-    full = _remote_tracking_ref(root, lead)
-    if full is None:
-        return None
     if _exact_ref_oid(root, full) is None:
         return "the leading ref name {!r} of {!r} names the remote-tracking ref {}, which does not exist, " \
                "so git would resolve the name through another ref; pass a remote-tracking branch that " \
@@ -351,31 +317,20 @@ def _short_name_refusal(root, base):
         return None
     return "the leading ref name {!r} of {!r} names {}, but {} of the same short name would stand in for " \
            "it; pass the base as {} or a commit id".format(lead, base, full, " and ".join(shadows),
-                                                         full + base[cut:])
+                                                         full + base[len(lead):])
 
 
 def _written_remote_tracking(name, remotes):
     """True when name is written as a remote-tracking branch: it starts with refs/remotes/ or with a
-    configured remote's name and a slash (the same text test _remote_tracking_ref applies)."""
+    configured remote's name and a slash (the text test _grammar_refusal applies)."""
     return name.startswith(REMOTE_REF_PREFIX) or any(name.startswith(r + "/") for r in remotes)
 
 
 def _resolved_names(base):
-    """The names git resolves on the way to base: base itself and each part of it that ends right before
-    a ~, ^ or @{ outside braces, up to its first ':' outside braces (what follows is a path or search
-    text). For origin/main@{u}~1 that is the whole value, origin/main and origin/main@{u}."""
-    names = [base]
-    depth = 0
-    for i, c in enumerate(base):
-        if depth == 0:
-            if c == ":":
-                break
-            if c in "~^" or base.startswith("@{", i):
-                names.append(base[:i])
-        if c == "{":
-            depth += 1
-        elif c == "}" and depth:
-            depth -= 1
+    """The names git resolves on the way to base, which the grammar holds to a full object id or HEAD
+    and a run of ~N or ^N suffixes: base itself and each part of it that ends right before a ~ or ^. For
+    HEAD~1^2 that is the whole value, HEAD and HEAD~1."""
+    names = [base] + [base[:i] for i, c in enumerate(base) if c in "~^"]
     return [n for n in dict.fromkeys(names) if n]
 
 
@@ -410,20 +365,17 @@ def _remote_symbolic_refs(root):
 
 
 def _resolved_ref_refusal(root, base):
-    """Why base, which is not written as a remote-tracking branch, resolves through a ref under
+    """Why base, a full object id or HEAD alone or leading a suffix run, resolves through a ref under
     refs/remotes/, or None when git reports it does not. git is asked which ref it resolves base, and each
-    name leading an operator in it, through (_git_resolved_refs), never this module's copy of git's name
+    part of it ending before a ~ or ^, through (_git_resolved_refs), never this module's copy of git's name
     rules, so a ref under refs/remotes/ that any of git's rules reaches is refused (exit 2): one git names
     directly, and, because git names only the end of a symbolic chain, a symbolic ref under refs/remotes/
     that ends at the ref git names (that ref is then refused even when git reached it directly, a
     fail-closed over-refusal)."""
-    remotes = _remotes(root)
     symbolic = None
     hint = "a remote-tracking base is passed as <configured remote>/<branch> or " \
            "refs/remotes/<remote>/<branch>"
     for name in _resolved_names(base):
-        if _written_remote_tracking(name, remotes):
-            continue  # read exactly, or refused, by resolve_base and _short_name_refusal
         for ref in _git_resolved_refs(root, name):
             if ref.startswith(REMOTE_REF_PREFIX):
                 return "git resolves {!r} through a ref under refs/remotes/ ({}), but {!r} is not written " \
@@ -448,6 +400,17 @@ ACCEPTED_BASE_FORMS = ("a full 40-hex object id that exists, HEAD, or refs/remot
                        "optionally followed by a run of ~N or ^N suffixes (N digits, possibly empty)")
 
 
+def _split_suffixes(base):
+    """(core, suffixes): base cut at its first ~ or ^ (HEAD and ~1^2 of HEAD~1^2)."""
+    cut = min([i for i in (base.find("~"), base.find("^")) if i >= 0] or [len(base)])
+    return base[:cut], base[cut:]
+
+
+def _id_or_head(core):
+    """True when core is a full 40-hex object id (lower case) or HEAD, the grammar's non-remote forms."""
+    return (len(core) == 40 and all(c in "0123456789abcdef" for c in core)) or core == "HEAD"
+
+
 def _grammar_refusal(root, base):
     """Why base is outside the closed --base grammar (ACCEPTED_BASE_FORMS), or None when it is inside it.
     The grammar is an allowlist that fails closed: base is cut at its first ~ or ^, the rest must be a run
@@ -456,11 +419,10 @@ def _grammar_refusal(root, base):
     slash whose fully qualified ref (the name itself, or refs/remotes/<name>) git check-ref-format
     accepts. Every other value, whatever name form git might read it by, is refused (exit 2) before git
     resolves anything; whether an accepted value resolves is left to resolve_base's refusals."""
-    cut = min([i for i in (base.find("~"), base.find("^")) if i >= 0] or [len(base)])
-    core, suffixes = base[:cut], base[cut:]
+    core, suffixes = _split_suffixes(base)
     if not all(c in "~^0123456789" for c in suffixes):
         why = "{!r} after {!r} is not a run of ~N or ^N suffixes".format(suffixes, core)
-    elif (len(core) == 40 and all(c in "0123456789abcdef" for c in core)) or core == "HEAD":
+    elif _id_or_head(core):
         return None
     elif core.startswith(REMOTE_REF_PREFIX) or any(core.startswith(r + "/") for r in _remotes(root)):
         full = core if core.startswith(REMOTE_REF_PREFIX) else REMOTE_REF_PREFIX + core
@@ -476,17 +438,18 @@ def _grammar_refusal(root, base):
 def resolve_base(root, base):
     """(commit, label) of the comparison base: the explicit ref, or with base None the merge base of
     HEAD and refs/remotes/origin/main. An explicit base outside the closed grammar (_grammar_refusal,
-    ACCEPTED_BASE_FORMS) is refused first. A remote base is read as its fully qualified ref with show-ref
-    --verify, so a tag or a local branch of the same short name (refs/tags/origin/main,
-    refs/heads/origin/main), which git's short-name search order prefers, cannot stand in for it. Any
-    other base is resolved as git resolves it, except that one (or the name leading it) for which
-    refs/remotes/<name> also exists is refused as ambiguous (_ambiguous_base_refusal). A bare remote
-    name, and a revision expression whose leading remote-tracking name does not exist or is shadowed by
-    a ref of the same short name, are refused (_short_name_refusal), and so is a base git resolves
-    through a ref under refs/remotes/ when it is not written as a remote-tracking branch
-    (_resolved_ref_refusal). A base that does not resolve to one commit (a full
-    object id whose object does not exist included) is a DemoError (exit 2), never "nothing to
-    compare"."""
+    ACCEPTED_BASE_FORMS) is refused first, and git is never handed a short name for one inside it. A
+    full object id or HEAD (checked first, so a remote named HEAD does not change it) is refused when
+    refs/remotes/<id> or refs/remotes/HEAD exists (_ambiguous_base_refusal) or when git resolves it
+    through a ref under refs/remotes/ (_resolved_ref_refusal); HEAD is read exactly with show-ref
+    --verify, and git is handed the object id followed by the suffix run. A remote base is read as its
+    fully qualified ref with show-ref --verify, so a tag, a local branch (refs/tags/origin/main,
+    refs/heads/origin/main) or a pseudo-ref file (<git dir>/origin/main) of the same short name, which
+    git's short-name search order prefers, cannot stand in for it; when it leads a suffix run it is
+    refused when that ref does not exist or is shadowed by a ref of the same short name
+    (_short_name_refusal), and git is handed the object id the ref holds followed by the suffix run. A
+    base that does not resolve to one commit (a full object id whose object does not exist included) is
+    a DemoError (exit 2), never "nothing to compare"."""
     if base is None:
         full = REMOTE_REF_PREFIX + DEFAULT_BASE_REMOTE
         tip = _exact_ref_oid(root, full)
@@ -504,24 +467,33 @@ def resolve_base(root, base):
     refusal = _grammar_refusal(root, base)
     if refusal is not None:
         raise DemoError("cannot resolve the comparison base {!r}: {}".format(base, refusal))
-    full = _remote_tracking_ref(root, base)
-    if full is not None:
+    core, suffixes = _split_suffixes(base)
+    if _id_or_head(core):
+        refusal = _ambiguous_base_refusal(root, core)
+        if refusal is not None:
+            raise DemoError("cannot resolve the comparison base {!r}: {}".format(base, refusal))
+        refusal = _resolved_ref_refusal(root, base)
+        if refusal is not None:
+            raise DemoError("cannot resolve the comparison base {!r}: {}".format(base, refusal))
+        oid = _exact_ref_oid(root, "HEAD") if core == "HEAD" else core
+        commit = _peel_commit(root, oid + suffixes) if oid is not None else None
+        if commit is None:
+            raise DemoError("cannot resolve the comparison base {!r} to a commit".format(base))
+        return commit, "{} ({})".format(base, commit[:12])
+    # Inside the grammar, anything else is written as a remote-tracking branch.
+    full = core if core.startswith(REMOTE_REF_PREFIX) else REMOTE_REF_PREFIX + core
+    if not suffixes:
         tip = _exact_ref_oid(root, full)
         commit = _peel_commit(root, tip) if tip is not None else None
         if commit is None:
             raise DemoError("cannot resolve the comparison base {!r}: the remote-tracking ref {} does not "
                             "exist or is not a commit".format(base, full))
         return commit, "{} ({}, {})".format(base, full, commit[:12])
-    refusal = _ambiguous_base_refusal(root, base)
-    if refusal is not None:
-        raise DemoError("cannot resolve the comparison base {!r}: {}".format(base, refusal))
-    refusal = _short_name_refusal(root, base)
+    refusal = _short_name_refusal(root, base, core, full)
     if refusal is not None:
         raise DemoError("cannot resolve the comparison base {!r} by short name: {}".format(base, refusal))
-    refusal = _resolved_ref_refusal(root, base)
-    if refusal is not None:
-        raise DemoError("cannot resolve the comparison base {!r}: {}".format(base, refusal))
-    commit = _peel_commit(root, base)
+    tip = _exact_ref_oid(root, full)
+    commit = _peel_commit(root, tip + suffixes) if tip is not None else None
     if commit is None:
         raise DemoError("cannot resolve the comparison base {!r} to a commit".format(base))
     return commit, "{} ({})".format(base, commit[:12])
@@ -777,7 +749,20 @@ def main():
 #       ruleaa while HEAD drops it: an abbreviated id, the describe form x-0-g<abbreviation> and
 #       <id>^{commit} are each exit 2 naming the accepted forms (a mutant without the grammar reads the
 #       base and exits 1), while the accepted HEAD^, HEAD~ (N empty) and <id>~0^0 read the base and the
-#       drop is exit 1 (a grammar refusing an empty N or a mixed suffix run fails).
+#       drop is exit 1 (a grammar refusing an empty N or a mixed suffix run fails);
+#   T39 (round 7 F1-r7) origin is configured, refs/remotes/origin/main is a child of the base and both
+#       list ruleaa, HEAD drops it, and a plain file <git dir>/origin/main (a pseudo-ref, the first rule
+#       of git's short-name search) holds a child of HEAD that also drops it: origin/main~0, ^0, ~, ^,
+#       ~1, ^1 and ~0^0 each read refs/remotes/origin/main and the drop is exit 1 (a mutant handing git
+#       the short name origin/main<suffixes> reads the planted commit and passes);
+#   T40 (round 6 N2-r6) a forged commit-graph file (generation v1, checksum recomputed) gives HEAD~1 a
+#       decoy parent that drops ruleaa, a child of the base that refs/remotes/origin/main points at; plain
+#       git then reads the decoy as HEAD~2 and as the merge base: with no --base and with --base HEAD~2
+#       the base is still read as committed and the drop is exit 1 (a mutant without
+#       core.commitGraph=false reads the decoy and passes);
+#   T41 (round 7 R7-a) a remote named HEAD is configured, HEAD lists ruleaa and the working list drops
+#       it: --base HEAD and HEAD~0 read HEAD and the drop is exit 1 (a mutant judging the bare-remote
+#       name before HEAD refuses both, exit 2).
 
 import gen_first_pin_demo as gfpd  # noqa: E402  fixture helpers (_write_tree, _tuned) and CAP_BYTES
 
@@ -811,8 +796,10 @@ def self_test_main():
 
 
 def _self_test_main_isolated():
+    import hashlib
     import io
     import shutil
+    import struct
     import tempfile
     from contextlib import redirect_stdout, redirect_stderr
     from _git_fixture_env import git_fixture_env
@@ -1552,6 +1539,98 @@ def _self_test_main_isolated():
             if code != 1 or drop_msg not in out or base38[:12] not in out:
                 failures.append("T38: --base {!r}, inside the grammar, must read the base and the drop be "
                                 "exit 1, got {}\n{}".format(base, code, out))
+
+        # T39. (round 7 F1-r7) A pseudo-ref file <git dir>/origin/main, which git's short-name search
+        # tries first, cannot stand in for refs/remotes/origin/main leading a suffix run: git is handed
+        # the object id the remote-tracking ref holds, never the short name.
+        t39, base39 = ratchet_fixture("t39")
+        fixture_git(t39, "remote", "add", "origin", str(tmp / "t39-nowhere"))
+        fixture_git(t39, "commit", "-q", "--allow-empty", "-m", "fixture origin/main, a child of the base")
+        main39 = fixture_git(t39, "rev-parse", "HEAD")
+        fixture_git(t39, "update-ref", "refs/remotes/origin/main", main39)
+        drop_at_head(t39)
+        fixture_git(t39, "commit", "-q", "--allow-empty", "-m", "fixture planted commit, also dropping ruleaa")
+        plant39 = fixture_git(t39, "rev-parse", "HEAD")
+        pseudo39 = Path(fixture_git(t39, "rev-parse", "--absolute-git-dir")) / "origin" / "main"
+        pseudo39.parent.mkdir(parents=True, exist_ok=True)
+        pseudo39.write_text(plant39 + "\n", encoding="ascii")
+        if fixture_git(t39, "rev-parse", "origin/main~0") != plant39:
+            failures.append("T39: the fixture pseudo-ref file did not stand in for origin/main in git")
+        for suffix, want39 in (("~0", main39), ("^0", main39), ("~", base39), ("^", base39), ("~1", base39),
+                               ("^1", base39), ("~0^0", main39)):
+            code, out = capture_gate(t39, "origin/main" + suffix)
+            if code != 1 or drop_msg not in out or "origin/main{} ({})".format(suffix, want39[:12]) not in out:
+                failures.append("T39: with {} planted, --base {!r} must read refs/remotes/origin/main and the "
+                                "drop be exit 1, got {}\n{}".format(pseudo39, "origin/main" + suffix, code, out))
+
+        # T40. (round 6 N2-r6) A forged commit-graph file cannot move the base: it gives HEAD~1 a decoy
+        # parent (a child of the base that drops ruleaa, at refs/remotes/origin/main), which plain git
+        # honours one commit below the tip, and the base is still read from the commit objects.
+        def forge_graph_parent(graph, child, parent):
+            """Rewrite child's first parent in the single commit-graph file graph to parent, recompute
+            every generation (v1 topological level) and the trailing checksum. A graph outside that shape
+            (a chain, a GDA2 chunk) is a _FixtureError."""
+            data = bytearray(graph.read_bytes())
+            sig, version, hash_version, chunk_count, base_count = struct.unpack(">4sBBBB", data[:8])
+            if sig != b"CGPH" or version != 1 or base_count != 0 or hash_version not in (1, 2):
+                raise _FixtureError("the fixture commit-graph file has an unexpected header")
+            hlen = 20 if hash_version == 1 else 32
+            chunks = dict(struct.unpack(">4sQ", data[8 + 12 * i:20 + 12 * i]) for i in range(chunk_count))
+            if b"GDA2" in chunks or not {b"OIDF", b"OIDL", b"CDAT"} <= set(chunks):
+                raise _FixtureError("the fixture commit-graph file is not a generation v1 graph")
+            count = struct.unpack(">I", data[chunks[b"OIDF"] + 1020:chunks[b"OIDF"] + 1024])[0]
+            oids = [bytes(data[chunks[b"OIDL"] + i * hlen:chunks[b"OIDL"] + (i + 1) * hlen]).hex()
+                    for i in range(count)]
+            if child not in oids or parent not in oids:
+                raise _FixtureError("the fixture commit-graph file does not hold both commits")
+            at = [chunks[b"CDAT"] + i * (hlen + 16) + hlen for i in range(count)]
+            struct.pack_into(">I", data, at[oids.index(child)], oids.index(parent))
+            levels = [0] * count
+            changed = True
+            while changed:
+                changed = False
+                for i in range(count):
+                    parents = struct.unpack(">II", data[at[i]:at[i] + 8])
+                    level = 1 + max([levels[p] for p in parents if p < 0x70000000] or [0])
+                    if levels[i] != level:
+                        levels[i], changed = level, True
+            for i in range(count):
+                low = struct.unpack(">I", data[at[i] + 8:at[i] + 12])[0] & 3
+                struct.pack_into(">I", data, at[i] + 8, (levels[i] << 2) | low)
+            data[-hlen:] = (hashlib.sha1 if hash_version == 1 else hashlib.sha256)(bytes(data[:-hlen])).digest()
+            graph.chmod(0o644)
+            graph.write_bytes(bytes(data))
+
+        t40, base40 = ratchet_fixture("t40")
+        decoy40 = drop_at_head(t40)
+        fixture_git(t40, "update-ref", "refs/remotes/origin/main", decoy40)
+        fixture_git(t40, "reset", "-q", "--hard", base40)
+        fixture_git(t40, "commit", "-q", "--allow-empty", "-m", "fixture HEAD~1, listing ruleaa")
+        mid40 = fixture_git(t40, "rev-parse", "HEAD")
+        drop_at_head(t40)
+        fixture_git(t40, "-c", "commitGraph.generationVersion=1", "commit-graph", "write", "--reachable")
+        forge_graph_parent(Path(fixture_git(t40, "rev-parse", "--absolute-git-dir")) / "objects" / "info" /
+                           "commit-graph", mid40, decoy40)
+        if (fixture_git(t40, "rev-parse", "HEAD~2") != decoy40
+                or fixture_git(t40, "merge-base", "HEAD", decoy40) != decoy40):
+            failures.append("T40: the forged commit-graph file did not move git's HEAD~2 and merge base")
+        for base, label in ((None, "(refs/remotes/origin/main, {})".format(base40[:12])),
+                            ("HEAD~2", "HEAD~2 ({})".format(base40[:12]))):
+            code, out = capture_gate(t40, base)
+            if code != 1 or drop_msg not in out or label not in out:
+                failures.append("T40: with a forged commit-graph file, base {!r} must be read as committed and "
+                                "the drop be exit 1, got {}\n{}".format(base, code, out))
+
+        # T41. (round 7 R7-a) A remote named HEAD does not turn --base HEAD into a bare remote name.
+        t41, base41 = ratchet_fixture("t41")
+        drop_at_head(t41)
+        fixture_git(t41, "reset", "-q", "--soft", base41)  # HEAD lists ruleaa; the working list drops it
+        fixture_git(t41, "remote", "add", "HEAD", str(tmp / "t41-nowhere"))
+        for base in ("HEAD", "HEAD~0"):
+            code, out = capture_gate(t41, base)
+            if code != 1 or drop_msg not in out or "{} ({})".format(base, base41[:12]) not in out:
+                failures.append("T41: with a remote named HEAD, --base {!r} must read HEAD and the drop be "
+                                "exit 1, got {}\n{}".format(base, code, out))
     except _FixtureError as exc:
         fixture_error = str(exc)
     finally:
@@ -1594,6 +1673,9 @@ def _self_test_main_isolated():
           "refs/remotes/<abbreviation> planted), a describe form, a brace, a bare remote name, and, each "
           "with its /HEAD planted, a '{{' in a leading name and a remote-tracking name check-ref-format "
           "rejects fail closed naming the accepted forms, while HEAD^, HEAD~ and <id>~0^0 read the base; "
+          "a pseudo-ref file <git dir>/origin/main does not change origin/main read with any suffix run, "
+          "a forged commit-graph file does not change the merge base or HEAD~2, and a remote named HEAD "
+          "does not change --base HEAD or HEAD~0; "
           "and a symlinked base list, a --base starting with -, an expression led by a shadowed "
           "remote-tracking name, an absent remote-tracking ref of a configured remote, and an expression "
           "led by one (also with its /HEAD planted) fail closed. "

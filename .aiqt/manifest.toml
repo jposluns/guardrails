@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "fc9142e31cb0e4a4260d927c3d50945eaae1e838095160fa34812b24f20dd2b8"
+tree-sha256 = "4b3004d5099f7a95fb34fba8edd1fc702b1ac3e8dc95191a91bf79b603d737c9"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 608517
-sha256 = "546d614b0b9e31235fa2d7eed45e04e63b326b9f43d0173a22a7acb9279e6b67"
+bytes = 608824
+sha256 = "d796069cf0130c2a64fece260018ad84722febab86f7e8ad33fcc1c7801ac699"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -4322,8 +4322,8 @@ sha256 = "ba8f58183c65755ae9e162ade7d35d3678ff2a77723a091eac230aca193fe24b"
 
 [[sources]]
 path = "tools/check_must_deliver.py"
-bytes = 102906
-sha256 = "f3b208996ad746a5d1f1e10ff1b16d3b89da068ce886bfd9de0775fa3639d5f3"
+bytes = 110225
+sha256 = "13fc130b7556ded755a0601d729821b05cadb86194ef338371df500a62789313"
 
 [[sources]]
 path = "tools/check_newtab.py"
