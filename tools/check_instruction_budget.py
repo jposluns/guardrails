@@ -3385,8 +3385,8 @@ def self_test(report_path=None):
         # An entry line holds printable ASCII only: every blank or separator outside it, on a continuation
         # line, is a finding (line 6).
         blanks = ["and its probe. ", "and its probe.　", "and its probe.\r", "\tand its probe.",
-                  " and its probe.", "and its ‮probe.", "and its probe.", "and its probe.",
-                  "and its\u0085probe.", "and its​probe.", "and its﻿probe.", "and its probe."]
+                  " and its probe.", "and its \u202eprobe.", "and its\u2028probe.", "and its\u2029probe.",
+                  "and its\u0085probe.", "and its\u200bprobe.", "and its\ufeffprobe.", "and its probe."]
         blank_heads = [raised(base_shape, entry + indent + text + "\n") for text in blanks]
         check("shape/entry-unicode-blank-1", [shape(base_shape, head) for head in blank_heads],
               [(1, ["6"])] * len(blanks))

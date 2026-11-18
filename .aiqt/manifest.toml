@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "aa9ac7f9c122bc6ea4f25893abcccad0ac18ac552218e0b46186a049d090cd4c"
+tree-sha256 = "b8d9b98e5d93269de5a14311e46a9be5425b87baf15d7140368c05601ecaf6fd"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4277,8 +4277,8 @@ sha256 = "8dfc2f59805c973c295196b7bf618cb6c938da109e7a0fc3544449a8ab99fc49"
 
 [[sources]]
 path = "tools/check_instruction_budget.py"
-bytes = 308436
-sha256 = "a18a3790e34eb0f84079706b1bdae2504798641fca2c625a1dec69cb93e522c7"
+bytes = 308451
+sha256 = "a9da7f401ed66796df68dbd6a8c788789477480f1137a0b73e1f85f4b0f5beb3"
 
 [[sources]]
 path = "tools/check_internal_names.py"
