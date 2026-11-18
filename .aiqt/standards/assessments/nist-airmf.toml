@@ -1,0 +1,215 @@
+# Fit assessment records for the NIST AI Risk Management Framework 1.0. Schema and definitions:
+# RUBRIC.md in this folder. Own words only; no framework text is reproduced.
+
+[[row]]
+rule-path = ".aiqt/core/rules/progr-decision.md"
+rule-slug = "decision-classification-before-enacting"
+rule-blob = "9ee5e892ac5076036728b82f990a1ec34551e521"
+framework = "nist-airmf"
+id = "MAP 3.5"
+current-fit = "tight"
+edition = "1.0 (NIST AI 100-1)"
+source = "NIST-AI-100-1--AI-Risk-Management-Framework-1.0--full-text.md"
+source-sha256 = "6fb8de85e764bfc8f60065baa47697adc93b39d780fa3cc6d431378f332e7a3b"
+locator = "MAP function, subcategory MAP 3.5"
+text-location = "lines 1240 to 1242"
+edition-check = "match"
+boundary = "decisions the assistant could enact, and which of them go to a human"
+core = "Processes for human oversight are defined, assessed and documented in line with the organisation's governance policies."
+covers = [
+  "defines an oversight process: each decision is classified as the assistant's, the maintainer's, or blocked",
+  "the classification is recorded before acting",
+  "the rule text itself documents the process",
+]
+omits = [
+  "assessment of whether the oversight process works",
+  "a link to organisational policies set by the governance function",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = [2]
+rationale = "The rule defines and documents an oversight process, which carries out the core. Nothing in it assesses the process or ties it to governance policy, so it is broad under B."
+assumptions = [
+  "a pack rule counts as a defined and documented process (convention 2)",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/progr-decision.md"
+rule-slug = "decision-classification-before-enacting"
+rule-blob = "9ee5e892ac5076036728b82f990a1ec34551e521"
+framework = "nist-airmf"
+id = "GOVERN 3.2"
+current-fit = "tight"
+edition = "1.0 (NIST AI 100-1)"
+source = "NIST-AI-100-1--AI-Risk-Management-Framework-1.0--full-text.md"
+source-sha256 = "6fb8de85e764bfc8f60065baa47697adc93b39d780fa3cc6d431378f332e7a3b"
+locator = "GOVERN function, subcategory GOVERN 3.2"
+text-location = "lines 1030 to 1031"
+edition-check = "match"
+boundary = "decision rights between the assistant and the human maintainer"
+core = "Policies and procedures define and separate the roles and responsibilities of humans and AI in human and AI configurations, and in oversight of AI systems."
+covers = [
+  "splits decision rights into the assistant's, the maintainer's, and blocked",
+  "a recorded maintainer ruling outranks a predicted one",
+]
+omits = []
+label-a = "tight"
+label-b = "tight"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = [2]
+rationale = "The rule is a procedure whose whole purpose is to separate what the AI decides from what the human decides, which is the single element of the entry."
+assumptions = [
+  "a pack rule counts as one of the policies and procedures the entry asks for (convention 2); if it does not, both labels are broad",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/trust-human-oversight.md"
+rule-slug = "human-oversight-and-autonomy-threshold"
+rule-blob = "e2f24af72cb683c4b723a5eeb73c9c7717ed51a0"
+framework = "nist-airmf"
+id = "MAP 3.5"
+current-fit = "tight"
+edition = "1.0 (NIST AI 100-1)"
+source = "NIST-AI-100-1--AI-Risk-Management-Framework-1.0--full-text.md"
+source-sha256 = "6fb8de85e764bfc8f60065baa47697adc93b39d780fa3cc6d431378f332e7a3b"
+locator = "MAP function, subcategory MAP 3.5"
+text-location = "lines 1240 to 1242"
+edition-check = "match"
+boundary = "the autonomy threshold for the assistant's actions"
+core = "Processes for human oversight are defined, assessed and documented in line with the organisation's governance policies."
+covers = [
+  "defines an oversight process: an autonomy threshold set by consequence and reversibility",
+  "holds for a human when in doubt",
+  "the rule text itself documents the process",
+]
+omits = [
+  "assessment of whether the oversight process works",
+  "a link to organisational policies set by the governance function",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = [2]
+rationale = "Same reading as the decision classification row: an oversight process is defined and documented, but not assessed or tied to governance policy."
+assumptions = [
+  "a pack rule counts as a defined and documented process (convention 2)",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/trust-human-oversight.md"
+rule-slug = "human-oversight-and-autonomy-threshold"
+rule-blob = "e2f24af72cb683c4b723a5eeb73c9c7717ed51a0"
+framework = "nist-airmf"
+id = "GOVERN 3.2"
+current-fit = "tight"
+edition = "1.0 (NIST AI 100-1)"
+source = "NIST-AI-100-1--AI-Risk-Management-Framework-1.0--full-text.md"
+source-sha256 = "6fb8de85e764bfc8f60065baa47697adc93b39d780fa3cc6d431378f332e7a3b"
+locator = "GOVERN function, subcategory GOVERN 3.2"
+text-location = "lines 1030 to 1031"
+edition-check = "match"
+boundary = "responsibility between the assistant and the human for consequential actions"
+core = "Policies and procedures define and separate the roles and responsibilities of humans and AI in human and AI configurations, and in oversight of AI systems."
+covers = [
+  "the autonomy threshold separates what the assistant may do alone from what a human must authorize",
+  "the threshold is set by consequence and reversibility, not by confidence",
+]
+omits = []
+label-a = "tight"
+label-b = "tight"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = [2]
+rationale = "The authorization threshold is the separation of AI and human responsibility the entry asks for."
+assumptions = [
+  "a pack rule counts as one of the policies and procedures the entry asks for (convention 2); if it does not, both labels are broad",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-seci-human-authorization.md"
+rule-slug = "human-authorization"
+rule-blob = "07c8e68e15bb0a70c6b3adeb7151c5ec46410a1c"
+framework = "nist-airmf"
+id = "MAP 3.5"
+current-fit = "tight"
+edition = "1.0 (NIST AI 100-1)"
+source = "NIST-AI-100-1--AI-Risk-Management-Framework-1.0--full-text.md"
+source-sha256 = "6fb8de85e764bfc8f60065baa47697adc93b39d780fa3cc6d431378f332e7a3b"
+locator = "MAP function, subcategory MAP 3.5"
+text-location = "lines 1240 to 1242"
+edition-check = "match"
+boundary = "consequential actions that need human authorization"
+core = "Processes for human oversight are defined, assessed and documented in line with the organisation's governance policies."
+covers = [
+  "defines an oversight process: consequential actions need explicit, informed human authorization",
+  "holds when authorization is missing or ambiguous",
+  "the rule text itself documents the process",
+]
+omits = [
+  "assessment of whether the oversight process works",
+  "a link to organisational policies set by the governance function",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = [2]
+rationale = "Same reading as the other two MAP 3.5 rows: defined and documented, not assessed or tied to governance policy."
+assumptions = [
+  "a pack rule counts as a defined and documented process (convention 2)",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/quali-high-assurance-verification.md"
+rule-slug = "high-assurance-verification"
+rule-blob = "4a151205dd11a83bf13b477cf001b2843429e0fd"
+framework = "nist-airmf"
+id = "MEASURE 1.3"
+current-fit = "tight"
+edition = "1.0 (NIST AI 100-1)"
+source = "NIST-AI-100-1--AI-Risk-Management-Framework-1.0--full-text.md"
+source-sha256 = "6fb8de85e764bfc8f60065baa47697adc93b39d780fa3cc6d431378f332e7a3b"
+locator = "MEASURE function, subcategory MEASURE 1.3"
+text-location = "lines 1340 to 1345"
+edition-check = "match"
+boundary = "each substantive change before it integrates"
+core = "People who did not build the system, or independent assessors, take part in regular assessments and updates; domain experts, users, outside AI actors and affected communities are consulted as needed for the organisation's risk tolerance."
+covers = [
+  "an independent pass, briefed to refute rather than confirm, checks every substantive change",
+]
+omits = [
+  "regular assessment of the AI system as a whole, rather than of single changes",
+  "consultation of domain experts, users, outside AI actors and affected communities, which the entry makes conditional",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = [3, 5]
+rationale = "Independent review is the core of the entry and the rule requires it. Under B the rule checks single changes, not the system at regular intervals, so it is broad. The consultation element is conditional in the entry, so it does not by itself decide B."
+assumptions = [
+  "the work product the assistant changes counts as the AI system (convention 3); if the AI system means only an AI product, both labels are broad",
+  "an element the entry makes conditional is not essential under B (convention 5)",
+]
+assessor = "first-pass review"
+date = "2026-11-18"

@@ -1,0 +1,78 @@
+# Fit assessment records for NIST SP 800-53 Rev 5. Schema and definitions: RUBRIC.md in this folder.
+# Own words only; no control text is reproduced.
+
+[[row]]
+rule-path = ".aiqt/core/rules/trust-ai-toolchain-register.md"
+rule-slug = "ai-toolchain-register"
+rule-blob = "cd77897c37eb7a61d184cd65fb8cc2b202ca5849"
+framework = "nist-80053"
+id = "CM-8"
+current-fit = "tight"
+edition = "Rev 5 (catalog 5.2.0)"
+source = "NIST_SP-800-53_rev5_catalog.json"
+source-sha256 = "d820835aa54aeb2265bdacdf8e678af7530443a59556563df898addf012024cb"
+locator = "CM-8 System Component Inventory, statement items a.1 to a.5 and b"
+text-location = "catalogue parts cm-8_smt.a.1 to cm-8_smt.a.5 and cm-8_smt.b"
+edition-check = "match"
+boundary = "AI tools, models and servers used for project work"
+core = "Keep a documented inventory of system components that reflects the system accurately, includes every component, has no duplicates, is detailed enough for tracking, and records accountability, and review and update it at a set frequency."
+covers = [
+  "an inventory of the AI tool subset",
+  "accountability: the reason for authorization and the approver are recorded",
+  "the inventory is reconciled with what is actually in use, so it reflects the system",
+]
+omits = [
+  "item a.2: all other components of the system",
+  "item a.3: the rule against duplicate accounting",
+  "item a.4: a level of detail set for tracking and reporting",
+  "item b: review and update at a set frequency",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = []
+rationale = "The register is a component inventory with accountability for the AI tool subset, which carries out the core. Several lettered items are left out, so it is broad under B."
+assumptions = [
+  "the register is treated as the inventory for this component class",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-secp-synthetic-fixture-data.md"
+rule-slug = "synthetic-fixture-data"
+rule-blob = "34bf9249e1c0c041c5e739eae7b8dd1fea51c447"
+framework = "nist-80053"
+id = "SA-3(2)"
+current-fit = "tight"
+edition = "Rev 5 (catalog 5.2.0)"
+source = "NIST_SP-800-53_rev5_catalog.json"
+source-sha256 = "d820835aa54aeb2265bdacdf8e678af7530443a59556563df898addf012024cb"
+locator = "SA-3(2) Use of Live or Operational Data, statement items (a) and (b) and the discussion"
+text-location = "catalogue parts sa-3.2_smt.a, sa-3.2_smt.b and sa-3.2_gdn"
+edition-check = "match"
+boundary = "test fixtures, seed data, examples and documentation"
+core = "Approve, document and control any use of live data in preproduction environments, and protect those environments at the level of the live data they hold; the discussion points to test or dummy data as the way to reduce the risk."
+covers = [
+  "real personal data and production records are kept out of fixtures, examples and documentation",
+  "synthetic data or validated anonymization is used instead, as the discussion suggests",
+]
+omits = [
+  "item (a): approving and documenting any use of live data that does happen",
+  "item (b): protecting preproduction environments at the live data's level",
+  "preproduction environments beyond fixtures, examples and documentation",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = []
+rationale = "Keeping live data out of preproduction material is the direct mitigation the control's discussion names. The rule does not approve, document or protect any live data use, so it is broad under B."
+assumptions = [
+  "a mitigation named in the control's discussion counts as visible in the control's text for test 5",
+]
+assessor = "first-pass review"
+date = "2026-11-18"

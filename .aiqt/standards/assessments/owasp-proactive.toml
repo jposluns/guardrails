@@ -1,0 +1,41 @@
+# Fit assessment records for the OWASP Top 10 Proactive Controls. Schema and definitions: RUBRIC.md in
+# this folder. Own words only; no control text is reproduced.
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-seci-threat-model-boundaries.md"
+rule-slug = "threat-model-boundaries"
+rule-blob = "6ad7821be8263a82fc8168692f2e0af08a5dcaf4"
+framework = "owasp-proactive"
+id = "C4"
+current-fit = "tight"
+edition = "4.0.0"
+source = "OWASP-Top-10-Proactive-Controls-v4.0-2024--full-text.md"
+source-sha256 = "a42d2fdf67244256248bca903695df4794ff948094acd6948db045e2ec67bf3f"
+locator = "C4 Address Security from the Start, description and the implementation section on trust relationships"
+text-location = "lines 475 to 531; design principles at lines 481 to 487; trust relationships at lines 525 to 529"
+edition-check = "match"
+boundary = "a new external interface, privileged operation, untrusted data flow or trust boundary in a change"
+core = "Build security into the architecture before implementation, following design principles such as simplicity, secure defaults, no reliance on obscurity, a small attack surface and defence in depth, and make clear and enforce what is trusted to do what."
+covers = [
+  "security is addressed before implementation",
+  "abuse paths of new trust boundaries are identified, which the trust relationships section asks for with threat modelling",
+  "mitigations become acceptance criteria of the change",
+]
+omits = [
+  "keeping the design simple",
+  "secure defaults",
+  "identifying and minimising the attack surface",
+  "choice and upkeep of third party components",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = [4]
+rationale = "Threat modelling a trust boundary before it is built is the core of addressing security from the start. The design principles the control lists are not part of the rule, so it is broad under B."
+assumptions = [
+  "a rule that acts per change can be tight to a control framed at the level of the whole architecture (convention 4)",
+]
+assessor = "first-pass review"
+date = "2026-11-18"

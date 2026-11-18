@@ -1,0 +1,110 @@
+# Fit assessment records for MITRE ATLAS. Schema and definitions: RUBRIC.md in this folder.
+# Own words only; no technique text is reproduced.
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-seci-output-encoding.md"
+rule-slug = "output-encoding"
+rule-blob = "476ba2c8e39b7c280b0344dd55225747e8357f09"
+framework = "atlas"
+id = "AML.T0077"
+current-fit = "tight"
+edition = "2026.06"
+source = "ATLAS-2026.06--techniques.csv"
+source-sha256 = "ba5bd12107a5ebf95a701b2d0447e0a27eebd5d7fed0c1a4e248651eb19872d3"
+locator = "technique AML.T0077 LLM Response Rendering"
+text-location = "line 124"
+edition-check = "match"
+boundary = "model output passed to a rendering sink such as HTML"
+core = "The adversary gets the model to emit content that the user's client renders automatically, such as an image whose address carries private data to a server the adversary controls; variants use HTML tags or markdown."
+covers = [
+  "output encoded for an HTML sink renders a tag as inert text, which stops the HTML tag variant",
+]
+omits = [
+  "the markdown image variant, where the client renders markdown it is meant to render",
+  "control of which destinations the client may fetch from",
+  "detection of private data placed in output",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = [4]
+rationale = "The entry names HTML tags as a variant, and encoding for the HTML sink breaks that variant, so the rule interrupts the core mechanism for one main variant. It does not control fetching or destinations, so it is broad under B."
+assumptions = [
+  "breaking one named variant at the sink counts as interrupting the core mechanism (test 5)",
+  "a rule at the producing side can be tight to a technique completed by the rendering client (convention 4)",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-seca-resource-bounds.md"
+rule-slug = "resource-bounds"
+rule-blob = "3f8e9e338135afe8eb97422619e92ef3191a55bf"
+framework = "atlas"
+id = "AML.T0029"
+current-fit = "tight"
+edition = "2026.06"
+source = "ATLAS-2026.06--techniques.csv"
+source-sha256 = "ba5bd12107a5ebf95a701b2d0447e0a27eebd5d7fed0c1a4e248651eb19872d3"
+locator = "technique AML.T0029 Denial of AI Service"
+text-location = "line 60"
+edition-check = "match"
+boundary = "the assistant's own tool calls, recursion, token and cost budgets and request rate"
+core = "An adversary floods an AI service with requests, or with inputs that need heavy compute, to degrade or shut it down."
+covers = [
+  "bounds and fail safe behaviour on the assistant's own consumption",
+  "a circuit breaker that relieves a degraded dependency",
+]
+omits = [
+  "admission control or rate limits on requests coming into the AI service",
+  "limits on the compute cost of a single crafted input to the service",
+]
+label-a = "broad"
+label-b = "broad"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = [4]
+rationale = "The technique is an inbound flood against the service; the rule limits the assistant's own outbound consumption and does not act on inbound requests, so it shares the theme but not the object."
+assumptions = [
+  "the rule is read as acting on the assistant's own consumption, not as an inbound service limit (convention 4)",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-seca-resource-bounds.md"
+rule-slug = "resource-bounds"
+rule-blob = "3f8e9e338135afe8eb97422619e92ef3191a55bf"
+framework = "atlas"
+id = "AML.T0034.000"
+current-fit = "tight"
+edition = "2026.06"
+source = "ATLAS-2026.06--techniques.csv"
+source-sha256 = "ba5bd12107a5ebf95a701b2d0447e0a27eebd5d7fed0c1a4e248651eb19872d3"
+locator = "sub-technique AML.T0034.000 Excessive Queries"
+text-location = "line 63"
+edition-check = "match"
+boundary = "the assistant's own tool calls, recursion, token and cost budgets and request rate"
+core = "An adversary sends a high volume of ordinary queries to an AI system to exhaust its capacity and raise its operating cost, exploiting rate limits, autoscaling and pay per use billing."
+covers = [
+  "bounds and fail safe behaviour on the assistant's own consumption and cost",
+]
+omits = [
+  "rate limits and quotas on queries coming into the AI system",
+  "autoscaling and billing limits on the service side",
+]
+label-a = "broad"
+label-b = "broad"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = [4]
+rationale = "Same mismatch as the Denial of AI Service row: the technique acts on the service's inbound edge and the rule bounds the assistant's own outbound use."
+assumptions = [
+  "the rule is read as acting on the assistant's own consumption, not as an inbound service limit (convention 4)",
+]
+assessor = "first-pass review"
+date = "2026-11-18"

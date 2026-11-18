@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "04f9db2b18d948ab6a3a5550c5d3ec88a8f9140639fe6b9441fb279cba06308a"
+tree-sha256 = "49e0634b35fcddce1e7a79731152a461f4e9d97ae1a0af9fc2d4f19c5d03094d"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -864,6 +864,61 @@ sha256 = "d2c017f17cc99680211b841ffc88f7f1dcd864d8c02ae5a4b6eba4813e24c436"
 path = ".aiqt/standards/README.md"
 bytes = 11106
 sha256 = "ce143791554930f8e5c87adaecb7aa295afb1d17bddf9defaa3c7131f1a63f8a"
+
+[[sources]]
+path = ".aiqt/standards/assessments/RUBRIC.md"
+bytes = 9040
+sha256 = "3710aff9b4d6abc7bd80394af82d62b51471c66bbb9b2da02d01ddca7e609001"
+
+[[sources]]
+path = ".aiqt/standards/assessments/atlas.toml"
+bytes = 4884
+sha256 = "3995f627ba0c70af226267972913c623217caa76bd4edd9b3d1bf89310d04346"
+
+[[sources]]
+path = ".aiqt/standards/assessments/csa-ccm.toml"
+bytes = 1794
+sha256 = "4fadd66c780e4c16b34d3552c0686b96dbee3f2cb9911dfa13ad482e6bc37d11"
+
+[[sources]]
+path = ".aiqt/standards/assessments/iso-23894.toml"
+bytes = 3611
+sha256 = "bed19a4a1a8f07bad4a527c79f07c4325e9d070ba9ef6ca0405ab5678188f6c9"
+
+[[sources]]
+path = ".aiqt/standards/assessments/iso-42001.toml"
+bytes = 2133
+sha256 = "56cf84b5e65add8e333504654cd7dfd8ad2a567d28f9c57804c0f72b92243401"
+
+[[sources]]
+path = ".aiqt/standards/assessments/nist-80053.toml"
+bytes = 3811
+sha256 = "a7c2520ebe9d6de18316088282a80cf02324b1adcea04a7a3c0c076389af5f78"
+
+[[sources]]
+path = ".aiqt/standards/assessments/nist-airmf.toml"
+bytes = 9515
+sha256 = "c41a77f2315855c901aaf3f2a595024fc448d3c67abd136a5676c49c2970ce0e"
+
+[[sources]]
+path = ".aiqt/standards/assessments/owasp-asi.toml"
+bytes = 1972
+sha256 = "760a98beabbf9cc72a53b83f9f717ecf1585198e4d7feb2cd8c7805a76c61cd6"
+
+[[sources]]
+path = ".aiqt/standards/assessments/owasp-llm.toml"
+bytes = 1886
+sha256 = "5ed24cbf75ba3d02d0f1fa19da6af994f09275c923ca20ceb518123b7f75fac3"
+
+[[sources]]
+path = ".aiqt/standards/assessments/owasp-mcp.toml"
+bytes = 4161
+sha256 = "4a99d7b9c23508bfea7e3a3a1004d1eadb07fda306eb4c92e648eb7ec2c0ff84"
+
+[[sources]]
+path = ".aiqt/standards/assessments/owasp-proactive.toml"
+bytes = 2143
+sha256 = "0bfe1518042136ce82101f82e3fb559e00aef84796b8f0bdee9befc792cd2ca8"
 
 [[sources]]
 path = ".aiqt/standards/atlas.toml"
@@ -2317,8 +2372,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 54314
-sha256 = "6372dd3f709be85b2a3e931447f41b8a4a7648b26ecf658a8d4c925c1620ad3e"
+bytes = 54916
+sha256 = "171168d63c36e4f497cad155f5fb4f6998fd3f481d5ef19b08b38fa2ade7f16c"
 
 [[sources]]
 path = ".github/copilot-instructions.md"

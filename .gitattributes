@@ -174,6 +174,17 @@
 .aiqt/release/first-pin-demonstration.toml text eol=lf
 .aiqt/release/root.txt text eol=lf
 .aiqt/standards/README.md text eol=lf
+.aiqt/standards/assessments/RUBRIC.md text eol=lf
+.aiqt/standards/assessments/atlas.toml text eol=lf
+.aiqt/standards/assessments/csa-ccm.toml text eol=lf
+.aiqt/standards/assessments/iso-23894.toml text eol=lf
+.aiqt/standards/assessments/iso-42001.toml text eol=lf
+.aiqt/standards/assessments/nist-80053.toml text eol=lf
+.aiqt/standards/assessments/nist-airmf.toml text eol=lf
+.aiqt/standards/assessments/owasp-asi.toml text eol=lf
+.aiqt/standards/assessments/owasp-llm.toml text eol=lf
+.aiqt/standards/assessments/owasp-mcp.toml text eol=lf
+.aiqt/standards/assessments/owasp-proactive.toml text eol=lf
 .aiqt/standards/atlas.toml text eol=lf
 .aiqt/standards/csa-aicm.toml text eol=lf
 .aiqt/standards/csa-ccm.toml text eol=lf

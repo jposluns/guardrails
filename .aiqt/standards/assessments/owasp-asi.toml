@@ -1,0 +1,38 @@
+# Fit assessment records for the OWASP Top 10 for Agentic Applications. Schema and definitions: RUBRIC.md
+# in this folder. Own words only; no entry text is reproduced.
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-seca-resource-bounds.md"
+rule-slug = "resource-bounds"
+rule-blob = "3f8e9e338135afe8eb97422619e92ef3191a55bf"
+framework = "owasp-asi"
+id = "ASI08"
+current-fit = "tight"
+edition = "2026"
+source = "OWASP-Top-10-for-Agentic-Applications-2026--full-text.md"
+source-sha256 = "024fd8cc24db4722da325f37a2c6a63b3d1f354250327a451ad1c40010bb30df"
+locator = "ASI08 Cascading Failures, description and prevention guidelines 6 and 7"
+text-location = "description at lines 1160 to 1173; guidelines at lines 1245 to 1263, with 6 and 7 at lines 1259 to 1261"
+edition-check = "match"
+boundary = "the assistant's own loops, tool calls, budgets and calls to dependencies"
+core = "A single fault spreads across agents, tools and workflows and grows into harm across the whole system; the entry is about the spread and amplification, not the first fault."
+covers = [
+  "rate limits and a fail safe stop when a bound is reached (guideline 6)",
+  "quotas, progress caps and a circuit breaker on a failing dependency (guideline 7)",
+]
+omits = [
+  "isolation and trust boundaries between agents (guideline 2)",
+  "short lived, task scoped access and independent policy enforcement (guidelines 3 and 4)",
+  "output validation and human gates before output moves downstream (guideline 5)",
+  "behaviour and governance drift detection (guideline 8)",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = []
+rationale = "Bounds and circuit breakers directly stop a fault from amplifying, which is the core of the entry and two of its listed mitigations. The other main lines of mitigation are left out, so it is broad under B."
+assumptions = []
+assessor = "first-pass review"
+date = "2026-11-18"

@@ -1,0 +1,39 @@
+# Fit assessment records for the CSA Cloud Controls Matrix. Schema and definitions: RUBRIC.md in this
+# folder. Own words only; no control text is reproduced.
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-secc-no-cross-context-bleed.md"
+rule-slug = "no-cross-context-bleed"
+rule-blob = "7730281accb232117e34aef267e97b14ccf94068"
+framework = "csa-ccm"
+id = "I&S-06"
+current-fit = "tight"
+edition = "4.1.0"
+source = "CSA-CCM-v4.1.0-catalogue__CCM.csv"
+source-sha256 = "81f3035d039dd7f6f257d91f6d6cfd5e6cf4512e8454a0650c7a51fddaf9576f"
+locator = "Infrastructure Security domain, control I&S-06 Segmentation and Segregation"
+text-location = "lines 535 to 538"
+edition-check = "match"
+boundary = "context assembled for one task, user, tenant or trust boundary inside the application"
+core = "Applications and infrastructure are designed, built, deployed and configured so that each tenant's access is segmented and segregated, and is monitored and restricted."
+covers = [
+  "context for one tenant or authorization is never carried into another",
+  "each new task or session starts from a clean boundary",
+]
+omits = [
+  "monitoring of tenant access",
+  "restriction of tenant access as an access control",
+  "segmentation at the infrastructure layer",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = [4]
+rationale = "Keeping each tenant's context apart is tenant segregation inside the application, which carries out the core. Monitoring, restriction and infrastructure segmentation are left out, so it is broad under B."
+assumptions = [
+  "segregation inside the application can be tight to a control that also covers infrastructure (convention 4)",
+]
+assessor = "first-pass review"
+date = "2026-11-18"

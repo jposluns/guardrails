@@ -1,0 +1,37 @@
+# Fit assessment records for ISO/IEC 42001:2023. Schema and definitions: RUBRIC.md in this folder.
+# Own words only; no clause or control text is reproduced.
+
+[[row]]
+rule-path = ".aiqt/core/rules/trust-ai-toolchain-register.md"
+rule-slug = "ai-toolchain-register"
+rule-blob = "cd77897c37eb7a61d184cd65fb8cc2b202ca5849"
+framework = "iso-42001"
+id = "A.4.4"
+current-fit = "tight"
+edition = "2023"
+source = "ISO-IEC-42001-2023--AI-management-system--full-text.md"
+source-sha256 = "658324d724e9615369ba331eb54f3cdf4e40c4486dd4c81cec9ed06cd31d77df"
+locator = "Annex A, control A.4.4 Tooling resources; Annex B, B.4.4 implementation guidance"
+text-location = "control text at lines 1391 to 1393; Annex B guidance at lines 1939 to 1955; the text printed under the A.4.4 heading at lines 1379 to 1381 belongs to A.4.3"
+edition-check = "match"
+boundary = "AI tools, models and servers used for project work"
+core = "As part of identifying resources, the organisation documents the tooling resources used for the AI system; the guidance lists model types, data tools, optimisation and evaluation methods, provisioning tools, development aids and the software and hardware for design, development and deployment."
+covers = [
+  "every AI tool, model and server in use is entered in a register before it is relied on",
+  "each entry names what it is, why it is authorized and who approved it",
+  "the register is reconciled with what is actually in use",
+]
+omits = []
+label-a = "tight"
+label-b = "tight"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = [3]
+rationale = "The control has a single element, documenting the tooling resources, and the register carries it out for the tools the assistant relies on."
+assumptions = [
+  "the assistant and its tools count as tooling for the AI system (convention 3); if the AI system means only an AI product being built, both labels are broad",
+  "the reference copy's Annex A table is extracted out of order, so the control text was read where it actually sits, not under the printed heading",
+]
+assessor = "first-pass review"
+date = "2026-11-18"

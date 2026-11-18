@@ -1,0 +1,38 @@
+# Fit assessment records for the OWASP Top 10 for LLM Applications. Schema and definitions: RUBRIC.md in
+# this folder. Own words only; no entry text is reproduced.
+
+[[row]]
+rule-path = ".aiqt/core/rules/accur-corroborate-external-claims.md"
+rule-slug = "corroborate-external-claims"
+rule-blob = "badb01a78820c23507cbe7bc225301e609aa6de2"
+framework = "owasp-llm"
+id = "LLM07"
+current-fit = "tight"
+edition = "2026"
+source = "OWASP-Top-10-for-LLM-Applications-2026--full-text.md"
+source-sha256 = "960f68a87fb9cede9c0ef9a497d6736f5e445cce2f8be3ea83fe2411d170e605"
+locator = "LLM07:2026 Misinformation, common examples and prevention strategies 1 and 2"
+text-location = "lines 1355 to 1405; examples at lines 1377 to 1396; strategies 1 and 2 at lines 1398 to 1402"
+edition-check = "match"
+boundary = "claims about external facts that the assistant relies on or presents"
+core = "Model output that is false, unsupported or misleading is relied on for decisions or actions; the entry asks that claims be grounded in authoritative sources and checked before anything acts on them."
+covers = [
+  "grounding claims in a source before they are relied on (strategy 1)",
+  "checking a claim before acting on it (strategy 2)",
+  "more corroboration for a weaker source",
+]
+omits = [
+  "misleading summaries and critical omissions (example 4)",
+  "incorrect inference that a workflow condition has been met (example 2)",
+  "tool call validation and verification signals (strategies 3 and 4)",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "pending-definition"
+proposed = "pending-definition"
+review-state = "assessed"
+conventions = []
+rationale = "Corroboration before reliance is the entry's first two mitigations. The rule deals with claims about external facts only, not omissions or state inference, so it is broad under B."
+assumptions = []
+assessor = "first-pass review"
+date = "2026-11-18"
