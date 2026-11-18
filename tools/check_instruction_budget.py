@@ -265,10 +265,16 @@ budget source) and a non-blank `reason`; when both digests match, the other chan
 declared instead of failing, and a declaration bound to other bytes excuses nothing. A declaration never
 waives the entry rules (every added line in the history run directly above the `#   ceiling` line is read
 as part of the entry block, whatever the ratchet direction, so a declaration can excuse a removed old
-history line there but never an added or edited one), the validation of either side, or what the candidate needs to serve as a later
+history line there but never an added or edited one; the history is found by its content wherever it
+sits, as each run of lines indented as entry lines that holds a line opening with "raised", and a history
+line moved, copied or edited away from the run directly above the `#   ceiling` line is a finding too), the
+validation of either side, or what the candidate needs to serve as a later
 comparison's base (exactly one `#   ceiling` line and the ratchet written as exactly one `ratchet = N`
 line, one space each side of `=`), and it records intent, not authorization: the
-review of the change that adds it is the authorization. Nothing removes a declaration once its change has
+review of the change that adds it is the authorization. The one edit of an old entry a declaration can
+excuse is the one the budget source invites: lines inserted directly after the last line of an entry whose
+text reads "record its measured cost here against the E-unit estimate", each an entry line reading
+`Queued fold [NAME ]measured M units against the E-unit estimate.` with that entry's E. Nothing removes a declaration once its change has
 landed, so a later change recreating the same base and candidate bytes is excused again. The base is the
 one tools/check_release_cut.py binds for the event, read with that gate's hardened git: in pull_request
 CI the merge commit's raw first parent, which must be origin/$GITHUB_BASE_REF; on a push (--protected and
@@ -1406,6 +1412,16 @@ SHAPE_ENTRY_FIRST_RE = re.compile(
 # An appended line whose text opens with the word "raised" in any letter case starts an entry and must be
 # a well-formed first line, so a second entry cannot pass as a continuation line of the one before it.
 SHAPE_ENTRY_START_RE = re.compile(r"Raised(?![A-Za-z0-9_])", re.ASCII | re.IGNORECASE)
+# The ratchet history, found by content wherever it sits: every maximal run of consecutive lines opening
+# with SHAPE_ENTRY_INDENT that holds a line whose text opens with "raised" in any letter case.
+SHAPE_ENTRY_INDENT = "#" + " " * SHAPE_ENTRY_INDENT_WIDTH
+# The one edit of an old entry: a history entry whose text (its lines' text joined by single spaces) reads
+# "record its measured cost here against the E-unit estimate" invites a line appended directly after its
+# last line that records a measured fold cost against that same estimate E.
+SHAPE_FOLD_INVITE_RE = re.compile(r"record its measured cost here against the ([1-9][0-9]*)-unit estimate", re.ASCII)
+SHAPE_FOLD_COST_RE = re.compile(
+    r"Queued fold (?:[!-~][ -~]* )?measured [1-9][0-9]{0,18} units against the ([1-9][0-9]*)-unit estimate\.",
+    re.ASCII)
 # A date written in the base above the `#   ceiling` line; the latest real one is the earliest date an
 # appended entry may carry. An entry dated later than the checking day (UTC) plus this slack is a finding.
 SHAPE_DATE_RE = re.compile(r"(?<![0-9])([0-9]{4}-[0-9]{2}-[0-9]{2})(?![0-9])", re.ASCII)
@@ -1477,6 +1493,62 @@ def _base_latest_date(lines):
     return latest
 
 
+def _history_lines(lines):
+    """The indices of `lines` in the ratchet history, found by content wherever it sits: each maximal run of
+    consecutive lines opening with SHAPE_ENTRY_INDENT that holds a line whose text opens with "raised" in
+    any letter case (SHAPE_ENTRY_START_RE)."""
+    found, idx = set(), 0
+    while idx < len(lines):
+        end = idx
+        while end < len(lines) and lines[end].startswith(SHAPE_ENTRY_INDENT):
+            end += 1
+        if end == idx:
+            idx += 1
+            continue
+        if any(SHAPE_ENTRY_START_RE.match(lines[k][len(SHAPE_ENTRY_INDENT):].lstrip(" ")) for k in range(idx, end)):
+            found.update(range(idx, end))
+        idx = end
+    return found
+
+
+def _comment_text(line):
+    """`line` without its LF, its leading `#` characters and surrounding blanks: the text a moved copy of a
+    history line keeps whatever its indentation."""
+    return line.rstrip("\n").lstrip("#").strip(" ")
+
+
+def _fold_points(base, history):
+    """{base index just past an entry's last line: the estimate E} for each history entry of `base` (the
+    lines of `history` from an opening `raised` line to the line before the next one or its run's end)
+    whose text invites a measured fold cost (SHAPE_FOLD_INVITE_RE)."""
+    entries, previous = [], None
+    for idx in sorted(history):
+        text = base[idx][len(SHAPE_ENTRY_INDENT):].strip(" \n")
+        if previous is None or idx != previous + 1:
+            entries.append(None)
+        if SHAPE_ENTRY_START_RE.match(text):
+            entries.append([])
+        if entries[-1] is not None:
+            entries[-1].append((idx, text))
+        previous = idx
+    points = {}
+    for entry in entries:
+        if entry:
+            invite = SHAPE_FOLD_INVITE_RE.search(" ".join(text for _, text in entry))
+            if invite is not None:
+                points[entry[-1][0] + 1] = invite.group(1)
+    return points
+
+
+def _fold_cost(line, estimate):
+    """Whether `line` is an entry line recording a measured fold cost against the estimate `estimate`."""
+    shape = SHAPE_ENTRY_LINE_RE.fullmatch(line)
+    if shape is None or len(shape.group(1)) != SHAPE_ENTRY_INDENT_WIDTH:
+        return False
+    match = SHAPE_FOLD_COST_RE.fullmatch(shape.group(2))
+    return match is not None and match.group(1) == estimate
+
+
 def _entry_findings(block, first, old, new, floor, today):
     """Findings for the lines `block` appended directly above the `#   ceiling` line (the first at 1-based
     head line `first`) while the ratchet moves `old` -> `new`. A raise needs at least one entry and every
@@ -1546,10 +1618,16 @@ def _entry_findings(block, first, old, new, floor, today):
 def _line_report(ops, base, head, base_from, head_from):
     """A finding for each line of each non-equal difflib opcode in `ops`, which compare base lines from
     index `base_from` with head lines from index `head_from`: a replacement of as many lines pairs them
-    one for one; otherwise each head line is reported added and each base line removed."""
+    one for one; a "kept" opcode (a base line whose text stays in the file but is now read as part of a
+    new entry) pairs them one for one as kept; otherwise each head line is reported added and each base
+    line removed."""
     report = []
     for tag, i1, i2, j1, j2 in ops:
         if tag == "equal":
+            continue
+        if tag == "kept":
+            report += ["base line {}: kept, but now read as part of the new entry at line {}: {!r}".format(
+                base_from + i + 1, head_from + j + 1, base[base_from + i]) for i, j in zip(range(i1, i2), range(j1, j2))]
             continue
         if tag == "replace" and i2 - i1 == j2 - j1:
             report += ["line {}: changed: base {!r} -> {!r}".format(head_from + j + 1, base[base_from + i],
@@ -1577,7 +1655,10 @@ def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
     the `#   ceiling` line, whatever their text, are the new entries (_entry_findings): the block opens at
     the first of them whatever the ratchet direction and whether or not the entries are valid, so every
     added line there is validated as an entry and none is a declarable change.
-    The base lines the entries displace are reported removed. Every
+    The base lines the entries displace are reported removed, or kept where their text stays as a line of
+    a new entry. A history line (_history_lines) moved, copied or edited away from that run is a finding
+    no declaration waives, and a line recording a measured fold cost appended to an old entry that invites
+    it is an added line, not an entry (_fold_points, _fold_cost). Every
     other changed line is a finding naming the line (_line_report), unless a declaration bound to these
     exact base and head bytes covers it; a declaration never waives the entry rules. A candidate without
     exactly one `#   ceiling` line is compared whole and has no entry block. A candidate without exactly
@@ -1614,8 +1695,21 @@ def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
         # `#   ceiling` line, whatever the ratchet direction and whether or not _entry_findings accepts it: the
         # boundary never depends on validation, so every added line there is validated as part of an entry,
         # which no declaration waives. A declaration waives only the base lines the block displaces (reported
-        # removed below); an edit of an old history line is therefore refused here.
-        added = {j for op in above if op[0] != "equal" for j in range(op[3], op[4])}
+        # removed below); an edit of an old history line is therefore refused here. The one exception is a
+        # pure insertion directly after the last line of an old entry that invites a measured fold cost
+        # (_fold_points), every inserted line recording one against that entry's estimate (_fold_cost):
+        # those lines are not added lines of the run, so they open no block, and are reported as added
+        # lines, which only a declaration waives.
+        below = _opcodes(expected[ceiling_at:], head[at:])
+        matched = {}
+        for ops, base_at, head_at in ((above, 0, 0), (below, ceiling_at, at)):
+            for op, a1, a2, b1, b2 in ops:
+                if op == "equal":
+                    matched.update(zip(range(head_at + b1, head_at + b2), range(base_at + a1, base_at + a2)))
+        points = _fold_points(base, _history_lines(base[:ceiling_at]))
+        folds = {j for op, a1, a2, b1, b2 in above if op == "insert" and a1 in points
+                 and all(_fold_cost(head[k], points[a1]) for k in range(b1, b2)) for j in range(b1, b2)}
+        added = {j for op in above if op[0] != "equal" for j in range(op[3], op[4])} - folds
         run = at
         while run > 0 and (run - 1 in added or head[run - 1].startswith("#" + " " * SHAPE_ENTRY_INDENT_WIDTH)):
             run -= 1
@@ -1623,20 +1717,43 @@ def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
         start = fresh[0] if fresh else at
         if start < at:
             block = head[start:at]
-            # Every base line the block displaces is reported removed; head lines above it as before.
+            # Every base line the block displaces is reported removed, or kept where its text stays in the
+            # block as a line of the new entry; head lines above it as before.
             cut = []
             for op, a1, a2, b1, b2 in above:
                 if b2 <= start:
                     cut.append((op, a1, a2, b1, b2))
                 elif b1 < start and op == "equal":
-                    cut += [("equal", a1, a1 + start - b1, b1, start), ("delete", a1 + start - b1, a2, start, start)]
+                    cut += [("equal", a1, a1 + start - b1, b1, start), ("kept", a1 + start - b1, a2, start, b2)]
                 elif b1 < start:
                     cut.append(("replace" if a2 > a1 else "insert", a1, a2, b1, start))
+                elif op == "equal":
+                    cut.append(("kept", a1, a2, b1, b2))
                 elif a2 > a1:
                     cut.append(("delete", a1, a2, start, start))
             above = cut
+        # The history found by content (_history_lines), wherever it sits, may change only in the run
+        # directly above the `#   ceiling` line. A head history line outside that run that the base does not
+        # match (a moved, copied or edited history line), or that matches a base line of the base's own run
+        # (a history line moved away from the ceiling line), and a line outside the run that the base does
+        # not match whose text is a base history line's (a moved copy re-indented out of the history), is a
+        # finding no declaration waives. A base whose history already sits elsewhere still compares
+        # unchanged, but an edit there is refused.
+        base_run = ceiling_at
+        while base_run > 0 and base[base_run - 1].startswith(SHAPE_ENTRY_INDENT):
+            base_run -= 1
+        history, base_history = _history_lines(head), _history_lines(base)
+        texts = {_comment_text(base[i]) for i in base_history} - {""}
+        for j in range(len(head)):
+            if run <= j < at:
+                continue
+            if (j in history and (j not in matched or base_run <= matched[j] < ceiling_at)) or (
+                    j not in matched and _comment_text(head[j]) in texts):
+                findings.append("line {}: a ratchet history line sits outside the history run directly above the "
+                                "`{}` line (moved, copied or edited away from it), which no declaration "
+                                "waives: {!r}".format(j + 1, SHAPE_CEILING_ANCHOR.strip(), head[j]))
         changed = (_line_report(above, base, head, 0, 0)
-                   + _line_report(_opcodes(expected[ceiling_at:], head[at:]), base, head, ceiling_at, at))
+                   + _line_report(below, base, head, ceiling_at, at))
     else:
         changed = _line_report(_opcodes(expected, head), base, head, 0, 0)
     if block is None:
@@ -3351,11 +3468,13 @@ def self_test(report_path=None):
         check("shape/removed-line-reported-1", shape(base_shape, removed), (1, ["base 6"]))
         check("shape/added-line-reported-1", shape(base_shape, added), (1, ["2"]))
         # An entry placed away from the ceiling line is an added line, never read as the entry, also when a
-        # declaration covers it.
+        # declaration covers it. Changed in round 6: being history by its content, the misplaced entry is
+        # also a history line away from the run above the ceiling line, which the declaration does not
+        # waive, so the declared comparison now names line 3 as well as lacking an entry.
         misplaced = missing.replace("#\n#   ratchet", "#\n" + entry + "#   ratchet")
         check("shape/declared-misplaced-entry-1",
               (shape(base_shape, misplaced), shape(base_shape, misplaced, declare(base_shape, misplaced))),
-              ((1, ["3"]), (1, [])))
+              ((1, ["3"]), (1, ["3"])))
         # Changed from shape/declared-edit-before-entry-0 (which expected the declared edit to pass): an edit
         # of the last old line before an appended entry is an added line in the history run, so it opens the
         # entry block and is validated as an entry (`Raised 90 -> 100` does not join the base value, line 4),
@@ -3464,6 +3583,60 @@ def self_test(report_path=None):
               (shape(repeat_base, two_entry_swap), shape(repeat_base, two_entry_swap,
                                                          declare(repeat_base, two_entry_swap))),
               ((1, ["base 6"]), (0, [])))
+        # Round 6, MEDIUM 1: the history is found by its content wherever it sits. Moving it below the
+        # `#   ceiling` line (unchanged, edited, or beside a raise) or re-indenting a moved copy out of it is a
+        # finding no declaration waives (the moved line); a base whose history already sits below the line
+        # compares unchanged, but an edit of that history there is refused.
+        def counting(text):
+            return text.replace("counting rule", "counting  rule")
+
+        moved_below = base_shape.replace(old_entry, "").replace(ceiling, ceiling + old_entry)
+        moved_heads = [moved_below, counting(moved_below), raised(moved_below),
+                       base_shape.replace(old_entry, "").replace(ceiling, ceiling + "#   " + old_entry[len(indent):])]
+        check("shape/declared-history-moved-1",
+              [shape(base_shape, head, declare(base_shape, head)) for head in moved_heads],
+              [(1, ["5"]), (1, ["5"]), (1, ["6"]), (1, ["5"])])
+        moved_edit = counting(raised(moved_below))
+        check("shape/declared-moved-history-edit-1",
+              (shape(moved_below, moved_edit, declare(moved_below, moved_edit)), shape(moved_below, moved_below)),
+              ((1, ["6"]), (0, [])))
+        # Round 6, MEDIUM 2: the one edit of an old entry a declaration excuses is the one the budget source
+        # invites: a line appended directly after the last line of an entry reading "record its measured
+        # cost here against the E-unit estimate", recording a measured fold cost against that E (beside a
+        # raise too). Undeclared it is an added line (line 6). Another estimate, other text, the line placed
+        # inside the entry or after an entry that does not invite it, or the invitation edited beside it,
+        # stays refused with a declaration.
+        invite = (entry_line("Raised 80 -> 90 on 2026-09-01 with 59 units estimated for a queued fold; when it")
+                  + entry_line("lands, record its measured cost here against the 59-unit estimate."))
+        fold_base = base_shape.replace(old_entry, invite + old_entry)
+        fold_line = entry_line("Queued fold a.1 measured 52 units against the 59-unit estimate.")
+        fold_head = fold_base.replace(old_entry, fold_line + old_entry)
+        fold_raised = raised(fold_head)
+        check("shape/declared-fold-cost-0",
+              (shape(fold_base, fold_head), shape(fold_base, fold_head, declare(fold_base, fold_head)),
+               shape(fold_base, fold_raised, declare(fold_base, fold_raised))),
+              ((1, ["6"]), (0, []), (0, [])))
+        fold_others = [fold_base.replace(old_entry, fold_line.replace("59-unit", "60-unit") + old_entry),
+                       fold_base.replace(old_entry, entry_line("The queued fold measured 52 units.") + old_entry),
+                       fold_base.replace(invite, invite.replace(" when it\n", " when it\n" + fold_line)),
+                       fold_base.replace(ceiling, fold_line + ceiling),
+                       fold_head.replace("against the 59-unit estimate.\n#", "against the 58-unit estimate.\n#", 1)]
+        check("shape/declared-fold-cost-other-1",
+              [shape(fold_base, head, declare(fold_base, head)) for head in fold_others],
+              [(1, ["6"]), (1, ["6"]), (1, ["5"]), (1, ["7"]), (1, ["5"])])
+        # Round 6, MINOR 3: a base line whose text stays in the file but is now read as part of a new entry
+        # is reported kept, not removed; a base line that left the file is reported removed.
+        def base_reports(base_text, head_text, module=None):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                (module.shape_exit if module is not None else shape_exit)(
+                    "fixture", base_text.encode("utf-8"), head_text.encode("utf-8"), None, shape_today)
+            return re.findall(r"^  - (base line [0-9]+: [a-z]+)", out.getvalue(), re.M)
+
+        check("shape/kept-line-not-removed",
+              [base_reports(repeat_base, head) for head in repeated],
+              [["base line 5: removed", "base line 6: kept"], ["base line 5: kept", "base line 6: removed"],
+               ["base line 5: removed", "base line 6: kept"]])
         check("shape/declaration-blank-reason-2",
               (shape(base_shape, version_bump, declare(base_shape, version_bump, reason="   ")),
                shape(base_shape, version_bump, declare(base_shape, version_bump) + 'extra = "x"\n')),
@@ -3640,8 +3813,15 @@ def self_test(report_path=None):
         # The previous discovery restored (an exact `Raised OLD -> ` opener, or the growth of a final
         # replacement): every added line beside a declared deletion with the ratchet unchanged or lowered is
         # waived again, and the valid raise beside it is still accepted.
+        # Changed in round 6: the target's first line now subtracts the measured fold-cost lines (folds),
+        # which the restored discovery below does not use. The mutant also removes the round 6 history check
+        # (history_off): with the shorter run the restored discovery reads, the old history above a
+        # non-indented free-text line sits away from that run, which that check refuses on its own, so
+        # without removing it the row would no longer isolate the discovery.
+        history_off = ("        for j in range(len(head)):\n            if run <= j < at:\n",
+                       "        for j in ():\n            if run <= j < at:\n")
         by_opener = _mutant(tmp, "".join((
-            "        added = {j for op in above if op[0] != \"equal\" for j in range(op[3], op[4])}\n",
+            "        added = {j for op in above if op[0] != \"equal\" for j in range(op[3], op[4])} - folds\n",
             "        run = at\n",
             "        while run > 0 and (run - 1 in added or head[run - 1].startswith(\"#\" + \" \" * SHAPE_ENTRY_INDENT_WIDTH)):\n",
             "            run -= 1\n",
@@ -3661,12 +3841,36 @@ def self_test(report_path=None):
             "        if final and j2 - j1 > i2 - i1:\n",
             "            starts.append(j1 + (i2 - i1))\n",
             "        if starts:\n",
-            "            start = min(starts)\n")))
+            "            start = min(starts)\n")), *history_off)
         check("revert/shape-declared-deletion-added-line-red",
               ([shape(repeat_base, head, declare(repeat_base, head), module=by_opener)[0]
                 for key in sorted(added_heads) for head in added_heads[key]],
                shape(repeat_base, valid_swap, declare(repeat_base, valid_swap), module=by_opener)[0]),
               ([0] * 8, 0))
+        # Round 6: each fix removed in a mutant turns its row: without the content-defined history check
+        # every declared move and the declared edit of moved history pass; without the fold allowance the
+        # declared fold line is refused, and without the estimate binding a fold line naming another
+        # estimate passes; with displaced lines that stay in the file rewritten as deletions again, they are
+        # reported removed.
+        no_history = _mutant(tmp, *history_off)
+        check("revert/shape-history-moved-red",
+              ([shape(base_shape, head, declare(base_shape, head), module=no_history)[0] for head in moved_heads],
+               shape(moved_below, moved_edit, declare(moved_below, moved_edit), module=no_history)[0]),
+              ([0] * 4, 0))
+        no_fold = _mutant(tmp, '        folds = {j for op, a1, a2, b1, b2 in above if op == "insert" and a1 in points\n',
+                          '        folds = set() and {j for op, a1, a2, b1, b2 in above if op == "insert" and a1 in points\n')
+        check("revert/shape-fold-cost-red",
+              [shape(fold_base, head, declare(fold_base, head), module=no_fold)[0] for head in (fold_head, fold_raised)],
+              [1, 1])
+        check("revert/shape-fold-cost-estimate-red",
+              shape(fold_base, fold_others[0], declare(fold_base, fold_others[0]), module=_mutant(
+                  tmp, "    return match is not None and match.group(1) == estimate\n",
+                  "    return match is not None\n"))[0], 0)
+        as_removed = _mutant(tmp, '("kept", a1 + start - b1, a2, start, b2)', '("delete", a1 + start - b1, a2, start, start)',
+                             'cut.append(("kept", a1, a2, b1, b2))', 'cut.append(("delete", a1, a2, start, start))')
+        check("revert/shape-kept-line-red",
+              [base_reports(repeat_base, head, as_removed) for head in repeated],
+              [["base line 5: removed", "base line 6: removed"]] * 3)
         check("revert/shape-declaration-reason-red",
               shape(base_shape, version_bump, declare(base_shape, version_bump, reason="   "), module=_mutant(
                   tmp, '    if not isinstance(data["reason"], str) or not data["reason"].strip():',
