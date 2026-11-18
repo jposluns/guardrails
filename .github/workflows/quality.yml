@@ -451,7 +451,8 @@ jobs:
       # is cannot-evaluate in the gate (exit 2), never a pass, and no branch runs the gate without
       # --base. A push whose before SHA is missing or all zero (the ${PUSH_BEFORE//0/} test is empty
       # for both) names no commit before the range, so the step prints why and fails closed (exit 1)
-      # before the gate runs.
+      # before the gate runs. The run block below is pinned verbatim as BASELINE_BASE_RUN_BLOCK in
+      # tools/check_ci_parity.py (any other text is a parity finding), so change both together.
       - name: Site baseline pin
         shell: bash
         env:

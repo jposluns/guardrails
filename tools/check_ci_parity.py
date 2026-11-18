@@ -335,8 +335,9 @@ leg's exit):
      stale or reversed, every mandatory member is present on both sides, and every
      checkout step sets persist-credentials: false
   1  an evaluated parity finding, stale or reversed exception, missing mandatory
-     member, required-status, trigger, relocation, lane or checkout-credentials
-     finding
+     member, required-status, trigger, relocation, lane, baseline-base-pin (the
+     quality.yml "Site baseline pin" run block departing from BASELINE_BASE_RUN_BLOCK)
+     or checkout-credentials finding
   2  cannot-evaluate, including an unreadable input, malformed control input, empty
      extraction, unsupported shell or YAML shape, unresolved command value, hidden
      action, circular runner invocation, shadow-scan discrepancy, or a workflow
@@ -4099,6 +4100,7 @@ def extract_ci(text, source=CI_SOURCE):
     findings.extend(_trigger_findings(lines, members, source, diagnostics))
     findings.extend(_relocation_findings(members, source))
     findings.extend(_step_shell_findings(steps))
+    findings.extend(_baseline_base_pin_findings(text, source))
     diagnostics.extend(_shadow_check(text, source, origins))
     return Extraction(
         frozenset(members),
@@ -5873,6 +5875,12 @@ def baseline_probe_problems(text):
 # BASELINE_BASE_SCENARIOS row (vector 48). The stubs hold no history, so the multi-commit
 # push row is a before SHA that is not HEAD^ (and holds zero digits, so only an all-zero
 # SHA reads as none): it requires the gate's base to be that exact SHA, never HEAD^.
+# The stubbed run sets no runner variable (GITHUB_*, RUNNER_*, CI), so it proves the
+# behaviour of a fixed text only: the run block is pinned verbatim as
+# BASELINE_BASE_RUN_BLOCK, which vector 48 runs once per scenario, and the live parity
+# run (_baseline_base_pin_findings) reports any departure from it as a
+# baseline-base-pin finding (exit 1). The step's comment in quality.yml names the
+# constant, so a reviewed change updates both together.
 BASELINE_BASE_STEP_NAME = "      - name: Site baseline pin"
 BASELINE_BASE_STEP_HEADER = (
     "        " + STEP_SHELL_LINE,
@@ -5882,22 +5890,49 @@ BASELINE_BASE_STEP_HEADER = (
     "        run: |",
 )
 BASELINE_BASE_RUN_INDENT = "          "
+# The reviewed run block, dedented by BASELINE_BASE_RUN_INDENT as
+# _baseline_base_selection_block returns it.
+BASELINE_BASE_RUN_BLOCK = (
+    'set -euo pipefail\n'
+    'if [ "$EVENT_NAME" = "pull_request" ]; then\n'
+    '  python3 -I -B tools/check_baseline_pin.py --base "HEAD^1"\n'
+    'else\n'
+    '  if [ "$EVENT_NAME" = "push" ]; then\n'
+    '    if [ -z "${PUSH_BEFORE//0/}" ]; then\n'
+    '      echo "CANNOT EVALUATE: the push event names no commit before the pushed'
+    ' range (its before SHA is missing or all zero), so the baseline-pin'
+    ' base-coupling leg has no base; fail closed"\n'
+    '      exit 1\n'
+    '    fi\n'
+    '    python3 -I -B tools/check_baseline_pin.py --base "$PUSH_BEFORE"\n'
+    '  else\n'
+    '    python3 -I -B tools/check_baseline_pin.py --base "HEAD^"\n'
+    '  fi\n'
+    'fi\n'
+)
+# The gate's script and flag as the step spells them; each occurrence in quality.yml
+# must be one of the pinned block's.
+BASELINE_BASE_GATE_TEXT = "tools/check_baseline_pin.py --base"
 BASELINE_BASE_GATE = "python3 -I -B tools/check_baseline_pin.py --base "
 BASELINE_BASE_BEFORE = "1f0e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 BASELINE_BASE_CANNOT = (
     "CANNOT EVALUATE: the push event names no commit before the pushed range")
 # (label, EVENT_NAME, PUSH_BEFORE, the one gate call expected or None, exit status
-# expected). None means the step prints one BASELINE_BASE_CANNOT line and fails closed
-# before any gate runs.
+# expected, whether the gate stub fails with exit 3). None means the step prints one
+# BASELINE_BASE_CANNOT line and fails closed before any gate runs. The failing-gate row
+# requires the step to propagate the gate's exit 3 after exactly its one gate call, so
+# a fallback gate call or a masked status is caught.
 BASELINE_BASE_SCENARIOS = (
-    ("pull request", "pull_request", "", BASELINE_BASE_GATE + "HEAD^1", 0),
+    ("pull request", "pull_request", "", BASELINE_BASE_GATE + "HEAD^1", 0, False),
     ("pull request carrying a before SHA", "pull_request", BASELINE_BASE_BEFORE,
-     BASELINE_BASE_GATE + "HEAD^1", 0),
+     BASELINE_BASE_GATE + "HEAD^1", 0, False),
     ("multi-commit push", "push", BASELINE_BASE_BEFORE,
-     BASELINE_BASE_GATE + BASELINE_BASE_BEFORE, 0),
-    ("manual run", "workflow_dispatch", "", BASELINE_BASE_GATE + "HEAD^", 0),
-    ("push with a missing before SHA", "push", "", None, 1),
-    ("push with an all-zero before SHA", "push", "0" * 40, None, 1),
+     BASELINE_BASE_GATE + BASELINE_BASE_BEFORE, 0, False),
+    ("multi-commit push whose gate fails", "push", BASELINE_BASE_BEFORE,
+     BASELINE_BASE_GATE + BASELINE_BASE_BEFORE, 3, True),
+    ("manual run", "workflow_dispatch", "", BASELINE_BASE_GATE + "HEAD^", 0, False),
+    ("push with a missing before SHA", "push", "", None, 1, False),
+    ("push with an all-zero before SHA", "push", "0" * 40, None, 1, False),
 )
 
 
@@ -5931,16 +5966,60 @@ def _baseline_base_selection_block(text):
     return tuple(header), "\n".join(body) + "\n"
 
 
+def _baseline_base_pin_problem(text):
+    """Return why the CI baseline-pin step of quality.yml text departs from the pinned
+    BASELINE_BASE_RUN_BLOCK, or None when it does not: the step must occur exactly once
+    with a run: | line, its run block must be BASELINE_BASE_RUN_BLOCK exactly, and every
+    BASELINE_BASE_GATE_TEXT occurrence in the text must be one of that block's."""
+    header, block = _baseline_base_selection_block(text)
+    if header is None:
+        return block
+    if block != BASELINE_BASE_RUN_BLOCK:
+        got, want = block.split("\n"), BASELINE_BASE_RUN_BLOCK.split("\n")
+        at = next((index for index, (left, right) in enumerate(zip(got, want))
+                   if left != right), min(len(got), len(want)))
+        return ("its run block departs from the pinned BASELINE_BASE_RUN_BLOCK at "
+                "block line {}: got {!r}, expected {!r}".format(
+                    at + 1, got[at] if at < len(got) else None,
+                    want[at] if at < len(want) else None))
+    if text.count(BASELINE_BASE_GATE_TEXT) != BASELINE_BASE_RUN_BLOCK.count(
+            BASELINE_BASE_GATE_TEXT):
+        return ("{!r} occurs {} times in the workflow, {} of them in the pinned run "
+                "block; it runs nowhere else".format(
+                    BASELINE_BASE_GATE_TEXT, text.count(BASELINE_BASE_GATE_TEXT),
+                    BASELINE_BASE_RUN_BLOCK.count(BASELINE_BASE_GATE_TEXT)))
+    return None
+
+
+def _baseline_base_pin_findings(text, source):
+    """The live parity leg of the baseline-pin base selection: in quality.yml text that
+    names the step or runs the gate with --base, a departure from the pinned run block
+    (_baseline_base_pin_problem) is a baseline-base-pin finding. The stubbed run of
+    vector 48 sets no runner variable, so only this pin holds an edit keyed on one (an
+    if [ -n "${GITHUB_ACTIONS:-}" ] rebinding PUSH_BEFORE or EVENT_NAME). Other
+    sources, and quality.yml text with neither, are not read here."""
+    if source != CI_SOURCE or (BASELINE_BASE_STEP_NAME not in text
+                               and BASELINE_BASE_GATE_TEXT not in text):
+        return []
+    problem = _baseline_base_pin_problem(text)
+    if problem is None:
+        return []
+    return [Finding(
+        "baseline-base-pin",
+        BASELINE_BASE_STEP_NAME.strip()[len("- name: "):],
+        "the step {!r} of {}: {}; only the pinned text is known to select each "
+        "event's reviewed base, so update the step and the constant together".format(
+            BASELINE_BASE_STEP_NAME.strip(), source, problem),
+    )]
+
+
 def baseline_base_selection_problems(text):
     """Run the CI baseline-pin step of workflow text once per BASELINE_BASE_SCENARIOS
     row; return the problems, empty when every event selects its reviewed base. The
     step header must be BASELINE_BASE_STEP_HEADER exactly (the env the stubs stand in
-    for); each row's run must record exactly its expected gate call (no other python3
-    call) and exit with its expected status. A row that expects a gate call must print
-    no CANNOT EVALUATE line at all; a row that expects none must print exactly one,
-    and it must start with BASELINE_BASE_CANNOT."""
-    import tempfile
-
+    for) and its run block BASELINE_BASE_RUN_BLOCK exactly (_baseline_base_pin_problem);
+    the run block read from the text is run either way, through
+    _baseline_base_run_problems."""
     header, block = _baseline_base_selection_block(text)
     if header is None:
         return ["step: " + block]
@@ -5948,17 +6027,35 @@ def baseline_base_selection_problems(text):
     if header != BASELINE_BASE_STEP_HEADER:
         problems.append("step header {!r}, expected {!r}".format(
             header, BASELINE_BASE_STEP_HEADER))
+    pin = _baseline_base_pin_problem(text)
+    if pin is not None:
+        problems.append("pin: " + pin)
+    return problems + _baseline_base_run_problems(block)
+
+
+def _baseline_base_run_problems(block):
+    """Run the run block text once per BASELINE_BASE_SCENARIOS row; return the problems.
+    Each row's run must record exactly its expected gate call (no other python3 call)
+    and exit with its expected status. A row that expects a gate call must print no
+    CANNOT EVALUATE line at all; a row that expects none must print exactly one, and it
+    must start with BASELINE_BASE_CANNOT."""
+    import tempfile
+
+    problems = []
     with tempfile.TemporaryDirectory(prefix="ci-parity-base-") as shared:
         stubs = _prepare_stubs(Path(shared))
         try:
-            for label, event, before, want_call, want_rc in BASELINE_BASE_SCENARIOS:
+            for (label, event, before, want_call, want_rc,
+                 gate_fails) in BASELINE_BASE_SCENARIOS:
                 # The Actions shell: bash runs the step as bash -e -o pipefail; the
-                # env: bindings arrive as exported variables.
+                # env: bindings arrive as exported variables. The stub matches its
+                # arguments, the call without the leading "python3 ".
+                fail = want_call[len("python3 "):] if gate_fails else ""
                 script = ("set -eo pipefail\n"
                           "export EVENT_NAME=" + shlex.quote(event) + "\n"
                           "export PUSH_BEFORE=" + shlex.quote(before) + "\n" + block)
                 try:
-                    rc, lines, calls = _run_runner_copy(script, stubs)
+                    rc, lines, calls = _run_runner_copy(script, stubs, fail_command=fail)
                 except Exception as exc:  # no bash, a scratch-tree error, or a timeout
                     problems.append("{}: step copy did not complete: {!r}".format(
                         label, exc))
@@ -11107,8 +11204,19 @@ def self_test():
     # cannot-evaluate diagnostic (with a wording other than BASELINE_BASE_CANNOT) before
     # its gate call. Before this vector, parity passed the push-disabled mutant with no
     # diagnostic; before the successful rows required an empty CANNOT EVALUATE list,
-    # the extra-diagnostic mutant passed too.
+    # the extra-diagnostic mutant passed too. The pinned BASELINE_BASE_RUN_BLOCK itself
+    # is run once per scenario, and the live step must be exactly it. The failing-gate
+    # row (the push gate exits 3) requires that status propagated after one gate call.
+    # S1 and S2 are runner-only rebindings (keyed on GITHUB_ACTIONS, which the stubs
+    # never set) of PUSH_BEFORE and EVENT_NAME: the stubbed rows cannot see them, so
+    # each must be a baseline-base-pin finding (exit 1) in live parity (run_paths on the
+    # live files, quality.yml replaced by the mutant), and exit 0 there with
+    # _baseline_base_pin_findings removed, the fail-without-the-change leg.
     count += 1
+    from unittest.mock import patch
+    pinned_run = _baseline_base_run_problems(BASELINE_BASE_RUN_BLOCK)
+    if pinned_run:
+        failures.append("48 pinned run block: {}".format(pinned_run))
     base_ci, base_diagnostic = read_runner_text(CI_PATH, CI_SOURCE)
     if base_diagnostic is not None:
         failures.append("48 cannot read {}: {!r}".format(CI_SOURCE, base_diagnostic))
@@ -11116,6 +11224,47 @@ def self_test():
         live_base = baseline_base_selection_problems(base_ci)
         if live_base:
             failures.append("48 live workflow: {}".format(live_base))
+        runner_mutants = (
+            ("S1 (PUSH_BEFORE rebound to HEAD^ when GITHUB_ACTIONS is set)",
+             '              python3 -I -B tools/check_baseline_pin.py --base '
+             '"$PUSH_BEFORE"\n',
+             '              if [ -n "${GITHUB_ACTIONS:-}" ]; then\n'
+             '                PUSH_BEFORE=HEAD^\n'
+             '              fi\n'
+             '              python3 -I -B tools/check_baseline_pin.py --base '
+             '"$PUSH_BEFORE"\n'),
+            ("S2 (EVENT_NAME rebound to pull_request when GITHUB_ACTIONS is set)",
+             '          set -euo pipefail\n'
+             '          if [ "$EVENT_NAME" = "pull_request" ]; then\n'
+             '            python3 -I -B tools/check_baseline_pin.py --base "HEAD^1"\n',
+             '          set -euo pipefail\n'
+             '          if [ -n "${GITHUB_ACTIONS:-}" ]; then\n'
+             '            EVENT_NAME=pull_request\n'
+             '          fi\n'
+             '          if [ "$EVENT_NAME" = "pull_request" ]; then\n'
+             '            python3 -I -B tools/check_baseline_pin.py --base "HEAD^1"\n'),
+        )
+        for label, old, new in runner_mutants:
+            if base_ci.count(old) != 1:
+                failures.append("48 fixture drift: " + label)
+                continue
+            mutant = base_ci.replace(old, new, 1).encode("ascii")
+
+            def mutant_reader(path, mutant=mutant):
+                return mutant if path == CI_PATH else Path.read_bytes(path)
+
+            report = run_paths(LOCAL_PATH, CI_PATH, reader=mutant_reader)
+            if report.code != 1 or not any(
+                    finding.kind == "baseline-base-pin" for finding in report.findings):
+                failures.append("48 live parity passed {}: code {}\n{}".format(
+                    label, report.code, render(report)))
+            with patch.object(sys.modules[__name__], "_baseline_base_pin_findings",
+                              lambda text, source: []):
+                unpinned = run_paths(LOCAL_PATH, CI_PATH, reader=mutant_reader)
+            if unpinned.code != 0:
+                failures.append("48 {} is not in the parity grammar without the pin: "
+                                "code {}\n{}".format(label, unpinned.code,
+                                                     render(unpinned)))
         step_start = base_ci.find("\n" + BASELINE_BASE_STEP_NAME + "\n")
         step_end = base_ci.find("\n      - ", step_start + 1)
         base_mutants = (
