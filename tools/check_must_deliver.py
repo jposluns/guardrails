@@ -710,8 +710,8 @@ def main():
 #       mutant accepting it hands it to git as an option and fails for another reason);
 #   T27 the base lists ruleaa and HEAD drops it: --base <base id> is exit 1; with a ref
 #       refs/remotes/<base id> planted at HEAD, --base <base id> is exit 2 naming it ambiguous (a mutant
-#       looking a full object id up under refs/remotes/ reads HEAD's list and passes; the round 4 rule,
-#       reading the id as that commit, is exit 1 and fails too);
+#       looking a full object id up under refs/remotes/ reads HEAD's list and passes; a rule reading the
+#       id as that commit and ignoring the planted ref is exit 1 and fails too);
 #   T28 refs/remotes/origin/main (and origin/HEAD) is the base listing ruleaa under a configured remote
 #       origin, and HEAD drops it: --base origin/main~0 is exit 1 unshadowed; with a tag origin at HEAD,
 #       --base origin and origin~0, outside the grammar, are exit 2 naming the accepted forms (a mutant
@@ -747,11 +747,11 @@ def main():
 #       parentless commit that drops ruleaa as their parent: with no --base and with --base HEAD^, the
 #       base is still read as committed and the drop is exit 1 (a mutant that leaves grafts on reads
 #       the grafted commit as the merge base or HEAD^ and passes);
-#   T36 a '{' in the leading name (round 6 F1-r6a): with refs/remotes/<name>/HEAD planted at HEAD, which
+#   T36 a '{' in the leading name: with refs/remotes/<name>/HEAD planted at HEAD, which
 #       drops ruleaa, a{b~0 and x{-0-g<abbreviation>~0 are each exit 2 naming the accepted forms (a mutant
 #       without the grammar lets the brace hide the ~ from the leading-name checks, so git takes the
 #       planted ref and the gate passes);
-#   T37 a remote-tracking name git check-ref-format rejects (round 6 F1-r6b): origin is configured, and
+#   T37 a remote-tracking name git check-ref-format rejects is refused: origin is configured, and
 #       with refs/remotes/origin/x./HEAD planted at HEAD, which drops ruleaa, origin/x. and origin/x.~0,
 #       and with refs/remotes/refs/remotes/x./HEAD planted, refs/remotes/x. and refs/remotes/x.~0, are
 #       each exit 2 naming the check-ref-format refusal (a mutant without the grammar skips both the
@@ -761,20 +761,20 @@ def main():
 #       <id>^{commit} are each exit 2 naming the accepted forms (a mutant without the grammar reads the
 #       base and exits 1), while the accepted HEAD^, HEAD~ (N empty) and <id>~0^0 read the base and the
 #       drop is exit 1 (a grammar refusing an empty N or a mixed suffix run fails);
-#   T39 (round 7 F1-r7) origin is configured, refs/remotes/origin/main is a child of the base and both
+#   T39 origin is configured, refs/remotes/origin/main is a child of the base and both
 #       list ruleaa, HEAD drops it, and a plain file <git dir>/origin/main (a pseudo-ref, the first rule
 #       of git's short-name search) holds a child of HEAD that also drops it: origin/main~0, ^0, ~, ^,
 #       ~1, ^1 and ~0^0 each read refs/remotes/origin/main and the drop is exit 1 (a mutant handing git
 #       the short name origin/main<suffixes> reads the planted commit and passes);
-#   T40 (round 6 N2-r6) a forged commit-graph file (generation v1, checksum recomputed) gives HEAD~1 a
+#   T40 a forged commit-graph file (generation v1, checksum recomputed) gives HEAD~1 a
 #       decoy parent that drops ruleaa, a child of the base that refs/remotes/origin/main points at; plain
 #       git then reads the decoy as HEAD~2 and as the merge base: with no --base and with --base HEAD~2
 #       the base is still read as committed and the drop is exit 1 (a mutant without
 #       core.commitGraph=false reads the decoy and passes);
-#   T41 (round 7 R7-a) a remote named HEAD is configured, HEAD lists ruleaa and the working list drops
+#   T41 a remote named HEAD is configured, HEAD lists ruleaa and the working list drops
 #       it: --base HEAD and HEAD~0 read HEAD and the drop is exit 1 (a mutant judging the bare-remote
 #       name before HEAD refuses both, exit 2);
-#   T42 (round 8 R8-a) main() is driven with self_test_main and gate replaced by recorders: --self-test
+#   T42 main() is driven with self_test_main and gate replaced by recorders: --self-test
 #       mixed with --base HEAD, --base=HEAD, a second --self-test or any other argument, in either order,
 #       is exit 2 naming the unknown arguments with nothing dispatched, --base --self-test reaches the
 #       gate with the value --self-test, and the real gate refuses that value as not a ref (exit 2), while
@@ -1514,7 +1514,7 @@ def _self_test_main_isolated():
                 failures.append("T35: with a grafts file, base {!r} must be read as committed and the drop be "
                                 "exit 1, got {}\n{}".format(base, code, out))
 
-        # T36. (round 6 F1-r6a) A '{' in the leading name is outside the grammar, so a planted
+        # T36. A '{' in the leading name is outside the grammar, so a planted
         # refs/remotes/<name>/HEAD cannot stand in for the base.
         t36, base36 = ratchet_fixture("t36")
         head36 = drop_at_head(t36)
@@ -1527,7 +1527,7 @@ def _self_test_main_isolated():
                                 "got {}\n{}".format(plant36, name + "~0", code, out))
             fixture_git(t36, "update-ref", "-d", plant36)
 
-        # T37. (round 6 F1-r6b) A name written as remote-tracking whose ref git check-ref-format rejects is
+        # T37. A name written as remote-tracking whose ref git check-ref-format rejects is
         # outside the grammar, so a planted refs/remotes/<name>/HEAD cannot stand in for the base.
         t37, _base37 = ratchet_fixture("t37")
         fixture_git(t37, "remote", "add", "origin", str(tmp / "t37-nowhere"))
@@ -1557,7 +1557,7 @@ def _self_test_main_isolated():
                 failures.append("T38: --base {!r}, inside the grammar, must read the base and the drop be "
                                 "exit 1, got {}\n{}".format(base, code, out))
 
-        # T39. (round 7 F1-r7) A pseudo-ref file <git dir>/origin/main, which git's short-name search
+        # T39. A pseudo-ref file <git dir>/origin/main, which git's short-name search
         # tries first, cannot stand in for refs/remotes/origin/main leading a suffix run: git is handed
         # the object id the remote-tracking ref holds, never the short name.
         t39, base39 = ratchet_fixture("t39")
@@ -1580,7 +1580,7 @@ def _self_test_main_isolated():
                 failures.append("T39: with {} planted, --base {!r} must read refs/remotes/origin/main and the "
                                 "drop be exit 1, got {}\n{}".format(pseudo39, "origin/main" + suffix, code, out))
 
-        # T40. (round 6 N2-r6) A forged commit-graph file cannot move the base: it gives HEAD~1 a decoy
+        # T40. A forged commit-graph file cannot move the base: it gives HEAD~1 a decoy
         # parent (a child of the base that drops ruleaa, at refs/remotes/origin/main), which plain git
         # honours one commit below the tip, and the base is still read from the commit objects.
         def forge_graph_parent(graph, child, parent):
@@ -1638,7 +1638,7 @@ def _self_test_main_isolated():
                 failures.append("T40: with a forged commit-graph file, base {!r} must be read as committed and "
                                 "the drop be exit 1, got {}\n{}".format(base, code, out))
 
-        # T41. (round 7 R7-a) A remote named HEAD does not turn --base HEAD into a bare remote name.
+        # T41. A remote named HEAD does not turn --base HEAD into a bare remote name.
         t41, base41 = ratchet_fixture("t41")
         drop_at_head(t41)
         fixture_git(t41, "reset", "-q", "--soft", base41)  # HEAD lists ruleaa; the working list drops it
@@ -1649,7 +1649,7 @@ def _self_test_main_isolated():
                 failures.append("T41: with a remote named HEAD, --base {!r} must read HEAD and the drop be "
                                 "exit 1, got {}\n{}".format(base, code, out))
 
-        # T42. (round 8 R8-a) --self-test runs only when it is the whole command line: main() is driven
+        # T42. --self-test runs only when it is the whole command line: main() is driven
         # with self_test_main and gate replaced by recorders, so no nested self-test or real gate runs.
         calls42 = []
         saved42 = (globals()["self_test_main"], globals()["gate"], sys.argv)

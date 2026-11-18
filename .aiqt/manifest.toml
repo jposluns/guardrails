@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "21099159b863881476dd8251cf492ed053028da1d4a3ea5e2bff6d886a8c8220"
+tree-sha256 = "72a13c8584d5c1aa493db9930f04de3c1763c6b18ab9bf6fd03165c161b091e9"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4322,8 +4322,8 @@ sha256 = "ba8f58183c65755ae9e162ade7d35d3678ff2a77723a091eac230aca193fe24b"
 
 [[sources]]
 path = "tools/check_must_deliver.py"
-bytes = 114143
-sha256 = "e05e5b06085712b0d611d1454e9aeae007f6f051338b1e6a51e771ece178685f"
+bytes = 113979
+sha256 = "f981d36c19ef4c5d29b34ecee45775c1b5c0fed97b78fdfe475fdf23f45b3e5e"
 
 [[sources]]
 path = "tools/check_newtab.py"
