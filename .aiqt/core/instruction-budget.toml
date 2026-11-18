@@ -121,6 +121,15 @@
 #                        unchanged. That change added no history entry of its own; this entry records it. The
 #                        12 units are the margin PACK stood under the ratchet after the 2026-11-17 entry, so
 #                        PACK now equals the ratchet and no headroom remains.
+#                        Late record of the 2026-11-14 change, written on 2026-11-18: held at 136304 on
+#                        2026-11-14, not raised, when merge train 20261114a (#1171, 7045af1b) gave
+#                        gate-discipline its closing paragraph (gatdis.22, gatdis.23): measured PACK 135928 at
+#                        the base 730c039b -> 136292 (+364 units); rule files 119305 -> 119669; managed block
+#                        360 and file headers 16263 unchanged. That change added no history entry of its own;
+#                        this entry records it. Merge train 20261112b (#1133, 2bc5a08c) had earlier cut 6
+#                        units (135934 -> 135928), also with no entry, so 370 + 6 - 364 = 12 units remained of
+#                        the headroom left by the 2026-11-08 entry: the margin PACK 136292 stood under the
+#                        ratchet 136304 when the 2026-11-17 entry was made.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
