@@ -5018,10 +5018,10 @@ def _test_trkasy_no_amp(failures, tmp):
             aiqt_hooks._ORCH_RUNTIME_START_RE = pattern
     fixed = aiqt_hooks._orch_foreground_detach_lexed
 
-    def no_start_forms(command, lifts=None):
+    def no_start_forms(command, lifts=None, grouped=None):
         if "&" not in command:
             return None
-        return fixed(command, lifts)
+        return fixed(command, lifts, grouped)
     aiqt_hooks._orch_foreground_detach_lexed = no_start_forms
     try:
         for label, command in start_rows:
@@ -5032,10 +5032,10 @@ def _test_trkasy_no_amp(failures, tmp):
     finally:
         aiqt_hooks._orch_foreground_detach_lexed = fixed
 
-    def unfixed(command, lifts=None):
+    def unfixed(command, lifts=None, grouped=None):
         if "&" not in command:
             return aiqt_hooks._orch_foreground_detach_kind(command)
-        return fixed(command, lifts)
+        return fixed(command, lifts, grouped)
     aiqt_hooks._orch_foreground_detach_lexed = unfixed
     try:
         for label, command in _TRKASY_NOAMP_FLIP_ROWS:
@@ -7558,6 +7558,129 @@ def _lex_repeats_failures(count=4000, seed=20261029):
         out.append("(dl-lex-repeats-taken-red) the default lex of {!r} built {} records, not more than 200, so "
                    "the count cannot see a caller that builds one per separator".format(lines[:12] + "...",
                                                                                       default_built))
+    return out
+
+
+# Commands dl-orch-detach-lex reads beside the lexer corpora: a bare '&' after a subshell (a record with no word
+# that a lex leaving out every such record loses), runs of '&' records with no word, separator runs before
+# uncertain '#' lines with an '&' glued to the last, and a polling loop with and without a subshell around it.
+_ORCH_DETACH_LEX_TEXTS = (
+    "(sleep 1)&", "(sleep 1)& &", "a & & &", "& &", "(a) & (b) &", "a; ; ; &", "a & ; ;", "a 'b & c'",
+    "a # b &\nc", "(;;; #a\n #b&\n)", "( #a\n #b\n #c\n #d&\n)", "(;;;; #a #b #c #d&\n)", "((( #a #b&\n)))",
+    "while true; do gh run view 1; sleep 5; done &", "(while true; do gh run view 1; sleep 5; done) &",
+    "x=`echo #` &")
+
+
+def _orch_detach_lex_reference(text):
+    """(lexed, grouped) as a lex keeping every record reads text: lexed None where _lex_command raises ValueError,
+    else whether a segment ends with a bare '&' (what _orch_foreground_detach_lexed read before
+    _orch_lexed_detach), and grouped whether every reading of _lex_readings holds a segment ended by a '(' or ')'
+    separator (False where it raises)."""
+    try:
+        lexed = any(seg.sep_after == "&" for seg in aiqt_hooks._lex_command(text))
+    except ValueError:
+        return None, False
+    readings = aiqt_hooks._lex_readings(text)
+    return lexed, bool(readings) and all(any(seg.sep_after in ("(", ")") for seg in segments)
+                                         for segments in readings)
+
+
+def _orch_detach_lex_failures(tmp, count=3000, seed=20261117):
+    """(dl-orch-detach-lex) _orch_lexed_detach, which lexes in the _SKIP_EMPTY_REPEATS mode, gives what a lex
+    keeping every record gives (_orch_detach_lex_reference): the same bare-'&' answer or the same refusal, and
+    grouped exactly where every reading holds a '(' or ')' separator, on _ORCH_DETACH_LEX_TEXTS, _LEX_SKIP_TEXTS,
+    _LEX_FORK_TEXTS and `count` seeded random texts over _LEX_SKIP_ALPHABET; wherever grouped is read,
+    _orch_bg_poll_loop gives 'indeterminate', the answer orch_truncation_guard takes for it without that
+    classifier's lex (dl-orch-detach-lex-grouped). (dl-orch-detach-lex-corpus) the corpus holds a grouped and an
+    ungrouped detach, a lexed command with no bare '&' and a refused one, and (dl-orch-detach-lex-corpus-skip-all)
+    a bare '&' that a lex leaving out every record with no word and no redirect (skip_empty True) loses, so the
+    comparison discriminates. (dl-orch-detach-lex-taken) orch_truncation_guard
+    in registry scope denies a run of 200 separators before four '#' lines with an '&' glued to the last
+    (sixteen readings), builds fewer than 50 records for it (_lex_records_built), where the default lex of that
+    command builds more than 200 (dl-orch-detach-lex-taken-red), and makes no _orch_bg_poll_loop call there; on
+    a polling loop with no subshell it still makes that call and denies with the poll-loop text
+    (dl-orch-detach-lex-ungrouped)."""
+    out = []
+    rng = random.Random(seed)
+    texts = list(_ORCH_DETACH_LEX_TEXTS) + list(_LEX_SKIP_TEXTS) + list(_LEX_FORK_TEXTS)
+    for _ in range(count):
+        texts.append("".join(rng.choice(_LEX_SKIP_ALPHABET) for _ in range(rng.randint(0, 10))))
+    seen = set()
+    wrong = 0
+    grouped_wrong = 0
+    skip_all_caught = False
+    for text in texts:
+        grouped = []
+        got = (aiqt_hooks._orch_lexed_detach(text, grouped), bool(grouped))
+        want = _orch_detach_lex_reference(text)
+        seen.add(want)
+        if got != want and wrong < 3:
+            wrong += 1
+            out.append("(dl-orch-detach-lex) _orch_lexed_detach({!r}) gave (lexed, grouped) {!r}, want {!r}"
+                       .format(text, got, want))
+        if want[1] and aiqt_hooks._orch_bg_poll_loop(text) != "indeterminate" and grouped_wrong < 3:
+            grouped_wrong += 1
+            out.append("(dl-orch-detach-lex-grouped) every reading of {!r} holds a '(' or ')' separator "
+                       "but _orch_bg_poll_loop gave {!r}, not 'indeterminate'".format(
+                           text, aiqt_hooks._orch_bg_poll_loop(text)))
+        if want[0] is not None and not skip_all_caught:
+            skip_all = any(seg.sep_after == "&" for seg in aiqt_hooks._lex_command(text, skip_empty=True))
+            skip_all_caught = skip_all != want[0]
+    for need in ((True, True), (True, False), (False, False), (None, False)):
+        if need not in seen:
+            out.append("(dl-orch-detach-lex-corpus) no text reads (lexed, grouped) {!r}, so the comparison does "
+                       "not cover it".format(need))
+    if not skip_all_caught:
+        out.append("(dl-orch-detach-lex-corpus-skip-all) no text holds a bare '&' that a lex leaving out every "
+                   "record with no word and no redirect loses, so the comparison cannot see a lexer mode that "
+                   "drops it")
+    try:
+        root = _init_repo(tmp / "orch-detach-lex")
+    except (OSError, subprocess.SubprocessError) as exc:
+        out.append("(dl-orch-detach-lex-taken-cannot-evaluate) the registry-scope repository could not be "
+                   "built: {}".format(exc))
+        return out
+    (root / ".aiqt").mkdir(parents=True, exist_ok=True)
+    (root / ".aiqt" / "orchestration.json").write_text('{"version": 1}\n', encoding="utf-8")
+    saved_bg = aiqt_hooks._orch_bg_poll_loop
+    calls = []
+
+    def counted_bg(command):
+        calls.append(command)
+        return saved_bg(command)
+
+    def guard_on(command):
+        data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": str(root),
+                "tool_input": {"command": command}, "session_id": "orch-detach-lex-session",
+                "tool_use_id": "orch-detach-lex-call"}
+        del calls[:]
+        result = []
+        aiqt_hooks._orch_bg_poll_loop = counted_bg
+        try:
+            built, _empty = _lex_records_built(lambda: result.append(aiqt_hooks.orch_truncation_guard(data)))
+        finally:
+            aiqt_hooks._orch_bg_poll_loop = saved_bg
+        code, stdout_obj, _stderr = result[0]
+        reason = ((stdout_obj or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+        return _reduce_result(code, stdout_obj), built, len(calls), " ".join(str(reason).split()).lower()
+
+    lines = "(" + ";" * 200 + " #a\n #b\n #c\n #d&\n)"
+    decision, built, polls, _reason = guard_on(lines)
+    if decision != "deny" or built >= 50 or polls:
+        out.append("(dl-orch-detach-lex-taken) orch_truncation_guard on {!r} decided {}, built {} records and made "
+                   "{} _orch_bg_poll_loop call(s); want deny, fewer than 50 records and no call".format(
+                       lines[:12] + "...", decision, built, polls))
+    default_built, _empty = _lex_records_built(lambda: aiqt_hooks._lex_command(lines))
+    if default_built <= 200:
+        out.append("(dl-orch-detach-lex-taken-red) the default lex of {!r} built {} records, not more than 200, so "
+                   "the count cannot see a detector that builds one per separator".format(lines[:12] + "...",
+                                                                                          default_built))
+    loop = "while true; do gh run view 1; sleep 5; done &"
+    decision, _built, polls, reason = guard_on(loop)
+    if decision != "deny" or polls != 1 or _WAIT_LOOP_OUTRIGHT_PHRASE not in reason:
+        out.append("(dl-orch-detach-lex-ungrouped) orch_truncation_guard on {!r} decided {} with {} "
+                   "_orch_bg_poll_loop call(s); want deny with one call and the poll-loop text ({!r})".format(
+                       loop, decision, polls, _WAIT_LOOP_OUTRIGHT_PHRASE))
     return out
 
 
@@ -12205,6 +12328,7 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_lex_skip_failures())
     failures.extend(_lex_skip_floor_failures())
     failures.extend(_lex_repeats_failures())
+    failures.extend(_orch_detach_lex_failures(Path(tmp)))
     failures.extend(_lex_fork_failures())
     failures.extend(_errexit_runs_failures())
     failures.extend(_deadline_child_wait_failures(tmp))
