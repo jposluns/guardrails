@@ -75,6 +75,7 @@ def main():
         ),
         regen_hint="run tools/gen_changelog.py to regenerate",
         schema_excs=(KeyError, IndexError, TypeError),
+        prog="gen_changelog.py",
     )
 
 

@@ -29,9 +29,10 @@ plus a companion for the OTHER direction, a self-test's read of the REAL reposit
                                          under test) inherit the process environment
   caller_env_without_git() -> dict       the PRE-SCRUB environment minus every GIT_-prefixed
                                          variable: the caller's HOME / XDG_CONFIG_HOME and config
-                                         files (where safe.directory trust for the checkout lives)
-                                         are KEPT, so a read of the real repository keeps working
-                                         after the in-place scrub
+                                         files (where a caller's safe.directory trust for the
+                                         checkout lives) are KEPT, so a read of the real repository
+                                         that relies on that trust keeps working after the in-place
+                                         scrub (gen_rules' class-check read does not: see below)
 
 DISCLOSED RESIDUAL: the scrub neutralizes the ENVIRONMENT only. The system-wide config is neutralized
 only while a descendant keeps the GIT_CONFIG_NOSYSTEM pin (the pin is itself GIT_-prefixed, so a
@@ -40,7 +41,11 @@ the system-wide attributes file is not neutralized (root-owned, the git binary's
 and git itself still resolves through the ambient PATH, a trusted-toolchain concern. The in-place
 scrub also drops the caller's git TRUST configuration (a safe.directory entry in the caller's global
 config) for FIXTURE calls BY DESIGN: a fixture repo in a fresh temp directory needs no trust entry,
-but a self-test's read of the real repository does, which is what caller_env_without_git() is for.
+but a self-test's read of the real repository does. caller_env_without_git() keeps the caller's own
+entry for such a read; gen_rules' class check instead keeps git_fixture_env() for its one read of the
+real checkout (`git archive HEAD`) and passes a single command-line entry naming that checkout's
+resolved path, `git -c safe.directory=<resolved checkout path>` (gen_rules._gen_argv_head_copy,
+which refuses a resolved path git would read as a pattern), so no caller configuration is read.
 """
 import atexit
 from contextlib import contextmanager

@@ -6,8 +6,47 @@ The first-pin demonstration (tools/gen_first_pin_demo.py) DERIVES its delivered 
 that list shrinks silently when the rules grow and every byte-identity gate stays green: a rule can fall
 out of the delivered prefix with no check failing. This gate closes that gap for the rules a maintainer
 has declared must stay delivered. The list is hand-edited policy, like .aiqt/core/instruction-budget.toml:
-additions may be proposed in any PR; a removal is a reviewed change that this gate does not block (the
-schema has no field that could record an approval; see the disclosed residual below).
+additions may be proposed in any PR and stay free; a removal must be declared (see LIST RATCHET below).
+
+LIST RATCHET. The list is compared with the list at a comparison base: --base REF, or with no flag the
+merge base of HEAD and origin/main (no base that resolves is exit 2, never "nothing to compare"). The
+default is the merge base, not the origin/main tip, on purpose: it is the commit this branch forked
+from, so the comparison sees only the list changes made on this branch, and a rule added to
+origin/main after the fork is not reported as dropped by a branch that has not merged it yet.
+--base REF is a closed grammar (an allowlist that fails closed): REF is accepted only as a full 40-hex
+object id that exists, HEAD, or refs/remotes/<name> or <configured remote>/<name> where git
+check-ref-format accepts the ref (refs/remotes/<name> as written, or refs/remotes/<REF> for the
+configured-remote form), each optionally followed by a run of ~N or ^N suffixes (N digits, possibly
+empty), and every other value (an abbreviated object id, a describe form, a bare remote name, a local
+branch or tag name, remotes/origin/main, any brace, @{, : or other revision syntax) is exit 2 with a
+message naming the accepted forms, before git resolves anything. Within the grammar git is never
+handed a short name: a remote base is read as its fully qualified ref with show-ref --verify: the
+default reads exactly refs/remotes/origin/main and HEAD (show-ref --verify HEAD) and hands git
+merge-base the two object ids, and a remote-tracking --base without suffixes is read
+as exactly that ref, so a tag, a local branch or a pseudo-ref file of the same short name, which git's
+short-name search order prefers, cannot stand in for it (an absent remote-tracking ref is exit 2); a
+remote-tracking name leading a suffix run is exit 2 when that remote-tracking ref does not exist
+(origin/gone~0) or is shadowed by refs/<name>, refs/tags/<name> or refs/heads/<name> (origin/main~1
+with a tag origin/main): pass the fully qualified form (refs/remotes/origin/main~1) or a commit id
+instead; otherwise git is handed the object id that ref holds followed by the suffixes. HEAD, alone
+or leading a suffix run, is read as HEAD (show-ref --verify HEAD) before any remote name is
+considered, so a remote named HEAD does not change it, and git is handed the object id it holds
+followed by the suffixes; a full object id is handed to git as written. Before that, git is asked
+which ref it resolves a full object id or HEAD, and the value with each part of its suffix run,
+through (git rev-parse --symbolic-full-name with core.warnAmbiguousRefs off, so git names the ref its
+own search takes, by whichever of its name rules, refs/remotes/<name>/HEAD included): it is exit 2
+when that ref is under refs/remotes/, or is where a symbolic ref under refs/remotes/ also ends (git
+names only the end of a symbolic chain); it is also exit 2 as ambiguous when refs/remotes/<id> or
+refs/remotes/HEAD exists for the id or HEAD leading the value, and a full object id whose object does
+not exist is exit 2. Every git read runs with replace objects, grafts and the commit-graph file off.
+tools/run_all_checks.sh runs the bare form, so a
+local run compares with that default; CI passes --base (the pull request's target branch, a push's
+before SHA, or HEAD^ for any other event when it resolves). The
+base file is read from the base commit through the same strict parser as the working file; a base
+commit without it, or with it as a symlink or malformed, is exit 2. A rule listed at the base and no
+longer listed is exit 1 naming it, unless a [[removal]] row (exactly id and reason) names it; each
+such removal is printed with its reason. A [[removal]] row that is duplicated, also listed in [[rule]],
+has an empty reason or carries an unknown key is exit 2. Removal rows may stay after the merge.
 
 The spans come from gen_first_pin_demo.measure, the ONE span algorithm the demonstration generator also
 uses: AGENTS.md must be byte-identical to a fresh composition of the rule corpus and the block registry
@@ -17,24 +56,41 @@ never reads the demonstration's own lists; it recomputes everything. The cap is 
 check_release_build.CAP_BYTES at call time, never copied here.
 
 The declared file carries exactly format-version, warn-margin-bytes and [[rule]] rows of exactly id and
-reason; every id must be a corpus-id with a measured span. An absent, unreadable, symlinked, non-UTF-8,
+reason, and optionally [[removal]] rows of exactly id and reason; every listed id must be a corpus-id
+with a measured span. An absent, unreadable, symlinked, non-UTF-8,
 malformed or EMPTY list is exit 2 (a missing input is a failure, never "nothing to check"), per the
 check-fails-closed-on-unreadable rule. The gate prints every listed rule's end offset and margin on every
 run, and a WARNING (still exit 0) when the tightest margin drops under warn-margin-bytes, so growth is
 visible before a listed rule falls out.
 
-DISCLOSED RESIDUAL (disclose-guard-residuals): a PR that removes a rule from the list passes this gate
-(review must judge the removal); a listed rule cut down to a stub still passes (content is not judged);
+DISCLOSED RESIDUAL (disclose-guard-residuals): a PR that removes a rule from the list AND adds a
+[[removal]] row for it passes this gate (the row turns a silent deletion into a named, reasoned record the
+gate prints; review must judge the removal itself); the ratchet sees only what changed since the base it
+is given, so it is as good as that base (a stale or wrong --base compares against the wrong list;
+the grammar refuses values git would resolve as meant (an abbreviated object id, a local branch or
+tag name), an over-refusal: pass a full object id; a full object id, which git reads as that object,
+and HEAD, which is read exactly, are still refused when refs/remotes/<id> or refs/remotes/HEAD exists
+or when git names a ref under refs/remotes/ for them (refs/remotes/<id>/HEAD), an over-refusal a ref
+written there can use to fail a push's base closed; a ref git names that a symbolic ref under
+refs/remotes/ also ends at is refused even when git reached it directly, an over-refusal; and grafts
+and the commit-graph file are off, but any write into the git directory can still change the base or
+the list read at it: a .git/shallow file, which also cuts a commit's parents, is read as git reads
+it, an object written into the object store under the id of the base list's blob or of a commit is
+read as git reads it, and a rewritten ref (refs/remotes/origin/main, HEAD) moves the base it names);
+a
+listed rule cut down to a stub still passes (content is not judged);
 the gate measures the repository file against the configured cap, not any platform's actual truncation
 behaviour or a budget other instruction files may share; and a client that checks AGENTS.md out with CRLF
 line endings inflates what a reader there receives, which this gate does not model (.gitattributes pins
 AGENTS.md to eol=lf).
 
-  check_must_deliver.py              check the live tree
-  check_must_deliver.py --self-test  build synthetic trees and assert each vector is discriminated
+  check_must_deliver.py [--base REF]  check the live tree (default base: merge base of HEAD and
+                                      refs/remotes/origin/main)
+  check_must_deliver.py --self-test   build synthetic trees and assert each vector is discriminated
 
-Exit convention: 0 every listed rule is delivered; 1 a listed rule ends past the cap; 2 an unreadable,
-malformed or ambiguous input (fail-closed).
+Exit convention: 0 every listed rule is delivered and no rule left the list undeclared; 1 a listed rule
+ends past the cap, or a rule listed at the base is no longer listed with no [[removal]] row; 2 an
+unreadable, malformed or ambiguous input, or a comparison base that does not resolve (fail-closed).
 """
 import sys
 
@@ -52,6 +108,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import os
 import stat
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -63,7 +120,15 @@ import check_release_build  # noqa: E402  the cap, read as check_release_build.C
 
 DECL_REL = ".aiqt/core/must-deliver.toml"
 TOP_KEYS = frozenset({"format-version", "warn-margin-bytes", "rule"})
+OPTIONAL_TOP_KEYS = frozenset({"removal"})
 ROW_KEYS = frozenset({"id", "reason"})
+REMOVAL_KEYS = frozenset({"id", "reason"})
+DEFAULT_BASE_REMOTE = "origin/main"
+REMOTE_REF_PREFIX = "refs/remotes/"
+GIT_TIMEOUT = 60  # seconds per git call; a call that does not finish is exit 2, never a pass
+# GIT_GRAFT_FILE for every git read: a path below the null device, which is not a directory, so it can
+# never exist and git reads no grafts at all.
+NO_GRAFT_FILE = os.path.join(os.devnull, "aiqt-no-graft-file")
 
 
 def _read_decl_bytes(path):
@@ -73,9 +138,9 @@ def _read_decl_bytes(path):
 
 
 def read_declared(path):
-    """The validated must-deliver list: ([rule ids], warn_margin_bytes). Absent, a symlink or
-    non-regular entry, unreadable, not UTF-8, not TOML, or outside the exact schema is a DemoError
-    (exit 2): the list is the gate's whole policy input, so nothing else may stand in for it."""
+    """The validated must-deliver list: ([rule ids], warn_margin_bytes, {removed id: reason}). Absent, a
+    symlink or non-regular entry, unreadable, not UTF-8, not TOML, or outside the exact schema is a
+    DemoError (exit 2): the list is the gate's whole policy input, so nothing else may stand in for it."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -88,46 +153,416 @@ def read_declared(path):
         raw = _read_decl_bytes(path)
     except OSError as exc:
         raise DemoError("{} is unreadable ({})".format(DECL_REL, exc))
+    return parse_declared(raw, DECL_REL)
+
+
+def parse_declared(raw, label):
+    """The one strict parser of the declaration's bytes, shared by the working file and the file at the
+    comparison base (label names which in every message). Returns ([rule ids], warn_margin_bytes,
+    {removed id: reason}); anything outside the exact schema is a DemoError (exit 2)."""
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise DemoError("{} is not valid UTF-8 ({})".format(DECL_REL, exc))
+        raise DemoError("{} is not valid UTF-8 ({})".format(label, exc))
     try:
         data = tomllib.loads(text)
     # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
     # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
     # on a deeply nested array or inline table; neither is a TOMLDecodeError.
     except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
-        raise DemoError("{} does not parse ({})".format(DECL_REL, exc))
-    if set(data) != TOP_KEYS:
-        raise DemoError("{} must carry exactly the keys {}, found {}".format(
-            DECL_REL, sorted(TOP_KEYS), sorted(data)))
+        raise DemoError("{} does not parse ({})".format(label, exc))
+    if not TOP_KEYS <= set(data) or not set(data) <= TOP_KEYS | OPTIONAL_TOP_KEYS:
+        raise DemoError("{} must carry exactly the keys {} (and optionally {}), found {}".format(
+            label, sorted(TOP_KEYS), sorted(OPTIONAL_TOP_KEYS), sorted(data)))
     version = data["format-version"]
     # The type is checked before the value: TOML 1.0 parses to a float that compares equal to 1, and a
     # bool is an int subclass.
     if isinstance(version, bool) or not isinstance(version, int) or version != 1:
-        raise DemoError("{}: format-version must be the integer 1, found {!r}".format(DECL_REL, version))
+        raise DemoError("{}: format-version must be the integer 1, found {!r}".format(label, version))
     warn = data["warn-margin-bytes"]
     if isinstance(warn, bool) or not isinstance(warn, int) or warn < 1:
-        raise DemoError("{}: warn-margin-bytes must be a positive integer, found {!r}".format(DECL_REL, warn))
+        raise DemoError("{}: warn-margin-bytes must be a positive integer, found {!r}".format(label, warn))
     rows = data["rule"]
     if not isinstance(rows, list) or not rows:
         raise DemoError("{}: rule must be a non-empty array of [[rule]] tables; an empty list is a "
-                        "failure, never \"nothing to check\"".format(DECL_REL))
+                        "failure, never \"nothing to check\"".format(label))
     ids = []
     for row in rows:
         if not isinstance(row, dict) or set(row) != ROW_KEYS:
             raise DemoError("{}: each [[rule]] row must carry exactly the keys {}, found {!r}".format(
-                DECL_REL, sorted(ROW_KEYS), row))
+                label, sorted(ROW_KEYS), row))
         rid, reason = row["id"], row["reason"]
         if not isinstance(rid, str) or not CID_RE.match(rid):
-            raise DemoError("{}: id {!r} is not a well-formed corpus-id".format(DECL_REL, rid))
+            raise DemoError("{}: id {!r} is not a well-formed corpus-id".format(label, rid))
         if not isinstance(reason, str) or not reason.strip():
-            raise DemoError("{}: rule {} must carry a non-empty reason string".format(DECL_REL, rid))
+            raise DemoError("{}: rule {} must carry a non-empty reason string".format(label, rid))
         if rid in ids:
-            raise DemoError("{}: rule {} is listed more than once".format(DECL_REL, rid))
+            raise DemoError("{}: rule {} is listed more than once".format(label, rid))
         ids.append(rid)
-    return ids, warn
+    removals = {}
+    if "removal" in data:
+        removal_rows = data["removal"]
+        if not isinstance(removal_rows, list) or not removal_rows:
+            raise DemoError("{}: removal must be a non-empty array of [[removal]] tables (omit the key "
+                            "when no removal is recorded)".format(label))
+        for row in removal_rows:
+            if not isinstance(row, dict) or set(row) != REMOVAL_KEYS:
+                raise DemoError("{}: each [[removal]] row must carry exactly the keys {}, found {!r}".format(
+                    label, sorted(REMOVAL_KEYS), row))
+            rid, reason = row["id"], row["reason"]
+            if not isinstance(rid, str) or not CID_RE.match(rid):
+                raise DemoError("{}: removal id {!r} is not a well-formed corpus-id".format(label, rid))
+            if not isinstance(reason, str) or not reason.strip():
+                raise DemoError("{}: removal {} must carry a non-empty reason string".format(label, rid))
+            if rid in removals:
+                raise DemoError("{}: removal {} is recorded more than once".format(label, rid))
+            if rid in ids:
+                raise DemoError("{}: removal {} is also listed in [[rule]]; a rule is either listed or "
+                                "removed".format(label, rid))
+            removals[rid] = reason
+    return ids, warn, removals
+
+
+# --- the comparison base (every git return code is checked; a nonzero exit is never an empty result) --
+
+def _git_env():
+    """The ambient environment without any GIT_-prefixed variable, so a GIT_DIR, GIT_INDEX_FILE or
+    GIT_OBJECT_DIRECTORY set by a hook or a wrapper cannot point the comparison at another repository,
+    with replace refs off so a replacement object cannot stand in for the base commit, and grafts off
+    (GIT_GRAFT_FILE names NO_GRAFT_FILE, a path that cannot exist, so <git dir>/info/grafts is never read)
+    so a graft cannot give the base, HEAD or origin/main other parents (the commit-graph file is
+    switched off in _git's argv). A .git/shallow file is still read as git reads it (the disclosed
+    residual in the module docstring)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_GRAFT_FILE"] = NO_GRAFT_FILE
+    return env
+
+
+def _git(root, args):
+    """Run git -C root with args; returns the CompletedProcess (bytes). The first three `-c` pairs in
+    option position switch off automatic gc and maintenance (tools/_git_fixture_env.py
+    _NO_AUTO_MAINTENANCE), the posture tools/check_no_dashes.py takes for its own git reads, so no call
+    here can leave a detached repack behind. The fourth, core.commitGraph=false (the control
+    tools/check_release_delta.py _stage1_git uses), makes git read every commit's parents from the
+    commit object, never from a commit-graph file, so a forged graph cannot give a commit other parents
+    and move the merge base or a ~ or ^ base. A missing git binary or a call past GIT_TIMEOUT is a
+    DemoError (exit 2): the comparison cannot run."""
+    try:
+        return subprocess.run(["git", "-C", str(root), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
+                               "-c", "maintenance.auto=false", "-c", "core.commitGraph=false", *args],
+                              capture_output=True, env=_git_env(), timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise DemoError("git {} could not run ({})".format(args[0], exc))
+
+
+def _git_err(proc):
+    return proc.stderr.decode("utf-8", "replace").strip() or "exit {}".format(proc.returncode)
+
+
+def _object_id(text):
+    """text as a full hexadecimal object id (SHA-1 or SHA-256), or None."""
+    oid = text.strip()
+    if len(oid) in (40, 64) and all(c in "0123456789abcdef" for c in oid):
+        return oid
+    return None
+
+
+def _exact_ref_oid(root, full):
+    """The object id the fully qualified ref `full` holds, read with show-ref --verify (that exact ref
+    name and no other, never git's short-name search order), or None when there is no such ref."""
+    proc = _git(root, ["show-ref", "--verify", "--hash", full])
+    return _object_id(proc.stdout.decode("ascii", "replace")) if proc.returncode == 0 else None
+
+
+def _remotes(root):
+    """The configured remote names (git remote); a failing call is a DemoError (exit 2)."""
+    proc = _git(root, ["remote"])
+    if proc.returncode != 0:
+        raise DemoError("git remote failed ({})".format(_git_err(proc)))
+    return [r for r in proc.stdout.decode("utf-8", "replace").splitlines() if r]
+
+
+def _ambiguous_base_refusal(root, core):
+    """Why the full object id or HEAD leading the base (core) is ambiguous, or None when it is not. git's
+    short-name search also tries refs/remotes/<name>, so when refs/remotes/<core> exists that ref is
+    taken as a sign the value was meant as something else: the base is refused (exit 2), never resolved
+    either way. git reads a full object id as the object and resolve_base reads HEAD exactly, so this is
+    the fail-closed over-refusal the module docstring discloses."""
+    full = REMOTE_REF_PREFIX + core
+    if _exact_ref_oid(root, full) is not None:
+        return "{} also exists, so {!r} is ambiguous (that ref could stand in for it); a " \
+               "remote-tracking base is passed as <configured remote>/<branch> or " \
+               "refs/remotes/<remote>/<branch>".format(full, core)
+    return None
+
+
+def _short_name_refusal(root, base, lead, full):
+    """Why base, a remote-tracking name (lead, whose fully qualified ref is full) leading a run of ~N or
+    ^N suffixes, is refused, or None when it is not. resolve_base hands git the object id full holds,
+    never the short name, so git's short-name search never runs for it; these refusals keep the
+    fail-closed posture of the short form: lead is refused when it is itself a configured remote's name
+    (possible only for a remote whose name contains a slash), when full does not exist, and, for the
+    <configured remote>/<name> form, when refs/<name>, refs/tags/<name> or refs/heads/<name> exists, a
+    ref of the same short name that git's short-name search order would prefer."""
+    if lead in _remotes(root):
+        return "{!r} is the bare remote name {!r}, which a tag or branch of that name would shadow; " \
+               "pass the remote-tracking branch, such as {}/main".format(base, lead, lead)
+    if _exact_ref_oid(root, full) is None:
+        return "the leading ref name {!r} of {!r} names the remote-tracking ref {}, which does not exist, " \
+               "so git would resolve the name through another ref; pass a remote-tracking branch that " \
+               "exists or a commit id".format(lead, base, full)
+    if lead.startswith(REMOTE_REF_PREFIX):
+        return None
+    shadows =[r for r in ("refs/" + lead, "refs/tags/" + lead, "refs/heads/" + lead)
+               if _exact_ref_oid(root, r) is not None]
+    if not shadows:
+        return None
+    return "the leading ref name {!r} of {!r} names {}, but {} of the same short name would stand in for " \
+           "it; pass the base as {} or a commit id".format(lead, base, full, " and ".join(shadows),
+                                                         full + base[len(lead):])
+
+
+def _written_remote_tracking(name, remotes):
+    """True when name is written as a remote-tracking branch: it starts with refs/remotes/ or with a
+    configured remote's name and a slash (the text test _grammar_refusal applies)."""
+    return name.startswith(REMOTE_REF_PREFIX) or any(name.startswith(r + "/") for r in remotes)
+
+
+def _resolved_names(base):
+    """The names git resolves on the way to base, which the grammar holds to a full object id or HEAD
+    and a run of ~N or ^N suffixes: base itself and each part of it that ends right before a ~ or ^. For
+    HEAD~1^2 that is the whole value, HEAD and HEAD~1."""
+    names = [base] + [base[:i] for i, c in enumerate(base) if c in "~^"]
+    return [n for n in dict.fromkeys(names) if n]
+
+
+def _git_resolved_refs(root, name):
+    """The refs git reports resolving name through: git rev-parse --symbolic-full-name with
+    core.warnAmbiguousRefs off, so git names the ref its own short-name search takes (the first that
+    exists, by whichever of its name rules, refs/remotes/<name>/HEAD included) instead of declining to
+    name one when a later rule also matches. Empty when name is no ref (an object id, a describe form, an
+    expression or a name that resolves to nothing). git follows a symbolic ref and names the ref the chain
+    ends at. A failing call is a DemoError (exit 2): which ref git takes cannot be established."""
+    proc = _git(root, ["-c", "core.warnAmbiguousRefs=false", "rev-parse", "--revs-only",
+                       "--symbolic-full-name", name])
+    if proc.returncode != 0:
+        raise DemoError("git rev-parse --symbolic-full-name {!r} failed ({})".format(name, _git_err(proc)))
+    return [line.strip().lstrip("^") for line in proc.stdout.decode("utf-8", "replace").splitlines()
+            if line.strip()]
+
+
+def _remote_symbolic_refs(root):
+    """[(symbolic ref, the ref git resolves it to)] for every symbolic ref under refs/remotes/ (git
+    for-each-ref, then git rev-parse --symbolic-full-name on each, so a chain is followed as git follows
+    it). A failing call is a DemoError (exit 2)."""
+    proc = _git(root, ["for-each-ref", "--format=%(refname)%00%(symref)", REMOTE_REF_PREFIX])
+    if proc.returncode != 0:
+        raise DemoError("git for-each-ref {} failed ({})".format(REMOTE_REF_PREFIX, _git_err(proc)))
+    pairs = []
+    for line in proc.stdout.decode("utf-8", "replace").splitlines():
+        ref, _nul, target = line.partition("\0")
+        if ref and target:
+            pairs += [(ref, end) for end in _git_resolved_refs(root, ref)]
+    return pairs
+
+
+def _resolved_ref_refusal(root, base):
+    """Why base, a full object id or HEAD alone or leading a suffix run, resolves through a ref under
+    refs/remotes/, or None when git reports it does not. git is asked which ref it resolves base, and each
+    part of it ending before a ~ or ^, through (_git_resolved_refs), never this module's copy of git's name
+    rules, so a ref under refs/remotes/ that any of git's rules reaches is refused (exit 2): one git names
+    directly, and, because git names only the end of a symbolic chain, a symbolic ref under refs/remotes/
+    that ends at the ref git names (that ref is then refused even when git reached it directly, a
+    fail-closed over-refusal)."""
+    symbolic = None
+    hint = "a remote-tracking base is passed as <configured remote>/<branch> or " \
+           "refs/remotes/<remote>/<branch>"
+    for name in _resolved_names(base):
+        for ref in _git_resolved_refs(root, name):
+            if ref.startswith(REMOTE_REF_PREFIX):
+                return "git resolves {!r} through a ref under refs/remotes/ ({}), but {!r} is not written " \
+                       "as a remote-tracking branch; {}".format(name, ref, base, hint)
+            if symbolic is None:
+                symbolic = _remote_symbolic_refs(root)
+            for sym, end in symbolic:
+                if end == ref:
+                    return "git may resolve {!r} through a ref under refs/remotes/ (the symbolic ref {}, " \
+                           "which ends at {}, the ref git names for it), but {!r} is not written as a " \
+                           "remote-tracking branch; {}".format(name, sym, ref, base, hint)
+    return None
+
+
+def _peel_commit(root, rev):
+    proc = _git(root, ["rev-parse", "--verify", "--quiet", rev + "^{commit}"])
+    return _object_id(proc.stdout.decode("ascii", "replace")) if proc.returncode == 0 else None
+
+
+ACCEPTED_BASE_FORMS = ("a full 40-hex object id that exists, HEAD, or refs/remotes/<name> or "
+                       "<configured remote>/<name> where git check-ref-format accepts the ref, each "
+                       "optionally followed by a run of ~N or ^N suffixes (N digits, possibly empty)")
+
+
+def _split_suffixes(base):
+    """(core, suffixes): base cut at its first ~ or ^ (HEAD and ~1^2 of HEAD~1^2)."""
+    cut = min([i for i in (base.find("~"), base.find("^")) if i >= 0] or [len(base)])
+    return base[:cut], base[cut:]
+
+
+def _id_or_head(core):
+    """True when core is a full 40-hex object id (lower case) or HEAD, the grammar's non-remote forms."""
+    return (len(core) == 40 and all(c in "0123456789abcdef" for c in core)) or core == "HEAD"
+
+
+def _grammar_refusal(root, base):
+    """Why base is outside the closed --base grammar (ACCEPTED_BASE_FORMS), or None when it is inside it.
+    The grammar is an allowlist that fails closed: base is cut at its first ~ or ^, the rest must be a run
+    of ~N or ^N suffixes (N ASCII digits, possibly empty), and what leads it must be a full 40-hex object
+    id (lower case), HEAD, or a name starting with refs/remotes/ or with a configured remote's name and a
+    slash whose fully qualified ref (the name itself, or refs/remotes/<name>) git check-ref-format
+    accepts. Every other value, whatever name form git might read it by, is refused (exit 2) before git
+    resolves anything; whether an accepted value resolves is left to resolve_base's refusals."""
+    core, suffixes = _split_suffixes(base)
+    if not all(c in "~^0123456789" for c in suffixes):
+        why = "{!r} after {!r} is not a run of ~N or ^N suffixes".format(suffixes, core)
+    elif _id_or_head(core):
+        return None
+    elif core.startswith(REMOTE_REF_PREFIX) or any(core.startswith(r + "/") for r in _remotes(root)):
+        full = core if core.startswith(REMOTE_REF_PREFIX) else REMOTE_REF_PREFIX + core
+        if _git(root, ["check-ref-format", full]).returncode == 0:
+            return None
+        why = "git check-ref-format does not accept {}".format(full)
+    else:
+        why = "{!r} is not a full 40-hex object id, HEAD, refs/remotes/<name> or " \
+              "<configured remote>/<name>".format(core)
+    return "it is not one of the accepted --base forms ({}); {}".format(ACCEPTED_BASE_FORMS, why)
+
+
+def resolve_base(root, base):
+    """(commit, label) of the comparison base: the explicit ref, or with base None the merge base of
+    HEAD and refs/remotes/origin/main, each read exactly with show-ref --verify and handed to git merge-base
+    as an object id. An explicit base outside the closed grammar (_grammar_refusal,
+    ACCEPTED_BASE_FORMS) is refused first, and git is never handed a short name for one inside it. A
+    full object id or HEAD (checked first, so a remote named HEAD does not change it) is refused when
+    refs/remotes/<id> or refs/remotes/HEAD exists (_ambiguous_base_refusal) or when git resolves it
+    through a ref under refs/remotes/ (_resolved_ref_refusal); HEAD is read exactly with show-ref
+    --verify, and git is handed the object id followed by the suffix run. A remote base is read as its
+    fully qualified ref with show-ref --verify, so a tag, a local branch (refs/tags/origin/main,
+    refs/heads/origin/main) or a pseudo-ref file (<git dir>/origin/main) of the same short name, which
+    git's short-name search order prefers, cannot stand in for it; when it leads a suffix run it is
+    refused when that ref does not exist or is shadowed by a ref of the same short name
+    (_short_name_refusal), and git is handed the object id the ref holds followed by the suffix run. A
+    base that does not resolve to one commit (a full object id whose object does not exist included) is
+    a DemoError (exit 2), never "nothing to compare"."""
+    if base is None:
+        full = REMOTE_REF_PREFIX + DEFAULT_BASE_REMOTE
+        tip = _exact_ref_oid(root, full)
+        if tip is None:
+            raise DemoError("no comparison base resolves: {} does not exist; pass --base REF or fetch "
+                            "{}".format(full, DEFAULT_BASE_REMOTE))
+        head = _exact_ref_oid(root, "HEAD")
+        if head is None:
+            raise DemoError("no comparison base resolves: HEAD does not resolve (show-ref --verify HEAD); "
+                            "pass --base REF")
+        proc = _git(root, ["merge-base", head, tip])
+        commit = _object_id(proc.stdout.decode("ascii", "replace")) if proc.returncode == 0 else None
+        if commit is None:
+            raise DemoError("no comparison base resolves: git merge-base HEAD {} failed ({}); pass "
+                            "--base REF or fetch {}".format(full, _git_err(proc), DEFAULT_BASE_REMOTE))
+        return commit, "merge base of HEAD and {} ({}, {})".format(DEFAULT_BASE_REMOTE, full, commit[:12])
+    if not base or base.startswith("-"):
+        raise DemoError("--base {!r} is not a ref".format(base))
+    refusal = _grammar_refusal(root, base)
+    if refusal is not None:
+        raise DemoError("cannot resolve the comparison base {!r}: {}".format(base, refusal))
+    core, suffixes = _split_suffixes(base)
+    if _id_or_head(core):
+        refusal = _ambiguous_base_refusal(root, core)
+        if refusal is not None:
+            raise DemoError("cannot resolve the comparison base {!r}: {}".format(base, refusal))
+        refusal = _resolved_ref_refusal(root, base)
+        if refusal is not None:
+            raise DemoError("cannot resolve the comparison base {!r}: {}".format(base, refusal))
+        oid = _exact_ref_oid(root, "HEAD") if core == "HEAD" else core
+        commit = _peel_commit(root, oid + suffixes) if oid is not None else None
+        if commit is None:
+            raise DemoError("cannot resolve the comparison base {!r} to a commit".format(base))
+        return commit, "{} ({})".format(base, commit[:12])
+    # Inside the grammar, anything else is written as a remote-tracking branch.
+    full = core if core.startswith(REMOTE_REF_PREFIX) else REMOTE_REF_PREFIX + core
+    if not suffixes:
+        tip = _exact_ref_oid(root, full)
+        commit = _peel_commit(root, tip) if tip is not None else None
+        if commit is None:
+            raise DemoError("cannot resolve the comparison base {!r}: the remote-tracking ref {} does not "
+                            "exist or is not a commit".format(base, full))
+        return commit, "{} ({}, {})".format(base, full, commit[:12])
+    refusal = _short_name_refusal(root, base, core, full)
+    if refusal is not None:
+        raise DemoError("cannot resolve the comparison base {!r} by short name: {}".format(base, refusal))
+    tip = _exact_ref_oid(root, full)
+    commit = _peel_commit(root, tip + suffixes) if tip is not None else None
+    if commit is None:
+        raise DemoError("cannot resolve the comparison base {!r} to a commit".format(base))
+    return commit, "{} ({})".format(base, commit[:12])
+
+
+def read_base_declared(root, commit, label):
+    """The declaration as listed at the base commit, read through parse_declared. A base commit without
+    the file, or with it as anything but a regular blob (a symlink, a tree, a submodule), is a DemoError
+    (exit 2): the base list is the ratchet's whole reference, so its absence is never an empty list."""
+    where = "{} at the base {}".format(DECL_REL, label)
+    proc = _git(root, ["ls-tree", "-z", "--full-tree", commit, "--", DECL_REL])
+    if proc.returncode != 0:
+        raise DemoError("git ls-tree failed for {} ({})".format(where, _git_err(proc)))
+    entries = [e for e in proc.stdout.split(b"\0") if e]
+    if not entries:
+        raise DemoError("{} does not exist; the list at the base cannot be read".format(where))
+    meta, _tab, path = entries[0].partition(b"\t")
+    fields = meta.split()
+    if (len(entries) != 1 or path != DECL_REL.encode("ascii") or len(fields) != 3
+            or fields[0] not in (b"100644", b"100755") or fields[1] != b"blob"):
+        raise DemoError("{} is not a regular file (a symlink, directory or other entry)".format(where))
+    proc = _git(root, ["cat-file", "blob", fields[2].decode("ascii", "replace")])
+    if proc.returncode != 0:
+        raise DemoError("{} is unreadable ({})".format(where, _git_err(proc)))
+    return parse_declared(proc.stdout, where)
+
+
+def ratchet(root, base):
+    """Compare the working list with the list at the comparison base. Exit 0 when every rule listed at
+    the base is still listed or named by a [[removal]] row, 1 when one is neither (named), 2 when the
+    base does not resolve or either list cannot be read. Additions are free."""
+    try:
+        ids, _warn, removals = read_declared(root / DECL_REL)
+        commit, label = resolve_base(root, base)
+        base_ids, _base_warn, _base_removals = read_base_declared(root, commit, label)
+    except (ValueError, OSError, UnicodeError) as exc:
+        print("error: {}; fail-closed".format(exc), file=sys.stderr)
+        return 2
+    dropped = [rid for rid in base_ids if rid not in ids]
+    undeclared = [rid for rid in dropped if rid not in removals]
+    added = [rid for rid in ids if rid not in base_ids]
+    print("must-deliver: list ratchet against base {}: {} listed there, {} listed now ({} added, {} "
+          "removed)".format(label, len(base_ids), len(ids), len(added), len(dropped)))
+    for rid in dropped:
+        if rid in removals:
+            print("must-deliver: removal: rule {} left the list since the base; [[removal]] reason: {}".format(
+                rid, removals[rid]))
+    for rid in sorted(removals):
+        if rid not in dropped:
+            print("must-deliver: removal row kept: rule {} (not listed at the base); reason: {}".format(
+                rid, removals[rid]))
+    for rid in undeclared:
+        print("must-deliver: FAIL: rule {} is listed at the base {} and is no longer listed, with no "
+              "[[removal]] row naming it".format(rid, label))
+    return 1 if undeclared else 0
+
+
+def gate(root, base):
+    """The whole gate: the prefix check (run) and the list ratchet, both always run so every finding is
+    printed. The worse exit wins: 2 over 1 over 0."""
+    return max(run(root), ratchet(root, base))
 
 
 def run(root):
@@ -135,7 +570,7 @@ def run(root):
     listed rule ends past it, 2 on an unreadable, malformed or ambiguous input. Parameterized on root so
     the self-test drives it against synthetic trees, never the real repo."""
     try:
-        ids, warn = read_declared(root / DECL_REL)
+        ids, warn, _removals = read_declared(root / DECL_REL)
         agents, spans, _apex_id = measure(root)
     except (ValueError, OSError, UnicodeError) as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
@@ -176,10 +611,22 @@ def run(root):
 
 
 def main():
+    """The self-test runs only when the arguments are exactly --self-test; every other shape goes through
+    the strict parser below, so --self-test mixed with any other argument is exit 2, never a self-test
+    run that exits 0 without running the gate."""
     args = sys.argv[1:]
-    if "--self-test" in args:
+    if args == ["--self-test"]:
         return self_test_main()
-    return run(repo_root())
+    base = None
+    if len(args) == 2 and args[0] == "--base":
+        base = args[1]
+    elif len(args) == 1 and args[0].startswith("--base="):
+        base = args[0][len("--base="):]
+    elif args:
+        print("error: unknown arguments {}; usage: check_must_deliver.py [--base REF] | --self-test".format(
+            args), file=sys.stderr)
+        return 2
+    return gate(repo_root(), base)
 
 
 # --- self-test ------------------------------------------------------------------------------------
@@ -226,8 +673,119 @@ def main():
 #       offsets relative to the rule region, without the rules_start shift, passes);
 #   T13 the margin report: the unlisted-rule line, and a WARNING line under warn-margin-bytes that still
 #       exits 0 (a mutant whose warning exits non-zero, or margin off by one, fails).
+# The list ratchet (T14 to T38) runs gate() against temporary git repositories built with the same
+# helpers and committed through _git_fixture_env's hermetic environment, the whole self-test inside
+# fixture_git_lifecycle so the gate's own base reads see no caller git configuration either:
+#   T14 the base lists ruleaa and the working list drops it with no [[removal]] row: exit 1 naming ruleaa
+#       (a mutant that never reads the base, comparing the working list with itself, passes);
+#   T15 the same drop with a [[removal]] row naming ruleaa: exit 0, the removal and its reason printed (a
+#       mutant that rejects every removal fails);
+#   T16 a [[removal]] row with an empty reason, an extra key, a duplicate, or an id also in [[rule]]: each
+#       exit 2 with its own message (a mutant without that one check exits 0);
+#   T17 a --base that does not resolve, and no origin/main with no --base: each exit 2; with origin/main
+#       present and no --base, the merge base is read and the drop is exit 1 (a mutant treating a missing
+#       base as nothing to compare passes the first two);
+#   T18 a base commit without the list, and one whose list is malformed: each exit 2 (a mutant treating an
+#       absent or unreadable base list as nothing to compare passes);
+#   T19 the working list adds an id the base does not list: exit 0 (a mutant failing on any difference
+#       between the two lists fails);
+#   T20 ruleaa grows past the cap, the working list drops it, and the first-pin demonstration is
+#       regenerated without it: exit 1 naming ruleaa from the ratchet, with no prefix FAIL line (a mutant
+#       comparing against the demonstration's delivered list instead of the base list passes);
+#   T21 the base lists ruleaa, a later commit (HEAD) drops it with no [[removal]] row and the working list
+#       matches HEAD: against the base, exit 1 naming ruleaa (a mutant that resolves --base but reads the
+#       list at HEAD sees no drop and passes);
+#   T22 refs/remotes/origin/main is the base listing ruleaa under a configured remote origin, and a
+#       local branch and then also a tag, each named origin/main, point at a later commit (HEAD) that drops it: with no --base and with --base
+#       origin/main, exit 1 naming ruleaa and naming refs/remotes/origin/main (a mutant resolving the
+#       short name lets the branch or the tag stand in, sees no drop, and passes);
+#   T23 a base commit whose list is a symlink: exit 2 naming it not a regular file (a mutant without the
+#       blob-mode check reads the link's target text and fails for another reason);
+#   T24 GIT_DIR in the caller's environment points at a decoy repository whose origin/main lists no
+#       ruleaa: the base is still read from the fixture repository and the drop is exit 1 (a mutant that
+#       keeps GIT_* variables reads the decoy and passes);
+#   T25 a replace ref substitutes, for the base commit, a commit that drops ruleaa: the base is still read
+#       as committed and the drop is exit 1 (a mutant that leaves replace objects on passes);
+#   T26 a --base value starting with - (-h, --git-dir=/nonexistent): each exit 2 naming it not a ref (a
+#       mutant accepting it hands it to git as an option and fails for another reason);
+#   T27 the base lists ruleaa and HEAD drops it: --base <base id> is exit 1; with a ref
+#       refs/remotes/<base id> planted at HEAD, --base <base id> is exit 2 naming it ambiguous (a mutant
+#       looking a full object id up under refs/remotes/ reads HEAD's list and passes; a rule reading the
+#       id as that commit and ignoring the planted ref is exit 1 and fails too);
+#   T28 refs/remotes/origin/main (and origin/HEAD) is the base listing ruleaa under a configured remote
+#       origin, and HEAD drops it: --base origin/main~0 is exit 1 unshadowed; with a tag origin at HEAD,
+#       --base origin and origin~0, outside the grammar, are exit 2 naming the accepted forms (a mutant
+#       without the grammar refuses them only by the bare-remote check, without that message, and fails);
+#       with a branch and then also a tag origin/main at HEAD,
+#       origin/main~0 and origin/main^0 are exit 2 naming the shadow (a mutant without the shadow
+#       refusal lets the branch or tag stand in and passes);
+#   T29 the configured-remote fallback: origin is configured, refs/remotes/origin/gone is absent and a tag
+#       origin/gone points at a commit that drops ruleaa: --base origin/gone is exit 2 naming the absent
+#       remote-tracking ref (a mutant without the fallback resolves the tag and passes);
+#   T30 a full-length id whose object does not exist: exit 2 unplanted; with refs/remotes/<that id>
+#       planted at HEAD, which drops ruleaa, exit 2 naming it ambiguous (a mutant treating a name with a
+#       ref under refs/remotes/ as remote-tracking reads HEAD's list and passes);
+#   T31 HEAD lists ruleaa and the working list drops it: --base HEAD is exit 1; with refs/remotes/HEAD
+#       planted at a commit that drops ruleaa, --base HEAD and HEAD~0 are each exit 2 naming it ambiguous
+#       (the same mutant reads the planted commit and passes the first; one checking the whole value but
+#       not the name leading a suffix run reads HEAD~0 and exits 1);
+#   T32 an abbreviated id of the base, with HEAD dropping ruleaa, is outside the grammar: unplanted, and
+#       with refs/remotes/<abbreviation> planted at HEAD, the abbreviation and <abbreviation>~0 are each
+#       exit 2 naming the accepted forms (a mutant without the grammar reads the unplanted abbreviation
+#       as git does and exits 1, and refuses the planted one only as ambiguous);
+#   T33 the base's full id, with HEAD dropping ruleaa: with refs/remotes/<id>/HEAD planted at HEAD, <id>,
+#       <id>~0 and <id>^0 are each exit 2 naming that ref, and with it a symbolic ref to a branch at HEAD,
+#       <id> and <id>~0 are each exit 2 naming it (git reads a full id as the object, so these are the
+#       fail-closed over-refusals the docstring discloses; a mutant without _resolved_ref_refusal exits 1
+#       on every case; one refusing only a ref git names under refs/remotes/, without the symbolic-ref
+#       check, exits 1 on the symbolic cases);
+#   T34 origin is configured, refs/remotes/origin/absent is absent and refs/remotes/origin/absent/HEAD is
+#       planted at HEAD, which drops ruleaa: origin/absent~0 and origin/absent^0 are each exit 2 naming
+#       the absent remote-tracking ref (a mutant without the leading-ref existence check lets git take
+#       the planted /HEAD and passes);
+#   T35 a grafts file gives the base (refs/remotes/origin/main) and HEAD, which drops ruleaa, one
+#       parentless commit that drops ruleaa as their parent: with no --base and with --base HEAD^, the
+#       base is still read as committed and the drop is exit 1 (a mutant that leaves grafts on reads
+#       the grafted commit as the merge base or HEAD^ and passes);
+#   T36 a '{' in the leading name: with refs/remotes/<name>/HEAD planted at HEAD, which
+#       drops ruleaa, a{b~0 and x{-0-g<abbreviation>~0 are each exit 2 naming the accepted forms (a mutant
+#       without the grammar lets the brace hide the ~ from the leading-name checks, so git takes the
+#       planted ref and the gate passes);
+#   T37 a remote-tracking name git check-ref-format rejects is refused: origin is configured, and
+#       with refs/remotes/origin/x./HEAD planted at HEAD, which drops ruleaa, origin/x. and origin/x.~0,
+#       and with refs/remotes/refs/remotes/x./HEAD planted, refs/remotes/x. and refs/remotes/x.~0, are
+#       each exit 2 naming the check-ref-format refusal (a mutant without the grammar skips both the
+#       exact read and the resolved-ref check, so git takes the planted ref and the gate passes);
+#   T38 a sample of forms outside the grammar, each of which git resolves to the base, which lists
+#       ruleaa while HEAD drops it: an abbreviated id, the describe form x-0-g<abbreviation> and
+#       <id>^{commit} are each exit 2 naming the accepted forms (a mutant without the grammar reads the
+#       base and exits 1), while the accepted HEAD^, HEAD~ (N empty) and <id>~0^0 read the base and the
+#       drop is exit 1 (a grammar refusing an empty N or a mixed suffix run fails);
+#   T39 origin is configured, refs/remotes/origin/main is a child of the base and both
+#       list ruleaa, HEAD drops it, and a plain file <git dir>/origin/main (a pseudo-ref, the first rule
+#       of git's short-name search) holds a child of HEAD that also drops it: origin/main~0, ^0, ~, ^,
+#       ~1, ^1 and ~0^0 each read refs/remotes/origin/main and the drop is exit 1 (a mutant handing git
+#       the short name origin/main<suffixes> reads the planted commit and passes);
+#   T40 a forged commit-graph file (generation v1, checksum recomputed) gives HEAD~1 a
+#       decoy parent that drops ruleaa, a child of the base that refs/remotes/origin/main points at; plain
+#       git then reads the decoy as HEAD~2 and as the merge base: with no --base and with --base HEAD~2
+#       the base is still read as committed and the drop is exit 1 (a mutant without
+#       core.commitGraph=false reads the decoy and passes);
+#   T41 a remote named HEAD is configured, HEAD lists ruleaa and the working list drops
+#       it: --base HEAD and HEAD~0 read HEAD and the drop is exit 1 (a mutant judging the bare-remote
+#       name before HEAD refuses both, exit 2);
+#   T42 main() is driven with self_test_main and gate replaced by recorders: --self-test
+#       mixed with --base HEAD, --base=HEAD, a second --self-test or any other argument, in either order,
+#       is exit 2 naming the unknown arguments with nothing dispatched, --base --self-test reaches the
+#       gate with the value --self-test, and the real gate refuses that value as not a ref (exit 2), while
+#       exactly --self-test runs the self-test and no argument, --base HEAD and --base=HEAD run the gate (a
+#       mutant that runs the self-test when --self-test appears anywhere dispatches it and exits 0).
 
 import gen_first_pin_demo as gfpd  # noqa: E402  fixture helpers (_write_tree, _tuned) and CAP_BYTES
+
+
+class _FixtureError(Exception):
+    """A self-test fixture's own git command failed: the vector cannot run (exit 2, never a pass)."""
 
 
 def _decl(root, rows, warn=512, raw=None):
@@ -244,10 +802,24 @@ def _decl(root, rows, warn=512, raw=None):
 
 
 def self_test_main():
+    """The self-test runs inside _git_fixture_env.fixture_git_lifecycle, as the sibling gates' self-tests
+    do: HOME, XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM are pinned to fixture-owned
+    values for the whole run, and its PATH wrapper reasserts the system-config pin after _git_env drops
+    every GIT_ variable, so neither the fixture git calls nor the gate's own base reads under test can
+    read the caller's git configuration."""
+    from _git_fixture_env import fixture_git_lifecycle
+    with fixture_git_lifecycle():
+        return _self_test_main_isolated()
+
+
+def _self_test_main_isolated():
+    import hashlib
     import io
     import shutil
+    import struct
     import tempfile
     from contextlib import redirect_stdout, redirect_stderr
+    from _git_fixture_env import git_fixture_env
 
     CAP = check_release_build.CAP_BYTES
 
@@ -257,8 +829,44 @@ def self_test_main():
             code = run(root)
         return code, buf.getvalue()
 
+    def capture_gate(root, base):
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(buf):
+            code = gate(root, base)
+        return code, buf.getvalue()
+
+    def fixture_git(root, *args):
+        env = git_fixture_env(GIT_AUTHOR_NAME="must-deliver self-test",
+                              GIT_AUTHOR_EMAIL="selftest@example.invalid",
+                              GIT_COMMITTER_NAME="must-deliver self-test",
+                              GIT_COMMITTER_EMAIL="selftest@example.invalid")
+        try:
+            proc = subprocess.run(["git", "-C", str(root), *args], capture_output=True, env=env,
+                                  timeout=GIT_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise _FixtureError("fixture git {} could not run ({})".format(args[0], exc))
+        if proc.returncode != 0:
+            raise _FixtureError("fixture git {} failed in {}: {}".format(args[0], root, _git_err(proc)))
+        return proc.stdout.decode("utf-8", "replace").strip()
+
+    def commit_base(root):
+        """Commit the tree at root as the fixture's one commit; returns its object id."""
+        fixture_git(root, "init", "-q")
+        fixture_git(root, "add", "-A")
+        fixture_git(root, "commit", "-q", "-m", "fixture base")
+        return fixture_git(root, "rev-parse", "HEAD")
+
+    def raw_decl(rules, removals=(), extra=""):
+        lines = ["format-version = 1", "warn-margin-bytes = 512"]
+        for rid in rules:
+            lines += ["", "[[rule]]", 'id = "{}"'.format(rid), 'reason = "fixture rule"']
+        for rid, reason in removals:
+            lines += ["", "[[removal]]", 'id = "{}"'.format(rid), 'reason = "{}"'.format(reason)]
+        return "\n".join(lines) + "\n" + extra
+
     failures = []
     skipped = []
+    fixture_error = None
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-check-must-deliver-selftest-"))
     except OSError as exc:
@@ -534,6 +1142,551 @@ def self_test_main():
         if code != 0 or "WARNING" in out:
             failures.append("T13: margin equal to warn-margin-bytes must not warn, got {}\n{}".format(
                 code, out))
+
+        # The list ratchet. Each fixture commits a base listing prjint1 and ruleaa (ruleaa CAP - 10),
+        # then edits the working list; the base is passed as its full object id unless stated.
+        drop_msg = "FAIL: rule ruleaa is listed at the base"
+
+        def ratchet_fixture(name, base_rules=("prjint1", "ruleaa")):
+            root = tmp / name
+            gfpd._tuned(root, base_specs, "ruleaa", CAP - 10)
+            _decl(root, [], raw=raw_decl(base_rules))
+            return root, commit_base(root)
+
+        # T14. Dropped with no [[removal]] row: exit 1 naming ruleaa.
+        t14, base14 = ratchet_fixture("t14")
+        _decl(t14, [], raw=raw_decl(["prjint1"]))
+        code, out = capture_gate(t14, base14)
+        if code != 1 or drop_msg not in out:
+            failures.append("T14: a rule dropped from the list with no [[removal]] row must be exit 1 "
+                            "naming it, got {}\n{}".format(code, out))
+
+        # T15. Dropped with a [[removal]] row: exit 0, the removal and its reason printed.
+        t15, base15 = ratchet_fixture("t15")
+        _decl(t15, [], raw=raw_decl(["prjint1"], [("ruleaa", "fixture removal reason")]))
+        code, out = capture_gate(t15, base15)
+        if (code != 0 or "removal: rule ruleaa left the list since the base; [[removal]] reason: "
+                         "fixture removal reason" not in out):
+            failures.append("T15: a drop with a [[removal]] row must be exit 0 printing the removal, got "
+                            "{}\n{}".format(code, out))
+
+        # T16. Malformed [[removal]] rows: each exit 2 with its own message.
+        t16, base16 = ratchet_fixture("t16")
+        bad_removals = (
+            ("empty reason", raw_decl(["prjint1"], [("ruleaa", " ")]),
+             "removal ruleaa must carry a non-empty reason"),
+            ("extra key", raw_decl(["prjint1"], [("ruleaa", "x")], extra="approved = true\n"),
+             "each [[removal]] row must carry exactly the keys"),
+            ("duplicate", raw_decl(["prjint1"], [("ruleaa", "x"), ("ruleaa", "y")]),
+             "removal ruleaa is recorded more than once"),
+            ("also in [[rule]]", raw_decl(["prjint1", "ruleaa"], [("ruleaa", "x")]),
+             "removal ruleaa is also listed in [[rule]]"),
+        )
+        for label, raw, want in bad_removals:
+            _decl(t16, [], raw=raw)
+            code, out = capture_gate(t16, base16)
+            if code != 2 or want not in out:
+                failures.append("T16 {}: expected exit 2 with {!r}, got {}\n{}".format(label, want, code, out))
+
+        # T17. An unresolvable --base, and no origin/main with no --base: each exit 2. With origin/main
+        # present and no --base, the merge base is the comparison base and the drop is caught.
+        t17, base17 = ratchet_fixture("t17")
+        _decl(t17, [], raw=raw_decl(["prjint1"]))
+        code, out = capture_gate(t17, "no-such-ref")
+        if code != 2 or "cannot resolve the comparison base 'no-such-ref'" not in out:
+            failures.append("T17: an unresolvable --base must be exit 2, got {}\n{}".format(code, out))
+        code, out = capture_gate(t17, None)
+        if code != 2 or "no comparison base resolves" not in out:
+            failures.append("T17: no origin/main and no --base must be exit 2, got {}\n{}".format(code, out))
+        fixture_git(t17, "update-ref", "refs/remotes/origin/main", base17)
+        code, out = capture_gate(t17, None)
+        if code != 1 or drop_msg not in out or "merge base of HEAD and origin/main" not in out:
+            failures.append("T17: with origin/main present the default base must catch the drop (exit 1), "
+                            "got {}\n{}".format(code, out))
+
+        # T18. A base commit without the list, and one whose list is malformed: each exit 2.
+        t18 = tmp / "t18"
+        gfpd._tuned(t18, base_specs, "ruleaa", CAP - 10)
+        base18 = commit_base(t18)  # no must-deliver.toml at the base
+        _decl(t18, [], raw=raw_decl(["prjint1", "ruleaa"]))
+        code, out = capture_gate(t18, base18)
+        if code != 2 or "at the base" not in out or "does not exist" not in out:
+            failures.append("T18: a base commit without the list must be exit 2, got {}\n{}".format(code, out))
+        _decl(t18, [], raw="format-version = 1\nwarn-margin-bytes = 512\nrule = []\n")
+        fixture_git(t18, "add", "-A")
+        fixture_git(t18, "commit", "-q", "-m", "fixture malformed base")
+        base18b = fixture_git(t18, "rev-parse", "HEAD")
+        _decl(t18, [], raw=raw_decl(["prjint1", "ruleaa"]))
+        code, out = capture_gate(t18, base18b)
+        if code != 2 or "at the base" not in out or "non-empty" not in out:
+            failures.append("T18: a malformed list at the base must be exit 2, got {}\n{}".format(code, out))
+
+        # T19. An addition is free: the base lists prjint1 only, the working list adds ruleaa.
+        t19, base19 = ratchet_fixture("t19", base_rules=("prjint1",))
+        _decl(t19, [], raw=raw_decl(["prjint1", "ruleaa"]))
+        code, out = capture_gate(t19, base19)
+        if code != 0 or "(1 added, 0 removed)" not in out:
+            failures.append("T19: adding a listed rule must be exit 0, got {}\n{}".format(code, out))
+
+        # T20. ruleaa grows past the cap; the working list drops it and the demonstration is regenerated
+        # without it, so every byte-identity surface agrees. Only the ratchet still fails, naming ruleaa.
+        t20 = tmp / "t20"
+        gfpd._tuned(t20, base_specs, "ruleaa", CAP - 10)
+        demo20 = t20 / Path(gfpd.DEMO_REL)
+        demo20.parent.mkdir(parents=True, exist_ok=True)
+        demo20.write_text(gfpd.build(t20), encoding="utf-8")
+
+        def demo_delivered():
+            """The demonstration's delivered list, or None when it does not parse (a T20 failure)."""
+            try:
+                return tomllib.loads(demo20.read_text(encoding="utf-8"))["delivered-prefix-obligations"]
+            except (ValueError, RecursionError, MemoryError, KeyError):
+                return None
+
+        delivered = demo_delivered()
+        if delivered is None or "ruleaa" not in delivered:
+            failures.append("T20: the base demonstration does not list ruleaa as delivered")
+        _decl(t20, [], raw=raw_decl(["prjint1", "ruleaa"]))
+        base20 = commit_base(t20)
+        gfpd._tuned(t20, base_specs, "ruleaa", CAP + 50)
+        demo20.write_text(gfpd.build(t20), encoding="utf-8")
+        _decl(t20, [], raw=raw_decl(["prjint1"]))
+        code, out = capture_gate(t20, base20)
+        delivered = demo_delivered()
+        if delivered is None or "ruleaa" in delivered:
+            failures.append("T20: the regenerated demonstration still lists ruleaa as delivered")
+        if code != 1 or drop_msg not in out or "FAIL: rule ruleaa ends at" in out:
+            failures.append("T20: a rule dropped from the list together with a regenerated demonstration "
+                            "must be exit 1 from the ratchet naming it, got {}\n{}".format(code, out))
+
+        # T21. The list is read from the named base, not HEAD: the base lists ruleaa, a later commit (HEAD)
+        # drops it with no [[removal]] row, and the working list matches HEAD. Against the base the drop is
+        # exit 1; a gate reading HEAD's list instead sees no drop and exits 0.
+        t21, base21 = ratchet_fixture("t21")
+        _decl(t21, [], raw=raw_decl(["prjint1"]))
+        fixture_git(t21, "add", "-A")
+        fixture_git(t21, "commit", "-q", "-m", "fixture head drops ruleaa")
+        head21 = fixture_git(t21, "rev-parse", "HEAD")
+        if head21 == base21:
+            failures.append("T21: the fixture HEAD did not move past the base ({})".format(base21))
+        code, out = capture_gate(t21, base21)
+        if code != 1 or drop_msg not in out or "base {} ({})".format(base21, base21[:12]) not in out:
+            failures.append("T21: with HEAD past the base, the list must be read at the named base and the "
+                            "drop be exit 1 naming ruleaa, got {}\n{}".format(code, out))
+
+        # T22. refs/remotes/origin/main lists ruleaa; a local branch, then also a tag, named origin/main
+        # point at HEAD, which drops it. The default base and --base origin/main must still read the
+        # remote-tracking ref; git's short-name order would pick the tag, then the branch.
+        t22, base22 = ratchet_fixture("t22")
+        fixture_git(t22, "remote", "add", "origin", str(tmp / "t22-nowhere"))
+        fixture_git(t22, "update-ref", "refs/remotes/origin/main", base22)
+        _decl(t22, [], raw=raw_decl(["prjint1"]))
+        fixture_git(t22, "add", "-A")
+        fixture_git(t22, "commit", "-q", "-m", "fixture head drops ruleaa")
+        head22 = fixture_git(t22, "rev-parse", "HEAD")
+        for shadow in ("refs/heads/origin/main", "refs/tags/origin/main"):
+            fixture_git(t22, "update-ref", shadow, head22)
+            for base in (None, "origin/main"):
+                code, out = capture_gate(t22, base)
+                if code != 1 or drop_msg not in out or "(refs/remotes/origin/main, {})".format(
+                        base22[:12]) not in out:
+                    failures.append("T22: with {} shadowing it, base {!r} must read refs/remotes/origin/main "
+                                    "and the drop be exit 1, got {}\n{}".format(shadow, base, code, out))
+
+        # T23. A base commit whose list is a symlink: exit 2 from the blob-mode check.
+        t23, _base23 = ratchet_fixture("t23")
+        decl23 = t23 / Path(DECL_REL)
+        (t23 / "aside.toml").write_text(decl23.read_text(encoding="utf-8"), encoding="utf-8")
+        decl23.unlink()
+        os.symlink(os.path.join("..", "..", "aside.toml"), decl23)
+        fixture_git(t23, "add", "-A")
+        fixture_git(t23, "commit", "-q", "-m", "fixture symlinked base list")
+        base23 = fixture_git(t23, "rev-parse", "HEAD")
+        decl23.unlink()
+        _decl(t23, [], raw=raw_decl(["prjint1", "ruleaa"]))
+        code, out = capture_gate(t23, base23)
+        if code != 2 or "at the base" not in out or "is not a regular file" not in out:
+            failures.append("T23: a symlinked list at the base must be exit 2 naming it not a regular file, "
+                            "got {}\n{}".format(code, out))
+
+        # T24. GIT_DIR in the environment names a decoy repository whose origin/main lists no ruleaa; the
+        # base must still be read from the fixture repository.
+        t24, base24 = ratchet_fixture("t24")
+        fixture_git(t24, "update-ref", "refs/remotes/origin/main", base24)
+        _decl(t24, [], raw=raw_decl(["prjint1"]))
+        decoy = tmp / "t24-decoy"
+        decoy.mkdir()
+        _decl(decoy, [], raw=raw_decl(["prjint1"]))
+        fixture_git(decoy, "update-ref", "refs/remotes/origin/main", commit_base(decoy))
+        saved_git_dir = os.environ.get("GIT_DIR")
+        os.environ["GIT_DIR"] = str(decoy / ".git")
+        try:
+            code, out = capture_gate(t24, None)
+        finally:
+            if saved_git_dir is None:
+                os.environ.pop("GIT_DIR", None)
+            else:
+                os.environ["GIT_DIR"] = saved_git_dir
+        if code != 1 or drop_msg not in out or base24[:12] not in out:
+            failures.append("T24: with GIT_DIR naming a decoy repository, the base must be read from the "
+                            "checked repository and the drop be exit 1, got {}\n{}".format(code, out))
+
+        # T25. A replace ref substitutes a parentless commit that drops ruleaa for the base commit; the
+        # base must still be read as committed.
+        t25, base25 = ratchet_fixture("t25")
+        _decl(t25, [], raw=raw_decl(["prjint1"]))
+        fixture_git(t25, "add", "-A")
+        repl25 = fixture_git(t25, "commit-tree", fixture_git(t25, "write-tree"), "-m", "fixture replacement")
+        fixture_git(t25, "replace", base25, repl25)
+        code, out = capture_gate(t25, base25)
+        if code != 1 or drop_msg not in out:
+            failures.append("T25: with a replace ref on the base commit, the base must be read as committed "
+                            "and the drop be exit 1, got {}\n{}".format(code, out))
+
+        # T26. A --base value starting with - is refused before git sees it.
+        t26, _base26 = ratchet_fixture("t26")
+        for bad in ("-h", "--git-dir=/nonexistent"):
+            code, out = capture_gate(t26, bad)
+            if code != 2 or "--base {!r} is not a ref".format(bad) not in out:
+                failures.append("T26: --base {!r} must be exit 2 naming it not a ref, got {}\n{}".format(
+                    bad, code, out))
+
+        def drop_at_head(root):
+            """Commit the working list without ruleaa as HEAD; returns HEAD's object id."""
+            _decl(root, [], raw=raw_decl(["prjint1"]))
+            fixture_git(root, "add", "-A")
+            fixture_git(root, "commit", "-q", "-m", "fixture head drops ruleaa")
+            return fixture_git(root, "rev-parse", "HEAD")
+
+        ambiguous = "is ambiguous"
+        outside = "it is not one of the accepted --base forms"
+
+        # T27. A full object id is that commit; with refs/remotes/<base id> planted at HEAD (which drops
+        # ruleaa) the base is ambiguous and refused, so the planted ref never stands in for it.
+        t27, base27 = ratchet_fixture("t27")
+        head27 = drop_at_head(t27)
+        code, out = capture_gate(t27, base27)
+        if code != 1 or drop_msg not in out or "base {} ({})".format(base27, base27[:12]) not in out:
+            failures.append("T27: unplanted, --base <base id> must read that commit and the drop be exit 1, "
+                            "got {}\n{}".format(code, out))
+        fixture_git(t27, "update-ref", REMOTE_REF_PREFIX + base27, head27)
+        code, out = capture_gate(t27, base27)
+        if code != 2 or ambiguous not in out or REMOTE_REF_PREFIX + base27 not in out:
+            failures.append("T27: with refs/remotes/<base id> planted, --base <base id> must be exit 2 naming "
+                            "it ambiguous, got {}\n{}".format(code, out))
+
+        # T28. A bare remote name (outside the grammar), and a revision expression whose leading
+        # remote-tracking name is shadowed by a branch or tag of the same short name, are refused (exit 2).
+        t28, base28 = ratchet_fixture("t28")
+        fixture_git(t28, "remote", "add", "origin", str(tmp / "t28-nowhere"))
+        fixture_git(t28, "update-ref", "refs/remotes/origin/main", base28)
+        fixture_git(t28, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        head28 = drop_at_head(t28)
+        code, out = capture_gate(t28, "origin/main~0")
+        if code != 1 or drop_msg not in out:
+            failures.append("T28: unshadowed, --base origin/main~0 must read refs/remotes/origin/main and the "
+                            "drop be exit 1, got {}\n{}".format(code, out))
+        fixture_git(t28, "update-ref", "refs/tags/origin", head28)
+        for base in ("origin", "origin~0"):
+            code, out = capture_gate(t28, base)
+            if code != 2 or outside not in out:
+                failures.append("T28: with a tag origin, --base {!r} (a bare remote name) must be exit 2 "
+                                "naming the accepted forms, got {}\n{}".format(base, code, out))
+        fixture_git(t28, "update-ref", "-d", "refs/tags/origin")
+        for shadow in ("refs/heads/origin/main", "refs/tags/origin/main"):
+            fixture_git(t28, "update-ref", shadow, head28)
+            for base in ("origin/main~0", "origin/main^0"):
+                code, out = capture_gate(t28, base)
+                if code != 2 or "would stand in" not in out or shadow not in out:
+                    failures.append("T28: with {} shadowing it, --base {!r} must be exit 2 naming the shadow, "
+                                    "got {}\n{}".format(shadow, base, code, out))
+
+        # T29. The configured-remote fallback: origin is configured and refs/remotes/origin/gone is
+        # absent, so --base origin/gone is exit 2 even with a tag origin/gone at a commit dropping ruleaa.
+        t29, _base29 = ratchet_fixture("t29")
+        fixture_git(t29, "remote", "add", "origin", str(tmp / "t29-nowhere"))
+        fixture_git(t29, "update-ref", "refs/tags/origin/gone", drop_at_head(t29))
+        code, out = capture_gate(t29, "origin/gone")
+        if code != 2 or "the remote-tracking ref refs/remotes/origin/gone does not exist" not in out:
+            failures.append("T29: with origin configured and refs/remotes/origin/gone absent, --base "
+                            "origin/gone must be exit 2 naming the absent ref, got {}\n{}".format(code, out))
+
+        # T30. A full-length id whose object does not exist is exit 2, also with refs/remotes/<that id>
+        # planted at HEAD (which drops ruleaa).
+        t30, base30 = ratchet_fixture("t30")
+        missing30 = ("0123456789abcdef" * 4)[:len(base30)]
+        head30 = drop_at_head(t30)
+        if missing30 in (base30, head30):
+            failures.append("T30: the fixture's missing id {} names a fixture commit".format(missing30))
+        code, out = capture_gate(t30, missing30)
+        if code != 2 or "cannot resolve the comparison base" not in out:
+            failures.append("T30: --base <missing full id> must be exit 2, got {}\n{}".format(code, out))
+        fixture_git(t30, "update-ref", REMOTE_REF_PREFIX + missing30, head30)
+        code, out = capture_gate(t30, missing30)
+        if code != 2 or ambiguous not in out or REMOTE_REF_PREFIX + missing30 not in out:
+            failures.append("T30: with refs/remotes/<missing full id> planted, --base <missing full id> must "
+                            "be exit 2 naming it ambiguous, got {}\n{}".format(code, out))
+
+        # T31. HEAD (listing ruleaa) is read as git reads it; with refs/remotes/HEAD planted at a commit
+        # that drops ruleaa the base is ambiguous and refused.
+        t31, base31 = ratchet_fixture("t31")
+        drop31 = drop_at_head(t31)
+        fixture_git(t31, "reset", "-q", "--soft", base31)  # HEAD lists ruleaa; the working list drops it
+        code, out = capture_gate(t31, "HEAD")
+        if code != 1 or drop_msg not in out:
+            failures.append("T31: unplanted, --base HEAD must read HEAD and the drop be exit 1, got {}\n{}"
+                            .format(code, out))
+        fixture_git(t31, "update-ref", REMOTE_REF_PREFIX + "HEAD", drop31)
+        for base in ("HEAD", "HEAD~0"):
+            code, out = capture_gate(t31, base)
+            if code != 2 or ambiguous not in out or REMOTE_REF_PREFIX + "HEAD" not in out:
+                failures.append("T31: with refs/remotes/HEAD planted, --base {!r} must be exit 2 naming it "
+                                "ambiguous, got {}\n{}".format(base, code, out))
+
+        # T32. An abbreviated id is outside the grammar: unplanted, and with refs/remotes/<abbreviation>
+        # planted at HEAD (which drops ruleaa), the abbreviation, alone or leading a suffix run, is refused
+        # naming the accepted forms, never read.
+        t32, base32 = ratchet_fixture("t32")
+        head32 = drop_at_head(t32)
+        abbrev32 = base32[:12]
+        for planted in (False, True):
+            if planted:
+                fixture_git(t32, "update-ref", REMOTE_REF_PREFIX + abbrev32, head32)
+            for base in (abbrev32, abbrev32 + "~0"):
+                code, out = capture_gate(t32, base)
+                if code != 2 or outside not in out:
+                    failures.append("T32: {}, --base {!r} (an abbreviated id) must be exit 2 naming the "
+                                    "accepted forms, got {}\n{}".format(
+                                        "with refs/remotes/<abbreviated id> planted" if planted
+                                        else "unplanted", base, code, out))
+
+        # T33. refs/remotes/<id>/HEAD, plain or symbolic, refuses the full id: git is asked which ref it
+        # takes, and one under refs/remotes/ is refused (git reads a full id as the object, so this is the
+        # disclosed fail-closed over-refusal).
+        through = "through a ref under refs/remotes/"
+        t33, base33 = ratchet_fixture("t33")
+        head33 = drop_at_head(t33)
+        plant33 = REMOTE_REF_PREFIX + base33 + "/HEAD"
+        fixture_git(t33, "update-ref", plant33, head33)
+        for base in (base33, base33 + "~0", base33 + "^0"):
+            code, out = capture_gate(t33, base)
+            if code != 2 or through not in out or plant33 not in out:
+                failures.append("T33: with {} planted, --base {!r} must be exit 2 naming it, got {}\n{}".format(
+                    plant33, base, code, out))
+        fixture_git(t33, "update-ref", "-d", plant33)
+        fixture_git(t33, "update-ref", "refs/heads/qa-drop", head33)
+        fixture_git(t33, "symbolic-ref", plant33, "refs/heads/qa-drop")
+        for base in (base33, base33 + "~0"):
+            code, out = capture_gate(t33, base)
+            if code != 2 or through not in out or plant33 not in out:
+                failures.append("T33: with {} a symbolic ref to a branch at HEAD, --base {!r} must be exit 2 "
+                                "naming it, got {}\n{}".format(plant33, base, code, out))
+
+        # T34. An expression led by a configured remote's absent remote-tracking branch is refused, so a
+        # planted refs/remotes/<that name>/HEAD cannot stand in for it.
+        t34, base34 = ratchet_fixture("t34")
+        fixture_git(t34, "remote", "add", "origin", str(tmp / "t34-nowhere"))
+        fixture_git(t34, "update-ref", "refs/remotes/origin/main", base34)
+        fixture_git(t34, "update-ref", "refs/remotes/origin/absent/HEAD", drop_at_head(t34))
+        for base in ("origin/absent~0", "origin/absent^0"):
+            code, out = capture_gate(t34, base)
+            if code != 2 or "refs/remotes/origin/absent, which does not exist" not in out:
+                failures.append("T34: with refs/remotes/origin/absent absent and its /HEAD planted, --base {!r} "
+                                "must be exit 2 naming the absent ref, got {}\n{}".format(base, code, out))
+
+        # T35. A grafts file cannot move the base: the base commit and HEAD are grafted onto one parentless
+        # commit that drops ruleaa, and the base is still read as committed.
+        t35, base35 = ratchet_fixture("t35")
+        fixture_git(t35, "update-ref", "refs/remotes/origin/main", base35)
+        head35 = drop_at_head(t35)
+        graft35 = fixture_git(t35, "commit-tree", fixture_git(t35, "rev-parse", "HEAD^{tree}"), "-m",
+                              "fixture graft parent")
+        info35 = Path(fixture_git(t35, "rev-parse", "--absolute-git-dir")) / "info"
+        info35.mkdir(parents=True, exist_ok=True)
+        (info35 / "grafts").write_text("{} {}\n{} {}\n".format(base35, graft35, head35, graft35),
+                                       encoding="ascii")
+        if fixture_git(t35, "merge-base", "HEAD", base35) != graft35:
+            failures.append("T35: the fixture grafts file did not move git's merge base")
+        for base, label in ((None, "(refs/remotes/origin/main, {})".format(base35[:12])),
+                            ("HEAD^", "HEAD^ ({})".format(base35[:12]))):
+            code, out = capture_gate(t35, base)
+            if code != 1 or drop_msg not in out or label not in out:
+                failures.append("T35: with a grafts file, base {!r} must be read as committed and the drop be "
+                                "exit 1, got {}\n{}".format(base, code, out))
+
+        # T36. A '{' in the leading name is outside the grammar, so a planted
+        # refs/remotes/<name>/HEAD cannot stand in for the base.
+        t36, base36 = ratchet_fixture("t36")
+        head36 = drop_at_head(t36)
+        for name in ("a{b", "x{-0-g" + base36[:12]):
+            plant36 = REMOTE_REF_PREFIX + name + "/HEAD"
+            fixture_git(t36, "update-ref", plant36, head36)
+            code, out = capture_gate(t36, name + "~0")
+            if code != 2 or outside not in out:
+                failures.append("T36: with {} planted, --base {!r} must be exit 2 naming the accepted forms, "
+                                "got {}\n{}".format(plant36, name + "~0", code, out))
+            fixture_git(t36, "update-ref", "-d", plant36)
+
+        # T37. A name written as remote-tracking whose ref git check-ref-format rejects is
+        # outside the grammar, so a planted refs/remotes/<name>/HEAD cannot stand in for the base.
+        t37, _base37 = ratchet_fixture("t37")
+        fixture_git(t37, "remote", "add", "origin", str(tmp / "t37-nowhere"))
+        head37 = drop_at_head(t37)
+        for name, plant37 in (("origin/x.", "refs/remotes/origin/x./HEAD"),
+                              ("refs/remotes/x.", "refs/remotes/refs/remotes/x./HEAD")):
+            fixture_git(t37, "update-ref", plant37, head37)
+            for base in (name, name + "~0"):
+                code, out = capture_gate(t37, base)
+                if code != 2 or outside not in out or "git check-ref-format does not accept" not in out:
+                    failures.append("T37: with {} planted, --base {!r} must be exit 2 naming the accepted forms "
+                                    "and the check-ref-format refusal, got {}\n{}".format(plant37, base, code, out))
+            fixture_git(t37, "update-ref", "-d", plant37)
+
+        # T38. A sample of forms outside the grammar that git resolves to the base (an abbreviated id, a
+        # describe form, a brace) is refused; accepted suffix runs still read the base.
+        t38, base38 = ratchet_fixture("t38")
+        drop_at_head(t38)
+        for base in (base38[:12], "x-0-g" + base38[:12], base38 + "^{commit}"):
+            code, out = capture_gate(t38, base)
+            if code != 2 or outside not in out:
+                failures.append("T38: --base {!r} must be exit 2 naming the accepted forms, got {}\n{}".format(
+                    base, code, out))
+        for base in ("HEAD^", "HEAD~", base38 + "~0^0"):
+            code, out = capture_gate(t38, base)
+            if code != 1 or drop_msg not in out or base38[:12] not in out:
+                failures.append("T38: --base {!r}, inside the grammar, must read the base and the drop be "
+                                "exit 1, got {}\n{}".format(base, code, out))
+
+        # T39. A pseudo-ref file <git dir>/origin/main, which git's short-name search
+        # tries first, cannot stand in for refs/remotes/origin/main leading a suffix run: git is handed
+        # the object id the remote-tracking ref holds, never the short name.
+        t39, base39 = ratchet_fixture("t39")
+        fixture_git(t39, "remote", "add", "origin", str(tmp / "t39-nowhere"))
+        fixture_git(t39, "commit", "-q", "--allow-empty", "-m", "fixture origin/main, a child of the base")
+        main39 = fixture_git(t39, "rev-parse", "HEAD")
+        fixture_git(t39, "update-ref", "refs/remotes/origin/main", main39)
+        drop_at_head(t39)
+        fixture_git(t39, "commit", "-q", "--allow-empty", "-m", "fixture planted commit, also dropping ruleaa")
+        plant39 = fixture_git(t39, "rev-parse", "HEAD")
+        pseudo39 = Path(fixture_git(t39, "rev-parse", "--absolute-git-dir")) / "origin" / "main"
+        pseudo39.parent.mkdir(parents=True, exist_ok=True)
+        pseudo39.write_text(plant39 + "\n", encoding="ascii")
+        if fixture_git(t39, "rev-parse", "origin/main~0") != plant39:
+            failures.append("T39: the fixture pseudo-ref file did not stand in for origin/main in git")
+        for suffix, want39 in (("~0", main39), ("^0", main39), ("~", base39), ("^", base39), ("~1", base39),
+                               ("^1", base39), ("~0^0", main39)):
+            code, out = capture_gate(t39, "origin/main" + suffix)
+            if code != 1 or drop_msg not in out or "origin/main{} ({})".format(suffix, want39[:12]) not in out:
+                failures.append("T39: with {} planted, --base {!r} must read refs/remotes/origin/main and the "
+                                "drop be exit 1, got {}\n{}".format(pseudo39, "origin/main" + suffix, code, out))
+
+        # T40. A forged commit-graph file cannot move the base: it gives HEAD~1 a decoy
+        # parent (a child of the base that drops ruleaa, at refs/remotes/origin/main), which plain git
+        # honours one commit below the tip, and the base is still read from the commit objects.
+        def forge_graph_parent(graph, child, parent):
+            """Rewrite child's first parent in the single commit-graph file graph to parent, recompute
+            every generation (v1 topological level) and the trailing checksum. A graph outside that shape
+            (a chain, a GDA2 chunk) is a _FixtureError."""
+            data = bytearray(graph.read_bytes())
+            sig, version, hash_version, chunk_count, base_count = struct.unpack(">4sBBBB", data[:8])
+            if sig != b"CGPH" or version != 1 or base_count != 0 or hash_version not in (1, 2):
+                raise _FixtureError("the fixture commit-graph file has an unexpected header")
+            hlen = 20 if hash_version == 1 else 32
+            chunks = dict(struct.unpack(">4sQ", data[8 + 12 * i:20 + 12 * i]) for i in range(chunk_count))
+            if b"GDA2" in chunks or not {b"OIDF", b"OIDL", b"CDAT"} <= set(chunks):
+                raise _FixtureError("the fixture commit-graph file is not a generation v1 graph")
+            count = struct.unpack(">I", data[chunks[b"OIDF"] + 1020:chunks[b"OIDF"] + 1024])[0]
+            oids = [bytes(data[chunks[b"OIDL"] + i * hlen:chunks[b"OIDL"] + (i + 1) * hlen]).hex()
+                    for i in range(count)]
+            if child not in oids or parent not in oids:
+                raise _FixtureError("the fixture commit-graph file does not hold both commits")
+            at = [chunks[b"CDAT"] + i * (hlen + 16) + hlen for i in range(count)]
+            struct.pack_into(">I", data, at[oids.index(child)], oids.index(parent))
+            levels = [0] * count
+            changed = True
+            while changed:
+                changed = False
+                for i in range(count):
+                    parents = struct.unpack(">II", data[at[i]:at[i] + 8])
+                    level = 1 + max([levels[p] for p in parents if p < 0x70000000] or [0])
+                    if levels[i] != level:
+                        levels[i], changed = level, True
+            for i in range(count):
+                low = struct.unpack(">I", data[at[i] + 8:at[i] + 12])[0] & 3
+                struct.pack_into(">I", data, at[i] + 8, (levels[i] << 2) | low)
+            data[-hlen:] = (hashlib.sha1 if hash_version == 1 else hashlib.sha256)(bytes(data[:-hlen])).digest()
+            graph.chmod(0o644)
+            graph.write_bytes(bytes(data))
+
+        t40, base40 = ratchet_fixture("t40")
+        decoy40 = drop_at_head(t40)
+        fixture_git(t40, "update-ref", "refs/remotes/origin/main", decoy40)
+        fixture_git(t40, "reset", "-q", "--hard", base40)
+        fixture_git(t40, "commit", "-q", "--allow-empty", "-m", "fixture HEAD~1, listing ruleaa")
+        mid40 = fixture_git(t40, "rev-parse", "HEAD")
+        drop_at_head(t40)
+        fixture_git(t40, "-c", "commitGraph.generationVersion=1", "commit-graph", "write", "--reachable")
+        forge_graph_parent(Path(fixture_git(t40, "rev-parse", "--absolute-git-dir")) / "objects" / "info" /
+                           "commit-graph", mid40, decoy40)
+        if (fixture_git(t40, "rev-parse", "HEAD~2") != decoy40
+                or fixture_git(t40, "merge-base", "HEAD", decoy40) != decoy40):
+            failures.append("T40: the forged commit-graph file did not move git's HEAD~2 and merge base")
+        for base, label in ((None, "(refs/remotes/origin/main, {})".format(base40[:12])),
+                            ("HEAD~2", "HEAD~2 ({})".format(base40[:12]))):
+            code, out = capture_gate(t40, base)
+            if code != 1 or drop_msg not in out or label not in out:
+                failures.append("T40: with a forged commit-graph file, base {!r} must be read as committed and "
+                                "the drop be exit 1, got {}\n{}".format(base, code, out))
+
+        # T41. A remote named HEAD does not turn --base HEAD into a bare remote name.
+        t41, base41 = ratchet_fixture("t41")
+        drop_at_head(t41)
+        fixture_git(t41, "reset", "-q", "--soft", base41)  # HEAD lists ruleaa; the working list drops it
+        fixture_git(t41, "remote", "add", "HEAD", str(tmp / "t41-nowhere"))
+        for base in ("HEAD", "HEAD~0"):
+            code, out = capture_gate(t41, base)
+            if code != 1 or drop_msg not in out or "{} ({})".format(base, base41[:12]) not in out:
+                failures.append("T41: with a remote named HEAD, --base {!r} must read HEAD and the drop be "
+                                "exit 1, got {}\n{}".format(base, code, out))
+
+        # T42. --self-test runs only when it is the whole command line: main() is driven
+        # with self_test_main and gate replaced by recorders, so no nested self-test or real gate runs.
+        calls42 = []
+        saved42 = (globals()["self_test_main"], globals()["gate"], sys.argv)
+        globals()["self_test_main"] = lambda: calls42.append(("self-test",)) or 0
+        globals()["gate"] = lambda root, base: calls42.append(("gate", base)) or 0
+        try:
+            for argv42, want42, code42 in (
+                    (["--base", "HEAD", "--self-test"], [], 2),
+                    (["--self-test", "--base", "HEAD"], [], 2),
+                    (["--base=HEAD", "--self-test"], [], 2),
+                    (["--self-test", "--base=HEAD"], [], 2),
+                    (["--self-test", "--self-test"], [], 2),
+                    (["--self-test", "extra"], [], 2),
+                    (["--base", "--self-test"], [("gate", "--self-test")], 0),
+                    (["--self-test"], [("self-test",)], 0),
+                    ([], [("gate", None)], 0),
+                    (["--base", "HEAD"], [("gate", "HEAD")], 0),
+                    (["--base=HEAD"], [("gate", "HEAD")], 0)):
+                del calls42[:]
+                sys.argv = ["check_must_deliver.py"] + argv42
+                buf = io.StringIO()
+                with redirect_stdout(buf), redirect_stderr(buf):
+                    code = main()
+                out = buf.getvalue()
+                if code != code42 or calls42 != want42 or (code42 == 2 and "unknown arguments" not in out):
+                    failures.append("T42: arguments {!r} must be exit {} dispatching {!r}, got exit {} "
+                                    "dispatching {!r}\n{}".format(argv42, code42, want42, code, calls42, out))
+        finally:
+            globals()["self_test_main"], globals()["gate"], sys.argv = saved42
+        # --base --self-test reaches the real gate with the value --self-test, which is not a ref (exit 2).
+        t42, _base42 = ratchet_fixture("t42")
+        code, out = capture_gate(t42, "--self-test")
+        if code != 2 or "--base '--self-test' is not a ref" not in out:
+            failures.append("T42: --base --self-test must be exit 2 naming it not a ref, got {}\n{}".format(
+                code, out))
+    except _FixtureError as exc:
+        fixture_error = str(exc)
     finally:
         for dirpath, _dirnames, filenames in os.walk(tmp):
             for fn in filenames:
@@ -543,6 +1696,10 @@ def self_test_main():
                     pass
         shutil.rmtree(tmp, ignore_errors=True)
 
+    if fixture_error is not None:
+        print("SELF-TEST ERROR: a list-ratchet fixture could not be built ({}); cannot evaluate".format(
+            fixture_error), file=sys.stderr)
+        return 2
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
@@ -554,8 +1711,30 @@ def self_test_main():
           "symlinked, unreadable (an injected read error) or unparseable list fail closed (exit 2); the "
           "demonstration's own lists are never read; an unknown or clause id fails closed naming it; the "
           "cap is read from check_release_build.CAP_BYTES at call time; a before-rules block moves the "
-          "spans it measures; and the margin report, the unlisted-rule line and the warn-margin WARNING "
-          "(still exit 0) are printed exactly. {}".format(
+          "spans it measures; the margin report, the unlisted-rule line and the warn-margin WARNING "
+          "(still exit 0) are printed exactly; and against a committed base, a rule dropped from the list "
+          "with no [[removal]] row fails naming it (also with the demonstration regenerated without it, "
+          "and with HEAD past the base, the list read at the base), "
+          "a declared removal passes and is printed, an addition passes, and a malformed removal row, an "
+          "unresolvable or missing base and an absent or malformed base list fail closed (exit 2); a "
+          "branch or tag shadowing origin/main, a GIT_DIR in the environment and a replace ref do not "
+          "change the base read, a full object id and HEAD are read as git reads them, "
+          "a full object id whose object does not exist fails closed, and a planted refs/remotes/<id> or "
+          "refs/remotes/HEAD makes the base (also HEAD~0) ambiguous (exit 2), never the base read; a "
+          "planted refs/remotes/<id>/HEAD makes <id>, <id>~0 and <id>^0 exit 2, and as a symbolic ref to "
+          "a branch <id> and <id>~0, never the base read; a grafts file does not change the base read, "
+          "with no --base or --base HEAD^; --base is a closed grammar: an abbreviated id (also with "
+          "refs/remotes/<abbreviation> planted), a describe form, a brace, a bare remote name, and, each "
+          "with its /HEAD planted, a '{{' in a leading name and a remote-tracking name check-ref-format "
+          "rejects fail closed naming the accepted forms, while HEAD^, HEAD~ and <id>~0^0 read the base; "
+          "a pseudo-ref file <git dir>/origin/main does not change origin/main read with any suffix run, "
+          "a forged commit-graph file does not change the merge base or HEAD~2, and a remote named HEAD "
+          "does not change --base HEAD or HEAD~0; --self-test runs only when it is the whole command "
+          "line, and mixed with any other argument it is exit 2, never a self-test run; "
+          "and a symlinked base list, a --base starting with -, an expression led by a shadowed "
+          "remote-tracking name, an absent remote-tracking ref of a configured remote, and an expression "
+          "led by one (also with its /HEAD planted) fail closed. "
+          "{}".format(
               "SKIPPED on this runner: {}.".format("; ".join(skipped)) if skipped
               else "No case was skipped (the mode-000 list ran too)."))
     return 0
@@ -564,8 +1743,9 @@ def self_test_main():
 # The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
 # tools/check_child_status_coverage.py pins this copy to by AST. The modules it imports hold child launch
 # and wait calls, which that gate's import scan counts, so under an ignored SIGCHLD a failing child they
-# start would read as a pass. This gate and its self-test start no child themselves; the guard runs at the
-# entry line, before main() dispatches either, so a launch added on either path later is covered.
+# start would read as a pass. The gate's list ratchet starts git children (the base reads) and its
+# self-test starts git children too (the fixture commits), each judged by its exit status; the guard runs
+# at the entry line, before main() dispatches either, so every launch on either path is covered.
 # The status the probe child exits with; any value other than 0 and the refusal exit would do.
 _CHILD_STATUS_PROBE_CODE = 77
 

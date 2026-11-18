@@ -124,7 +124,7 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "cnstpr"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:constraint-reread"]
 
 [[rule]]

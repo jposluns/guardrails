@@ -1,0 +1,3 @@
+# Adopter-owned extra tracker-label shapes for tools/check_internal_names.py (schema, limits and
+# fixture meaning: docs/tracker-labels.md). This repository ships no shape.
+format-version = 1

@@ -32,7 +32,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
+from _gen_common import repo_root, load_toml, reconcile, unknown_args_refused  # noqa: E402
 from _standards import load_manifests, ManifestError, natkey  # noqa: E402
 
 ATTRIB_REL = Path(".aiqt") / "attribution.toml"
@@ -230,6 +230,8 @@ def build(root):
 
 
 def main():
+    if unknown_args_refused(sys.argv[1:], "gen_notice.py [--check]", flags=("--check",)):
+        return 2
     check = "--check" in sys.argv[1:]
     root = repo_root()
     try:
