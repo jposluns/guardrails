@@ -25535,11 +25535,12 @@ def _orch_runtime_start_readings(command):
             command.replace("\\\n", "").translate(_ORCH_RUNTIME_START_UNQUOTE))
 
 
-def _orch_foreground_detach_lexed(command, lifts=None):
+def _orch_foreground_detach_lexed(command, lifts=None, grouped=None):
     """The foreground detach verdict orch_truncation_guard acts on: "detach", "unbalanced" or None, as the raw
     scan (_orch_foreground_detach_kind) returns them, read beside the shared lexer. The lexer decides first
-    where it can (_lex_command, skip_empty NOT passed: the segment after `(job)` that carries the `&` has no
-    word): a segment of any reading of the command's uncertain '#' characters that ends with a bare `&`
+    where it can (_orch_lexed_detach, whose lex keeps every segment with no word that does not repeat the
+    record before it: the segment after `(job)` that carries the `&` has no word, and is kept): a segment of
+    any reading of the command's uncertain '#' characters that ends with a bare `&`
     separator is a "detach" whatever the scan reads, so a real detach the scan reads as quoted or commented
     text (the QUOTE SHIFT and COMMENT SHIFT false allows of _orch_foreground_detach) denies. Where the lexer
     refuses the command (a ValueError, _UncertainHashError included: an unquoted here-document, a here-string,
@@ -25568,7 +25569,11 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     is allowed (the disclosed lexer-path false-allow residual). lifts, when given, is a list the call
     appends True to where that narrowing reads the scan's "detach" as None, or where the scan reads None
     and the same scan reading every here-document body as text reads a "detach" the narrowing lifts, so a
-    caller that must know whether it did reads the list instead of running the scan again.
+    caller that must know whether it did reads the list instead of running the scan again. grouped, when
+    given, is a list the call appends True to where the lexer read the command and every one of its readings
+    holds a segment ended by a '(' or ')' separator (_orch_lexed_detach), so a caller that would classify the
+    command's readings for a backgrounded polling loop knows, without lexing it again, that each reading is
+    'indeterminate' there (_orch_poll_reading).
 
     NO '&': a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for
     the scan, so the lex (which can cost more than both scan rules together) is not run. Its "unbalanced"
@@ -25586,11 +25591,10 @@ def _orch_foreground_detach_lexed(command, lifts=None):
         if not any(_ORCH_RUNTIME_START_RE.search(text) for text in _orch_runtime_start_readings(command)):
             return None
         return _orch_foreground_detach_kind(command)
-    try:
-        segments = _lex_command(command)
-    except ValueError:
+    lexed = _orch_lexed_detach(command, grouped)
+    if lexed is None:
         return _orch_foreground_detach_kind(command)
-    if any(seg.sep_after == "&" for seg in segments):
+    if lexed:
         return "detach"
     kind = _orch_foreground_detach_kind(command)
     if kind is None and lifts is not None:
@@ -25608,6 +25612,36 @@ def _orch_foreground_detach_lexed(command, lifts=None):
             lifts.append(True)
         return None
     return kind
+
+
+def _orch_lexed_detach(command, grouped=None):
+    """The shared lexer's reading of a bare `&` detach for _orch_foreground_detach_lexed: True where a segment
+    of any reading of the command's uncertain '#' characters ends with a bare `&` separator, False where the
+    lexer reads the command and no segment does, and None where it refuses the command (a ValueError,
+    _UncertainHashError included), exactly as a lex keeping every record (_lex_command) reads them.
+
+    COST: the lex leaves out each segment with no word and no redirect that repeats the record kept before it
+    (_SKIP_EMPTY_REPEATS), so a long run of one separator builds one record, not one per character, and the
+    readings that resume where an earlier one stopped copy that short list, not a list as long as the run. A
+    record left out ends with the same separator as a record kept before it in the same reading, so each
+    reading holds the same separators as its full lex, and a bare `&` ends a segment of some reading in one
+    lex exactly where it does in the other; the readings, their order and the ValueError are those of the
+    full lex (dl-lex-repeats, dl-orch-detach-lex). grouped, when given, is a list this appends True to where
+    the lexer reads the command and every reading holds a segment ended by a '(' or ')' separator, which a
+    full lex of each reading holds too, so _orch_poll_reading reads every reading as 'indeterminate' and
+    _orch_bg_poll_loop gives 'indeterminate' without lexing the command again."""
+    try:
+        readings = _lex_readings(command, skip_empty=_SKIP_EMPTY_REPEATS)
+    except ValueError:
+        return None
+    # grouped is set whether or not a bare `&` was found. The guard reads it only on a "detach" verdict; where
+    # this lex finds no bare `&`, the "detach" verdict comes from the raw scan. Even then every reading here holds
+    # a '(' or ')' separator, so every reading of the full lex _orch_bg_poll_loop runs does too, it gives
+    # 'indeterminate' either way, and the wider setting cannot change a verdict (dl-orch-detach-lex-grouped).
+    if grouped is not None and readings and all(
+            any(seg.sep_after in ("(", ")") for seg in segments) for segments in readings):
+        grouped.append(True)
+    return any(seg.sep_after == "&" for segments in readings for seg in segments)
 
 
 def _orch_foreground_amps_lifted(command, skip_bodies=True):
@@ -27390,7 +27424,8 @@ def orch_truncation_guard(data):
                 .format(unread),
                 "AIQT guardrail: denied a foreground Bash call with no readable command string "
                 "(fail-closed).")
-        detach_kind = _orch_foreground_detach_lexed(command)
+        grouped = []
+        detach_kind = _orch_foreground_detach_lexed(command, grouped=grouped)
         if detach_kind == "unbalanced":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command ends with a single or "
@@ -27416,8 +27451,15 @@ def orch_truncation_guard(data):
         # COST: the classifier below lexes the command again, so it runs ONCE per detach deny, and
         # _orch_detach_poll_loop (a further lex) only on its 'match', never on the plain detach path: the
         # 1 MB deadline shapes whose readings the lexer can judge stay at one classifier lex, within the
-        # timed bounds the hooks self-test pins.
-        detach_poll_kind = _orch_bg_poll_loop(command) if detach_kind == "detach" else "none"
+        # timed bounds the hooks self-test pins. Where the detector's own lex found a '(' or ')' separator in
+        # every reading (grouped), the classifier would read each reading as 'indeterminate'
+        # (_orch_poll_reading), so that answer is taken without its lex (_orch_lexed_detach).
+        if detach_kind != "detach":
+            detach_poll_kind = "none"
+        elif grouped:
+            detach_poll_kind = "indeterminate"
+        else:
+            detach_poll_kind = _orch_bg_poll_loop(command)
         if detach_kind == "detach" and detach_poll_kind == "match" and _orch_detach_poll_loop(command):
             # A backgrounded polling loop is the event orch_untracked_wait_loop denies with its specific
             # advice (never resubmit the loop). The generic advice below (use the tracked background
