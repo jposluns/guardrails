@@ -1,0 +1,11 @@
+schema = 1
+
+# Accounting record read by tools/check_selftest_removal.py: one [[removal]] entry for each registered self-test
+# check id a change removes from tools/selftest_checks.toml, written in the change that removes it.
+
+[[removal]]
+suite = "selftest-removal-selftest"
+id = "refuse/moved-suite-counts"
+state = "unreachable"
+capability-removed = "the move rule of tools/check_selftest_removal.py, introduced in the change series that also adds this record: a check id newly registered in another suite with the same launch (runner path and args) and the same check() body, not generic, is reported as moved, not removed, so the refusal of a move that this row asserted no longer exists"
+observed = "pass/moved-between-suites runs the same fixture (check id c moved from suite s to suite t, one runner) and asserts exit 0; refuse/move-target-held-at-base, refuse/move-absorbs-one-removal, refuse/move-other-body, refuse/move-other-runner, refuse/move-other-args, refuse/move-body-generic and refuse/move-live-generic-twin assert the refusals that remain"

@@ -191,6 +191,8 @@ run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check
 run_gate "versions"        python3 -I -B tools/check_versions.py
 run_gate "release-cut-selftest" python3 -I -B tools/check_release_cut.py --self-test --red-on-revert
 run_gate "release-cut"          python3 -I -B tools/check_release_cut.py
+run_gate "selftest-removal-selftest" python3 -I -B tools/check_selftest_execution.py --suite selftest-removal-selftest
+run_gate "selftest-removal"     python3 -I -B tools/check_selftest_removal.py
 run_gate "version-monotonicity-selftest" python3 -I -B tools/check_version_monotonicity.py --self-test
 run_gate "version-monotonicity" python3 -I -B tools/check_version_monotonicity.py
 run_gate "branch-root-selftest" python3 -I -B tools/check_branch_root.py --self-test
@@ -360,6 +362,12 @@ run_gate "qa-adapter-selftest"      python3 -I -B tools/_qa_adapter.py --self-te
 run_gate "audit-reference-selftest" python3 -I -B tools/audit_reference.py --self-test
 run_gate "internal-names-selftest"  python3 -I -B tools/check_selftest_execution.py --suite internal-names-selftest
 run_gate "internal-names"           python3 -I -B tools/check_internal_names.py
+# Review and work labels on the lines this branch adds, judged against its merge base with origin/main
+# when origin/HEAD exists (an origin/HEAD naming another branch, such as a feature branch in a clone of a
+# worktree, is set aside for origin/main; without origin/main it is cannot-evaluate: pass --protected).
+# HEAD at or behind origin/main judges its uncommitted edits only and passes with a NOTE when clean.
+run_gate "review-labels-selftest"   python3 -I -B tools/check_selftest_execution.py --suite review-labels-selftest
+run_gate "review-labels"            python3 -I -B tools/check_review_labels.py
 
 # ADVISORY QA digest, run under run_gate. It runs the reference audit and prints a compact digest that
 # distinguishes a required-unavailable surface from an optional-disabled one. audit_reference.py --digest
