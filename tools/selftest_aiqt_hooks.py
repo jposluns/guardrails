@@ -32875,6 +32875,26 @@ def _main_isolated(monitor):
             if _ci_got != "allow" or _ci_spent > _ci_cap:
                 failures.append("{} over {} characters expected allow within {} s of CPU time, got {} after "
                                 "{:.2f} s".format(_ci_label, len(_ci_cmd), _ci_cap, _ci_got, _ci_spent))
+        # The += join rule of the unread-route rule (_cmtidn_unread_route_ai) judges every assignment in a word from
+        # readings of the whole word that resume where the last one stopped (_CmtidnJoinWord), where copying the
+        # rest of the word for each assignment, as written and dropped, and searching it for an expansion and the
+        # joined value for an AI identity cost time quadratic in its length. The commands are the review's: 'echo
+        # "EMAIL+=x,EMAIL+=x,..."' with 1,024, 2,048, 4,095 and 8,191 assignments in one quoted word (9,223 to
+        # 73,726 characters). Each names no AI identity and allows. With the change reverted the handler took
+        # about 0.36 s, 1.35 s, 5.3 s and 21.6 s of the calling thread's CPU in-process, the last past the
+        # 8-second hook deadline, against about 0.02 s, 0.04 s, 0.07 s and 0.15 s with it (one run each, one
+        # shared host, 2026-11-18). The bound is the per-character bound of the rows above (0.375 s at 16,384
+        # characters). A longer command runs only when the shorter one is within its bound.
+        for _ci_reps in (1024, 2048, 4095, 8191):
+            _ci_cmd = 'echo "' + "EMAIL+=x," * _ci_reps + '"'
+            _ci_cap = 0.375 * len(_ci_cmd) / (16 << 10)
+            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
+            if _ci_got != "allow" or _ci_spent > _ci_cap:
+                failures.append("(ci-idc-cpu7) 'echo \"EMAIL+=x,EMAIL+=x,...\"' over {} characters expected allow "
+                                "within {:.2f} s of CPU time, got {} after {:.2f} s{}".format(
+                                    len(_ci_cmd), _ci_cap, _ci_got, _ci_spent,
+                                    "; the longer commands were not run" if _ci_reps != 8191 else ""))
+                break
         # Every co-author trailer name in a word is read, each with its own value of up to 160 characters, where the
         # reader read only the first trailer name of a word and the raw-string scan resumed its search after each
         # value. A second trailer on the same line after a first value of 140 characters, which ends inside it

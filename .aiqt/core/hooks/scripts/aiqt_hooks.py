@@ -6587,6 +6587,78 @@ _CMTIDN_JOIN_KEY_RE = re.compile(r"(?<![A-Za-z0-9_])GIT_CONFIG_KEY_([0-9]+)[+:]?
 # the longest name AI_IDENTITY_RE spells; a gpt-4 form already matched once its digit was read), so the last 16
 # characters, with one more before them for the word boundary, are enough, and each part is searched once.
 _CMTIDN_JOIN_TAIL = 17
+# The characters that the gpt alternative of AI_IDENTITY_RE reads in its tail ([a-z0-9.-] in any case, the same
+# class with the same flags), so _CmtidnJoinWord can find where a match that starts in the kept end of a joined
+# value stops reading.
+_CMTIDN_AI_TAIL_RE = re.compile(r"(?i)[a-z0-9.-]*")
+
+
+class _CmtidnJoinWord:
+    """One raw word of the += join rule of _cmtidn_unread_route_ai, read once, and the assigned values in it. A
+    value is the rest of the word after an assignment name (with its '='), as written (word[r:]) and with the
+    characters of _CMTIDN_SET_UNREAD_RE dropped (dropped[start:end], end being the first '}' at or after start
+    for a ${NAME:=VALUE} part, else the end of dropped), and is named by its offsets, never copied whole: each
+    question about a value is answered from readings of the whole word that resume where the last one stopped,
+    so a word that holds many assignments ('EMAIL+=x,EMAIL+=x,...') costs time linear in its length, where
+    copying the rest of the word for each assignment, as written and dropped, searching it for an expansion and
+    a '}', and searching the joined value for an AI identity cost time quadratic in it. The answers are those
+    that the copied rest gives: the expansion search reads only the text from each place on
+    (_cmtidn_last_start); the '}' search resumes at its last answer while that lies at or after the place asked;
+    and the AI identity search of a joined value (ai) is that of the kept end of the value before it followed
+    by this value."""
+
+    __slots__ = ("word", "dropped", "_expansion", "_brace", "_searched", "_found")
+
+    def __init__(self, word, dropped):
+        self.word = word
+        self.dropped = dropped
+        self._expansion = None  # the start of the last expansion in word, read when first asked
+        self._brace = -1  # the first '}' at or after the place last asked (len(dropped) when none)
+        self._searched = None  # where the last AI identity search of dropped started
+        self._found = None  # and its match
+
+    def expansion(self, r):
+        """True when the value at r, as written, holds an expansion (_CMTIDN_EXPANSION_RE)."""
+        if self._expansion is None:
+            self._expansion = _cmtidn_last_start(_CMTIDN_EXPANSION_RE, self.word)
+        return r <= self._expansion
+
+    def brace(self, start):
+        """The index of the first '}' of dropped at or after start, else len(dropped). Asked at places in
+        increasing order, each search resumes where the last answer was found, so dropped is read once."""
+        if self._brace < start:
+            k = self.dropped.find("}", start)
+            self._brace = len(self.dropped) if k < 0 else k
+        return self._brace
+
+    def _first(self, q):
+        """AI_IDENTITY_RE.search(dropped, q). A match attempt at a place reads the same characters whatever
+        place the search started at, so the last search, when it started at or before q and found no match
+        or one at or after q, answers for q as well."""
+        if self._searched is not None and self._searched <= q and (self._found is None or self._found.start() >= q):
+            return self._found
+        self._searched, self._found = q, AI_IDENTITY_RE.search(self.dropped, q)
+        return self._found
+
+    def ai(self, before, start, end, first):
+        """The text of AI_IDENTITY_RE.search(before + dropped[start:end], first), else None, with before at most
+        _CMTIDN_JOIN_TAIL characters long. An attempt that starts in before or at the value's first character
+        reads at most 16 characters from where it starts, or, in the gpt alternative, to the first character
+        that its tail does not take (_CMTIDN_AI_TAIL_RE) at or after the value's sixth, and one character more
+        for the word boundary; so before followed by the value up to there gives each such attempt the result it
+        has in the joined text. An attempt at a later character of the value reads the character before it and
+        the value from there on, which dropped holds at the same place; the value ends at the end of dropped or
+        at a '}', which no match holds, and the word boundary reads a '}' as it reads the end of the text, so a
+        match of dropped that starts before end is one of the value, and the first of them is the first match
+        of dropped from the value's second character (_first)."""
+        dropped = self.dropped
+        run = _CMTIDN_AI_TAIL_RE.match(dropped, min(start + 6, end), end).end()
+        head = before + dropped[start:min(end, max(start + 16, run + 1))]
+        m = AI_IDENTITY_RE.search(head, first)
+        if m is not None and m.start() <= len(before):
+            return m.group(0)
+        m = self._first(start + 1)
+        return m.group(0) if m is not None and m.start() < end else None
 
 
 def _cmtidn_config_string_ai(text):
@@ -6730,13 +6802,15 @@ def _cmtidn_unread_route_ai(command):
         for m in _CMTIDN_JOIN_KEY_RE.finditer(dropped):
             if IDENTITY_CONF_NAME_RE.match(dropped, m.end()):
                 keys.add(m.group(1))
+        join = None  # the reading of this word's values, made at its first assignment (_CmtidnJoinWord)
         for m in _CMTIDN_JOIN_SET_RE.finditer(dropped):
+            if join is None:
+                join = _CmtidnJoinWord(word, dropped)
             name = m.group(1) if m.group(1) == "EMAIL" else m.group(1).upper()
-            raw = word[at[m.end()]:]
-            value = dropped[m.end():]
+            start, end = m.end(), len(dropped)
             if m.start() and dropped[m.start() - 1] == "{":
-                value = value.split("}", 1)[0]  # ${NAME:=VALUE} or ${NAME=VALUE}: the value ends at its }
-            spelled = _CMTIDN_EXPANSION_RE.search(raw) is None
+                end = join.brace(start)  # ${NAME:=VALUE} or ${NAME=VALUE}: the value ends at its }
+            spelled = not join.expansion(at[start])
             # A git identity variable is joined under its name in any case, as before, and under its name as
             # spelled too, so an assignment of the same name in another case between two parts does not restart
             # the join of that spelling (GIT_AUTHOR_NAME=Cla; git_author_name=x; GIT_AUTHOR_NAME+=ude); EMAIL and
@@ -6747,20 +6821,20 @@ def _cmtidn_unread_route_ai(command):
                 if not spelled:
                     joined[key] = None
                     continue
+                tail = dropped[max(start, end - _CMTIDN_JOIN_TAIL):end]  # the value's last characters
                 if m.group(2) != "+=" or key not in joined:
-                    joined[key] = value[-_CMTIDN_JOIN_TAIL:]
+                    joined[key] = tail
                     continue
                 if joined[key] is None:
                     continue
                 before = joined[key]
-                window = before + value
-                joined[key] = window[-_CMTIDN_JOIN_TAIL:]
-                ai = AI_IDENTITY_RE.search(window, 1 if len(before) == _CMTIDN_JOIN_TAIL else 0)
+                joined[key] = (before + tail)[-_CMTIDN_JOIN_TAIL:]
+                ai = join.ai(before, start, end, 1 if len(before) == _CMTIDN_JOIN_TAIL else 0)
                 if ai is None:
                     continue
                 if not name.startswith("GIT_CONFIG_VALUE_"):
                     return ("identity assignments of {!r} joined by += into a value that names an AI identity ({!r})"
-                            .format(name, ai.group(0)))
+                            .format(name, ai))
                 values.append((name, ai))
     if file_subst and outer:
         hit = _cmtidn_stdin_identity_ai(outer, named.group(0))
@@ -6769,7 +6843,7 @@ def _cmtidn_unread_route_ai(command):
     for name, ai in values:
         if name[len("GIT_CONFIG_VALUE_"):] in keys:
             return ("identity assignments of {!r} joined by += into a value that names an AI identity ({!r})"
-                    .format(name, ai.group(0)))
+                    .format(name, ai))
     return None
 
 
