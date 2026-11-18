@@ -25,10 +25,12 @@ wrong.
 
 Whenever the changelog bytes change, on a cut or not, every release entry,
 earlier entries included, must carry a date that is a quoted string holding a
-real calendar date written YYYY-MM-DD: one rule shared with the site renderer
-(tools/gen_draft_site.py renders only a string date). A missing date, the
-"YYYY-MM-DD" placeholder, any other string, a TOML local date and an impossible
-date such as 2026-02-30 are refused (exit 1). On a cut, a pending-fixes record
+real calendar date written YYYY-MM-DD, a rule stricter than both changelog
+renderers (tools/gen_draft_site.py reads only the entry for VERSION and takes
+any non-empty string date; tools/gen_changelog.py renders any date it finds, a
+TOML local date included). A missing date, the "YYYY-MM-DD" placeholder, any
+other string, a TOML local date and a date that is not on the calendar, such as
+2026-02-30, are refused (exit 1). On a cut, a pending-fixes record
 bound to another release is decided first (exit 2). A date later than the run
 day is not refused: the verdict stays a function of the repository bytes alone,
 not of the clock or time zone of the run. A change that leaves the changelog
@@ -169,9 +171,12 @@ def parse_changelog(raw, label):
         version(row.get("version"), where)
         require(isinstance(row.get("title"), str), where + ": missing string title")
         if "date" in row:
-            # datetime is a date subclass, but TOML timestamps are not local dates.
+            # datetime is a date subclass, but TOML timestamps are not local dates. A string or a
+            # TOML local date parses here and is then judged by the date rule, which refuses the
+            # local date (exit 1); any other value cannot be evaluated.
             require(isinstance(row["date"], str) or type(row["date"]) is datetime.date,
-                    where + ": date must be a string or local date")
+                    where + ": date must be a quoted YYYY-MM-DD string, not a TOML timestamp,"
+                    " time or other value")
         if "tag" in row:
             require(isinstance(row["tag"], str), where + ": tag must be a string")
         for key in ("items", "refs"):
@@ -270,9 +275,8 @@ def changelog_date_refusal(rows):
     if not refused:
         return None
     return ("; ".join(refused) + "; every release date must be a quoted string holding a real"
-            " calendar date in YYYY-MM-DD form, one rule shared with the site renderer"
-            " (tools/gen_draft_site.py renders only a string date), so replace any placeholder"
-            " with the release day")
+            " calendar date in YYYY-MM-DD form, a rule stricter than both changelog renderers,"
+            " so replace any placeholder with the release day")
 
 
 def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
@@ -5105,7 +5109,7 @@ def _self_test_isolated(red_on_revert):
                 # The head is judged, never the base, so repairing a refused date passes.
                 ("release-date-judges-head", "changelog_date_refusal(head)",
                  "changelog_date_refusal(base)", "date-placeholder-repair", 1),
-                # Round 1 accepted a TOML local date, which the site renderer refuses.
+                # An earlier draft accepted a TOML local date, which the date rule refuses.
                 ("release-date-native",
                  '    value = row.get("date")\n    if isinstance(value, str) and RELEASE_DATE',
                  '    value = row.get("date")\n    if type(value) is datetime.date:\n'
@@ -5115,11 +5119,12 @@ def _self_test_isolated(red_on_revert):
                  "            datetime.date.fromisoformat(value)\n        except ValueError:",
                  "            if datetime.date.fromisoformat(value) > datetime.date.today():\n"
                  "                raise ValueError\n        except ValueError:", "cut-date-future", 1),
-                # Round 1 judged only the appended entry, so a cut could rewrite an earlier date.
+                # An earlier draft judged only the appended entry, so a cut could rewrite an earlier
+                # date.
                 ("release-date-earlier", "map(release_date_refusal, rows)",
                  "map(release_date_refusal, rows[-1:])", "cut-date-earlier-rewrite", 0),
-                # Round 1 read no date on a change that cut nothing (the check sat below the
-                # identities-unchanged early return); this moves it back below that return.
+                # An earlier draft read no date on a change that cut nothing (the check sat below
+                # the identities-unchanged early return); this moves it back below that return.
                 ("release-date-below-early-return",
                  'return 1, "declaration changed without a release transition"\n'
                  "        if date_refusal is not None:",
