@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "c3b79da99574d0cdb304953fb2fe6d78dce30e4ac230103ea1b480634855ee01"
+tree-sha256 = "899e9df5e228268001096520a7ddd7db39114699959fb2e2cafa178cf30f5e18"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -158,7 +158,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3408
-sha256 = "bd791e0965fb24eee69b662b2492925619f9ccf9b7d42b8c7a986be7f757ed7c"
+sha256 = "125d7f17beacce1dd5323ebc7fd6065643be6196830bd64d761885a962d110dc"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -4382,8 +4382,8 @@ sha256 = "3aba6654e5757854a967398ac9e512d9b614b6b6c2012fba0d76eae55685ebff"
 
 [[sources]]
 path = "tools/check_portability.py"
-bytes = 212743
-sha256 = "071a278d42cdc59b78fe60305e9a211dbc0003e96e7aaf75c9c96797509b19f7"
+bytes = 213139
+sha256 = "334d1ddb4b678b93a4b34b2066262c4195ff7a147541b1b95dd5af03e1018d9b"
 
 [[sources]]
 path = "tools/check_python_floor.py"
@@ -4532,8 +4532,8 @@ sha256 = "b0fa40d1f94ac44b818660015db141d889882c48c31f3576994f9083dc1e8bcc"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 110563
-sha256 = "858faa2927c04767054e19e135868cde53390623a8beb3994d98baf41691aba2"
+bytes = 120351
+sha256 = "8352466204de5517599bae067ca901c4dc06e80b04bb2eb395d3063ab17fb30e"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -4657,8 +4657,8 @@ sha256 = "da46591c5eb6070ac9cf404c3a0680b8266b003a27ebfe625f5013575e569101"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 207560
-sha256 = "c136c560f17ac247bdf0d5021d0d320278143ea578fc1c09adb072c682733a4d"
+bytes = 209983
+sha256 = "3983d3a7c2835ae238e65fefe8e1d4fe68819e3d526993927eddbfa6a24d2c60"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"

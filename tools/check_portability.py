@@ -205,7 +205,8 @@ def author_header_line(name):
     br_spaces=2, matching the cleanlanguage skill; byte-canon permits exactly this via its path-scoped
     [[hardbreak]] allowance for SKILL.md). The C1 mask (mask_attribution_line) compares a line's STRIPPED
     content, so this exempt string carries NO trailing whitespace and the two-space break is transparent to
-    the match. Exactly this string, as a STANDALONE stripped line and only in SKILL_MD_REL, is masked before
+    the match. Exactly this string, as a STANDALONE stripped line and only in SKILL_MD_RELS (the download's
+    SKILL.md and the hooks plugin's byte-identical copy), is masked before
     the C1 scan; nothing else is exempted. A break-style change that merges this into a neighbouring line
     (dropping the standalone break) makes the stripped body no longer equal it, so the name trips C1
     (fail-safe), never a silent pass."""
@@ -2888,7 +2889,8 @@ def _self_test_main_isolated(_vectors=True, _mkdtemp=None, _symlink=None, _which
     # the same bytes as the download's SKILL.md, so both exemptions extend to that one path and no other.
     # (P1) the Author header and the attribution line in the plugin copy mask clean, while the same two lines
     # in any other plugin file still trip C1; (P2) a duplicated attribution line in the plugin copy raises the
-    # placement finding. Red if either exemption set drops the plugin path or widens to the plugin tree.
+    # placement finding. Red if either exemption set drops the plugin path, widens to the plugin tree, or
+    # widens to the skills/aiqt/ prefix (the notes.md sibling).
     plugin_skill = "plugin/aiqt-guardrails-hooks/skills/aiqt/SKILL.md"
 
     def _plugin_c1(rel_, txt):
@@ -2897,7 +2899,10 @@ def _self_test_main_isolated(_vectors=True, _mkdtemp=None, _symlink=None, _which
     if _plugin_c1(plugin_skill, "# AIQT\n\n" + hdr + "  \n" + attr + "\ncontent\n"):
         failures.append("GD-56 plugin copy (P1): the Author header and attribution line in {} were not masked "
                         "clean".format(plugin_skill))
-    for other_rel in ("plugin/aiqt-guardrails-hooks/skills/other/SKILL.md", "plugin/aiqt-guardrails-hooks/NOTICE.md"):
+    # The siblings include one INSIDE skills/aiqt/ (notes.md), so an exemption widened to the skills/aiqt/
+    # prefix (a startswith match rather than exact membership) is red too.
+    for other_rel in ("plugin/aiqt-guardrails-hooks/skills/other/SKILL.md", "plugin/aiqt-guardrails-hooks/NOTICE.md",
+                      "plugin/aiqt-guardrails-hooks/skills/aiqt/notes.md"):
         if not _plugin_c1(other_rel, "# AIQT\n\n" + hdr + "  \n" + attr + "\ncontent\n"):
             failures.append("GD-56 plugin copy (P1): the Author header and attribution line were exempted in "
                             "{} (scope too broad)".format(other_rel))
