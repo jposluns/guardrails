@@ -153,13 +153,13 @@
 #                        2026-10-31 to raise the ratchet by exactly the measured delta, when
 #                        workers-produce-inert-data gained its paragraph that a reader splitting a worker
 #                        delivery into files at marker lines treats every marker-form line as grammar and
-#                        refuses one it does not recognise or cannot handle before any file is written, and
+#                        refuses one it does not recognize or cannot handle before any file is written, and
 #                        checks each extracted file against a digest the delivery states (wowo01.22,
 #                        wowo01.23): measured PACK 137546 at the base 782e2310 -> 138036 (+490 units); rule
 #                        files 120923 -> 121413; managed block 360 and file headers 16263 unchanged. The
 #                        ratchet rises by the measured delta, 137546 + 490 = 138036, within the maintainer's
 #                        authorization of 2026-11-08 for raises up to 148000.
-#   ceiling             a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
+#   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
