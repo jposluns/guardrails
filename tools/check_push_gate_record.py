@@ -202,7 +202,9 @@ GIT_PINS = ("-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.a
 # The supervisor's own git launches also pin the attribute and ignore files: with global configuration
 # off, git still reads the default per-user files ($XDG_CONFIG_HOME/git/attributes and .../ignore),
 # which could change the exported bytes (eol, working-tree-encoding) or hide a file from git status.
-SUPERVISOR_PINS = ("-c", "core.attributesFile=" + os.devnull, "-c", "core.excludesFile=" + os.devnull)
+# Spelt as f-strings with a literal "key=" head so the maintenance-pin scan can read each -c key (a
+# "key=" + os.devnull concatenation leaves the key unreadable to it); the values are unchanged.
+SUPERVISOR_PINS = ("-c", f"core.attributesFile={os.devnull}", "-c", f"core.excludesFile={os.devnull}")
 # The caller's own line-ending settings, which the first status read of the caller's work tree (and no
 # other git step) honours: (key, git config --type, the values this check interprets, compared without
 # case). Only these two; see CALLER CLEANLINESS in the module docstring.
@@ -644,9 +646,12 @@ def _git_env(source=None):
 def _git_query(root, args, env=None, data=None):
     """(exit status, stdout bytes) of one git call in root, with data (bytes) on its stdin when given;
     CannotEvaluate when git cannot be launched. env None is _git_env()."""
-    feed = {"stdin": subprocess.DEVNULL} if data is None else {"input": data}
+    # stdin and input are passed literally (the maintenance-pin scan cannot evaluate a
+    # **-expanded launch): with no data, stdin is the null device and input is None; with
+    # data, stdin is None so subprocess.run feeds input through its own pipe.
     try:
-        done = subprocess.run(["git", *GIT_PINS, *SUPERVISOR_PINS, "-C", str(root), *args], **feed,
+        done = subprocess.run(["git", *GIT_PINS, *SUPERVISOR_PINS, "-C", str(root), *args],
+                              stdin=subprocess.DEVNULL if data is None else None, input=data,
                               capture_output=True, timeout=GIT_EXPORT_TIMEOUT if args[:1] == ("clone",)
                               else GIT_TIMEOUT, env=_git_env() if env is None else env)
     except (OSError, subprocess.SubprocessError) as exc:
