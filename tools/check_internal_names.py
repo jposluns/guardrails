@@ -1072,8 +1072,9 @@ def _adopter_match_worker():
 # --- the --diff BASE added-line mode --------------------------------------------------------------------
 # `--diff BASE` reports every built-in or adopter tracker-shape match on a line ADDED between the merge
 # base of BASE and HEAD, within HEAD's shipped set, whatever the ratchet baseline allows (an equal-count
-# relocation is still reported). Every input is read from the pinned HEAD commit (manifest, adopter
-# configuration, baseline, tree and blobs), never from the working tree or the index. A path shipped at
+# relocation is still reported). Every input is read from a commit, never from the working tree or the
+# index: HEAD supplies the manifest, adopter configuration, baseline, tree and blobs, and the merge base
+# supplies its own manifest and tree and the old blobs each change is compared against. A path shipped at
 # HEAD whose content was not shipped at the merge base (its merge-base path, the rename source for a
 # rename, is outside the shipped set computed from the merge base's own manifest and tree, or it is
 # new) is wholly added: every line is reported, so a rename from an unshipped path into the shipped set
