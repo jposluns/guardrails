@@ -2039,6 +2039,16 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("tools/_adapter_compose.py", "_target_dir_fd", "TRY", "parent", "directory", 1,
      _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally (guarded "
                    "by handed, which a successful hand-over sets) closes child, never parent")),
+    ("tools/check_hook_coverage.py", "_open_dir_nofollow", "TRY", "parent", "fd", 1,
+     _CS_P1.format("parent, fd = fd, None runs before the open of the next component and the inner finally's "
+                   "close of parent, so the handler's `if fd is not None: os.close(fd)` closes only that child "
+                   "(or nothing, while fd is None), never parent")),
+    ("tools/check_hook_coverage.py", "_self_test", "REBIND", "case", "", 1,
+     _CS_LEGS.format("_Case() (a temporary directory, not a descriptor)")),
+    ("tools/check_hook_coverage.py", "_self_test", "AFTER", "case", "case", 1,
+     "false positive: case is a _Case (a temporary directory, not a descriptor); row 2's finally cleans up its "
+     "own case, and the later case.close() in the command-line row's finally cleans up the fresh _Case() bound "
+     "to case just before that try, never row 2's"),
     ("tools/pin.py", "do_recover", "TRY", "fd", "root_fd", 4,
      _CS_P1.format("each fd, root_fd = root_fd, None runs before os.close(fd), so the handler's `if root_fd is "
                    "not None` guard never reaches the closed number")),

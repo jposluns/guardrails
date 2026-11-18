@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "b2775c79d334b422f1638786b30629236ddcea4076a431820fa35b283d22af71"
+tree-sha256 = "950e90f8bcaec437be4552764a2c949fa6628b4430cf82dbc4f8f8148bc3ec6b"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4272,8 +4272,8 @@ sha256 = "7de00bde82268e3d13fe503a84ccbcbc1042cb96e9d91df6cd0781bee044b841"
 
 [[sources]]
 path = "tools/check_hook_coverage.py"
-bytes = 71747
-sha256 = "b026f90bede2129db9dc2ef09a82ee4ff4885ca0829c2142b21721d957b0151a"
+bytes = 72691
+sha256 = "d147f7c79ad0de776191ecc130bbed011972c27faeea93e7ce03f0301321771e"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"
@@ -4412,8 +4412,8 @@ sha256 = "1062f2cdf038f39b3a88bb1a124c4e9d6bc58d89e5aa3b4b8855dadf04d8c447"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 305329
-sha256 = "8018c683be72410d249b6d4005d6aa2c27d4094d874788f5c683addc8dc3e507"
+bytes = 306217
+sha256 = "d28764baf17e4c4ce5e590f522e28905a19d4caef7296d488640529bd4a27a89"
 
 [[sources]]
 path = "tools/check_release_delta.py"

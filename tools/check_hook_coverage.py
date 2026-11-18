@@ -591,6 +591,27 @@ def _guarded(thunk):
         return "raised " + type(exc).__name__
 
 
+# The C stack the deep-nesting row parses on. The JSON parser recurses in C, and CPython bounds that recursion
+# by the thread's own stack, so on the main thread whether a given depth exhausts it depends on the host's stack
+# limit (with a large enough one, 100000 levels parse, and the reverted run exits 2 like the guarded one). On a
+# thread with this much stack, the row no longer depends on that limit.
+_DEEP_STACK = 1 << 20
+
+
+def _on_small_stack(thunk):
+    """_guarded(thunk)'s result, computed on a thread whose C stack is _DEEP_STACK bytes."""
+    import threading
+    box = []
+    previous = threading.stack_size(_DEEP_STACK)
+    try:
+        worker = threading.Thread(target=lambda: box.append(_guarded(thunk)))
+        worker.start()
+    finally:
+        threading.stack_size(previous)
+    worker.join()
+    return box[0] if box else "no result"
+
+
 def _swap(name, value):
     """The module global name's current value, after storing value in its place. Each revertible global is
     spelled as a literal key (tools/gen_renderers.py refuses a computed globals() key); any other name raises
@@ -980,9 +1001,9 @@ def _self_test():
     check("refuse/nan-constant", got == 2, got)
     check("refuse/nan-constant/red-when-reverted", mutant != 2, mutant)
     # Deeply nested JSON exhausts the parser's recursion: refused (exit 2); without the RecursionError catch
-    # the gate crashes instead.
+    # the gate crashes instead. Both runs parse on a bounded stack (_DEEP_STACK), whatever the host's limit.
     deep = "[" * 100000 + "]" * 100000
-    got, mutant = _run(lambda: _guarded(lambda: _code(_Case().settings(deep))),
+    got, mutant = _run(lambda: _on_small_stack(lambda: _code(_Case().settings(deep))),
                        revert=("_JSON_ERRORS", (ValueError,)))
     check("refuse/deep-nesting", got == 2, got)
     check("refuse/deep-nesting/red-when-reverted", mutant != 2, mutant)
