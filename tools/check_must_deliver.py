@@ -21,7 +21,8 @@ empty), and every other value (an abbreviated object id, a describe form, a bare
 branch or tag name, remotes/origin/main, any brace, @{, : or other revision syntax) is exit 2 with a
 message naming the accepted forms, before git resolves anything. Within the grammar git is never
 handed a short name: a remote base is read as its fully qualified ref with show-ref --verify: the
-default reads exactly refs/remotes/origin/main, and a remote-tracking --base without suffixes is read
+default reads exactly refs/remotes/origin/main and HEAD (show-ref --verify HEAD) and hands git
+merge-base the two object ids, and a remote-tracking --base without suffixes is read
 as exactly that ref, so a tag, a local branch or a pseudo-ref file of the same short name, which git's
 short-name search order prefers, cannot stand in for it (an absent remote-tracking ref is exit 2); a
 remote-tracking name leading a suffix run is exit 2 when that remote-tracking ref does not exist
@@ -72,9 +73,11 @@ and HEAD, which is read exactly, are still refused when refs/remotes/<id> or ref
 or when git names a ref under refs/remotes/ for them (refs/remotes/<id>/HEAD), an over-refusal a ref
 written there can use to fail a push's base closed; a ref git names that a symbolic ref under
 refs/remotes/ also ends at is refused even when git reached it directly, an over-refusal; and grafts
-and the commit-graph file are off but a .git/shallow file, which also cuts a commit's parents, is
-read as git reads it, so a write into the git directory can still move the merge base or a ~ or ^
-base through it); a
+and the commit-graph file are off, but any write into the git directory can still change the base or
+the list read at it: a .git/shallow file, which also cuts a commit's parents, is read as git reads
+it, an object written into the object store under the id of the base list's blob or of a commit is
+read as git reads it, and a rewritten ref (refs/remotes/origin/main, HEAD) moves the base it names);
+a
 listed rule cut down to a stub still passes (content is not judged);
 the gate measures the repository file against the configured cap, not any platform's actual truncation
 behaviour or a budget other instruction files may share; and a client that checks AGENTS.md out with CRLF
@@ -437,7 +440,8 @@ def _grammar_refusal(root, base):
 
 def resolve_base(root, base):
     """(commit, label) of the comparison base: the explicit ref, or with base None the merge base of
-    HEAD and refs/remotes/origin/main. An explicit base outside the closed grammar (_grammar_refusal,
+    HEAD and refs/remotes/origin/main, each read exactly with show-ref --verify and handed to git merge-base
+    as an object id. An explicit base outside the closed grammar (_grammar_refusal,
     ACCEPTED_BASE_FORMS) is refused first, and git is never handed a short name for one inside it. A
     full object id or HEAD (checked first, so a remote named HEAD does not change it) is refused when
     refs/remotes/<id> or refs/remotes/HEAD exists (_ambiguous_base_refusal) or when git resolves it
@@ -456,7 +460,11 @@ def resolve_base(root, base):
         if tip is None:
             raise DemoError("no comparison base resolves: {} does not exist; pass --base REF or fetch "
                             "{}".format(full, DEFAULT_BASE_REMOTE))
-        proc = _git(root, ["merge-base", "HEAD", tip])
+        head = _exact_ref_oid(root, "HEAD")
+        if head is None:
+            raise DemoError("no comparison base resolves: HEAD does not resolve (show-ref --verify HEAD); "
+                            "pass --base REF")
+        proc = _git(root, ["merge-base", head, tip])
         commit = _object_id(proc.stdout.decode("ascii", "replace")) if proc.returncode == 0 else None
         if commit is None:
             raise DemoError("no comparison base resolves: git merge-base HEAD {} failed ({}); pass "
@@ -603,8 +611,11 @@ def run(root):
 
 
 def main():
+    """The self-test runs only when the arguments are exactly --self-test; every other shape goes through
+    the strict parser below, so --self-test mixed with any other argument is exit 2, never a self-test
+    run that exits 0 without running the gate."""
     args = sys.argv[1:]
-    if "--self-test" in args:
+    if args == ["--self-test"]:
         return self_test_main()
     base = None
     if len(args) == 2 and args[0] == "--base":
@@ -762,7 +773,13 @@ def main():
 #       core.commitGraph=false reads the decoy and passes);
 #   T41 (round 7 R7-a) a remote named HEAD is configured, HEAD lists ruleaa and the working list drops
 #       it: --base HEAD and HEAD~0 read HEAD and the drop is exit 1 (a mutant judging the bare-remote
-#       name before HEAD refuses both, exit 2).
+#       name before HEAD refuses both, exit 2);
+#   T42 (round 8 R8-a) main() is driven with self_test_main and gate replaced by recorders: --self-test
+#       mixed with --base HEAD, --base=HEAD, a second --self-test or any other argument, in either order,
+#       is exit 2 naming the unknown arguments with nothing dispatched, --base --self-test reaches the
+#       gate with the value --self-test, and the real gate refuses that value as not a ref (exit 2), while
+#       exactly --self-test runs the self-test and no argument, --base HEAD and --base=HEAD run the gate (a
+#       mutant that runs the self-test when --self-test appears anywhere dispatches it and exits 0).
 
 import gen_first_pin_demo as gfpd  # noqa: E402  fixture helpers (_write_tree, _tuned) and CAP_BYTES
 
@@ -1631,6 +1648,43 @@ def _self_test_main_isolated():
             if code != 1 or drop_msg not in out or "{} ({})".format(base, base41[:12]) not in out:
                 failures.append("T41: with a remote named HEAD, --base {!r} must read HEAD and the drop be "
                                 "exit 1, got {}\n{}".format(base, code, out))
+
+        # T42. (round 8 R8-a) --self-test runs only when it is the whole command line: main() is driven
+        # with self_test_main and gate replaced by recorders, so no nested self-test or real gate runs.
+        calls42 = []
+        saved42 = (globals()["self_test_main"], globals()["gate"], sys.argv)
+        globals()["self_test_main"] = lambda: calls42.append(("self-test",)) or 0
+        globals()["gate"] = lambda root, base: calls42.append(("gate", base)) or 0
+        try:
+            for argv42, want42, code42 in (
+                    (["--base", "HEAD", "--self-test"], [], 2),
+                    (["--self-test", "--base", "HEAD"], [], 2),
+                    (["--base=HEAD", "--self-test"], [], 2),
+                    (["--self-test", "--base=HEAD"], [], 2),
+                    (["--self-test", "--self-test"], [], 2),
+                    (["--self-test", "extra"], [], 2),
+                    (["--base", "--self-test"], [("gate", "--self-test")], 0),
+                    (["--self-test"], [("self-test",)], 0),
+                    ([], [("gate", None)], 0),
+                    (["--base", "HEAD"], [("gate", "HEAD")], 0),
+                    (["--base=HEAD"], [("gate", "HEAD")], 0)):
+                del calls42[:]
+                sys.argv = ["check_must_deliver.py"] + argv42
+                buf = io.StringIO()
+                with redirect_stdout(buf), redirect_stderr(buf):
+                    code = main()
+                out = buf.getvalue()
+                if code != code42 or calls42 != want42 or (code42 == 2 and "unknown arguments" not in out):
+                    failures.append("T42: arguments {!r} must be exit {} dispatching {!r}, got exit {} "
+                                    "dispatching {!r}\n{}".format(argv42, code42, want42, code, calls42, out))
+        finally:
+            globals()["self_test_main"], globals()["gate"], sys.argv = saved42
+        # --base --self-test reaches the real gate with the value --self-test, which is not a ref (exit 2).
+        t42, _base42 = ratchet_fixture("t42")
+        code, out = capture_gate(t42, "--self-test")
+        if code != 2 or "--base '--self-test' is not a ref" not in out:
+            failures.append("T42: --base --self-test must be exit 2 naming it not a ref, got {}\n{}".format(
+                code, out))
     except _FixtureError as exc:
         fixture_error = str(exc)
     finally:
@@ -1675,7 +1729,8 @@ def _self_test_main_isolated():
           "rejects fail closed naming the accepted forms, while HEAD^, HEAD~ and <id>~0^0 read the base; "
           "a pseudo-ref file <git dir>/origin/main does not change origin/main read with any suffix run, "
           "a forged commit-graph file does not change the merge base or HEAD~2, and a remote named HEAD "
-          "does not change --base HEAD or HEAD~0; "
+          "does not change --base HEAD or HEAD~0; --self-test runs only when it is the whole command "
+          "line, and mixed with any other argument it is exit 2, never a self-test run; "
           "and a symlinked base list, a --base starting with -, an expression led by a shadowed "
           "remote-tracking name, an absent remote-tracking ref of a configured remote, and an expression "
           "led by one (also with its /HEAD planted) fail closed. "
