@@ -9,12 +9,28 @@ margin recorded there, and raised only with a reviewed reason; the `ceiling` in 
 separate reported figure for the pack's own share alone, not enforced, and PACK currently exceeds it
 (its value predates the header counting that raised PACK, and was not raised with it).
 
+The comment above `ratchet` in that file keeps a dated history of the ratchet, and the gate's
+`--change-shape` mode holds it to an append-only rule: every existing history line stays exactly as
+written, and new lines go only directly above the `#   ceiling` comment line, as one new entry that
+opens with a line reading `Raised OLD -> NEW on YYYY-MM-DD`. A change that leaves the ratchet where it
+is (held, not raised) or lowers it may add no history lines at all, so it cannot carry a record of its
+own. Write a held, not raised, record, and a late record of an earlier change that landed without one,
+into the next raise entry instead: first that entry's `Raised OLD -> NEW on YYYY-MM-DD` line, then the
+held or late record as more lines of the same entry, each written like the other entry lines (`#`,
+exactly 24 spaces, then the text). For example, a line opening `Held at N on YYYY-MM-DD, not raised,
+when` or `Late record of the YYYY-MM-DD change, written on YYYY-MM-DD: held at N` continues the entry
+above it. No line after the first may begin with the word "raised" in any letter case, since the gate
+reads such a line as the start of a new entry; rewrap the text so that word falls inside a line. The
+held and late records written on 2026-11-18 above the `Raised 136499 -> 137546` line predate this rule
+and stay as they are; do not copy that layout. `tools/check_instruction_budget.py` states the full
+entry grammar.
+
 Treat 150,000 characters as this project's target for everything Claude Code loads at the start of a
 session. One caveat: the loader of the pinned Claude Code build the gate models (2.1.287 in
 `.aiqt/core/instruction-budget.toml`) carries its own 120,000-character check on loaded file
 contents, a total limit below that figure (Claude Code behaviour, which can change, not a pack
 guarantee), so budget to 120,000, not 150,000.
-Today the shipped pack may exceed that figure: the budget gate allows it a PACK of up to the committed ratchet, 136,499 UTF-16 code units, the unit the budget gate counts.
+Today the shipped pack may exceed that figure: the budget gate allows it a PACK of up to the committed ratchet, 137,546 UTF-16 code units, the unit the budget gate counts.
 The gate prints two totals: PACK, the
 pack's own share, and SESSION, which adds the rest of your `CLAUDE.md` and its imports. Both count
 `.claude/CLAUDE.md` and its imports, and a header for each loaded file with its resolved path relative to

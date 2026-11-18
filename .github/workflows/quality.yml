@@ -439,9 +439,40 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite baseline-pin-selftest
 
+      # The base-coupling leg compares each pin at HEAD with the same pin at the exact commit --base
+      # names, which must be an ancestor of HEAD; it compares those 2 endpoints only, so a row changed
+      # in one commit and restored by a later one is not seen. A pull_request checks out the test
+      # merge and compares it with its first parent HEAD^1, the protected line it merges into. A push
+      # compares the pushed HEAD with the event's before SHA (the PUSH_BEFORE the Release cut step
+      # passes too), the net change of the pushed range; a before SHA that is not an ancestor of HEAD
+      # (a force or otherwise divergent push) is cannot-evaluate (exit 2), never compared with a common
+      # ancestor. A workflow_dispatch run compares HEAD with its previous commit HEAD^, that 1 commit's
+      # change. Every base is passed unprobed, so a base that does not resolve (a root HEAD included)
+      # is cannot-evaluate in the gate (exit 2), never a pass, and no branch runs the gate without
+      # --base. A push whose before SHA is missing or all zero (the ${PUSH_BEFORE//0/} test is empty
+      # for both) names no commit before the range, so the step prints why and fails closed (exit 1)
+      # before the gate runs. The run block below is pinned verbatim as BASELINE_BASE_RUN_BLOCK in
+      # tools/check_ci_parity.py (any other text is a parity finding), so change both together.
       - name: Site baseline pin
         shell: bash
-        run: python3 -I -B tools/check_baseline_pin.py
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 -I -B tools/check_baseline_pin.py --base "HEAD^1"
+          else
+            if [ "$EVENT_NAME" = "push" ]; then
+              if [ -z "${PUSH_BEFORE//0/}" ]; then
+                echo "CANNOT EVALUATE: the push event names no commit before the pushed range (its before SHA is missing or all zero), so the baseline-pin base-coupling leg has no base; fail closed"
+                exit 1
+              fi
+              python3 -I -B tools/check_baseline_pin.py --base "$PUSH_BEFORE"
+            else
+              python3 -I -B tools/check_baseline_pin.py --base "HEAD^"
+            fi
+          fi
 
       - name: Site palette contrast (aiqt.ai draft)
         shell: bash
@@ -1093,9 +1124,42 @@ jobs:
       - name: Must-deliver prefix self-test
         shell: bash
         run: python3 -I -B tools/check_must_deliver.py --self-test
+      # The list ratchet's base: a push compares against the event's before SHA, as the Release cut
+      # step reads it, so a rule dropped in any commit of a multi-commit push is caught; a missing or
+      # all-zero before SHA (no prior tip) fails the step closed (exit 1, the one exit the parity
+      # grammar admits), never a weaker base. A pull_request compares against
+      # origin/$GITHUB_BASE_REF. Any other event (a workflow_dispatch run) passes HEAD^ when it
+      # resolves, otherwise the gate's own default base (the merge base with origin/main) decides.
       - name: Must-deliver prefix
         shell: bash
-        run: python3 -I -B tools/check_must_deliver.py
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            if [ -z "$PUSH_BEFORE" ]; then
+              echo "error: the push event carries no before SHA; the must-deliver list ratchet has no base; fail-closed"
+              exit 1
+            fi
+            if [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              echo "error: the push event's before SHA is all zero; the must-deliver list ratchet has no base; fail-closed"
+              exit 1
+            fi
+            if [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000000000000000000000000000" ]; then
+              echo "error: the push event's before SHA is all zero; the must-deliver list ratchet has no base; fail-closed"
+              exit 1
+            fi
+            python3 -I -B tools/check_must_deliver.py --base "$PUSH_BEFORE"
+          else
+            if [ "$EVENT_NAME" = "pull_request" ]; then
+              python3 -I -B tools/check_must_deliver.py --base "origin/${GITHUB_BASE_REF}"
+            elif git rev-parse --verify --quiet "HEAD^" >/dev/null; then
+              python3 -I -B tools/check_must_deliver.py --base "HEAD^"
+            else
+              python3 -I -B tools/check_must_deliver.py
+            fi
+          fi
 
       - name: Mappings page self-test
         shell: bash
@@ -1141,6 +1205,28 @@ jobs:
       - name: Instruction budget
         shell: bash
         run: python3 -I -B tools/check_instruction_budget.py
+
+      # The budget source's change shape: a routine ratchet update changes only the ratchet value and,
+      # on each raise, appends one dated history entry above the ceiling line. The base is the one the
+      # release-cut gate binds: a pull_request compares its merge with the raw first parent, which must
+      # be origin/$GITHUB_BASE_REF; a push compares the event's before commit with the pushed tip, the
+      # whole range at once; a workflow_dispatch run compares the tip with its first parent.
+      - name: Instruction budget change shape
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 -I -B tools/check_instruction_budget.py --change-shape
+          else
+            if [ "$EVENT_NAME" = "push" ]; then
+              python3 -I -B tools/check_instruction_budget.py --change-shape --protected "origin/${GITHUB_REF_NAME}" --base "$PUSH_BEFORE"
+            else
+              python3 -I -B tools/check_instruction_budget.py --change-shape --protected "origin/${GITHUB_REF_NAME}"
+            fi
+          fi
 
       # A brief addressed to a worker family that cannot execute must not ask it to run anything. The gate
       # runs on briefs before they are sent; here only its self-test runs, since the repository holds none.
@@ -1226,6 +1312,15 @@ jobs:
       - name: Hooks preview
         shell: bash
         run: python3 -I -B tools/check_hooks_preview.py
+
+      # The pre-launch hook-coverage gate judges a launch directory the orchestrator names before it
+      # starts a session; the repository holds no launch to judge, so CI runs its self-test only.
+      - name: Hook coverage self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite hook-coverage-selftest
+      - name: Hook coverage self-test
+        shell: bash
+        run: python3 -I -B tools/check_hook_coverage.py --self-test
 
   selftest-execution:
     name: Execution-reconciled self-tests

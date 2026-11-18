@@ -4,9 +4,11 @@
 
 AIQT Guardrails holds your AI assistant to one standard: **A**ccuracy, **I**ntegrity, **Q**uality, and
 **T**rust. More than guidance: these principles outrank progress, speed, and cost. In chat, the standard
-guides your assistant. In this repository, CI gates check each batch of changes before it merges into
-main, and each push to main, against the rules the gates cite, a subset of the standard. Open source,
-and built to be read.
+guides your assistant. In this repository, CI gates run on each merge train, the pull request that
+carries a batch of changes into main, and every gate runs on each push to main; a train that changes
+only the website may skip some gates. Some gates check the repository against the rules they cite, a
+subset of the standard, others check it without citing a rule, and some only test themselves. The
+Gates and CI section of [CLAUDE.md](CLAUDE.md) has the detail. Open source, and built to be read.
 
 <!-- COUNTS-PROOF:BEGIN (generated) -->
 **133 rules. 131 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml). 34 Claude Code hooks shipped as an opt-in plugin. Mapped to 17 frameworks.**
@@ -48,7 +50,7 @@ everything Claude Code loads at the start of a session under 150,000 characters 
 the loader of the pinned Claude Code build the gate models (2.1.287, pinned with its binary hash in
 `.aiqt/core/instruction-budget.toml`) carries its own 120,000-character check on loaded file contents,
 a total limit below that figure (Claude Code behaviour, which can change, not a pack guarantee), so
-budget to 120,000. Today the shipped pack may exceed that figure: the budget gate allows it a PACK of up to the committed ratchet, 136,499 UTF-16 code units, the unit the budget gate counts.
+budget to 120,000. Today the shipped pack may exceed that figure: the budget gate allows it a PACK of up to the committed ratchet, 137,546 UTF-16 code units, the unit the budget gate counts.
 The counting rules, the totals the gate prints, and what not to load twice are
 in [Keep the always loaded instructions small](INSTRUCTION-BUDGET.md).
 

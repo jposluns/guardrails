@@ -120,7 +120,62 @@ run_gate "site-versions" python3 -I -B tools/check_site_versions.py
 run_gate "draft-site-selftest" python3 -I -B tools/gen_draft_site.py --self-test
 run_gate "draft-site-drift" python3 -I -B tools/gen_draft_site.py --check
 run_gate "baseline-pin-selftest" python3 -I -B tools/check_selftest_execution.py --suite baseline-pin-selftest
-run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py
+# --local-base refs/remotes/origin/main runs the base-coupling leg against the fork point of HEAD and the
+# commit that exact ref points at (the git merge-base form of check_version_monotonicity.py's default base,
+# which reads the short name origin/main instead). The full ref name is required: a tag or local branch named
+# origin/main would win over the short name. This runner never fetches (it does not touch the network). The
+# decision is the gate's own: check_baseline_pin.py --probe-local-base runs the same --local-base reads under
+# the same scrubbed git environment (no inherited GIT_DIR or other GIT_ variable selects the repository) and
+# exits 0 when the ref is usable, 1 with nothing on stderr only when the clone genuinely lacks it and its ref
+# store is shown readable and well formed, and 2 for anything else (a broken loose ref, a broken packed-refs
+# line, a dangling symbolic ref, a packed-refs that is a directory or otherwise not a regular readable file, a
+# reftable ref store, an unreadable object, any other git failure); --local-base takes the same decision. The flag is passed only on exit 0 with nothing on stderr. Exit 1 with nothing on
+# stderr prints one NOTE line that the base comparison did not run and how to create the ref, then runs the
+# gate without the flag (the gate's own no-base NOTE follows) and FAILS the run under the baseline-pin name,
+# since the leg did not run. The one opt-out is BASELINE_PIN_ALLOW_NO_BASE=1 in this runner's environment
+# (for example BASELINE_PIN_ALLOW_NO_BASE=1 tools/run_all_checks.sh): with it, and only on that genuine
+# absence, the run is not failed for the missing comparison, so it can end RESULT: PASS without the leg. Any
+# other outcome (output on stderr, or an exit other than 0 or 1) is never read as absence: it fails the run
+# under the baseline-pin name, opt-out or not. The block sets baseline_fetch to 1 only on that genuine absence (0
+# otherwise, whatever the environment held), and a run that then fails prints the fetch command first in its summary.
+# The probe runs as a plain command inside the baseline_probe function, so its python3 sits in a command-word
+# position check_python_launcher_isolation.py resolves; the command substitution calls only the function, keeps
+# the probe's stderr, discards its stdout and leaves the probe's exit status in $?. The function writes one "."
+# on stderr after the probe and the runner removes it, so a probe stderr of only line feeds (which a command
+# substitution would otherwise strip to nothing) still reads as output on stderr.
+# check_ci_parity.py admits this block only as its exact reviewed text (BASELINE_PROBE_BLOCK).
+baseline_probe() {
+  python3 -I -B tools/check_baseline_pin.py --probe-local-base refs/remotes/origin/main
+  local baseline_probe_status=$?
+  printf '.' >&2
+  return "$baseline_probe_status"
+}
+baseline_probe_err=$(baseline_probe 2>&1 >/dev/null)
+baseline_probe_rc=$?
+baseline_probe_err=${baseline_probe_err%.}
+baseline_fetch=0
+if [ "$baseline_probe_rc" -eq 0 ] && [ -z "$baseline_probe_err" ]; then
+  run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py --local-base refs/remotes/origin/main
+elif [ "$baseline_probe_rc" -eq 1 ] && [ -z "$baseline_probe_err" ]; then
+  echo "NOTE: baseline-pin base comparison did NOT RUN: this clone has no refs/remotes/origin/main; create it with git fetch origin main:refs/remotes/origin/main"
+  baseline_fetch=1
+  run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py
+  if [ "${BASELINE_PIN_ALLOW_NO_BASE:-}" != "1" ]; then
+    failed=1
+    # When the bare gate above failed, run_gate has already named baseline-pin last; name it only once.
+    if [ "${failed_names##*, }" != "baseline-pin" ]; then
+      failed_names="${failed_names:+${failed_names}, }baseline-pin"
+    fi
+    echo "GATE FAILED: baseline-pin (the base comparison did NOT RUN; fetch the ref as the NOTE above says, or set BASELINE_PIN_ALLOW_NO_BASE=1 to accept a run without it)"
+    echo
+  fi
+else
+  echo "--- baseline-pin ---"
+  failed=1
+  failed_names="${failed_names:+${failed_names}, }baseline-pin"
+  echo "GATE FAILED: baseline-pin (check_baseline_pin.py --probe-local-base refs/remotes/origin/main exit ${baseline_probe_rc}, stderr: ${baseline_probe_err})"
+  echo
+fi
 run_gate "palette-aiqt" python3 -I -B .baseline/check_palette.py --site aiqt --palettes site/draft/assets/baseline/palettes.css
 run_gate "palette-opfiles" python3 -I -B .baseline/check_palette.py --site opfiles --palettes opf/site/draft/assets/baseline/palettes.css
 run_gate "security-txt-selftest" python3 -I -B tools/check_selftest_execution.py --suite security-txt-selftest
@@ -239,6 +294,7 @@ run_gate "sized-instructions-selftest" python3 -I -B tools/check_sized_instructi
 run_gate "sized-instructions" python3 -I -B tools/check_sized_instructions.py
 run_gate "instruction-budget-selftest" python3 -I -B tools/check_instruction_budget.py --self-test
 run_gate "instruction-budget" python3 -I -B tools/check_instruction_budget.py
+run_gate "instruction-budget-change-shape" python3 -I -B tools/check_instruction_budget.py --change-shape
 run_gate "brief-capability-selftest" python3 -I -B tools/check_brief_capability.py --self-test  # no brief in the repository to lint
 run_gate "push-gate-record-selftest" python3 -I -B tools/check_push_gate_record.py --self-test --red-on-revert  # the push check is an adopter-installed pre-push hook
 run_gate "notice-drift"    python3 -I -B tools/gen_notice.py --check
@@ -258,6 +314,8 @@ run_gate "char-policy-selftest" python3 -I -B tools/gen_char_policy.py --self-te
 run_gate "char-policy-drift" python3 -I -B tools/gen_char_policy.py --check
 run_gate "hooks-preview-selftest" python3 -I -B tools/check_hooks_preview.py --self-test
 run_gate "hooks-preview" python3 -I -B tools/check_hooks_preview.py
+run_gate "hook-coverage-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite hook-coverage-selftest
+run_gate "hook-coverage-selftest" python3 -I -B tools/check_hook_coverage.py --self-test  # no launch directory in the repository to judge
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
@@ -377,6 +435,11 @@ run_gate "review-labels"            python3 -I -B tools/check_review_labels.py
 run_gate "qa-advisory-digest"       python3 -I -B tools/audit_reference.py --digest
 
 if [ "$failed" -ne 0 ]; then
+  # A failed run whose clone lacks the base (baseline_fetch=1, set only on the probe block's genuine absence) starts
+  # its summary with the one fetch command that creates the ref (the maintainer's ruling of 2026-11-17).
+  if [ "${baseline_fetch:-0}" = "1" ]; then
+    echo "FETCH FIRST: the baseline-pin base comparison did NOT RUN; run git fetch origin main:refs/remotes/origin/main"
+  fi
   echo "FAILED GATES: ${failed_names}"
   echo "RESULT: FAIL"
   exit 1
