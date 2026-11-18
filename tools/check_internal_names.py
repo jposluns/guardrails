@@ -231,6 +231,8 @@ a complete set:
   "cases 19 to 23 and 25 (the child sentinel matched the parent pid)"
   "case 23 (the inherited-probe sentinel matched the parent pid)"
   "case 25 (an unreadable file could not be planted: permissions do not bind here)"
+  "case 34 diff/grafts-file-ignored (this git does not honour a grafts file)"
+  "case 34 diff/commit-graph-file-ignored (this git does not honour a forged commit-graph file)"
 """
 import sys
 
@@ -1076,10 +1078,8 @@ def _adopter_match_worker():
 # relocation is still reported). Every input is read from a commit, never from the working tree or the
 # index: HEAD supplies the manifest, adopter configuration, baseline, tree and blobs, and the merge base
 # supplies its own manifest and tree and the old blobs each change is compared against. Every git read
-# ignores refs/replace objects and any grafts file (_git_read), so neither can stand in for an object or
-# move the merge base; a forged commit-graph file in the local object directory is NOT neutralized and
-# might change the parents git reads (inferred, not tested), a disclosed residual that, like a grafts
-# file, needs write access to the local repository. A path shipped at
+# ignores refs/replace objects, any grafts file and any commit-graph file (_git_read), so none of them can
+# stand in for an object or change the parents git reads and move the merge base. A path shipped at
 # HEAD whose content was not shipped at the merge base (its merge-base path, the rename source for a
 # rename, is outside the shipped set computed from the merge base's own manifest and tree, or it is
 # new) is wholly added: every line is reported, so a rename from an unshipped path into the shipped set
@@ -1102,16 +1102,18 @@ def _git_read(root, args):
     protocol.allow=never, GIT_NO_LAZY_FETCH=1, a 120-second timeout) plus the three automatic-maintenance
     pins in option position (gc.auto=0, gc.autoDetach=false, maintenance.auto=false), the spelling the
     maintenance-pin scan resolves for a funnel whose subcommand is a parameter, --no-replace-objects
-    (a local refs/replace object can never stand in for a commit, tree or blob this check reads) and
+    (a local refs/replace object can never stand in for a commit, tree or blob this check reads),
     GIT_GRAFT_FILE set to a path that cannot exist (a child of the null device, so no info/grafts line
-    can rewrite a commit's parents and move the merge base); returns the CompletedProcess and raises
-    OSError when git cannot run or times out."""
+    can rewrite a commit's parents and move the merge base) and core.commitGraph=false (the control
+    tools/check_release_delta.py's _stage1_git uses, so a forged commit-graph file in the local object
+    directory cannot supply a commit's parents either; every commit is parsed from its object); returns
+    the CompletedProcess and raises OSError when git cannot run or times out."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_NO_LAZY_FETCH"] = "1"
     env["GIT_GRAFT_FILE"] = os.path.join(os.devnull, "aiqt-no-grafts")
     try:
         return subprocess.run(["git", "--no-replace-objects", "-C", str(root), "-c", "core.fsmonitor=false",
-                               "-c", "protocol.allow=never",
+                               "-c", "core.commitGraph=false", "-c", "protocol.allow=never",
                                "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
                                *args], capture_output=True, timeout=120, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -2023,15 +2025,22 @@ def _load_ratchet_mutant(source, directory, tag):
     return module
 
 
-def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
+def _self_test_adopter_and_diff(failures, not_run, tempfile, shutil, git_env_module):
     """Self-test case 34: the adopter shape configuration (schema, limits, fixtures, the budgeted
     worker), its place in the ratchet, and the --diff BASE mode on a fixture git repository. Each check
     turns red with its feature reverted: without the configuration no adopter count, key or refusal
     exists; without the worker budget the slow fixture never returns; without the merge base, the
     added-line filter, rename detection or the HEAD-only read a listed line is reported or missed.
     Its check() is the same instrumented choke point as _self_test's: each call records its literal id
-    in EXECUTED and a failed one lands in the caller's `failures`."""
+    in EXECUTED and a failed one lands in the caller's `failures`. A row whose premise this host's git
+    cannot provide (it does not honour a grafts file or a commit-graph file at all) is not called: its
+    reason lands in the caller's `not_run` (so the run exits 3, cannot evaluate, never 0 and never a
+    spurious 1) and its id is returned in the set of rows not evaluated."""
+    import hashlib
+    import struct
     import time
+
+    unevaluated = set()
 
     def check(check_id, ok, detail=""):
         EXECUTED.append(check_id)
@@ -2391,21 +2400,100 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
         # A legacy .git/info/grafts line cannot rewrite a commit's parents for this check: giving main the
         # feature tip as its parent makes HEAD the merge base (the fixture's own git, which honours the
         # file, must say so), so a read that honours it reports nothing and exits 0; with GIT_GRAFT_FILE
-        # pointed at a path that cannot exist the report is unchanged.
+        # pointed at a path that cannot exist the report is unchanged. A git that does not honour a grafts
+        # file at all (the merge base stays the fork point, every step succeeding) cannot evaluate this
+        # row: it is reported not run (exit 3), never a spurious red.
         info = repo / ".git" / "info"
         graft_steps = len(steps)
         head_id = git("rev-parse", "HEAD")
+        fork_id = git("merge-base", "main", "HEAD")
         info.mkdir(exist_ok=True)
         (info / "grafts").write_text("{} {}\n".format(git("rev-parse", "main"), head_id), encoding="utf-8")
-        honoured = git("merge-base", "main", "HEAD") == head_id
-        grafted = gate("--diff", "main")
+        graft_base = git("merge-base", "main", "HEAD")
+        honoured = graft_base == head_id
+        grafted = gate("--diff", "main") if honoured else (None, "", "")
         (info / "grafts").unlink()
-        grafted_reported = {line.strip().split(" ")[0] for line in grafted[1].splitlines()
-                            if line.startswith("  ")}
-        check("diff/grafts-file-ignored",
-              built and honoured and all(r == 0 for _c, r, _e in steps[graft_steps:]) and grafted[0] == rc == 1
-              and grafted_reported == reported and "docs/new.md:2:" in grafted_reported,
-              (honoured, grafted, rc, steps[graft_steps:]))
+        graft_ran = built and all(r == 0 for _c, r, _e in steps[graft_steps:])
+        if graft_ran and fork_id and fork_id != head_id and graft_base == fork_id:
+            not_run.append("case 34 diff/grafts-file-ignored (this git does not honour a grafts file)")
+            unevaluated.add("diff/grafts-file-ignored")
+        else:
+            grafted_reported = {line.strip().split(" ")[0] for line in grafted[1].splitlines()
+                                if line.startswith("  ")}
+            check("diff/grafts-file-ignored",
+                  graft_ran and honoured and grafted[0] == rc == 1
+                  and grafted_reported == reported and "docs/new.md:2:" in grafted_reported,
+                  (honoured, grafted, rc, steps[graft_steps:]))
+        # A forged commit-graph file cannot rewrite a commit's parents for this check either: on a branch
+        # one commit past main, the graph entry for main is given HEAD as its parent (git parses the branch
+        # tip from its object but main from the graph), which makes HEAD the merge base for the fixture's
+        # own git, so a read that honours the graph reports nothing and exits 0; with core.commitGraph=false
+        # the report is unchanged. A git that writes no graph this row can forge, or does not honour the
+        # forged graph (the merge base stays the fork point, every step succeeding), cannot evaluate this
+        # row: it is reported not run (exit 3), never a spurious red.
+        graph_steps = len(steps)
+        main_id = git("rev-parse", "main")
+        past_id = git("commit-tree", git("rev-parse", "main^{tree}"), "-p", main_id, "-m", "past main")
+        git("branch", "graphed", past_id)
+        git("-c", "commitGraph.generationVersion=1", "commit-graph", "write", "--reachable")
+        graph_file = repo / ".git" / "objects" / "info" / "commit-graph"
+        forged = False
+        try:
+            # The commit-graph format: a CGPH header (version, hash version, chunk count), a chunk
+            # table of 4-byte ids and 8-byte offsets, OIDL (sorted object ids) and CDAT (per commit:
+            # tree id, first and second parent positions, then generation << 34 | commit time), and a
+            # trailing checksum of the hash in use (generation version 1 writes no GDA2 chunk).
+            data = bytearray(graph_file.read_bytes())
+            hash_size, digest = {1: (20, hashlib.sha1), 2: (32, hashlib.sha256)}[data[5]]
+            if data[:5] != b"CGPH\x01":
+                raise ValueError("not a version-1 commit-graph file")
+            table = {bytes(data[8 + 12 * i:12 + 12 * i]): struct.unpack(">Q", data[12 + 12 * i:20 + 12 * i])[0]
+                     for i in range(data[6] + 1)}
+            oidl, cdat, width = table[b"OIDL"], table[b"CDAT"], hash_size + 16
+            oids = [bytes(data[oidl + hash_size * i:oidl + hash_size * (i + 1)]).hex()
+                    for i in range((cdat - oidl) // hash_size)]
+            record = {oid: cdat + width * pos for pos, oid in enumerate(oids)}
+
+            def generation_word(oid):
+                at = record[oid] + hash_size + 8
+                return at, struct.unpack(">Q", data[at:at + 8])[0]
+
+            def set_generation(oid, value):
+                at, word = generation_word(oid)
+                data[at:at + 8] = struct.pack(">Q", (value << 34) | (word & (2 ** 34 - 1)))
+
+            at = record[main_id] + hash_size
+            data[at:at + 4] = struct.pack(">I", oids.index(head_id))
+            set_generation(main_id, (generation_word(head_id)[1] >> 34) + 1)
+            set_generation(past_id, (generation_word(main_id)[1] >> 34) + 1)
+            data[-hash_size:] = digest(bytes(data[:-hash_size])).digest()
+            graph_file.chmod(0o644)
+            graph_file.write_bytes(bytes(data))
+            forged = True
+        except (OSError, KeyError, ValueError, IndexError, struct.error) as exc:
+            forged = repr(exc)
+        graph_base = git("merge-base", "graphed", "HEAD")
+        graph_honoured = forged is True and graph_base == head_id
+        graphed = gate("--diff", "graphed") if graph_honoured else (None, "", "")
+        if graph_file.exists():
+            graph_file.unlink()
+        git("branch", "-D", "graphed")
+        graph_ran = built and all(r == 0 for _c, r, _e in steps[graph_steps:])
+        if graph_ran and forged is not True:
+            not_run.append("case 34 diff/commit-graph-file-ignored (this git wrote no commit-graph file "
+                           "this row can forge: {})".format(forged))
+            unevaluated.add("diff/commit-graph-file-ignored")
+        elif graph_ran and fork_id and fork_id != head_id and graph_base == fork_id:
+            not_run.append("case 34 diff/commit-graph-file-ignored (this git does not honour a forged "
+                           "commit-graph file)")
+            unevaluated.add("diff/commit-graph-file-ignored")
+        else:
+            graphed_reported = {line.strip().split(" ")[0] for line in graphed[1].splitlines()
+                                if line.startswith("  ")}
+            check("diff/commit-graph-file-ignored",
+                  graph_ran and graph_honoured and graphed[0] == rc == 1
+                  and graphed_reported == reported and "docs/new.md:2:" in graphed_reported,
+                  (forged, graph_base, graphed, rc, steps[graph_steps:]))
         # Ordinary user or repository git configuration cannot change which lines count as added. Each
         # row sets one setting in the fixture repository and expects the same report; with
         # diff.interHunkContext the two changes of docs/move.md (lines 1 and 3) would otherwise share
@@ -2453,6 +2541,7 @@ def _self_test_adopter_and_diff(failures, tempfile, shutil, git_env_module):
               empty[0] == 2 and "green fixture" in empty[2], (steps[-3:], empty))
     finally:
         shutil.rmtree(repo, ignore_errors=True)
+    return unevaluated
 
 
 # --- self-test --------------------------------------------------------------------------------------
@@ -2464,6 +2553,9 @@ def _self_test(caller_env=None):
     failures = []
     # Each case this run does not run, with the reason; the full PASS text is printed only when it is empty.
     not_run = []
+    # The registered check ids a row reported not run instead of calling check() (case 34's rows whose
+    # premise this host's git cannot provide); the in-run reconcile below excuses exactly these.
+    unevaluated = set()
 
     def check(check_id, ok, detail=""):
         # The instrumented choke point for the tracker-label cases (27 to 31): every call records its
@@ -4690,7 +4782,7 @@ def _self_test(caller_env=None):
         # 34. DISCRIMINATING (adopter tracker shapes and the --diff BASE mode). Every vector is synthetic
         #     and assembled at run time where a built-in shape would otherwise match this source; the
         #     adopter shapes below are fixtures only (this repository ships the configuration with none).
-        _self_test_adopter_and_diff(failures, tempfile, shutil, _git_fixture_env)
+        unevaluated = _self_test_adopter_and_diff(failures, not_run, tempfile, shutil, _git_fixture_env)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -4717,10 +4809,14 @@ def _self_test(caller_env=None):
             if expected is None:
                 failures.append("execution-set/registry: missing or malformed suite {!r} in {}".format(
                     SUITE_ID, registry))
-            elif len(set(EXECUTED)) != len(EXECUTED) or set(EXECUTED) != expected:
+            elif len(set(EXECUTED)) != len(EXECUTED) or set(EXECUTED) | unevaluated != expected \
+                    or set(EXECUTED) & unevaluated:
+                # A row reported not run is missing from EXECUTED by design; the run already exits 3 for
+                # it, so it is excused here (only when registered and never also executed), never passed.
                 failures.append("execution-set/reconciled: missing={} extra={} duplicates={}".format(
-                    sorted(expected - set(EXECUTED)), sorted(set(EXECUTED) - expected),
-                    len(EXECUTED) - len(set(EXECUTED))))
+                    sorted(expected - set(EXECUTED) - unevaluated),
+                    sorted((set(EXECUTED) | unevaluated) - expected),
+                    len(EXECUTED) - len(set(EXECUTED)) + len(set(EXECUTED) & unevaluated)))
 
     # A failure outranks a skip: a run that failed a case exits 1 even when it also skipped one, and lists
     # the cases it did not run.

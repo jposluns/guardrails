@@ -5335,6 +5335,7 @@ expected-check-ids = [
   "diff/head-inputs-not-working-tree",
   "diff/replace-objects-ignored",
   "diff/grafts-file-ignored",
+  "diff/commit-graph-file-ignored",
   "diff/user-config-no-prefix",
   "diff/user-config-colour",
   "diff/user-config-external-diff",
