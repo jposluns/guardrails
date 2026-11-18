@@ -19,10 +19,11 @@ sidebar-active = "tech-details"
 <pre><code>format-version = 1
 [[shape]]
 name = "backlog-id"
-regex = '\bTASK-[0-9]+\b'
-red = ["References TASK-123 here."]
-green = ["References TASK-next here."]
+regex = '\bACME-[0-9]+\b'
+red = ["References ACME\U0000002D123 here."]
+green = ["References ACME-next here."]
 </code></pre>
+<p>Replace <code>ACME</code> with your tracker's own prefix. The red fixture writes its hyphen as the TOML escape <code>\U0000002D</code>, so the fixture value is a real label while the text of this page does not match the shape. Before you adopt a shape, run the full gate: a match in any shipped file is a count above the baseline and fails.</p>
 <ul>
 <li>The schema is closed. The file holds only <code>format-version</code> (the integer 1) and <code>[[shape]]</code> tables, and each table carries exactly <code>name</code>, <code>regex</code>, <code>red</code> and <code>green</code>.</li>
 <li><code>name</code> is a lower-case ASCII identifier (letters, digits and single hyphens, at most 48 characters), and names are unique. The baseline key is <code>adopter-&lt;name&gt;</code>, so it never collides with a built-in key.</li>
@@ -66,8 +67,8 @@ green = ["References TASK-next here."]
 <li>Lines are counted by LF. A carriage return stays part of the line, and a last line without LF counts.</li>
 <li>An added file counts all its lines as added. A rename from a path the merge base did not ship reports every line, with or without edits. Deleted files, deletion-only changes, pure renames within the shipped set and mode-only changes add nothing. Within the shipped set, a rename with edits reports added lines at the destination path. A rename Git does not detect counts as a delete plus an add.</li>
 <li>Added lines are read with command-line options that outrank user and repository Git configuration: no colour, no external diff, no text conversion, fixed <code>a/</code> and <code>b/</code> prefixes, and no inter-hunk context.</li>
-<li>A binary attribute does not hide a change. A blob that is not UTF-8 fails closed under a text suffix and is skipped under any other suffix. Archive contents are not examined.</li>
-<li>Exit codes: 0 means no label on an added line, 1 means at least one, and 2 means the check cannot be evaluated. Exit 2 covers: BASE is not a readable commit, the repository is shallow, there is no merge base or more than one, Git fails or times out, Git output is malformed, a shipped path is absent or is not a regular file in HEAD, a manifest present at the merge base is not a regular file, is not UTF-8 or is not a usable inventory, or the HEAD configuration or baseline is invalid (also when no line was added). The check never fetches history.</li>
+<li>A binary attribute does not hide a change. The check decodes a HEAD blob only for a shipped path that changed between the merge base and HEAD (added, edited, renamed or with a new mode) or is newly shipped at HEAD. Such a blob that is not UTF-8 fails closed, unless its path has a suffix outside the text-suffix list, in which case it is skipped. A path that was shipped at the merge base and is unchanged is not decoded, so a blob there that is not UTF-8 does not fail the check. Archive contents are not examined.</li>
+<li>Exit codes: 0 means no label on an added line, 1 means at least one, and 2 means the check cannot be evaluated. Exit 2 covers: BASE is not a readable commit, the repository is shallow, there is no merge base or more than one, Git fails or times out, Git output is malformed, a shipped path other than the baseline is absent from HEAD, a present shipped path is not a regular file in HEAD (both checked for every shipped path, changed or not, before any line is read; an absent baseline is not an error, and then no baseline is validated), a changed or newly shipped blob is not UTF-8 as stated above, a manifest present at the merge base is not a regular file, is not UTF-8 or is not a usable inventory, or the HEAD configuration or baseline is invalid (also when no line was added). The check never fetches history.</li>
 <li><code>--diff</code> takes exactly one operand that does not start with <code>-</code>, and it cannot be combined with another option.</li>
 </ul>
 <p>The diff check is an extra check. Keep the full gate required in CI. A clean diff check does not mean the full gate passes.</p>

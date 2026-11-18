@@ -5317,6 +5317,7 @@ expected-check-ids = [
   "adopter/stale-adopter-key-refused",
   "adopter/config-file-scanned-no-exemption",
   "adopter/zero-hit-shape-keeps-pack-baseline",
+  "adopter/documented-example-matches-no-docs-page",
   "adopter/wired-write-baseline-carries-adopter-key",
   "adopter/wired-full-gate-counts-adopter-shape",
   # ---------- the --diff BASE added-line mode over a fixture repository ----------

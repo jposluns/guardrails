@@ -1892,7 +1892,9 @@ def main():
     # UNKNOWN-OPTION REJECTION precedes the dispatch: this gate accepts only --self-test, --write-baseline
     # alone, --diff BASE, the --execution-report form above, no args for a real scan, and the internal
     # --adopter-match-worker entry (alone; the worker _run_adopter_matcher launches, which reads JSON on
-    # stdin, and whose failures are never exit 0), so any other token (a
+    # stdin and exits 0 whenever it prints its JSON result, a refusal it reports as {"ok": false}
+    # included; the parent turns a reported refusal, a nonzero worker exit, malformed output or a timeout
+    # into exit 2), so any other token (a
     # misspelled --self-testx, a stray flag) is a LOUD exit 2, never a silent fall-through to the default
     # scan path that would exit without running the self-test the caller asked for (which would let
     # --self-testx masquerade as --self-test in CI parity).
@@ -2248,6 +2250,36 @@ def _self_test_adopter_and_diff(failures, not_run, tempfile, shutil, git_env_mod
         check("adopter/zero-hit-shape-keeps-pack-baseline",
               adopter_shapes and pack_render == with_shape and "adopter-" not in with_shape
               and qa_key + " = 1" in pack_render and unchanged == [], (pack_render, with_shape, unchanged))
+        # The documented example follows that procedure on its own page: the one configuration block of
+        # docs/tracker-labels.md is a valid configuration (the worker checks its fixtures), and its shapes,
+        # matched by the worker line by line as the full gate does, match nothing in that page or in its
+        # generated site page. Red when the example's own fixture text matches its regex again. The pages
+        # are read only when this script sits in the tools/ directory of a tree that has them; a scratch
+        # copy of this script (a lane launched by another case) has neither, so the row is reported not
+        # run there, never passed.
+        import html
+        doc_root = Path(__file__).resolve().parents[1]
+        doc_rels = ("docs/tracker-labels.md", "site/tracker-labels.html")
+        if Path(__file__).resolve().parent.name != "tools" or not all(
+                (doc_root / rel).is_file() for rel in doc_rels):
+            not_run.append("case 34 adopter/documented-example-matches-no-docs-page (the documented pages "
+                           "are not beside this script)")
+            unevaluated.add("adopter/documented-example-matches-no-docs-page")
+        else:
+            blocks, doc_hits = [], None
+            try:
+                doc_texts = {rel: (doc_root / rel).read_bytes().decode("utf-8") for rel in doc_rels}
+                blocks = re.findall(r"<pre><code>(format-version = .*?)</code></pre>", doc_texts[doc_rels[0]],
+                                    re.S)
+                if len(blocks) == 1:
+                    example = parse_tracker_config(html.unescape(blocks[0]).encode("utf-8"))
+                    if example:
+                        doc_hits = _run_adopter_matcher(example, [
+                            [rel, [[number, line] for number, line in enumerate(doc_texts[rel].splitlines(), 1)]]
+                            for rel in doc_rels])
+            except (OSError, UnicodeDecodeError) as exc:
+                doc_hits = str(exc)
+            check("adopter/documented-example-matches-no-docs-page", doc_hits == {}, (doc_hits, blocks))
     finally:
         shutil.rmtree(lab, ignore_errors=True)
 
