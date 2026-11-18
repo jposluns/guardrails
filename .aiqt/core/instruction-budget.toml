@@ -114,6 +114,13 @@
 #                        and file headers 16263 unchanged. The ratchet rises by the measured delta,
 #                        136304 + 195 = 136499, within the maintainer's authorization of 2026-11-08 for
 #                        raises up to 148000.
+#                        Held at 136499 on 2026-11-18, not raised, when merge train 20261118b (#1270)
+#                        reworded valgat.2 in validation-gates-apply as one either/or sentence with the gate's
+#                        predicate as the authority: measured PACK 136487 at the base 7bdc7fc2 -> 136499 (+12
+#                        units); rule files 119864 -> 119876; managed block 360 and file headers 16263
+#                        unchanged. That change added no history entry of its own; this entry records it. The
+#                        12 units are the margin PACK stood under the ratchet after the 2026-11-17 entry, so
+#                        PACK now equals the ratchet and no headroom remains.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
