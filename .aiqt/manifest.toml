@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "04f9db2b18d948ab6a3a5550c5d3ec88a8f9140639fe6b9441fb279cba06308a"
+tree-sha256 = "4234b5274d58d6d01a60cbe3f41aa1ed095722e3eac7d64afd7b0d5127838a35"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -2427,8 +2427,8 @@ sha256 = "bae43dcfb3e30c428f59a243370f83e2835ef9706caa5692c83f9d7137964cb3"
 
 [[sources]]
 path = "README.md"
-bytes = 5272
-sha256 = "a4ece361d3ca6579b842003340136789c844ce01f95f30ffcec56472d9f86b57"
+bytes = 5325
+sha256 = "ce01653e6092ee356ccc99fa5c789a043ea9e5f16d53ebccfc3770bdb9876b3d"
 
 [[sources]]
 path = "RELEASING.md"
