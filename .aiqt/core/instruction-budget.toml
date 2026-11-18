@@ -85,8 +85,8 @@
 #                        a 1000-unit margin. The margin is deliberate headroom approved by the maintainer
 #                        on 2026-10-29 under that same decision, not a stale saving: the gate's
 #                        lower-the-ratchet note does not apply to it, and a later tidy-up must not remove
-#                        it. When a queued fold lands, record its measured cost against the 559-unit
-#                        estimate in the next raise entry, as the 2026-11-01 entry did.
+#                        it. When a queued fold lands, record its measured cost here against the 559-unit
+#                        estimate.
 #                        Raised 134991 -> 135529 on 2026-11-01 under the maintainer's recorded decision of
 #                        2026-10-31 to raise the ratchet by exactly the measured delta, when change-carries-check
 #                        gained its paragraph on testing a fix to code that sorts text into verdicts
