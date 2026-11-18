@@ -23,6 +23,19 @@ When neither snapshot holds a record, nothing changes. The list is hand-kept,
 so it shows currency for the items it names, never completeness of what is
 wrong.
 
+Whenever the changelog bytes change, on a cut or not, every release entry,
+earlier entries included, must carry a date that is a quoted string holding a
+real calendar date written YYYY-MM-DD, a rule stricter than both changelog
+renderers (tools/gen_draft_site.py reads only the entry for VERSION and takes
+any non-empty string date; tools/gen_changelog.py renders any date it finds, a
+TOML local date included). A missing date, the "YYYY-MM-DD" placeholder, any
+other string, a TOML local date and a date that is not on the calendar, such as
+2026-02-30, are refused (exit 1). On a cut, a pending-fixes record
+bound to another release is decided first (exit 2). A date later than the run
+day is not refused: the verdict stays a function of the repository bytes alone,
+not of the clock or time zone of the run. A change that leaves the changelog
+bytes unchanged reads no date.
+
 A declaration is author-controlled intent, not authorization or readiness.
 This reusable pack author tool is opt-in for adopters of this changelog schema.
 For pull_request events or when GITHUB_BASE_REF is set, require a merge HEAD
@@ -109,6 +122,9 @@ DECL_KEYS = {
 }
 PENDING_KEYS = {"schema", "release", "fix"}
 PENDING_STATES = ("open", "done", "deferred")
+# The cut release's date form. date.fromisoformat alone also takes the basic and week
+# forms (20261115, 2026-W46-7), so the shape is matched first, then the calendar.
+RELEASE_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
 class CannotEvaluate(ValueError):
@@ -155,9 +171,12 @@ def parse_changelog(raw, label):
         version(row.get("version"), where)
         require(isinstance(row.get("title"), str), where + ": missing string title")
         if "date" in row:
-            # datetime is a date subclass, but TOML timestamps are not local dates.
+            # datetime is a date subclass, but TOML timestamps are not local dates. A string or a
+            # TOML local date parses here and is then judged by the date rule, which refuses the
+            # local date (exit 1); any other value cannot be evaluated.
             require(isinstance(row["date"], str) or type(row["date"]) is datetime.date,
-                    where + ": date must be a string or local date")
+                    where + ": date must be a quoted YYYY-MM-DD string, not a TOML timestamp,"
+                    " time or other value")
         if "tag" in row:
             require(isinstance(row["tag"], str), where + ": tag must be a string")
         for key in ("items", "refs"):
@@ -225,6 +244,41 @@ def parse_pending(raw, label="pending fixes"):
     return dict(data)
 
 
+def release_date_refusal(row):
+    """Return why one release entry's date breaks the shared date rule, else None.
+
+    The rule is the one the site renderer applies (tools/gen_draft_site.py renders only a
+    non-empty string date), narrowed to a real calendar date written YYYY-MM-DD, so a TOML
+    local date is refused. A date after the run day is not refused, so the verdict never
+    depends on the clock."""
+    value = row.get("date")
+    if isinstance(value, str) and RELEASE_DATE.fullmatch(value) is not None:
+        try:
+            datetime.date.fromisoformat(value)
+        except ValueError:
+            pass
+        else:
+            return None
+    # The diagnostic stays total for any value, even with a guard above mutated away.
+    if value is None:
+        shown = "no date"
+    elif isinstance(value, str):
+        shown = "date " + json.dumps(value, ensure_ascii=True)
+    else:
+        shown = "date " + str(value) + " (a TOML local date, not a quoted string)"
+    return "release " + row["version"] + " has " + shown
+
+
+def changelog_date_refusal(rows):
+    """Judge every release entry's date, earlier entries included; return the refusal, else None."""
+    refused = [reason for reason in map(release_date_refusal, rows) if reason is not None]
+    if not refused:
+        return None
+    return ("; ".join(refused) + "; every release date must be a quoted string holding a real"
+            " calendar date in YYYY-MM-DD form, a rule stricter than both changelog renderers,"
+            " so replace any placeholder with the release day")
+
+
 def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
                         base_decl, head_decl, base_pending=None, head_pending=None):
     """Return (exit_code, detail). Only the caller can prove that None is absence."""
@@ -245,9 +299,16 @@ def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
             return 1, label + ": duplicate or non-increasing release identities"
     identities = lambda rows: [row["version"] for row in rows]
     before, after = identities(base), identities(head)
+    # Every entry's date is judged whenever the changelog bytes change, so neither a cut nor a
+    # change that cuts nothing can put a placeholder or non-date on any entry, earlier ones
+    # included. An unchanged changelog reads no date.
+    date_refusal = (changelog_date_refusal(head)
+                    if head_changelog_bytes != base_changelog_bytes_or_absent else None)
     if after == before:
         if base_decl != head_decl:
             return 1, "declaration changed without a release transition"
+        if date_refusal is not None:
+            return 1, "release date refused: " + date_refusal
         return 0, "release identities unchanged"
     if len(after) != len(before) + 1 or after[:-1] != before:
         return 1, "only one appended identity is permitted (no relabel, insert, delete or reorder)"
@@ -262,11 +323,15 @@ def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
     )
     if not authorized:
         return 1, "missing, unchanged or mismatched release declaration"
+    # A record bound to another release cannot be evaluated (exit 2); that is decided before
+    # the date (exit 1), so the cannot-evaluate outcome is never masked by a policy finding.
+    if head_pending is not None and head_pending["release"] != after[-1]:
+        return 2, ("cannot evaluate: pending fixes: record is bound to release "
+                   + head_pending["release"] + ", not to the appended " + after[-1])
+    if date_refusal is not None:
+        return 1, "release date refused: " + date_refusal
     if head_pending is not None:
         # The record proves currency only for the one cut it names, never completeness.
-        if head_pending["release"] != after[-1]:
-            return 2, ("cannot evaluate: pending fixes: record is bound to release "
-                       + head_pending["release"] + ", not to the appended " + after[-1])
         open_items = [item["id"] for item in head_pending["fix"] if item["state"] == "open"]
         if open_items:
             return 1, "pending fixes still open: " + ", ".join(open_items)
@@ -642,6 +707,10 @@ def local_report(root, protected=None, before=None):
 # SELF-TEST: mutation targets are restricted to the production prefix above.
 
 
+# Self-test IDs of the release-date cases; each refused one names the date and has a revert.
+DATE_CASES = ("cut-date-", "date-", "native-date-")
+
+
 def fixture_changelog(versions, item="note"):
     text = 'title = "Changelog"\nnote = "Fixture"\n'
     for value in versions:
@@ -686,12 +755,14 @@ def test_cases():
     add("notes", 0, after=fixture_changelog(["1.0.0"], "curated note"))
     add("title-date", 0, after=base.replace(b'"Release"', b'"Published"')
         .replace(b'"2000-01-01"', b'"2000-02-02"'))
+    # A TOML local date parses, but the site renderer renders only a string date, so any
+    # changelog change that leaves one in place is refused; converting it to a string passes.
     native = base.replace(b'"2000-01-01"', b"2000-01-01")
-    add("native-date-maintenance", 0, before=native,
+    add("native-date-maintenance", 1, before=native,
         after=native.replace(b'items = ["note"]', b'items = ["curated note"]'))
-    add("native-date-edit", 0, before=native,
+    add("native-date-edit", 1, before=native,
         after=native.replace(b"2000-01-01", b"2000-02-02"))
-    add("date-string-to-native", 0, after=native)
+    add("date-string-to-native", 1, after=native)
     add("date-native-to-string", 0, before=native)
     add("formatting", 0, after=b"# formatting only\n\n" + base)
     add("metadata", 0, after=base + (
@@ -871,6 +942,56 @@ def test_cases():
         add(name, 2, tweak=name)
     add("protected-tip", 1, after=cut, tweak="protected")
     add("staged-hidden", 1, tweak="staged")
+    # The appended entry's date: every refused form, then dates that pass. Only the last
+    # (appended) entry changes; the base entry keeps its fixture date.
+    stem = cut[:cut.rindex(b'date = "2000-01-01"')]
+    tail = cut[len(stem):].replace(b'date = "2000-01-01"\n', b"", 1)
+
+    def cut_dated(line):
+        return stem + line + tail
+    for name, line in (("placeholder", b'date = "YYYY-MM-DD"\n'),
+                       ("text", b'date = "TBD"\n'),
+                       ("empty", b'date = ""\n'),
+                       ("impossible", b'date = "2026-02-30"\n'),
+                       ("basic-form", b'date = "20261115"\n'),
+                       ("week-form", b'date = "2026-W46-7"\n'),
+                       ("padded", b'date = " 2026-11-15"\n'),
+                       ("missing", b"")):
+        add("cut-date-" + name, 1, after=cut_dated(line), new=declaration)
+    placeholder_cut = cut_dated(b'date = "YYYY-MM-DD"\n')
+    add("cut-date-placeholder-initialize", 1, before=None,
+        after=fixture_changelog(["1.0.0"]).replace(b'"2000-01-01"', b'"YYYY-MM-DD"'),
+        new=fixture_declaration(None, following="1.0.0"))
+    for tweak in ("ci-merge", "push-protected", "tip-dispatch", "tip-schedule", "local-base"):
+        add("cut-date-placeholder-" + tweak, 1, after=placeholder_cut, new=declaration, tweak=tweak)
+    # The placeholder only in the index, or only in the working file, with HEAD a dated cut.
+    for tweak in ("index", "working"):
+        add("cut-date-placeholder-" + tweak + "-only", 1, after=cut, new=declaration,
+            tweak="date-" + tweak)
+    # A dated push of two cuts whose first cut carried the placeholder: only that transition
+    # is refused, since the second cut dates the entry.
+    add("cut-date-placeholder-push-two-cuts", 1, after=placeholder_cut, new=declaration,
+        tweak="push-two-cuts")
+    add("cut-date-valid", 0, after=cut_dated(b'date = "2024-02-29"\n'), new=declaration)
+    # The site renderer refuses a TOML local date, so the gate does too (one shared rule).
+    add("cut-date-native", 1, after=cut_dated(b"date = 2026-11-15\n"), new=declaration)
+    add("cut-date-future", 0, after=cut_dated(b'date = "2999-12-31"\n'), new=declaration)
+    # Every entry's date is judged whenever the changelog changes, earlier entries included.
+    placeholder_base = base.replace(b'"2000-01-01"', b'"YYYY-MM-DD"')
+    add("cut-date-earlier-placeholder", 1, before=placeholder_base,
+        after=cut.replace(b'"2000-01-01"', b'"YYYY-MM-DD"', 1),
+        new=fixture_declaration(placeholder_base))
+    add("cut-date-earlier-rewrite", 1,
+        after=cut.replace(b'"2000-01-01"', b'"YYYY-MM-DD"', 1), new=declaration)
+    add("date-placeholder-no-cut", 1, after=placeholder_base)
+    add("date-text-no-cut", 1, after=base.replace(b'"2000-01-01"', b'"TBD"'))
+    # Repairing an earlier placeholder passes; an unchanged changelog reads no date.
+    add("date-placeholder-repair", 0, before=placeholder_base)
+    add("date-placeholder-unchanged", 0, before=placeholder_base, after=placeholder_base,
+        fixes=done_fix)
+    # A record bound to another release fails closed (exit 2) ahead of a refused date (exit 1).
+    add("cut-date-vs-pending-bound-elsewhere", 2, after=placeholder_cut, new=declaration,
+        fixes=fixture_pending("1.0.0", (("id", "loose-end"), ("state", "done"))))
     return cases
 
 
@@ -974,6 +1095,13 @@ def fixture_repo(parent, name, case, env):
         (root / CHANGELOG).write_bytes(fixture_changelog(["1.0.0", "1.1.0"]))
         command("add", "--", CHANGELOG)
         (root / CHANGELOG).write_bytes(after)
+    elif tweak in ("date-index", "date-working"):
+        # HEAD holds the dated cut; the placeholder reaches only the index or the working file.
+        at = after.rindex(b'"2000-01-01"')
+        (root / CHANGELOG).write_bytes(after[:at] + b'"YYYY-MM-DD"' + after[at + 12:])
+        if tweak == "date-index":
+            command("add", "--", CHANGELOG)
+            (root / CHANGELOG).write_bytes(after)
     elif tweak in ("ancestor-branch", "ancestor-origin", "ancestor-tag", "ancestor-base",
                    "candidate-self-base"):
         for ref in ("refs/heads/attacker", "refs/remotes/origin/attacker", "refs/tags/attacker"):
@@ -4652,6 +4780,32 @@ def _self_test_isolated(red_on_revert):
                 check("unreadable-read-boundary",
                       any("injected unreadable working file" in row["detail"]
                           for row in report["snapshots"]))
+            if case_id.startswith(DATE_CASES) and cases[case_id][0] == 1:
+                # Every refusing snapshot, not just one of them, must be the date refusal.
+                refusing = [row for row in report["snapshots"] if row["code"] != 0]
+                check(case_id + "-names-date",
+                      bool(refusing)
+                      and all("release date refused: release " in row["detail"]
+                              and ('"YYYY-MM-DD"' in row["detail"] if "placeholder" in case_id
+                                   else True)
+                              and (" local date" in row["detail"] if "native" in case_id else True)
+                              for row in refusing))
+            if case_id in ("cut-date-placeholder-index-only", "cut-date-placeholder-working-only"):
+                where = case_id[len("cut-date-placeholder-"):-len("-only")]
+                check(case_id + "-snapshots",
+                      [(r["snapshot"], r["code"]) for r in report["snapshots"]]
+                      == [(name, 1 if name == where else 0) for name in ("HEAD", "index", "working")])
+            if case_id == "cut-date-placeholder-push-two-cuts":
+                transitions = report["context"]["transitions"]
+                check(case_id + "-first-transition",
+                      len(transitions) == 2
+                      and [(r["snapshot"], r["code"]) for r in report["snapshots"]]
+                      == [("commit:" + transitions[0][1], 1), ("commit:" + transitions[1][1], 0),
+                          ("HEAD", 0), ("index", 0), ("working", 0)])
+            if case_id == "cut-date-vs-pending-bound-elsewhere":
+                check(case_id + "-binding",
+                      all(row["code"] == 2 and "bound to release 1.0.0" in row["detail"]
+                          for row in report["snapshots"]))
             print("PASS " + case_id)
         _close_stage(parent, script)
         stage_failures = _close_stage_mapping_check(parent, script)
@@ -4916,8 +5070,9 @@ def _self_test_isolated(red_on_revert):
                  'if actions and event == "push":\n            require(head == target,',
                  "tip-schedule-target-mismatch", 0),
                 ("pending-open-items", "if open_items:", "if False:", "pending-open", 0),
-                ("pending-binding", 'if head_pending["release"] != after[-1]:', "if False:",
-                 "pending-bound-elsewhere", 0),
+                ("pending-binding",
+                 'if head_pending is not None and head_pending["release"] != after[-1]:',
+                 "if False:", "pending-bound-elsewhere", 0),
                 ("pending-head-input",
                  'head_pending = parse_pending(head_pending, "head pending fixes")',
                  "head_pending = None", "head-fix-toml", 0),
@@ -4937,6 +5092,60 @@ def _self_test_isolated(red_on_revert):
                  "require(isinstance(item[key], str) and bool(item[key].strip()),",
                  "require(isinstance(item[key], str) and bool(item[key]),",
                  "head-fix-space-id", 0),
+            ) + tuple(
+                # With the date refusal reverted, every refused date form, entry and mode is accepted.
+                ("release-date-off-" + case_id, "    if not refused:\n        return None",
+                 "    if True:\n        return None", case_id, 0)
+                for case_id in cases if case_id.startswith(DATE_CASES) and cases[case_id][0] == 1
+            ) + (
+                ("release-date-shape",
+                 "if isinstance(value, str) and RELEASE_DATE.fullmatch(value) is not None:",
+                 "if isinstance(value, str):", "cut-date-basic-form", 0),
+                ("release-date-shape-week",
+                 "if isinstance(value, str) and RELEASE_DATE.fullmatch(value) is not None:",
+                 "if isinstance(value, str):", "cut-date-week-form", 0),
+                ("release-date-refuses-valid", "changelog_date_refusal(head)",
+                 '"every date"', "cut-date-valid", 1),
+                # The head is judged, never the base, so repairing a refused date passes.
+                ("release-date-judges-head", "changelog_date_refusal(head)",
+                 "changelog_date_refusal(base)", "date-placeholder-repair", 1),
+                # An earlier draft accepted a TOML local date, which the date rule refuses.
+                ("release-date-native",
+                 '    value = row.get("date")\n    if isinstance(value, str) and RELEASE_DATE',
+                 '    value = row.get("date")\n    if type(value) is datetime.date:\n'
+                 "        return None\n    if isinstance(value, str) and RELEASE_DATE",
+                 "cut-date-native", 0),
+                ("release-date-future",
+                 "            datetime.date.fromisoformat(value)\n        except ValueError:",
+                 "            if datetime.date.fromisoformat(value) > datetime.date.today():\n"
+                 "                raise ValueError\n        except ValueError:", "cut-date-future", 1),
+                # An earlier draft judged only the appended entry, so a cut could rewrite an earlier
+                # date.
+                ("release-date-earlier", "map(release_date_refusal, rows)",
+                 "map(release_date_refusal, rows[-1:])", "cut-date-earlier-rewrite", 0),
+                # An earlier draft read no date on a change that cut nothing (the check sat below
+                # the identities-unchanged early return); this moves it back below that return.
+                ("release-date-below-early-return",
+                 'return 1, "declaration changed without a release transition"\n'
+                 "        if date_refusal is not None:",
+                 'return 1, "declaration changed without a release transition"\n'
+                 "        if False:", "date-placeholder-no-cut", 0),
+                ("release-date-unchanged-bytes",
+                 "if head_changelog_bytes != base_changelog_bytes_or_absent else None",
+                 "if True else None", "date-placeholder-unchanged", 1),
+                # A bound-elsewhere record (exit 2) is decided before the date (exit 1).
+                ("release-date-before-binding",
+                 '    if head_pending is not None and head_pending["release"] != after[-1]:\n'
+                 '        return 2, ("cannot evaluate: pending fixes: record is bound to release "\n'
+                 '                   + head_pending["release"] + ", not to the appended " + after[-1])\n'
+                 "    if date_refusal is not None:\n"
+                 '        return 1, "release date refused: " + date_refusal\n',
+                 "    if date_refusal is not None:\n"
+                 '        return 1, "release date refused: " + date_refusal\n'
+                 '    if head_pending is not None and head_pending["release"] != after[-1]:\n'
+                 '        return 2, ("cannot evaluate: pending fixes: record is bound to release "\n'
+                 '                   + head_pending["release"] + ", not to the appended " + after[-1])\n',
+                 "cut-date-vs-pending-bound-elsewhere", 1),
             )
             parser_bytes = (script.parents[1] / "opf" / "tools" / "_semver.py").read_bytes()
             for name, old, new, case_id, mutated_code in mutations:
