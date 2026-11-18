@@ -723,7 +723,12 @@ def main():
     if unknown_args_refused(argv, "gen_rules.py [--check | --self-test]"):
         return 2
     if "--self-test" in argv:
-        return self_test_main()
+        # The whole self-test runs inside the fixture git lifecycle, so the code under test (the generators the
+        # class check launches, whose git ls-files reads strip GIT_* and so drop the scrub's config pins) reads no
+        # caller HOME, XDG or system git configuration either.
+        from _git_fixture_env import fixture_git_lifecycle
+        with fixture_git_lifecycle():
+            return self_test_main()
     return run(repo_root(), "--check" in argv)
 
 
