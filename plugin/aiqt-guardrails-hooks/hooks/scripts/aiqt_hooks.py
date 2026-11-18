@@ -5665,22 +5665,95 @@ def _cmtidn_dequoted(word):
     return "".join(kept), at
 
 
-def _cmtidn_assigned_values(word, regex):
-    """Yield (name, raw, dropped) for each match of regex in the word as written and in the word with the
-    characters of _CMTIDN_SET_UNREAD_RE dropped: the matched name with its '=', and the rest of the word after
-    it, as written and with those characters dropped."""
-    for m in regex.finditer(word):
-        rest = word[m.end():]
-        yield m.group(0), rest, _CMTIDN_SET_UNREAD_RE.sub("", rest)
-    dropped, at = _cmtidn_dequoted(word)
-    for m in regex.finditer(dropped):
-        yield m.group(0), word[at[m.end()]:], dropped[m.end():]
+def _cmtidn_last_start(regex, text):
+    """The start of the last place in text where regex matches, overlapping places included, else -1. For a
+    regex whose match at a place reads only the text from that place on (no lookbehind, anchor or word
+    boundary), regex.search(text[k:]) finds a match exactly when k is at most this start. Each search resumes
+    one character past the last start found, so the text is scanned once."""
+    last = -1
+    m = regex.search(text)
+    while m is not None:
+        last = m.start()
+        m = regex.search(text, last + 1)
+    return last
 
 
-def _cmtidn_value_ai(raw, dropped):
-    """The AI identity match that an assigned value names, as written or with the characters of
-    _CMTIDN_SET_UNREAD_RE dropped, else None."""
-    return AI_IDENTITY_RE.search(raw) or AI_IDENTITY_RE.search(dropped)
+class _CmtidnWord:
+    """One raw word of _cmtidn_identity_set_ai, read once, and the assigned values in it. Each value is the rest
+    of the word after an assignment name (with its '='), as written (word[r:]) and with the characters of
+    _CMTIDN_SET_UNREAD_RE dropped (dropped[j:]), and is named by its two start offsets (r, j), never copied:
+    each question about a value is answered from a reading of the whole word made once, so a word that holds
+    many assignments ('EMAIL=x,EMAIL=x,...') costs time linear in its length, where copying, dropping and
+    searching the rest of the word for each assignment cost time quadratic in it. The answers are those the
+    copied rest would give: an AI identity match (AI_IDENTITY_RE) cannot hold a character of
+    _CMTIDN_SET_UNREAD_RE or an '=', and the character before a value's start is one of those (the '=' that
+    ends its name, or a dropped character after it), so the first match of the whole word at or after a
+    value's start is the match a search of the value alone finds, word boundary included; the expansion, key
+    and replacement-string searches read only the text from each place on (_cmtidn_last_start, str.rfind)."""
+
+    __slots__ = ("word", "dropped", "at", "kept", "_ai", "_expansion", "_key", "_places", "_placed")
+
+    def __init__(self, word):
+        self.word = word
+        self.dropped, self.at = _cmtidn_dequoted(word)
+        # kept[i]: how many characters of word[:i] dropped keeps, so the rest of the word from i, with those
+        # characters dropped, is dropped[kept[i]:].
+        kept = []
+        j = 0
+        for i in range(len(word) + 1):
+            while self.at[j] < i:
+                j += 1
+            kept.append(j)
+        self.kept = kept
+        self._ai = None  # (starts, matches) of AI_IDENTITY_RE in word and in dropped, read when first asked
+        self._expansion = None
+        self._key = None
+        self._places = None  # the replacement strings _placed was read for
+        self._placed = -1
+
+    def values(self, regex):
+        """Yield (name, r, j) for each match of regex in the word as written and in the word with the characters
+        of _CMTIDN_SET_UNREAD_RE dropped: the matched name with its '=', and the start of the rest of the word
+        after it, in word and in dropped."""
+        for m in regex.finditer(self.word):
+            yield m.group(0), m.end(), self.kept[m.end()]
+        for m in regex.finditer(self.dropped):
+            yield m.group(0), self.at[m.end()], m.end()
+
+    def ai(self, r, j):
+        """The AI identity match that the value at (r, j) names, as written or with the characters of
+        _CMTIDN_SET_UNREAD_RE dropped, else None."""
+        if self._ai is None:
+            self._ai = []
+            for text in (self.word, self.dropped):
+                found = list(AI_IDENTITY_RE.finditer(text))
+                self._ai.append(([m.start() for m in found], found))
+        for (starts, found), at in zip(self._ai, (r, j)):
+            k = bisect.bisect_left(starts, at)
+            if k < len(found):
+                return found[k]
+        return None
+
+    def expansion(self, r):
+        """True when the value at r, as written, holds an expansion (_CMTIDN_EXPANSION_RE)."""
+        if self._expansion is None:
+            self._expansion = _cmtidn_last_start(_CMTIDN_EXPANSION_RE, self.word)
+        return r <= self._expansion
+
+    def key(self, j):
+        """True when the value at j, with the characters of _CMTIDN_SET_UNREAD_RE dropped, names a user, author
+        or committer name or email key (IDENTITY_CONF_NAME_RE)."""
+        if self._key is None:
+            self._key = _cmtidn_last_start(IDENTITY_CONF_NAME_RE, self.dropped)
+        return j <= self._key
+
+    def placed(self, j, places):
+        """True when the value at j, with the characters of _CMTIDN_SET_UNREAD_RE dropped, holds one of the
+        nonempty strings of places (a frozenset), read once for each places given."""
+        if self._places is not places:
+            self._places = places
+            self._placed = max((self.dropped.rfind(p) for p in places if p), default=-1)
+        return j <= self._placed
 
 
 def _cmtidn_identity_set_ai(command):
@@ -5754,33 +5827,33 @@ def _cmtidn_identity_set_ai(command):
         if "=" not in word:
             previous = bare
             continue
-        for name, raw, dropped in _cmtidn_assigned_values(word, _CMTIDN_IDENTITY_SET_RE):
-            ai = _cmtidn_value_ai(raw, dropped)
+        reading = _CmtidnWord(word)  # each value of the word is judged from this one reading of it
+        here = frozenset(places)
+        for name, r, j in reading.values(_CMTIDN_IDENTITY_SET_RE):
+            ai = reading.ai(r, j)
             if ai is not None:
                 return "identity assignment {!r} whose value names an AI identity ({!r})".format(name, ai.group(0))
             config_env = previous == "--config-env" or bare.startswith("--config-env=")
-            if unspelled is None and (config_env or doubtful or many or _CMTIDN_EXPANSION_RE.search(raw)
-                                      or any(p and p in dropped for p in places)):
+            if unspelled is None and (config_env or doubtful or many or reading.expansion(r)
+                                      or reading.placed(j, here)):
                 unspelled = name
-        for name, raw, dropped in _cmtidn_assigned_values(word, _CMTIDN_CONFIG_KEY_SET_RE):
-            if config_key is None and (doubtful or IDENTITY_CONF_NAME_RE.search(dropped)
-                                       or _CMTIDN_EXPANSION_RE.search(raw)):
+        for name, r, j in reading.values(_CMTIDN_CONFIG_KEY_SET_RE):
+            if config_key is None and (doubtful or reading.key(j) or reading.expansion(r)):
                 config_key = name
-        config_values.extend((name, raw, dropped, doubtful) for name, raw, dropped
-                             in _cmtidn_assigned_values(word, _CMTIDN_CONFIG_VALUE_SET_RE))
-        for name, raw, dropped in _cmtidn_assigned_values(word, _CMTIDN_PARAMETERS_SET_RE):
-            if unspelled is None and (doubtful or many or _CMTIDN_EXPANSION_RE.search(raw)
-                                      or any(p and p in dropped for p in places)):
+        config_values.extend((name, reading, r, j, doubtful) for name, r, j
+                             in reading.values(_CMTIDN_CONFIG_VALUE_SET_RE))
+        for name, r, j in reading.values(_CMTIDN_PARAMETERS_SET_RE):
+            if unspelled is None and (doubtful or many or reading.expansion(r) or reading.placed(j, here)):
                 unspelled = name
         previous = bare
     if config_key is not None:
-        for name, raw, dropped, doubtful in config_values:
-            ai = _cmtidn_value_ai(raw, dropped)
+        here = frozenset(places)  # the replacement strings read from the whole text, as each value is judged
+        for name, reading, r, j, doubtful in config_values:
+            ai = reading.ai(r, j)
             if ai is not None:
                 return ("identity assignment {!r} beside {!r}, whose value names an AI identity ({!r})"
                         .format(name, config_key, ai.group(0)))
-            if unspelled is None and (doubtful or many or _CMTIDN_EXPANSION_RE.search(raw)
-                                      or any(p and p in dropped for p in places)):
+            if unspelled is None and (doubtful or many or reading.expansion(r) or reading.placed(j, here)):
                 unspelled = name
     if unspelled is None:
         return None
@@ -6326,10 +6399,11 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
     elif error is not None and not readings:
         raise error
     line_env = None  # read at the first segment that runs git (below)
+    command_ai = []  # the AI identity search of this line, made once for all its segments (_cmtidn_command_ai)
     for same, segments in readings:
         keys = [reading for reading in paths if reading in same] or [None]
         for tokens, _sep in segments:
-            hit = _identity_assignment_ai(tokens) or _cmtidn_stdin_identity_ai(tokens, command)
+            hit = _identity_assignment_ai(tokens) or _cmtidn_stdin_identity_ai(tokens, command, command_ai)
             if hit is not None:
                 return hit
             subs = list(_cmtidn_git_commands(tokens))
@@ -6375,13 +6449,27 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
     return None
 
 
-def _cmtidn_stdin_identity_ai(tokens, command):
+def _cmtidn_command_ai(command, found=None):
+    """The AI identity match that command names anywhere, as written or once the characters of
+    _CMTIDN_SET_UNREAD_RE are dropped, else None. found, when given, is a list shared by every segment of one
+    command: empty until the first search, then holding its one result, so the command is searched once
+    however many segments ask, where a search for each segment cost time quadratic in its length."""
+    if found is None:
+        found = []
+    if not found:
+        found.append(AI_IDENTITY_RE.search(command)
+                     or AI_IDENTITY_RE.search(_CMTIDN_SET_UNREAD_RE.sub("", command)))
+    return found[0]
+
+
+def _cmtidn_stdin_identity_ai(tokens, command, found=None):
     """A hit label when one segment's command word (past reserved words and VAR=value words) is xargs, or is a
     wrapper the git command finder reads (_CMTIDN_FINDER_WRAPPERS) with an xargs word after it and before the
     git config words (nice xargs git config ..., sudo -u ci xargs git config ...), the git command it runs is a
     git config that sets a value (_cmtidn_config_setting) and names a user, author or committer name or email
     key, and the command line names an AI identity anywhere, as written or once the characters of
-    _CMTIDN_SET_UNREAD_RE are dropped; else None. xargs adds the words it reads from its input to that
+    _CMTIDN_SET_UNREAD_RE are dropped (_cmtidn_command_ai, searched once for every segment that shares found);
+    else None. xargs adds the words it reads from its input to that
     command, so the value can come from another segment (echo X | xargs git config author.name), and the
     check fails closed there, as the raw-text rule does on a value the text does not spell; the cost is a
     disclosed over-deny of such a line that names an AI for another reason."""
@@ -6398,7 +6486,7 @@ def _cmtidn_stdin_identity_ai(tokens, command):
         return None
     if not any(tok.rsplit("/", 1)[-1] == "xargs" for tok in tokens[i:start]):
         return None
-    ai = AI_IDENTITY_RE.search(command) or AI_IDENTITY_RE.search(_CMTIDN_SET_UNREAD_RE.sub("", command))
+    ai = _cmtidn_command_ai(command, found)
     if ai is None:
         return None
     return ("identity config name whose value xargs may read from its input, in a command line that names an AI "
@@ -6451,10 +6539,11 @@ def _cmtidn_raw_stdin_identity_ai(command):
                         "({!r})".format(ai.group(0)))
         return None
     tokens = []
+    command_ai = []  # the AI identity search of the command, made once for all its simple commands
     for k, (word, _doubtful) in enumerate(words):
         gap = gaps[k]
         if _CMTIDN_CMD_SEPARATOR_RE.search(gap) and tokens:
-            hit = _cmtidn_stdin_identity_ai(tokens, command)
+            hit = _cmtidn_stdin_identity_ai(tokens, command, command_ai)
             if hit is not None:
                 return hit
             tokens = []
@@ -6465,7 +6554,7 @@ def _cmtidn_raw_stdin_identity_ai(command):
         if bare.isdigit() and after.startswith(("<", ">")):
             continue  # a file descriptor number written directly before a redirection operator
         tokens.append(bare)
-    return _cmtidn_stdin_identity_ai(tokens, command) if tokens else None
+    return _cmtidn_stdin_identity_ai(tokens, command, command_ai) if tokens else None
 
 
 # The wrappers that run a command string given to their -c or --command option: flock FILE -c CMD, su USER -c

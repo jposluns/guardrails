@@ -16387,8 +16387,9 @@ def _cmo_decider(handler, cwd):
 
 def _cmo_findings(base_decide, tree_decide, corpus, allowed, must_deny):
     """The oracle's failure messages: a corpus command the base denies (or raises on) that the tree does not
-    deny and that allowed does not name; an allowed entry the corpus does not hold or that no longer differs;
-    a must_deny form the tree does not deny."""
+    deny and that allowed does not name; a corpus command the tree raises on that the base decides without
+    raising, whatever the base decides and whether or not allowed names it; an allowed entry the corpus does
+    not hold or that no longer differs; a must_deny form the tree does not deny."""
     out = []
     differ = set()
     for command in corpus:
@@ -16399,6 +16400,9 @@ def _cmo_findings(base_decide, tree_decide, corpus, allowed, must_deny):
             if command not in allowed:
                 out.append("(cmo-newly-allowed) the base decides {} and this tree decides {} for {!r}"
                            .format(base, tree, command[:300]))
+        if tree.startswith("raised") and not base.startswith("raised"):
+            out.append("(cmo-head-raised) the base decides {} and this tree {} for {!r}"
+                       .format(base, tree, command[:300]))
     for command in sorted(allowed):
         if command not in differ:
             out.append("(cmo-allow-stale) the allowlist entry {!r} is not a corpus command that the base denies "
@@ -16433,7 +16437,8 @@ def _cmo_load_base(tmp):
 
 def _test_cmtidn_oracle(failures, tmp):
     """(cmo-*) The commit_identity differential oracle (see the cmo comment above) and its mutation checks: a
-    revert of the change (the base decides as the tree) and a deleted allowlist entry each turn it red."""
+    revert of the change (the base decides as the tree), a tree that raises on a command the base allows and a
+    deleted allowlist entry each turn it red."""
     try:
         base_mod = _cmo_load_base(tmp)
     except (OSError, RuntimeError, SyntaxError, ImportError, subprocess.SubprocessError) as exc:
@@ -16460,9 +16465,26 @@ def _test_cmtidn_oracle(failures, tmp):
         if (base == "deny" or base.startswith("raised")) and tree != "deny":
             failures.append("(cmo-too-long) the base decides {} and this tree decides {} for {!r} padded past the "
                             "read limit".format(base, tree, command.rstrip()))
+        if tree.startswith("raised") and not base.startswith("raised"):
+            failures.append("(cmo-too-long-raised) the base decides {} and this tree {} for {!r} padded past the "
+                            "read limit".format(base, tree, command.rstrip()))
     # Mutation: a revert of the change, the base deciding in the tree's place, must turn the oracle red.
     if not _cmo_findings(base_decide, base_decide, corpus, _CMO_NEWLY_ALLOWED, _CMO_NEW_DENIES):
         failures.append("(cmo-mutant-revert) the oracle stays green when the base decides in the tree's place")
+    # Mutation: a tree that raises on a corpus command the base allows, outside the forms the change exists to
+    # deny, must turn the oracle red, where the oracle once reported a raise only as a decision change or in
+    # must_deny and so stayed green on it.
+    calm = next((c for c in corpus if base_decide(c) == "allow" and c not in _CMO_NEW_DENIES), None)
+    if calm is None:
+        failures.append("(cmo-mutant-raise-victim) the corpus holds no command outside the new denies that the "
+                        "base allows")
+    else:
+        def raising(command):
+            return "raised RuntimeError" if command == calm else tree_decide(command)
+        if not any(line.startswith("(cmo-head-raised)") and repr(calm[:300]) in line
+                   for line in _cmo_findings(base_decide, raising, corpus, _CMO_NEWLY_ALLOWED, _CMO_NEW_DENIES)):
+            failures.append("(cmo-mutant-head-raised) the oracle stays green when the tree raises on {!r}, a corpus "
+                            "command the base allows".format(calm[:300]))
     # Mutation: deleting an allowlist entry must turn the oracle red. Each real entry is deleted in turn, and a
     # synthetic entry pins the mechanism while the allowlist is empty: a tree that newly allows the first
     # command the base denies is green with that command allowlisted and red without it.
@@ -32836,6 +32858,23 @@ def _main_isolated(monitor):
                                     len(_ci_cmd), _ci_cap, _ci_got, _ci_spent,
                                     "; the longer command was not run" if _ci_size == 16 << 10 else ""))
                 break
+        # The raw-text rule judges every assignment in a word from one reading of the word (_CmtidnWord), where
+        # copying, dropping and searching the rest of the word for each assignment cost time quadratic in its
+        # length; and the xargs stdin rule searches a line for an AI identity once for all its segments
+        # (_cmtidn_command_ai), where a search for each 'xargs git config' segment cost time quadratic in the
+        # line's length. The commands are the review's: 'echo "EMAIL=x,EMAIL=x,..."' (4,095 assignments in one
+        # quoted word, 32,767 characters) and 'xargs git config author.name;' 2,259 times (65,511 characters).
+        # Each names no AI identity and allows. With either change reverted they took about 20.4 s and 18.3 s
+        # of the calling thread's CPU in-process, past the 8-second hook deadline, against about 0.04 s and
+        # 0.24 s with them (one run each, one shared host, Python 3.14, 2026-11-18). The bound is the
+        # per-character bound of the rows above (0.375 s at 16,384 characters): 0.75 s and 1.5 s.
+        for _ci_label, _ci_cmd, _ci_cap in (
+                ("(ci-idc-cpu5) 'echo \"EMAIL=x,EMAIL=x,...\"'", 'echo "' + "EMAIL=x," * 4095 + '"', 0.75),
+                ("(ci-idc-cpu6) 'xargs git config author.name; ...'", "xargs git config author.name;" * 2259, 1.5)):
+            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
+            if _ci_got != "allow" or _ci_spent > _ci_cap:
+                failures.append("{} over {} characters expected allow within {} s of CPU time, got {} after "
+                                "{:.2f} s".format(_ci_label, len(_ci_cmd), _ci_cap, _ci_got, _ci_spent))
         # Every co-author trailer name in a word is read, each with its own value of up to 160 characters, where the
         # reader read only the first trailer name of a word and the raw-string scan resumed its search after each
         # value. A second trailer on the same line after a first value of 140 characters, which ends inside it
