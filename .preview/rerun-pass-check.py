@@ -1741,7 +1741,7 @@ def _self_test():
             self.assertFalse(ci_rerun("echo g\nh run rerun"))
             self.assertTrue(ci_rerun("echo g\nh run rerun; echo $"))
 
-        def test_39_round_9_reproductions_are_flagged(self):
+        def test_39_off_grammar_reproductions_are_flagged(self):
             for c in ("#x\\\ng\\\nh run rerun 7", "g$'\\0x'h run rerun 7", "g$'\\400'h run rerun 7",
                       "$'\\547h' run rerun 7", "g" + "${x:-" * 40000 + "}" * 40000 + "h run rerun",
                       "gh run re{run,try} 7", "echo $; " + "gh run " * 800):

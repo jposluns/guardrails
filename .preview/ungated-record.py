@@ -2256,7 +2256,7 @@ def _self_test():
 
         # regression tests for runner options, errexit option values, tee to stdout, builtin echo, parameter
         # expansion and extra argv: each passes only with its guard present
-        def test_qa_runner_options(self):
+        def test_runner_options(self):
             for c in ("make -j test; echo PASS >> r", "make -j 4 -C sub test; echo PASS >> r",
                       "make --jobs check; echo PASS >> r", "npm --prefix web test; echo PASS >> r",
                       "npm -w pkg run test; echo PASS >> r", "pnpm -C web test; echo PASS >> r",
@@ -2267,7 +2267,7 @@ def _self_test():
                       "go -C test build; echo PASS >> r"):
                 self.assertAllow(c)
 
-        def test_qa_errexit_option_values(self):
+        def test_errexit_option_values(self):
             for c in ("set -o nounset -o errexit; pytest; echo PASS >> r", "set -o posix -e; pytest; echo PASS >> r",
                       "set -uo pipefail; pytest; echo PASS >> r", "builtin set -e; pytest; echo PASS >> r"):
                 self.assertAllow(c)
@@ -2276,24 +2276,24 @@ def _self_test():
                       "set -- -e; pytest; echo PASS >> r"):
                 self.assertDeny(c)
 
-        def test_qa_tee_stdout(self):
+        def test_tee_stdout(self):
             self.assertDeny("pytest; echo PASS | tee > r")
             self.assertDeny("pytest; echo PASS | tee -a log >> r")
             self.assertAllow("pytest; echo PASS | tee > /dev/null")
 
-        def test_qa_builtin_echo(self):
+        def test_builtin_echo(self):
             self.assertDeny("pytest; builtin echo PASS >> r")
             self.assertDeny("pytest; builtin printf PASS >> r")
             self.assertAllow("pytest; builtin grep PASS >> r")
 
-        def test_qa_parameter_expansion(self):
+        def test_parameter_expansion(self):
             for c in ('pytest; echo "$PASS" >> r', "pytest; echo $PASS >> r", 'pytest; echo "${PASS}" >> r',
                       'pytest; echo "${X:-PASS}" >> r', "pytest; cat >> r <<EOF\n$DONE\nEOF"):
                 self.assertAllow(c)
             self.assertDeny('pytest; echo "$X PASS" >> r')
             self.assertDeny('pytest; echo "${X}PASS" >> r')
 
-        def test_qa_extra_argv_fails_open(self):
+        def test_extra_argv_fails_open(self):
             for extra in (["--bogus"], ["extra"], ["--self-test", "extra"], ["-", "--self-test"]):
                 p = subprocess.run([sys.executable, "-I", "-S", "-B", here] + extra, input=payload_bytes(base),
                                    capture_output=True, env={"LC_ALL": "C"}, timeout=30)
@@ -2456,7 +2456,7 @@ def _self_test():
             self.assertAllow('X=x; pytest; echo "${X:-\\${} PASS}" >> r')
             self.assertAllow("unset X; pytest; echo ${X:-\"'\"}\" PASS\"\\' >> r")
 
-        def test_qa_compound_pipeline_stage(self):
+        def test_compound_pipeline_stage(self):
             for c in ("( true ) | pytest; echo PASS >> r", "pytest | (cat > log); echo PASS >> r",
                       "{ true; } | pytest; echo PASS >> r", "pytest | { cat; } && echo PASS >> r",
                       "pytest || { exit 1; } | cat; echo PASS >> r"):
@@ -2465,19 +2465,19 @@ def _self_test():
                       "{ true; } | pytest && echo PASS >> r", "{ pytest; } && echo PASS >> r"):
                 self.assertAllow(c)
 
-        def test_qa_pipeline_growth(self):
+        def test_pipeline_growth(self):
             def cost(k):
                 return work(" | ".join("pytest t%d" % i for i in range(k)) + "; echo PASS >> r")
             small, large = cost(150), cost(1200)
             self.assertLess(large / small, 10, (small, large))  # 8x the stages: linear is 7.9 here, quadratic 64
 
-        def test_qa_oversized_command_not_judged(self):
+        def test_oversized_command_not_judged(self):
             self.assertAllow(base + " " * 65536 + " # record-ok: intentional log")
             self.assertAllow(base + " " * 65536)
             self.assertAllow(base + " " + chr(233) * 33000)  # under 64 KiB of characters, over it in bytes
             self.assertDeny(base + " " * 60000)
 
-        def test_qa_stdin_order(self):
+        def test_stdin_order(self):
             for c in ("pytest; cat <<<PASS < /dev/null >> r", "pytest; echo PASS | tee r < /dev/null",
                       "pytest; cat <<EOF < /dev/null >> r\nPASS\nEOF"):
                 self.assertAllow(c)
@@ -2485,7 +2485,7 @@ def _self_test():
                       "pytest; tee r <<< PASS"):
                 self.assertDeny(c)
 
-        def test_qa_printf_format(self):
+        def test_printf_format(self):
             for c in ("pytest; printf '%.0s\\n' PASS >> r", "pytest; printf '%d\\n' PASS >> r",
                       "pytest; printf 'x\\n' PASS >> r"):
                 self.assertAllow(c)
@@ -2493,12 +2493,12 @@ def _self_test():
                       "pytest; printf -- '%b' PASS >> r", "pytest; printf '%-10s' PASS >> r"):
                 self.assertDeny(c)
 
-        def test_qa_quote_assembled_words(self):
+        def test_quote_assembled_words(self):
             self.assertDeny('pytest; echo "PA"SS >> r')
             self.assertDeny('pyt"est"; echo PASS >> r')
             self.assertDeny("py\\test; echo P\\ASS >> r")
 
-        def test_qa_descriptor_duplication(self):
+        def test_descriptor_duplication(self):
             for c in ("pytest; echo PASS 3>>r 1>&3", "pytest; echo PASS 2>r >&2", "pytest; echo PASS 3>r >&3"):
                 self.assertDeny(c)
             for c in ("pytest; echo PASS 3>>r 1>&4", "pytest; echo PASS 3>>r 1>&3 >&-", "pytest; echo PASS 1<r"):
