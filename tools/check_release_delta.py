@@ -1401,8 +1401,9 @@ def _predecessor_tree_checks(root, commit, prev_genesis):
     import tempfile
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-delta-prev-"))
     dest = tmp / "tree"
-    dest.mkdir()
     try:
+        # Inside the guard, so a failed mkdir still removes tmp.
+        dest.mkdir()
         try:
             _release_schema.materialize_tree_raw(root, commit, dest)
         except SchemaError as exc:
@@ -2403,8 +2404,9 @@ def _head_committed_manifest_integrity(root, head_oid):
     import tempfile
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-delta-head-"))
     dest = tmp / "tree"
-    dest.mkdir()
     try:
+        # Inside the guard, so a failed mkdir still removes tmp.
+        dest.mkdir()
         try:
             _release_schema.materialize_tree_raw(root, head_oid, dest)
         except SchemaError as exc:

@@ -56,6 +56,7 @@ import stat
 import subprocess
 import tempfile
 import shutil
+import socket
 import threading
 import time
 import datetime
@@ -83,6 +84,7 @@ sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
 import aiqt_hooks  # noqa: E402
 from _git_fixture_env import scrub_git_environment  # noqa: E402
 import _selftest_exit_report  # noqa: E402
+import _selftest_tmproot  # noqa: E402  owned temporary roots: marker, checked removal, stale sweep
 
 FAILURES = []
 EXECUTED = []        # ordered check ids actually reached this run
@@ -5776,6 +5778,143 @@ def _fixture_tmpdir(prefix):
             continue
         return Path(path)
     raise OSError("no writable temporary directory outside /dev and /proc ({})".format("; ".join(failures)))
+
+
+# This suite's own temporary root: its name prefix and the suite name its marker records. The stale-root
+# sweep at the start of a run removes only roots carrying both (tools/_selftest_tmproot.py), in the
+# parents _fixture_tmpdir allocates in.
+_TMPROOT_PREFIX = "aiqt-orch-selftest-"
+_TMPROOT_SUITE = "selftest_orch_hooks"
+
+
+def _tmproot_parents():
+    return (tempfile.gettempdir(), "/var/tmp", "/tmp")
+
+
+# The child of temp/failed-setup-cleans-root: it imports this suite from the tools directory in argv[1],
+# records the root _fixture_tmpdir makes, makes scrub_git_environment (a setup step after the root is made)
+# raise a sentinel, runs _main_isolated, and prints one tagged JSON line: the name of the exception that
+# came out (None when none did), how many roots were made, and those still present.
+_TEMP_SETUP_TAG = "TEMP-SETUP-RESULT "
+_TEMP_SETUP_CHILD = (
+    "import json, os, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import selftest_orch_hooks as suite\n"
+    "made = []\n"
+    "real_tmpdir = suite._fixture_tmpdir\n"
+    "def recording_tmpdir(prefix):\n"
+    "    path = real_tmpdir(prefix)\n"
+    "    made.append(str(path))\n"
+    "    return path\n"
+    "suite._fixture_tmpdir = recording_tmpdir\n"
+    "class InjectedSetupFailure(Exception):\n"
+    "    pass\n"
+    "def failing_scrub():\n"
+    "    raise InjectedSetupFailure('injected setup failure')\n"
+    "suite.scrub_git_environment = failing_scrub\n"
+    "raised = None\n"
+    "try:\n"
+    "    suite._main_isolated(None)\n"
+    "except BaseException as exc:\n"
+    "    raised = type(exc).__name__\n"
+    "print('" + _TEMP_SETUP_TAG + "' + json.dumps({'raised': raised, 'made': len(made),\n"
+    "      'left': [p for p in made if os.path.lexists(p)]}))\n")
+
+
+class _InjectedAllocationFailure(OSError):
+    """The allocation failure the partial-allocation rows inject."""
+
+
+def _entry_restore_partial_allocation(tmp, name, call, fail_at):
+    """Run call() with _entry_restore_selftest's tempfile.mkdtemp making its directories under a fresh
+    parent in tmp and failing at the fail_at-th call. Returns (the injected failure came out, number of
+    directories made before it, the names still present in that parent)."""
+    import _entry_restore_selftest as entry_restore
+    parent = tmp / name
+    parent.mkdir()
+    real = entry_restore.tempfile
+    made = []
+
+    class _Shim:
+        @staticmethod
+        def mkdtemp(prefix=None):
+            if len(made) + 1 == fail_at:
+                raise _InjectedAllocationFailure("injected allocation failure")
+            path = real.mkdtemp(prefix=prefix, dir=str(parent))
+            made.append(path)
+            return path
+
+    raised = False
+    entry_restore.tempfile = _Shim
+    try:
+        call(entry_restore)
+    except _InjectedAllocationFailure:
+        raised = True
+    finally:
+        entry_restore.tempfile = real
+    return raised, len(made), sorted(os.listdir(parent))
+
+
+def _temp_root_cases(tmp):
+    """The temporary-root ownership rows: a setup failure after this suite's root is made removes it and
+    keeps its own failure visible; an entry-restore allocation that fails removes the directories made
+    before it; and the stale-root sweep removes only a stale marked root of this suite."""
+    # temp/failed-setup-cleans-root: in a child, since the run changes the process environment.
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-B", "-c", _TEMP_SETUP_CHILD,
+                               str(Path(__file__).resolve().parent)],
+                              capture_output=True, text=True, timeout=300)
+        lines = [line for line in proc.stdout.splitlines() if line.startswith(_TEMP_SETUP_TAG)]
+        got = (json.loads(lines[0][len(_TEMP_SETUP_TAG):]) if len(lines) == 1
+               else {"no-single-result-line": proc.returncode, "stderr": proc.stderr[-2000:]})
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        got = {"child-error": str(exc)}
+    for path in got.get("left") or []:
+        shutil.rmtree(path, ignore_errors=True)
+    check("temp/failed-setup-cleans-root", got,
+          {"raised": "InjectedSetupFailure", "made": 1, "left": []})
+
+    # temp/partial-allocation-cleans-earlier-roots: the second of the probe child's four allocations
+    # fails, so the first, made before any guard was entered in the old code, must be gone.
+    check("temp/partial-allocation-cleans-earlier-roots", _entry_restore_partial_allocation(
+        tmp, "entry-restore-child", lambda mod: mod._child("unused.py", "main", "_main_isolated"), 2),
+        (True, 1, []))
+    # The mutant child's five allocations, the last failing: the four before it must be gone.
+    check("temp/partial-allocation-cleans-earlier-mutant-roots", _entry_restore_partial_allocation(
+        tmp, "entry-restore-mutant", lambda mod: mod._mutant_child(), 5), (True, 4, []))
+
+    # temp/stale-marked-root-swept: only the stale marked root of this suite goes; a root whose owner is
+    # alive, a recent one, an unmarked one, another suite's and one with another prefix all stay.
+    parent = tmp / "stale-sweep"
+    parent.mkdir()
+    gone = subprocess.Popen([sys.executable, "-I", "-c", "pass"])
+    gone.wait(timeout=60)
+    old = time.time() - _selftest_tmproot.STALE_SECONDS - 3600
+    host = socket.gethostname()
+
+    def root(name, suite=_TMPROOT_SUITE, pid=gone.pid, created=old, marked=True):
+        path = parent / name
+        (path / "fixture").mkdir(parents=True)
+        (path / "fixture" / "data.txt").write_text("x", encoding="utf-8")
+        if marked:
+            marker = path / _selftest_tmproot.MARKER
+            marker.write_text(json.dumps({"suite": suite, "pid": pid, "host": host, "created": created}),
+                              encoding="utf-8")
+            os.utime(marker, (created, created))
+        os.utime(path, (old, old))
+
+    root(_TMPROOT_PREFIX + "stale")
+    root(_TMPROOT_PREFIX + "live", pid=os.getpid())
+    root(_TMPROOT_PREFIX + "recent", created=time.time())
+    root(_TMPROOT_PREFIX + "unmarked", marked=False)
+    root(_TMPROOT_PREFIX + "othersuite", suite="selftest_aiqt_hooks")
+    root("aiqt-other-stale")
+    removed, problems = _selftest_tmproot.sweep_stale(_TMPROOT_SUITE, _TMPROOT_PREFIX, (str(parent),))
+    check("temp/stale-marked-root-swept",
+          ([os.path.basename(path) for path in removed], problems, sorted(os.listdir(parent))),
+          ([_TMPROOT_PREFIX + "stale"], [],
+           sorted(["aiqt-other-stale", _TMPROOT_PREFIX + "live", _TMPROOT_PREFIX + "othersuite",
+                   _TMPROOT_PREFIX + "recent", _TMPROOT_PREFIX + "unmarked"])))
 
 
 # QA round 7 of the silent-write fixes: the state-directory permission sweep. Each cell of _PERM_SWEEP_TABLE
@@ -13299,24 +13438,32 @@ def main(report_path=None):
 
 
 def _main_isolated(report_path=None):
+    # Every truncation-guard verdict is decided by fixtures under tmp alone: the registry walk runs behind
+    # the test-only ceiling below (production takes none), restored in the finally below. Read before the
+    # root is made, so the finally that owns the root can always restore it.
+    saved_probe = aiqt_hooks._orch_dirfd_has_registry
+    # Recover the roots of earlier runs that were killed before their finally ran: only this suite's own
+    # marked roots, older than a day, whose owner process is gone (tools/_selftest_tmproot.py).
+    for _sweep_problem in _selftest_tmproot.sweep_stale(_TMPROOT_SUITE, _TMPROOT_PREFIX, _tmproot_parents())[1]:
+        print("SELF-TEST NOTE: stale-root sweep: {}".format(_sweep_problem), file=sys.stderr)
     try:
-        tmp = _fixture_tmpdir("aiqt-orch-selftest-")
+        tmp = _fixture_tmpdir(_TMPROOT_PREFIX)
     except OSError as exc:
         print("SELF-TEST ERROR: no writable temp dir: {}".format(exc), file=sys.stderr)
         return 2
-    os.environ["XDG_STATE_HOME"] = str(tmp / "xdg")  # hermetic default state root
-    # Hermetic registry scope: an inherited opt-in AIQT_ORCH_REQUIRE_REGISTRY would turn every no-registry
-    # allow below into a deny; the registry-required checks set and restore it themselves.
-    os.environ.pop(aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV, None)
-    # Hermetic git fixtures on a DIRECT run (test-hermeticity): the selftest-execution gate
-    # launches this runner git-neutral, but a direct run inherits the caller's environment,
-    # where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook children) would
-    # redirect every fixture git init/add/commit below into the CALLER's repository.
-    scrub_git_environment()
-    # Every truncation-guard verdict is decided by fixtures under tmp alone: the registry walk runs behind
-    # the test-only ceiling above (production takes none), restored in the finally below.
-    saved_probe = aiqt_hooks._orch_dirfd_has_registry
+    # The root is owned from here: every setup step below runs inside the try whose finally removes it.
+    _tmp_left = None
     try:
+        _selftest_tmproot.write_marker(tmp, _TMPROOT_SUITE)
+        os.environ["XDG_STATE_HOME"] = str(tmp / "xdg")  # hermetic default state root
+        # Hermetic registry scope: an inherited opt-in AIQT_ORCH_REQUIRE_REGISTRY would turn every no-registry
+        # allow below into a deny; the registry-required checks set and restore it themselves.
+        os.environ.pop(aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV, None)
+        # Hermetic git fixtures on a DIRECT run (test-hermeticity): the selftest-execution gate
+        # launches this runner git-neutral, but a direct run inherits the caller's environment,
+        # where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook children) would
+        # redirect every fixture git init/add/commit below into the CALLER's repository.
+        scrub_git_environment()
         aiqt_hooks._orch_dirfd_has_registry = _registry_ceiling(tmp, saved_probe)
         _record_surface_cases(tmp)
         _stop_unreadable_input_cases(tmp)
@@ -20098,9 +20245,18 @@ def _main_isolated(report_path=None):
         _rdp_cases(tmp)
         _rwh_cases(tmp)
         _gitalias_oracle_cases(tmp)
+        _temp_root_cases(tmp)
     finally:
-        aiqt_hooks._orch_dirfd_has_registry = saved_probe
-        shutil.rmtree(tmp, ignore_errors=True)
+        # Nested, so a failure restoring the probe cannot skip removing the root.
+        try:
+            aiqt_hooks._orch_dirfd_has_registry = saved_probe
+        finally:
+            # A root that survives removal is reported on every path (here, so a run that raises reports
+            # it too) and fails a run that reaches the check below; it is never silenced.
+            _tmp_left = _selftest_tmproot.remove_root(tmp)
+            if _tmp_left is not None:
+                print("SELF-TEST ERROR: {}".format(_tmp_left), file=sys.stderr)
+    check("temp/own-root-removed", _tmp_left, None)
 
     # An in-process call of main() hands the caller's environment back exactly (HOME,
     # XDG_CONFIG_HOME, the GIT_CONFIG_* pins and the caller's own GIT_* variables), with the git

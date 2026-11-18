@@ -204,6 +204,7 @@ from _git_fixture_env import _MAINTENANCE_PIN_VARS, git_fixture_env, scrub_git_e
 import gen_hooks  # noqa: E402  (the one source of the hook timeout the deadline derives from)
 import gen_secret_patterns  # noqa: E402  (same tools dir, for the drift-gate F-129 self-test)
 import _load_bound  # noqa: E402  hang-versus-slowness bounds shared by the self-tests and gates
+import _selftest_tmproot  # noqa: E402  owned temporary roots: marker, checked removal, stale sweep
 
 sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
 import aiqt_hooks  # noqa: E402
@@ -16507,6 +16508,85 @@ def _fixture_tmpdir(prefix):
     raise OSError("no writable temporary directory outside /dev and /proc ({})".format("; ".join(failures)))
 
 
+# This suite's own temporary root: its name prefix and the suite name its marker records. The stale-root
+# sweep at the start of a run removes only roots carrying both (tools/_selftest_tmproot.py), in the
+# parents _fixture_tmpdir allocates in.
+_TMPROOT_PREFIX = "aiqt-hooks-selftest-"
+_TMPROOT_SUITE = "selftest_aiqt_hooks"
+
+
+def _tmproot_parents():
+    return (tempfile.gettempdir(), "/var/tmp", "/tmp")
+
+
+# The child of (temp-failed-setup-cleans-root): it imports this suite from the tools directory in argv[1],
+# records the root _fixture_tmpdir makes, makes the emptyhome mkdir (the first fallible setup step after the
+# root is made) raise a sentinel, runs _main_isolated, and prints one tagged JSON line: the name of the
+# exception that came out (None when none did), how many roots were made, and those still present.
+_TEMP_SETUP_TAG = "TEMP-SETUP-RESULT "
+_TEMP_SETUP_CHILD = (
+    "import json, os, pathlib, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import selftest_aiqt_hooks as suite\n"
+    "made = []\n"
+    "real_tmpdir = suite._fixture_tmpdir\n"
+    "def recording_tmpdir(prefix):\n"
+    "    path = real_tmpdir(prefix)\n"
+    "    made.append(str(path))\n"
+    "    return path\n"
+    "suite._fixture_tmpdir = recording_tmpdir\n"
+    "class InjectedSetupFailure(Exception):\n"
+    "    pass\n"
+    "real_mkdir = pathlib.Path.mkdir\n"
+    "def failing_mkdir(self, *args, **kwargs):\n"
+    "    if self.name == 'emptyhome':\n"
+    "        raise InjectedSetupFailure('injected emptyhome mkdir failure')\n"
+    "    return real_mkdir(self, *args, **kwargs)\n"
+    "pathlib.Path.mkdir = failing_mkdir\n"
+    "raised = None\n"
+    "try:\n"
+    "    suite._main_isolated(None)\n"
+    "except BaseException as exc:\n"
+    "    raised = type(exc).__name__\n"
+    "print('" + _TEMP_SETUP_TAG + "' + json.dumps({'raised': raised, 'made': len(made),\n"
+    "      'left': [p for p in made if os.path.lexists(p)]}))\n")
+
+
+def _temp_failed_setup_failures():
+    """(temp-failed-setup-cleans-root): a setup step that fails after this suite's root is made must
+    remove the root, and the step's own failure must still come out of _main_isolated. Runs
+    _TEMP_SETUP_CHILD and returns the failure lines (empty when both hold). A root the child leaves is
+    removed here afterwards, so a regression does not itself leave one behind."""
+    label = "(temp-failed-setup-cleans-root)"
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-B", "-c", _TEMP_SETUP_CHILD,
+                               str(Path(__file__).resolve().parent)],
+                              capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return ["{} could not run the setup-failure child: {}".format(label, exc)]
+    lines = [line for line in proc.stdout.splitlines() if line.startswith(_TEMP_SETUP_TAG)]
+    if len(lines) != 1:
+        return ["{} the setup-failure child printed no single result line (exit {}): {}".format(
+            label, proc.returncode, proc.stderr[-2000:])]
+    try:
+        got = json.loads(lines[0][len(_TEMP_SETUP_TAG):])
+    except ValueError as exc:
+        return ["{} unreadable result line {!r}: {}".format(label, lines[0], exc)]
+    out = []
+    for path in got.get("left") or []:
+        shutil.rmtree(path, ignore_errors=True)
+    if got.get("raised") != "InjectedSetupFailure":
+        out.append("{} the injected setup failure must come out of _main_isolated; got {!r}".format(
+            label, got.get("raised")))
+    if got.get("made") != 1:
+        out.append("{} the child must make exactly one root before the injected failure; made {!r}".format(
+            label, got.get("made")))
+    if got.get("left"):
+        out.append("{} a setup failure after the root was made left it behind: {!r}".format(
+            label, got.get("left")))
+    return out
+
+
 _PL239_DEADLINE_NOTE = "commit evaluation deadline exhausted"
 # A deadline denial on every launch while a MEASURED load factor read at each launch stayed at or below
 # this (the host ran about as much work as it has CPUs) is reported as a latency regression: a failure,
@@ -17126,54 +17206,13 @@ def _selftest_exit_code(failures, cannot_evaluate):
 def _main_isolated(monitor):
     scrub_git_environment()
     handler = aiqt_hooks.git_discard
-    try:
-        tmp = _fixture_tmpdir("aiqt-hooks-selftest-")
-    except OSError as exc:
-        print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
-        return 2
-    # Redirect the recovery ledger into the throwaway tree so the recovery layer, which fires on every
-    # dirty-tree in-scope case below, never writes to the real user's $XDG_STATE_HOME/~/.local/state.
-    os.environ["XDG_STATE_HOME"] = str(tmp / "xdgstate")
-    # Make the fail-safe repository-view check (git_discard) deterministic: scrub any ambient GIT_* the
-    # gate's own runner happens to carry (a shell may export GIT_EDITOR, CI may export others), so each case
-    # below is judged ONLY against the GIT_* vars it explicitly sets. Production still reads the real
-    # os.environ; this scrub is a test-harness isolation, not a change to the control.
-    # The synthetic handler environment must not include harness config pins: the
-    # production guard correctly treats those as repository-view overrides. That covers BOTH the
-    # config-file pins AND the F-367 maintenance pins the entry scrub just installed
-    # (GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n): every one is a non-cosmetic
-    # GIT_* environment-config variable, so leaving any of them in the suite process flips every
-    # in-process handler case to the artbr1 ambient-view-override denial. Fixture git
-    # subprocesses receive git_fixture_env() explicitly, including all three pins, and the
-    # entry's PATH lifecycle wrapper reasserts the pins argv-side for every `git` resolved
-    # through PATH, so popping the process-wide copies does not unpin any fixture launch.
-    for key in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
-                "GIT_CONFIG_NOSYSTEM") + _MAINTENANCE_PIN_VARS:
-        os.environ.pop(key, None)
-    # F-106 regression guard: run the whole self-test with NO ambient git identity, so the recovery
-    # snapshot's `git commit-tree` must supply its OWN fixed identity to succeed. The recovery layer scrubs
-    # GIT_CONFIG_*/GIT_AUTHOR_*/GIT_COMMITTER_* itself (the allowlist posture), but NOT HOME/XDG_CONFIG_HOME,
-    # so pointing those at an EMPTY throwaway dir is what actually denies the snapshot a global-config
-    # identity, reproducing CI's no-global-gitconfig condition LOCALLY (why F-106 passed here but failed in
-    # CI), so a future regression that reintroduces an ambient-identity dependence in the snapshot fails THIS
-    # gate, not only in CI. HOME/XDG_CONFIG_HOME are NOT GIT_*-prefixed, so this does not trip the guard's
-    # own ambient-GIT_* view-override check (unlike GIT_CONFIG_GLOBAL/SYSTEM, which are non-cosmetic and would
-    # force every case to ASK), and the recovery layer scrubs GIT_CONFIG_* regardless, so nulling those would
-    # not reach its commit-tree anyway. The seed-repo commits set their identity inline via `-c user.name=...`
-    # (env_identity), so they are unaffected; the rec-ambient case still injects and removes its own
-    # GIT_AUTHOR_*/GIT_COMMITTER_* to prove an ambient identity does not break the snapshot.
-    _emptyhome = tmp / "emptyhome"
-    _emptyhome.mkdir(parents=True, exist_ok=True)
-    os.environ["HOME"] = str(_emptyhome)
-    os.environ["XDG_CONFIG_HOME"] = str(_emptyhome / "xdgconfig")
-    for _idk in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
-        os.environ.pop(_idk, None)
     failures = []
     # A bound that fired under host load is reported here, attributed to the bound, never as a failure of
     # the hook under test; any entry makes the run cannot-evaluate (exit 2) unless a real failure exists.
     cannot_evaluate = []
     # The hook production commit limits: the protected_line cases widen them, and both the end of those
     # cases and the finally below put these back, so no later case and no caller runs on widened limits.
+    # Read before the root is made, so the finally that owns the root can always restore them.
     _pl_production_limits = (aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS)
 
     def expect(label, command, want, cwd=None):
@@ -17181,7 +17220,58 @@ def _main_isolated(monitor):
         if got != want:
             failures.append("{}: expected {}, got {}".format(label, want, got))
 
+    # Recover the roots of earlier runs that were killed before their finally ran: only this suite's own
+    # marked roots, older than a day, whose owner process is gone (tools/_selftest_tmproot.py).
+    for _sweep_problem in _selftest_tmproot.sweep_stale(_TMPROOT_SUITE, _TMPROOT_PREFIX, _tmproot_parents())[1]:
+        print("SELF-TEST NOTE: stale-root sweep: {}".format(_sweep_problem), file=sys.stderr)
     try:
+        tmp = _fixture_tmpdir(_TMPROOT_PREFIX)
+    except OSError as exc:
+        print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+        return 2
+    # The root is owned from here: every setup step below runs inside the try whose finally removes it,
+    # so a failed setup step (the emptyhome mkdir, an environment change) no longer leaves it behind.
+    _tmp_left = None
+    try:
+        _selftest_tmproot.write_marker(tmp, _TMPROOT_SUITE)
+        # Redirect the recovery ledger into the throwaway tree so the recovery layer, which fires on every
+        # dirty-tree in-scope case below, never writes to the real user's $XDG_STATE_HOME/~/.local/state.
+        os.environ["XDG_STATE_HOME"] = str(tmp / "xdgstate")
+        # Make the fail-safe repository-view check (git_discard) deterministic: scrub any ambient GIT_* the
+        # gate's own runner happens to carry (a shell may export GIT_EDITOR, CI may export others), so each case
+        # below is judged ONLY against the GIT_* vars it explicitly sets. Production still reads the real
+        # os.environ; this scrub is a test-harness isolation, not a change to the control.
+        # The synthetic handler environment must not include harness config pins: the
+        # production guard correctly treats those as repository-view overrides. That covers BOTH the
+        # config-file pins AND the F-367 maintenance pins the entry scrub just installed
+        # (GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n): every one is a non-cosmetic
+        # GIT_* environment-config variable, so leaving any of them in the suite process flips every
+        # in-process handler case to the artbr1 ambient-view-override denial. Fixture git
+        # subprocesses receive git_fixture_env() explicitly, including all three pins, and the
+        # entry's PATH lifecycle wrapper reasserts the pins argv-side for every `git` resolved
+        # through PATH, so popping the process-wide copies does not unpin any fixture launch.
+        for key in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+                    "GIT_CONFIG_NOSYSTEM") + _MAINTENANCE_PIN_VARS:
+            os.environ.pop(key, None)
+        # F-106 regression guard: run the whole self-test with NO ambient git identity, so the recovery
+        # snapshot's `git commit-tree` must supply its OWN fixed identity to succeed. The recovery layer scrubs
+        # GIT_CONFIG_*/GIT_AUTHOR_*/GIT_COMMITTER_* itself (the allowlist posture), but NOT HOME/XDG_CONFIG_HOME,
+        # so pointing those at an EMPTY throwaway dir is what actually denies the snapshot a global-config
+        # identity, reproducing CI's no-global-gitconfig condition LOCALLY (why F-106 passed here but failed in
+        # CI), so a future regression that reintroduces an ambient-identity dependence in the snapshot fails THIS
+        # gate, not only in CI. HOME/XDG_CONFIG_HOME are NOT GIT_*-prefixed, so this does not trip the guard's
+        # own ambient-GIT_* view-override check (unlike GIT_CONFIG_GLOBAL/SYSTEM, which are non-cosmetic and would
+        # force every case to ASK), and the recovery layer scrubs GIT_CONFIG_* regardless, so nulling those would
+        # not reach its commit-tree anyway. The seed-repo commits set their identity inline via `-c user.name=...`
+        # (env_identity), so they are unaffected; the rec-ambient case still injects and removes its own
+        # GIT_AUTHOR_*/GIT_COMMITTER_* to prove an ambient identity does not break the snapshot.
+        _emptyhome = tmp / "emptyhome"
+        _emptyhome.mkdir(parents=True, exist_ok=True)
+        os.environ["HOME"] = str(_emptyhome)
+        os.environ["XDG_CONFIG_HOME"] = str(_emptyhome / "xdgconfig")
+        for _idk in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+            os.environ.pop(_idk, None)
+
         try:
             repo = _init_repo(tmp / "repo")
         except (OSError, subprocess.SubprocessError) as exc:
@@ -38364,8 +38454,19 @@ def _main_isolated(monitor):
         # a later case that widened the limits again a failure in the check below.
         _pl_limits_after_battery = (aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS)
     finally:
-        aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS = _pl_production_limits
-        shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS = _pl_production_limits
+        finally:
+            # A root that survives removal is reported on every path (here, so a run that raises reports
+            # it too) and fails a run that reaches the check below; it is never silenced.
+            _tmp_left = _selftest_tmproot.remove_root(tmp)
+            if _tmp_left is not None:
+                print("SELF-TEST ERROR: {}".format(_tmp_left), file=sys.stderr)
+    if _tmp_left is not None:
+        failures.append("(temp-own-root-removed) {}".format(_tmp_left))
+    # A setup step that fails after the root is made removes the root and lets its own failure through:
+    # run this suite's _main_isolated in a child with the emptyhome mkdir failing (_TEMP_SETUP_CHILD).
+    failures.extend(_temp_failed_setup_failures())
     # No caller of this self-test is left on widened limits: the limits read at the end of the battery,
     # before the restore in the finally, must already be the production ones. The finally above covers a
     # run that raises, which never reaches this check.

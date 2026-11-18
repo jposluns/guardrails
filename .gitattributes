@@ -832,6 +832,7 @@ tools/_load_bound.py text eol=lf
 tools/_qa_adapter.py text eol=lf
 tools/_release_schema.py text eol=lf
 tools/_selftest_exit_report.py text eol=lf
+tools/_selftest_tmproot.py text eol=lf
 tools/_site_markup.py text eol=lf
 tools/_standards.py text eol=lf
 tools/_template_pages.py text eol=lf

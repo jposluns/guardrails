@@ -115,6 +115,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import contextlib
 import importlib
 import json
 import keyword
@@ -520,17 +521,28 @@ def _import_tool(tool):
     return module, None
 
 
+def _owned_tempdirs(owned, prefixes):
+    """One fresh temporary directory per prefix, in order, each registered with the ExitStack owned
+    for removal the moment it is made, so an allocation that fails after earlier ones still removes
+    those earlier directories (the exception itself comes through)."""
+    made = []
+    for prefix in prefixes:
+        path = tempfile.mkdtemp(prefix=prefix)
+        owned.callback(shutil.rmtree, path, ignore_errors=True)
+        made.append(path)
+    return made
+
+
 def _child(tool, entry, inner, args=(), helpers=()):
     """Child side: set the caller environment, import the tool (_import_tool), call the entry point
     in this child with args, with inner replaced by a stand-in that records the arguments it
     receives and each helper by a recorder, first around a stand-in returning 0 and then around one
     raising, and return the list of problems found."""
     problems = []
-    home = tempfile.mkdtemp(prefix="aiqt-entry-restore-home-")
-    fixture_home = tempfile.mkdtemp(prefix="aiqt-entry-restore-fixture-home-")
-    stand_in_bin = tempfile.mkdtemp(prefix="aiqt-entry-restore-git-")
-    channel = tempfile.mkdtemp(prefix="aiqt-entry-restore-channel-")
-    try:
+    with contextlib.ExitStack() as owned:
+        home, fixture_home, stand_in_bin, channel = _owned_tempdirs(owned, (
+            "aiqt-entry-restore-home-", "aiqt-entry-restore-fixture-home-", "aiqt-entry-restore-git-",
+            "aiqt-entry-restore-channel-"))
         _set_caller_environment(home)
         module, refused = _import_tool(tool)
         if module is None:
@@ -589,11 +601,6 @@ def _child(tool, entry, inner, args=(), helpers=()):
                             "of letting the exception through".format(rc))
         problems.extend("around a raising stand-in, " + problem for problem in _call_problems(
             caller, bound, module, recorded, seen, home, fixture_home, args))
-    finally:
-        shutil.rmtree(home, ignore_errors=True)
-        shutil.rmtree(fixture_home, ignore_errors=True)
-        shutil.rmtree(stand_in_bin, ignore_errors=True)
-        shutil.rmtree(channel, ignore_errors=True)
     return problems
 
 
@@ -645,12 +652,10 @@ def _mutant_child():
     (see wrapper_mutant_failures)."""
     names = _mutant_result_names()
     reasons = dict(_WRAPPER_MUTANTS)
-    home = tempfile.mkdtemp(prefix="aiqt-entry-restore-home-")
-    fixture_home = tempfile.mkdtemp(prefix="aiqt-entry-restore-fixture-home-")
-    stand_in_bin = tempfile.mkdtemp(prefix="aiqt-entry-restore-git-")
-    channel = tempfile.mkdtemp(prefix="aiqt-entry-restore-channel-")
-    mutants = tempfile.mkdtemp(prefix="aiqt-entry-restore-mutants-")
-    try:
+    with contextlib.ExitStack() as owned:
+        home, fixture_home, stand_in_bin, channel, mutants = _owned_tempdirs(owned, (
+            "aiqt-entry-restore-home-", "aiqt-entry-restore-fixture-home-", "aiqt-entry-restore-git-",
+            "aiqt-entry-restore-channel-", "aiqt-entry-restore-mutants-"))
         _set_caller_environment(home)
         import _git_fixture_env
         _git_fixture_env._SCRATCH_HOME = fixture_home
@@ -688,12 +693,6 @@ def _mutant_child():
             else:
                 found[_SECOND_DEFECT] = []
         return found
-    finally:
-        shutil.rmtree(home, ignore_errors=True)
-        shutil.rmtree(fixture_home, ignore_errors=True)
-        shutil.rmtree(stand_in_bin, ignore_errors=True)
-        shutil.rmtree(channel, ignore_errors=True)
-        shutil.rmtree(mutants, ignore_errors=True)
 
 
 def _well_formed_spec(spec):
