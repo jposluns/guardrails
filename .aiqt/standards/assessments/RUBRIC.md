@@ -70,7 +70,9 @@ in the mappings or on the site; that is a later change.
   or the identity provider); granting an agent's permissions, auditing the permissions granted, and
   keeping the records of changes to them (the party that grants them and holds those records), except
   where the assistant is that party, for the sub-agents it starts and the tools it hands on to them, where
-  granting and auditing those permissions are at the rule's layer; enforcing access, mutual
+  granting and auditing those permissions, and keeping the records of the grants it makes and of changes
+  to them, are at the rule's layer, since the assistant can record its own grants with what it holds, as
+  it can log its own trust decisions; enforcing access, mutual
   authentication or address restrictions at a server, tool, endpoint or network, keeping tamper evident
   logs there, and watching those logs for signs of attack (whoever runs the servers, the network or the
   infrastructure); and rendering output (the client). Holding its own actions for human
@@ -249,17 +251,25 @@ proposal, not a decision. A record names every convention that decides one of it
     read as yes: the edition records the sub-technique as a specialization of the parent, and a
     mitigation of the parent's behaviour can apply to each way of carrying that behaviour out. On either
     reading a sub-technique takes in nothing linked only to its sibling sub-techniques. The ATLAS 2026.06
-    release's own linking pattern is evidence against the reading taken. Where the release means a
-    parent's mitigation to apply to the sub-techniques, it repeats the link on each one: AML.M0004 and
+    release does not say which reading it intends. Its linking pattern can be read both ways, and each
+    reading of it below is the assessor's inference, not something the release states. Against the
+    reading taken: the release repeats some of a parent's links on each sub-technique and not others, so
+    a parent's link that a sub-technique does not repeat can be read as deliberate. AML.M0004 and
     AML.M0024 are linked to AML.T0024 and to each of its three sub-techniques (lines 13548 to 13571 and
     14296 to 14315 of its YAML copy), while AML.M0019 is linked to AML.T0024 (lines 14096 to 14100) and
     to none of them. Counted over the `mitigates` and `specializes` relations of that YAML copy, 45
     links run from a mitigation to a parent technique that has sub-techniques; 15 are repeated on every
-    one of its sub-techniques and 30 are missing from at least one, and 40 of the 70 sub-techniques have
-    no mitigation linked to them directly. So a parent's link that a sub-technique does not repeat can be
-    read as deliberate, and on that reading a sub-technique takes in only the mitigations linked to it
-    directly. This convention is engaged when a row maps to a sub-technique whose parent has a linked
-    mitigation that the sub-technique does not repeat.
+    one of its sub-techniques, 18 on some of them and 12 on none. Of the 70 sub-techniques, 40 have no
+    mitigation linked to them directly, but 27 of those have a parent with no linked mitigation either,
+    so only 13 bear on the question. For the reading taken: whether a sub-technique repeats its parent's
+    links follows when the sub-technique was created, by the `created-date` the release records for it.
+    Counting each parent link once for each of the parent's sub-techniques, those created in 2021 repeat
+    48 of their parents' 92 links, and those created in 2026 repeat 2 of 22. The three AML.T0034
+    sub-techniques were created on 2026-03-30 (line 1999 for AML.T0034.000), after AML.M0004 and
+    AML.M0019 were last modified on 2025-12-23 (lines 4864 and 5164), so the links missing from them fit
+    a gap in a new entry's links as well as they fit a deliberate choice. The relations themselves carry
+    no dates, so when any one link was added cannot be told. This convention is engaged when a row maps
+    to a sub-technique whose parent has a linked mitigation that the sub-technique does not repeat.
 
 ## Record schema
 
