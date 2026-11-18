@@ -851,12 +851,18 @@ def _valued_option_failures():
 #   hook, and the status comparison sees it only when it changes a file in the copy: such a write of identical
 #   bytes, or one to a path outside the copy, would pass this check; so would such a write by the allowed git read;
 # - the copy is read from the real checkout by `git archive HEAD` in the fixture environment (no caller HOME, XDG
-#   or system configuration is read), with one command-line safe.directory entry naming exactly that checkout, so a
-#   checkout owned by another uid is still copied (_gen_argv_head_copy); that entry trusts the checkout whatever
-#   the caller's own safe.directory setting says, which extends no trust this run had not already extended, since
-#   the self-test is code loaded from that checkout; the foreign-owner row (_gen_argv_foreign_owner_failures)
-#   stands in for the other uid with git's GIT_TEST_ASSUME_DIFFERENT_OWNER switch, so a git that ignores that
-#   switch is reported, not passed;
+#   or system configuration is read), with one command-line safe.directory entry naming that checkout's resolved
+#   path, so a checkout owned by another uid is still copied (_gen_argv_head_copy); that entry lets git read the
+#   checkout whatever the caller's own safe.directory setting says. What the rows show: the entry is the only one,
+#   it is on the archive read alone, it names that resolved path (the foreign-owner row,
+#   _gen_argv_foreign_owner_failures, which stands in for the other uid with git's GIT_TEST_ASSUME_DIFFERENT_OWNER
+#   switch, so a git that ignores that switch is reported, not passed), and a resolved path that git would read as
+#   a pattern (one holding `*`, such as one ending in `/*`) or not as a plain absolute path is refused before any
+#   git call (_gen_argv_safe_directory, the glob-path row _gen_argv_glob_root_failures). What they do not show:
+#   git matches the entry against the worktree path, while its ownership check also covers the git directory, so
+#   where that git directory has an owner of its own (a linked worktree's, or a .git owned apart from the
+#   worktree) the entry may also admit it and the repository configuration git archive reads from it; that this
+#   trust is no wider than the trust already placed in the self-test's own code is not established here;
 # - only files matching gen_*.py directly in tools/ are enumerated, so a generator nested in a subdirectory or
 #   named otherwise is not checked.
 _GEN_ARGV_CLASS_CASES = (["--chek"], ["--check", "--chek"], ["--self-test", "--chek"], ["--help"], ["check"],
@@ -1201,6 +1207,22 @@ def _gen_argv_bytecode(rel):
     return len(parts) >= 2 and parts[-2] == "__pycache__" and parts[-1].endswith(".pyc")
 
 
+def _gen_argv_safe_directory(root):
+    """(value, None): the safe.directory value naming root alone, root's resolved path; or (None, failure line)
+    when git would not read that path as itself. git reads a safe.directory value as more than a path: `*` trusts
+    every repository, a value ending in `/*` trusts every path under its prefix, `.` and any other value that is
+    not absolute name no fixed path, and a value starting `~` or `%(prefix)/` is expanded first. So a resolved
+    path that does not start with `/` (no leading character git rewrites) or that holds `*` anywhere is refused,
+    failing closed."""
+    resolved = str(Path(root).resolve())
+    if not resolved.startswith("/") or "*" in resolved:
+        return None, ("class check: built no copy, the checkout path {!r} cannot be named alone in a safe.directory "
+                      "entry: git reads a value holding `*` (such as one ending in `/*`) as a pattern and a value not "
+                      "starting with `/` as no plain absolute path; run the check from a checkout whose resolved "
+                      "path is absolute and holds no `*`".format(resolved))
+    return resolved, None
+
+
 def _gen_argv_head_copy(root, dest, **overrides):
     """Build at dest (which must not exist) a throwaway git repository holding the committed tree of root's HEAD:
     `git archive HEAD` of root, extracted into dest, then git init, add and commit there. Return None, or a
@@ -1208,12 +1230,16 @@ def _gen_argv_head_copy(root, dest, **overrides):
     The archive read is the one git call here on a checkout this self-test did not create. It keeps the fixture
     environment, so no caller or system configuration is read, and carries exactly one command-line safe.directory
     entry, naming root and nothing else, so a root owned by another uid is still read (git honours safe.directory
-    given on the command line). The fixture calls in dest carry no such entry. overrides go to the archive read's
-    environment only (the foreign-owner row)."""
+    given on the command line). A root whose resolved path git would read as a pattern is refused before dest is
+    made or git runs (_gen_argv_safe_directory). The fixture calls in dest carry no such entry. overrides go to the
+    archive read's environment only (the foreign-owner row)."""
     import tarfile
+    entry, problem = _gen_argv_safe_directory(root)
+    if problem:
+        return problem
     dest.mkdir()
     tar = dest.parent / (dest.name + ".tar")
-    done = _gen_argv_git(root, "-c", "safe.directory=" + str(Path(root).resolve()), "archive", "--format=tar", "-o",
+    done = _gen_argv_git(root, "-c", "safe.directory=" + entry, "archive", "--format=tar", "-o",
                          str(tar), "HEAD", **overrides)
     if done.returncode != 0:
         return "class check: built no copy, git archive HEAD of {} failed (exit {}): {!r}".format(
@@ -1301,6 +1327,49 @@ def _gen_argv_foreign_owner_failures():
             failures.append("foreign-owner row: expected the archive read of {} first, with the one entry {!r} and "
                             "the owner switch, then only fixture calls with no safe.directory entry and no override; "
                             "got {!r}".format(source, trust, calls))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return failures
+
+
+# The glob-path row: a checkout whose resolved path git would read as a pattern must not be read under an entry
+# built from that path. A checkout in a directory named `*` (its path ends in `/*`, which git reads as a prefix match
+# over every path under its parent) and one in a directory named `a*b` are each committed, then _gen_argv_head_copy
+# under the owner switch must refuse with the safe.directory failure line, make no copy and run no git call (red
+# when _gen_argv_safe_directory's refusal is removed: the entry then admits the checkout and the copy is built).
+def _gen_argv_glob_root_failures():
+    """The glob-path row (see the comment above): one failure line per broken expectation."""
+    import shutil
+    import tempfile
+    failures = []
+    real = _gen_argv_git
+    tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-argv-glob-"))
+    try:
+        for parent, name in (("suffix", "*"), ("inner", "a*b")):
+            source = tmp / parent / name
+            source.mkdir(parents=True)
+            (source / "seed.txt").write_text("seed\n", encoding="utf-8")
+            problem = _gen_argv_commit(source)
+            if problem:
+                failures.append("glob-path row: " + problem)
+                continue
+            copy = tmp / parent / "copy"
+            calls = []
+
+            def recording(cwd, *args, **overrides):
+                calls.append((Path(cwd), args, overrides))
+                return real(cwd, *args, **overrides)
+
+            globals()["_gen_argv_git"] = recording
+            try:
+                got = _gen_argv_head_copy(source, copy, **_GEN_ARGV_FOREIGN_OWNER)
+            finally:
+                globals()["_gen_argv_git"] = real
+            if (not isinstance(got, str) or "cannot be named alone in a safe.directory entry" not in got
+                    or os.path.lexists(copy) or calls):
+                failures.append("glob-path row: a checkout at {} must be refused before any git call, with the "
+                                "safe.directory failure line and no copy; got {!r}, copy {}, git calls {!r}".format(
+                                    source, got, "present" if os.path.lexists(copy) else "absent", calls))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return failures
@@ -2873,6 +2942,9 @@ def self_test_main():
     # The class check's real-checkout read still copies a checkout owned by another uid, trusting that checkout
     # alone (red when the read's safe.directory entry is removed).
     failures.extend(_gen_argv_foreign_owner_failures())
+    # A checkout whose resolved path git would read as a pattern (ending in `/*`, or holding `*`) is refused before
+    # any git call (red when _gen_argv_safe_directory's refusal is removed).
+    failures.extend(_gen_argv_glob_root_failures())
 
     if failures:
         print("SELF-TEST FAIL:")
