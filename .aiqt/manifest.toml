@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "e4e414a2492bc7c42e5330b434de7948c11c8433b498d793bbe8124bad0e58e9"
+tree-sha256 = "126988f2adf520c42529cf64c6abd232d811d73cc9e6b4988c01f044a89cd24e"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -2427,8 +2427,8 @@ sha256 = "bae43dcfb3e30c428f59a243370f83e2835ef9706caa5692c83f9d7137964cb3"
 
 [[sources]]
 path = "README.md"
-bytes = 5216
-sha256 = "691f7ad234f6804660e9042398956a342f467d22c54861d90dd1ddb2d1c29e9c"
+bytes = 5272
+sha256 = "9cc7d6d49b50475c70b171f0c19d8ae46f3d31cb0beef2e427613292facf9d47"
 
 [[sources]]
 path = "RELEASING.md"
@@ -4402,8 +4402,8 @@ sha256 = "ddd59f0b7cd9ab298f97c57a029ae45d860bfb838099a9d9e85028c7629604d3"
 
 [[sources]]
 path = "tools/check_reference_facts.py"
-bytes = 212774
-sha256 = "84375af7aa64fa1796fa1b17f7fd0a5c0399f2e48968f3e7539ba6d733f8a893"
+bytes = 213139
+sha256 = "0defa1b803a9a3ea3f68f3ed07d262ec152ee6084de3344a7eca8cfe0816f073"
 
 [[sources]]
 path = "tools/check_release_build.py"
@@ -4612,8 +4612,8 @@ sha256 = "0cc03f3a7518b71ae27e071b2162c7f59902210d892d3c562ceba8f05544aa6a"
 
 [[sources]]
 path = "tools/gen_reference_facts.py"
-bytes = 48168
-sha256 = "96202544ccd5fd2184724fa1ab6cbff0803d653503b6d811b813530f0f2c4374"
+bytes = 48680
+sha256 = "ec628addbf17cadf73e8507417a13365ccfc07d7c1060f9e1f301871a0ae282e"
 
 [[sources]]
 path = "tools/gen_renderers.py"
