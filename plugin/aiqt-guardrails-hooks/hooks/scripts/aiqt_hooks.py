@@ -5001,12 +5001,12 @@ def diff_source_pretool(data):
 # command line of its own (_cmtidn_run_lines). The read-side forms that still trip are the disclosed over-denies at
 # _CMTIDN_GIT_WRAPPERS: a wrapped git word right after a wrapper option, which the finder cannot tell from that
 # option's value (sudo -E git log --grep git commit --author=Claude), and a wrapped git command whose
-# subcommand is not a git command name (an alias). Separately, an identity
-# ASSIGNMENT (a git-identity env var, or a user.name/user.email config value) is a violation on ANY
-# segment, to harden the common 'set the identity then commit' form. Because the tokens are quote-aware,
-# a trailer hiding inside a quoted -m message (e.g. -m "fix; Co-authored-by: Claude", which the old
-# whitespace split broke at the ';') now lives intact in the single message token, and a substring scan
-# on that token catches it.
+# subcommand is not a git command name (an alias). Separately, an identity ASSIGNMENT (a git-identity env
+# var, an EMAIL assignment the shell runs, or a user, author or committer name or email config value set by -c
+# or by git config; _identity_assignment_ai) is a violation on ANY segment, to harden the common 'set the
+# identity then commit' form. Because the tokens are quote-aware, a trailer hiding inside a quoted -m
+# message (e.g. -m "fix; Co-authored-by: Claude", which the old whitespace split broke at the ';') now lives
+# intact in the single message token, and a substring scan on that token catches it.
 AI_IDENTITY_RE = re.compile(
     r"(?i)\b(claude|anthropic|openai|chatgpt|codex|copilot|gemini|gpt-?[0-9o][a-z0-9.-]*)\b"
     r"|@anthropic\.com|@openai\.com")
@@ -5026,10 +5026,20 @@ COMMIT_VERBS = ("commit", "merge", "cherry-pick", "am", "rebase", "revert", "com
 # identities. The whitespace runs after a name end before the next name starts, so a token costs time linear in
 # its length.
 CO_AUTHOR_RE = re.compile(r"(?i)co[- ]?authored[- ]?by(?=\s*+:?\s*+([^\n]{1,160}))")
-# Identity-assignment tokens (any segment): a git-identity env var, or a user.name/user.email config
-# value in the '-c user.name=VALUE' inline shape.
-GIT_ENV_RE = re.compile(r"(?is)^GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)=(.*)$")
+# Identity-assignment tokens (any segment): a git-identity env var, the EMAIL variable where the shell runs it
+# as an assignment, or an identity config value in the '-c user.name=VALUE' inline shape, the author and
+# committer names only right after a -c word (_identity_assignment_ai). git 2.53.0 takes the author from author.name and
+# author.email, the committer from committer.name and committer.email, each ahead of user.name and user.email,
+# and the address of both from EMAIL when no user.email is set; config keys are read in any case, so the
+# config names match in any case, while EMAIL, an environment variable name, matches only as spelled. An
+# assignment by '+=' (EMAIL+=x git commit) sets the variable too, so it counts as '=' does.
+GIT_ENV_RE = re.compile(r"(?is)^GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\+?=(.*)$")
+EMAIL_ENV_RE = re.compile(r"(?s)^EMAIL\+?=(.*)$")
 USER_CONF_EQ_RE = re.compile(r"(?is)^user\.(?:name|email)=(.*)$")
+ROLE_CONF_EQ_RE = re.compile(r"(?is)^(?:author|committer)\.(?:name|email)=(.*)$")
+# An identity config name standing alone as a word, the NAME of a 'git config NAME VALUE' command that sets a
+# value (_cmtidn_config_setting).
+IDENTITY_CONF_NAME_RE = re.compile(r"(?i)(?:user|author|committer)\.(?:name|email)")
 # Fallback-only raw-string contexts, used when the shared tokenizer cannot parse the command, when a command
 # line that git runs from its operands is left unread, because the tokenizer cannot parse it or it is past the
 # run-line bounds, and when the command is too long to read and holds no word that can record an identity (see
@@ -5050,16 +5060,23 @@ USER_CONF_EQ_RE = re.compile(r"(?is)^user\.(?:name|email)=(.*)$")
 # followed by a whitespace run, '=' and a whitespace run, or else by a whitespace run that holds a space (the
 # lookahead). No value starts with whitespace, so either way a value starts after the whole run, where it started
 # when the run was split, and when no value starts after the '=', the '=' itself is the value, as it was when a
-# space before it was taken for the separator: the context finds the same values. The identity variable and
-# user.name contexts judge a command too long to read only when it holds none of their names
+# space before it was taken for the separator: the context finds the same values. The author.name context (the
+# author and committer config names) has the same shape for the same reason. Both also start right after a git
+# clone -c word or a short option cluster ending in it (-cauthor.name=X, -qcuser.name=X; CONFIG_SHORT_RE), where
+# no word boundary stands; that letter is read in lower case only. The identity variable, EMAIL, user.name and
+# author.name contexts judge a command too long to read only when it holds none of their names
 # (_cmtidn_identity_word), so there they find no place to start.
 _VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"';|&]+)"
 _RAW_IDENTITY_CONTEXTS = (
     (re.compile(r"(?i)co[- ]?authored[- ]?by(?=\s*+:?\s*+([^\n\"']{1,160}))"), "co-author trailer"),
     (re.compile(r"(?i)--au(?:t(?:h(?:o(?:r)?)?)?)?[=\s]\s*" + _VALUE), "--author value"),
-    (re.compile(r"(?i)\bGIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\s*=\s*" + _VALUE), "git identity variable"),
-    (re.compile(r"(?i)\buser\.(?:name|email)(?:\s*+=\s*+|(?=[^\S ]*+ )\s*+)" + _VALUE),
+    (re.compile(r"(?i)\bGIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)\s*\+?=\s*" + _VALUE), "git identity variable"),
+    (re.compile(r"\bEMAIL\s*\+?=\s*" + _VALUE), "EMAIL variable"),
+    (re.compile(r"(?i)(?:\b|(?-i:(?<=[-vqnls46]c)))user\.(?:name|email)(?:\s*+=\s*+|(?=[^\S ]*+ )\s*+)" + _VALUE),
      "user.name/user.email value"),
+    (re.compile(r"(?i)(?:\b|(?-i:(?<=[-vqnls46]c)))(?:author|committer)\.(?:name|email)"
+                r"(?:\s*+=\s*+|(?=[^\S ]*+ )\s*+)" + _VALUE),
+     "author/committer config value"),
 )
 
 
@@ -5231,20 +5248,791 @@ def _commit_message_and_author_ai(tokens, judged):
 
 
 def _identity_assignment_ai(tokens):
-    """A hit label if any token of this segment ASSIGNS an AI identity: a git-identity env var
-    (GIT_AUTHOR_NAME=..., ...), a '-c user.name=VALUE' config inline value, or a 'config user.name VALUE'
-    /'config user.name=VALUE' pair. Judged on EVERY segment, so setting the identity in a prior segment
-    before the commit is caught too."""
+    """A hit label if any token of this segment ASSIGNS an AI identity. Judged on EVERY segment, so setting the
+    identity in a prior segment before the commit is caught too. A hit is:
+    - a git-identity env var (GIT_AUTHOR_NAME=..., ...) by '=' or '+=' in any word, as before EMAIL was read;
+    - the EMAIL variable by '=' or '+=' only where the shell or a wrapper runs the word as an assignment
+      (_cmtidn_assignment_words), so EMAIL=... in a commit message or another program's operand is not one;
+    - a user.name=VALUE or user.email=VALUE word (any case) anywhere, and an exact-case user.name or user.email
+      word followed by a value, on any segment, as before author and committer were read;
+    - an author.name=VALUE, author.email=VALUE, committer.name=VALUE or committer.email=VALUE word (any case)
+      right after a -c word, the git -c inline form (a git alias or function standing for git included), or
+      after a git clone --config word or a git clone short option cluster ending in c (-qc), and any of the six
+      in a git clone --config=NAME=VALUE word or in the rest of a git clone -c word or cluster
+      (-cauthor.name=VALUE, -qcauthor.name=VALUE: CONFIG_SHORT_RE);
+    - a git alias definition whose value holds an identity config assignment (-c author.name=VALUE), given
+      by -c alias.NAME=VALUE, git clone --config, or a git config command that sets a value
+      (_alias_identity_ai);
+    - one of the six config names (any case) followed by a value, on a git config command that sets a value
+      (_cmtidn_config_setting), so a read-only command that merely names one (grep, rg, git config
+      --get-regexp, git log) is not one."""
     n = len(tokens)
+    assigned = frozenset(_cmtidn_assignment_words(tokens))
     for i, tok in enumerate(tokens):
         m = GIT_ENV_RE.match(tok)
         if m and AI_IDENTITY_RE.search(m.group(1)):
             return "git identity variable {!r}".format(tok.strip()[:80])
+        m = EMAIL_ENV_RE.match(tok)
+        if m and i in assigned and AI_IDENTITY_RE.search(m.group(1)):
+            return "EMAIL variable {!r}".format(tok.strip()[:80])
         m = USER_CONF_EQ_RE.match(tok)
         if m and AI_IDENTITY_RE.search(m.group(1)):
             return "user.name/user.email value {!r}".format(tok.strip()[:80])
+        pairs = []
+        if i > 0:
+            prev = tokens[i - 1]
+            m = CONFIG_SHORT_RE.match(prev)
+            if prev in _CMTIDN_CONFIG_OPTS or (m and not m.group(1)):
+                pairs.append(tok)  # the pair in the word after -c, --config or a cluster ending in c (-qc)
+        m = CONFIG_OPT_EQ_RE.match(tok) or CONFIG_SHORT_RE.match(tok)
+        if m and m.group(1):
+            pairs.append(m.group(1))  # the pair in the same word: --config=NAME=VALUE, -cNAME=VALUE, -qcNAME=VALUE
+        for pair in pairs:
+            hit = _identity_inline_config_ai(pair)
+            if hit is not None:
+                return hit
         if tok in ("user.name", "user.email") and i + 1 < n and AI_IDENTITY_RE.search(tokens[i + 1]):
             return "user.name/user.email value {!r}".format(tokens[i + 1].strip()[:80])
+    start = _cmtidn_config_setting(tokens)
+    for i in range(n - 1 if start is None else start, n - 1):
+        tok = tokens[i]
+        if IDENTITY_CONF_NAME_RE.fullmatch(tok) and AI_IDENTITY_RE.search(tokens[i + 1]):
+            label = "user.name/user.email" if tok[:1] in "uU" else "author/committer config"
+            return "{} value {!r}".format(label, tokens[i + 1].strip()[:80])
+        if ALIAS_CONF_NAME_RE.fullmatch(tok):
+            hit = _alias_identity_ai(tokens[i + 1])
+            if hit is not None:
+                return hit
+    return None
+
+
+# The words that give git a NAME=VALUE config pair in the next word: the git -c global option (and the -c
+# option of git clone), and git clone --config with the prefixes git reads as it (git clone has no other long
+# option starting with 'co'). A prefix shared with another option is refused by git, so reading it here is a
+# safe-direction over-deny.
+_CMTIDN_CONFIG_OPTS = frozenset(("-c", "--co", "--con", "--conf", "--confi", "--config"))
+CONFIG_OPT_EQ_RE = re.compile(r"(?s)^--co(?:n(?:f(?:i(?:g)?)?)?)?=(.*)$")
+# The -c option of git clone, which git 2.53.0 reads as other short options are: its NAME=VALUE pair is the
+# rest of its word (-cauthor.name=X) or else the next word, and it may end a cluster of the git clone short
+# options that take no value (-v, -q, -n, -l, -s, -4, -6: -qcauthor.name=X, -qc author.name=X). A letter that
+# takes a value (-o, -b, -u, -j) takes the rest of the word, c included, so it is not read as part of a cluster.
+# The word is read so on any segment, as a separate -c word is; git refuses the attached form as a git global
+# option, and git commit reads -cVALUE as a commit, so reading it there is a safe-direction over-deny.
+CONFIG_SHORT_RE = re.compile(r"(?s)^-[vqnls46]*c(.*)$")
+# A git alias definition: its key (any case) and, in the NAME=VALUE form, its value. git runs an alias value
+# that does not start with '!' as git options and a subcommand, so a '-c author.name=X' inside it sets the
+# identity of the command the alias runs (git config alias.ci '-c author.name=X commit'; git ci).
+ALIAS_CONF_NAME_RE = re.compile(r"(?is)alias\..+")
+ALIAS_CONF_EQ_RE = re.compile(r"(?is)^alias\.[^=]*=(.*)$")
+# An identity config assignment inside an alias value, read as raw text: a user, author or committer name or
+# email (any case), '=' and a value (a quoted string or a word).
+_ALIAS_IDENTITY_RE = re.compile(r"(?i)(?:user|author|committer)\.(?:name|email)\s*+=\s*+" + _VALUE)
+# An identity name in an assignment or default-value form, sought in the raw command text: EMAIL (as spelled)
+# or a GIT_AUTHOR_ or GIT_COMMITTER_ name or email variable with no letter, digit or underscore before it, or a
+# user, author or committer name or email config key (any case, anywhere in a word, so -cauthor.name=X counts),
+# followed by '=', '+=' or ':=' (EMAIL=X, EMAIL+=X, ${EMAIL=X}, ${EMAIL:=X}, -c author.name=X). bash assigns
+# a default-value expansion wherever it stands (a redirect target, a here-string, an unquoted heredoc body, or
+# behind a nested expansion in its own value), and an assignment to a variable already exported, or under set
+# -a, reaches git, so the form is sought in the whole text rather than in the words the tokenizer keeps.
+_CMTIDN_IDENTITY_SET_RE = re.compile(r"(?<![A-Za-z0-9_])(?:EMAIL|(?i:GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL)))"
+                                     r"[+:]?=|(?i:(?:user|author|committer)\.(?:name|email))[+:]?=")
+# The characters dropped from a word before the second search for an identity name and an AI name: quotes,
+# backslashes and '$' (a backslash-newline is dropped from the text first), so a name or value that quoting
+# splits (export 'EM''AIL=X', -c author.na"me"=X, Cl"au"de) is found joined.
+_CMTIDN_SET_UNREAD_RE = re.compile(r"[\\\"'$]")
+# A GIT_CONFIG_KEY_<n> or GIT_CONFIG_VALUE_<n> name in an assignment or default-value form, sought as
+# _CMTIDN_IDENTITY_SET_RE is (git 2.53.0 reads GIT_CONFIG_COUNT pairs, so a KEY that names an identity key gives
+# its VALUE as that identity).
+_CMTIDN_CONFIG_KEY_SET_RE = re.compile(r"(?<![A-Za-z0-9_])GIT_CONFIG_KEY_[0-9]+[+:]?=")
+_CMTIDN_CONFIG_VALUE_SET_RE = re.compile(r"(?<![A-Za-z0-9_])GIT_CONFIG_VALUE_[0-9]+[+:]?=")
+# A part of an assigned value that the shell fills in when it runs the command, so the text does not spell the
+# value: a backquote, or a '$' that starts a parameter, a ${...} or $(...) body or an ANSI-C quote ($'\x43').
+# A locale quote ($"...") is read as the double-quoted text it is.
+_CMTIDN_EXPANSION_RE = re.compile(r"`|\$[A-Za-z_0-9{(@*#?!$'-]")
+# The characters that end a word of the raw-text rule where they stand outside every quote and body.
+_CMTIDN_WORD_STOPS = frozenset(" \t\n;&|<>()")
+# A replacement string that xargs fills in from its input (xargs -I STR, -ISTR, a cluster ending in I, -iSTR,
+# --replace=STR), read from a raw word after an xargs word; find -exec and xargs -i fill in {} as well.
+_CMTIDN_XARGS_REPLACE_RE = re.compile(r"(?s)^(?:-[A-Za-z0-9]*I(.*)|-i(.+)|--replace=(.+))$")
+# How many replacement strings the raw-text rule keeps, so each value is searched a fixed number of times; past
+# it, every identity value counts as one the text does not spell (a safe-direction over-deny).
+_CMTIDN_PLACES_MAX = 16
+# Every name that the raw-text rule reads as setting an identity when it is assigned: the identity names
+# (_CMTIDN_IDENTITY_SET_RE) and a GIT_CONFIG_KEY_<n>, GIT_CONFIG_VALUE_<n> or GIT_CONFIG_PARAMETERS name in an
+# assignment or default-value form, sought in the whole text by the AI-anywhere fallback (_cmtidn_inexact).
+_CMTIDN_ANY_SET_RE = re.compile(_CMTIDN_IDENTITY_SET_RE.pattern + r"|(?<![A-Za-z0-9_])GIT_CONFIG_(?:KEY_[0-9]+|"
+                                r"VALUE_[0-9]+|PARAMETERS)[+:]?=")
+# A GIT_CONFIG_PARAMETERS name in an assignment or default-value form, whose value git reads as NAME=VALUE pairs.
+_CMTIDN_PARAMETERS_SET_RE = re.compile(r"(?<![A-Za-z0-9_])GIT_CONFIG_PARAMETERS[+:]?=")
+# A braced word part that a program fills in at run time or that bash expands into more than one word: a {}
+# or {1} placeholder (find -exec, xargs -I{}, GNU parallel {1}, {.}, {/}) or a brace expansion ({a,b}, {1..3}),
+# not a ${...} body.
+_CMTIDN_BRACE_RE = re.compile(r"(?<![$\\])\{[^\s{}]*\}")
+# A word that starts with an expansion, once its leading quote characters are dropped (a command run through a
+# variable, X=xargs; $X -I NAME ...), so the text does not spell the program it may run.
+_CMTIDN_EXPANSION_WORD_RE = re.compile(r"^[\"']*(?:`|\$[A-Za-z_0-9{(@*#?!$-])")
+# A program that fills a replacement string into its command from its input or operands (GNU parallel and its
+# sem alias, and the ::: and :::: operand separators of parallel).
+_CMTIDN_FILLERS = frozenset(("parallel", "sem", ":::", "::::", ":::+", "::::+"))
+# Every construct inside which bash 5.3 runs a command, as the Bash Reference Manual for bash 5.3 lists them in
+# section 3.5 Shell Expansions, sought lexically anywhere in the text, so one inside a quote or a heredoc body
+# matches too. _CMTIDN_SUBSTITUTION_RE: a command substitution in each of its three spellings (3.5.4: $(...),
+# a backquote, and ${C...; } where C is a space, a tab, a newline or |, which runs in the current shell) and a
+# process substitution (3.5.6: <(...) or >(...)); a $(( arithmetic expansion matches as well.
+_CMTIDN_SUBSTITUTION_RE = re.compile(r"\$\(|`|[<>]\(|\$\{[ \t\n|]")
+# _CMTIDN_PROMPT_RE: a ${NAME@P} prompt-string expansion (3.5.3), whose result bash expands as a prompt string,
+# a command substitution included, so a command runs that the text need not spell ($ and ( can come from
+# separate words: printf -v X '%s(cmd)' '$'; : "${X@P}").
+_CMTIDN_PROMPT_RE = re.compile(r"@P\}")
+# _CMTIDN_ARITHMETIC_RE: a place where bash evaluates an arithmetic expression (6.5 Shell Arithmetic), where a
+# variable whose value holds an indexed array subscript has that subscript expanded, a command substitution in
+# it included, so a command runs that the text need not spell, sought in the whole text where its shape does
+# not depend on command position: an indexed array subscript, a name directly followed by [ with no letter,
+# digit, _, /, . or $ before the name (an assignment a[X]=v, an expansion ${a[X]}, ${#a[X]} or ${!a[X]}, a name
+# operand of unset, read, printf -v or test -v), so a [ right after a quote ('[hooks] ...'), a / or a . (the glob
+# .claude/rules/[a-z]*.md) is not one, nor is $a[X], which bash reads as $a followed by a glob; a deprecated
+# $[...] arithmetic expansion; a (( arithmetic command or for (( loop (3.2.5.1, 3.2.5.2), which a $((
+# arithmetic expansion matches as well; a declare, typeset or local word with an option cluster holding i (the
+# integer attribute, 4.2); a ${NAME:OFFSET} substring expansion (3.5.3) and a ${!NAME} indirect expansion
+# (3.5.3), whose name may hold a subscript. Each alternative starts only where its first character stands and
+# scans no further than its own word, so the search takes time linear in the text. The places that depend on
+# command position (a let word, the [[ compound command, a [X]=v word of a compound array assignment, a name
+# directly followed by [ behind quotes or a backslash) are read by _cmtidn_arithmetic_word over the words of
+# _cmtidn_raw_words.
+_CMTIDN_ARITHMETIC_RE = re.compile(r"(?<![A-Za-z0-9_./$])[A-Za-z_][A-Za-z_0-9]*\["
+                                   r"|\$\[|\(\("
+                                   r"|(?<![A-Za-z0-9_.-])(?:declare|typeset|local)(?:[ \t]+[-+][A-Za-z]+)*?"
+                                   r"[ \t]+-[A-Za-z]*i"
+                                   r"|\$\{(?:[A-Za-z_][A-Za-z_0-9]*|[0-9]+|[@*]):(?![-=+?])|\$\{!")
+# The words of _cmtidn_arithmetic_word. _CMTIDN_CMD_RESERVED: the reserved words after which the next word is
+# still in command position (bash 5.3, 3.2.5 Compound Commands and 3.2.3 Pipelines: time and its -p option, !,
+# coproc). _CMTIDN_CMD_PREFIXES: the words that run the command named after them, with their option words, as
+# the git command finder reads them (builtin, command -p, exec, nohup and the like), so the word after them is
+# in command position too. _CMTIDN_CMD_SHELL_TEXT: the words that run their operands as shell text (eval, trap
+# and a shell named as a command, sh -c '...'), whose every operand is searched for a let or [[ word or a
+# subscript anywhere in it (_CMTIDN_SHELL_TEXT_ARITHMETIC_RE). _CMTIDN_CMD_NAME_BUILTINS: the builtins that
+# take a variable name as an operand, whose operands are searched for a name directly followed by [ once their
+# quotes and backslashes are dropped (read "a"[X], unset a\[X\]).
+_CMTIDN_CMD_RESERVED = frozenset(("if", "then", "else", "elif", "do", "while", "until", "time", "coproc", "!",
+                                  "{", "}"))
+_CMTIDN_CMD_PREFIXES = frozenset(("builtin", "command", "exec", "nohup", "env", "nice", "sudo", "setsid", "stdbuf",
+                                  "xargs"))
+_CMTIDN_CMD_SHELL_TEXT = frozenset(("eval", "trap", "sh", "bash", "dash", "ksh", "zsh"))
+_CMTIDN_CMD_NAME_BUILTINS = frozenset(("read", "unset", "printf", "declare", "typeset", "local", "export",
+                                       "readonly", "mapfile", "readarray", "wait", "getopts", "test", "["))
+# An assignment word in command position (NAME=V or NAME+=V, as written: a quoted name is not an assignment).
+_CMTIDN_CMD_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\+?=")
+# A name directly followed by [ at the start of a word in command position (an assignment a[X]=v), sought in
+# the word with its quotes and backslashes dropped.
+_CMTIDN_CMD_SUBSCRIPT_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*\[")
+# A name directly followed by [ anywhere in an operand of a builtin that takes a variable name, sought in the
+# operand with its quotes and backslashes dropped.
+_CMTIDN_NAME_SUBSCRIPT_RE = re.compile(r"(?<![A-Za-z0-9_./])[A-Za-z_][A-Za-z_0-9]*\[")
+# A [X]=v or [X]+=v word of a compound array assignment (a=([X]=v)), matched at the start of a word as written.
+_CMTIDN_COMPOUND_WORD_RE = re.compile(r"\[[^\]\n]*\]\+?=")
+# The builtins whose operand bash reads as an assignment and may read as a compound array assignment even when
+# the operand is quoted or escaped as written (declare -a "b=([X]=1)", local -a b=\([X]=1\)). Each operand is
+# searched for a [X]=v or [X]+=v word after the start of the operand, a blank or a ( with its quotes and
+# backslashes dropped (_CMTIDN_COMPOUND_OPERAND_RE). The [X]=v pattern stops at the next [, so each start scans
+# no further than the next one and the search stays linear in the operand.
+_CMTIDN_CMD_COMPOUND_BUILTINS = frozenset(("declare", "typeset", "readonly", "local"))
+_CMTIDN_COMPOUND_OPERAND_RE = re.compile(r"(?<![^\s(])\[[^\]\n\[]*\]\+?=")
+# A let or [[ word, a name directly followed by [, or a [X]=v word, anywhere in a word that bash may read as
+# shell text again (an operand of eval, trap or sh -c) or that the lexical reading may misread (a doubtful word of
+# _cmtidn_raw_words), sought in the word with its quotes and backslashes dropped. The [X]=v alternative stops at
+# the next [, so each start scans no further than the next one and the search stays linear in the word.
+_CMTIDN_SHELL_TEXT_ARITHMETIC_RE = re.compile(r"(?<![^\s;&|(){}!])(?:let|\[\[)(?![^\s;&|()<>])"
+                                              r"|(?<![A-Za-z0-9_./])[A-Za-z_][A-Za-z_0-9]*\["
+                                              r"|(?<![^\s(])\[[^\]\n\[]*\]\+?=")
+# A command separator in the operator characters between two words: a newline, ;, (, ), a | that does not end a
+# >| redirection operator, or a & that is not part of a >&, <&, &> or &>> redirection operator.
+_CMTIDN_CMD_SEPARATOR_RE = re.compile(r"[\n;()]|(?<!>)\||(?<![<>])&(?!>)")
+
+
+def _cmtidn_inexact(command, read=None):
+    """The first construct in the raw command text that the value reader of _cmtidn_identity_set_ai cannot read
+    exactly, as a short label, else None: a backslash right before a newline (which the reader drops, though an
+    escaped backslash before it keeps the newline and shifts every later quote), an xargs replacement string,
+    attached or detached (an xargs word followed by an option word whose short cluster holds I or i, or a
+    --r... long option, a prefix of --replace), a braced placeholder or brace expansion (_CMTIDN_BRACE_RE: {},
+    {1}, {a,b}), a GNU parallel or sem word or its ::: separator (_CMTIDN_FILLERS), or a word that starts with an
+    expansion (_CMTIDN_EXPANSION_WORD_RE: $X -I NAME ..., where the variable may name xargs), or, anywhere in the
+    text, a construct inside which bash 5.3 runs a command: a command or process substitution
+    (_CMTIDN_SUBSTITUTION_RE: $(, a backquote, ${ , ${<tab>, ${<newline> or ${|, <( or >(), a ${NAME@P}
+    prompt-string expansion (_CMTIDN_PROMPT_RE) or a place where bash evaluates an arithmetic expression, which
+    runs a command substitution held in an array subscript of a variable's value (_CMTIDN_ARITHMETIC_RE: a name
+    directly followed by [, $[, ((, a declare, typeset or local integer attribute, a ${NAME:OFFSET} or ${!NAME}
+    expansion; _cmtidn_arithmetic_word: let, [[ or a name directly followed by [ in command position, a
+    subscript in an operand of a builtin that takes a variable name, a [X]=v compound assignment word, and these
+    inside an operand of eval, trap or sh -c or a doubtful word). The value reader does not model
+    what happens inside a substitution body (a quote there, a case pattern's ')', a backquote or a brace group in
+    a ${ cmd; } body can each put it out of step with bash and split a later value before its AI part), nor a
+    command run from a prompt string or an arithmetic expression, so each of these makes the text inexact. A
+    construct is sought lexically in the words of _cmtidn_raw_words, and a substitution, prompt-string expansion
+    or arithmetic place in the whole text, so one inside a quoted string or a heredoc body counts as well, and so
+    does a $(( arithmetic expansion (a safe-direction over-deny). read, when given, is _cmtidn_read_words of
+    command, made once by the caller so the raw text is read once per call."""
+    if "\\\n" in command:
+        return "a backslash before a newline"
+    if read is None:
+        read = _cmtidn_read_words(command)
+    xargs = False
+    for word, _doubtful in read[0]:
+        bare = _CMTIDN_SET_UNREAD_RE.sub("", word)
+        base = bare.rsplit("/", 1)[-1]
+        if xargs and ((bare.startswith("-") and not bare.startswith("--") and ("I" in bare or "i" in bare))
+                      or bare.startswith("--r")):
+            return "an xargs replacement string ({!r})".format(bare[:40])
+        xargs = xargs or base == "xargs"
+        if base in _CMTIDN_FILLERS:
+            return "a parallel replacement string ({!r})".format(bare[:40])
+        if _CMTIDN_BRACE_RE.search(word):
+            return "a braced placeholder or brace expansion ({!r})".format(word[:40])
+        if _CMTIDN_EXPANSION_WORD_RE.match(word):
+            return "a word that starts with an expansion ({!r})".format(word[:40])
+    if _CMTIDN_SUBSTITUTION_RE.search(command):
+        return "a command or process substitution"
+    if _CMTIDN_PROMPT_RE.search(command):
+        return "a prompt-string expansion"
+    if _CMTIDN_ARITHMETIC_RE.search(command) or _cmtidn_arithmetic_word(command, read):
+        return "an arithmetic expression that can run a command through an array subscript"
+    return None
+
+
+def _cmtidn_read_words(text):
+    """(words, gaps): _cmtidn_raw_words of text with its gaps list, read once for each caller that shares it."""
+    gaps = []
+    return _cmtidn_raw_words(text, gaps), gaps
+
+
+def _cmtidn_arithmetic_word(command, read=None):
+    """True when a word of the raw text (_cmtidn_raw_words) is a place where bash evaluates an arithmetic
+    expression that depends on command position, read in one pass over the words. A word is in command position
+    when it is the first word of a simple command: after the start of the text or a command separator
+    (_CMTIDN_CMD_SEPARATOR_RE) or a { or } word, behind reserved words (_CMTIDN_CMD_RESERVED), assignment words,
+    redirections (a word after a redirection operator, and a file descriptor number written directly before one)
+    and prefix words with their option words (_CMTIDN_CMD_PREFIXES: command -p let, time -p let, >/dev/null
+    let). In that position a let word, a [[ word or a name directly followed by [ (a[X]=v), each read with its
+    quotes and backslashes dropped ('let', l\\et, "a"[X]=v), counts; so does a name directly followed by [ in an
+    operand of a builtin that takes a variable name (_CMTIDN_CMD_NAME_BUILTINS: read "a"[X], unset a\\[X\\],
+    printf -v, declare), a [X]=v word of a compound array assignment at the start of a word as written or, with
+    its quotes and backslashes dropped, in an operand of declare, typeset, readonly or local
+    (_CMTIDN_CMD_COMPOUND_BUILTINS: declare -a "b=([X]=1)", local -a b=\\([X]=1\\)), and a let or [[ word,
+    a name directly followed by [ or a [X]=v word anywhere in an operand of a word that runs its operands as
+    shell text (_CMTIDN_CMD_SHELL_TEXT: eval 'let X', trap, sh -c) or in a doubtful word, one the lexical
+    reading may misread (_CMTIDN_SHELL_TEXT_ARITHMETIC_RE). A [ inside a quoted message ('[hooks] ...') or a
+    glob in a path operand (.claude/rules/[a-z]*.md) and a let inside a quoted message ('let CLAUDE.md ...') are
+    not one. Each word is searched a fixed number of times, so the pass takes time linear in the text. read,
+    when given, is _cmtidn_read_words of command."""
+    words, gaps = read if read is not None else _cmtidn_read_words(command)
+    position = True  # the next word is in command position
+    options = False  # a prefix word was read, so an option word keeps command position
+    shell_text = False  # the command word runs its operands as shell text
+    names = False  # the command word is a builtin that takes a variable name
+    compound = False  # the command word is a builtin that may read an operand as a compound array assignment
+    for k, (word, doubtful) in enumerate(words):
+        gap = gaps[k]
+        if _CMTIDN_CMD_SEPARATOR_RE.search(gap) or word in ("{", "}"):
+            position, options, shell_text, names, compound = True, False, False, False, False
+        bare = _CMTIDN_SET_UNREAD_RE.sub("", word)
+        if word.startswith("[") and _CMTIDN_COMPOUND_WORD_RE.match(word):
+            return True
+        if (doubtful or shell_text) and _CMTIDN_SHELL_TEXT_ARITHMETIC_RE.search(bare):
+            return True
+        if names and _CMTIDN_NAME_SUBSCRIPT_RE.search(bare):
+            return True
+        if compound and _CMTIDN_COMPOUND_OPERAND_RE.search(bare):
+            return True
+        tail = gap.rstrip(" \t")
+        if tail.endswith(("<", ">", "<&", ">&", ">|")):
+            continue  # the target of a redirection keeps the command position as it was
+        if not position:
+            continue
+        after = gaps[k + 1] if k + 1 < len(gaps) else ""
+        if bare.isdigit() and after.startswith(("<", ">")):
+            continue  # a file descriptor number written directly before a redirection operator
+        if bare in ("let", "[[") or _CMTIDN_CMD_SUBSCRIPT_RE.match(bare):
+            return True
+        if bare in _CMTIDN_CMD_RESERVED:
+            options = bare == "time"
+            continue
+        if options and bare.startswith("-"):
+            continue
+        if _CMTIDN_CMD_ASSIGNMENT_RE.match(word):
+            continue
+        if bare in _CMTIDN_CMD_PREFIXES:
+            options = True
+            continue
+        name = bare.rsplit("/", 1)[-1]
+        position, options = False, False
+        shell_text = name in _CMTIDN_CMD_SHELL_TEXT
+        names = name in _CMTIDN_CMD_NAME_BUILTINS
+        compound = name in _CMTIDN_CMD_COMPOUND_BUILTINS
+    return False
+
+
+def _cmtidn_raw_words(text, gaps=None):
+    """The words of the raw text for the raw-text rule (_cmtidn_identity_set_ai), heredoc bodies, redirect words
+    and here-strings included, read in one pass, each as (word, doubtful). A word ends at a space, a tab, a
+    newline or a shell operator character (_CMTIDN_WORD_STOPS) that stands outside every single or double
+    quote, backslash escape and open ${...}, $(...) or backquote body, so a value keeps the quoted spaces, nested
+    expansions and quoted braces that bash keeps in it (${EMAIL:="}"x@y}). The reading is lexical: a quote or
+    body left open runs to the end of the text, and a quote character in a heredoc body or a comment is read as
+    a quote, which can join or split the words after it. So a word is doubtful when, at or before its end, the
+    reader has passed a construct that bash reads otherwise: a '#' that can start a comment (at the start of
+    the text or after a blank, an operator character or a backquote), a heredoc operator '<<' (not a '<<<'
+    here-string), an ANSI-C quote $'...' (whose \\' bash keeps inside it), a single quote right inside a
+    ${...} body that stands inside double quotes, or a ')' that closes no '(' outside every body (a case
+    pattern inside $(...)). Each of these is read outside single and double quotes. The word reader
+    (find_ai_authorship) judges every command it can parse before this rule; this rule is its backstop. When
+    gaps is a list, the characters read between the end of the previous word (or the start of the text) and the
+    start of each word, blanks and operator characters, are appended to it, one string per word in order."""
+    words = []
+    stack = []  # the open contexts: "'", '"', "{" (a ${ body), "(" (a $( body or a ( inside one), "`"
+    quoted = 0  # how many '"' contexts the stack holds, kept as it changes so no step searches the stack
+    start = None
+    last = 0  # where the characters between the previous word and the next one start
+    doubt = False  # a construct the lexical reading may misread has been passed
+    groups = 0  # the '(' read outside every body and not yet closed
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        top = stack[-1] if stack else None
+        if top == "'":
+            if c == "'":
+                stack.pop()
+            i += 1
+            continue
+        if top != '"' and not doubt:
+            prev = text[i - 1] if i else " "
+            if ((c == "#" and (prev in _CMTIDN_WORD_STOPS or prev == "`"))
+                    or (c == "<" and text.startswith("<<", i) and not text.startswith("<<<", i) and prev != "<")
+                    or (c == "$" and text.startswith("$'", i))
+                    or (c == "'" and top == "{" and quoted)
+                    or (c == ")" and top is None and groups == 0)):
+                doubt = True
+        if top is None and c in _CMTIDN_WORD_STOPS:
+            if c == "(":
+                groups += 1
+            elif c == ")" and groups:
+                groups -= 1
+            if start is not None:
+                words.append((text[start:i], doubt))
+                start = None
+                last = i
+            i += 1
+            continue
+        if start is None:
+            start = i
+            if gaps is not None:
+                gaps.append(text[last:i])
+        if c == "\\":
+            i += 2  # the escaped character is part of the word and opens nothing
+            continue
+        if c == "'" and top != '"':
+            stack.append("'")
+        elif c == '"':
+            if top == '"':
+                stack.pop()
+                quoted -= 1
+            else:
+                stack.append('"')
+                quoted += 1
+        elif c == "`":
+            if top == "`":
+                stack.pop()
+            else:
+                stack.append("`")
+        elif c == "$" and i + 1 < n and text[i + 1] in "{(":
+            stack.append("{" if text[i + 1] == "{" else "(")
+            i += 2
+            continue
+        elif c == "}" and top == "{":
+            stack.pop()
+        elif c == "(" and top == "(":
+            stack.append("(")
+        elif c == ")" and top == "(":
+            stack.pop()
+        i += 1
+    if start is not None:
+        words.append((text[start:], doubt))
+    return words
+
+
+def _cmtidn_dequoted(word):
+    """(dropped, at): the word with the characters of _CMTIDN_SET_UNREAD_RE dropped, and for each character of
+    dropped, and for its end, the index in word it comes from."""
+    kept, at = [], []
+    for k, ch in enumerate(word):
+        if ch not in "\\\"'$":
+            kept.append(ch)
+            at.append(k)
+    at.append(len(word))
+    return "".join(kept), at
+
+
+def _cmtidn_last_start(regex, text):
+    """The start of the last place in text where regex matches, overlapping places included, else -1. For a
+    regex whose match at a place reads only the text from that place on (no lookbehind, anchor or word
+    boundary), regex.search(text[k:]) finds a match exactly when k is at most this start. Each search resumes
+    one character past the last start found, so the text is scanned once."""
+    last = -1
+    m = regex.search(text)
+    while m is not None:
+        last = m.start()
+        m = regex.search(text, last + 1)
+    return last
+
+
+class _CmtidnWord:
+    """One raw word of _cmtidn_identity_set_ai, read once, and the assigned values in it. Each value is the rest
+    of the word after an assignment name (with its '='), as written (word[r:]) and with the characters of
+    _CMTIDN_SET_UNREAD_RE dropped (dropped[j:]), and is named by its two start offsets (r, j), never copied:
+    each question about a value is answered from a reading of the whole word made once, so a word that holds
+    many assignments ('EMAIL=x,EMAIL=x,...') costs time linear in its length, where copying, dropping and
+    searching the rest of the word for each assignment cost time quadratic in it. The answers are those the
+    copied rest would give: an AI identity match (AI_IDENTITY_RE) cannot hold a character of
+    _CMTIDN_SET_UNREAD_RE or an '=', and the character before a value's start is one of those (the '=' that
+    ends its name, or a dropped character after it), so the first match of the whole word at or after a
+    value's start is the match a search of the value alone finds, word boundary included; the expansion, key
+    and replacement-string searches read only the text from each place on (_cmtidn_last_start, str.rfind)."""
+
+    __slots__ = ("word", "dropped", "at", "kept", "_ai", "_expansion", "_key", "_places", "_placed")
+
+    def __init__(self, word):
+        self.word = word
+        self.dropped, self.at = _cmtidn_dequoted(word)
+        # kept[i]: how many characters of word[:i] dropped keeps, so the rest of the word from i, with those
+        # characters dropped, is dropped[kept[i]:].
+        kept = []
+        j = 0
+        for i in range(len(word) + 1):
+            while self.at[j] < i:
+                j += 1
+            kept.append(j)
+        self.kept = kept
+        self._ai = None  # (starts, matches) of AI_IDENTITY_RE in word and in dropped, read when first asked
+        self._expansion = None
+        self._key = None
+        self._places = None  # the replacement strings _placed was read for
+        self._placed = -1
+
+    def values(self, regex):
+        """Yield (name, r, j) for each match of regex in the word as written and in the word with the characters
+        of _CMTIDN_SET_UNREAD_RE dropped: the matched name with its '=', and the start of the rest of the word
+        after it, in word and in dropped."""
+        for m in regex.finditer(self.word):
+            yield m.group(0), m.end(), self.kept[m.end()]
+        for m in regex.finditer(self.dropped):
+            yield m.group(0), self.at[m.end()], m.end()
+
+    def ai(self, r, j):
+        """The AI identity match that the value at (r, j) names, as written or with the characters of
+        _CMTIDN_SET_UNREAD_RE dropped, else None."""
+        if self._ai is None:
+            self._ai = []
+            for text in (self.word, self.dropped):
+                found = list(AI_IDENTITY_RE.finditer(text))
+                self._ai.append(([m.start() for m in found], found))
+        for (starts, found), at in zip(self._ai, (r, j)):
+            k = bisect.bisect_left(starts, at)
+            if k < len(found):
+                return found[k]
+        return None
+
+    def expansion(self, r):
+        """True when the value at r, as written, holds an expansion (_CMTIDN_EXPANSION_RE)."""
+        if self._expansion is None:
+            self._expansion = _cmtidn_last_start(_CMTIDN_EXPANSION_RE, self.word)
+        return r <= self._expansion
+
+    def key(self, j):
+        """True when the value at j, with the characters of _CMTIDN_SET_UNREAD_RE dropped, names a user, author
+        or committer name or email key (IDENTITY_CONF_NAME_RE)."""
+        if self._key is None:
+            self._key = _cmtidn_last_start(IDENTITY_CONF_NAME_RE, self.dropped)
+        return j <= self._key
+
+    def placed(self, j, places):
+        """True when the value at j, with the characters of _CMTIDN_SET_UNREAD_RE dropped, holds one of the
+        nonempty strings of places (a frozenset), read once for each places given."""
+        if self._places is not places:
+            self._places = places
+            self._placed = max((self.dropped.rfind(p) for p in places if p), default=-1)
+        return j <= self._placed
+
+
+def _cmtidn_identity_set_ai(command):
+    """A hit label when the raw command text, heredoc bodies, redirect words and here-strings included, assigns
+    an AI identity, else None. Each word of the text (_cmtidn_raw_words) that names an identity in an
+    assignment or default-value form (_CMTIDN_IDENTITY_SET_RE), as written or once the characters of
+    _CMTIDN_SET_UNREAD_RE are dropped, is judged by the VALUE it assigns: the rest of that word after the '='.
+    The value denies when it names an AI identity (AI_IDENTITY_RE). A value that the text does not spell, one
+    that holds an expansion (_CMTIDN_EXPANSION_RE: EMAIL=$ME, ${EMAIL:=${USER:-u}@x}, $'\\x43laude'), a {}
+    placeholder or a replacement string given to xargs -I, -i or --replace (find . -exec git -c
+    author.name={} ..., xargs -I{} env EMAIL={} git commit), or the environment variable name of a --config-env
+    pair (--config-env=author.name=V), cannot be told from one that names no AI, so for it the rule fails
+    closed and denies when the command names an AI identity anywhere, as written or once those characters are
+    dropped. So does a value in a doubtful word (_cmtidn_raw_words), one at or after a comment, a heredoc
+    operator or another construct the lexical reading may misread, since a quote character there can split the
+    value before its AI part (# don't, then ${EMAIL:=' X'}). A GIT_CONFIG_VALUE_<n> assignment is judged the
+    same way when a GIT_CONFIG_KEY_<n> assignment in the text names a user, author or committer name or email
+    key, holds an expansion or stands in a doubtful word (GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name
+    GIT_CONFIG_VALUE_0=X). So a
+    command that sets a human identity by a spelled value is allowed whatever else its text names (git -c
+    user.email=me@example.com commit -m 'regenerate .claude/rules'). The cost is a disclosed over-deny of
+    text that only quotes an assignment of an AI value (a commit message that holds EMAIL=X@anthropic.com, an
+    echo, a quoted heredoc that writes such text), and of a command that names an AI beside an assignment of
+    an unspelled value. A command whose text holds a construct the value reader cannot read exactly
+    (_cmtidn_inexact: a backslash before a newline, an xargs or parallel replacement string, a braced
+    placeholder or brace expansion, a word that starts with an expansion, or anywhere a command substitution
+    ($(...), a backquote, ${ cmd; } or ${| cmd; }), a process substitution (<(...) or >(...)), a ${NAME@P}
+    prompt-string expansion or a place where bash evaluates an arithmetic expression) is not judged by its
+    values: any identity name or GIT_CONFIG_KEY_<n>, GIT_CONFIG_VALUE_<n> or GIT_CONFIG_PARAMETERS name in an
+    assignment form there denies when the command names an AI identity anywhere, as written or once those characters are
+    dropped. Bounded: a command longer than _CMTIDN_READ_LIMIT is not searched here, since the
+    too-long fallback already denies one that names an AI and holds any of these names
+    (_commit_identity_fallback); the words are read in one pass and each word is searched a fixed number of
+    times. The raw words are read once here and shared with _cmtidn_inexact, which reads them only for a command
+    with no backslash-newline, the same text. A word with no '=' is not searched for an assignment, since each
+    assignment pattern matches a literal '=' and dropping characters from a word never adds one."""
+    if len(command) > _CMTIDN_READ_LIMIT:
+        return None
+    read = _cmtidn_read_words(command.replace("\\\n", ""))
+    inexact = _cmtidn_inexact(command, read)
+    if inexact is not None:
+        # The value reader cannot read this text exactly, so the AI-anywhere rule decides: any identity name or
+        # GIT_CONFIG_KEY_<n>, GIT_CONFIG_VALUE_<n> or GIT_CONFIG_PARAMETERS name in an assignment form, beside an
+        # AI identity anywhere, denies (a safe-direction over-deny of a human identity beside an AI product name).
+        text = _CMTIDN_SET_UNREAD_RE.sub("", command.replace("\\\n", ""))
+        named = _CMTIDN_ANY_SET_RE.search(command) or _CMTIDN_ANY_SET_RE.search(text)
+        ai = named and (AI_IDENTITY_RE.search(command) or AI_IDENTITY_RE.search(text))
+        if ai:
+            return ("identity assignment {!r} in a command whose text holds {}, which the value reader cannot read "
+                    "exactly, and that names an AI identity ({!r})".format(named.group(0), inexact, ai.group(0)))
+    unspelled = None  # an identity assignment whose value the text does not spell
+    config_key = None  # a GIT_CONFIG_KEY_<n> assignment that names an identity key or holds an expansion
+    config_values = []
+    previous = ""
+    places = {"{}"}  # the strings that xargs -I or -i, or find -exec, fill in at run time
+    many = False  # more replacement strings than _CMTIDN_PLACES_MAX were read
+    xargs = False
+    for word, doubtful in read[0]:
+        bare = _CMTIDN_SET_UNREAD_RE.sub("", word)
+        if xargs:
+            m = _CMTIDN_XARGS_REPLACE_RE.match(bare)
+            if previous == "-I" or (previous.startswith("-") and not previous.startswith("--")
+                                    and previous.endswith("I")):
+                places.add(bare)
+            elif m and (m.group(1) or m.group(2) or m.group(3)):
+                places.add(m.group(1) or m.group(2) or m.group(3))
+            if len(places) > _CMTIDN_PLACES_MAX:
+                many = True  # past the bound every value counts as one the text does not spell (fail closed)
+                places = set()
+        xargs = xargs or bare.rsplit("/", 1)[-1] == "xargs"
+        if "=" not in word:
+            previous = bare
+            continue
+        reading = _CmtidnWord(word)  # each value of the word is judged from this one reading of it
+        here = frozenset(places)
+        for name, r, j in reading.values(_CMTIDN_IDENTITY_SET_RE):
+            ai = reading.ai(r, j)
+            if ai is not None:
+                return "identity assignment {!r} whose value names an AI identity ({!r})".format(name, ai.group(0))
+            config_env = previous == "--config-env" or bare.startswith("--config-env=")
+            if unspelled is None and (config_env or doubtful or many or reading.expansion(r)
+                                      or reading.placed(j, here)):
+                unspelled = name
+        for name, r, j in reading.values(_CMTIDN_CONFIG_KEY_SET_RE):
+            if config_key is None and (doubtful or reading.key(j) or reading.expansion(r)):
+                config_key = name
+        config_values.extend((name, reading, r, j, doubtful) for name, r, j
+                             in reading.values(_CMTIDN_CONFIG_VALUE_SET_RE))
+        for name, r, j in reading.values(_CMTIDN_PARAMETERS_SET_RE):
+            if unspelled is None and (doubtful or many or reading.expansion(r) or reading.placed(j, here)):
+                unspelled = name
+        previous = bare
+    if config_key is not None:
+        here = frozenset(places)  # the replacement strings read from the whole text, as each value is judged
+        for name, reading, r, j, doubtful in config_values:
+            ai = reading.ai(r, j)
+            if ai is not None:
+                return ("identity assignment {!r} beside {!r}, whose value names an AI identity ({!r})"
+                        .format(name, config_key, ai.group(0)))
+            if unspelled is None and (doubtful or many or reading.expansion(r) or reading.placed(j, here)):
+                unspelled = name
+    if unspelled is None:
+        return None
+    text = _CMTIDN_SET_UNREAD_RE.sub("", command.replace("\\\n", ""))
+    ai = AI_IDENTITY_RE.search(command) or AI_IDENTITY_RE.search(text)
+    if ai is None:
+        return None
+    return ("identity assignment {!r} of a value the text does not spell, in a command that names an AI identity "
+            "({!r})".format(unspelled, ai.group(0)))
+
+
+def _alias_identity_ai(value):
+    """A hit label when the git alias value names an AI identity in an identity config assignment it holds
+    (_ALIAS_IDENTITY_RE: -c author.name=X, a quoted value included), else None."""
+    for m in _ALIAS_IDENTITY_RE.finditer(value):
+        if AI_IDENTITY_RE.search(m.group(1)):
+            return "git alias identity config {!r}".format(m.group(0).strip()[:80])
+    return None
+
+
+def _identity_inline_config_ai(pair):
+    """A hit label when the NAME=VALUE config pair that a -c or git clone --config word gives sets an AI
+    identity: an author.* or committer.* name (any case) with an AI value, a user.* one the same way (any
+    case, so the --config=user.name=X word is read too), or an alias whose value holds such an assignment
+    (_alias_identity_ai); else None."""
+    m = ROLE_CONF_EQ_RE.match(pair)
+    if m and AI_IDENTITY_RE.search(m.group(1)):
+        return "author/committer config value {!r}".format(pair.strip()[:80])
+    m = USER_CONF_EQ_RE.match(pair)
+    if m and AI_IDENTITY_RE.search(m.group(1)):
+        return "user.name/user.email value {!r}".format(pair.strip()[:80])
+    m = ALIAS_CONF_EQ_RE.match(pair)
+    if m:
+        return _alias_identity_ai(m.group(1))
+    return None
+
+
+# The declaration builtins whose VAR=value operands the shell assigns (export EMAIL=x, declare -x EMAIL=x).
+_CMTIDN_DECLARE_WORDS = frozenset(("export", "declare", "typeset", "local", "readonly"))
+
+
+def _cmtidn_assignment_words(tokens):
+    """Yield the index of each word of one segment that the shell or a wrapper runs as a variable assignment:
+    the VAR=value (or VAR+=value) words before the command word, past leading reserved words
+    (_CMTIDN_RESERVED) as _cmtidn_git_commands passes over them; every VAR=value operand of a declaration
+    builtin command word (_CMTIDN_DECLARE_WORDS); and, when the command word is a wrapper
+    (_CMTIDN_GIT_WRAPPERS), every VAR=value word after it up to its first git word (env EMAIL=x git commit,
+    sudo -u ci EMAIL=x git commit, env -S 'EMAIL=x' git commit), whatever the wrapper's options, the same
+    bounded rule the git command finder uses. A VAR=value word in any other place (a commit message, an echo
+    operand, an argument of python3 -c) is an operand, not an assignment. Not read: a variable set by a for
+    loop, read, printf -v or another builtin that is not an assignment word, and an assignment inside a string
+    a shell parses at run time (bash -c, eval, env -S'...' attached to its option)."""
+    n = len(tokens)
+    i = 0
+    while i < n and tokens[i] in _CMTIDN_RESERVED:
+        named = tokens[i] in ("function", "coproc")
+        i += 1
+        if named and i + 1 < n and tokens[i + 1] in _CMTIDN_COMPOUND_OPENERS:
+            i += 1  # the NAME of a function definition or a named coprocess, before its compound body
+    while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
+        yield i
+        i += 1
+    if i >= n:
+        return
+    word = tokens[i].rsplit("/", 1)[-1]
+    declare = word in _CMTIDN_DECLARE_WORDS
+    if not declare and word not in _CMTIDN_GIT_WRAPPERS:
+        return
+    for j in range(i + 1, n):
+        if not declare and tokens[j].rsplit("/", 1)[-1] == "git":
+            return
+        if _ENV_ASSIGN_RE.match(tokens[j]):
+            yield j
+
+
+# git config reads or edits rather than sets a value under these options and subcommands. A long option is
+# also read by any prefix of at least three characters that one of these names starts with (git accepts an
+# unambiguous prefix, and refuses an ambiguous one, so no prefix that only names one of these sets a value).
+_GIT_CONFIG_READ_LONG = ("--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color",
+                         "--get-colorbool", "--list", "--unset", "--unset-all", "--rename-section",
+                         "--remove-section", "--edit")
+_GIT_CONFIG_READ_SHORT = frozenset("le")  # -l (--list) and -e (--edit), alone or in a short option cluster
+_GIT_CONFIG_READ_SUBS = frozenset(("get", "list", "unset", "rename-section", "remove-section", "edit"))
+# git config options that take a value (git 2.53.0 git config set -h and git config get -h): the long names,
+# also read by any prefix, and the short letters -f (--file) and -t (--type), which take the rest of their word
+# or else the next word. A value given in the next word is that option's value, never a mode or a subcommand,
+# so 'git config --comment -l author.name X' sets author.name with the comment '-l'.
+_GIT_CONFIG_VALUE_LONG = ("file", "blob", "type", "default", "comment", "value", "url")
+_GIT_CONFIG_VALUE_SHORT = frozenset("ft")
+
+
+def _cmtidn_config_read_option(tok):
+    """True when one word after git config, read as an option, selects a mode that reads or edits rather than
+    sets a value."""
+    if tok.startswith("--"):
+        return len(tok) >= 3 and "=" not in tok and any(name.startswith(tok) for name in _GIT_CONFIG_READ_LONG)
+    if tok.startswith("-") and len(tok) > 1:
+        for letter in tok[1:]:
+            if letter in _GIT_CONFIG_READ_SHORT:
+                return True
+            if letter in _GIT_CONFIG_VALUE_SHORT:
+                return False  # -f and -t take the rest of their word or the next word as their value
+    return False
+
+
+def _cmtidn_config_value_option(tok):
+    """True when one word after git config, read as an option, takes the next word as its value: a long
+    value option, or a prefix of one, with no '=' and no 'no-' (--comment, --comm, --file), or a short option
+    cluster whose first value letter is its last letter (-f, -zf, -t). A word that git takes for another
+    option is so read only where it is a prefix of a value option too, and skipping its next word can only
+    pass over a read or edit option or a subcommand, so the command is then judged as one that sets a
+    value, a safe-direction over-deny."""
+    if tok.startswith("--"):
+        name = tok[2:]
+        return (bool(name) and "=" not in name and not name.startswith("no-")
+                and any(full.startswith(name) for full in _GIT_CONFIG_VALUE_LONG))
+    if tok.startswith("-") and len(tok) > 1:
+        for k in range(1, len(tok)):
+            if tok[k] in _GIT_CONFIG_READ_SHORT:
+                return False
+            if tok[k] in _GIT_CONFIG_VALUE_SHORT:
+                return k == len(tok) - 1
+    return False
+
+
+def _cmtidn_config_setting(tokens):
+    """The index of the first word after the earliest 'config' word of one segment that a git config command
+    reads as its arguments when that command sets a value, or None when there is none. A config word counts
+    when it is the subcommand of a git command the finder reads (_cmtidn_git_commands: git config, sudo git
+    config, git -C dir config) or stands right after a command word that is not git (a git alias or function
+    standing for git, g config author.name ...). The command sets a value unless one of its options selects a
+    read or edit mode (_cmtidn_config_read_option: --get, --get-regexp, --list, --unset and the rest) or its
+    first word that is not an option is a read or edit subcommand (git config get, list, unset,
+    rename-section, remove-section, edit); git config set and the NAME VALUE form, with any scope, file,
+    type, comment, value pattern, --add or --replace-all option, set one. Its options are read as git 2.53.0
+    reads them: from the word after config up to its first word that is neither an option nor the value of
+    the option before it (_cmtidn_config_value_option), or up to a '--' word. So an option value spelled as a
+    read option (--comment -l, --value -e, -f -l) selects no mode, and neither does a word after the NAME
+    (git config author.name X -l and git config author.name X --get set author.name). One backward pass
+    marks, for each word read as an option and for each word read as an option value, whether the options
+    from there select a read or edit mode, so a segment of many config words costs time linear in its
+    length."""
+    n = len(tokens)
+    starts = [k for k in _cmtidn_git_commands(tokens) if tokens[k] == "config"]
+    k = 0
+    while k < n and tokens[k] in _CMTIDN_RESERVED:
+        k += 1
+    while k < n and _ENV_ASSIGN_RE.match(tokens[k]):
+        k += 1
+    if k + 1 < n and tokens[k + 1] == "config" and tokens[k].rsplit("/", 1)[-1] != "git":
+        starts.append(k + 1)
+    if not starts:
+        return None
+    # read_opt[i]: a git config command whose options start at word i reads or edits; read_val[i]: the same when
+    # word i is the value of the option before it, never a mode or a subcommand.
+    read_opt = [False] * (n + 1)
+    read_val = [False] * (n + 1)
+    for i in range(n - 1, -1, -1):
+        tok = tokens[i]
+        read_val[i] = read_opt[i + 1]
+        if tok == "--":
+            read_opt[i] = False
+        elif _cmtidn_config_read_option(tok):
+            read_opt[i] = True
+        elif _cmtidn_config_value_option(tok):
+            read_opt[i] = read_val[i + 1]
+        elif not tok.startswith("-"):
+            read_opt[i] = tok in _GIT_CONFIG_READ_SUBS  # the first word that is not an option ends the options
+        else:
+            read_opt[i] = read_opt[i + 1]
+    for k in sorted(starts):
+        if not read_opt[k + 1]:
+            return k + 1
     return None
 
 
@@ -5268,11 +6056,16 @@ def _identity_assignment_ai(tokens):
 # git command's subcommand is an alias ('env git lg --grep git commit --author=...'); the remaining gap is a
 # git-named operand of a program off the list followed by a word spelled as a git command name. 'command -v
 # NAME' and 'command -V NAME' only look a name up, so a command word 'command' whose options carry v or V runs
-# no git command. A wrapper off this list (builtin, doas, ionice, ...) is not read. The list and the reserved
+# no git command. A wrapper off this list (builtin, doas, ...) is not read. The list and the reserved
 # words below are this check's own (the _CMTIDN_ prefix), so one shared wrapper-aware finder can later replace
 # them.
 _CMTIDN_GIT_WRAPPERS = frozenset((
     "env", "timeout", "command", "exec", "nohup", "xargs", "sudo", "nice", "setsid", "stdbuf", "time"))
+# The git command finder (_cmtidn_git_commands) also reads these, which run a command from their operands (find
+# -exec and -execdir, flock FILE CMD, ionice -c3 CMD), so a git config that sets an author or committer name or
+# email behind one is judged as one behind env is (find . -exec git config author.name X ';'). They are kept off
+# _CMTIDN_GIT_WRAPPERS, which other guards share, and off the assignment-word reader (_cmtidn_assignment_words).
+_CMTIDN_FINDER_WRAPPERS = _CMTIDN_GIT_WRAPPERS | frozenset(("find", "flock", "ionice"))
 # The shell reserved words that can stand before a segment's command word ('! git ...', 'if git ...',
 # 'then git ...', '{ git ...; }'); the same words the gate-discipline check passes over (_GATE_RESERVED).
 _CMTIDN_RESERVED = frozenset(("{", "}", "!", "if", "then", "else", "elif", "fi", "for", "while", "until",
@@ -5319,7 +6112,7 @@ def _cmtidn_git_commands(tokens):
     linear in its length. Leading reserved words (_CMTIDN_RESERVED) and VAR=value words are passed over to the
     command word, and so is the NAME after 'function' or 'coproc' when a compound opener follows it
     (_CMTIDN_COMPOUND_OPENERS). When the command word is git (a path to git included), that one git command
-    is read and the index of its subcommand is yielded. When it is a wrapper (_CMTIDN_GIT_WRAPPERS), the finder
+    is read and the index of its subcommand is yielded. When it is a wrapper (_CMTIDN_FINDER_WRAPPERS), the finder
     yields CANDIDATES: a later word that is git and not a VAR=value word starts a candidate git command, a
     git-named option value or operand included, until a held candidate (its git word does not stand right
     after a word that may be an option taking it as a value) has a subcommand that is a git command name
@@ -5348,7 +6141,7 @@ def _cmtidn_git_commands(tokens):
     if i >= n:
         return
     word = tokens[i].rsplit("/", 1)[-1]
-    wrapped = word in _CMTIDN_GIT_WRAPPERS
+    wrapped = word in _CMTIDN_FINDER_WRAPPERS
     if word != "git" and not wrapped:
         return
     i += 1
@@ -5461,17 +6254,20 @@ _CMTIDN_UNREAD_CHARS_RE = re.compile(r"[\\\"'$\n]")
 # The words that can record an identity, which a command too long to read must also hold before its AI name
 # denies it (_cmtidn_identity_word): the reader judges an --author value or a trailer only on a segment whose
 # git command it finds by a word that is git or a path ending in /git, and a run line only under such a git
-# command, and it judges an identity assignment only in a word that starts with a GIT_AUTHOR_ or GIT_COMMITTER_
-# variable name, or with user.name or user.email. Each such word holds its letters in the command with only the
-# characters of _CMTIDN_UNREAD_CHARS_RE between them, so the variable and config names are sought in the command
-# once those characters are dropped, as the AI name is. git is sought as a whole word: its letters with only
-# those characters between them (g$'i't), and no letter, digit or underscore directly before or after it in the
-# command as written, so a dropped character counts as a word boundary too. A word of the command starts after
-# a space, a tab, a newline or an operator, and git in a path follows a '/', so a git at the start of a line,
-# whose newline the dropping removes (EOF, a newline, then git commit ...), is still found. A command that runs
-# git under another name (a variable, a function, an alias) is outside the reader too.
+# command, and it judges an identity assignment only in a word that holds a GIT_AUTHOR_ or GIT_COMMITTER_
+# variable name or EMAIL, or user.name, user.email, author.name, author.email, committer.name or
+# committer.email (EMAIL as spelled, the others in any case), as the raw-text rule (_cmtidn_identity_set_ai)
+# judges one only in text that holds such a name. Each such word holds its letters in the command
+# with only the characters of _CMTIDN_UNREAD_CHARS_RE between them, so the variable and config names are sought
+# in the command once those characters are dropped, as the AI name is. git is sought as a whole word: its
+# letters with only those characters between them (g$'i't), and no letter, digit or underscore directly before
+# or after it in the command as written, so a dropped character counts as a word boundary too. A word of the
+# command starts after a space, a tab, a newline or an operator, and git in a path follows a '/', so a git at
+# the start of a line, whose newline the dropping removes (EOF, a newline, then git commit ...), is still found.
+# A command that runs git under another name (a variable, a function, an alias) is outside the reader too.
 _CMTIDN_GIT_WORD_RE = re.compile(r"(?<!\w)g[\\\"'$\n]*i[\\\"'$\n]*t(?!\w)")
-_CMTIDN_IDENTITY_NAME_RE = re.compile(r"(?i)GIT_(?:AUTHOR|COMMITTER)_|user\.(?:name|email)")
+_CMTIDN_IDENTITY_NAME_RE = re.compile(r"(?i)GIT_(?:AUTHOR|COMMITTER)_|(?:user|author|committer)\.(?:name|email)"
+                                      r"|(?-i:EMAIL)")
 
 
 def _cmtidn_run_lines(tokens, k, stop):
@@ -5609,10 +6405,11 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
     elif error is not None and not readings:
         raise error
     line_env = None  # read at the first segment that runs git (below)
+    command_ai = []  # the AI identity search of this line, made once for all its segments (_cmtidn_command_ai)
     for same, segments in readings:
         keys = [reading for reading in paths if reading in same] or [None]
         for tokens, _sep in segments:
-            hit = _identity_assignment_ai(tokens)
+            hit = _identity_assignment_ai(tokens) or _cmtidn_stdin_identity_ai(tokens, command, command_ai)
             if hit is not None:
                 return hit
             subs = list(_cmtidn_git_commands(tokens))
@@ -5658,10 +6455,409 @@ def _cmtidn_line_ai(command, depth, budgets, unread, paths, judged, from_env=Fal
     return None
 
 
+def _cmtidn_command_ai(command, found=None):
+    """The AI identity match that command names anywhere, as written or once the characters of
+    _CMTIDN_SET_UNREAD_RE are dropped, else None. found, when given, is a list shared by every segment of one
+    command: empty until the first search, then holding its one result, so the command is searched once
+    however many segments ask, where a search for each segment cost time quadratic in its length."""
+    if found is None:
+        found = []
+    if not found:
+        found.append(AI_IDENTITY_RE.search(command)
+                     or AI_IDENTITY_RE.search(_CMTIDN_SET_UNREAD_RE.sub("", command)))
+    return found[0]
+
+
+def _cmtidn_stdin_identity_ai(tokens, command, found=None):
+    """A hit label when one segment's command word (past reserved words and VAR=value words) is xargs, or is a
+    wrapper the git command finder reads (_CMTIDN_FINDER_WRAPPERS) with an xargs word after it and before the
+    git config words (nice xargs git config ..., sudo -u ci xargs git config ...), the git command it runs is a
+    git config that sets a value (_cmtidn_config_setting) and names a user, author or committer name or email
+    key, and the command line names an AI identity anywhere, as written or once the characters of
+    _CMTIDN_SET_UNREAD_RE are dropped (_cmtidn_command_ai, searched once for every segment that shares found);
+    else None. xargs adds the words it reads from its input to that
+    command, so the value can come from another segment (echo X | xargs git config author.name), and the
+    check fails closed there, as the raw-text rule does on a value the text does not spell; the cost is a
+    disclosed over-deny of such a line that names an AI for another reason."""
+    n = len(tokens)
+    i = 0
+    while i < n and tokens[i] in _CMTIDN_RESERVED:
+        i += 1
+    while i < n and _ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i >= n or tokens[i].rsplit("/", 1)[-1] not in _CMTIDN_FINDER_WRAPPERS:
+        return None
+    start = _cmtidn_config_setting(tokens)
+    if start is None or not any(IDENTITY_CONF_NAME_RE.fullmatch(tok) for tok in tokens[start:]):
+        return None
+    if not any(tok.rsplit("/", 1)[-1] == "xargs" for tok in tokens[i:start]):
+        return None
+    ai = _cmtidn_command_ai(command, found)
+    if ai is None:
+        return None
+    return ("identity config name whose value xargs may read from its input, in a command line that names an AI "
+            "identity ({!r})".format(ai.group(0)))
+
+
+# The blanks and shell operator characters at which _cmtidn_raw_stdin_identity_ai splits the text of a command
+# whose raw word reading is doubtful.
+_CMTIDN_RAW_SPLIT_RE = re.compile(r"[\s;&|<>()]+")
+
+
+def _cmtidn_raw_stdin_identity_ai(command):
+    """_cmtidn_stdin_identity_ai for a command the shared tokenizer cannot parse, such as a here-string or a
+    heredoc feeding xargs (xargs git config user.name <<< X, which _lex_command refuses), read over the raw
+    words of the text (_cmtidn_raw_words), each with the characters of _CMTIDN_SET_UNREAD_RE dropped; a hit
+    label, else None. The words are split into simple commands at each command separator between two words
+    (_CMTIDN_CMD_SEPARATOR_RE); a word that is the target of a redirection (after <, >, <&, >& or >|: a
+    here-string word, a heredoc delimiter, a file read by < F) and a file descriptor number written directly
+    before a redirection operator are dropped, as the tokenizer drops a redirection; and each simple command is
+    judged by _cmtidn_stdin_identity_ai, with the whole command as the text that must name an AI identity. When
+    a word is doubtful (the reading has passed a heredoc operator, a comment or another construct it may
+    misread, so it can join the words of several commands into one, as an apostrophe in a heredoc body does),
+    the text with a backslash-newline and those characters dropped is instead split at every blank and shell
+    operator character (_CMTIDN_RAW_SPLIT_RE) and its pieces searched in order: an xargs piece (or a path
+    ending in /xargs), a later config piece and a later user, author or committer name or email key piece
+    (IDENTITY_CONF_NAME_RE, any case) deny when the command names an AI identity anywhere, as written or once
+    those characters are dropped. Bounded as _cmtidn_identity_set_ai
+    is: a command longer than _CMTIDN_READ_LIMIT is not read here (the too-long fallback denies one that names
+    an AI and holds such a key), and the words are read in one pass. The cost is a safe-direction over-deny of
+    such a command that names an AI for another reason, a heredoc body line that reads as such a command
+    included."""
+    if len(command) > _CMTIDN_READ_LIMIT:
+        return None
+    gaps = []
+    words = _cmtidn_raw_words(command, gaps)
+    if any(doubtful for _word, doubtful in words):
+        text = _CMTIDN_SET_UNREAD_RE.sub("", command.replace("\\\n", ""))
+        want = 0  # 0: an xargs word, 1: a config word, 2: an identity key word
+        for bare in _CMTIDN_RAW_SPLIT_RE.split(text):
+            if want == 0 and bare.rsplit("/", 1)[-1] == "xargs":
+                want = 1
+            elif want == 1 and bare == "config":
+                want = 2
+            elif want == 2 and IDENTITY_CONF_NAME_RE.fullmatch(bare):
+                ai = AI_IDENTITY_RE.search(command) or AI_IDENTITY_RE.search(text)
+                if ai is None:
+                    return None
+                return ("xargs, git config and an identity config name in a command the check could not parse, "
+                        "whose value xargs may read from its input, in a command line that names an AI identity "
+                        "({!r})".format(ai.group(0)))
+        return None
+    tokens = []
+    command_ai = []  # the AI identity search of the command, made once for all its simple commands
+    for k, (word, _doubtful) in enumerate(words):
+        gap = gaps[k]
+        if _CMTIDN_CMD_SEPARATOR_RE.search(gap) and tokens:
+            hit = _cmtidn_stdin_identity_ai(tokens, command, command_ai)
+            if hit is not None:
+                return hit
+            tokens = []
+        if gap.rstrip(" \t").endswith(("<", ">", "<&", ">&", ">|")):
+            continue  # the target of a redirection is not a word of the command
+        bare = _CMTIDN_SET_UNREAD_RE.sub("", word)
+        after = gaps[k + 1] if k + 1 < len(gaps) else ""
+        if bare.isdigit() and after.startswith(("<", ">")):
+            continue  # a file descriptor number written directly before a redirection operator
+        tokens.append(bare)
+    return _cmtidn_stdin_identity_ai(tokens, command, command_ai) if tokens else None
+
+
+# The wrappers that run a command string given to their -c or --command option: flock FILE -c CMD, su USER -c
+# CMD, runuser USER -c CMD and script -c CMD FILE (_cmtidn_unread_route_ai).
+_CMTIDN_C_STRING_WRAPPERS = frozenset(("flock", "su", "runuser", "script"))
+# Their -c option: a short option cluster ending in c, whose string is the next word (-c, -qc), or with the
+# string attached after the c (-c'git config ...'); and --command or a prefix of it from --co, or su's
+# --session-command, with the string after = or as the next word.
+_CMTIDN_C_STRING_SHORT_RE = re.compile(r"-[A-Za-z]*c")
+_CMTIDN_C_STRING_ATTACHED_RE = re.compile(r"-[A-Za-z]*c(.+)", re.S)
+_CMTIDN_C_STRING_LONG_RE = re.compile(r"--(?:session-)?co(?:m(?:m(?:a(?:n(?:d)?)?)?)?)?(?:=(.*))?", re.S)
+# xargs's option that names the file it reads its arguments from: a short option cluster ending in a (-a,
+# -0a), or --arg-file or a prefix of it from --a (no other xargs long option starts so), with or without =.
+_CMTIDN_XARGS_FILE_RE = re.compile(r"-[A-Za-z0-9]*a|--a(?:r(?:g(?:-(?:f(?:i(?:l(?:e)?)?)?)?)?)?)?=?")
+# A command separator in the operator characters between two words, other than ( and ): a newline, ;, a |
+# that does not end a >| redirection operator, or a & that is not part of a redirection operator.
+_CMTIDN_PLAIN_SEPARATOR_RE = re.compile(r"[\n;]|(?<!>)\||(?<![<>])&(?!>)")
+# A process substitution <( that the operator characters before a word open, its body starting with blanks,
+# newlines or a further ( (<(echo X), <( (echo X) ), <((echo X)), or <( and a newline before echo X).
+_CMTIDN_SUBST_OPEN_RE = re.compile(r"<\([ \t\n(]*\Z")
+# The characters at which _cmtidn_config_string_ai splits a command string into simple commands.
+_CMTIDN_STRING_SEGMENT_RE = re.compile(r"[\n;&|()]+")
+# An identity variable or GIT_CONFIG_VALUE_<n> name in an assignment form (=, += or :=), for the += join rule:
+# EMAIL as spelled, the git identity variables in any case, as _CMTIDN_IDENTITY_SET_RE reads them.
+_CMTIDN_JOIN_SET_RE = re.compile(r"(?<![A-Za-z0-9_])(EMAIL|(?i:GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL))"
+                                 r"|GIT_CONFIG_VALUE_[0-9]+)([+:]?=)")
+_CMTIDN_JOIN_KEY_RE = re.compile(r"(?<![A-Za-z0-9_])GIT_CONFIG_KEY_([0-9]+)[+:]?=")
+# The characters of a joined value that the += join rule keeps: an AI identity match that a += completes
+# holds an appended character and starts at most 13 characters before it (@anthropic.com, 14 characters, is
+# the longest name AI_IDENTITY_RE spells; a gpt-4 form already matched once its digit was read), so the last 16
+# characters, with one more before them for the word boundary, are enough, and each part is searched once.
+_CMTIDN_JOIN_TAIL = 17
+# The characters that the gpt alternative of AI_IDENTITY_RE reads in its tail ([a-z0-9.-] in any case, the same
+# class with the same flags), so _CmtidnJoinWord can find where a match that starts in the kept end of a joined
+# value stops reading.
+_CMTIDN_AI_TAIL_RE = re.compile(r"(?i)[a-z0-9.-]*")
+
+
+class _CmtidnJoinWord:
+    """One raw word of the += join rule of _cmtidn_unread_route_ai, read once, and the assigned values in it. A
+    value is the rest of the word after an assignment name (with its '='), as written (word[r:]) and with the
+    characters of _CMTIDN_SET_UNREAD_RE dropped (dropped[start:end], end being the first '}' at or after start
+    for a ${NAME:=VALUE} part, else the end of dropped), and is named by its offsets, never copied whole: each
+    question about a value is answered from readings of the whole word that resume where the last one stopped,
+    so a word that holds many assignments ('EMAIL+=x,EMAIL+=x,...') costs time linear in its length, where
+    copying the rest of the word for each assignment, as written and dropped, searching it for an expansion and
+    a '}', and searching the joined value for an AI identity cost time quadratic in it. The answers are those
+    that the copied rest gives: the expansion search reads only the text from each place on
+    (_cmtidn_last_start); the '}' search resumes at its last answer while that lies at or after the place asked;
+    and the AI identity search of a joined value (ai) is that of the kept end of the value before it followed
+    by this value."""
+
+    __slots__ = ("word", "dropped", "_expansion", "_brace", "_searched", "_found")
+
+    def __init__(self, word, dropped):
+        self.word = word
+        self.dropped = dropped
+        self._expansion = None  # the start of the last expansion in word, read when first asked
+        self._brace = -1  # the first '}' at or after the place last asked (len(dropped) when none)
+        self._searched = None  # where the last AI identity search of dropped started
+        self._found = None  # and its match
+
+    def expansion(self, r):
+        """True when the value at r, as written, holds an expansion (_CMTIDN_EXPANSION_RE)."""
+        if self._expansion is None:
+            self._expansion = _cmtidn_last_start(_CMTIDN_EXPANSION_RE, self.word)
+        return r <= self._expansion
+
+    def brace(self, start):
+        """The index of the first '}' of dropped at or after start, else len(dropped). Asked at places in
+        increasing order, each search resumes where the last answer was found, so dropped is read once."""
+        if self._brace < start:
+            k = self.dropped.find("}", start)
+            self._brace = len(self.dropped) if k < 0 else k
+        return self._brace
+
+    def _first(self, q):
+        """AI_IDENTITY_RE.search(dropped, q). A match attempt at a place reads the same characters whatever
+        place the search started at, so the last search, when it started at or before q and found no match
+        or one at or after q, answers for q as well."""
+        if self._searched is not None and self._searched <= q and (self._found is None or self._found.start() >= q):
+            return self._found
+        self._searched, self._found = q, AI_IDENTITY_RE.search(self.dropped, q)
+        return self._found
+
+    def ai(self, before, start, end, first):
+        """The text of AI_IDENTITY_RE.search(before + dropped[start:end], first), else None, with before at most
+        _CMTIDN_JOIN_TAIL characters long. An attempt that starts in before or at the value's first character
+        reads at most 16 characters from where it starts, or, in the gpt alternative, to the first character
+        that its tail does not take (_CMTIDN_AI_TAIL_RE) at or after the value's sixth, and one character more
+        for the word boundary; so before followed by the value up to there gives each such attempt the result it
+        has in the joined text. An attempt at a later character of the value reads the character before it and
+        the value from there on, which dropped holds at the same place; the value ends at the end of dropped or
+        at a '}', which no match holds, and the word boundary reads a '}' as it reads the end of the text, so a
+        match of dropped that starts before end is one of the value, and the first of them is the first match
+        of dropped from the value's second character (_first)."""
+        dropped = self.dropped
+        run = _CMTIDN_AI_TAIL_RE.match(dropped, min(start + 6, end), end).end()
+        head = before + dropped[start:min(end, max(start + 16, run + 1))]
+        m = AI_IDENTITY_RE.search(head, first)
+        if m is not None and m.start() <= len(before):
+            return m.group(0)
+        m = self._first(start + 1)
+        return m.group(0) if m is not None and m.start() < end else None
+
+
+def _cmtidn_config_string_ai(text):
+    """(key, match) when a command string that a wrapper runs (text, its quote characters, backslashes and '$'
+    signs dropped, split into simple commands at each newline, ;, &, |, ( and )) holds a git config command
+    that sets a value (_cmtidn_config_setting) of a user, author or committer name or email key whose later
+    words in that simple command name an AI identity (git config user.name Claude, git config --global
+    author.email noreply@anthropic.com); else None."""
+    dropped = _CMTIDN_SET_UNREAD_RE.sub("", text)
+    if "config" not in dropped:
+        return None
+    for segment in _CMTIDN_STRING_SEGMENT_RE.split(dropped):
+        tokens = segment.split()
+        start = _cmtidn_config_setting(tokens)
+        if start is None:
+            continue
+        for j in range(start, len(tokens)):
+            if IDENTITY_CONF_NAME_RE.fullmatch(tokens[j]):
+                ai = AI_IDENTITY_RE.search(" ".join(tokens[j + 1:]))
+                if ai is not None:
+                    return tokens[j], ai
+                break
+    return None
+
+
+def _cmtidn_unread_route_ai(command):
+    """A hit label for three routes by which an identity value reaches git where the reader and the raw-text
+    rule (_cmtidn_identity_set_ai) do not read it, else None. Each is read in one pass over the raw words of
+    the text (_cmtidn_raw_words, a backslash-newline dropped first), each word with the characters of
+    _CMTIDN_SET_UNREAD_RE dropped:
+    (a) an xargs word whose argument-file option (_CMTIDN_XARGS_FILE_RE: -a, a cluster ending in a, --arg-file
+    or a prefix of it, attached or detached) is given a process substitution (xargs -a <(echo X) git config
+    user.name, xargs --arg-file=<(...) ...), whose body may start with blanks, newlines or a further (
+    (_CMTIDN_SUBST_OPEN_RE: xargs -a <( (echo X) ) ...): the words of that simple command outside the substitution, the
+    option word dropped, are judged by the xargs stdin rule (_cmtidn_stdin_identity_ai), which denies when
+    xargs runs a git config that sets a user, author or committer name or email key and the command names an
+    AI identity anywhere, the substitution included, since xargs adds the words it reads from that file;
+    (b) a flock, su, runuser or script word (_CMTIDN_C_STRING_WRAPPERS) with a -c or --command option
+    (_CMTIDN_C_STRING_SHORT_RE, _CMTIDN_C_STRING_ATTACHED_RE, _CMTIDN_C_STRING_LONG_RE) whose command string
+    holds a git config command that sets such a key to a value that names an AI identity
+    (_cmtidn_config_string_ai: flock /tmp/l -c 'git config user.name Claude', su ci -c "git config
+    author.email noreply@anthropic.com", script -qc '...' /dev/null);
+    (c) spelled assignments of one identity variable or GIT_CONFIG_VALUE_<n> (_CMTIDN_JOIN_SET_RE), in text
+    order, the last =, := or a first += setting the value and each later += appending to it, whose joined value
+    names an AI identity (EMAIL=noreply@anthr; EMAIL+=opic.com, GIT_AUTHOR_NAME=Cla GIT_AUTHOR_NAME+=ude); a
+    GIT_CONFIG_VALUE_<n> counts only when a GIT_CONFIG_KEY_<n> assignment of the same n names such a key, and
+    a part that holds an expansion (_CMTIDN_EXPANSION_RE) stops the join for that name, since the raw-text rule
+    judges such a value as one the text does not spell. A git identity variable is joined twice, once with its
+    name in any case and once as spelled, and either join can deny. A ${NAME:=VALUE} or ${NAME=VALUE} part sets
+    the value up to its first }. Every word that holds an assignment form counts as one, quoted text and an
+    operand of another command included, so such a word between two parts restarts the join of its name.
+    A simple command ends at a newline, ;, | or & outside the substitution. Not read: any other route, which
+    the residue lists. Bounded as _cmtidn_identity_set_ai is: a command longer than _CMTIDN_READ_LIMIT is not
+    read here, and each word is searched a fixed number of times. Routes (a) and (b) need a config word and
+    an AI identity named in the text, as written or with those characters dropped (sought once, here, and
+    handed to the xargs stdin rule as the matched name, so that rule does not search the whole text again for
+    each simple command), and route (c) a += operator, so a text that holds none of them is not read further."""
+    if len(command) > _CMTIDN_READ_LIMIT:
+        return None
+    text = _CMTIDN_SET_UNREAD_RE.sub("", command.replace("\\\n", ""))
+    named = None
+    if "config" in text:
+        named = AI_IDENTITY_RE.search(command) or AI_IDENTITY_RE.search(text)
+    if named is None and "+=" not in command:
+        return None
+    gaps = []
+    words = _cmtidn_raw_words(command.replace("\\\n", ""), gaps)
+    outer = []  # (a) the words of the current simple command outside an argument-file process substitution
+    xargs = False  # (a) an xargs word is among them
+    file_subst = False  # (a) an xargs argument-file option was given a process substitution in this command
+    depth = 0  # the ( read in the operator characters between words and not yet closed
+    inside = None  # (a) the depth outside the argument-file process substitution while it is open
+    wrapper = False  # (b) a -c wrapper word was read in this simple command
+    string_next = False  # (b) the next word is the wrapper's command string
+    joined = {}  # (c) a name as spelled, or ("any case", NAME) for a git identity variable -> the end of the
+    # joined spelled value so far (_CMTIDN_JOIN_TAIL characters), or None once a part is not spelled
+    keys = set()  # (c) the n of each GIT_CONFIG_KEY_<n> assignment that names an identity key
+    values = []  # (c) (name, joined value) for each GIT_CONFIG_VALUE_<n> join that names an AI identity
+    for k, (word, _doubtful) in enumerate(words):
+        gap = gaps[k]
+        cut = 0  # (a) where the part of the gap outside the argument-file process substitution starts
+        for pos, ch in enumerate(gap):
+            if ch == "(":
+                depth += 1
+            elif ch == ")" and depth:
+                depth -= 1
+                if inside is not None and depth <= inside:
+                    inside = None  # the argument-file process substitution has closed
+                    cut = pos + 1  # a newline or ; before its ) is inside it, not a separator
+        # (a) the gap opens a process substitution as the value of an xargs argument-file option, with no
+        # separator before the <(; a newline after it is inside the substitution, not a separator
+        opener = (_CMTIDN_SUBST_OPEN_RE.search(gap, cut) if named is not None and inside is None and xargs and outer
+                  else None)
+        subst = (opener is not None and _CMTIDN_XARGS_FILE_RE.fullmatch(outer[-1]) is not None
+                 and _CMTIDN_PLAIN_SEPARATOR_RE.search(gap, cut, opener.start()) is None)
+        if inside is None and not subst and _CMTIDN_PLAIN_SEPARATOR_RE.search(gap, cut):
+            if file_subst and outer:
+                # The AI name was sought once above; the xargs stdin rule searches only that name here.
+                hit = _cmtidn_stdin_identity_ai(outer, named.group(0))
+                if hit is not None:
+                    return "xargs reading an argument file from a process substitution: " + hit
+            outer, xargs, file_subst, wrapper, string_next = [], False, False, False, False
+        bare = _CMTIDN_SET_UNREAD_RE.sub("", word)
+        if subst:
+            outer.pop()  # the option's value is the substitution, so the option word is not an argument
+            file_subst = True
+            inside = depth - gap.count("(", opener.start())  # the depth outside the <( and any ( after it
+        if inside is None:
+            outer.append(bare)
+            xargs = xargs or bare.rsplit("/", 1)[-1] == "xargs"
+        # (b) a -c wrapper's command string
+        string = None
+        if named is None:
+            pass  # routes (a) and (b) need an AI identity named in the text
+        elif string_next:
+            string, string_next = word, False
+        elif wrapper and bare.startswith("-"):
+            long = _CMTIDN_C_STRING_LONG_RE.fullmatch(bare)
+            if long is not None:
+                if long.group(1) is None:
+                    string_next = True
+                else:
+                    string = long.group(1)
+            elif _CMTIDN_C_STRING_SHORT_RE.fullmatch(bare):
+                string_next = True
+            else:
+                attached = _CMTIDN_C_STRING_ATTACHED_RE.fullmatch(bare)
+                if attached is not None and not bare.startswith("--"):
+                    string = attached.group(1)
+        if bare.rsplit("/", 1)[-1] in _CMTIDN_C_STRING_WRAPPERS:
+            wrapper = True
+        if string is not None:
+            found = _cmtidn_config_string_ai(string)
+            if found is not None:
+                return ("git config of {!r} to a value that names an AI identity ({!r}) in the command string of a "
+                        "flock, su, runuser or script -c option".format(found[0], found[1].group(0)))
+        # (c) identity values joined by +=
+        if "=" not in word:
+            continue
+        dropped, at = _cmtidn_dequoted(word)
+        for m in _CMTIDN_JOIN_KEY_RE.finditer(dropped):
+            if IDENTITY_CONF_NAME_RE.match(dropped, m.end()):
+                keys.add(m.group(1))
+        join = None  # the reading of this word's values, made at its first assignment (_CmtidnJoinWord)
+        for m in _CMTIDN_JOIN_SET_RE.finditer(dropped):
+            if join is None:
+                join = _CmtidnJoinWord(word, dropped)
+            name = m.group(1) if m.group(1) == "EMAIL" else m.group(1).upper()
+            start, end = m.end(), len(dropped)
+            if m.start() and dropped[m.start() - 1] == "{":
+                end = join.brace(start)  # ${NAME:=VALUE} or ${NAME=VALUE}: the value ends at its }
+            spelled = not join.expansion(at[start])
+            # A git identity variable is joined under its name in any case, as before, and under its name as
+            # spelled too, so an assignment of the same name in another case between two parts does not restart
+            # the join of that spelling (GIT_AUTHOR_NAME=Cla; git_author_name=x; GIT_AUTHOR_NAME+=ude); EMAIL and
+            # GIT_CONFIG_VALUE_<n> are read only as spelled, so each has one join.
+            joins = ((name,) if name == "EMAIL" or name.startswith("GIT_CONFIG_VALUE_")
+                     else (("any case", name), m.group(1)))
+            for key in joins:
+                if not spelled:
+                    joined[key] = None
+                    continue
+                tail = dropped[max(start, end - _CMTIDN_JOIN_TAIL):end]  # the value's last characters
+                if m.group(2) != "+=" or key not in joined:
+                    joined[key] = tail
+                    continue
+                if joined[key] is None:
+                    continue
+                before = joined[key]
+                joined[key] = (before + tail)[-_CMTIDN_JOIN_TAIL:]
+                ai = join.ai(before, start, end, 1 if len(before) == _CMTIDN_JOIN_TAIL else 0)
+                if ai is None:
+                    continue
+                if not name.startswith("GIT_CONFIG_VALUE_"):
+                    return ("identity assignments of {!r} joined by += into a value that names an AI identity ({!r})"
+                            .format(name, ai))
+                values.append((name, ai))
+    if file_subst and outer:
+        hit = _cmtidn_stdin_identity_ai(outer, named.group(0))
+        if hit is not None:
+            return "xargs reading an argument file from a process substitution: " + hit
+    for name, ai in values:
+        if name[len("GIT_CONFIG_VALUE_"):] in keys:
+            return ("identity assignments of {!r} joined by += into a value that names an AI identity ({!r})"
+                    .format(name, ai))
+    return None
+
+
 def _cmtidn_identity_word(command):
     """A word of command that can record an identity, as a match object: its first git word
-    (_CMTIDN_GIT_WORD_RE), else its first GIT_AUTHOR_, GIT_COMMITTER_, user.name or user.email name once the
-    characters of _CMTIDN_UNREAD_CHARS_RE are dropped (_CMTIDN_IDENTITY_NAME_RE); None when it holds neither."""
+    (_CMTIDN_GIT_WORD_RE), else its first GIT_AUTHOR_, GIT_COMMITTER_ or EMAIL variable name or user, author
+    or committer config name once the characters of _CMTIDN_UNREAD_CHARS_RE are dropped
+    (_CMTIDN_IDENTITY_NAME_RE); None when it holds neither."""
     return (_CMTIDN_GIT_WORD_RE.search(command)
             or _CMTIDN_IDENTITY_NAME_RE.search(_CMTIDN_UNREAD_CHARS_RE.sub("", command)))
 
@@ -5674,7 +6870,8 @@ def _commit_identity_fallback(command, error):
     (_CMTIDN_RUN_BOUNDS), or the command is longer than the check reads within the hook timeout
     (_CMTIDN_TOO_LONG). Unless a check below decides first, it scans the RAW string of the whole command for an
     AI identity in a Co-Authored-By trailer, an --author value (any prefix git reads as --author), a
-    git-identity env var, or a user.name/user.email value (_RAW_IDENTITY_CONTEXTS), and denies on a hit.
+    git-identity env var or EMAIL, or a user, author or committer name or email config value
+    (_RAW_IDENTITY_CONTEXTS), and denies on a hit.
     A command too long to read is first denied when an AI name appears ANYWHERE in it once every quote,
     backslash, '$' and newline is removed, with no word boundary needed around the name (_AI_NAME_ANYWHERE_RE),
     and it also holds a word that can record an identity (_cmtidn_identity_word), so a command that the reader
@@ -5771,14 +6968,15 @@ def commit_identity(data):
     if unread is not None:
         return _deny_unreadable_command("cmtidn (commit-identity)", "commit-identity check", unread)
     reads = _SubstHeredocs.reads
+    raw = False  # True when the hit comes from the raw-text rule rather than the word reader
     try:
         hit = find_ai_authorship(command)
     except _ReadingLimitError:
         # The command reading spent its body budget: the raw fallback below can allow an identity that main's
         # reading finds, so it denies (COST above _COMMAND_LEAD_WORDS).
         return _reading_limit_deny("cmtidn (commit-identity)", "a git command recording an AI identity (a "
-                                   "co-author trailer, an --author value, a git identity variable or a "
-                                   "user.name or user.email value)")
+                                   "co-author trailer, an --author value, a git identity variable, EMAIL, or "
+                                   "a user, author or committer name or email value)")
     except _UncertainHashError as exc:
         # A '#' the lexer could not judge under both readings, in the command itself under each locale
         # reading: the raw scan also reads the text with its backslash-newlines, quote characters and
@@ -5787,14 +6985,43 @@ def commit_identity(data):
         if _hash_doubt_opaque(command):
             return _hash_doubt_opaque_deny("cmtidn (commit-identity)", "a git command recording an AI "
                                            "identity (a co-author trailer, an --author value, a git identity "
-                                           "variable or a user.name or user.email value)")
-        return _commit_identity_fallback(_hash_doubt_scan(command), str(exc))
+                                           "variable, EMAIL, or a user, author or committer name or email "
+                                           "value)")
+        hit = (_cmtidn_identity_set_ai(command) or _cmtidn_raw_stdin_identity_ai(command)
+               or _cmtidn_unread_route_ai(command))
+        if hit is None:
+            return _commit_identity_fallback(_hash_doubt_scan(command), str(exc))
+        raw = True
     except ValueError as exc:
-        return _commit_identity_fallback(command, str(exc))
+        # A command the tokenizer cannot parse (a here-string or heredoc feeding xargs) is judged by the xargs
+        # stdin rule over its raw words as well (_cmtidn_raw_stdin_identity_ai).
+        hit = (_cmtidn_identity_set_ai(command) or _cmtidn_raw_stdin_identity_ai(command)
+               or _cmtidn_unread_route_ai(command))
+        if hit is None:
+            return _commit_identity_fallback(command, str(exc))
+        raw = True
+    if hit is None:
+        # Nothing the reader judges sets an AI identity: the raw text decides next, failing closed when it
+        # assigns an identity a value that names an AI, or a value it does not spell in a command that names an AI
+        # anywhere (_cmtidn_identity_set_ai).
+        hit = _cmtidn_identity_set_ai(command) or _cmtidn_unread_route_ai(command)
+        raw = hit is not None
     if hit is None:
         if _SubstHeredocs.reads != reads:
             return _commit_identity_fallback(command, _SUBST_HEREDOC_MAIN_FAILS)  # main's fallback, in place
         return _allow()
+    if raw:
+        # The raw-text rule finds only that the text names an identity assignment form and an AI identity, not
+        # that a git command sets one (the command may run no git, set a human identity, or be one the reader
+        # could not parse), so its reason says that and that the check fails closed.
+        reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's own "
+                  "identity, with no AI as author, committer, or co-author. This command's text names an "
+                  "identity assignment form and an AI identity ({}); whether it sets an AI identity could not "
+                  "be ruled out, so the check fails closed, which may over-deny a command that only quotes "
+                  "such text. Remove the AI identity, or the assignment text, and commit as the "
+                  "maintainer.".format(hit))
+        return _deny(reason, "AIQT guardrail: denied a command naming an identity assignment and an AI "
+                     "identity (rule cmtidn, fail-closed).")
     reason = ("AIQT rule cmtidn (commit-identity): a recorded change carries the human maintainer's "
               "own identity, with no AI as author, committer, or co-author; this git command sets an "
               "AI identity ({}). Remove it and commit as the maintainer.".format(hit))

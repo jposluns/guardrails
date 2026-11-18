@@ -16660,6 +16660,462 @@ def _pl239_launch_failures():
     return failures
 
 
+# === cmtidn differential oracle (cmo) ===
+# The commit_identity guard of this tree against the same guard at the base its identity-assignment change
+# starts from, decided side by side in one process. The base is read from git at _CMO_BASE (git show, with
+# replacement objects disabled) and loaded under its own module name. The corpus takes the -c and --config
+# words, the declaration words and the wrapper words from the guard's own tables, and the identity variables
+# and identity config keys from lists written here, each of which must match the guard's regexes (a name
+# added to those regexes later does not reach the corpus); these are crossed with -c placements,
+# environment prefixes, wrapper words and quoting, plus the pinned forms of _CMO_PINNED; a core of those is
+# also judged where the reader cannot parse it (an unbalanced quote) and where it is too long to read (past
+# _CMTIDN_READ_LIMIT). Every command is judged with the payload cwd in a real scratch repository, one per
+# module, under the empty HOME that _main_isolated sets; _main_isolated also removes GIT_CONFIG_NOSYSTEM
+# from the environment, which the decisions do not depend on, since the check does not read the git
+# configuration. A command the base denies (or raises on) that this tree does not deny is a failure unless
+# _CMO_NEWLY_ALLOWED names that exact command with its reason; an entry the corpus does not hold, or one
+# that no longer differs, is a stale failure. The forms the change exists to deny (_CMO_NEW_DENIES) must
+# deny here, so a revert of the change turns the oracle red, and so does deleting an allowlist entry (the
+# cmo-mutant checks).
+_CMO_BASE = "189a280e388d6a2e6d3d1b59b3616d32dac3ad51"
+_CMO_HOOK_PATH = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
+# AI identity values: a name, an address, a two-word name (always quoted) and a model name.
+_CMO_AI_VALUES = ("Claude", "noreply@anthropic.com", "Codex Bot", "gpt-4o")
+# The fewest commands the generated corpus may hold, so a table read that went empty cannot pass vacuously.
+_CMO_MIN_CORPUS = 3000
+# Commands this tree allows that the base denies: each an exact command and the reason it is safe to allow.
+# Empty: the corpus holds no command that the base denies and this tree allows.
+_CMO_NEWLY_ALLOWED = {}
+# The forms the change exists to deny, which the base allows: author.* and committer.* config pairs (by -c,
+# git config and git clone --config or -c), EMAIL and += assignments, an alias that carries -c, a
+# default-value expansion and an option value spelled as a read option.
+_CMO_NEW_DENIES = (
+    "git -c author.name=Claude commit -m x",
+    "git -c committer.email=noreply@anthropic.com commit -m x",
+    "git -c Author.Name=Claude commit -m x",
+    "EMAIL=noreply@anthropic.com git commit -m x",
+    "export EMAIL=noreply@anthropic.com; git commit -m x",
+    "GIT_AUTHOR_NAME+=Claude git commit -m x",
+    "git config author.name Claude; git commit -m x",
+    "git config set committer.name Claude",
+    "git clone --config author.name=Claude . c2",
+    "git clone -qcauthor.name=Claude . c2",
+    "git config alias.ci '-c author.name=Claude commit'; git ci",
+    ': "${EMAIL:=noreply@anthropic.com}"; export EMAIL; git commit -m x',
+    "git config --comment -l author.name Claude",
+)
+# Forms that set, or look as if they set, an identity through git or the shell, pinned exactly: the -c,
+# --config-env, GIT_CONFIG_* and include forms, git config with scopes, options and option values spelled as
+# read options, git clone config words and short option clusters, git aliases (git-quoted values included),
+# EMAIL and identity variables by assignment, declaration, nameref, default-value expansion (in a word, a
+# redirect target, a here-string, a heredoc body, nested), wrappers, functions and reserved words, run lines,
+# substitutions and fast-import, and read-only controls that only name an identity.
+_CMO_PINNED = (
+    "V=Claude git --config-env=author.name=V commit -m x",
+    "V=Claude git --config-env author.name=V commit -m x",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0=Claude git commit -m x",
+    "GIT_CONFIG_PARAMETERS=\"'author.name'='Claude'\" git commit -m x",
+    "printf '[author]\\n\\tname = Claude\\n' >> .git/config; git commit -m x",
+    "env -S'GIT_AUTHOR_NAME=Claude' git commit -m x",
+    "env -S'EMAIL=noreply@anthropic.com' git commit -m x",
+    "env -S\"EMAIL=claude@anthropic.com\" git commit -m x",
+    "env -S 'EMAIL=noreply@anthropic.com' git commit -m x",
+    "env -S 'GIT_AUTHOR_NAME=Claude' git commit -m x",
+    "env --split-string 'EMAIL=noreply@anthropic.com' git commit -m x",
+    "env --split-string='EMAIL=noreply@anthropic.com' git commit -m x",
+    "env -S 'git -c author.name=Claude commit -m x'",
+    "for EMAIL in noreply@anthropic.com; do export EMAIL; git commit -m x; done",
+    "read EMAIL <<< noreply@anthropic.com; export EMAIL; git commit -m x",
+    "printf -v EMAIL noreply@anthropic.com; export EMAIL; git commit -m x",
+    "bash -c 'git -c author.name=Claude commit -m x'",
+    "eval 'git -c author.name=Claude commit -m x'",
+    "git -cauthor.name=Claude commit -m x",
+    "EMAIL[0]=noreply@anthropic.com git commit -m x",
+    "EMAIL[0]=noreply@anthropic.com; export EMAIL; git commit -m x",
+    "declare -x EMAIL[0]=noreply@anthropic.com; git commit -m x",
+    "git config author.name --comment hi Claude",
+    "git config set author.name --comment=hi Claude",
+    "git config set author.name --comment hi Claude",
+    "git config author.name --global Claude",
+    "git -c committer.name = Claude commit -m x",
+    "f() { git \"$@\"; }; f -c author.name=Claude commit -m x",
+    "f() { git \"$@\"; }; f config author.name Claude",
+    "g() { git \"$@\"; }; g -C . config author.name Claude",
+    "alias g=git; g -c committer.name=Claude commit -m x",
+    "git -c user.name=Other -c author.name=Claude commit -m x",
+    "git -c 'author'.name=Claude commit -m x",
+    "git -c AUTHOR.NAME=Claude commit -m x",
+    "git config --global author.name Claude; git commit -m x",
+    "git config --file .git/config author.name Claude",
+    "git config --file=.git/config author.name Claude",
+    "git config -f.git/config author.name Claude",
+    "git config --local author.name Claude",
+    "git config --system author.name Claude",
+    "git config --worktree author.name Claude",
+    "git config --add author.name Claude",
+    "git config --replace-all Author.Name Claude",
+    "git config set --global author.name Claude",
+    "git config set -- author.name Claude",
+    "git -C . config author.name Claude",
+    "git -P config author.name Claude",
+    "git --no-pager config author.name Claude",
+    "/usr/bin/git config author.name Claude",
+    "sudo git config author.name Claude",
+    "git config set --comment -e author.name Claude",
+    "git config set --comment --list author.name Claude",
+    "git config set --value -l author.name Claude",
+    "git config set --all --value=x --comment -e author.name Claude",
+    "git config --comment -l User.Name Claude",
+    "git config --comm -e User.Name Claude",
+    "git config --co -l author.name Claude",
+    "git config set --v -l author.name Claude",
+    "git config -zf -l author.name Claude",
+    "git config -f -l author.name Claude",
+    "git config author.name Claude -l",
+    "git config author.name Claude --get",
+    "git config author.name Claude -- -l",
+    "git config --type -l author.name Claude",
+    "git config --default --get author.name Claude",
+    "git config foo.name Claude; git config --rename-section foo author",
+    "git config foo.name Claude; git config rename-section foo author",
+    "git config alias.ci '-c user.name=Claude commit'; git ci",
+    "git -c alias.ci='-c author.name=Claude commit' ci",
+    "git -c alias.ci='-c user.name=Claude commit' ci",
+    "git config alias.ci '-c author.\"name\"=Claude commit'; git ci",
+    "git config alias.ci '-c author.name=Cl\"au\"de commit'; git ci",
+    "git -c 'alias.ci=-c author.name=Cl\\aude commit' ci",
+    "git -c alias.ci='-c user.\"email\"=claude@anthropic.com commit' ci",
+    "git clone -c 'alias.ci=-c author.\"name\"=Claude commit' . cl; git -C cl ci",
+    "git clone --config alias.ci='-c author.name=Claude commit' . c2",
+    "git -c alias.cfg=config cfg author.name Claude",
+    "git config alias.ci 'commit --author=\"Claude <c@x>\"'; git ci",
+    "git config alias.who \"log --author=Claude\"",
+    "git clone --config=author.name=Claude . c2",
+    "git clone --conf author.name=Claude . c2",
+    "git clone --confi=Author.Email=noreply@anthropic.com . c2",
+    "git clone --config user.name=Claude . c2",
+    "git clone -c author.name=Claude . c2",
+    "git clone -c Author.Name=Claude . c2",
+    "git clone -q -cauthor.name=Claude . c2; git -C c2 commit -m x",
+    "git clone -cuser.name=Claude . c2",
+    "git clone -q4cauthor.name=Claude . c2",
+    "git clone -6qcauthor.name=Claude . c2",
+    "git clone -ocauthor.name=Claude . c2",
+    "git clone --c=author.name=Claude . c2",
+    "git clone -qcCommitter.Email=noreply@anthropic.com . c2",
+    "git clone -c core.autocrlf=false . c2",
+    "git rebase -x 'git clone -cauthor.name=Claude . c2' HEAD",
+    "git rebase -x 'EMAIL=noreply@anthropic.com git commit --amend --no-edit' HEAD~1",
+    "git submodule foreach 'git -c author.name=Claude commit -m x'",
+    "git bisect run sh -c 'EMAIL=noreply@anthropic.com git commit -m x'",
+    "declare -n R=EMAIL; export R=noreply@anthropic.com; git commit -m x",
+    "declare -n R=GIT_AUTHOR_NAME; export R=Claude; git commit -m x",
+    "builtin export EMAIL=noreply@anthropic.com; git commit -m x",
+    "command export EMAIL=noreply@anthropic.com; git commit -m x",
+    "set -a; EMAIL=noreply@anthropic.com; git commit -m x",
+    "time -p EMAIL=noreply@anthropic.com git commit -m x",
+    "f() { local -x EMAIL=noreply@anthropic.com; git commit -m x; }; f",
+    "echo $(EMAIL=noreply@anthropic.com git commit -m x)",
+    "echo `EMAIL=noreply@anthropic.com git commit -m x`",
+    "cat <(EMAIL=noreply@anthropic.com git commit -m x)",
+    "case x in x) EMAIL=noreply@anthropic.com git commit -m x;; esac",
+    "function f { EMAIL=noreply@anthropic.com git commit -m x; }",
+    "{ EMAIL=noreply@anthropic.com git commit -m x; }",
+    "! EMAIL=noreply@anthropic.com git commit -m x",
+    "sudo -u ci EMAIL=noreply@anthropic.com git commit -m x",
+    "typeset -x EMAIL=noreply@anthropic.com; git commit -m x",
+    "declare -gx EMAIL=noreply@anthropic.com; git commit -m x",
+    "readonly EMAIL=noreply@anthropic.com; git commit -m x",
+    "export -- EMAIL=noreply@anthropic.com; git commit -m x",
+    "env -- EMAIL=noreply@anthropic.com git commit -m x",
+    "EMAIL=${USER:-u}@anthropic.com git commit -m x",
+    ': "${GIT_AUTHOR_NAME=Claude}"; export GIT_AUTHOR_NAME; git commit -m x',
+    ': "${GIT_COMMITTER_EMAIL:=noreply@anthropic.com}"; git commit -m x',
+    'set -a; : > "${EMAIL:=noreply@anthropic.com}.txt"; git commit -m x',
+    'export GIT_AUTHOR_NAME=; : 2> "${GIT_AUTHOR_NAME:=Claude}.log"; git commit -m x',
+    '{ :; } 2>"${GIT_AUTHOR_EMAIL:=noreply@anthropic.com}"; git commit -m x',
+    'exec 3> "${EMAIL:=noreply@anthropic.com}.log"; git commit -m x',
+    ': <<< "${EMAIL:=noreply@anthropic.com}"; git commit -m x',
+    ": <<EOF\n${EMAIL:=noreply@anthropic.com}\nEOF\ngit commit -m x",
+    ": <<EOF\n${GIT_COMMITTER_NAME:=Claude}\nEOF\ngit commit -m x",
+    ': "${EMAIL:=${USER:-u}@anthropic.com}"; git commit -m x',
+    ': "${GIT_AUTHOR_NAME:=${X-}Claude}"; git commit -m x',
+    'for w in "${EMAIL:=noreply@anthropic.com}"; do git commit -m x; done',
+    '[[ -n "${EMAIL:=noreply@anthropic.com}" ]]; git commit -m x',
+    ': > "$(git -c author.name=Claude commit -m x)x.log"',
+    ': > "$(git commit --author="Claude <c@x>" -m x)x.log"',
+    "printf 'commit refs/heads/main\\ncommitter Claude <c@x> 0 +0000\\n' | git fast-import",
+    "git -c $'author.name=Cl\\x61ude' commit -m x",
+    "cat <<EOF > env.sh\nexport EMAIL=noreply@anthropic.com\nEOF",
+    "cat <<'EOF' > env.sh\nexport EMAIL=noreply@anthropic.com\nEOF",
+    "git commit -m 'EMAIL=noreply@anthropic.com is the bot address'",
+    "git commit -m 'author.name=Claude'",
+    "git commit -m 'set author.name Claude'",
+    "git tag -m 'EMAIL=noreply@anthropic.com' v1",
+    "git notes add -m 'author.name=Claude'",
+    "echo EMAIL=noreply@anthropic.com",
+    "python3 -c 'print(1)' EMAIL=noreply@anthropic.com",
+    "grep -rn author.name .claude/",
+    "grep -rln Author.Email .claude/settings.json",
+    "rg -n committer.email CLAUDE.md AGENTS.md",
+    "grep user.email CLAUDE.md",
+    "grep config author.name Claude",
+    "grep -c author.name=Claude commits.log",
+    "grep -lc 'author.email=claude@anthropic.com' docs/x.md",
+    "wc -c author.name=Claude",
+    "ls -lc author.name=Claude.txt",
+    "git config --get-regexp author.name claude",
+    "git config get --all author.name claude",
+    "git config list --show-origin author.name claude",
+    "git log -1 --format='%an' -- author.email claude.txt",
+    "git log --author=Claude -1",
+    "git shortlog --author=Claude",
+    "git var GIT_AUTHOR_IDENT",
+    "printenv EMAIL",
+    "echo ${EMAIL:-noreply@anthropic.com}",
+)
+
+
+def _cmo_quotings(value):
+    """The quoting forms of one shell word holding value: bare when it holds no space, then single- and
+    double-quoted."""
+    forms = ["'{}'".format(value), '"{}"'.format(value)]
+    return forms if " " in value else [value] + forms
+
+
+def _cmo_table_failures(mod):
+    """Failures when a name the corpus derives is not one the guard tables of mod read."""
+    out = []
+    for role in ("AUTHOR", "COMMITTER"):
+        for part in ("NAME", "EMAIL"):
+            if not mod.GIT_ENV_RE.match("GIT_{}_{}=x".format(role, part)):
+                out.append("(cmo-table-var) GIT_{}_{} is not an identity variable of GIT_ENV_RE".format(role, part))
+    if not mod.EMAIL_ENV_RE.match("EMAIL=x"):
+        out.append("(cmo-table-email) EMAIL is not read by EMAIL_ENV_RE")
+    for scope in ("user", "author", "committer"):
+        for part in ("name", "email"):
+            if not mod.IDENTITY_CONF_NAME_RE.fullmatch("{}.{}".format(scope, part)):
+                out.append("(cmo-table-key) {}.{} is not an IDENTITY_CONF_NAME_RE name".format(scope, part))
+    for name in ("_CMTIDN_GIT_WRAPPERS", "_CMTIDN_DECLARE_WORDS", "_CMTIDN_CONFIG_OPTS"):
+        if not getattr(mod, name, None):
+            out.append("(cmo-table-words) the guard table {} is missing or empty".format(name))
+    return out
+
+
+def _cmo_corpus(mod):
+    """(corpus, core): the sorted distinct oracle commands built from the wrapper, declaration and config
+    option tables of mod (this tree's hook), the identity variables and config keys listed here, and the
+    pinned forms, and the core subset that is also judged unparsed and past the read limit."""
+    commit = "git commit -m x"
+    variables = ["GIT_{}_{}".format(role, part) for role in ("AUTHOR", "COMMITTER")
+                 for part in ("NAME", "EMAIL")] + ["EMAIL"]
+    keys = ["{}.{}".format(scope, part) for scope in ("user", "author", "committer") for part in ("name", "email")]
+    wrappers = sorted(mod._CMTIDN_GIT_WRAPPERS)
+    declares = sorted(mod._CMTIDN_DECLARE_WORDS)
+    config_opts = sorted(mod._CMTIDN_CONFIG_OPTS)
+    forms = set(_CMO_PINNED) | set(_CMO_NEW_DENIES)
+    core = []
+    for value in _CMO_AI_VALUES:
+        quoted = _cmo_quotings(value)
+        for var in variables:
+            for q in quoted:
+                assign = "{}={}".format(var, q)
+                shaped = ["{} {}".format(assign, commit), "{}+={} {}".format(var, q, commit),
+                          "export {}; {}".format(assign, commit), "{}; export {}; {}".format(assign, var, commit),
+                          "{} git -C . commit -m x".format(assign), "( {} {} )".format(assign, commit),
+                          "if true; then {} {}; fi".format(assign, commit), "true && {} {}".format(assign, commit)]
+                shaped += ["{} {}; {}".format(word, assign, commit) for word in declares]
+                shaped += ["{} {} {}".format(word, assign, commit) for word in wrappers]
+                forms.update(shaped)
+                if q is quoted[0] and value in _CMO_AI_VALUES[:2]:
+                    core.extend(shaped[:3])
+            forms.add(': "${{{}:={}}}"; export {}; {}'.format(var, value, var, commit))
+        for key in keys:
+            scope, part = key.split(".")
+            for spelled in (key, "{}.{}".format(scope.capitalize(), part.capitalize()), key.upper()):
+                for q in quoted:
+                    pair = "{}={}".format(spelled, q)
+                    shaped = ["git -c {} commit -m x".format(pair), "git -C . -c {} commit -m x".format(pair),
+                              "git -c commit.gpgsign=false -c {} commit -m x".format(pair),
+                              "git config {} {}; {}".format(spelled, q, commit),
+                              "git config --global {} {}".format(spelled, q),
+                              "git config set {} {}".format(spelled, q), "git config --add {} {}".format(spelled, q),
+                              "git config --file .git/config {} {}".format(spelled, q),
+                              "git config {}".format(pair), "echo {} {}".format(spelled, q),
+                              "git clone --config={} . c2".format(pair), "git clone -c{} . c2".format(pair),
+                              "git clone -qc{} . c2".format(pair)]
+                    shaped += ["git clone {} {} . c2".format(opt, pair) for opt in config_opts]
+                    shaped += ["{} git -c {} commit -m x".format(word, pair) for word in wrappers]
+                    shaped += ["{} git config {} {}".format(word, spelled, q) for word in wrappers]
+                    forms.update(shaped)
+                    if spelled == key and q is quoted[0] and value in _CMO_AI_VALUES[:2]:
+                        core.extend(shaped[:4])
+                forms.add("git -c '{}={}' commit -m x".format(spelled, value))
+                forms.add('git -c "{}={}" commit -m x'.format(spelled, value))
+                if " " not in value:
+                    forms.add("git -c 'alias.ci=-c {}={} commit' ci".format(spelled, value))
+                    forms.add("git config alias.ci '-c {}={} commit'; git ci".format(spelled, value))
+        ident = "Bot <{}>".format(value) if "@" in value else "{} <c@example.invalid>".format(value)
+        for q in _cmo_quotings(ident):
+            for prefix in ("--author", "--autho", "--auth", "--aut", "--au"):
+                forms.add("git commit {}={} -m x".format(prefix, q))
+                forms.add("git commit {} {} -m x".format(prefix, q))
+            forms.update("{} git commit --author={} -m x".format(word, q) for word in wrappers)
+        trailer = ['git commit -m fix -m "Co-Authored-By: {}"'.format(ident),
+                   "git commit -m 'fix\n\nCo-authored-by: {}'".format(ident),
+                   "git commit --author='{}' -m x".format(ident)]
+        forms.update(trailer)
+        if value in _CMO_AI_VALUES[:2]:
+            core.extend(trailer)
+    for command in list(core):
+        forms.add(command + " '")  # an unbalanced quote: the reader cannot parse it and the fallback decides
+        forms.add("cat <<'EOF'\nnote\nEOF\n" + command)
+        forms.add(command + "; echo done")
+    return sorted(forms), sorted(set(core))
+
+
+def _cmo_decider(handler, cwd):
+    """A memoised decide(command) for one commit_identity handler with the payload cwd at cwd: the
+    _decision value, or 'raised NAME' when the handler raises (never read as an allow)."""
+    cache = {}
+
+    def decide(command):
+        if command not in cache:
+            try:
+                cache[command] = _decision(handler, command, cwd=cwd)
+            except Exception as exc:  # the oracle reports a raise; it never reads one as a decision
+                cache[command] = "raised {}".format(type(exc).__name__)
+        return cache[command]
+    return decide
+
+
+def _cmo_findings(base_decide, tree_decide, corpus, allowed, must_deny):
+    """The oracle's failure messages: a corpus command the base denies (or raises on) that the tree does not
+    deny and that allowed does not name; a corpus command the tree raises on that the base decides without
+    raising, whatever the base decides and whether or not allowed names it; an allowed entry the corpus does
+    not hold or that no longer differs; a must_deny form the tree does not deny."""
+    out = []
+    differ = set()
+    for command in corpus:
+        base = base_decide(command)
+        tree = tree_decide(command)
+        if (base == "deny" or base.startswith("raised")) and tree != "deny":
+            differ.add(command)
+            if command not in allowed:
+                out.append("(cmo-newly-allowed) the base decides {} and this tree decides {} for {!r}"
+                           .format(base, tree, command[:300]))
+        if tree.startswith("raised") and not base.startswith("raised"):
+            out.append("(cmo-head-raised) the base decides {} and this tree {} for {!r}"
+                       .format(base, tree, command[:300]))
+    for command in sorted(allowed):
+        if command not in differ:
+            out.append("(cmo-allow-stale) the allowlist entry {!r} is not a corpus command that the base denies "
+                       "and this tree allows; remove it".format(command[:300]))
+    for command in must_deny:
+        tree = tree_decide(command)
+        if tree != "deny":
+            out.append("(cmo-new-deny) this tree decides {} for {!r}, a form the change exists to deny"
+                       .format(tree, command))
+    return out
+
+
+def _cmo_load_base(tmp):
+    """The hook module at _CMO_BASE, read with git show (replacement objects disabled) from this checkout and
+    loaded under its own module name. Raises on a git or import failure."""
+    root = str(repo_root())
+    # The -c value is an f-string with a literal "safe.directory=" head, so its config key is fixed in the
+    # source and the launch cannot define an alias (a concatenation onto an unread name would not fix it).
+    shown = subprocess.run(["git", "--no-replace-objects", "-c", f"safe.directory={root}", "-C", root, "show",
+                            "{}:{}".format(_CMO_BASE, _CMO_HOOK_PATH)],
+                           capture_output=True, timeout=60, env=git_fixture_env(GIT_NO_REPLACE_OBJECTS="1"))
+    if shown.returncode != 0:
+        raise RuntimeError("git show {}:{} failed (rc={}): {}".format(
+            _CMO_BASE, _CMO_HOOK_PATH, shown.returncode, shown.stderr.decode("utf-8", "replace").strip()))
+    path = tmp / "cmo_base_hooks.py"
+    path.write_bytes(shown.stdout)
+    spec = importlib.util.spec_from_file_location("cmo_base_hooks", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _test_cmtidn_oracle(failures, tmp):
+    """(cmo-*) The commit_identity differential oracle (see the cmo comment above) and its mutation checks: a
+    revert of the change (the base decides as the tree), a tree that raises on a command the base allows and a
+    deleted allowlist entry each turn it red."""
+    try:
+        base_mod = _cmo_load_base(tmp)
+    except (OSError, RuntimeError, SyntaxError, ImportError, subprocess.SubprocessError) as exc:
+        failures.append("(cmo-load) could not load the base hook: {}: {}".format(type(exc).__name__, exc))
+        return
+    table = _cmo_table_failures(aiqt_hooks)
+    if table:
+        failures.extend(table)
+        return
+    corpus, core = _cmo_corpus(aiqt_hooks)
+    if len(corpus) < _CMO_MIN_CORPUS or not core:
+        failures.append("(cmo-corpus-size) the corpus holds {} commands and its core {}, fewer than {} and 1"
+                        .format(len(corpus), len(core), _CMO_MIN_CORPUS))
+        return
+    base_decide = _cmo_decider(base_mod.commit_identity, str(_init_repo(tmp / "cmo-base-repo")))
+    tree_decide = _cmo_decider(aiqt_hooks.commit_identity, str(_init_repo(tmp / "cmo-tree-repo")))
+    found = _cmo_findings(base_decide, tree_decide, corpus, _CMO_NEWLY_ALLOWED, _CMO_NEW_DENIES)
+    failures.extend(found)
+    # Past the read limit: each core command padded to one character more than the tree reads.
+    limit = aiqt_hooks._CMTIDN_READ_LIMIT
+    padded = [command + " " * (limit + 1 - len(command)) for command in core]
+    for command in padded:
+        base, tree = base_decide(command), tree_decide(command)
+        if (base == "deny" or base.startswith("raised")) and tree != "deny":
+            failures.append("(cmo-too-long) the base decides {} and this tree decides {} for {!r} padded past the "
+                            "read limit".format(base, tree, command.rstrip()))
+        if tree.startswith("raised") and not base.startswith("raised"):
+            failures.append("(cmo-too-long-raised) the base decides {} and this tree {} for {!r} padded past the "
+                            "read limit".format(base, tree, command.rstrip()))
+    # Mutation: a revert of the change, the base deciding in the tree's place, must turn the oracle red.
+    if not _cmo_findings(base_decide, base_decide, corpus, _CMO_NEWLY_ALLOWED, _CMO_NEW_DENIES):
+        failures.append("(cmo-mutant-revert) the oracle stays green when the base decides in the tree's place")
+    # Mutation: a tree that raises on a corpus command the base allows, outside the forms the change exists to
+    # deny, must turn the oracle red, where the oracle once reported a raise only as a decision change or in
+    # must_deny and so stayed green on it.
+    calm = next((c for c in corpus if base_decide(c) == "allow" and c not in _CMO_NEW_DENIES), None)
+    if calm is None:
+        failures.append("(cmo-mutant-raise-victim) the corpus holds no command outside the new denies that the "
+                        "base allows")
+    else:
+        def raising(command):
+            return "raised RuntimeError" if command == calm else tree_decide(command)
+        if not any("this tree raised RuntimeError for " + repr(calm[:300]) in line
+                   for line in _cmo_findings(base_decide, raising, corpus, _CMO_NEWLY_ALLOWED, _CMO_NEW_DENIES)):
+            failures.append("(cmo-mutant-head-raised) the oracle stays green when the tree raises on {!r}, a corpus "
+                            "command the base allows".format(calm[:300]))
+    # Mutation: deleting an allowlist entry must turn the oracle red. Each real entry is deleted in turn, and a
+    # synthetic entry pins the mechanism while the allowlist is empty: a tree that newly allows the first
+    # command the base denies is green with that command allowlisted and red without it.
+    for command in sorted(_CMO_NEWLY_ALLOWED):
+        rest = {k: v for k, v in _CMO_NEWLY_ALLOWED.items() if k != command}
+        if not any(repr(command[:300]) in line
+                   for line in _cmo_findings(base_decide, tree_decide, corpus, rest, _CMO_NEW_DENIES)):
+            failures.append("(cmo-mutant-allow-entry) deleting the allowlist entry {!r} leaves the oracle green"
+                            .format(command[:300]))
+    victim = next((c for c in corpus if base_decide(c) == "deny" and c not in _CMO_NEW_DENIES), None)
+    if victim is None:
+        failures.append("(cmo-mutant-victim) the corpus holds no command the base denies")
+        return
+
+    def loosened(command):
+        return "allow" if command == victim else tree_decide(command)
+    with_entry = dict(_CMO_NEWLY_ALLOWED)
+    with_entry[victim] = "synthetic entry for the deletion mutant"
+    kept = _cmo_findings(base_decide, loosened, corpus, with_entry, _CMO_NEW_DENIES)
+    dropped = _cmo_findings(base_decide, loosened, corpus, _CMO_NEWLY_ALLOWED, _CMO_NEW_DENIES)
+    if any(repr(victim[:300]) in line for line in kept):
+        failures.append("(cmo-mutant-entry-kept) a newly allowed command named in the allowlist is still reported")
+    if not any(repr(victim[:300]) in line for line in dropped):
+        failures.append("(cmo-mutant-entry-dropped) deleting the allowlist entry of a newly allowed command "
+                        "leaves the oracle green")
+
+
 def _selftest_exit_code(failures, cannot_evaluate):
     """1 for any real failure, else 2 when a case could not be evaluated (a bound fired), else 0."""
     if failures:
@@ -31555,6 +32011,809 @@ def _main_isolated(monitor):
         # commit subcommand (which had made the AI --author invisible) -> DENY.
         ciexpect("(ci-b1) backslash-newline AI-author commit does not slip via an empty argv element, denies",
                  "git \\\n commit --author='Claude <c@x>' -m y", "deny")
+        # git 2.53.0 takes the author from author.name and author.email and the committer from committer.name
+        # and committer.email ahead of user.name and user.email, reads a config name in any case, and takes the
+        # address of both from EMAIL when no user.email is set; a prefix assignment by '+=' sets a variable too.
+        # Each deny vector below allowed while only user.name, user.email and the GIT_AUTHOR_ and GIT_COMMITTER_
+        # variables were read, and with an exact-case pair name; the controls pin a value that names no AI, a
+        # config name git does not read (a longer or shorter key), an environment name spelled otherwise (git
+        # reads EMAIL only as spelled), and a commit message that merely holds the config name.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc1) an AI author.name given by -c denies", "git -c author.name=Claude commit -m x"),
+                ("(ci-idc2) an AI author.email given by -c denies",
+                 "git -c author.email=noreply@anthropic.com commit -m x"),
+                ("(ci-idc3) an AI committer.name given by -c denies", "git -c committer.name=Claude commit -m x"),
+                ("(ci-idc4) an AI committer.email given by -c denies",
+                 "git -c committer.email=bot@openai.com commit -m x"),
+                ("(ci-idc5) an AI author.name given by -c in mixed case denies",
+                 "git -c Author.Name=Claude commit -m x"),
+                ("(ci-idc6) an AI EMAIL assigned before git commit denies",
+                 "EMAIL=noreply@anthropic.com git commit -m x"),
+                ("(ci-idc7) an AI EMAIL exported in a prior segment denies",
+                 "export EMAIL=noreply@anthropic.com; git commit -m x"),
+                ("(ci-idc8) an AI EMAIL appended by += before git commit denies",
+                 "EMAIL+=noreply@anthropic.com git commit -m x"),
+                ("(ci-idc9) an AI git identity variable appended by += before git commit denies",
+                 "GIT_AUTHOR_NAME+=Claude git commit -m x"),
+                ("(ci-idc10) a config author.name pair naming an AI denies", "git config author.name Claude"),
+                ("(ci-idc11) a config committer.email pair in mixed case naming an AI denies",
+                 "git config --global Committer.Email noreply@anthropic.com"),
+                ("(ci-idc12) a config user.name pair in mixed case naming an AI denies",
+                 "git config User.Name Claude"),
+                ("(ci-idc13) an AI author.name in a command the tokenizer cannot parse denies",
+                 "git -c author.name='Claude' commit -m 'x"),
+                ("(ci-idc14) an AI EMAIL in a command the tokenizer cannot parse denies",
+                 'EMAIL=x@anthropic.com git commit -m "x')):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-c1) an author.name that names no AI allows", "git -c author.name=Alice commit -m x"),
+                ("(ci-idc-c2) an EMAIL that names no AI allows", "EMAIL=alice@example.com git commit -m x"),
+                ("(ci-idc-c3) a longer config name git does not read as author.name allows",
+                 "git -c author.names=Claude commit -m x"),
+                ("(ci-idc-c4) a shorter config name git does not read as author.name allows",
+                 "git -c author.nam=Claude commit -m x"),
+                ("(ci-idc-c5) a lower-case email variable, which git does not read, allows",
+                 "email=noreply@anthropic.com git commit -m x"),
+                ("(ci-idc-c6) a variable whose name only ends in EMAIL allows",
+                 "XEMAIL=noreply@anthropic.com git commit -m x"),
+                ("(ci-idc-c7) a commit message that holds author.name and an AI name allows",
+                 "git commit -m 'author.name Claude'")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
+        # The config NAME VALUE pair of the author and committer names, and of user.name and user.email in a
+        # case other than lower, is judged only on a git config command that sets a value, so a read-only
+        # command that merely names one of them beside an AI word allows; an EMAIL word is judged only where
+        # the shell or a wrapper runs it as an assignment, so one inside a commit message or another program's
+        # operand allows. Each deny vector below sets an identity git records; each allow control denied while
+        # the pair was judged on any two adjacent words and EMAIL in any word.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc17) a config set author.name naming an AI denies", "git config set author.name Claude"),
+                ("(ci-idc18) a config --file author.email pair naming an AI denies",
+                 "git config --file .git/config author.email noreply@anthropic.com"),
+                ("(ci-idc19) a config --add committer.name pair naming an AI denies",
+                 "git config --add committer.name Claude"),
+                ("(ci-idc20) a config author.name pair behind sudo and git -C denies",
+                 "sudo -u ci git -C repo config author.name Claude"),
+                ("(ci-idc21) a config author.name pair through a function standing for git denies",
+                 "f() { git \"$@\"; }; f config author.name Claude"),
+                ("(ci-idc22) an AI EMAIL declared with declare -x in a prior segment denies",
+                 "declare -x EMAIL=noreply@anthropic.com; git commit -m x"),
+                ("(ci-idc23) an AI EMAIL given to env before git commit denies",
+                 "env EMAIL=noreply@anthropic.com git commit -m x"),
+                ("(ci-idc24) an AI EMAIL given to sudo after its options denies",
+                 "sudo -u ci EMAIL=noreply@anthropic.com git commit -m x"),
+                ("(ci-idc25) an AI EMAIL given as an env -S operand denies",
+                 "env -S 'EMAIL=noreply@anthropic.com' git commit -m x"),
+                ("(ci-idc26) an AI EMAIL assigned after if denies",
+                 "if EMAIL=noreply@anthropic.com git commit -m x; then :; fi"),
+                ("(ci-idc27) an AI user.name pair in exact case on a read-only command still denies",
+                 "grep user.email CLAUDE.md")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-c9) grep naming author.name beside an AI path allows", "grep -rn author.name .claude/"),
+                ("(ci-idc-c10) grep naming Author.Email beside an AI path allows",
+                 "grep -rln Author.Email .claude/settings.json"),
+                ("(ci-idc-c11) rg naming committer.email beside an AI path allows",
+                 "rg -n committer.email CLAUDE.md AGENTS.md"),
+                ("(ci-idc-c12) git config --get-regexp of author.name allows",
+                 "git config --get-regexp author.name claude"),
+                ("(ci-idc-c13) git config --get of author.name allows", "git config --get author.name claude"),
+                ("(ci-idc-c14) git config --get-regexp given by a prefix allows",
+                 "git config --get-re author.name claude"),
+                ("(ci-idc-c15) git config --unset of author.name allows", "git config --unset author.name Claude"),
+                ("(ci-idc-c16) git config --list allows", "git config --list --show-origin author.name claude"),
+                ("(ci-idc-c17) git config get of author.name allows", "git config get author.name claude"),
+                ("(ci-idc-c18) git log with author.email and an AI path as pathspecs allows",
+                 "git log -1 --format='%an' -- author.email claude.txt")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
+        # A command whose raw text assigns an identity a value that names an AI, or a value the text does not
+        # spell in a command that names an AI anywhere, denies (_cmtidn_identity_set_ai), so text that only
+        # quotes such an assignment, which the word reader leaves alone, is the disclosed over-deny of that
+        # fail-closed rule.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-o1) a commit message that starts with an AI EMAIL assignment denies (over-deny)",
+                 "git commit -m 'EMAIL=noreply@anthropic.com is the bot address'"),
+                ("(ci-idc-o2) a commit message of an AI author.name assignment denies (over-deny)",
+                 "git commit -m 'author.name=Claude'"),
+                ("(ci-idc-o3) an AI EMAIL operand of python3 denies (over-deny)",
+                 "python3 -c 'print(1)' EMAIL=noreply@anthropic.com"),
+                ("(ci-idc-o4) an AI EMAIL that echo only prints denies (over-deny)", "echo EMAIL=noreply@anthropic.com"),
+                ("(ci-idc-o5) a commit message that quotes -c author.name with an AI name denies (over-deny)",
+                 "git commit -m 'use -c author.name=Claude in an alias'"),
+                ("(ci-idc-o6) a git clone -o value that holds c and an AI author.name pair denies (over-deny)",
+                 "git clone -q -ocauthor.name=Claude . c2"),
+                ("(ci-idc-o8) an EMAIL value the text does not spell beside an AI product name denies (over-deny)",
+                 "EMAIL=\"$ME\" git commit -m 'fix the claude adapter'")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        # The raw-text rule judges the VALUE assigned to an identity key, not an AI name anywhere in the command,
+        # so a commit that sets the maintainer's identity by a spelled value is allowed when its message or paths
+        # name .claude/ or CLAUDE.md. The first two rows are the review's examples verbatim; the next two are
+        # written to the same shape for author.* pairs and an exported EMAIL before git add of such paths. Each
+        # allowed row is checked to name an identity assignment form and an AI name (ci-idc-p-shape), so it pins
+        # the over-deny of the rule that denied both anywhere: that rule cannot return without turning it red.
+        # Each AI twin sets the same keys to an AI identity and denies.
+        _ci_maint_rows = (
+            ("(ci-idc-p1) the maintainer's -c user.name and user.email beside a .claude/ message allow",
+             "git -c user.name='Jeff Posluns' -c user.email=jeff@posluns.ca commit -m 'rules: regenerate "
+             ".claude/rules'",
+             "git -c user.name='Claude' -c user.email=noreply@anthropic.com commit -m 'rules: regenerate "
+             ".claude/rules'"),
+            ("(ci-idc-p2) the maintainer's EMAIL beside a CLAUDE.md message allows",
+             "EMAIL=jeff@posluns.ca git commit -m 'gen: refresh CLAUDE.md index'",
+             "EMAIL=noreply@anthropic.com git commit -m 'gen: refresh CLAUDE.md index'"),
+            ("(ci-idc-p3) the maintainer's -c author.name and author.email beside a .claude/ message allow",
+             "git -c author.name='Jeff Posluns' -c author.email=jeff@posluns.ca commit -m 'hooks: sync "
+             ".claude/settings.json'",
+             "git -c author.name='Claude' -c author.email=noreply@anthropic.com commit -m 'hooks: sync "
+             ".claude/settings.json'"),
+            ("(ci-idc-p4) the maintainer's exported EMAIL before git add of .claude/ and CLAUDE.md paths allows",
+             "export EMAIL=jeff@posluns.ca; git add .claude/rules CLAUDE.md; git commit -m 'rules: refresh'",
+             "export EMAIL=noreply@anthropic.com; git add .claude/rules CLAUDE.md; git commit -m 'rules: refresh'"),
+            ("(ci-idc-p5) a human EMAIL beside a commit message that names an AI product allows (the over-deny "
+             "this rule had, pinned so it cannot return)",
+             "EMAIL=alice@example.com git commit -m 'fix the claude adapter'",
+             "EMAIL=claude@anthropic.com git commit -m 'fix the claude adapter'"))
+        for _ci_label, _ci_allow, _ci_twin in _ci_maint_rows:
+            if not (aiqt_hooks._CMTIDN_IDENTITY_SET_RE.search(_ci_allow)
+                    and aiqt_hooks.AI_IDENTITY_RE.search(_ci_allow)):
+                failures.append("(ci-idc-p-shape) {}: the row no longer names an identity assignment form and an AI "
+                                "name, so it does not pin the over-deny".format(_ci_label))
+            ciexpect(_ci_label, _ci_allow, "allow")
+            ciexpect(_ci_label + " [AI twin denies]", _ci_twin, "deny")
+        # author.* and committer.* writes behind find -exec, flock, ionice and xargs are judged as user.* ones
+        # are, xargs reading the value from its input included; a GIT_CONFIG_VALUE_<n> is judged when a
+        # GIT_CONFIG_KEY_<n> names an identity key. Each deny vector but ci-idc-g3 allowed before this change
+        # (ci-idc-g3 denied already and pins that the --config-env form still denies); the controls set a value
+        # that names no AI or a key that is not an identity key.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-w1) find -exec git config author.name naming an AI denies",
+                 "find . -exec git config author.name Claude ';'"),
+                ("(ci-idc-w2) find -execdir git config committer.email naming an AI denies",
+                 "find . -execdir git config committer.email noreply@anthropic.com ';'"),
+                ("(ci-idc-w3) flock git config author.name naming an AI denies", "flock L git config author.name Claude"),
+                ("(ci-idc-w4) ionice git config committer.name naming an AI denies",
+                 "ionice -c3 git config committer.name Claude"),
+                ("(ci-idc-w5) xargs git config author.name with an AI value on its input denies",
+                 "echo Claude | xargs git config author.name"),
+                ("(ci-idc-w6) xargs git config committer.email with an AI value on its input denies",
+                 "echo noreply@anthropic.com | xargs git config committer.email"),
+                ("(ci-idc-g1) a GIT_CONFIG_VALUE_0 naming an AI for GIT_CONFIG_KEY_0=author.name denies",
+                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0=Claude git commit -m x"),
+                ("(ci-idc-g2) an exported GIT_CONFIG_VALUE_0 naming an AI for a quoted Committer.Email key denies",
+                 "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0='Committer.Email' "
+                 "GIT_CONFIG_VALUE_0=\"noreply@anthropic.com\"; git commit -m x"),
+                ("(ci-idc-g3) a --config-env identity pair beside an AI value denies",
+                 "V=Claude git --config-env=author.name=V commit -m x")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-w-c1) xargs git config author.name with a human value on its input allows",
+                 "echo Alice | xargs git config author.name"),
+                ("(ci-idc-w-c2) find -exec git config author.name with a human value allows",
+                 "find . -exec git config author.name Alice ';'"),
+                ("(ci-idc-w-c3) find -exec git add of .claude/ files allows",
+                 "find .claude -name '*.md' -exec git add {} ';'"),
+                ("(ci-idc-g-c1) a GIT_CONFIG_VALUE_0 for a key that is not an identity key allows",
+                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=claude-pager git log"),
+                ("(ci-idc-g-c2) a human GIT_CONFIG_VALUE_0 for author.name beside a CLAUDE.md message allows",
+                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0=Alice git commit -m 'docs: "
+                 "CLAUDE.md'")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
+        # A quote character in a comment or a heredoc body is read as a quote by the raw reader, which can split
+        # a later value before its AI part, so an identity assignment at or after such a construct is judged as a
+        # value the text does not spell (ci-idc-s1 to s6); so is a {} placeholder or an xargs -I replacement
+        # string (ci-idc-r1 to r4), and xargs behind a wrapper reads the value from its input as bare xargs does
+        # (ci-idc-x1 to x4). Each deny vector allowed before this change; the controls set the maintainer's
+        # identity after a comment or before a quoted heredoc, or name no AI.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-s1) an AI EMAIL default after a comment holding an apostrophe denies",
+                 "# don't\nset -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-s2) a --config-env pair after a quoted heredoc holding an apostrophe denies",
+                 "cat > msg <<'EOF'\nDon't merge yet\nEOF\nV='Claude Code' git --config-env=author.name=V commit -m x"),
+                ("(ci-idc-s3) an AI GIT_AUTHOR_NAME default after a quoted heredoc holding an apostrophe denies",
+                 "cat >/dev/null <<'EOF'\ndon't\nEOF\nset -a; : ${GIT_AUTHOR_NAME:='Bot Claude'}; git commit -m x"),
+                ("(ci-idc-s4) an AI GIT_CONFIG_PARAMETERS pair after a comment holding an apostrophe denies",
+                 "# don't\nGIT_CONFIG_PARAMETERS=\"'author.name'='x Claude'\" git commit -m x"),
+                ("(ci-idc-s5) an AI GIT_CONFIG_VALUE_0 after a comment holding an apostrophe denies",
+                 "# don't\nGIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0='x Claude' git commit -m x"),
+                ("(ci-idc-s6) an AI EMAIL default after an unquoted heredoc holding an apostrophe denies",
+                 "cat >/dev/null <<EOF\ndon't\nEOF\nset -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-r1) an xargs -I{} placeholder as an author.name value beside an AI name denies",
+                 "echo Claude | xargs -I{} git -c author.name={} commit -m x"),
+                ("(ci-idc-r2) an xargs -I{} placeholder as an EMAIL value beside an AI address denies",
+                 "echo noreply@anthropic.com | xargs -I{} env EMAIL={} git commit -m x"),
+                ("(ci-idc-r3) a find -exec {} placeholder as an author.name value beside an AI name denies",
+                 "find . -name Claude -exec git -c author.name={} commit -m x ';'"),
+                ("(ci-idc-r4) an xargs -I replacement string as an author.name value beside an AI name denies",
+                 "echo Claude | xargs -I NAME git -c author.name=NAME commit -m x"),
+                ("(ci-idc-x1) xargs behind nice reading an AI author.name from its input denies",
+                 "echo Claude | nice xargs git config author.name"),
+                ("(ci-idc-x2) xargs behind env reading an AI author.name from its input denies",
+                 "echo Claude | env xargs git config author.name"),
+                ("(ci-idc-x3) xargs behind sudo reading an AI author.name from its input denies",
+                 "echo Claude | sudo -u ci xargs git config author.name"),
+                ("(ci-idc-x4) xargs behind timeout reading an AI author.name from its input denies",
+                 "echo Claude | timeout 5 xargs git config author.name")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-s-c1) the maintainer's EMAIL before a quoted heredoc holding an apostrophe allows",
+                 "EMAIL=jeff@posluns.ca git commit -F - <<'EOF'\nrules: regenerate .claude/rules\n\nDon't edit by "
+                 "hand.\nEOF"),
+                ("(ci-idc-s-c2) the maintainer's EMAIL after a comment holding an apostrophe allows",
+                 "# don't\nEMAIL=jeff@posluns.ca git commit -m 'docs: fix typo'"),
+                ("(ci-idc-x-c1) xargs behind nice with a human value on its input allows",
+                 "echo Alice | nice xargs git config author.name"),
+                ("(ci-idc-r-c1) xargs -I{} git add of .claude/ files allows",
+                 "git ls-files .claude | xargs -I{} git add {}")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
+        # A here-string or a heredoc feeding xargs git config is a command the shared tokenizer cannot parse, so
+        # the xargs stdin rule is applied to its raw words as well (_cmtidn_raw_stdin_identity_ai), and to its
+        # dequoted text in order when a construct the raw reading may misread comes first (ci-idc-h9). ci-idc-h1 to
+        # h5 are the shapes the review of this rule listed as allowed, h6 to h10 further shapes of the same kind,
+        # and each of the ten allowed before this change; the controls feed the maintainer's identity the same
+        # ways, or read a key beside a CLAUDE.md message, and name no AI identity as a value.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-h1) a here-string AI user.name fed to xargs git config denies",
+                 "xargs git config user.name <<< Claude"),
+                ("(ci-idc-h2) a here-string AI committer.email fed to xargs git config denies",
+                 "xargs git config committer.email <<< noreply@anthropic.com"),
+                ("(ci-idc-h3) a here-string AI committer.email fed to xargs behind nice -n 5 denies",
+                 "nice -n 5 xargs git config committer.email <<< noreply@anthropic.com"),
+                ("(ci-idc-h4) a here-string AI author.name fed to xargs -a /dev/stdin git config denies",
+                 "xargs -a /dev/stdin git config author.name <<< Claude"),
+                ("(ci-idc-h5) an unquoted heredoc AI author.name fed to xargs git config denies",
+                 "xargs git config author.name <<EOF\nClaude\nEOF"),
+                ("(ci-idc-h6) a tab-stripped heredoc AI user.email fed to xargs git config denies",
+                 "xargs git config user.email <<-EOF\n\tnoreply@anthropic.com\nEOF"),
+                ("(ci-idc-h7) a quoted here-string AI committer.name fed to xargs behind sudo -u ci denies",
+                 "sudo -u ci xargs git config committer.name <<< 'Claude Code'"),
+                ("(ci-idc-h8) a here-string AI user.name fed to xargs git config before a commit denies",
+                 "xargs git config user.name <<< \"Claude\"; git commit -m x"),
+                ("(ci-idc-h9) a here-string AI user.name fed to xargs after a heredoc holding an apostrophe denies",
+                 "cat >/dev/null <<'A'\ndon't\nA\nxargs git config user.name <<< Claude"),
+                ("(ci-idc-h10) a here-string AI author.name fed to xargs git config before a comment denies",
+                 "xargs git config author.name <<< Claude # note")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-h-c1) the maintainer's user.name in a here-string fed to xargs git config allows",
+                 "xargs git config user.name <<< 'Jeff Posluns'"),
+                ("(ci-idc-h-c2) the maintainer's user.email in a here-string fed to xargs git config allows",
+                 "xargs git config user.email <<< jeff@posluns.ca"),
+                ("(ci-idc-h-c3) the maintainer's committer.email in a here-string fed to xargs behind nice allows",
+                 "nice -n 5 xargs git config committer.email <<< jeff@posluns.ca"),
+                ("(ci-idc-h-c4) the maintainer's author.email fed to xargs -a /dev/stdin git config allows",
+                 "xargs -a /dev/stdin git config author.email <<< jeff@posluns.ca"),
+                ("(ci-idc-h-c5) the maintainer's author.name in a heredoc fed to xargs git config allows",
+                 "xargs git config author.name <<EOF\nJeff Posluns\nEOF"),
+                ("(ci-idc-h-c6) xargs git config --get user.name from a here-string beside a CLAUDE.md message allows",
+                 "xargs git config --get user.name <<< x; git commit -m 'docs: CLAUDE.md'")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
+        # Three routes the reader and the raw-text rule do not read (_cmtidn_unread_route_ai): an xargs argument
+        # file given as a process substitution feeding git config of an identity key (ci-idc-af1 to af6), a flock,
+        # su, runuser or script -c string running git config of an identity key with an AI value (ci-idc-cs1 to
+        # cs7), and an AI value joined from spelled identity-variable or GIT_CONFIG_VALUE_n assignments by +=
+        # (ci-idc-pj1 to pj5). Each deny vector allowed before this change; the controls set the maintainer's
+        # identity the same ways, read a key, or join a value that names no AI.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-af1) xargs -a of a process substitution naming an AI, feeding git config author.name, "
+                 "denies", "xargs -a <(echo Claude) git config author.name"),
+                ("(ci-idc-af2) xargs --arg-file= of a process substitution feeding git config user.name denies",
+                 "xargs --arg-file=<(printf 'Claude Code') git config user.name"),
+                ("(ci-idc-af3) xargs --arg-file of a process substitution feeding git config committer.email "
+                 "denies", "xargs --arg-file <(echo noreply@anthropic.com) git config committer.email"),
+                ("(ci-idc-af4) xargs -0a of a process substitution feeding git config --global user.name denies",
+                 "xargs -0a <(printf 'Claude\\0') git config --global user.name"),
+                ("(ci-idc-af5) xargs -a attached to a process substitution feeding git config set author.name "
+                 "denies", "xargs -a<(echo Claude) git config set author.name"),
+                ("(ci-idc-af6) xargs -a of a process substitution behind nice, before a commit, denies",
+                 "nice xargs -a <(echo Claude) git config user.name; git commit -m x"),
+                ("(ci-idc-cs1) flock -c running git config user.name with an AI value denies",
+                 "flock /tmp/l -c 'git config user.name Claude'"),
+                ("(ci-idc-cs2) su -c running git config author.email with an AI value denies",
+                 "su ci -c \"git config author.email noreply@anthropic.com\""),
+                ("(ci-idc-cs3) runuser -c running git config --global committer.name with an AI value denies",
+                 "runuser ci -c 'git config --global committer.name \"Claude Code\"'"),
+                ("(ci-idc-cs4) script -qc running git config user.email with an AI value denies",
+                 "script -qc 'git config user.email noreply@anthropic.com' /dev/null"),
+                ("(ci-idc-cs5) flock --command= running git config set author.name with an AI value denies",
+                 "flock --command='git config set author.name Claude' /tmp/l"),
+                ("(ci-idc-cs6) su with the -c string attached running git config user.name with an AI value denies",
+                 "su -c'git config user.name Claude' ci"),
+                ("(ci-idc-cs7) runuser -c running git config with an AI value between other commands denies",
+                 "runuser -u ci -c 'cd /repo && git config user.name Claude && git commit -m x'"),
+                ("(ci-idc-pj1) an AI EMAIL joined from two spelled assignments by += denies",
+                 "EMAIL=noreply@anthr; EMAIL+=opic.com; git commit -m x"),
+                ("(ci-idc-pj2) an AI GIT_AUTHOR_NAME joined by += in assignment words denies",
+                 "GIT_AUTHOR_NAME=Cla GIT_AUTHOR_NAME+=ude git commit -m x"),
+                ("(ci-idc-pj3) an exported GIT_COMMITTER_NAME joined by a quoted += denies",
+                 "export GIT_COMMITTER_NAME=Cl; GIT_COMMITTER_NAME+='aude Code'; git commit -m x"),
+                ("(ci-idc-pj4) an AI GIT_CONFIG_VALUE_0 joined by += for a user.name key denies",
+                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=Cla GIT_CONFIG_VALUE_0+=ude "
+                 "git commit -m x"),
+                ("(ci-idc-pj5) an AI EMAIL joined from three spelled assignments by += denies",
+                 "EMAIL=x; EMAIL+=@ant; EMAIL+=hropic.com; git commit -m x")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        # The same routes in spellings the rule did not read: a process substitution whose body starts with a
+        # subshell or a newline (ci-idc-af7 to af9; the newline before its ) is inside it, not a separator), a join
+        # that starts in a ${NAME:=VALUE} default (ci-idc-pj6, whose value ends at its }), and a join with an
+        # assignment of the same name in another case between its parts (ci-idc-pj7, pj8), which no longer
+        # restarts the join of the name as spelled. Each deny vector allowed before this change; the controls set
+        # the maintainer's identity the same ways, and af-c7 names CLAUDE.md beside a process substitution feeding
+        # git add.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-af7) xargs -a of a process substitution whose body is a subshell, feeding git config "
+                 "user.name, denies", "xargs -a <( (echo Claude) ) git config user.name"),
+                ("(ci-idc-af8) xargs -a of a process substitution with an unspaced subshell body, feeding git config "
+                 "user.name, denies", "xargs -a <((echo Claude)) git config user.name"),
+                ("(ci-idc-af9) xargs -a of a process substitution whose body starts on a new line, feeding git config "
+                 "user.name, denies", "xargs -a <(\necho Claude\n) git config user.name"),
+                ("(ci-idc-pj6) an AI EMAIL joined by += onto a ${EMAIL:=...} default denies",
+                 ": ${EMAIL:=noreply@anthr}; EMAIL+=opic.com; git commit -m x"),
+                ("(ci-idc-pj7) an AI GIT_AUTHOR_NAME joined by += past a lower-case assignment of the name denies",
+                 "GIT_AUTHOR_NAME=Cla; git_author_name=x; GIT_AUTHOR_NAME+=ude; export GIT_AUTHOR_NAME; "
+                 "git commit -m x"),
+                ("(ci-idc-pj8) an AI GIT_AUTHOR_NAME joined by += past a mixed-case += of the name denies",
+                 "GIT_AUTHOR_NAME=Cla; Git_Author_Name+=zz; GIT_AUTHOR_NAME+=ude; export GIT_AUTHOR_NAME; "
+                 "git commit -m x")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-af-c5) the maintainer's user.name in an xargs -a subshell process substitution allows",
+                 "xargs -a <( (echo 'Jeff Posluns') ) git config user.name"),
+                ("(ci-idc-af-c6) the maintainer's user.email in an xargs -a unspaced subshell process substitution "
+                 "allows", "xargs -a <((echo jeff@posluns.ca)) git config user.email"),
+                ("(ci-idc-af-c7) xargs -a of a process substitution starting on a new line feeding git add, before a "
+                 "CLAUDE.md commit, allows",
+                 "xargs -a <(\ngit ls-files .claude\n) git add; git commit -m 'regen CLAUDE.md'"),
+                ("(ci-idc-pj-c6) the maintainer's EMAIL joined by += onto a ${EMAIL:=...} default allows",
+                 ": ${EMAIL:=jeff@posluns}; EMAIL+=.ca; git commit -m x"),
+                ("(ci-idc-pj-c7) the maintainer's GIT_AUTHOR_NAME joined past a lower-case assignment beside a .claude/ "
+                 "message allows", "GIT_AUTHOR_NAME=Jeff; git_author_name=x; GIT_AUTHOR_NAME+=' Posluns'; "
+                 "export GIT_AUTHOR_NAME; git commit -m 'rules: regenerate .claude/rules'"),
+                ("(ci-idc-pj-c8) the maintainer's GIT_AUTHOR_NAME joined past a mixed-case += beside a CLAUDE.md "
+                 "message allows", "GIT_AUTHOR_NAME=Jeff; Git_Author_Name+=zz; GIT_AUTHOR_NAME+=' Posluns'; "
+                 "export GIT_AUTHOR_NAME; git commit -m 'docs: CLAUDE.md'")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-af-c1) the maintainer's user.name in an xargs -a process substitution allows",
+                 "xargs -a <(echo 'Jeff Posluns') git config user.name"),
+                ("(ci-idc-af-c2) the maintainer's user.email in an xargs --arg-file= process substitution allows",
+                 "xargs --arg-file=<(echo jeff@posluns.ca) git config user.email"),
+                ("(ci-idc-af-c3) xargs -a of a process substitution naming .claude feeding git add allows",
+                 "xargs -a <(git ls-files .claude) git add"),
+                ("(ci-idc-af-c4) xargs -a of a process substitution naming CLAUDE.md feeding git config --get allows",
+                 "xargs -a <(echo CLAUDE.md) git config --get user.name"),
+                ("(ci-idc-cs-c1) flock -c setting the maintainer's user.name allows",
+                 "flock /tmp/l -c 'git config user.name \"Jeff Posluns\"'"),
+                ("(ci-idc-cs-c2) su -c setting the maintainer's user.email before a .claude/ commit allows",
+                 "su ci -c 'git config user.email jeff@posluns.ca && git commit -m \"regenerate .claude/rules\"'"),
+                ("(ci-idc-cs-c3) script -qc reading user.name beside a CLAUDE.md path allows",
+                 "script -qc 'git config --get user.name; cat CLAUDE.md' /dev/null"),
+                ("(ci-idc-pj-c1) the maintainer's EMAIL joined by += beside a CLAUDE.md message allows",
+                 "EMAIL=jeff@posluns; EMAIL+=.ca; git commit -m 'docs: CLAUDE.md'"),
+                ("(ci-idc-pj-c2) the maintainer's GIT_AUTHOR_NAME joined by += beside a .claude/ message allows",
+                 "GIT_AUTHOR_NAME=Jeff GIT_AUTHOR_NAME+=' Posluns' git commit -m 'rules: regenerate .claude/rules'"),
+                ("(ci-idc-pj-c3) the maintainer's GIT_CONFIG_VALUE_0 joined by += beside a CLAUDE.md message allows",
+                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.name GIT_CONFIG_VALUE_0=Jeff GIT_CONFIG_VALUE_0+=' Posluns' "
+                 "git commit -m 'docs: CLAUDE.md'"),
+                ("(ci-idc-pj-c4) a GIT_CONFIG_VALUE_0 joined into an AI name for a core.editor key allows",
+                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.editor GIT_CONFIG_VALUE_0=Cla GIT_CONFIG_VALUE_0+=ude "
+                 "git commit -m x"),
+                ("(ci-idc-pj-c5) git add of .claude/ and a heredoc commit message in a command substitution allows",
+                 "git add .claude/rules && git commit -m \"$(cat <<'EOF'\nrules: regenerate .claude/rules\nEOF\n)\"")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
+        # DISCLOSED RESIDUALS, pinned at their current allow: shapes of routes (a), (b) and (c) and of a subscript
+        # built at run time that a review found the residue described as denied. Each was run through the guard
+        # as a deny row first and was allowed, so the residue now names each one as not caught instead of claiming
+        # it (ci-idc-nc1 to nc16). ci-idc-ta1 to ta4 pin the trailer-alias route, a co-author trailer given as
+        # --trailer NAME: VALUE after trailer.NAME.key is set to Co-authored-by, which the residue also names as
+        # not caught. Every one of these was allowed at main as well. A guard change that denies one of them
+        # turns its row into a failure, so the row and the residue entry move together.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-nc1) route (a) after a leading 2> redirect word is not caught, allows",
+                 "2>/dev/null xargs -a <(echo Claude) git config user.name"),
+                ("(ci-idc-nc2) route (a) after a leading < redirect word is not caught, allows",
+                 "</dev/null xargs -a <(echo Claude) git config user.name"),
+                ("(ci-idc-nc3) route (a) with a redirect word between -a and the process substitution is not "
+                 "caught, allows", "xargs -a 2>/dev/null <(echo Claude) git config user.name"),
+                ("(ci-idc-nc4) route (b) with a redirect word between -c and the string is not caught, allows",
+                 "flock /tmp/l -c 2>/dev/null 'git config author.name Claude'"),
+                ("(ci-idc-nc5) route (b) with a redirect word between -c and a double-quoted string is not caught, "
+                 "allows", "flock /tmp/l -c 2>/dev/null \"git config author.name Claude\""),
+                ("(ci-idc-nc6) route (a) inside a $(...) body is not caught, allows",
+                 ": \"$(xargs -a <(echo Claude) git config user.name)\""),
+                ("(ci-idc-nc7) route (a) inside a backquote body is not caught, allows",
+                 ": \"`xargs -a <(echo Claude) git config user.name`\""),
+                ("(ci-idc-nc8) route (b) inside a $(...) body is not caught, allows",
+                 ": \"$(flock /tmp/l -c 'git config user.name Claude')\""),
+                ("(ci-idc-nc9) route (b) inside a backquote body is not caught, allows",
+                 ": \"`flock /tmp/l -c 'git config user.name Claude'`\""),
+                ("(ci-idc-nc10) route (c) inside a $(...) body is not caught, allows",
+                 ": \"$(EMAIL=noreply@anthr; EMAIL+=opic.com; git commit -m x)\""),
+                ("(ci-idc-nc11) route (c) inside a backquote body is not caught, allows",
+                 ": \"`EMAIL=noreply@anthr; EMAIL+=opic.com; git commit -m x`\""),
+                ("(ci-idc-nc12) route (c) from a ${EMAIL:=...} part followed by an expansion is not caught, allows",
+                 ": ${EMAIL:=noreply@anthr}$X; EMAIL+=opic.com; git commit -m x"),
+                ("(ci-idc-nc13) route (c) with a $ inside single quotes in the += part is not caught, allows",
+                 "EMAIL=noreply@anthr; EMAIL+='opic.com$x'; git commit -m x"),
+                ("(ci-idc-nc14) route (c) with a same-name decoy in a comment is not caught, allows",
+                 "EMAIL=noreply@anthr; # EMAIL=x\nEMAIL+=opic.com; git commit -m x"),
+                ("(ci-idc-nc15) route (c) with a same-name decoy in a quoted heredoc body is not caught, allows",
+                 "EMAIL=noreply@anthr; cat >/dev/null <<'E'\nEMAIL=x\nE\nEMAIL+=opic.com; git commit -m x"),
+                ("(ci-idc-nc16) a subscript built at run time in a test -v operand is not caught, allows",
+                 "z=(1); printf -v X '[%s(git -c user.name=%s commit -m x)]' '$' Claude; test -v z$X"),
+                ("(ci-idc-nc17) a subscript built at run time in an unset operand is not caught, allows",
+                 "z=(1); printf -v X '[%s(git -c user.name=%s commit -m x)]' '$' Claude; unset z$X"),
+                ("(ci-idc-ta1) a co-author trailer through a -c trailer alias is not caught, allows",
+                 "git -c trailer.co.key=Co-authored-by commit -m x --trailer 'co: Claude'"),
+                ("(ci-idc-ta2) a co-author trailer through an unquoted -c trailer alias value is not caught, allows",
+                 "git -c trailer.co.key=Co-authored-by commit -m x --trailer co:Claude"),
+                ("(ci-idc-ta3) a co-author trailer through a git config trailer alias is not caught, allows",
+                 "git config trailer.co.key Co-authored-by; git commit -m x --trailer 'co: Claude'"),
+                ("(ci-idc-ta4) a co-author trailer through a GIT_CONFIG_KEY_0 trailer alias is not caught, allows",
+                 "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=trailer.co.key GIT_CONFIG_VALUE_0=Co-authored-by "
+                 "git commit -m x --trailer 'co: Claude'")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
+        # A command whose text holds a construct the value reader cannot read exactly (a backslash before a
+        # newline, an xargs replacement string attached or detached, a braced placeholder, a parallel word, a word
+        # that starts with an expansion) is judged by the AI-anywhere rule, not by its values
+        # (_cmtidn_inexact). Each deny vector allowed before this change; the controls set a human identity
+        # through such a construct in a command that names no AI.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-e1) an AI EMAIL default after an escaped backslash before a newline denies",
+                 "echo a\\\\\n'q'; set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-e2) an AI GIT_AUTHOR_NAME default after an escaped backslash before a newline denies",
+                 "echo a\\\\\n'q'; set -a; : ${GIT_AUTHOR_NAME:='Bot Claude'}; git commit -m x"),
+                ("(ci-idc-e3) a --config-env pair after an escaped backslash before a newline denies",
+                 "echo a\\\\\n'q'; V='Claude Code' git --config-env=author.name=V commit -m x"),
+                ("(ci-idc-e4) an attached xargs replacement string ending in I as an author.name value denies",
+                 "echo Claude | xargs -IHI git -c author.name=HI commit -m x"),
+                ("(ci-idc-e5) an xargs -0 cluster replacement string ending in I as an author.name value denies",
+                 "echo Claude | xargs -0IHI git -c author.name=HI commit -m x"),
+                ("(ci-idc-e6) an attached xargs replacement string ending in I as an EMAIL value denies",
+                 "echo noreply@anthropic.com | xargs -IXI env EMAIL=XI git commit -m x"),
+                ("(ci-idc-e7) an xargs placeholder as a GIT_CONFIG_KEY_0 value beside an AI value denies",
+                 "printf author.%s name | xargs -I{} env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0={} "
+                 "GIT_CONFIG_VALUE_0=Claude git commit -m x"),
+                ("(ci-idc-e8) an xargs -I replacement string as a GIT_CONFIG_KEY_0 value beside an AI value denies",
+                 "printf author.%s name | xargs -I KEY env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=KEY "
+                 "GIT_CONFIG_VALUE_0=Claude git commit -m x"),
+                ("(ci-idc-e9) an xargs -d placeholder as a GIT_CONFIG_PARAMETERS value beside an AI name denies",
+                 "printf \"'author.name'='%s'\" Claude | xargs -d '\\n' -I{} env GIT_CONFIG_PARAMETERS={} "
+                 "git commit -m x"),
+                ("(ci-idc-e10) an xargs -0 placeholder as a GIT_CONFIG_PARAMETERS value beside an AI name denies",
+                 "printf \"'author.name'='%s'\" Claude | xargs -0 -I{} env GIT_CONFIG_PARAMETERS={} git commit -m x"),
+                ("(ci-idc-e11) xargs run through a variable with a replacement string as an author.name value denies",
+                 "X=xargs; echo Claude | $X -I NAME git -c author.name=NAME commit -m x"),
+                ("(ci-idc-e12) a parallel {1} placeholder as an author.name value beside an AI name denies",
+                 "parallel git -c author.name={1} commit -m x ::: Claude"),
+                ("(ci-idc-e13) a GIT_CONFIG_PARAMETERS value held in a variable beside an AI product name denies",
+                 "GIT_CONFIG_PARAMETERS=\"$P\" git commit -m 'fix the claude adapter'")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        # bash ends a backquote body at the first unescaped backquote even inside a single quote, while the raw
+        # reader keeps that quote open past the body and so closes it one quote late, splitting a later value
+        # before its AI part; any command or process substitution in the text ($(, a backquote, <( or >()
+        # makes the text inexact (_cmtidn_inexact). Each row allowed before the backquote change.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-n1) an AI EMAIL default after a single quote inside a backquote body denies",
+                 ": x`echo '`; X='`'; set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-n2) an AI GIT_AUTHOR_NAME default after a single quote inside a backquote body denies",
+                 ": x`echo '`; X='`'; set -a; : ${GIT_AUTHOR_NAME:='Bot Claude'}; git commit -m x"),
+                ("(ci-idc-n3) an AI GIT_CONFIG_PARAMETERS pair after a single quote inside a backquote body denies",
+                 ": x`echo '`; X='`'; GIT_CONFIG_PARAMETERS=\"'author.name'='x Claude'\" git commit -m x"),
+                ("(ci-idc-n4) an AI GIT_CONFIG_VALUE_0 after a single quote inside a backquote body denies",
+                 ": x`echo '`; X='`'; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0='x Claude' "
+                 "git commit -m x")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        # A case pattern written without a leading '(' inside a double-quoted $(...) body closes that body early
+        # in the raw reader but not in bash, which puts every later quote out of step and splits a later value
+        # before its AI part. Each row allowed before this change.
+        _ci_case = "X=\"$(case a in a) echo '\"' ;; esac)\"; "
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-n5) an AI EMAIL default after a case pattern inside a quoted $(...) body denies",
+                 _ci_case + "set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-n6) an AI GIT_AUTHOR_NAME default after a case pattern inside a quoted $(...) body denies",
+                 _ci_case + "set -a; : ${GIT_AUTHOR_NAME:='Bot Claude'}; git commit -m x"),
+                ("(ci-idc-n7) an AI GIT_CONFIG_PARAMETERS pair after a case pattern inside a quoted $(...) body "
+                 "denies", _ci_case + "GIT_CONFIG_PARAMETERS=\"'author.name'='x Claude'\" git commit -m x"),
+                ("(ci-idc-n8) an AI GIT_CONFIG_VALUE_0 after a case pattern inside a quoted $(...) body denies",
+                 _ci_case + "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0='x Claude' "
+                 "git commit -m x"),
+                ("(ci-idc-n9) a --config-env pair after a case pattern inside a quoted $(...) body denies",
+                 _ci_case + "V='Claude Code' git --config-env=author.name=V commit -m x")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        # A brace group inside a bash 5.3 ${ cmd; } or ${| cmd; } command substitution closes the ${ body early
+        # in the raw reader but not in bash, which puts every later quote out of step and splits a later value
+        # before its AI part (ci-idc-n10 to n14 are the review's five shapes; n15 to n17 the tab, newline and |
+        # spellings). Each row allowed before this change.
+        _ci_funsub = "X=\"${ { :; }; echo \"'\"; }\"; "
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-n10) an AI GIT_AUTHOR_NAME default after a brace group inside a quoted ${ cmd; } body "
+                 "denies", _ci_funsub + "set -a; : ${GIT_AUTHOR_NAME:='Bot Claude'}; git commit -m x"),
+                ("(ci-idc-n11) an AI EMAIL default after a brace group inside a quoted ${ cmd; } body denies",
+                 _ci_funsub + "set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-n12) an AI GIT_CONFIG_PARAMETERS pair after a brace group inside a quoted ${ cmd; } body "
+                 "denies", _ci_funsub + "GIT_CONFIG_PARAMETERS=\"'author.name'='x Claude'\" git commit -m x"),
+                ("(ci-idc-n13) a --config-env pair after a brace group inside a quoted ${ cmd; } body denies",
+                 _ci_funsub + "V='Claude Code' git --config-env=author.name=V commit -m x"),
+                ("(ci-idc-n14) an AI GIT_CONFIG_VALUE_0 after a brace group inside a quoted ${ cmd; } body denies",
+                 _ci_funsub + "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=author.name GIT_CONFIG_VALUE_0='x Claude' "
+                 "git commit -m x"),
+                ("(ci-idc-n15) an AI EMAIL default after a brace group inside a quoted ${<tab>cmd; } body denies",
+                 "X=\"${\t{ :; }; echo \"'\"; }\"; set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-n16) an AI EMAIL default after a brace group inside a quoted ${<newline>cmd; } body "
+                 "denies",
+                 "X=\"${\n{ :; }; echo \"'\"; }\"; set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x"),
+                ("(ci-idc-n17) an AI EMAIL default after a brace group inside a quoted ${| cmd; } body denies",
+                 "X=\"${| { :; }; REPLY=\"'\"; }\"; set -a; : ${EMAIL:=' noreply@anthropic.com'}; git commit -m x")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        # bash runs a command substitution held in an indexed array subscript of a variable's value wherever it
+        # evaluates an arithmetic expression, and one held in a value expanded as a prompt string (${X@P}), so
+        # each such place makes the text inexact and a human EMAIL beside an AI product name denies (the disclosed
+        # over-deny; the same EMAIL with no such place is ci-idc-p5). Rows a1 to a9 allowed before the arithmetic
+        # change; a10 to a13 pin shapes the narrowed search keeps; n18 allowed before the prompt-string change.
+        _ci_human = "EMAIL=alice@example.com git commit -m 'fix the claude adapter'"
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-a1) an indexed array subscript makes the text inexact (over-deny)",
+                 "a[0]=1; " + _ci_human),
+                ("(ci-idc-a2) a [[ arithmetic comparison makes the text inexact (over-deny)",
+                 "[[ 1 -eq 1 ]] && " + _ci_human),
+                ("(ci-idc-a3) a $[...] arithmetic expansion makes the text inexact (over-deny)",
+                 "Y=$[1]; " + _ci_human),
+                ("(ci-idc-a4) a (( arithmetic command makes the text inexact (over-deny)",
+                 "((n=1)); " + _ci_human),
+                ("(ci-idc-a5) a for (( loop makes the text inexact (over-deny)",
+                 "for ((i=0;i<1;i++)); do " + _ci_human + "; done"),
+                ("(ci-idc-a6) a let word makes the text inexact (over-deny)",
+                 "let n=1; " + _ci_human),
+                ("(ci-idc-a7) a declare integer attribute makes the text inexact (over-deny)",
+                 "declare -i n=1; " + _ci_human),
+                ("(ci-idc-a8) a ${NAME:OFFSET} substring expansion makes the text inexact (over-deny)",
+                 "Y=${N:1}; " + _ci_human),
+                ("(ci-idc-a9) a ${!NAME} indirect expansion makes the text inexact (over-deny)",
+                 "Y=${!V}; " + _ci_human),
+                ("(ci-idc-a10) a [X]=v compound array assignment word makes the text inexact (over-deny)",
+                 "Y=([0]=1); " + _ci_human),
+                ("(ci-idc-a11) a ${a[X]} array expansion makes the text inexact (over-deny)",
+                 "Y=${a[0]}; " + _ci_human),
+                ("(ci-idc-a12) a let command word after an assignment word makes the text inexact (over-deny)",
+                 "X=1 let n=1; " + _ci_human),
+                ("(ci-idc-a13) a [[ command word after if makes the text inexact (over-deny)",
+                 "if [[ 1 -eq 1 ]]; then " + _ci_human + "; fi"),
+                ("(ci-idc-n18) a ${NAME@P} prompt-string expansion in the middle of a word makes the text inexact "
+                 "(over-deny)", "Y=a${X@P}; " + _ci_human)):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        # An arithmetic place is sought in the shape bash reads it, so a [ right after a quote or a / and let
+        # inside a quoted message are not one, and the maintainer's EMAIL beside an AI tool path allows (the
+        # review's three shapes; each denied before this change).
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-a-c1) the maintainer's EMAIL beside a [tag] message prefix allows",
+                 "EMAIL=jeff@posluns.ca git commit -m '[hooks] refresh CLAUDE.md'"),
+                ("(ci-idc-a-c2) the maintainer's EMAIL beside a message that starts with let allows",
+                 "EMAIL=jeff@posluns.ca git commit -m 'let CLAUDE.md name the rules'"),
+                ("(ci-idc-a-c3) the maintainer's EMAIL beside a pathspec glob in .claude/rules allows",
+                 "EMAIL=jeff@posluns.ca git add .claude/rules/[a-z]*.md")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
+        # Command position is read in one pass over the words (_cmtidn_arithmetic_word), so a let word behind time
+        # -p, command -p or a redirection, and a subscript behind quotes or a backslash in an operand of read or
+        # unset, make the text inexact, as do let in an operand of trap or sh -c, each allowed by the lexical
+        # command-start search (b1 to b3 are the review's three shapes, b4 and b5 its read and unset shapes); the
+        # maintainer's three commit shapes after a command separator still allow (a-c4 to a-c6), and so does a ;
+        # let inside a quoted message (a-c7), which the lexical search over-denied.
+        _ci_built = "printf -v X 'a%s\\44(git -c user.name=%s commit -m x)]' '[' Claude; "
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-b1) a let word behind time -p after a run-time-built subscript denies",
+                 _ci_built + "time -p let X"),
+                ("(ci-idc-b2) a let word behind command -p after a run-time-built subscript denies",
+                 _ci_built + "command -p let X"),
+                ("(ci-idc-b3) a let word behind a redirection after a run-time-built subscript denies",
+                 _ci_built + ">/dev/null let X"),
+                ("(ci-idc-b4) a quoted read operand followed by [ makes the text inexact (over-deny)",
+                 "read \"a\"[X] <<< 1; " + _ci_human),
+                ("(ci-idc-b5) a quoted unset word with a backslash-escaped subscript makes the text inexact "
+                 "(over-deny)", "\"unset\" a\\[X\\]; " + _ci_human),
+                ("(ci-idc-b6) a let word in a trap operand makes the text inexact (over-deny)",
+                 "trap 'let X' EXIT; " + _ci_human),
+                ("(ci-idc-b7) a let word in an sh -c operand makes the text inexact (over-deny)",
+                 "export X; bash -c 'let X'; " + _ci_human)):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        # A quoted or escaped compound array operand of declare, typeset, readonly or local is searched for a
+        # [X]=v word with its quotes and backslashes dropped, so each of the review's six shapes after a
+        # run-time-built subscript denies (each allowed by the one-pass reading before this change, and denied by
+        # the lexical [X]=v search it replaced).
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-d1) a double-quoted declare -a compound operand after a run-time-built subscript denies",
+                 _ci_built + "declare -a \"b=([X]=1)\""),
+                ("(ci-idc-d2) a single-quoted typeset -a compound operand after a run-time-built subscript denies",
+                 _ci_built + "typeset -a 'b=([X]=1)'"),
+                ("(ci-idc-d3) a double-quoted readonly -a compound operand after a run-time-built subscript denies",
+                 _ci_built + "readonly -a \"b=([X]=1)\""),
+                ("(ci-idc-d4) a backslash-escaped local -a compound operand after a run-time-built subscript denies",
+                 _ci_built + "local -a b=\\([X]=1\\)"),
+                ("(ci-idc-d5) a declare -a operand with a single-quoted compound value after a run-time-built "
+                 "subscript denies", _ci_built + "declare -a b='([X]=1)'"),
+                ("(ci-idc-d6) a declare -a operand with a double-quoted compound value after a run-time-built "
+                 "subscript denies", _ci_built + "declare -a b=\"([X]=1)\"")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-a-c4) the maintainer's EMAIL beside a [tag] message prefix after && allows",
+                 "cd . && EMAIL=jeff@posluns.ca git commit -m '[hooks] refresh CLAUDE.md'"),
+                ("(ci-idc-a-c5) the maintainer's EMAIL beside a message that starts with let after && allows",
+                 "cd . && EMAIL=jeff@posluns.ca git commit -m 'let CLAUDE.md name the rules'"),
+                ("(ci-idc-a-c6) the maintainer's EMAIL beside a pathspec glob in .claude/rules after && allows",
+                 "cd . && EMAIL=jeff@posluns.ca git add .claude/rules/[a-z]*.md"),
+                ("(ci-idc-a-c7) the maintainer's EMAIL beside a ; let inside a quoted message allows",
+                 "EMAIL=jeff@posluns.ca git commit -m 'fix x; let CLAUDE.md load'")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-e-c1) a human EMAIL with a backslash before a newline and no AI name allows",
+                 "EMAIL=alice@example.com git commit -m 'fix the \\\nadapter'"),
+                ("(ci-idc-e-c2) an attached xargs replacement string with a human value on its input allows",
+                 "echo Alice | xargs -IHI git -c author.name=HI commit -m x")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
+        # The raw-text rule finds only that the text names an identity assignment form and an AI identity, so its
+        # deny says that and that it fails closed, never that a git command sets an AI identity: on a command
+        # that runs no git (ci-idc-m1), one that may set a human identity by a value its text does not spell
+        # (ci-idc-m2) and one the reader cannot
+        # parse (ci-idc-m3). A hit of the word reader keeps the message that a git command sets one (ci-idc-m4).
+        _ci_raw_wants = ("names an identity assignment form and an AI identity", "fails closed",
+                         "identity assignment 'EMAIL=")
+        _ci_raw_banner = "denied a command naming an identity assignment and an AI identity"
+        for _ci_label, _ci_cmd, _ci_wants, _ci_banner, _ci_unwanted in (
+                ("(ci-idc-m1) an AI EMAIL that echo only prints denies with the fail-closed raw-text message",
+                 "echo EMAIL=noreply@anthropic.com", _ci_raw_wants, _ci_raw_banner, "this git command sets"),
+                ("(ci-idc-m2) an EMAIL assignment of an unspelled value beside an AI product name denies with the "
+                 "fail-closed raw-text message", "EMAIL=\"$ME\" git commit -m 'fix the claude adapter'",
+                 _ci_raw_wants, _ci_raw_banner, "this git command sets"),
+                ("(ci-idc-m3) an AI EMAIL assignment in a command the reader cannot parse denies with the "
+                 "fail-closed raw-text message", "EMAIL=noreply@anthropic.com git commit -m 'x",
+                 _ci_raw_wants, _ci_raw_banner, "this git command sets"),
+                ("(ci-idc-m4) an AI EMAIL assignment the word reader reads denies with the message that the git "
+                 "command sets an AI identity", "EMAIL=noreply@anthropic.com git commit -m x",
+                 ("this git command sets an AI identity",), "denied a git command recording an AI commit identity",
+                 "fails closed")):
+            _ci_code, _ci_out = cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                     "tool_input": {"command": _ci_cmd}})[:2]
+            _ci_got = _reduce_result(_ci_code, _ci_out)
+            _ci_reason = ((_ci_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            _ci_sys = (_ci_out or {}).get("systemMessage", "")
+            if (_ci_got != "deny" or not all(_ci_w in _ci_reason for _ci_w in _ci_wants)
+                    or _ci_banner not in _ci_sys or _ci_unwanted in _ci_reason):
+                failures.append("{}: expected deny with a reason holding {!r} and not {!r} and a banner holding {!r}, "
+                                "got {} with the reason {!r} and the banner {!r}".format(
+                                    _ci_label, _ci_wants, _ci_unwanted, _ci_banner, _ci_got, _ci_reason, _ci_sys))
+        # git config reads its options only up to its first word that is neither an option nor an option's
+        # value, so a read option spelled as an option value or after the NAME selects no mode and the command
+        # still sets the value; each deny vector below set the identity on git 2.53.0 (with a stand-in name).
+        # A git alias whose value holds '-c author.name=X', a git clone --config pair and a default-value
+        # expansion of EMAIL or a git identity variable set an identity git records too, and so does a git clone
+        # -c pair attached to its word or to a short option cluster ending in c (-qcauthor.name=X).
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc28) a --comment value spelled -l does not make git config a read, denies",
+                 "git config --comment -l author.name Claude"),
+                ("(ci-idc29) a set --value pattern spelled -l does not make git config set a read, denies",
+                 "git config set --value -l author.name Claude"),
+                ("(ci-idc30) a --comment value spelled -e given by a prefix, before a User.Name pair, denies",
+                 "git config --comm -e User.Name Claude"),
+                ("(ci-idc31) a -f value spelled -l in a short option cluster denies",
+                 "git config -zf -l author.name Claude"),
+                ("(ci-idc32) a --list word after the NAME VALUE pair does not make git config a read, denies",
+                 "git config author.name Claude -l"),
+                ("(ci-idc33) a --get word after the NAME VALUE pair does not make git config a read, denies",
+                 "git config committer.email noreply@anthropic.com --get"),
+                ("(ci-idc34) a --comment value spelled --get-regexp at --global scope denies",
+                 "git config --global --comment --get-regexp committer.name Claude"),
+                ("(ci-idc35) a --replace-all Author.Name pair denies", "git config --replace-all Author.Name Claude"),
+                ("(ci-idc36) a --system author.name pair denies", "git config --system author.name Claude"),
+                ("(ci-idc37) a --worktree committer.email pair denies",
+                 "git config --worktree committer.email noreply@anthropic.com"),
+                ("(ci-idc38) a config pair through an alias standing for git denies",
+                 "alias g=git; g config author.name Claude"),
+                ("(ci-idc39) a git alias whose value sets an AI author.name denies",
+                 "git config alias.ci '-c author.name=Claude commit'; git ci -m x"),
+                ("(ci-idc40) a git alias whose value sets an AI user.name denies",
+                 "git config alias.ci '-c user.name=Claude commit'"),
+                ("(ci-idc41) a git alias set by config set whose value sets an AI committer.email denies",
+                 "git config set alias.ci '-c committer.email=noreply@anthropic.com commit'"),
+                ("(ci-idc42) a git -c alias whose value sets an AI author.name denies",
+                 "git -c alias.ci='-c author.name=Claude commit' ci -m x"),
+                ("(ci-idc43) a git clone --config author.name pair naming an AI denies",
+                 "git clone --config author.name=Claude . c2"),
+                ("(ci-idc44) a git clone --config=author.name word naming an AI denies",
+                 "git clone --config=author.name=Claude . c2"),
+                ("(ci-idc45) a git clone --conf committer.name pair naming an AI denies",
+                 "git clone --conf committer.name=Claude . c2"),
+                ("(ci-idc46) a default-value expansion that assigns an AI EMAIL denies",
+                 ": \"${EMAIL:=noreply@anthropic.com}\"; export EMAIL; git commit -m x"),
+                ("(ci-idc47) a default-value expansion that assigns an AI GIT_AUTHOR_NAME denies",
+                 ": ${GIT_AUTHOR_NAME=Claude}; export GIT_AUTHOR_NAME; git commit -m x"),
+                ("(ci-idc48) a git clone -c word with an attached AI author.name pair denies",
+                 "git clone -q -cauthor.name=Claude . c2"),
+                ("(ci-idc49) a git clone short option cluster ending in c with an attached AI Committer.Email "
+                 "denies", "git clone -qcCommitter.Email=noreply@anthropic.com . c2"),
+                ("(ci-idc50) a git clone short option cluster ending in c, the AI author.name pair in the next "
+                 "word, denies", "git clone -qc author.name=Claude . c2"),
+                ("(ci-idc51) a git clone -c word with an attached AI user.name pair denies",
+                 "git clone -cuser.name=Claude . c2"),
+                ("(ci-idc52) a git clone -c word with an attached alias that sets an AI author.name denies",
+                 "git clone -q '-calias.ci=-c author.name=Claude commit' . c2"),
+                ("(ci-idc53) a git clone -c word with an attached AI author.name in a rebase -x line denies",
+                 "git rebase -x 'git clone -cauthor.name=Claude . c2' HEAD"),
+                ("(ci-idc54) a git clone -c word with an attached AI author.name in a command the tokenizer "
+                 "cannot parse denies", "git clone -cauthor.name='Claude' . c2; git commit -m 'x"),
+                # A default-value expansion sets the variable wherever bash expands it: in a redirect target, a
+                # here-string or an unquoted heredoc body, which the tokenizer does not keep as words, and with a
+                # nested expansion or a quoted '}' before the AI part of its value. Each set the identity on git
+                # 2.53.0 with bash 5.3 (with a stand-in name) and allowed while the expansion was read per word.
+                ("(ci-idc55) an AI EMAIL default in a redirect target under set -a denies",
+                 'set -a; : > "${EMAIL:=noreply@anthropic.com}.txt"; git commit -m x'),
+                ("(ci-idc56) an AI GIT_AUTHOR_NAME default in a 2> redirect target denies",
+                 'export GIT_AUTHOR_NAME=; : 2> "${GIT_AUTHOR_NAME:=Claude}.log"; git commit -m x'),
+                ("(ci-idc57) an AI GIT_AUTHOR_EMAIL default in a brace group redirect target denies",
+                 'export GIT_AUTHOR_EMAIL=; { :; } 2>"${GIT_AUTHOR_EMAIL:=noreply@anthropic.com}"; git commit -m x'),
+                ("(ci-idc58) an AI EMAIL default in an exec redirect target denies",
+                 'export EMAIL; exec 3> "${EMAIL:=noreply@anthropic.com}.log"; git commit -m x'),
+                ("(ci-idc59) an AI EMAIL default in a here-string denies",
+                 'export EMAIL; : <<< "${EMAIL:=noreply@anthropic.com}"; git commit -m x'),
+                ("(ci-idc60) an AI EMAIL default in an unquoted heredoc body denies",
+                 'export EMAIL; : <<EOF\n${EMAIL:=noreply@anthropic.com}\nEOF\ngit commit -m x'),
+                ("(ci-idc61) an AI GIT_COMMITTER_NAME default in an unquoted heredoc body denies",
+                 'export GIT_COMMITTER_NAME=; : <<EOF\n${GIT_COMMITTER_NAME:=Claude}\nEOF\ngit commit -m x'),
+                ("(ci-idc62) an AI EMAIL default behind a nested expansion denies",
+                 'export EMAIL; : "${EMAIL:=${USER:-u}@anthropic.com}"; git commit -m x'),
+                ("(ci-idc63) an AI GIT_AUTHOR_NAME default behind a nested expansion denies",
+                 'export GIT_AUTHOR_NAME=; : "${GIT_AUTHOR_NAME:=${X-}Claude}"; git commit -m x'),
+                ("(ci-idc64) an AI EMAIL default behind a quoted closing brace denies",
+                 'export EMAIL; : "${EMAIL:="}"noreply@anthropic.com}"; git commit -m x'),
+                ("(ci-idc65) an AI EMAIL default whose name a backslash-newline splits denies",
+                 'export EMAIL; : "${EM\\\nAIL:=noreply@anthropic.com}"; git commit -m x')):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        # The raw-text rule reads a command up to the read limit; one past it goes to the too-long fallback,
+        # which denies a command that names an AI anywhere and holds an identity name, so the redirect-target
+        # form denies just inside, at and just past the limit.
+        _ci_base = 'set -a; : > "${EMAIL:=noreply@anthropic.com}.txt"; git commit -m x'
+        for _ci_len in (aiqt_hooks._CMTIDN_READ_LIMIT - 1, aiqt_hooks._CMTIDN_READ_LIMIT,
+                        aiqt_hooks._CMTIDN_READ_LIMIT + 1):
+            ciexpect("(ci-idc-bound) a {}-character redirect-target default denies".format(_ci_len),
+                     _ci_base + " " * (_ci_len - len(_ci_base)), "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-c23) git config -l before the NAME allows", "git config -l author.name claude"),
+                ("(ci-idc-c24) git config -f FILE -l of author.name allows",
+                 "git config -f .git/config -l author.name claude"),
+                ("(ci-idc-c25) git config --comment=VALUE then --get allows",
+                 "git config --comment=x --get author.name claude"),
+                ("(ci-idc-c26) git config get --value PATTERN of author.name allows",
+                 "git config get --value claude author.name"),
+                ("(ci-idc-c27) git config get --all of author.name allows", "git config get --all author.name claude"),
+                ("(ci-idc-c28) git config list --show-origin allows",
+                 "git config list --show-origin author.name claude"),
+                ("(ci-idc-c29) a git alias whose value names an AI only in a message allows",
+                 "git config alias.ci 'commit -m claude'"),
+                ("(ci-idc-c30) a git clone --config author.name pair with no AI value allows",
+                 "git clone --config author.name=Me . c2"),
+                ("(ci-idc-c31) a use-default expansion of an AI EMAIL, which assigns nothing, allows",
+                 ": \"${EMAIL:-noreply@anthropic.com}\""),
+                ("(ci-idc-c38) an ordinary commit allows", 'git commit -m "fix the parser"'),
+                ("(ci-idc-c39) an ordinary commit of all tracked changes allows",
+                 'git commit -am "docs: update the readme"'),
+                ("(ci-idc-c40) a human EMAIL export before a commit allows",
+                 "export EMAIL=alice@example.com; git commit -m x"),
+                ("(ci-idc-c41) a human EMAIL default in a redirect target allows",
+                 'set -a; : > "${EMAIL:=alice@example.com}.txt"; git commit -m x'),
+                ("(ci-idc-c42) a human GIT_AUTHOR_NAME default in an unquoted heredoc body allows",
+                 ': <<EOF\n${GIT_AUTHOR_NAME:=Alice}\nEOF\ngit commit -m x'),
+                ("(ci-idc-c43) human author.name and committer.email pairs given by -c allow",
+                 "git -c author.name=Alice -c committer.email=alice@example.com commit -m x"),
+                ("(ci-idc-c44) a log read that names an AI author and sets no identity allows",
+                 "git log --author=Claude -1"),
+                ("(ci-idc-c33) a git clone -c word with an attached unrelated key and an AI-named value allows",
+                 "git clone -cinit.templateDir=claude-templates . c2"),
+                ("(ci-idc-c34) a git clone short option cluster ending in c with an unrelated key allows",
+                 "git clone -qccore.sshCommand=claude-ssh . c2"),
+                ("(ci-idc-c35) a git clone -c word with an attached key git does not read as author.name allows",
+                 "git clone -q -cauthor.names=Claude . c2"),
+                ("(ci-idc-c36) a git clone -c word with an attached author.name that names no AI allows",
+                 "git clone -qcauthor.name=Me . c2"),
+                ("(ci-idc-c37) a git clone -o value that holds c and an author.name pair, an origin name, allows",
+                 "git clone -q -ocauthor.name=Maint . c2")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
         # A git commit behind leading reserved words, a function or coprocess name, VAR=value words or a wrapper
         # word (env, timeout, command, exec, nohup, xargs, sudo, nice, setsid, stdbuf, time) is judged like the
         # bare form: behind a wrapper a git word starts a candidate git command, whatever the wrapper's own
@@ -32412,9 +33671,14 @@ def _main_isolated(monitor):
         # handler (_hook_cpu_timed: the thread clock, the cyclic collector held off) over 'sudo -E git
         # rebase x ...' and over 'sudo -E git rebase -x x ...', each padded to 65,536 characters and to
         # _CMTIDN_READ_LIMIT, the longest command the reader reads (131,072 characters): 0.5 s at 65,536 and 1 s at
-        # 131,072, the same bound per character, against at most about 0.035 s and 0.07 s measured, a margin of
-        # about 14 times. The run-line read is counted through a shim, so a handler that allows a long command
-        # without reading it fails too: every rebase of the command is read, and in the -x form each one's exec line
+        # 131,072, the same bound per character, against about 0.13 s and 0.26 s measured for the first form and
+        # 0.22 s and 0.43 s for the -x form (the least of three in-process runs of the handler alone, on one shared
+        # 96-CPU host at a load5 near 24, 2026-11-17), a margin of about 3.9 and 2.3 times; the raw-text identity
+        # search (_cmtidn_identity_set_ai) reads the raw words once per call and skips a word with no '=', where it
+        # had read them three times and searched every word four times (0.27 s and 0.36 s at 65,536 then; the fork
+        # point of this branch took 0.05 s and 0.12 s). The run-line read is counted through a shim, so a
+        # handler that allows a long command without reading it fails too: every rebase of the command is read, and
+        # in the -x form each one's exec line
         # is built. For each form the command at the limit runs only when the shorter one is within its bound, so a
         # quadratic reader fails in seconds.
         _ci_saved = aiqt_hooks._cmtidn_run_lines
@@ -32485,6 +33749,107 @@ def _main_isolated(monitor):
                                         _ci_reason[-200:],
                                         "; the longer command was not run" if _ci_size == 16 << 10 else ""))
                     break
+        # The inexact-text search finds let, [[ and a [X]=v word in one pass over the words of the text
+        # (_cmtidn_arithmetic_word), where a lexical command-start search cost time quadratic in the text's length
+        # (on one shared host, in-process, about 2.2 s, 3.2 s and 0.5 s of the calling thread's CPU at 16,384
+        # characters for the three forms below, and 9.1 s for the first at 32,768 in the review, past the
+        # 8-second hook deadline). The bound is the CPU time the calling thread spends in the handler
+        # (_hook_cpu_timed) over 'echo x=! x=! ...', '! ! ...' and 'echo [ [ ...', each padded to 16,384 characters
+        # and to _CMTIDN_READ_LIMIT: 0.375 s and 3 s, the same bound per character, against at most about 0.11 s
+        # and 0.87 s measured (the least of three in-process runs of the handler alone, in each of two samples on a
+        # shared 96-CPU host at a one-minute load average of about 55, Python 3.14.4, 2026-11-17), a margin of about
+        # 3.3 times. Each command
+        # names no identity and allows. For each form the command at the limit runs only when the shorter one is
+        # within its bound, so a quadratic search fails in seconds.
+        for _ci_label, _ci_head, _ci_unit in (
+                ("(ci-idc-cpu1) 'echo x=! x=! ...'", "echo", " x=!"),
+                ("(ci-idc-cpu2) '! ! ...'", "", " !"),
+                ("(ci-idc-cpu3) 'echo [ [ ...' with no ]", "echo", " [")):
+            for _ci_size, _ci_cap in ((16 << 10, 0.375), (aiqt_hooks._CMTIDN_READ_LIMIT, 3.0)):
+                _ci_cmd = _ci_head + _ci_unit * ((_ci_size - len(_ci_head)) // len(_ci_unit))
+                _ci_cmd += " " * (_ci_size - len(_ci_cmd))
+                _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
+                if _ci_got != "allow" or _ci_spent > _ci_cap:
+                    failures.append("{} over {} characters expected allow within {} s of CPU time, got {} after "
+                                    "{:.2f} s{}".format(_ci_label, len(_ci_cmd), _ci_cap, _ci_got, _ci_spent,
+                                                        "; the longer command was not run"
+                                                        if _ci_size == 16 << 10 else ""))
+                    break
+        # The unread-route rule (_cmtidn_unread_route_ai) seeks an AI identity in the text once and hands the xargs
+        # stdin rule only the matched name, where handing it the whole text searched the text again for each
+        # simple command (about 67 s of the calling thread's CPU at _CMTIDN_READ_LIMIT characters for the form
+        # below, on one shared host, 2026-11-17). The bound is that of the rows above, 0.375 s at 16,384
+        # characters and 3 s at _CMTIDN_READ_LIMIT, against about 0.05 s and 0.44 s measured for the handler (the
+        # least of three in-process runs, 2026-11-17). The command names no AI identity and allows. The command at
+        # the limit runs only when the shorter one is within its bound.
+        for _ci_size, _ci_cap in ((16 << 10, 0.375), (aiqt_hooks._CMTIDN_READ_LIMIT, 3.0)):
+            _ci_unit = "xargs -a <(x) git config user.name;"
+            _ci_cmd = _ci_unit * (_ci_size // len(_ci_unit))
+            _ci_cmd += " " * (_ci_size - len(_ci_cmd))
+            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
+            if _ci_got != "allow" or _ci_spent > _ci_cap:
+                failures.append("(ci-idc-cpu4) 'xargs -a <(x) git config user.name; ...' over {} characters expected "
+                                "allow within {} s of CPU time, got {} after {:.2f} s{}".format(
+                                    len(_ci_cmd), _ci_cap, _ci_got, _ci_spent,
+                                    "; the longer command was not run" if _ci_size == 16 << 10 else ""))
+                break
+        # The raw-text rule judges every assignment in a word from one reading of the word (_CmtidnWord), where
+        # copying, dropping and searching the rest of the word for each assignment cost time quadratic in its
+        # length; and the xargs stdin rule searches a line for an AI identity once for all its segments
+        # (_cmtidn_command_ai), where a search for each 'xargs git config' segment cost time quadratic in the
+        # line's length. The commands are the review's: 'echo "EMAIL=x,EMAIL=x,..."' (4,095 assignments in one
+        # quoted word, 32,767 characters) and 'xargs git config author.name;' 2,259 times (65,511 characters).
+        # Each names no AI identity and allows. With either change reverted they took about 20.4 s and 18.3 s
+        # of the calling thread's CPU in-process, past the 8-second hook deadline, against about 0.04 s and
+        # 0.24 s with them (one run each, one shared host, Python 3.14, 2026-11-18). The bound is the
+        # per-character bound of the rows above (0.375 s at 16,384 characters): 0.75 s and 1.5 s.
+        for _ci_label, _ci_cmd, _ci_cap in (
+                ("(ci-idc-cpu5) 'echo \"EMAIL=x,EMAIL=x,...\"'", 'echo "' + "EMAIL=x," * 4095 + '"', 0.75),
+                ("(ci-idc-cpu6) 'xargs git config author.name; ...'", "xargs git config author.name;" * 2259, 1.5)):
+            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
+            if _ci_got != "allow" or _ci_spent > _ci_cap:
+                failures.append("{} over {} characters expected allow within {} s of CPU time, got {} after "
+                                "{:.2f} s".format(_ci_label, len(_ci_cmd), _ci_cap, _ci_got, _ci_spent))
+        # The += join rule of the unread-route rule (_cmtidn_unread_route_ai) judges every assignment in a word from
+        # readings of the whole word that resume where the last one stopped (_CmtidnJoinWord), where copying the
+        # rest of the word for each assignment, as written and dropped, and searching it for an expansion and the
+        # joined value for an AI identity cost time quadratic in its length. The commands are the review's: 'echo
+        # "EMAIL+=x,EMAIL+=x,..."' with 1,024, 2,048, 4,095 and 8,191 assignments in one quoted word (9,223 to
+        # 73,726 characters). Each names no AI identity and allows. With the change reverted the handler took
+        # about 0.36 s, 1.35 s, 5.3 s and 21.6 s of the calling thread's CPU in-process, the last past the
+        # 8-second hook deadline, against about 0.02 s, 0.04 s, 0.07 s and 0.15 s with it (one run each, one
+        # shared host, 2026-11-18). The bound is the per-character bound of the rows above (0.375 s at 16,384
+        # characters). A longer command runs only when the shorter one is within its bound.
+        for _ci_reps in (1024, 2048, 4095, 8191):
+            _ci_cmd = 'echo "' + "EMAIL+=x," * _ci_reps + '"'
+            _ci_cap = 0.375 * len(_ci_cmd) / (16 << 10)
+            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
+            if _ci_got != "allow" or _ci_spent > _ci_cap:
+                failures.append("(ci-idc-cpu7) 'echo \"EMAIL+=x,EMAIL+=x,...\"' over {} characters expected allow "
+                                "within {:.2f} s of CPU time, got {} after {:.2f} s{}".format(
+                                    len(_ci_cmd), _ci_cap, _ci_got, _ci_spent,
+                                    "; the longer commands were not run" if _ci_reps != 8191 else ""))
+                break
+        # The raw word reader (_cmtidn_raw_words) keeps a count of the double quotes open on its nesting stack, so
+        # a single quote read right inside a ${...} body tests whether one is open in constant time, where a search
+        # of the stack for each such quote cost time in the stack's depth times the number of quotes. The commands
+        # are the review's: 'echo ' followed by N '${a-' openers, 5N/2 empty quotes '' and N '}', then ' +=', for N
+        # of 3,276, 6,552 and 13,104 (32,768 to 131,048 characters, the last below _CMTIDN_READ_LIMIT). Each names
+        # no AI identity and allows. With the change reverted the handler took about 0.77 s, 2.9 s and 15.3 s of
+        # the calling thread's CPU in-process, the last past the 8-second hook deadline, against about 0.06 s,
+        # 0.10 s and 0.20 s with it (the least of three runs each, one shared host, 2026-11-18). The bound is the
+        # per-character bound of the rows above (0.375 s at 16,384 characters). A longer command runs only when
+        # the shorter one is within its bound.
+        for _ci_depth in (3276, 6552, 13104):
+            _ci_cmd = "echo " + "${a-" * _ci_depth + "''" * (_ci_depth * 5 // 2) + "}" * _ci_depth + " +="
+            _ci_cap = 0.375 * len(_ci_cmd) / (16 << 10)
+            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
+            if _ci_got != "allow" or _ci_spent > _ci_cap:
+                failures.append("(ci-idc-cpu8) 'echo ${{a-${{a-...'''...}}}} +=' over {} characters expected allow "
+                                "within {:.2f} s of CPU time, got {} after {:.2f} s{}".format(
+                                    len(_ci_cmd), _ci_cap, _ci_got, _ci_spent,
+                                    "; the longer commands were not run" if _ci_depth != 13104 else ""))
+                break
         # Every co-author trailer name in a word is read, each with its own value of up to 160 characters, where the
         # reader read only the first trailer name of a word and the raw-string scan resumed its search after each
         # value. A second trailer on the same line after a first value of 140 characters, which ends inside it
@@ -32937,7 +34302,13 @@ def _main_isolated(monitor):
                 ("(ci-wr163) an AI user.name value with no git word, past the read limit, denies",
                  _ci_body + "\nsetconf user.name Claude", "deny"),
                 ("(ci-wr165) an AI identity variable spelled in lower case, which the reader also judges, with no git "
-                 "word, past the read limit, denies", _ci_body + "\ngit_committer_email=claude@x make", "deny")):
+                 "word, past the read limit, denies", _ci_body + "\ngit_committer_email=claude@x make", "deny"),
+                ("(ci-idc15) an AI author.name value with no git word, past the read limit, denies",
+                 _ci_body + "\nsetconf author.name Claude", "deny"),
+                ("(ci-idc16) an AI EMAIL with no git word, past the read limit, denies",
+                 _ci_body + "\nEMAIL=noreply@anthropic.com make release", "deny"),
+                ("(ci-idc-c8) a lower-case email word, which names no identity variable, with no git word, past "
+                 "the read limit, allows", _ci_body + "\necho email", "allow")):
             _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_long: _decision(cig, _cmd), bound=1.0)
             if _ci_got != _ci_want or _ci_spent > 1.0:
                 failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s"
@@ -36313,6 +37684,7 @@ def _main_isolated(monitor):
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
         _test_reset_ancestry(failures, tmp)
+        _test_cmtidn_oracle(failures, tmp)
         _test_clock_inject(failures, tmp)
         _test_clock_hooks(failures, tmp)
 
