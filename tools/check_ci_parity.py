@@ -382,7 +382,9 @@ The remaining runner scaffold is an ALLOWLIST of the exact line shapes the two r
 runners use (tools/run_all_checks.sh and the adapted opf/tools/run_all_checks.sh),
 not a blocklist of known-bad spellings. The only recognized [ ] tests are
 if [ "$failed" -ne 0 ]; then, if [ "$notrun" -ne 0 ]; then, and the two exact
-gitleaks lookup lines, so a -v operand (whose subscript can assign), any NAME[...]
+gitleaks lookup lines (with the baseline-pin probe block's own tests, admitted only
+as that exact block, and the fetch check that opens the local summary's failed
+branch, admitted only inside its terminal summary tail), so a -v operand (whose subscript can assign), any NAME[...]
 subscript operand, a bare [ ] line, and every unlisted test form are unclassified.
 set -uo pipefail or set -euo pipefail, and the three checked directory-binding
 lines (LOCAL_BINDING_LINES), are accepted only at top level before the
@@ -1833,6 +1835,21 @@ BASELINE_PROBE_NOTE = (
 # The one documented opt-out of the absent branch's failure: set to exactly 1 in the
 # runner's environment, a genuine absence runs the gate bare without failing the run.
 BASELINE_PROBE_OPT_OUT = "BASELINE_PIN_ALLOW_NO_BASE"
+# The block's absence flag: 0 before the probe's branches (so an inherited value never
+# reads as an absence) and 1 only in the genuine-absence branch, after the NOTE. The
+# terminal summary (TERMINAL_SUMMARIES, local runner) reads it as the first statement
+# of its failed branch and then prints BASELINE_FETCH_SUMMARY, the one fetch command,
+# at the top of a failed run's summary (the maintainer's ruling of 2026-11-17); the
+# fail-closed default above is unchanged. The summary reads it as ${NAME:-0}, so a
+# runner without the block prints no fetch line rather than ending under set -u.
+BASELINE_FETCH_FLAG = "baseline_fetch"
+BASELINE_FETCH_COMMAND = "git fetch origin main:refs/remotes/origin/main"
+BASELINE_FETCH_SUMMARY = (
+    "FETCH FIRST: the baseline-pin base comparison did NOT RUN; run "
+    + BASELINE_FETCH_COMMAND)
+BASELINE_FETCH_CHECK_LINE = (
+    'if [ "${' + BASELINE_FETCH_FLAG + ':-0}" = "1" ]; then')
+BASELINE_FETCH_ECHO = 'echo "' + BASELINE_FETCH_SUMMARY + '"'
 # The probe launch, a plain command in the baseline_probe function body, so its python3
 # sits in a command-word position tools/check_python_launcher_isolation.py resolves; the
 # command substitution after the function calls only the function.
@@ -1847,10 +1864,12 @@ BASELINE_PROBE_BLOCK = (
     "baseline_probe_err=$(baseline_probe 2>&1 >/dev/null)",
     "baseline_probe_rc=$?",
     "baseline_probe_err=${baseline_probe_err%.}",
+    BASELINE_FETCH_FLAG + "=0",
     'if [ "$baseline_probe_rc" -eq 0 ] && [ -z "$baseline_probe_err" ]; then',
     BASELINE_PROBE_GATE,
     'elif [ "$baseline_probe_rc" -eq 1 ] && [ -z "$baseline_probe_err" ]; then',
     'echo "' + BASELINE_PROBE_NOTE + '"',
+    BASELINE_FETCH_FLAG + "=1",
     BASELINE_PROBE_ABSENT_GATE,
     'if [ "${' + BASELINE_PROBE_OPT_OUT + ':-}" != "1" ]; then',
     "failed=1",
@@ -1911,6 +1930,9 @@ def _baseline_absent_identity():
 TERMINAL_SUMMARIES = (
     (
         'if [ "$failed" -ne 0 ]; then',
+        BASELINE_FETCH_CHECK_LINE,
+        BASELINE_FETCH_ECHO,
+        "fi",
         'echo "FAILED GATES: ${failed_names}"',
         'echo "RESULT: FAIL"',
         "exit 1",
@@ -2629,6 +2651,12 @@ def extract_local(text):
             scaffold = (bool(if_stack) and if_stack[-1]["failed_check"]
                         and not if_stack[-1]["in_else"]
                         and "failed_names" in initialized)
+        elif stripped in (BASELINE_FETCH_CHECK_LINE, BASELINE_FETCH_ECHO):
+            # Only where the real runner puts them: the fetch check and its echo
+            # inside the recognized terminal summary tail (the first statement of
+            # its failed branch), whose exact match fixes their position. Anywhere
+            # else they are unclassified.
+            scaffold = line_number in terminal_summary_lines
         elif stripped in RUNNER_SCAFFOLD_LINES:
             # Exact membership decides; the named-expansion screen is belt and
             # braces so a future scaffold addition cannot widen the expansion
@@ -5773,9 +5801,11 @@ def baseline_probe_problems(text):
     may run. Exit 0 with nothing on stderr passes --local-base; exit 1 with nothing on
     stderr prints BASELINE_PROBE_NOTE exactly once, runs the gate bare and names
     baseline-pin as failed and fails the run unless BASELINE_PROBE_OPT_OUT is exactly 1
-    (BASELINE_PROBE_OPT_OUT_SCENARIOS); every other outcome runs no baseline-pin gate
-    call, names baseline-pin as failed and fails the run, opt-out or not. A stderr of
-    only line feeds is output on stderr."""
+    (BASELINE_PROBE_OPT_OUT_SCENARIOS), and when it fails the run its summary starts
+    with BASELINE_FETCH_SUMMARY, directly before the FAILED GATES line; every other
+    outcome runs no baseline-pin gate call, prints no fetch summary line, names
+    baseline-pin as failed and fails the run, opt-out or not. A stderr of only line
+    feeds is output on stderr."""
     import tempfile
 
     problems = []
@@ -5808,6 +5838,18 @@ def baseline_probe_problems(text):
                     "NOTE: baseline-pin base comparison")]
                 if notes != ([BASELINE_PROBE_NOTE] if status == 1 and not err else []):
                     problems.append("{}: NOTE lines {!r}".format(label, notes))
+                # A genuine absence that fails the run starts its summary with the one
+                # fetch command, directly before the FAILED GATES line; no other run
+                # prints it.
+                fetch = [index for index, line in enumerate(lines)
+                         if line.startswith("FETCH FIRST:")]
+                want_fetch = status == 1 and not err and not passes
+                if ([lines[index] for index in fetch]
+                        != ([BASELINE_FETCH_SUMMARY] if want_fetch else [])
+                        or (want_fetch and lines[fetch[0] + 1:fetch[0] + 2]
+                            != ["FAILED GATES: baseline-pin"])):
+                    problems.append("{}: summary fetch lines {!r}".format(
+                        label, [lines[index] for index in fetch]))
                 if rc != (0 if passes else 1):
                     problems.append("{}: exit {}".format(label, rc))
                 named = [line for line in lines if line.startswith(
@@ -10815,7 +10857,9 @@ def self_test():
     # and must be caught at runtime: the unconditional flag, the git show-ref probe
     # restored, any silent non-zero exit read as absence, stderr ignored on either
     # branch, the old fetch hint, an absence that passes without the opt-out or with any
-    # opt-out value, and a stderr of only line feeds read as silent. The block-position
+    # opt-out value, a stderr of only line feeds read as silent, and the fetch command
+    # missing from the top of a failed absent run's summary (its summary lines removed,
+    # or the block's absence flag never set). The block-position
     # and duplicate-block guards each have a mutant of their own below.
     count += 1
     probe_runner, probe_diagnostic = read_runner_text(LOCAL_PATH, LOCAL_SOURCE)
@@ -10855,6 +10899,11 @@ def self_test():
               'if [ -z "${' + BASELINE_PROBE_OPT_OUT + ':-}" ]; then')),
             ("stderr of only line feeds read as silent",
              ("printf '.' >&2\n", ":\n")),
+            ("fetch line removed from the run summary",
+             ("  " + BASELINE_FETCH_CHECK_LINE + "\n    " + BASELINE_FETCH_ECHO
+              + "\n  fi\n", "")),
+            ("absence flag not set, so the summary prints no fetch line",
+             ("  " + BASELINE_FETCH_FLAG + "=1\n", "")),
         )
         for label, edit in probe_mutants:
             if edit is None:

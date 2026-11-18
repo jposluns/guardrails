@@ -136,7 +136,8 @@ run_gate "baseline-pin-selftest" python3 -I -B tools/check_selftest_execution.py
 # (for example BASELINE_PIN_ALLOW_NO_BASE=1 tools/run_all_checks.sh): with it, and only on that genuine
 # absence, the run is not failed for the missing comparison, so it can end RESULT: PASS without the leg. Any
 # other outcome (output on stderr, or an exit other than 0 or 1) is never read as absence: it fails the run
-# under the baseline-pin name, opt-out or not.
+# under the baseline-pin name, opt-out or not. The block sets baseline_fetch to 1 only on that genuine absence (0
+# otherwise, whatever the environment held), and a run that then fails prints the fetch command first in its summary.
 # The probe runs as a plain command inside the baseline_probe function, so its python3 sits in a command-word
 # position check_python_launcher_isolation.py resolves; the command substitution calls only the function, keeps
 # the probe's stderr, discards its stdout and leaves the probe's exit status in $?. The function writes one "."
@@ -152,10 +153,12 @@ baseline_probe() {
 baseline_probe_err=$(baseline_probe 2>&1 >/dev/null)
 baseline_probe_rc=$?
 baseline_probe_err=${baseline_probe_err%.}
+baseline_fetch=0
 if [ "$baseline_probe_rc" -eq 0 ] && [ -z "$baseline_probe_err" ]; then
   run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py --local-base refs/remotes/origin/main
 elif [ "$baseline_probe_rc" -eq 1 ] && [ -z "$baseline_probe_err" ]; then
   echo "NOTE: baseline-pin base comparison did NOT RUN: this clone has no refs/remotes/origin/main; create it with git fetch origin main:refs/remotes/origin/main"
+  baseline_fetch=1
   run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py
   if [ "${BASELINE_PIN_ALLOW_NO_BASE:-}" != "1" ]; then
     failed=1
@@ -419,6 +422,11 @@ run_gate "internal-names"           python3 -I -B tools/check_internal_names.py
 run_gate "qa-advisory-digest"       python3 -I -B tools/audit_reference.py --digest
 
 if [ "$failed" -ne 0 ]; then
+  # A failed run whose clone lacks the base (baseline_fetch=1, set only on the probe block's genuine absence) starts
+  # its summary with the one fetch command that creates the ref (the maintainer's ruling of 2026-11-17).
+  if [ "${baseline_fetch:-0}" = "1" ]; then
+    echo "FETCH FIRST: the baseline-pin base comparison did NOT RUN; run git fetch origin main:refs/remotes/origin/main"
+  fi
   echo "FAILED GATES: ${failed_names}"
   echo "RESULT: FAIL"
   exit 1
