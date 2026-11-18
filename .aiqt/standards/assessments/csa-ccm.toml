@@ -25,7 +25,7 @@ omits = [
   "monitoring of tenant access",
   "restriction of tenant access as an access control",
   "segmentation at the infrastructure layer",
-  "segmenting and segregating tenant access in applications other than the assistant, such as the product being built (the whole of the control's object, met for one application only)",
+  "segmenting and segregating tenant access in applications other than the assistant (the whole of the control's object, met for one application only): on the recorded reading of convention 8 that includes the product being built; on its other reading the rule also acts on tenant context inside the product's application, and every other application the organisation builds or runs is still left out",
   "the design, development, deployment and configuration work the control's leading verbs ask for: the rule sets how the assistant treats context it holds, not how any application or infrastructure is designed, developed, deployed or configured",
 ]
 label-a = "tight"

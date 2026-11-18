@@ -39,18 +39,14 @@ in the mappings or on the site; that is a later change.
   part (the ATLAS release, for example, gives a technique's text in its techniques file and links its
   mitigations to it only through `mitigates` relations in its YAML copy), every part is read, and a record
   never narrows the control by citing only one of them. For a technique, each mitigation the edition links
-  to it is a listed mitigation. A sub-technique takes in every mitigation the edition links to its parent
-  technique as well as those linked to it directly, because the edition records it as a specialization of
-  the parent and a mitigation of the parent's behaviour applies to each way of carrying that behaviour out;
-  it does not take in its sibling sub-techniques or mitigations linked only to them. This rule on
-  sub-techniques is the assessor's decision in this pass; the record it decides (row 14) states the label
-  the other reading would give. Detection guidance is any part or item that names signs of an attack or
-  failure to watch for, where the entry heads or numbers it as detection guidance or otherwise presents
-  those signs as something to detect (calling them detection hooks or signals, for example), wherever in the entry they
-  sit, the prose of the description included; each sign it names counts. Signs the prose names without
-  presenting them as something to detect are read for the core and the main variants only. For a
-  catalogue control or a management system control, the statement is what counts; text in a separate
-  discussion or guidance part counts only as convention 6 below allows.
+  to it is a listed mitigation. Whether a sub-technique also takes in the mitigations the edition links to
+  its parent technique is open (convention 10). Detection guidance is any part or item that names signs of
+  an attack or failure to watch for, where the entry heads or numbers it as detection guidance or
+  otherwise presents those signs as something to detect (calling them detection hooks or signals, for
+  example), wherever in the entry they sit, the prose of the description included; each sign it names
+  counts. Signs the prose names without presenting them as something to detect are read for the core and
+  the main variants only. For a catalogue control or a management system control, the statement is what
+  counts; text in a separate discussion or guidance part counts only as convention 6 below allows.
 - **Exposure checklists.** A checklist of the conditions under which a system is exposed (a "how to
   detect" or "is the application vulnerable" list that names exposed conditions rather than signs of an
   attack) is part of the control under B when the entry presents its conditions as requirements: that is,
@@ -159,10 +155,12 @@ Apply these in order for each row and write the outcome into the record.
 
 ## Open conventions
 
-Choosing Definition B did not settle these, and the maintainer has settled none of them. All nine stay
-open, all three questions of convention 6 included. Conventions 6 to 9 are read in this pass as stated
-below; those readings are the assessor's proposals, not decisions. A record names every convention that
-decides one of its labels (test 8).
+Choosing Definition B did not settle these, and the maintainer has settled none of them. All ten stay
+open, all three questions of convention 6 included. Conventions 6, 9 and 10 state below the reading taken
+in this pass. Conventions 1 to 5, 7 and 8 state a question without a reading: where one of them decides a
+label, the record states the reading it takes in `assumptions`, with the labels the other reading would
+give, and the totals below say what each other reading changes. Every reading taken is the assessor's
+proposal, not a decision. A record names every convention that decides one of its labels (test 8).
 
 1. **Informative annexes.** Can a row that maps to an informative annex (for example ISO/IEC 23894
    Annex B, which lists risk sources rather than requirements) be tight at all?
@@ -246,6 +244,22 @@ decides one of its labels (test 8).
    labels are broad. This convention is engaged when the entry's object is an AI system and the rule's
    boundary is the work product or the tooling used to build it, including the assistant's tools where
    convention 3 is read as meaning only the product and its tooling exception applies.
+10. **Sub-techniques and their parent's mitigations.** Does a sub-technique take in the mitigations an
+    edition links to its parent technique, as well as those linked to it directly? In this pass it is
+    read as yes: the edition records the sub-technique as a specialization of the parent, and a
+    mitigation of the parent's behaviour can apply to each way of carrying that behaviour out. On either
+    reading a sub-technique takes in nothing linked only to its sibling sub-techniques. The ATLAS 2026.06
+    release's own linking pattern is evidence against the reading taken. Where the release means a
+    parent's mitigation to apply to the sub-techniques, it repeats the link on each one: AML.M0004 and
+    AML.M0024 are linked to AML.T0024 and to each of its three sub-techniques (lines 13548 to 13571 and
+    14296 to 14315 of its YAML copy), while AML.M0019 is linked to AML.T0024 (lines 14096 to 14100) and
+    to none of them. Counted over the `mitigates` and `specializes` relations of that YAML copy, 45
+    links run from a mitigation to a parent technique that has sub-techniques; 15 are repeated on every
+    one of its sub-techniques and 30 are missing from at least one, and 40 of the 70 sub-techniques have
+    no mitigation linked to them directly. So a parent's link that a sub-technique does not repeat can be
+    read as deliberate, and on that reading a sub-technique takes in only the mitigations linked to it
+    directly. This convention is engaged when a row maps to a sub-technique whose parent has a linked
+    mitigation that the sub-technique does not repeat.
 
 ## Record schema
 
@@ -276,7 +290,7 @@ and the lines read.
 | `omits` | what the rule leaves out |
 | `label-a` | `tight`, `broad` or `remove` under definition A |
 | `label-b` | `tight`, `broad` or `remove` under definition B |
-| `adopted` | `B` when the row's B label holds on every reading of every open convention; `B pending convention N` (each such convention by number, as in `B pending conventions 3 and 8`) when the other reading of an open convention would give another B label |
+| `adopted` | `B` when the row's B label holds on every reading of every open convention; `B pending convention N` (each such convention by number, as in `B pending conventions 3 and 8`) when the other reading of an open convention, or of several read the other way together, would give another B label; where only several together would, `assumptions` says so |
 | `proposed` | the B label (`tight`, `broad` or `remove`) when `adopted` is `B`; `pending-convention` when `adopted` names a dependency, with `label-b` giving the label on the reading the record states |
 | `review-state` | `assessed`, `evidence-missing`, `edition-mismatch` or `disputed` |
 | `conventions` | the open conventions (by number above) that decide a label in this row |
@@ -307,7 +321,7 @@ representative sample. All 20 are tight in frontmatter today.
 | 11 | corroborate-external-claims | owasp-llm | LLM07 | tight | broad | B | none |
 | 12 | output-encoding | atlas | AML.T0077 | tight | broad | B | 4 |
 | 13 | resource-bounds | atlas | AML.T0029 | broad | broad | B | 8 |
-| 14 | resource-bounds | atlas | AML.T0034.000 | broad | broad | B | 8 |
+| 14 | resource-bounds | atlas | AML.T0034.000 | broad | broad | B pending conventions 8 and 10 | 8, 10 |
 | 15 | resource-bounds | owasp-asi | ASI08 | tight | broad | B | none |
 | 16 | threat-model-boundaries | owasp-proactive | C4 | tight | broad | B | none |
 | 17 | guardrail-config-integrity | owasp-mcp | MCP02 | tight | broad | B | 4 |
@@ -321,19 +335,21 @@ Totals for these 20 rows, under the readings the records state:
 - Definition B, as chosen: 0 tight, 20 broad. Rows 4, 6 and 9, tight under B in the earlier rounds,
   are broad once B is read over the whole control: rows 4 and 6 count the objects of GOVERN 3.2 as well as
   its verbs, and row 9 counts the whole of the tooling the A.4.4 statement names (see their records).
-- The B label holds on every reading of every open convention for all 20 rows. Rows 13 and 14, which
-  earlier rounds left waiting on convention 8, are broad under B on either reading of it once their
+- The B label holds on every reading of every open convention for 19 of the 20 rows. Rows 13 and 14,
+  which earlier rounds left waiting on convention 8, are broad under B on either reading of it once their
   listed mitigations are read from the whole technique: the ATLAS release links access control on the
-  model's API (AML.M0019) to the Denial of AI Service technique and to the parent of the Excessive Queries
-  sub-technique, and the resource bounds rule does not meet it on either reading (see their records).
-  Row 14's B label also rests on the rule above that a sub-technique takes in its parent's mitigations:
-  on the other reading of that rule, row 14 would be tight under B where convention 8 is read the other
-  way.
+  model's API (AML.M0019) to the Denial of AI Service technique and to the parent of the Excessive
+  Queries sub-technique, and the resource bounds rule does not meet it on either reading (see their
+  records). For row 14 this holds only while a sub-technique is read as taking in its parent's
+  mitigations (convention 10): if it takes in only those linked to it directly, row 14 has no listed
+  mitigations, and where convention 8 is read the other way as well, its record gives tight under B. Row
+  14's B label is therefore pending conventions 8 and 10 together.
 
-The A totals depend on conventions 1, 2, 3, 4, 6, 7, 8 and 9; the B totals depend on no open
-convention, because in every row the omissions that make the row broad under B stand on every reading.
-Each item below says what changes when that convention is read the other way and every other convention
-is read as the records state:
+The A totals depend on conventions 1, 2, 3, 4, 6, 7, 8 and 9. The B totals depend only on conventions 8
+and 10 read the other way together, which would make row 14 tight under B (1 tight, 19 broad); in every
+other row the omissions that make the row broad under B stand on every reading. Each item below says
+what changes when that convention is read the other way and every other convention is read as the
+records state:
 
 - Convention 1: if an informative annex entry cannot be tight, rows 1 and 2 are broad under A as well.
 - Convention 2: if a pack rule is not one of an organisation's policies, procedures or processes, rows 3
@@ -348,13 +364,19 @@ is read as the records state:
   A as well.
 - Convention 6, third question: no label changes. The assessor's proposed reading, that a guidance item
   is an essential element under B only where the source presents it as a requirement, is the reading
-  rows 9 and 10 state; if every item of a discussion or guidance part were an essential element under B, rows 9,
-  10 and 20 would be broad under B as they are.
+  rows 9 and 10 state; if every item of a discussion or guidance part were an essential element under
+  B, rows 9, 10 and 20 would be broad under B as they are.
 - Convention 7: if the entry's role needs a person, row 8 is broad under A as well.
 - Convention 8: if the resource bounds rule is read as also binding the services of the product the
-  assistant builds, rows 13 and 14 are tight under A; they stay broad under B.
+  assistant builds, rows 13 and 14 are tight under A; row 13 stays broad under B, and row 14 does too
+  while convention 10 is read as recorded.
 - Convention 9: if an entry about an AI system is met only by a rule aimed at what makes a system AI,
   row 8 is broad under A as well.
+- Convention 10: no label changes on its own. If a sub-technique takes in only the mitigations linked to
+  it directly, row 14 has no listed mitigations, but while convention 8 is read as recorded the rule does
+  not act on the service the sub-technique targets, so both labels stay broad.
+- Convention 8 together with convention 10: if both are read the other way, row 14 is tight under A and
+  under B.
 - Convention 3 together with convention 9 or convention 6: row 9 is broad under A as well only if
   convention 3 is read the other way and convention 9 or convention 6 is too. On the product reading of
   convention 3 the assistant's tools are tooling for the AI system only through that convention's

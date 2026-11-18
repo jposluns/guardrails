@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "7675cf362946aa8ec105e292fc53b995617a06139a33b3272841d856fe5de54d"
+tree-sha256 = "8b1551f256430a5921b8104334dc02ebaabd498589e0db48fcf69906335f5c16"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -867,18 +867,18 @@ sha256 = "ce143791554930f8e5c87adaecb7aa295afb1d17bddf9defaa3c7131f1a63f8a"
 
 [[sources]]
 path = ".aiqt/standards/assessments/RUBRIC.md"
-bytes = 29581
-sha256 = "2591faf3624e98b5a6529661c76093cd6fe744a9041e544f3786bd9fc72e91c3"
+bytes = 31897
+sha256 = "10b3abdd6c1203a91caef9a426b28f27db461d0330a1084aaa35fe018b7839b1"
 
 [[sources]]
 path = ".aiqt/standards/assessments/atlas.toml"
-bytes = 12965
-sha256 = "5552902271c363b22aca25f25611fdd9b76b468c192084e91ec6627452f2aaf9"
+bytes = 14858
+sha256 = "b4a5f2919c57bdea8a3ee874be0f0c3fe7ce8cf4ec6d25755d7d77214a6b40d0"
 
 [[sources]]
 path = ".aiqt/standards/assessments/csa-ccm.toml"
-bytes = 4552
-sha256 = "da9961b55e43b77402a0a6c2335a2d28c22788daa16124a3e9afc3b79896d295"
+bytes = 4769
+sha256 = "eaecf340c00dca66fd0e2d67dee04dbab3ee97f05c987079d4a0d616f61079c9"
 
 [[sources]]
 path = ".aiqt/standards/assessments/iso-23894.toml"
@@ -887,8 +887,8 @@ sha256 = "5935799f8f2b720a61458fc9a6c6ff446bc1ead3862734ac205d3db55fd037e3"
 
 [[sources]]
 path = ".aiqt/standards/assessments/iso-42001.toml"
-bytes = 7684
-sha256 = "0771fd141d68597005bcecde50212b0b27dd05ca49f86a75cd06ed8ac0018358"
+bytes = 8461
+sha256 = "ddb72a367837d9ad6f58b68159052450cba879dcb11b1d5f95cb78583d38726b"
 
 [[sources]]
 path = ".aiqt/standards/assessments/nist-80053.toml"
@@ -912,8 +912,8 @@ sha256 = "8d0d83671c7ab9e5d2826bcd3740322b67eb3339dc394545468becf55d9fb895"
 
 [[sources]]
 path = ".aiqt/standards/assessments/owasp-mcp.toml"
-bytes = 17894
-sha256 = "1280e7adbe6fabe25488765f8796a04923bb50b29974f94e35ab15367a2723c5"
+bytes = 19796
+sha256 = "b48ad7229f82439c44b0bfe2e30c9f75ec17713c1339d632c79bd439ddf1bfc3"
 
 [[sources]]
 path = ".aiqt/standards/assessments/owasp-proactive.toml"
