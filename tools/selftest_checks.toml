@@ -1979,11 +1979,14 @@ expected-check-ids = [
   "gitalias-oracle/no-fail-open",
   "gitalias-oracle/fixture-hermetic",
   # ---------- temporary-root ownership (tools/_selftest_tmproot.py, tools/_entry_restore_selftest.py) ----------
-  # A setup failure after the suite root is made removes it and keeps its own failure visible; an
-  # entry-restore allocation that fails removes the directories made before it (the probe child's four,
-  # the mutant child's five); the start-of-run sweep removes only this suite's stale marked root; and the
-  # run's own root is gone after its finally.
+  # A setup failure after the suite root is made removes it and keeps its own failure visible; a root that
+  # survives removal is reported and recorded as a run failure; a failed probe restore still removes the
+  # root; an entry-restore allocation that fails removes the directories made before it (the probe child's
+  # four, the mutant child's five); the start-of-run sweep removes only this suite's stale marked root; and
+  # the run's own root is gone after its finally.
   "temp/failed-setup-cleans-root",
+  "temp/failed-removal-reported",
+  "temp/probe-restore-failure-removes-root",
   "temp/partial-allocation-cleans-earlier-roots",
   "temp/partial-allocation-cleans-earlier-mutant-roots",
   "temp/stale-marked-root-swept",

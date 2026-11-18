@@ -6862,6 +6862,63 @@ def _drift_child_failures(returncode, out, err):
     return failures
 
 
+class _InjectedTreeMkdirFailure(OSError):
+    """The tree-directory mkdir failure _tmp_mkdir_guard_failures injects."""
+
+
+def _tmp_mkdir_guard_failures():
+    """(tmp-mkdir-guard): both raw-materialization sites, _predecessor_tree_checks and
+    _head_committed_manifest_integrity, make a private temporary directory and then its tree
+    subdirectory, and a failure of that second mkdir must still remove the temporary directory. Each
+    site runs with tempfile's directory pointed at a fresh private parent and Path.mkdir failing for
+    the tree subdirectory under it: the injected failure must come out and the parent must be empty
+    afterwards. Nothing reaches git, since the injected failure precedes the materialization. Returns
+    the failure lines (empty when both sites hold); a directory a regression leaves goes with the
+    parent here, so a failing row does not itself leave one behind."""
+    import shutil
+    import tempfile
+    failures = []
+    sites = (
+        ("_predecessor_tree_checks",
+         lambda: _predecessor_tree_checks(Path("unused-root"), "0" * 40, False)),
+        ("_head_committed_manifest_integrity",
+         lambda: _head_committed_manifest_integrity(Path("unused-root"), "0" * 40)),
+    )
+    real_mkdir = Path.mkdir
+    real_tempdir = tempfile.tempdir
+    for name, call in sites:
+        parent = Path(tempfile.mkdtemp(prefix="aiqt-release-delta-mkdir-guard-"))
+
+        def failing_mkdir(self, *args, _parent=parent, **kwargs):
+            if self.name == "tree" and self.parent.parent == _parent:
+                raise _InjectedTreeMkdirFailure("injected tree mkdir failure")
+            return real_mkdir(self, *args, **kwargs)
+
+        raised = None
+        try:
+            tempfile.tempdir = str(parent)
+            Path.mkdir = failing_mkdir
+            try:
+                call()
+            except _InjectedTreeMkdirFailure:
+                raised = True
+            except Exception as exc:  # any other outcome is this row's failure, never a crash
+                raised = "{}: {}".format(type(exc).__name__, exc)
+            finally:
+                Path.mkdir = real_mkdir
+                tempfile.tempdir = real_tempdir
+            left = sorted(os.listdir(parent))
+        finally:
+            shutil.rmtree(parent, ignore_errors=True)
+        if raised is not True:
+            failures.append("(tmp-mkdir-guard {}) the injected tree mkdir failure must come out; got "
+                            "{!r}".format(name, raised if raised is not None else "no exception"))
+        if left:
+            failures.append("(tmp-mkdir-guard {}) a failed tree mkdir left the temporary directory "
+                            "behind: {!r}".format(name, left))
+    return failures
+
+
 def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent classification cases
     # Hermetic git fixtures (test-hermeticity): every fixture git call below inherits
     # os.environ, where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook
@@ -8688,6 +8745,10 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     # fixture scrub in effect inside: the entry point is run in a child around a stand-in main.
     from _entry_restore_selftest import entry_restore_failures
     failures.extend(entry_restore_failures(__file__, "self_test_main", "_self_test_main_isolated"))
+
+    # Each raw-materialization site removes its temporary directory when making the tree directory
+    # in it fails (the mkdir runs inside the guard whose finally removes the directory).
+    failures.extend(_tmp_mkdir_guard_failures())
 
     # Round-6 (codex 1 / claude MEDIUM-1): the gate and probe bindings are verified BY IDENTITY at
     # each gated block above and here at the end, and every gate label must account for exactly

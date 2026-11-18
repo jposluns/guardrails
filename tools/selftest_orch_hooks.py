@@ -5791,34 +5791,83 @@ def _tmproot_parents():
     return (tempfile.gettempdir(), "/var/tmp", "/tmp")
 
 
-# The child of temp/failed-setup-cleans-root: it imports this suite from the tools directory in argv[1],
-# records the root _fixture_tmpdir makes, makes scrub_git_environment (a setup step after the root is made)
-# raise a sentinel, runs _main_isolated, and prints one tagged JSON line: the name of the exception that
-# came out (None when none did), how many roots were made, and those still present.
+# The child of the temp/ rows that run _main_isolated: it imports this suite from the tools directory in
+# argv[1] and confines it to the base directory in argv[2], which the parent made inside its own root: the
+# root is made there (recorded) and the start-of-run sweep looks only there, never in the real temporary
+# parents. scrub_git_environment (a setup step after the root is made) raises a sentinel, so the run stops
+# at its first step. argv[3] adds injections, comma-separated: "removal" makes shutil.rmtree fail on the
+# root and leave it in place (with ignore_errors it returns silently, as rmtree does), and "restore" makes
+# the finally's restore of the registry probe raise a second sentinel. The child prints one tagged JSON
+# line: the name of the exception that came out (None when none did), how many roots were made, those
+# still present, and the run's temp/own-root-removed failure lines.
 _TEMP_SETUP_TAG = "TEMP-SETUP-RESULT "
 _TEMP_SETUP_CHILD = (
-    "import json, os, sys\n"
+    "import errno, json, os, shutil, sys, tempfile, types\n"
+    "from pathlib import Path\n"
     "sys.path.insert(0, sys.argv[1])\n"
+    "base, modes = sys.argv[2], set(filter(None, sys.argv[3].split(',')))\n"
     "import selftest_orch_hooks as suite\n"
     "made = []\n"
-    "real_tmpdir = suite._fixture_tmpdir\n"
-    "def recording_tmpdir(prefix):\n"
-    "    path = real_tmpdir(prefix)\n"
+    "def confined_tmpdir(prefix):\n"
+    "    path = Path(tempfile.mkdtemp(prefix=prefix, dir=base))\n"
     "    made.append(str(path))\n"
     "    return path\n"
-    "suite._fixture_tmpdir = recording_tmpdir\n"
+    "suite._fixture_tmpdir = confined_tmpdir\n"
+    "suite._tmproot_parents = lambda: (base,)\n"
     "class InjectedSetupFailure(Exception):\n"
+    "    pass\n"
+    "class InjectedRestoreFailure(Exception):\n"
     "    pass\n"
     "def failing_scrub():\n"
     "    raise InjectedSetupFailure('injected setup failure')\n"
     "suite.scrub_git_environment = failing_scrub\n"
+    "if 'removal' in modes:\n"
+    "    real_rmtree = shutil.rmtree\n"
+    "    def failing_rmtree(path, *args, **kwargs):\n"
+    "        if str(path) in made:\n"
+    "            if kwargs.get('ignore_errors') or (args and args[0]):\n"
+    "                return None\n"
+    "            raise PermissionError(errno.EACCES, 'injected removal failure', str(path))\n"
+    "        return real_rmtree(path, *args, **kwargs)\n"
+    "    shutil.rmtree = failing_rmtree\n"
+    "if 'restore' in modes:\n"
+    "    hooks = suite.aiqt_hooks\n"
+    "    original = hooks._orch_dirfd_has_registry\n"
+    "    class RestoreFailing(types.ModuleType):\n"
+    "        def __setattr__(self, name, value):\n"
+    "            if name == '_orch_dirfd_has_registry' and value is original:\n"
+    "                raise InjectedRestoreFailure('injected probe restore failure')\n"
+    "            super().__setattr__(name, value)\n"
+    "    hooks.__class__ = RestoreFailing\n"
     "raised = None\n"
     "try:\n"
     "    suite._main_isolated(None)\n"
     "except BaseException as exc:\n"
     "    raised = type(exc).__name__\n"
     "print('" + _TEMP_SETUP_TAG + "' + json.dumps({'raised': raised, 'made': len(made),\n"
-    "      'left': [p for p in made if os.path.lexists(p)]}))\n")
+    "      'left': [p for p in made if os.path.lexists(p)],\n"
+    "      'own_root_failures': [f for f in suite.FAILURES if f.startswith('temp/own-root-removed')]}))\n")
+
+
+def _temp_setup_child(tmp, name, modes):
+    """Run _TEMP_SETUP_CHILD with the injections modes (a comma-separated string) under a fresh base
+    directory tmp/name. Returns (its result object, or a description of why there is none; its stderr).
+    A root the child leaves is removed here afterwards, so a failing row does not itself leave one."""
+    base = tmp / name
+    base.mkdir()
+    stderr = ""
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-B", "-c", _TEMP_SETUP_CHILD,
+                               str(Path(__file__).resolve().parent), str(base), modes],
+                              capture_output=True, text=True, timeout=300)
+        stderr = proc.stderr
+        lines = [line for line in proc.stdout.splitlines() if line.startswith(_TEMP_SETUP_TAG)]
+        got = (json.loads(lines[0][len(_TEMP_SETUP_TAG):]) if len(lines) == 1
+               else {"no-single-result-line": proc.returncode, "stderr": proc.stderr[-2000:]})
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        got = {"child-error": str(exc)}
+    shutil.rmtree(base, ignore_errors=True)
+    return got, stderr
 
 
 class _InjectedAllocationFailure(OSError):
@@ -5857,22 +5906,32 @@ def _entry_restore_partial_allocation(tmp, name, call, fail_at):
 
 def _temp_root_cases(tmp):
     """The temporary-root ownership rows: a setup failure after this suite's root is made removes it and
-    keeps its own failure visible; an entry-restore allocation that fails removes the directories made
-    before it; and the stale-root sweep removes only a stale marked root of this suite."""
+    keeps its own failure visible; a root that survives removal is reported and fails the run; a failed
+    probe restore still removes the root; an entry-restore allocation that fails removes the directories
+    made before it; and the stale-root sweep removes only a stale marked root of this suite."""
     # temp/failed-setup-cleans-root: in a child, since the run changes the process environment.
-    try:
-        proc = subprocess.run([sys.executable, "-I", "-B", "-c", _TEMP_SETUP_CHILD,
-                               str(Path(__file__).resolve().parent)],
-                              capture_output=True, text=True, timeout=300)
-        lines = [line for line in proc.stdout.splitlines() if line.startswith(_TEMP_SETUP_TAG)]
-        got = (json.loads(lines[0][len(_TEMP_SETUP_TAG):]) if len(lines) == 1
-               else {"no-single-result-line": proc.returncode, "stderr": proc.stderr[-2000:]})
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        got = {"child-error": str(exc)}
-    for path in got.get("left") or []:
-        shutil.rmtree(path, ignore_errors=True)
+    got, _stderr = _temp_setup_child(tmp, "temp-setup-failure", "")
     check("temp/failed-setup-cleans-root", got,
-          {"raised": "InjectedSetupFailure", "made": 1, "left": []})
+          {"raised": "InjectedSetupFailure", "made": 1, "left": [], "own_root_failures": []})
+
+    # temp/failed-removal-reported: removing the root fails and leaves it in place. The surviving root
+    # must be named on stderr and recorded as the run's temp/own-root-removed failure, so the run cannot
+    # report clean success; a removal that silences the error (ignore_errors) does neither.
+    got, stderr = _temp_setup_child(tmp, "temp-removal-failure", "removal")
+    left = got.get("left") or []
+    check("temp/failed-removal-reported",
+          (got.get("raised"), got.get("made"), len(left),
+           len(left) == 1 and "SELF-TEST ERROR: could not remove the temporary root {}".format(left[0])
+           in stderr,
+           len(left) == 1 and len(got.get("own_root_failures") or []) == 1
+           and left[0] in got["own_root_failures"][0]),
+          ("InjectedSetupFailure", 1, 1, True, True))
+
+    # temp/probe-restore-failure-removes-root: restoring the registry probe raises in the finally. The
+    # nested finally must still remove the root, and the restore failure must come out.
+    got, _stderr = _temp_setup_child(tmp, "temp-restore-failure", "restore")
+    check("temp/probe-restore-failure-removes-root", got,
+          {"raised": "InjectedRestoreFailure", "made": 1, "left": [], "own_root_failures": []})
 
     # temp/partial-allocation-cleans-earlier-roots: the second of the probe child's four allocations
     # fails, so the first, made before any guard was entered in the old code, must be gone.
@@ -20247,16 +20306,18 @@ def _main_isolated(report_path=None):
         _gitalias_oracle_cases(tmp)
         _temp_root_cases(tmp)
     finally:
-        # Nested, so a failure restoring the probe cannot skip removing the root.
+        # Nested, so a failure restoring the probe cannot skip removing the root
+        # (temp/probe-restore-failure-removes-root injects one).
         try:
             aiqt_hooks._orch_dirfd_has_registry = saved_probe
         finally:
-            # A root that survives removal is reported on every path (here, so a run that raises reports
-            # it too) and fails a run that reaches the check below; it is never silenced.
+            # A root that survives removal is reported and recorded as a failure on every path (here, so
+            # a run that raises carries both too); it is never silenced. temp/failed-removal-reported
+            # injects a removal failure to hold both.
             _tmp_left = _selftest_tmproot.remove_root(tmp)
             if _tmp_left is not None:
                 print("SELF-TEST ERROR: {}".format(_tmp_left), file=sys.stderr)
-    check("temp/own-root-removed", _tmp_left, None)
+            check("temp/own-root-removed", _tmp_left, None)
 
     # An in-process call of main() hands the caller's environment back exactly (HOME,
     # XDG_CONFIG_HOME, the GIT_CONFIG_* pins and the caller's own GIT_* variables), with the git
