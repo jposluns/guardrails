@@ -1206,6 +1206,28 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_instruction_budget.py
 
+      # The budget source's change shape: a routine ratchet update changes only the ratchet value and,
+      # on each raise, appends one dated history entry above the ceiling line. The base is the one the
+      # release-cut gate binds: a pull_request compares its merge with the raw first parent, which must
+      # be origin/$GITHUB_BASE_REF; a push compares the event's before commit with the pushed tip, the
+      # whole range at once; a workflow_dispatch run compares the tip with its first parent.
+      - name: Instruction budget change shape
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 -I -B tools/check_instruction_budget.py --change-shape
+          else
+            if [ "$EVENT_NAME" = "push" ]; then
+              python3 -I -B tools/check_instruction_budget.py --change-shape --protected "origin/${GITHUB_REF_NAME}" --base "$PUSH_BEFORE"
+            else
+              python3 -I -B tools/check_instruction_budget.py --change-shape --protected "origin/${GITHUB_REF_NAME}"
+            fi
+          fi
+
       # A brief addressed to a worker family that cannot execute must not ask it to run anything. The gate
       # runs on briefs before they are sent; here only its self-test runs, since the repository holds none.
       - name: Brief capability self-test
