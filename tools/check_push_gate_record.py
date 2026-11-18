@@ -23,7 +23,9 @@ skip-worktree), ignored files or uncommitted edits hide. Every git step of the s
 caller's reads, the export and every status read) runs with system and global configuration off
 (GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null) and with core.attributesFile and
 core.excludesFile pinned to /dev/null, so no filter, line-ending or attribute setting from them can
-shape the exported files and no global ignore pattern can hide a file from a status read. A commit
+shape the exported files and no global ignore pattern can hide a file from a status read; the one
+exception is the line-ending pair that the first status read of the caller's work tree honours
+(CALLER CLEANLINESS below). A commit
 whose tree holds a gitlink (a submodule) is refused (cannot evaluate), because the export cannot
 hold the submodule's files. Refs: the clone's own branches (the caller's local branches, which clone
 writes under refs/heads/ and refs/remotes/origin/) are all deleted, and refs/remotes/origin/* and the
@@ -37,6 +39,24 @@ are read in that export. The export is removed when the run ends. Cost: one full
 gate that needs one fails), no local branch and none of the caller's per-repository configuration;
 the export's origin remote is still the caller's repository itself (clone --shared), so a runner
 that fetches from origin brings the caller's local branches back under refs/remotes/origin/.
+
+CALLER CLEANLINESS. The first status read judges the caller's own work tree, not the export, so it
+runs under the caller's own line-ending settings: core.autocrlf and core.eol, each read once with git
+config --get as the caller's plain git resolves it (system, global and repository configuration; the
+caller's GIT_CONFIG_NOSYSTEM, GIT_CONFIG_SYSTEM and GIT_CONFIG_GLOBAL choose those files, every
+other GIT_* variable is dropped) and passed to that one status read as -c options. Without them a
+fresh clone made under a global core.autocrlf=true, whose text files are CRLF in the work tree, reads
+as modified wherever git compares a file by content (every racily clean entry of a fresh clone)
+although plain git status lists nothing, and the run was refused as not clean. A value outside
+true/false/input (core.autocrlf) or lf/crlf/native (core.eol), or a read that fails, is cannot
+evaluate. Nothing else of the caller's system or global configuration reaches that read: ignore and
+attribute files stay pinned to /dev/null, and no filter driver, fsmonitor or other setting is taken.
+This cannot hide a local edit: the two settings only decide how CRLF and LF line endings convert when
+git compares a text file with the index, so any change to a file other than its line endings still
+reads as modified, and an untracked file is still listed. A change of line endings alone in a text
+file is not seen, exactly as plain git status does not see it, and it cannot reach the record because
+the export writes the commit's own bytes under isolated configuration; every later git step (the
+export, its start and end status reads) stays isolated.
   check_push_gate_record.py --pre-push --records DIR REMOTE URL
       Read git's pre-push lines on stdin and refuse (exit 1) every branch update whose pushed commit has
       no acceptable record in DIR; exit 2 on a malformed stdin line or an unreadable DIR; exit 0 when
@@ -73,7 +93,8 @@ is refused (cannot evaluate, exit 2); a stdin that is not UTF-8, lacks its final
 MAX_STDIN_BYTES is malformed (exit 2); a carriage return anywhere in a record line refuses the record;
 a supervised run whose end-of-run HEAD or tree status cannot be read publishes no record; the
 supervisor's git reads drop every inherited GIT_* variable, read only the repository's own
-configuration (system and global configuration off, so a caller whose repository is trusted only
+configuration (system and global configuration off, apart from the caller's core.autocrlf and core.eol
+for the first status read of the caller's tree, so a caller whose repository is trusted only
 through a global safe.directory entry, or whose global ignore patterns hide local files, is refused
 as cannot evaluate or as not clean), disable optional locks, replace objects and terminal prompts,
 and carry the automatic-maintenance and attribute/ignore-file pins in option position; --supervise
@@ -95,12 +116,18 @@ RESIDUALS (what this check does not catch):
     leave its private temporary file in the records directory and its export directory, named
     aiqt-push-gate-export-*, in the temporary directory).
   - The record binds the commit's exported files, not the process that ran: the runner can still
-    read outside the export (an absolute path, the network, the caller's home, and the caller's
-    global git configuration for any git command the runner itself launches, the borrowed object
-    store), a change to the export during the run is caught
+    read outside the export (an absolute path, the network, the caller's home, the borrowed object
+    store, and for any git command the runner itself launches the caller's system and global git
+    configuration and per-user attribute and ignore files, $XDG_CONFIG_HOME/git/attributes and
+    $XDG_CONFIG_HOME/git/ignore), a change to the export during the run is caught
     only when it is still visible to git status at the end, and the caller's own work tree is
     checked only by a git status read at the start (its index flags can hide an edit there,
     which the export makes harmless to the record).
+  - The caller's tree is judged under its core.autocrlf and core.eol only (CALLER CLEANLINESS): a
+    caller whose line endings or content conversion come from a per-user attributes file or a filter
+    driver defined only in system or global configuration (git-lfs installed globally, for example)
+    can still be refused as not clean where git compares such a file by content, although plain git
+    status lists nothing (fails closed).
   - Only refs/heads/ destinations are checked; a tag push or any other destination is not.
   - No remote CI result is checked; the event-trigger paragraph of the rule still governs that in prose.
   - Per-gate lines are parsed from the runner's printed output (a gate that prints a look-alike line
@@ -176,6 +203,14 @@ GIT_PINS = ("-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.a
 # off, git still reads the default per-user files ($XDG_CONFIG_HOME/git/attributes and .../ignore),
 # which could change the exported bytes (eol, working-tree-encoding) or hide a file from git status.
 SUPERVISOR_PINS = ("-c", "core.attributesFile=" + os.devnull, "-c", "core.excludesFile=" + os.devnull)
+# The caller's own line-ending settings, which the first status read of the caller's work tree (and no
+# other git step) honours: (key, git config --type, the values this check interprets, compared without
+# case). Only these two; see CALLER CLEANLINESS in the module docstring.
+CALLER_EOL_SETTINGS = (("core.autocrlf", "bool-or-str", ("true", "false", "input")),
+                       ("core.eol", None, ("lf", "crlf", "native")))
+# The environment variables that choose which system and global configuration files git reads; the
+# read of CALLER_EOL_SETTINGS keeps the caller's own values of these (every other GIT_* is dropped).
+CALLER_CONFIG_VARS = ("GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL")
 UPSTREAM_PREFIX = "refs/remotes/origin/"
 UPSTREAM_HEAD = "refs/remotes/origin/HEAD"
 GITLINK_MODE = b"160000"
@@ -219,6 +254,7 @@ RULES = {
     "no-contradiction": True,
     "supervise-clean-start": True,
     "supervise-sigchld": True,
+    "supervise-caller-eol": True,
 }
 
 # Self-test seam: called between the end of the record read and the second fstat (None in production).
@@ -636,8 +672,45 @@ def _head(git, root):
     return head, fmt
 
 
-def _clean(git, root):
-    code, out = git(root, ("status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"))
+def _caller_config_env(source=None):
+    """_git_env(source) with the caller's own CALLER_CONFIG_VARS (or their absence) restored, so git
+    reads the system and global configuration files the caller's plain git would read."""
+    source = os.environ if source is None else source
+    env = _git_env(source)
+    for key in CALLER_CONFIG_VARS:
+        env.pop(key, None)
+        if key in source:
+            env[key] = source[key]
+    return env
+
+
+def _caller_eol(root, source=None):
+    """The -c pins that give the caller's effective CALLER_EOL_SETTINGS (system, global and repository
+    configuration, read the way the caller's plain git reads them; source as in _git_env) to the first
+    status read of the caller's work tree; () when neither is set. CannotEvaluate when one cannot be
+    read or holds a value this check does not interpret."""
+    env = _caller_config_env(source)
+    pins = []
+    for key, kind, allowed in CALLER_EOL_SETTINGS:
+        code, out = _git_query(root, ("config", *(("--type=" + kind,) if kind else ()), "--get", key),
+                               env=env)
+        if code == 1 and out == b"":
+            continue
+        if code != 0 or not out.endswith(b"\n") or out.count(b"\n") != 1 or b"\0" in out:
+            raise CannotEvaluate("the caller's {} cannot be read (git exit {})".format(key, code))
+        value = out[:-1].decode("utf-8", "replace")
+        if value.lower() not in allowed:
+            raise CannotEvaluate("the caller's {} is {!r}, a value this check does not interpret".format(
+                key, value))
+        pins += ["-c", "{}={}".format(key, value)]
+    return tuple(pins)
+
+
+def _clean(git, root, pins=()):
+    """True when git status lists nothing in root's work tree; pins (-c options, _caller_eol) go before
+    the status subcommand."""
+    code, out = git(root, (*pins, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                           "--ignore-submodules=none"))
     if code != 0:
         raise CannotEvaluate("the work tree status cannot be read (git exit {})".format(code))
     return out == b""
@@ -792,10 +865,11 @@ def _sync_dir(path):
 
 
 def supervise(cwd, out, err, git=_git_query, start_runner=_start_runner, replace=os.replace,
-              sync_dir=_sync_dir):
+              sync_dir=_sync_dir, caller_eol=_caller_eol):
     """Export the commit, run the runner there under supervision and publish its record; return the
     exit code (see the module docstring). out receives the runner's bytes; err is a text stream for
-    the supervisor's own lines."""
+    the supervisor's own lines; caller_eol(root) gives the pins of the caller's line-ending settings for
+    the first status read of the caller's work tree (CALLER CLEANLINESS)."""
     if _on("supervise-sigchld") and signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN:
         # With SIGCHLD ignored the kernel reaps the runner and its exit status cannot be read, so a failed
         # run would read as a pass. Refuse by name instead of publishing such a status.
@@ -805,7 +879,9 @@ def supervise(cwd, out, err, git=_git_query, start_runner=_start_runner, replace
     try:
         root = Path(_one_line(git, cwd, ("rev-parse", "--show-toplevel"), "the work tree root"))
         head, fmt = _head(git, root)
-        clean_start = _clean(git, root)
+        # The caller's tree is judged under the caller's own line-ending settings; every later git step
+        # (the export and its status reads) stays isolated.
+        clean_start = _clean(git, root, caller_eol(root) if _on("supervise-caller-eol") else ())
         common = _one_line(git, root, ("rev-parse", "--path-format=absolute", "--git-common-dir"),
                            "the git common directory")
         upstream = _upstream(git, root)
@@ -1159,7 +1235,8 @@ def _supervise_case(base, name, lines=PASS_OUTPUT, status=0, statuses=(b"",), du
     fake = _FakeGit(root, common, heads=heads, statuses=statuses, **(git_kw or {}))
     if fakes is not None:
         fakes.append(fake)
-    code = supervise(root, out, err, git=fake, start_runner=fake_runner, replace=replace, sync_dir=sync_dir)
+    code = supervise(root, out, err, git=fake, start_runner=fake_runner, replace=replace, sync_dir=sync_dir,
+                     caller_eol=lambda where: ())
     if messages is not None:
         messages.append(err.getvalue())
     return code, records, final, spawned, out.getvalue()
@@ -1213,10 +1290,11 @@ def _real_repo(base, name, files, env, upstream=True):
 def _real_supervise(repo, env):
     """supervise() with real git and the real runner child; (exit, stdout bytes, err text). git runs in
     the production _git_env() built from env (the hermetic one, or a poisoned home's) instead of
-    os.environ."""
+    os.environ, and the caller's line-ending settings are read from env's configuration files."""
     out, err = io.BytesIO(), io.StringIO()
     code = supervise(repo, out, err,
-                     git=lambda where, args, data=None: _git_query(where, args, env=_git_env(env), data=data))
+                     git=lambda where, args, data=None: _git_query(where, args, env=_git_env(env), data=data),
+                     caller_eol=lambda where: _caller_eol(where, source=env))
     return code, out.getvalue(), err.getvalue()
 
 
@@ -1901,6 +1979,53 @@ def self_test(red_on_revert, report_path=None):
             end_rows = ("real git fixture failed: {}".format(exc),)
         check("realgit/end-of-run-reads-in-export", end_rows,
               ((0, (1, "clean-at-end")), (0, (1, "head-at-end-bind"))))
+
+        # A fresh clone made under a global core.autocrlf=true holds CRLF text files that plain git status
+        # reads as clean: the caller's tree is judged under the caller's line-ending settings, so it is
+        # accepted (and the export still holds the commit's LF bytes), while a real edit there is refused.
+        crlf_global = Path(base) / "crlf-global.gitconfig"
+        crlf_global.write_text("[core]\n\tautocrlf = true\n", encoding="utf-8")
+        crlf_env = dict(genv, GIT_CONFIG_GLOBAL=str(crlf_global))
+        lf_only = {RUNNER_REL: "printf -- '--- a ---\\n'\ntr -d '\\r' < notes.txt | cmp -s - notes.txt || exit 7\n"
+                               "exit 0\n",
+                   "notes.txt": "one\ntwo\n"}
+
+        def crlf_clone(name, source):
+            clone = Path(base) / name
+            _git_fixture(crlf_env, base, "clone", "--quiet", "--template=", "--", str(source), str(clone))
+            # Every entry is compared by content, as git compares the racily clean entries of a fresh clone;
+            # the plain status read below takes no optional lock, so it does not refresh the index.
+            for rel in lf_only:
+                os.utime(clone / rel, (1000000000, 1000000000))
+            plain = subprocess.run(["git", "-C", str(clone), "status", "--porcelain", "--untracked-files=all"],
+                                   env=dict(crlf_env, GIT_OPTIONAL_LOCKS="0"), stdin=subprocess.DEVNULL,
+                                   capture_output=True, timeout=GIT_TIMEOUT, check=True).stdout
+            return clone, (plain, (clone / "notes.txt").read_bytes())
+
+        try:
+            source, oid = _real_repo(base, "real-crlf-source", lf_only, genv, upstream=False)
+            clone, seen = crlf_clone("real-crlf-clone", source)
+            code, shown, said = _real_supervise(clone, crlf_env)
+            accepted = (seen, code, _judge_path(_real_records(clone), oid))
+            clone, seen = crlf_clone("real-crlf-edit", source)
+            (clone / "notes.txt").write_bytes(b"one\r\nedited\r\n")
+            code, shown, said = _real_supervise(clone, crlf_env)
+            edited = (code, "is not clean" in said, _judge_path(_real_records(clone), oid))
+            crlf_rows = (accepted, edited)
+        except (OSError, subprocess.SubprocessError) as exc:
+            crlf_rows = ("real git fixture failed: {}".format(exc),)
+        check("realgit/global-autocrlf-clone-clean-and-edit-refused", crlf_rows,
+              (((b"", b"one\r\ntwo\r\n"), 0, (0, None)), (2, True, (1, "record-present"))))
+        if red_on_revert:
+            with _reverted("supervise-caller-eol"):
+                try:
+                    clone, seen = crlf_clone("real-crlf-reverted", source)
+                    code, shown, said = _real_supervise(clone, crlf_env)
+                    reverted = (seen, code, "is not clean" in said, _judge_path(_real_records(clone), oid))
+                except (OSError, subprocess.SubprocessError, NameError) as exc:
+                    reverted = ("real git fixture failed: {}".format(exc),)
+                check("revert/supervise-caller-eol-goes-red", reverted,
+                      ((b"", b"one\r\ntwo\r\n"), 2, True, (1, "record-present")))
 
         # ---------- the hook shim ----------
         hook_base = Path(base) / "hook"

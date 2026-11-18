@@ -3742,6 +3742,8 @@ expected-check-ids = [
   "realgit/gitlink-refused-and-staged-gitlink-dirty",
   "realgit/global-config-and-attributes-do-not-shape-export",
   "realgit/end-of-run-reads-in-export",
+  "realgit/global-autocrlf-clone-clean-and-edit-refused",
+  "revert/supervise-caller-eol-goes-red",
   # ---------- the hook shim ----------
   "hook/shim-execs-and-propagates",
 ]
