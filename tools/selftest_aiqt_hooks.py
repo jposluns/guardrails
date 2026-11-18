@@ -16481,7 +16481,7 @@ def _test_cmtidn_oracle(failures, tmp):
     else:
         def raising(command):
             return "raised RuntimeError" if command == calm else tree_decide(command)
-        if not any(line.startswith("(cmo-head-raised)") and repr(calm[:300]) in line
+        if not any("this tree raised RuntimeError for " + repr(calm[:300]) in line
                    for line in _cmo_findings(base_decide, raising, corpus, _CMO_NEWLY_ALLOWED, _CMO_NEW_DENIES)):
             failures.append("(cmo-mutant-head-raised) the oracle stays green when the tree raises on {!r}, a corpus "
                             "command the base allows".format(calm[:300]))
