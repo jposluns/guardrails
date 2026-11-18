@@ -1563,8 +1563,9 @@ def _entry_findings(block, first, old, new, floor, today):
     any case, opens an entry and must read `Raised OLD -> NEW on YYYY-MM-DD` (SHAPE_ENTRY_FIRST_RE); entry
     by entry, OLD is `old` for the first and the previous entry's NEW after it, NEW exceeds OLD, and the
     last NEW is `new`. Each date is real, no earlier than `floor` (the base's latest entry date,
-    _base_latest_date, None for no bound) or an earlier entry's date, and no later than `today` plus SHAPE_DATE_SLACK_DAYS. GateError
-    (cannot evaluate) when an opening line's number has more than SHAPE_NUMBER_MAX_DIGITS digits."""
+    _base_latest_date, None for no bound) or an earlier entry's date, and no later than `today` plus
+    SHAPE_DATE_SLACK_DAYS. GateError (cannot evaluate) when an opening line's number has more than
+    SHAPE_NUMBER_MAX_DIGITS digits."""
     if new <= old:
         return ["line {}: a history entry was added, but the ratchet was not raised ({} -> {})".format(
             first, old, new)] if block else []
@@ -3400,7 +3401,7 @@ def self_test(report_path=None):
               ([shape(before, head) for before, head in floor_rows], shape(base_shape, mistyped),
                shape(noted_base, raised(noted_base, opened("2026-09-30")))),
               ([(0, [])] * 2, (0, []), (1, ["7"])))
-        unraised =base_shape.replace(ceiling, entry + ceiling)
+        unraised = base_shape.replace(ceiling, entry + ceiling)
         lowered_entry = raised(base_shape, ratchet=90)
         check("shape/entry-without-raise-1", (shape(base_shape, unraised), shape(base_shape, lowered_entry)),
               ((1, ["5"]), (1, ["5"])))

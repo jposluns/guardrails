@@ -24,11 +24,12 @@ trailing blank). For example, a line opening `Held at N on YYYY-MM-DD, not raise
 `Late record of the YYYY-MM-DD change, written on YYYY-MM-DD: held at N` continues the entry above it.
 No line of an entry after its first may begin with the word "raised" in any letter case, since the gate
 reads such a line as the start of a new entry; rewrap the text so that word falls inside a line. An
-entry's date may be no earlier than the latest date on a `Raised OLD -> NEW on YYYY-MM-DD` line already
-in the history, and no later than the day after the checking day (UTC); a date in any other line, such
-as one in a held or late record, sets no bound for later entries. The held and late records written on 2026-11-18 above the `Raised 136499 -> 137546` line predate this rule
-and stay as they are; do not copy that layout. `tools/check_instruction_budget.py` states the full
-entry grammar.
+entry's date is the one its opening line carries after `on`. It may be no earlier than the latest such
+date of an entry already in the history or of an earlier entry in the same change, and no later than
+the day after the checking day (UTC). Any other date, such as a later one on an opening line or one in
+a held or late record, sets no bound for later entries. The held and late records written on
+2026-11-18 above the `Raised 136499 -> 137546` line predate this rule and stay as they are; do not copy
+that layout. `tools/check_instruction_budget.py` states the full entry grammar.
 
 Treat 150,000 characters as this project's target for everything Claude Code loads at the start of a
 session. One caveat: the loader of the pinned Claude Code build the gate models (2.1.287 in
