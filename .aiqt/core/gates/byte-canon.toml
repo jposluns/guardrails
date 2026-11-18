@@ -35,3 +35,7 @@ roadmap = ["windows"]            # not supported at this release
 [[hardbreak]]
 path = "site/downloads/aiqt/SKILL.md"
 rationale = "Chat-skill identity header: five-line Version/Author/Website/GitHub/Licence render via two-space hard breaks; sanitizing viewers drop backslash and <br> breaks."
+
+[[hardbreak]]
+path = "plugin/aiqt-guardrails-hooks/skills/aiqt/SKILL.md"
+rationale = "The hooks plugin's copy of the chat skill, written by tools/gen_skill.py from the same bytes as site/downloads/aiqt/SKILL.md, so it carries the same two-space hard-break identity header."

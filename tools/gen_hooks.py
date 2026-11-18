@@ -12,6 +12,10 @@ This tool renders them into the shipped, NESTED plugin surface under plugin/aiqt
                                                             (both pairs in the authoring tree only)
   .claude/settings.json                                     this repository's own project hook registration
                                                             (the authoring tree only, never an adopter tree)
+NOT owned here: plugin/aiqt-guardrails-hooks/skills/ (the chat skill the plugin carries, skills/aiqt/SKILL.md)
+is written, orphan-scanned and drift-checked by tools/gen_skill.py alone, from the same bytes as
+site/downloads/aiqt/SKILL.md. This generator never writes, compares, prunes or deletes anything under it, and
+build_desired() never lists it, so conformance.py C5 never requires it of an adopter.
 The plugin is nested (not the whole repo) so an adopter installs only the plugin, never the authoring
 repo. The .aiqt/core/hooks/ tree is the single edit point; the generated surface is always
 regenerated, never hand-edited, and plugin/aiqt-guardrails-hooks/hooks/ is a RESERVED subtree (100%
@@ -1729,6 +1733,20 @@ def self_test_main(_nested=False):
         if run_quiet(good, check=True) != 1:
             failures.append("orphan under the plugin hooks/ expected exit 1")
         stray.unlink()
+
+        # 2b. The plugin's skills/ tree belongs to tools/gen_skill.py, never to this generator: a planted
+        #     skills/aiqt/SKILL.md survives a write run byte for byte and is not reported as drift by --check.
+        #     Red if the orphan prune widens from hooks/ to the plugin root (the same file under hooks/ is
+        #     pruned and reported, case 2), or if this generator starts to render or compare skills/.
+        planted = good.joinpath(*PLUGIN_ROOT_PARTS, "skills", "aiqt", "SKILL.md")
+        planted.parent.mkdir(parents=True)
+        planted.write_bytes(b"---\nname: aiqt\n---\nowned by gen_skill\n")
+        if run_quiet(good, check=False) != 0 or run_quiet(good, check=True) != 0:
+            failures.append("a skills/aiqt/SKILL.md beside hooks/ expected a clean reconcile (gen_hooks never "
+                            "owns skills/)")
+        if not planted.is_file() or planted.read_bytes() != b"---\nname: aiqt\n---\nowned by gen_skill\n":
+            failures.append("a gen_hooks write run must never prune or rewrite the plugin skills/ tree")
+        shutil.rmtree(good.joinpath(*PLUGIN_ROOT_PARTS, "skills"))
 
         # 3. An unknown corpus-id in the manifest fails closed.
         badid = tmp / "badid"
