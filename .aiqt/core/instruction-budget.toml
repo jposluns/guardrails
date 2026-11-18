@@ -114,6 +114,22 @@
 #                        and file headers 16263 unchanged. The ratchet rises by the measured delta,
 #                        136304 + 195 = 136499, within the maintainer's authorization of 2026-11-08 for
 #                        raises up to 148000.
+#                        Held at 136499 on 2026-11-18, not raised, when merge train 20261118b (#1270)
+#                        reworded valgat.2 in validation-gates-apply as one either/or sentence with the gate's
+#                        predicate as the authority: measured PACK 136487 at the base 7bdc7fc2 -> 136499 (+12
+#                        units); rule files 119864 -> 119876; managed block 360 and file headers 16263
+#                        unchanged. That change added no history entry of its own; this entry records it. The
+#                        12 units are the margin PACK stood under the ratchet after the 2026-11-17 entry, so
+#                        PACK now equals the ratchet and no headroom remains.
+#                        Late record of the 2026-11-14 change, written on 2026-11-18: held at 136304 on
+#                        2026-11-14, not raised, when merge train 20261114a (#1171, 7045af1b) gave
+#                        gate-discipline its closing paragraph (gatdis.22, gatdis.23): measured PACK 135928 at
+#                        the base 730c039b -> 136292 (+364 units); rule files 119305 -> 119669; managed block
+#                        360 and file headers 16263 unchanged. That change added no history entry of its own;
+#                        this entry records it. Merge train 20261112b (#1133, 2bc5a08c) had earlier cut 6
+#                        units (135934 -> 135928), also with no entry, so 370 + 6 - 364 = 12 units remained of
+#                        the headroom left by the 2026-11-08 entry: the margin PACK 136292 stood under the
+#                        ratchet 136304 when the 2026-11-17 entry was made.
 #                        Raised 136499 -> 137546 on 2026-11-18 under the maintainer's recorded decision of
 #                        2026-10-31 to raise the ratchet by exactly the measured delta, when
 #                        standing-constraints-persist gained its sentences that, where an upper limit whose
