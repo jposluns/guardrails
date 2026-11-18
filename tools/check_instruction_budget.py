@@ -1572,9 +1572,10 @@ def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
     `#   ceiling` line, or the declaration is malformed. The candidate is compared in two parts, the lines
     above its one `#   ceiling` line and the rest, each with the matching part of the base (its ratchet
     value replaced by the candidate's). Lines appended at the end of the upper part are the new entries
-    (_entry_findings); after a replacement there, the lines beyond the ones it pairs one for one, or, for a
-    raise, from the first line the base does not match that opens `Raised OLD -> ` (OLD the base ratchet),
-    in that change or in the run of entry-indented lines directly above the `#   ceiling` line, if earlier.
+    (_entry_findings); after a replacement there, the lines beyond the ones it pairs one for one, or,
+    whatever the ratchet direction, from the first line the base does not match that opens `Raised OLD -> `
+    (OLD the base ratchet), in that change or in the run of entry-indented lines directly above the
+    `#   ceiling` line, if earlier.
     The base lines the entries displace are reported removed. Every
     other changed line is a finding naming the line (_line_report), unless a declaration bound to these
     exact base and head bytes covers it; a declaration never waives the entry rules. A candidate without
@@ -1606,18 +1607,19 @@ def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
         tag, i1, i2, j1, j2 = above[-1] if above else ("equal", 0, 0, 0, 0)
         final = tag in ("insert", "replace") and (i2, j2) == (ceiling_at, at)
         # Appended at the end of the upper part: past the lines a final replacement pairs one for one, or,
-        # for a raise, from the first line the base does not match that opens `Raised OLD -> ` (OLD the base
-        # ratchet) when that is earlier. That opener is read from the candidate text, across diff opcodes:
-        # in the final change, or in the run of lines indented as entry lines directly above the
-        # `#   ceiling` line, so neither a declared deletion just before the entry nor an entry line that
-        # repeats a base line (which moves the diff's alignment) can hide it.
+        # whatever the ratchet direction, from the first line the base does not match that opens
+        # `Raised OLD -> ` (OLD the base ratchet) when that is earlier. That opener is read from the candidate
+        # text, across diff opcodes: in the final change, or in the run of lines indented as entry lines
+        # directly above the `#   ceiling` line, so neither a declared deletion just before the entry nor an
+        # entry line that repeats a base line (which moves the diff's alignment) can hide it, and an entry
+        # beside a declared deletion with the ratchet unchanged or lowered is still an entry without a raise.
         run = at
         while run > 0 and head[run - 1].startswith("#" + " " * SHAPE_ENTRY_INDENT_WIDTH):
             run -= 1
         floor = min(run, j1) if final else run
         fresh = [j for op in above if op[0] != "equal" for j in range(op[3], op[4])]
         opener = "Raised {} -> ".format(old)
-        starts = [j for j in fresh if new > old and head[j][:1] == "#" and j >= floor
+        starts = [j for j in fresh if head[j][:1] == "#" and j >= floor
                   and head[j][1:].lstrip(" ").startswith(opener)][:1]
         if final and j2 - j1 > i2 - i1:
             starts.append(j1 + (i2 - i1))
@@ -3387,6 +3389,22 @@ def self_test(report_path=None):
         check("shape/repeated-line-wrong-old-1",
               (shape(repeat_base, wrong_old), shape(repeat_base, wrong_old, declare(repeat_base, wrong_old))),
               ((1, ["5"]), (1, [])))
+        # With the ratchet unchanged or lowered, an entry appended in place of a declared deletion of the
+        # last old line (an opener or a continuation) is still read as the entry, so it is an entry without
+        # a raise, which no declaration waives; the deleted base line is reported removed.
+        def swapped(ratchet):
+            return [(base_shape, base_shape.replace(old_entry, entry).replace(
+                         "ratchet = 100\n", "ratchet = {}\n".format(ratchet)), ["base 4", "4"], ["4"]),
+                    (repeat_base, repeat_base.replace(tail, entry).replace(
+                         "ratchet = 100\n", "ratchet = {}\n".format(ratchet)), ["base 6", "6"], ["6"])]
+
+        unraised_swaps, lowered_swaps = swapped(100), swapped(90)
+        check("shape/declared-deletion-unchanged-entry-1",
+              [(shape(before, head), shape(before, head, declare(before, head))) for before, head, _, _ in unraised_swaps],
+              [((1, plain), (1, declared)) for _, _, plain, declared in unraised_swaps])
+        check("shape/declared-deletion-lowered-entry-1",
+              [(shape(before, head), shape(before, head, declare(before, head))) for before, head, _, _ in lowered_swaps],
+              [((1, plain), (1, declared)) for _, _, plain, declared in lowered_swaps])
         check("shape/declaration-blank-reason-2",
               (shape(base_shape, version_bump, declare(base_shape, version_bump, reason="   ")),
                shape(base_shape, version_bump, declare(base_shape, version_bump) + 'extra = "x"\n')),
@@ -3527,8 +3545,12 @@ def self_test(report_path=None):
               1)
         check("revert/shape-declared-deletion-before-entry-red",
               [shape(base_shape, head, declare(base_shape, head), module=_mutant(
-                  tmp, 'if new > old and head[j][:1] == "#"', 'if False and head[j][:1] == "#"'))[0]
+                  tmp, 'if head[j][:1] == "#" and j >= floor', 'if False and head[j][:1] == "#" and j >= floor'))[0]
                for head in deleted], [1, 1])
+        raise_only = _mutant(tmp, 'if head[j][:1] == "#" and j >= floor', 'if new > old and head[j][:1] == "#" and j >= floor')
+        check("revert/shape-declared-deletion-entry-without-raise-red",
+              [shape(before, head, declare(before, head), module=raise_only)[0]
+               for before, head, _, _ in unraised_swaps + lowered_swaps], [0, 0, 0, 0])
         final_only = _mutant(tmp, "        floor = min(run, j1) if final else run\n",
                              "        floor = j1 if final else at\n")
         check("revert/shape-declared-repeated-line-entry-red",
