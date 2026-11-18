@@ -57,3 +57,9 @@ names a live checkout; a changed working directory alone is not that isolation. 
 live checkout only through the orchestrator's own verified apply. This is a rule on what the orchestrator
 runs and where, not OS containment: only the full reading checks a path the code builds at run time or
 configuration it inherits.
+
+A reader that splits a worker delivery into files at marker lines treats every line in its marker form as
+grammar, so a marker it does not recognise or cannot handle is refused, naming the line, before any file is
+written, never kept as content of the file before it. Where the delivery states a digest for each file, each
+extracted file is checked against it before use and a mismatch is refused the same way; such a digest detects
+a splitting or transport fault, not unfaithful content.

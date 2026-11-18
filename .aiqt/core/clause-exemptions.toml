@@ -278,6 +278,11 @@ text = "That inert guarantee is bounded, not categorical: git may additionally r
 reason = "Disclosed residual of wowo01.6; no obligation of its own."
 
 [[exempt]]
+corpus-id = "wowo01"
+text = "such a digest detects\na splitting or transport fault, not unfaithful content."
+reason = "Disclosed limit of wowo01.23; no obligation of its own."
+
+[[exempt]]
 corpus-id = "exetgt"
 text = "A correct\ncommand aimed by a stale kubeconfig, cloud profile, or connection string at the wrong system is still\na wrong action."
 reason = "Rationale for exetgt.1 and exetgt.2; no obligation of its own."
