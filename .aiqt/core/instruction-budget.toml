@@ -114,12 +114,31 @@
 #                        and file headers 16263 unchanged. The ratchet rises by the measured delta,
 #                        136304 + 195 = 136499, within the maintainer's authorization of 2026-11-08 for
 #                        raises up to 148000.
+#                        Raised 136499 -> 137546 on 2026-11-18 under the maintainer's recorded decision of
+#                        2026-10-31 to raise the ratchet by exactly the measured delta, when
+#                        standing-constraints-persist gained its sentences that, where an upper limit whose
+#                        value the operator or a governing rule has set, not the assistant under the
+#                        bounded-consumption rule, is enforced at that value or a stricter one by a check the
+#                        assistant cannot change, the assistant takes an action the limit covers only as that
+#                        check admits it; that the limit gives no reason to withhold an action that check
+#                        admits, and the assistant does not repeat an action that check refuses while it has
+#                        no sign that anything the check reads has changed, and does not route around the
+#                        refusal; that only a grant the limit's setter records where that check reads the
+#                        limit raises it, so a grant the assistant writes, or one its setter did not record
+#                        where that check reads, cannot raise it; and that an action the limit covers that no
+#                        such check meters, as under a host store alone, a count kept by hand, or neither, is a
+#                        residual those sentences reach only to bar a route around a refusal by such a check,
+#                        and the limit still persists as a standing constraint (cnstpr.6 to cnstpr.9):
+#                        measured PACK 136499 at the base 98e352bf -> 137546 (+1047 units); rule files
+#                        119876 -> 120923; managed block 360 and file headers 16263 unchanged. The ratchet
+#                        rises by the measured delta, 136499 + 1047 = 137546, within the maintainer's
+#                        authorization of 2026-11-08 for raises up to 148000.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 136499
+ratchet = 137546
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
