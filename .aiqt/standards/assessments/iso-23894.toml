@@ -12,7 +12,7 @@ edition = "2023"
 source = "ISO-IEC-23894-2023--AI-guidance-on-risk-management--full-text.md"
 source-sha256 = "b4bbb9dedc130c889971be548fb8e89407b9a3fcbc88c5cac52b2365a572f625"
 locator = "Annex B (informative), B.4 Level of automation"
-text-location = "lines 1619 to 1627"
+text-location = "entry from its heading to its end at lines 1619 to 1627, with the statement at lines 1621 to 1626; line 1627 only points to ISO/IEC 22989 and adds no elements"
 edition-check = "match"
 boundary = "the level of autonomy the assistant takes for an action, and the handover to a human"
 core = "The level of automation is itself a risk source: automated decisions can affect safety, fairness or security, and where a human must be ready to take over, the handover can fail through time pressure or lack of attention."
@@ -35,6 +35,7 @@ rationale = "Reading the entry's AI system as including the assistant (conventio
 assumptions = [
   "an informative annex entry that lists a risk source can be tight (convention 1); if it cannot, both labels are broad",
   "the AI system whose level of automation the entry discusses includes the assistant whose actions the rule governs (convention 3); if it means only the product being built, both labels are broad",
+  "convention 3 is engaged at question (c) of its ordered test: the entry's object, an AI system, is a class that takes in AI software of every kind, so question (a) does not answer; the entry does not act only where the assistant would not be, so question (b) does not answer; and the rule's boundary is the assistant's own actions",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -50,7 +51,7 @@ edition = "2023"
 source = "ISO-IEC-23894-2023--AI-guidance-on-risk-management--full-text.md"
 source-sha256 = "b4bbb9dedc130c889971be548fb8e89407b9a3fcbc88c5cac52b2365a572f625"
 locator = "Annex B (informative), B.4 Level of automation"
-text-location = "lines 1619 to 1627"
+text-location = "entry from its heading to its end at lines 1619 to 1627, with the statement at lines 1621 to 1626; line 1627 only points to ISO/IEC 22989 and adds no elements"
 edition-check = "match"
 boundary = "consequential actions the assistant would otherwise take on its own"
 core = "The level of automation is itself a risk source: automated decisions can affect safety, fairness or security, and where a human must be ready to take over, the handover can fail through time pressure or lack of attention."
@@ -74,6 +75,7 @@ rationale = "Same readings of conventions 1 and 3 as the human oversight row: th
 assumptions = [
   "an informative annex entry that lists a risk source can be tight (convention 1); if it cannot, both labels are broad",
   "the AI system whose level of automation the entry discusses includes the assistant whose actions the rule governs (convention 3); if it means only the product being built, both labels are broad",
+  "convention 3 is engaged at question (c) of its ordered test, as in the human oversight row: an AI system is not a kind of software the assistant is by its nature under question (a), question (b) does not answer, and the rule's boundary is the consequential actions the assistant would take",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"

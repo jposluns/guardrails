@@ -12,7 +12,7 @@ edition = "2026"
 source = "OWASP-Top-10-for-LLM-Applications-2026--full-text.md"
 source-sha256 = "960f68a87fb9cede9c0ef9a497d6736f5e445cce2f8be3ea83fe2411d170e605"
 locator = "LLM07:2026 Misinformation, common examples 1 to 7, prevention and mitigation strategies 1 to 10 and example attack scenarios 1 to 7"
-text-location = "entry from its heading to its end at lines 1355 to 1442; examples at lines 1377 to 1396; strategies at lines 1398 to 1414, with 1 and 2 at lines 1398 to 1402; attack scenarios at lines 1421 to 1442"
+text-location = "entry from its heading to its end at lines 1355 to 1442, with no part that adds no elements; description at lines 1357 to 1375; examples at lines 1377 to 1396; strategies at lines 1398 to 1414, with 1 and 2 at lines 1398 to 1402; attack scenarios at lines 1421 to 1442"
 edition-check = "match"
 boundary = "claims about external facts that the assistant relies on or presents"
 core = "Model output that is false, unsupported or misleading is relied on for decisions or actions; the entry asks that claims be grounded in authoritative sources and checked before anything acts on them."
@@ -61,7 +61,7 @@ review-state = "assessed"
 conventions = []
 rationale = "Corroboration before reliance is the entry's first two mitigations. The rule deals with claims about external facts only, meets five of the seven examples only in part and two not at all, meets attack scenario 4 and parts of scenarios 1 and 6 but not scenarios 2, 3, 5 and 7, and leaves out strategies 3 to 10, so it is broad under B. No open convention decides the row."
 assumptions = [
-  "convention 3 is not engaged: the entry's object is an LLM or LLM-enabled application, which is a kind of software the assistant itself is, so the entry reaches the assistant's own output directly and no reading of what the system means is needed",
+  "convention 3 is not engaged, and question (a) of its ordered test is the one that answers: the entry's object is an LLM or LLM-enabled application, which is a kind of software the assistant itself is, so the entry reaches the assistant's own output directly and no reading of what the system means is needed",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"

@@ -24,10 +24,12 @@ covers = [
   "an admin scope written into the agent's manifest by someone else, which the human the assistant works for did not ask for, is surfaced for renewed approval rather than used (part of attack scenario C)",
 ]
 omits = [
-  "expiry of scopes and tokens and just in time access (the rest of remediation 3)",
+  "expiry of scopes and tokens and just in time elevation (the rest of remediation 3); at another layer: only whoever issues the agent's scopes and tokens can carry it out, so it is not essential under B",
   "entitlement audits run on a schedule and on each change to find scope that has grown, and a written justification for each increase (the rest of remediation 5, most of it)",
-  "per agent identity and credential binding (remediation 4)",
-  "policy as code, runtime enforcement and least privilege design (remediations 1, 2 and 6)",
+  "per agent identity and credential binding (remediation 4); at another layer: only the identity provider can carry it out, so it is not essential under B",
+  "least privilege design of each agent's permissions before deployment, and policy as code enforced in the pipeline (remediations 1 and 2); at another layer: only whoever deploys the agent and grants its permissions, and whoever runs the pipeline, can carry them out, so they are not essential under B",
+  "runtime policy enforcement through a policy decision point (the first part of remediation 6); at another layer: only whoever runs the infrastructure can carry it out, so it is not essential under B",
+  "action allowlists, safe execution sandboxes and multi step confirmation for high impact operations, beyond protecting the allowlists and approval requirements that constrain the assistant (the rest of remediation 6)",
   "change records and tamper evident audit trails (remediation 7)",
   "a temporary grant a person asked for that is never withdrawn, which the agent later uses to merge a crafted change that is then deployed automatically (attack scenario A); the rule surfaces only a widening the human did not ask for",
   "a long lived token exposed in logs, the exposed internal interface that lets its holder add scopes, and the attacker's own use of that token (the rest of attack scenario B)",
@@ -39,10 +41,10 @@ adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
 conventions = [4]
-rationale = "Surfacing an unrequested widening for renewed approval, and keeping the assistant from granting itself scope, directly interrupt scope creep. Expiry, periodic entitlement audits, identity and audit trail lines are left out, and attack scenarios B and C are met only in part and A not at all, so it is broad under B."
+rationale = "Surfacing an unrequested widening for renewed approval, and keeping the assistant from granting itself scope, directly interrupt scope creep. Broad under B rests on attack scenario A, a main variant the rule leaves out, on scenarios B and C, met only in part, and on listed mitigations at the rule's layer it leaves out (the rest of remediation 5, the rest of remediation 6 and remediation 7). The expiry, identity, least privilege design, pipeline policy and runtime policy items in omits sit at another layer and are not essential under B."
 assumptions = [
   "a rule on the assistant's own guardrail configuration and granted scope can be tight to an entry whose main remediations act in the identity, policy and pipeline layers that grant and enforce MCP agent and tool permissions (convention 4); if it cannot, label-a is broad",
-  "convention 3 is not engaged: the entry's object is an MCP agent or tool, and the assistant is itself one",
+  "convention 3 is not engaged, and question (a) of its ordered test is the one that answers: the entry's object is an MCP agent or tool, and the assistant is itself one",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -79,16 +81,16 @@ omits = [
   "a stolen static token replayed against another server (scenario 1)",
   "a test agent holding the same scope as production (scenario 2)",
   "token lifecycle: expiry, rotation, revocation, secure storage and replay detection (guidance 3)",
-  "server side validation of every token and per request authorization (guidance 1 and 2)",
-  "central identity management (guidance 5)",
+  "server side validation of every token and per request authorization (guidance 1 and 2); at another layer: only the servers the assistant calls can carry it out, so it is not essential under B",
+  "central identity management (guidance 5); at another layer: only the organisation's identity provider can carry it out, so it is not essential under B",
   "logging of authentication and authorization decisions (guidance 6)",
-  "secure defaults on MCP endpoints: no guest or anonymous access, no public exposure of local test servers, and separate credentials per environment (guidance 7)",
-  "watching for tokens reused across agents or addresses, failed authentication followed by a privileged action that succeeds, a sudden rise in refused requests, and tokens used after they expire (detection points 1, 2, 4 and 5)",
+  "secure defaults on MCP endpoints: no guest or anonymous access, no public exposure of local test servers, and separate credentials per environment (guidance 7); at another layer: only whoever runs those endpoints can carry them out, so they are not essential under B",
+  "watching for tokens reused across agents or addresses, failed authentication followed by a privileged action that succeeds, a sudden rise in refused requests, and tokens used after they expire (detection points 1, 2, 4 and 5); at another layer: only whoever runs the servers and holds their logs can carry it out, so it is not essential under B",
   "watching for actions by unknown or unregistered agent identities (detection point 3); the rule refuses to trust an agent whose identity is not verified, but does not detect or report such actions",
-  "revoking compromised or static tokens, rotating service credentials and giving each agent its own identity (immediate remediation points 1 and 2)",
-  "turning on mutual TLS and strict binding of API keys (immediate remediation point 3)",
+  "revoking compromised or static tokens, rotating service credentials and giving each agent its own identity (immediate remediation points 1 and 2); at another layer: only whoever issues the tokens, credentials and identities can carry it out, so it is not essential under B",
+  "turning on mutual TLS and strict binding of API keys (immediate remediation point 3); at another layer: only whoever runs the servers and issues the keys can carry it out, so it is not essential under B",
   "auditing the agents, tools and connectors already in place for excessive privileges, beyond giving a new sub-agent only the least tools it needs (immediate remediation point 4)",
-  "reviewing and patching authorization middleware so that it validates scopes (immediate remediation point 5)",
+  "reviewing and patching authorization middleware so that it validates scopes (immediate remediation point 5); at another layer: only whoever runs the servers that hold that middleware can carry it out, so it is not essential under B",
   "temporary compensating controls: address restrictions and manual approval of sensitive actions (immediate remediation point 6)",
 ]
 label-a = "tight"
@@ -97,10 +99,10 @@ adopted = "pending-definition"
 proposed = "pending-definition"
 review-state = "assessed"
 conventions = [4]
-rationale = "Verified identity and no inherited authority directly stop the spoofed agent and inherited token scenarios, on the reading of convention 4 stated below. Strong authentication, most of the authorization flaws the description names, fine grained authorization, most of least privilege, token lifecycle, central identity, logging, secure endpoint defaults, detection, immediate remediation and scenarios 1 and 2 are left out, so it is broad under B."
+rationale = "Verified identity and no inherited authority directly stop the spoofed agent and inherited token scenarios, on the reading of convention 4 stated below. Broad under B rests on main variants the rule leaves out (scenarios 1 and 2, the insecure authentication variants and most of the authorization flaws the description names) and on listed mitigations at the rule's layer it leaves out (the rest of guidance 1, 2 and 4, guidance 3 and 6, detection point 3 and immediate remediation points 4 and 6). The server side validation, central identity, endpoint defaults, log monitoring and credential and middleware remediation items in omits sit at another layer and are not essential under B."
 assumptions = [
   "a rule acting on the messages and authority passed between agents can be tight to an entry whose main listed mitigations are checks on the server side and at the identity provider (convention 4); if it cannot, label-a is broad",
-  "convention 3 is not engaged: the entry's object is MCP agents, tools and servers, and the assistant is itself an MCP client and agent",
+  "convention 3 is not engaged, and question (a) of its ordered test is the one that answers: the entry's object is MCP agents, tools and servers, and the assistant is itself an MCP client and agent",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"

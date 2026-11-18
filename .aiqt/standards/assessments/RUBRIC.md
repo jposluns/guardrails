@@ -27,9 +27,13 @@ below.
   count.
 - **Listed mitigations.** The entry's own prevention, mitigation, remediation (immediate or temporary
   remediation included), detection or implementation guidance at the location the record cites, item by
-  item as the entry numbers or heads them. Detection guidance counts when it names signs of an attack to
-  watch for. For a catalogue control or a management system control, the statement is what counts; text
-  in a separate discussion or guidance part counts only as convention 6 below allows.
+  item as the entry numbers or heads them. Detection guidance is a part the entry heads as detection
+  guidance, or an item it numbers among its guidance, that names signs of an attack to watch for; each
+  sign it lists counts. Signs of an attack named only in the prose of the description (observable
+  symptoms, for example) are not detection guidance: they are read for the core and the main variants,
+  and `omits` does not list them. For a catalogue control or a management system control, the statement
+  is what counts; text in a separate discussion or guidance part counts only as convention 6 below
+  allows.
 - **Parts that add no elements.** An entry's impact list, its list of the vulnerabilities it prevents, a
   checklist of the conditions under which a system is exposed (a "how to detect" or "is the application
   vulnerable" list that names exposed conditions rather than signs of an attack), its references, further
@@ -130,13 +134,17 @@ The maintainer must settle these before a definition is adopted. A record that d
    LLM or LLM-enabled application, an agent or agentic component, an MCP client or server), as in the
    OWASP LLM, agentic and MCP lists? Then it is not engaged, because the entry reaches the assistant
    directly. A class that takes in software of every kind (a system, its components, applications,
-   services, infrastructure) is not such a kind, even though the assistant falls inside it: whether the
-   class takes in the assistant is the question this convention asks. (b) Does the entry act only where
-   the assistant would not be even if counted as part of the system, such as the inbound edge of a service
-   the assistant only calls? Then it is not engaged. (c) Is the entry's object a system, AI or not, that
-   an organisation builds, deploys, operates or governs, and is the rule's boundary the assistant itself,
-   its actions and decisions, or its tools? Then it is engaged. (d) Otherwise it is not engaged. Two
-   related questions are kept apart as conventions 8 and 9.
+   services, infrastructure) is not such a kind, even though the assistant falls inside it. Nor is an AI
+   system, or AI named in general terms (the AI of a human and AI configuration, for example), which takes
+   in AI software of every kind, even though the assistant is an AI system by its nature. For both kinds
+   of class, whether the class takes in the assistant is the question this convention asks, so (a) does
+   not answer and the assessor goes on to (b). (b) Does the entry act only where the assistant would not
+   be even if counted as part of the system, such as the inbound edge of a service the assistant only
+   calls? Then it is not engaged. (c) Is the entry's object a system, AI or not, that an organisation
+   builds, deploys, operates or governs, and is the rule's boundary the assistant itself, its actions and
+   decisions, or its tools? Then it is engaged. (d) Otherwise it is not engaged. Every record states in
+   `assumptions` which question answers for its row. Two related questions are kept apart as conventions
+   8 and 9.
 4. **Layer and boundary.** Can a rule that acts at the assistant's or the application's layer be tight
    to an entry whose mechanism or main control sits at another layer (the service's inbound edge, the
    client that renders output, the infrastructure, the authorization server)? This convention is engaged

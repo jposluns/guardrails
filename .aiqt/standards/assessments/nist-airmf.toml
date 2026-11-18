@@ -35,6 +35,7 @@ rationale = "Reading a pack rule as a process (convention 2) and the AI system a
 assumptions = [
   "a pack rule counts as a defined and documented process (convention 2); if it does not, both labels are broad",
   "the AI system to be overseen includes the assistant whose decisions the rule classifies (convention 3); if it means only the product being built, both labels are broad",
+  "convention 3 is engaged at question (c) of its ordered test: the entry's object, an AI system, is a class that takes in AI software of every kind, so question (a) does not answer; the entry does not act only where the assistant would not be, so question (b) does not answer; and the rule's boundary is the assistant's own decisions",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -70,6 +71,7 @@ rationale = "The statement has two verbs, setting out the human and AI duties an
 assumptions = [
   "a pack rule counts as one of the policies and procedures the entry asks for (convention 2); if it does not, both labels are broad",
   "the AI in the entry's human and AI configurations includes the assistant the rule governs (convention 3); if it means only the product being built, both labels are broad",
+  "convention 3 is engaged at question (c) of its ordered test: the entry names AI and AI systems in general terms, a class that takes in AI software of every kind, so question (a) does not answer; question (b) does not answer; and the rule's boundary is the assistant's own decision rights",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -108,6 +110,7 @@ rationale = "Same readings of conventions 2 and 3 as the decision classification
 assumptions = [
   "a pack rule counts as a defined and documented process (convention 2); if it does not, both labels are broad",
   "the AI system to be overseen includes the assistant whose autonomy the rule bounds (convention 3); if it means only the product being built, both labels are broad",
+  "convention 3 is engaged at question (c) of its ordered test, as in the decision classification MAP 3.5 row: an AI system is not a kind of software the assistant is by its nature under question (a), question (b) does not answer, and the rule's boundary is the assistant's own actions",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -142,6 +145,7 @@ rationale = "The statement has two verbs, setting out the human and AI duties an
 assumptions = [
   "a pack rule counts as one of the policies and procedures the entry asks for (convention 2); if it does not, both labels are broad",
   "the AI in the entry's human and AI configurations includes the assistant the rule governs (convention 3); if it means only the product being built, both labels are broad",
+  "convention 3 is engaged at question (c) of its ordered test, as in the decision classification GOVERN 3.2 row: AI named in general terms is not a kind of software the assistant is by its nature under question (a), question (b) does not answer, and the rule's boundary is the assistant's own actions",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -180,6 +184,7 @@ rationale = "Same readings of conventions 2 and 3 as the other two MAP 3.5 rows:
 assumptions = [
   "a pack rule counts as a defined and documented process (convention 2); if it does not, both labels are broad",
   "the AI system to be overseen includes the assistant whose actions the rule gates (convention 3); if it means only the product being built, both labels are broad",
+  "convention 3 is engaged at question (c) of its ordered test, as in the other two MAP 3.5 rows: an AI system is not a kind of software the assistant is by its nature under question (a), question (b) does not answer, and the rule's boundary is the assistant's own consequential actions",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -218,7 +223,7 @@ rationale = "Independent review is the core of the entry, and the rule requires 
 assumptions = [
   "a rule whose independent pass checks every product the assistant changes, AI or not, acts on the AI system the entry is about, because AI products are among those it checks (convention 9); if an entry about an AI system is met only by a rule aimed at what makes a system AI, both labels are broad",
   "an independent pass that another AI model may run can fill the entry's role for staff experts or outside assessors (convention 7); if the role needs a person, both labels are broad",
-  "convention 3 is not engaged: the rule's boundary is the change to the work product, not the assistant or its tools",
+  "convention 3 is not engaged, and question (d) of its ordered test is the one that answers: the entry's object, an AI system, is a class that takes in AI software of every kind, so question (a) does not answer; question (b) does not answer; and the rule's boundary is the change to the work product, not the assistant or its tools, so question (c) does not answer",
   "convention 5 does not decide this row: the consultation element is conditional, but label-b is broad on the regular whole system assessment alone, so either reading of convention 5 gives the same labels",
 ]
 assessor = "first-pass review"
