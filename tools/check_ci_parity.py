@@ -968,6 +968,20 @@ ALLOWLIST = (
     {
         "side": "ci-only",
         "identity": (
+            "tools/check_instruction_budget.py --change-shape --protected <ref:origin/${GITHUB_REF_NAME}> "
+            "--base <ref:$PUSH_BEFORE>"
+        ),
+        "reason": (
+            "The push CI job binds the change-shape base to the event's before "
+            "OID and its runtime-derived origin ref, as the release-cut push leg "
+            "does. The bare leg runs locally and in pull_request CI, where "
+            "GITHUB_BASE_REF binds the merge parent."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
+        "identity": (
             "tools/check_selftest_removal.py --protected <ref:origin/${GITHUB_REF_NAME}> "
             "--base <ref:$PUSH_BEFORE>"
         ),
@@ -976,6 +990,18 @@ ALLOWLIST = (
             "event's before OID, the base the release-cut derivation this gate "
             "imports requires on a push. The bare leg runs locally and in "
             "pull_request CI, where GITHUB_BASE_REF binds the merge parent."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
+        "identity": "tools/check_instruction_budget.py --change-shape --protected <ref:origin/${GITHUB_REF_NAME}>",
+        "reason": (
+            "A workflow_dispatch run (the Quality workflow has no schedule "
+            "trigger today) has no pushed range, so the CI "
+            "job supplies only its runtime-derived origin ref and the change-shape "
+            "mode compares the checked-out tip with its first parent. The bare "
+            "leg runs locally."
         ),
         "backlog": "GD-123",
     },
