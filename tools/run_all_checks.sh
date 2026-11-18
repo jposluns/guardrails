@@ -296,6 +296,7 @@ run_gate "instruction-budget-selftest" python3 -I -B tools/check_instruction_bud
 run_gate "instruction-budget" python3 -I -B tools/check_instruction_budget.py
 run_gate "instruction-budget-change-shape" python3 -I -B tools/check_instruction_budget.py --change-shape
 run_gate "brief-capability-selftest" python3 -I -B tools/check_brief_capability.py --self-test  # no brief in the repository to lint
+run_gate "push-gate-record-selftest" python3 -I -B tools/check_push_gate_record.py --self-test --red-on-revert  # the push check is an adopter-installed pre-push hook
 run_gate "notice-drift"    python3 -I -B tools/gen_notice.py --check
 run_gate "claude-selftest" python3 -I -B tools/gen_claude.py --self-test
 run_gate "claude-drift"    python3 -I -B tools/gen_claude.py --check
@@ -325,6 +326,7 @@ run_gate "git-fixture-env-config-malformed" python3 -I -B tools/check_selftest_e
 run_gate "git-fixture-env-config-system" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system
 run_gate "instruction-budget-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
 run_gate "brief-capability-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite brief-capability-selftest
+run_gate "push-gate-record-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite push-gate-record-selftest
 run_gate "hook-latency-selftest" python3 -I -B tools/check_selftest_execution.py --suite hook-latency-selftest
 run_gate "entry-guard-selftest" python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
 run_gate "entry-guard" python3 -I -B tools/check_entry_guard.py
