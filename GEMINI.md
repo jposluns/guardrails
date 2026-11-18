@@ -587,6 +587,8 @@ not needed, detaching it is a deliberate, recorded choice, not a reflex.
 
 There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its
 source. Trust is never a substitute for the gate.
+A writer of a record validates it with the predicate of a later gate that reads it, one shared predicate,
+or, where that predicate is out of reach, a test holds the writer to refusing what the gate rejects.
 
 ## Workers produce inert data
 

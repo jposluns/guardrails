@@ -919,6 +919,29 @@ jobs:
             fi
           fi
 
+      - name: Self-test check removal self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite selftest-removal-selftest
+
+      - name: Self-test check removal
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 -I -B tools/check_selftest_removal.py
+          else
+            if [ "$EVENT_NAME" = "push" ]; then
+              # The pushed range: every check id registered before the push and gone after it.
+              python3 -I -B tools/check_selftest_removal.py --protected "origin/${GITHUB_REF_NAME}" --base "$PUSH_BEFORE"
+            else
+              # A workflow_dispatch or schedule run compares the checked-out tip with its first parent.
+              python3 -I -B tools/check_selftest_removal.py --protected "origin/${GITHUB_REF_NAME}"
+            fi
+          fi
+
       - name: Version monotonicity self-test
         shell: bash
         run: python3 -I -B tools/check_version_monotonicity.py --self-test
@@ -2842,6 +2865,14 @@ jobs:
       - name: Internal-name leak scan
         shell: bash
         run: python3 -I -B tools/check_internal_names.py
+      # The gate derives the protected branch itself: origin/GITHUB_BASE_REF on a pull request, and on
+      # any other event origin/HEAD or, failing that, origin/GITHUB_REF_NAME (nothing added on main).
+      - name: Review-label self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite review-labels-selftest
+      - name: Review labels on added lines
+        shell: bash
+        run: python3 -I -B tools/check_review_labels.py
       - name: QA advisory digest (non-gating finding)
         shell: bash
         run: python3 -I -B tools/audit_reference.py --digest
