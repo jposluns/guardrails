@@ -5936,8 +5936,9 @@ def baseline_base_selection_problems(text):
     row; return the problems, empty when every event selects its reviewed base. The
     step header must be BASELINE_BASE_STEP_HEADER exactly (the env the stubs stand in
     for); each row's run must record exactly its expected gate call (no other python3
-    call), exit with its expected status, and print one BASELINE_BASE_CANNOT line only
-    when it expects no gate call."""
+    call) and exit with its expected status. A row that expects a gate call must print
+    no CANNOT EVALUATE line at all; a row that expects none must print exactly one,
+    and it must start with BASELINE_BASE_CANNOT."""
     import tempfile
 
     header, block = _baseline_base_selection_block(text)
@@ -5968,9 +5969,16 @@ def baseline_base_selection_problems(text):
                 if rc != want_rc:
                     problems.append("{}: exit {}, expected {}".format(label, rc, want_rc))
                 cannot = [line for line in lines if line.startswith("CANNOT EVALUATE:")]
-                if (len(cannot) == 1 and cannot[0].startswith(BASELINE_BASE_CANNOT)
-                        ) != (want_call is None) or len(cannot) > 1:
-                    problems.append("{}: CANNOT EVALUATE lines {!r}".format(label, cannot))
+                if want_call is not None:
+                    # A successful scenario prints no cannot-evaluate diagnostic at all,
+                    # whatever its wording.
+                    if cannot:
+                        problems.append("{}: CANNOT EVALUATE lines {!r}, expected "
+                                        "none".format(label, cannot))
+                elif len(cannot) != 1 or not cannot[0].startswith(BASELINE_BASE_CANNOT):
+                    problems.append("{}: CANNOT EVALUATE lines {!r}, expected one "
+                                    "starting {!r}".format(
+                                        label, cannot, BASELINE_BASE_CANNOT))
         finally:
             stubs[0].chmod(0o700)  # so the shared directory can be removed
     return problems
@@ -11095,8 +11103,11 @@ def self_test():
     # inside that step only, and must be caught on the scenario it breaks: the push
     # branch disabled (a push falls through to HEAD^, the finding this vector closes),
     # the pull_request branch disabled, the all-zero test weakened to an empty test,
-    # and the step's env rebinding EVENT_NAME. Before this vector, parity passed the
-    # push-disabled mutant with no diagnostic.
+    # the step's env rebinding EVENT_NAME, and the pull_request branch printing an extra
+    # cannot-evaluate diagnostic (with a wording other than BASELINE_BASE_CANNOT) before
+    # its gate call. Before this vector, parity passed the push-disabled mutant with no
+    # diagnostic; before the successful rows required an empty CANNOT EVALUATE list,
+    # the extra-diagnostic mutant passed too.
     count += 1
     base_ci, base_diagnostic = read_runner_text(CI_PATH, CI_SOURCE)
     if base_diagnostic is not None:
@@ -11124,6 +11135,11 @@ def self_test():
              "EVENT_NAME: ${{ github.event_name }}",
              "EVENT_NAME: ${{ github.event.action }}",
              "step header "),
+            ("extra cannot-evaluate diagnostic on the pull_request branch",
+             'python3 -I -B tools/check_baseline_pin.py --base "HEAD^1"',
+             'echo "CANNOT EVALUATE: an unexpected diagnostic on a successful run"\n'
+             '            python3 -I -B tools/check_baseline_pin.py --base "HEAD^1"',
+             "pull request: "),
         )
         for label, old, new, want_prefix in base_mutants:
             if step_start == -1 or step_end == -1:
