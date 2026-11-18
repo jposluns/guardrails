@@ -27,8 +27,8 @@ omits = [
 ]
 label-a = "tight"
 label-b = "broad"
-adopted = "pending-definition"
-proposed = "pending-definition"
+adopted = "B"
+proposed = "broad"
 review-state = "assessed"
 conventions = [2, 3]
 rationale = "Reading a pack rule as a process (convention 2) and the AI system as including the assistant (convention 3), the rule defines and documents an oversight process, which carries out the core. Nothing in it assesses the process or ties it to governance policy, so it is broad under B."
@@ -54,20 +54,23 @@ locator = "GOVERN function, subcategory GOVERN 3.2"
 text-location = "lines 1030 to 1031"
 edition-check = "match"
 boundary = "decision rights between the assistant and the human maintainer"
-core = "The organisation's policy and procedure both set out what people and what AI are each charged with, and keep those two sets of duties distinct, where humans and AI work together and where people oversee AI."
+core = "The organisation's policy and procedure both set out what people and what AI are each charged with, and keep those two sets of duties distinct, for two objects: the configurations in which humans and AI work together, and the oversight of AI systems."
 covers = [
-  "setting out the duties (the entry's first verb): the rule names three kinds of decision right, the assistant's own, the maintainer's, and blocked",
-  "keeping them distinct (the entry's second verb): every decision is placed in exactly one of those kinds, and the placement is recorded before acting",
-  "a recorded maintainer ruling outranks a predicted one, so the human's part cannot be taken over by the assistant's guess",
+  "setting out the duties (the entry's first verb) for one human and AI configuration, the assistant working with its maintainer: the rule names three kinds of decision right, the assistant's own, the maintainer's, and blocked",
+  "keeping them distinct (the entry's second verb) for that configuration: every decision is placed in exactly one of those kinds, and the placement is recorded before acting",
+  "a recorded maintainer ruling outranks a predicted one, so the human's part cannot be taken over by the assistant's guess, which sets out part of the maintainer's role in overseeing the assistant",
 ]
-omits = []
+omits = [
+  "roles and responsibilities for human and AI configurations other than the assistant with its maintainer, such as those of an AI product the organisation builds or runs (the first object, beyond the one configuration the rule governs)",
+  "roles and responsibilities for the oversight of AI systems (the second object): who oversees an AI system, what each overseeing role must do, such as monitor, review or step in, and how those duties are split among people; the rule names only which decisions go to the maintainer, for the assistant alone",
+]
 label-a = "tight"
-label-b = "tight"
-adopted = "pending-definition"
-proposed = "pending-definition"
+label-b = "broad"
+adopted = "B"
+proposed = "broad"
 review-state = "assessed"
 conventions = [2, 3]
-rationale = "The statement has two verbs, setting out the human and AI duties and keeping them distinct. The rule does both for the assistant and the maintainer, so nothing essential is left out, on the readings of conventions 2 and 3 stated below."
+rationale = "The statement has two verbs, setting out the human and AI duties and keeping them distinct, and two objects, human and AI configurations and the oversight of AI systems. On the readings of conventions 2 and 3 stated below, the rule carries out both verbs for one configuration, the assistant with its maintainer, which is tight under A. Under B, read over the whole control, it leaves out every other configuration and sets out oversight roles only as far as routing the maintainer's decisions, so it is broad; the B label holds on every reading of every open convention."
 assumptions = [
   "a pack rule counts as one of the policies and procedures the entry asks for (convention 2); if it does not, both labels are broad",
   "the AI in the entry's human and AI configurations includes the assistant the rule governs (convention 3); if it means only the product being built, both labels are broad",
@@ -102,8 +105,8 @@ omits = [
 ]
 label-a = "tight"
 label-b = "broad"
-adopted = "pending-definition"
-proposed = "pending-definition"
+adopted = "B"
+proposed = "broad"
 review-state = "assessed"
 conventions = [2, 3]
 rationale = "Same readings of conventions 2 and 3 as the decision classification row: an oversight process for the assistant is defined and documented, but not assessed or tied to governance policy."
@@ -129,19 +132,23 @@ locator = "GOVERN function, subcategory GOVERN 3.2"
 text-location = "lines 1030 to 1031"
 edition-check = "match"
 boundary = "responsibility between the assistant and the human for consequential actions"
-core = "The organisation's policy and procedure both set out what people and what AI are each charged with, and keep those two sets of duties distinct, where humans and AI work together and where people oversee AI."
+core = "The organisation's policy and procedure both set out what people and what AI are each charged with, and keep those two sets of duties distinct, for two objects: the configurations in which humans and AI work together, and the oversight of AI systems."
 covers = [
-  "setting out the duties (the entry's first verb): high consequence, irreversible or outward facing actions are the human's to authorize, and the rest the assistant may do alone",
-  "keeping them distinct (the entry's second verb): the threshold between the two is set by consequence and reversibility, not by confidence; a doubtful case holds for the human and a timeout never picks the risky path",
+  "setting out the duties (the entry's first verb) for one human and AI configuration, the assistant working with a human: high consequence, irreversible or outward facing actions are the human's to authorize, and the rest the assistant may do alone",
+  "keeping them distinct (the entry's second verb) for that configuration: the threshold between the two is set by consequence and reversibility, not by confidence; a doubtful case holds for the human and a timeout never picks the risky path",
+  "the human's part in overseeing the assistant is set out as authorizing consequential actions and taking the cases in doubt (part of the second object)",
 ]
-omits = []
+omits = [
+  "roles and responsibilities for human and AI configurations other than the assistant with the human it works for, such as those of an AI product the organisation builds or runs (the first object, beyond the one configuration the rule governs)",
+  "roles and responsibilities for the oversight of AI systems beyond one human approval point for the assistant (the rest of the second object): who oversees an AI system, what each overseeing role must do beyond authorizing actions, such as monitor, review or step in, and how those duties are split among people",
+]
 label-a = "tight"
-label-b = "tight"
-adopted = "pending-definition"
-proposed = "pending-definition"
+label-b = "broad"
+adopted = "B"
+proposed = "broad"
 review-state = "assessed"
 conventions = [2, 3]
-rationale = "The statement has two verbs, setting out the human and AI duties and keeping them distinct. The autonomy threshold does both for consequential actions, so nothing essential is left out, on the readings of conventions 2 and 3 stated below."
+rationale = "The statement has two verbs, setting out the human and AI duties and keeping them distinct, and two objects, human and AI configurations and the oversight of AI systems. On the readings of conventions 2 and 3 stated below, the autonomy threshold carries out both verbs for consequential actions in one configuration, which is tight under A. Under B, read over the whole control, it leaves out every other configuration and sets out oversight roles only as one approval point, so it is broad; the B label holds on every reading of every open convention."
 assumptions = [
   "a pack rule counts as one of the policies and procedures the entry asks for (convention 2); if it does not, both labels are broad",
   "the AI in the entry's human and AI configurations includes the assistant the rule governs (convention 3); if it means only the product being built, both labels are broad",
@@ -176,8 +183,8 @@ omits = [
 ]
 label-a = "tight"
 label-b = "broad"
-adopted = "pending-definition"
-proposed = "pending-definition"
+adopted = "B"
+proposed = "broad"
 review-state = "assessed"
 conventions = [2, 3]
 rationale = "Same readings of conventions 2 and 3 as the other two MAP 3.5 rows: defined and documented, not assessed or tied to governance policy."
@@ -215,8 +222,8 @@ omits = [
 ]
 label-a = "tight"
 label-b = "broad"
-adopted = "pending-definition"
-proposed = "pending-definition"
+adopted = "B"
+proposed = "broad"
 review-state = "assessed"
 conventions = [7, 9]
 rationale = "Independent review is the core of the entry, and the rule requires an independent pass on the work product, read here as acting on the AI system when the product is one (convention 9) and as able to fill the entry's role for people (convention 7). Under B the rule checks single changes, not the system at set intervals, so it is broad whatever the reading of convention 5, which is therefore not named."

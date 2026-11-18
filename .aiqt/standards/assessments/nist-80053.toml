@@ -12,18 +12,18 @@ edition = "Rev 5 (catalog 5.2.0)"
 source = "NIST_SP-800-53_rev5_catalog.json"
 source-sha256 = "d820835aa54aeb2265bdacdf8e678af7530443a59556563df898addf012024cb"
 locator = "CM-8 System Component Inventory, statement items a.1 to a.5 and b, and the discussion"
-text-location = "catalogue parts cm-8_smt.a.1 to cm-8_smt.a.5 and cm-8_smt.b; the discussion part cm-8_gdn, read for what the control's object takes in (test 3), as convention 6 allows"
+text-location = "catalogue parts cm-8_smt.a.1 to cm-8_smt.a.5 and cm-8_smt.b; the discussion part cm-8_gdn, read for what the control's object takes in (test 3), as convention 6 allows, including its sentence on centrally managed software in the second paragraph"
 edition-check = "match"
 boundary = "AI tools, models and servers used for project work"
 core = "Keep a documented inventory of system components that reflects the system accurately, includes every component, has no duplicates, is detailed enough for tracking, and records accountability, and review and update it at a set frequency."
 covers = [
-  "an inventory of the AI tool subset",
+  "an inventory of the AI tool subset, for the components within the system: the AI tools and servers installed and managed where the project works, such as an assistant client or an MCP server the project runs",
   "accountability: the reason for authorization and the approver are recorded",
   "the inventory is reconciled with what is actually in use, so it reflects the system",
 ]
 omits = [
   "item a.2: all other components of the system",
-  "item a.3: the rule against duplicate accounting",
+  "item a.3: no duplicate accounting and no components assigned to another system: the register has no rule against counting a component twice, and it enters hosted models and remote servers the assistant only calls, which the discussion places in the system on which they are installed and managed, not in the project's system",
   "item a.4: a level of detail set for tracking and reporting",
   "item b: review and update at a set frequency",
   "discussion only, not an element under the reading of convention 6 this record takes: the accountability details the discussion lists for each component (system name, owner, version, licence, network names and addresses, and receipt, cost, model, serial number, maker, supplier, type and location), beyond the reason and approver the register records",
@@ -31,17 +31,18 @@ omits = [
 ]
 label-a = "tight"
 label-b = "broad"
-adopted = "pending-definition"
-proposed = "pending-definition"
+adopted = "B"
+proposed = "broad"
 review-state = "assessed"
 conventions = [3]
-rationale = "Reading the system as including the assistant and the tools it uses (convention 3), the register is a component inventory with accountability for the AI tool subset, which carries out the core. Several lettered items are left out, so it is broad under B."
+rationale = "Reading the system as including the assistant and the tools it uses (convention 3), the register is a component inventory with accountability for the AI tool subset installed where the project works, which carries out the core. Under B, read over the whole control, several lettered items are left out, so it is broad; the B label holds on every reading of every open convention."
 assumptions = [
   "the register is treated as the inventory for this component class",
   "the AI tools, models and servers the assistant uses count as components of the system whose inventory the control asks for (convention 3); if the system means only the product being built, they are tools used to build it rather than its components; the control's object, the components of the system, does not take in the tooling used to build it, so the tooling exception of convention 3 does not apply, and both labels are broad",
   "the tooling exception was checked against the statement and the discussion part: the statement asks for an inventory of the components within the system, and the discussion describes components as the hardware, software and firmware assets of a system and allows central inventories across an organisation's systems, but neither names the tools used to build a system; so on the product reading neither the statement nor the guidance shows that the object takes in that tooling",
+  "the discussion's sentence on centrally managed software was applied to the convention 3 reading: software reached from other systems counts as a component of the system on which it is installed and managed, so hosted models and remote servers the assistant only calls are components of their providers' systems, not of the project's; AI tools and servers installed and managed where the project works still count as its components on the recorded reading of convention 3, so label-a holds for that subset, and label-b is broad either way",
   "convention 3 is engaged at question (c) of its ordered test: the entry's object, a system and its components, is a class that takes in software of every kind, so question (a) does not answer; question (b) does not answer; and the rule's boundary is the assistant's own tools",
-  "convention 6 does not decide this row: the discussion is read only to check whether the object takes in build tooling, and it does not, so reading it or setting it aside gives the same labels; its items, read as essential, would leave label-b broad as it is",
+  "convention 6 does not decide this row: the discussion is read only to check what the object takes in, for build tooling, which it does not take in, and for software reached from other systems, which it places in the providing system, and reading it or setting it aside gives the same labels; its items, read as essential, would leave label-b broad as it is",
 ]
 assessor = "first-pass review"
 date = "2026-11-18"
@@ -72,11 +73,11 @@ omits = [
 ]
 label-a = "tight"
 label-b = "broad"
-adopted = "pending-definition"
-proposed = "pending-definition"
+adopted = "B"
+proposed = "broad"
 review-state = "assessed"
 conventions = [6]
-rationale = "Keeping operational data out of material used before production is the direct mitigation the control's discussion part names, which shows the match under A on the reading of convention 6 this record takes. The rule does not sign off, record or protect any operational data use, so it is broad under B."
+rationale = "Keeping operational data out of material used before production is the direct mitigation the control's discussion part names, which shows the match under A on the reading of convention 6 this record takes. Under B, read over the whole control, the rule does not sign off, record or protect any operational data use, so it is broad; the B label holds on every reading of every open convention."
 assumptions = [
   "a mitigation named only in the control's discussion part can satisfy test 5 under A (convention 6); if only the statement counts, label-a is broad",
   "convention 3 is not engaged, and question (d) of its ordered test is the one that answers: the entry's object, the use of operational data in a system's development, test and integration, is not a kind of software the assistant is by its nature, so question (a) does not answer; question (b) does not answer; and the rule's boundary is the fixtures, examples and documentation of the work product, not the assistant or its tools, so question (c) does not answer",

@@ -55,11 +55,11 @@ omits = [
 ]
 label-a = "tight"
 label-b = "broad"
-adopted = "pending-definition"
-proposed = "pending-definition"
+adopted = "B"
+proposed = "broad"
 review-state = "assessed"
 conventions = []
-rationale = "Corroboration before reliance is the entry's first two mitigations. The rule deals with claims about external facts only, meets five of the seven examples only in part and two not at all, meets attack scenario 4 and parts of scenarios 1 and 6 but not scenarios 2, 3, 5 and 7, and leaves out strategies 3 to 10, so it is broad under B. No open convention decides the row."
+rationale = "Corroboration before reliance is the entry's first two mitigations. Under B, read over the whole control, the rule deals with claims about external facts only, meets five of the seven examples only in part and two not at all, meets attack scenario 4 and parts of scenarios 1 and 6 but not scenarios 2, 3, 5 and 7, and leaves out strategies 3 to 10, so it is broad under B. No open convention decides the row, and the B label holds on every reading of every open convention."
 assumptions = [
   "convention 3 is not engaged, and question (a) of its ordered test is the one that answers: the entry's object is an LLM or LLM-enabled application, which is a kind of software the assistant itself is, so the entry reaches the assistant's own output directly and no reading of what the system means is needed",
 ]

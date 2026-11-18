@@ -34,11 +34,11 @@ omits = [
 ]
 label-a = "tight"
 label-b = "broad"
-adopted = "pending-definition"
-proposed = "pending-definition"
+adopted = "B"
+proposed = "broad"
 review-state = "assessed"
 conventions = []
-rationale = "Threat modelling a trust boundary before it is built is the core of addressing security from the start. The design principles, the threats that illustrate them (met only in part for threat 3), the enforcement side of trust relationships and the architecture patterns the control lists are not part of the rule, so it is broad under B. No open convention decides the row."
+rationale = "Threat modelling a trust boundary before it is built is the core of addressing security from the start. Under B, read over the whole control, the design principles, the threats that illustrate them (met only in part for threat 3), the enforcement side of trust relationships and the architecture patterns the control lists are not part of the rule, and the rule acts on single changes, not the whole architecture, so it is broad under B. No open convention decides the row, and the B label holds on every reading of every open convention."
 assumptions = [
   "the rule acts on each change while the control is framed at the level of the whole architecture; both act on the same application at the same layer, so this is a difference of scope, which Definition A treats as secondary, and convention 4 is not engaged",
   "convention 3 is not engaged, and question (d) of its ordered test is the one that answers: the entry's object, an application, is a class that takes in software of every kind, so question (a) does not answer; question (b) does not answer; and the rule's boundary is a change to the application being built, not the assistant or its tools, so question (c) does not answer",
