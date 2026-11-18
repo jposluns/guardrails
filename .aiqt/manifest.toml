@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "5d5ff85a89195209151832844e054737356a9181dbce3603da30ef524b985584"
+tree-sha256 = "b2775c79d334b422f1638786b30629236ddcea4076a431820fa35b283d22af71"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4737,8 +4737,8 @@ sha256 = "5218fd5dd347aa7f25cebbbce29bff5d48d94b8ffdd219e678ddd8ccc75ffc0d"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 488978
-sha256 = "abdb4452c106497e0442cf244296c84abb3bdde194a44b57a3e7eb45e81b4c6b"
+bytes = 489632
+sha256 = "8475be95d3fe3408046efd4bfc974a816a7e5a2017d2fd71955ef285c6dabf6e"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"
