@@ -92,10 +92,10 @@ def render_proof_line(counts):
     """The landing page's bold proof line, rendered as ONE line: check_reference_facts binds the proof
     wording to the first line that opens bold with a digit, so the line may not wrap. The gate figure
     is every "ci" [[gate]] entry of the gates manifest (expected_counts), and some of those gates run
-    only their own fixture self-tests, so the wording states what is counted (gates registered in the
-    gate manifest), never that each counted gate checks this repository's tree."""
-    return ("**{rules} rules. {gates} CI gates registered in this repository's gate manifest. {hooks} "
-            "Claude Code hooks shipped as an opt-in plugin. Mapped to {frameworks} "
+    only their own fixture self-tests, so the wording states what is counted (the gates in the gate
+    manifest, linked by its path), never that each counted gate checks this repository's tree."""
+    return ("**{rules} rules. {gates} CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml). "
+            "{hooks} Claude Code hooks shipped as an opt-in plugin. Mapped to {frameworks} "
             "frameworks.**").format(**counts)
 
 
@@ -108,8 +108,8 @@ _INSIDE_TABLE_ROWS = (
     "| --- | --- | --- |",
     "| **The standard** | {rules} clear, single-behaviour rules across the four AIQT facets, plus a "
     "security floor covering confidentiality, integrity, availability, and privacy. | Rules |",
-    "| **Technical controls** | {gates} CI gates registered in this repository's gate manifest and "
-    "{hooks} Claude Code hooks shipped as an opt-in plugin ({blocking} blocking, {warning} warning). "
+    "| **Technical controls** | {gates} CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml) "
+    "and {hooks} Claude Code hooks shipped as an opt-in plugin ({blocking} blocking, {warning} warning). "
     "Today {enforced} of the {rules} rules are linked to at least one shipped gate or hook; "
     "[ENFORCEMENT.md](ENFORCEMENT.md) lists each rule's status. | Controls |",
     "| **Generated adapters** | The Claude, AGENTS.md, Gemini, Copilot, and Cursor surfaces are "
@@ -272,8 +272,8 @@ def main():
 #   (a) a conformant fixture (2 manifests; 6 rules, 5 ci gates, 7 claude-code hooks split 4/3, 1
 #       enforced: every fixture count distinct, so a figure rendered into the wrong slot or two swapped
 #       count keys can never collide into a passing value) generates the right roster AND every landing
-#       figure in both blocks with the hand prose around the blocks untouched, never the old wording
-#       that claimed each counted gate checks this repository, then re-checks drift-clean,
+#       figure in both blocks with the hand prose around the blocks untouched, then re-checks
+#       drift-clean,
 #   (b) a hand-desynced count in the committed roster block is caught by --check (exit 1),
 #   (c) a README missing the ROSTER markers fails closed (exit 2),
 #   (d) an empty .aiqt/standards/ dir fails closed (exit 2), never a false-clean empty roster,
@@ -376,12 +376,12 @@ _ENFORCEMENT = (
 # literal per anchored table wording, together covering all twelve rendered figure positions. Every
 # literal starts at FIXED text to the left of its first figure (the controls row at its cell opener),
 # so a renderer that glues a digit onto the front of a figure cannot still contain the literal.
-_PROOF_RENDERED = ("**6 rules. 5 CI gates registered in this repository's gate manifest. 7 Claude Code "
-                   "hooks shipped as an opt-in plugin. Mapped to 2 frameworks.**")
+_PROOF_RENDERED = ("**6 rules. 5 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml). 7 Claude "
+                   "Code hooks shipped as an opt-in plugin. Mapped to 2 frameworks.**")
 _TABLE_RENDERED = (
     "| **The standard** | 6 clear, single-behaviour rules",
-    "| **Technical controls** | 5 CI gates registered in this repository's gate manifest and 7 Claude "
-    "Code hooks shipped as an opt-in plugin (4 blocking, 3 warning)",
+    "| **Technical controls** | 5 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml) and 7 "
+    "Claude Code hooks shipped as an opt-in plugin (4 blocking, 3 warning)",
     "Today 1 of the 6 rules are linked to at least one shipped gate or hook",
     "Mappings from the rules to 2 pinned external control catalogues",
 )
@@ -455,12 +455,6 @@ def self_test_main():
             if rendered not in landing_text:
                 failures.append("conformant tree: expected the rendered table figure "
                                 "({!r})".format(rendered))
-        # The gate figure counts every "ci" gate of the gates manifest, some of which run only their
-        # own fixture self-tests, so the rendered page must never claim each counted gate checks this
-        # repository: the old overclaiming wording is refused in both blocks.
-        if "CI gates that check this repository" in landing_text:
-            failures.append("conformant tree: the gate figure counts manifest entries, so the page must "
-                            "not say each counted gate checks this repository")
         for prose in ("Hand prose above the counts.", "Hand prose between the blocks.",
                       "Hand prose below the counts."):
             if prose not in landing_text:
@@ -526,11 +520,11 @@ def self_test_main():
         if run_quiet(gatemove, check=False) != 0:
             failures.append("gate-move tree: regeneration expected exit 0")
         moved = (gatemove / LANDING_REL).read_text(encoding="utf-8")
-        if ("**6 rules. 6 CI gates registered in this repository's gate manifest. 7 Claude Code "
-                "hooks shipped as an opt-in plugin. Mapped to 2 frameworks.**") not in moved:
+        if ("**6 rules. 6 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml). 7 Claude "
+                "Code hooks shipped as an opt-in plugin. Mapped to 2 frameworks.**") not in moved:
             failures.append("gate-move tree: expected the regenerated proof line to state 6 CI gates")
-        if ("| **Technical controls** | 6 CI gates registered in this repository's gate manifest and "
-                "7 Claude Code hooks shipped as an opt-in plugin (4 blocking, 3 warning)") not in moved:
+        if ("| **Technical controls** | 6 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml) "
+                "and 7 Claude Code hooks shipped as an opt-in plugin (4 blocking, 3 warning)") not in moved:
             failures.append("gate-move tree: expected the regenerated table row to state 6 CI gates")
         if run_quiet(gatemove, check=True) != 0:
             failures.append("gate-move tree: re-check after regeneration expected exit 0")
@@ -564,10 +558,10 @@ def self_test_main():
             failures.append("all-counts move: regeneration expected exit 0")
         moved = (gatemove / LANDING_REL).read_text(encoding="utf-8")
         for rendered in (
-                "**9 rules. 7 CI gates registered in this repository's gate manifest. 11 Claude Code "
-                "hooks shipped as an opt-in plugin. Mapped to 3 frameworks.**",
+                "**9 rules. 7 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml). 11 Claude "
+                "Code hooks shipped as an opt-in plugin. Mapped to 3 frameworks.**",
                 "| **The standard** | 9 clear, single-behaviour rules",
-                "| **Technical controls** | 7 CI gates registered in this repository's gate manifest "
+                "| **Technical controls** | 7 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml) "
                 "and 11 Claude Code hooks shipped as an opt-in plugin (6 blocking, 5 warning)",
                 "Today 2 of the 9 rules are linked to at least one shipped gate or hook",
                 "Mappings from the rules to 3 pinned external control catalogues",
@@ -588,7 +582,7 @@ def self_test_main():
         if run_quiet(handedit, check=False) != 0:
             failures.append("hand-edit tree: initial generation expected exit 0")
         edited = (handedit / LANDING_REL).read_text(encoding="utf-8").replace(
-            "5 CI gates registered in", "9 CI gates registered in")
+            "5 CI gates in the", "9 CI gates in the")
         (handedit / LANDING_REL).write_text(edited, encoding="utf-8")
         if run_quiet(handedit, check=True) != 1:
             failures.append("hand-edited landing count expected exit 1 (drift)")

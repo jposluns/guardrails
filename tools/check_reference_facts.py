@@ -681,8 +681,9 @@ README_COUNT_FACTS = (
     ("proof line",
      r"(?m)^\*\*(?=[0-9])",
      "proof",
-     _NUM + r" rules\. " + _NUM + r" CI gates registered in this repository's gate manifest\. "
-     + _NUM + r" Claude Code hooks shipped as an opt-in plugin\. Mapped to " + _NUM + r" frameworks\.\*\*",
+     _NUM + r" rules\. " + _NUM
+     + r" CI gates in the \[gate manifest\]\(\.aiqt/core/gates/manifest\.toml\)\. " + _NUM
+     + r" Claude Code hooks shipped as an opt-in plugin\. Mapped to " + _NUM + r" frameworks\.\*\*",
      ("rules", "gates", "hooks", "frameworks")),
     ("rules row",
      r"(?m)^\| \*\*The standard\*\* \| ",
@@ -692,7 +693,7 @@ README_COUNT_FACTS = (
     ("controls row",
      r"(?m)^\| \*\*Technical controls\*\* \| ",
      "row",
-     _NUM + r" CI gates registered in this repository's gate manifest and " + _NUM +
+     _NUM + r" CI gates in the \[gate manifest\]\(\.aiqt/core/gates/manifest\.toml\) and " + _NUM +
      r" Claude Code hooks shipped as an opt-in plugin \(" + _NUM + r" blocking, " + _NUM + r" warning\)",
      ("gates", "hooks", "blocking", "warning")),
     ("enforcement figure",
@@ -1493,12 +1494,12 @@ _BUDGET_MD = ("# Fixture Budget\n\nTreat 150,000 characters as this project's ta
 
 _LANDING = (
     "# Fixture Landing\n\n"
-    "**3 rules. 2 CI gates registered in this repository's gate manifest. 2 Claude Code hooks "
-    "shipped as an opt-in plugin. Mapped to 2 frameworks.**\n\n"
+    "**3 rules. 2 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml). 2 Claude Code "
+    "hooks shipped as an opt-in plugin. Mapped to 2 frameworks.**\n\n"
     "| **The standard** | 3 clear, single-behaviour rules across the fixture facets. | Rules |\n"
-    "| **Technical controls** | 2 CI gates registered in this repository's gate manifest and 2 Claude "
-    "Code hooks shipped as an opt-in plugin (1 blocking, 1 warning). Today 1 of the 3 rules are linked to at least one "
-    "shipped gate or hook. | Controls |\n"
+    "| **Technical controls** | 2 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml) and 2 "
+    "Claude Code hooks shipped as an opt-in plugin (1 blocking, 1 warning). Today 1 of the 3 rules are "
+    "linked to at least one shipped gate or hook. | Controls |\n"
     "| **A standards crosswalk** | Mappings from the rules to 2 pinned external control catalogues. "
     "| Mappings |\n"
     "\nKeep it under 150,000\ncharacters in total. " + _BUDGET_CAVEAT.format(after=", pinned")
@@ -2196,7 +2197,7 @@ def self_test_main():
         #     REQUIRED, so a reword cannot silently drop a count from coverage.
         reword = tmp / "reword"
         _write_fixture(reword, landing=_LANDING.replace(
-            "CI gates registered in this repository's gate manifest",
+            "CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml)",
             "CI gates that check this repository"))
         if run_quiet(reword) != 1:
             failures.append("a reworded anchored count wording expected exit 1")
@@ -2204,14 +2205,14 @@ def self_test_main():
         # 17. every captured figure, drifted alone to 999 at its designated line -> finding.
         drifts = (
             ("proof-rules", "**3 rules.", "**999 rules."),
-            ("proof-gates", "2 CI gates registered in this repository's gate manifest. ",
-             "999 CI gates registered in this repository's gate manifest. "),
+            ("proof-gates", "2 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml). ",
+             "999 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml). "),
             ("proof-hooks", "2 Claude Code hooks shipped as an opt-in plugin. ",
              "999 Claude Code hooks shipped as an opt-in plugin. "),
             ("proof-frameworks", "Mapped to 2 frameworks", "Mapped to 999 frameworks"),
             ("rules-row-rules", "3 clear, single-behaviour rules", "999 clear, single-behaviour rules"),
-            ("controls-gates", "2 CI gates registered in this repository's gate manifest and",
-             "999 CI gates registered in this repository's gate manifest and"),
+            ("controls-gates", "2 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml) and",
+             "999 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml) and"),
             ("controls-hooks", "and 2 Claude Code hooks", "and 999 Claude Code hooks"),
             ("controls-blocking", "(1 blocking", "(999 blocking"),
             ("controls-warning", "1 warning)", "999 warning)"),
@@ -2260,8 +2261,8 @@ def self_test_main():
             ("rules-separator", "3 clear, single-behaviour rules",
              "1,003 clear, single-behaviour rules"),
             ("rules-sign", "3 clear, single-behaviour rules", "-3 clear, single-behaviour rules"),
-            ("controls-separator", "2 CI gates registered in this repository's gate manifest and",
-             "1,002 CI gates registered in this repository's gate manifest and"),
+            ("controls-separator", "2 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml) and",
+             "1,002 CI gates in the [gate manifest](.aiqt/core/gates/manifest.toml) and"),
             ("controls-sign", "(1 blocking", "(-1 blocking"),
             ("enforced-separator", "Today 1 of the", "Today 1,001 of the"),
             ("enforced-sign", "Today 1 of the", "Today -1 of the"),
@@ -2291,12 +2292,13 @@ def self_test_main():
              "\nA later release may raise the figure; it would still be wrong to claim: Today 999 of "
              "the 3 rules are linked to at least one shipped gate or hook.\n"),
             ("proof-aside",
-             "\nA stale draft once read: 999 rules. 999 CI gates registered in this repository's "
-             "gate manifest. 999 Claude Code hooks shipped as an opt-in plugin. Mapped to 999 frameworks.** That line "
-             "was corrected before release.\n"),
+             "\nA stale draft once read: 999 rules. 999 CI gates in the [gate manifest]"
+             "(.aiqt/core/gates/manifest.toml). 999 Claude Code hooks shipped as an opt-in plugin. "
+             "Mapped to 999 frameworks.** That line was corrected before release.\n"),
             ("controls-aside",
-             "\nNo release may again print 999 CI gates registered in this repository's gate "
-             "manifest and 999 Claude Code hooks shipped as an opt-in plugin (999 blocking, 999 warning) anywhere here.\n"),
+             "\nNo release may again print 999 CI gates in the [gate manifest]"
+             "(.aiqt/core/gates/manifest.toml) and 999 Claude Code hooks shipped as an opt-in plugin "
+             "(999 blocking, 999 warning) anywhere here.\n"),
             ("crosswalk-aside",
              "\nIt would be wrong to map the rules to 999 pinned external control catalogues.\n"),
         )
