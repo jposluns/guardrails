@@ -2667,7 +2667,7 @@ def self_test(report_path=None):
                    _tree(tmp / "in-word-rule", rules=_files("a.md", "Then `git reset --hard HEAD@{1}~1`.\n"))]
         check("exit/in-word-at-not-short-name-0", [_quiet(run, r) for r in in_word], [0, 0])
         # The loader starts a text token right after an inline token, so an `@` there begins an import and
-        # a short name in it exits 2 (N1 to N8: emphasis, HTML, a code span, a link, strong, underscore
+        # a short name in it exits 2 (eight cases: emphasis, HTML, a code span, a link, strong, underscore
         # emphasis, an escape, and a conditional rule file).
         long_md, long_txt = _files("docs/payload-long-name.md", big_b), _files(
             ".claude/rules/sub/payload-long-name.txt", big_b, ".claude/rules/payload-long-name.txt", big_b)
@@ -3340,9 +3340,9 @@ def self_test(report_path=None):
         check("shape/declared-exception-keeps-entry-rule-1",
               shape(base_shape, no_entry_bump, declare(base_shape, no_entry_bump)), (1, []))
         # A declared raise whose candidate has two `#   ceiling` lines, or none, has no entry block: the
-        # declaration excuses every changed line, so the anchor-count finding keeps it red. Changed in round
-        # 7: with no entry block the added entry is also a history line added elsewhere (line 5), which the
-        # declaration does not waive.
+        # declaration excuses every changed line, so the anchor-count finding keeps it red. With no entry
+        # block the added entry is also a history line added elsewhere (line 5), which the declaration does
+        # not waive.
         anchor_heads = [clean.replace(ceiling, ceiling + ceiling), clean.replace(ceiling, "")]
         check("shape/declared-raise-anchor-count-1",
               [shape(base_shape, head, declare(base_shape, head)) for head in anchor_heads], [(1, ["5"])] * 2)
@@ -3382,7 +3382,8 @@ def self_test(report_path=None):
         long_indent = raised(base_shape, entry.replace(indent, "#" + " " * 25))
         check("shape/entry-indent-1", (shape(base_shape, short_indent), shape(base_shape, long_indent)),
               ((1, ["5"]), (1, ["5"])))
-        # MEDIUM 3: every blank or separator outside printable ASCII, on a continuation line (line 6).
+        # An entry line holds printable ASCII only: every blank or separator outside it, on a continuation
+        # line, is a finding (line 6).
         blanks = ["and its probe. ", "and its probe.　", "and its probe.\r", "\tand its probe.",
                   " and its probe.", "and its ‮probe.", "and its probe.", "and its probe.",
                   "and its\u0085probe.", "and its​probe.", "and its﻿probe.", "and its probe."]
@@ -3403,14 +3404,14 @@ def self_test(report_path=None):
         check("shape/removed-line-reported-1", shape(base_shape, removed), (1, ["base 6"]))
         check("shape/added-line-reported-1", shape(base_shape, added), (1, ["2"]))
         # An entry placed away from the ceiling line is an added line, never read as the entry, also when a
-        # declaration covers it. Changed in round 6: being history by its content, the misplaced entry is
-        # also a history line added away from the new entries directly above the ceiling line, which the
-        # declaration does not waive, so the declared comparison names line 3 as well as lacking an entry.
+        # declaration covers it. Being history by its content, the misplaced entry is also a history line
+        # added away from the new entries directly above the ceiling line, which the declaration does not
+        # waive, so the declared comparison names line 3 as well as lacking an entry.
         misplaced = missing.replace("#\n#   ratchet", "#\n" + entry + "#   ratchet")
         check("shape/declared-misplaced-entry-1",
               (shape(base_shape, misplaced), shape(base_shape, misplaced, declare(base_shape, misplaced))),
               ((1, ["3"]), (1, ["3"])))
-        # Round 7: the ratchet history is append-only. Every base history line must stay unchanged in place,
+        # The ratchet history is append-only. Every base history line must stay unchanged in place,
         # so its edit or deletion is a finding no declaration waives (`base 4`, `base 5`, `base 6` below,
         # in the declared comparisons too), and the lines directly above the ceiling line the base does not
         # match are the entry block. Changed in shape/declared-edit-before-entry-1: the declared comparison
@@ -3524,12 +3525,12 @@ def self_test(report_path=None):
               (shape(repeat_base, two_entry_swap), shape(repeat_base, two_entry_swap,
                                                          declare(repeat_base, two_entry_swap))),
               ((1, ["base 6"]), (1, ["base 6"])))
-        # Round 6, MEDIUM 1, kept in round 7: the history is found by its content wherever it sits. Moving it
-        # below the `#   ceiling` line (unchanged, edited, beside a raise, or re-indented) is a finding no
-        # declaration waives, for the moved base line (base 4) and the added history line (line 5 or 6). A
-        # base whose history already sits below the line compares unchanged, but an edit there is refused.
-        # Round 9: re-indented to the `#   ` column, the moved opener also makes the unchanged line below it
-        # read as its continuation, a history line added (line 6).
+        # The history is found by its content wherever it sits. Moving it below the `#   ceiling` line
+        # (unchanged, edited, beside a raise, or re-indented) is a finding no declaration waives, for the
+        # moved base line (base 4) and the added history line (line 5 or 6). A base whose history already
+        # sits below the line compares unchanged, but an edit there is refused. Re-indented to the `#   `
+        # column, the moved opener also makes the unchanged line below it read as its continuation, a
+        # history line added (line 6).
         def counting(text):
             return text.replace("counting rule", "counting  rule")
 
@@ -3543,14 +3544,13 @@ def self_test(report_path=None):
         check("shape/declared-moved-history-edit-1",
               (shape(moved_below, moved_edit, declare(moved_below, moved_edit)), shape(moved_below, moved_below)),
               ((1, ["base 5", "6"]), (0, [])))
-        # Round 7, the round 6 codex cases. A line opening `Raised` placed directly below the `#   ceiling`
-        # line with the ratchet unchanged is a history line added away from the new entries (line 6) at any
-        # indentation: 24 spaces, 23 (which passed declared in round 6), 3, or none. The last continuation of
-        # the history moved below the ceiling line, edited (148000 to 149000, which passed declared in round
-        # 6) or not, is a moved history line (base 6). A line inserted between two adjacent history lines,
-        # free text or a continuation, is a finding too (line 6). No declaration waives any of these. Round 9:
-        # at 3 spaces or none the opener also makes the unchanged line below it read as its continuation, a
-        # history line added (line 7).
+        # A line opening `Raised` placed directly below the `#   ceiling` line with the ratchet unchanged is
+        # a history line added away from the new entries (line 6) at any indentation: 24 spaces, 23 (one
+        # short of the entry column), 3, or none. The last continuation of the history moved below the
+        # ceiling line, edited (148000 to 149000) or not, is a moved history line (base 6). A line inserted
+        # between two adjacent history lines, free text or a continuation, is a finding too (line 6). No
+        # declaration waives any of these. At 3 spaces or none the opener also makes the unchanged line
+        # below it read as its continuation, a history line added (line 7).
         below_openers =[base_shape.replace(ceiling, ceiling + "#" + " " * width
                                             + "Raised 100 -> 101 on 2026-11-16 for review fixture.\n")
                          for width in (24, 23, 3, 0)]
@@ -3566,10 +3566,10 @@ def self_test(report_path=None):
                     repeat_base.replace(cont, cont + entry_line("a continuation between two history lines."))]
         check("shape/declared-history-insert-1",
               [shape(repeat_base, head, declare(repeat_base, head)) for head in inserted], [(1, ["6"])] * 2)
-        # Round 9, MINOR 1 (the reviewer's fixture G1): with a blank `#` separator (base line 5) between an old
-        # entry and a note at entry indentation, the history is base lines 4 and 7. Removing the separator
-        # leaves the note unchanged but makes it read as a continuation of the old entry (line 5), a history
-        # line added away from the new entries, which no declaration waives.
+        # With a blank `#` separator (base line 5) between an old entry and a note at entry indentation, the
+        # history is base lines 4 and 7. Removing the separator leaves the note unchanged but makes it read
+        # as a continuation of the old entry (line 5), a history line added away from the new entries, which
+        # no declaration waives.
         joined_base = base_shape.replace(ceiling, "#\n" + entry_line("A note on the figures below.")
                                          + entry_line("Raised 100 -> 110 on 2026-10-15 for a review fixture.")
                                          + ceiling)
@@ -3577,11 +3577,11 @@ def self_test(report_path=None):
         check("shape/declared-separator-removal-joins-entry-1",
               (shape(joined_base, joined), shape(joined_base, joined, declare(joined_base, joined))),
               ((1, ["base 5", "5"]), (1, ["5"])))
-        # Round 7, replacing the round 6 fold-cost allowance: a queued fold's measured cost is recorded in the
-        # next raise entry. Recorded there it is accepted, beside an inviting entry that is the last one or
-        # not; a line recording it inserted into an old entry (line 6) or appended without a raise (line 7,
-        # read as an entry without a raise) is refused with a declaration, and so is a cost line placed
-        # directly above a raise (line 5, not an entry opener).
+        # A queued fold's measured cost is recorded in the next raise entry; there is no separate fold-cost
+        # allowance. Recorded there it is accepted, beside an inviting entry that is the last one or not; a
+        # line recording it inserted into an old entry (line 6) or appended without a raise (line 7, read as
+        # an entry without a raise) is refused with a declaration, and so is a cost line placed directly
+        # above a raise (line 5, not an entry opener).
         invite = (entry_line("Raised 80 -> 90 on 2026-09-01 with 59 units estimated for a queued fold; when it")
                   + entry_line("lands, record its measured cost here against the 59-unit estimate."))
         fold_base, fold_last = base_shape.replace(old_entry, invite + old_entry), base_shape.replace(old_entry, invite)
@@ -3649,8 +3649,8 @@ def self_test(report_path=None):
               shape(base_shape, missing, module=_mutant(
                   tmp, '    if not block:\n        return ["the raise',
                   '    if not block:\n        return [] and ["the raise'))[0], 0)
-        # Changed in round 7: the mutant also removes the finding for an added history line, which refuses
-        # the entry in these candidates on its own.
+        # The mutant also removes the finding for an added history line, which refuses the entry in these
+        # candidates on its own.
         anchor_mutant = _mutant(tmp, '        if new > old:\n            findings.append("the raise {} -> {} has no',
                                 '        if False:\n            findings.append("the raise {} -> {} has no',
                                 "        if j not in taken and j not in fresh and (j in read or j in inside):\n",
@@ -3731,9 +3731,9 @@ def self_test(report_path=None):
         check("revert/shape-added-line-red",
               shape(base_shape, added, module=_mutant(tmp, '        report += ["line {}: added: {!r}"',
                                                        '        report += [] and ["line {}: added: {!r}"'))[0], 0)
-        # Round 7: each check of the append-only history removed in a mutant turns its rows. Removed in round
-        # 7 with the code they targeted: the reverts of the round 5 and round 6 entry-block boundary, entry
-        # discovery, fold-cost allowance and kept-line report (revert/shape-declared-edit-before-entry-red,
+        # Each check of the append-only history removed in a mutant turns its rows. Removed with the code
+        # they targeted: the reverts of the earlier entry-block boundary, entry discovery, fold-cost
+        # allowance and kept-line report (revert/shape-declared-edit-before-entry-red,
         # revert/shape-declared-deletion-malformed-opener-red, revert/shape-declared-deletion-before-entry-red,
         # revert/shape-declared-deletion-entry-without-raise-red, revert/shape-declared-repeated-line-entry-red,
         # revert/shape-declared-deletion-added-line-red, revert/shape-fold-cost-red,
