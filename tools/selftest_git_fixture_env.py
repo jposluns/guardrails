@@ -746,6 +746,14 @@ CONFIG_EXCLUSIONS = {
             " launch/no-arguments-exit-2); its self-test stays in this roster as the direct"
             " --self-test launch, registered in both CI and the standalone runner, and as the"
             " ci-site-scope-selftest suite step.",
+        ("tools/check_hook_coverage.py",):
+            "A bare launch is a usage error by design, not a self-test: the tool runs only with"
+            " --launch-dir and --require or with --self-test, so with no arguments it prints one"
+            " unrecognized-arguments line and exits 2 (fail closed) in every lane and under any"
+            " configuration, running no git (its self-test pins that exit as"
+            " cli/unrecognized-arguments-exit-2); its self-test stays in this roster as the direct"
+            " --self-test launch, registered in both CI and the local runner, and as the"
+            " hook-coverage-selftest suite step.",
     },
     "archive": {
         ("tools/check_release_build.py", "--self-test"):
