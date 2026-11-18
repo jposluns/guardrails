@@ -1011,6 +1011,39 @@ ALLOWLIST = (
     },
     {
         "side": "ci-only",
+        "identity": "tools/check_must_deliver.py --base <ref:origin/${GITHUB_BASE_REF}>",
+        "reason": (
+            "CI derives the list ratchet's comparison base from trusted event "
+            "context; the bare leg (default base: the merge base with "
+            "origin/main) runs on both sides."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
+        "identity": "tools/check_must_deliver.py --base <ref:$PUSH_BEFORE>",
+        "reason": (
+            "The push CI job compares the list with the list at the event's "
+            "before OID, so a rule dropped in any commit of the push is caught; "
+            "a missing or all-zero before OID fails the step closed. The bare "
+            "leg (default base: the merge base with origin/main) runs on both "
+            "sides."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
+        "identity": "tools/check_must_deliver.py --base HEAD^",
+        "reason": (
+            "The CI else-branch (a workflow_dispatch run, which has neither a "
+            "pull-request target ref nor a pushed range) uses the "
+            "history-relative literal base HEAD^; there is no local --base "
+            "leg, so this literal form is CI-only by design."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
         "identity": (
             "tools/check_branch_root.py --protected <ref:origin/${GITHUB_BASE_REF}> --head <ref:$PR_HEAD_SHA> --max-lag 200"
         ),
