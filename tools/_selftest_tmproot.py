@@ -16,13 +16,31 @@ tool) and one whose owner still runs are left alone; a process identifier the sy
 reads as a live owner, so reuse keeps a root rather than removing one. There is deliberately no
 broad aiqt-* pattern here: each suite sweeps only its own prefix and suite name.
 
+Every removal works on pinned directory descriptors, never by re-resolving a path. The root's parent
+is opened once; the root is checked (lstat for remove_root, a no-follow stat in the parent for the
+sweep), then opened once in that parent with O_DIRECTORY and O_NOFOLLOW, and its device and inode
+must match the check, or nothing is touched and the root is reported. The sweep reads and judges the
+marker through that descriptor. Listing, permission repair, unlinking and removal of every entry go
+through descriptors opened the same way, each matched against the no-follow stat of its name. Before
+the marker is deleted, and again before the root itself is removed, the root's name in the pinned
+parent must still name the pinned directory; a root replaced (by a symbolic link or another
+directory) after it was checked is reported as replaced, keeps its marker and is never followed, so
+nothing outside the checked tree is listed, repaired or deleted.
+
 Removal deletes the marker last. Everything else in the root goes first; the marker is deleted only
-once nothing else is left, and is written back (with its modification time) when the empty root
-itself then cannot be removed. A removal that stops part way therefore leaves a marked root, which a
-later sweep still recognises and retries; an unmarked survivor would be skipped by every sweep. Before
-giving up, removal adds owner read, write and search permission to the directories of the tree that
-this user owns (a run killed while a fixture directory sat at mode 0000 leaves one rmtree cannot
-enter) and tries once more.
+once nothing else is left. Before it is deleted, a full copy of it (its bytes and its modification
+time) is made as an unnamed file in the root (O_TMPFILE, which does not keep the root from being
+removed); when that copy cannot be made the removal stops there, the marker is kept whole and the
+root is reported. When the empty root itself then cannot be removed, the copy is linked back as the
+marker, so the marker returns with its full content and time and a later sweep still recognises and
+retries the root; an unmarked survivor would be skipped by every sweep. Where O_TMPFILE or /proc is
+not available, or the link fails, the marker is written back instead to a temporary name in the root
+(every short write continued, a write that makes no progress treated as an error) and renamed into
+place, so a partly written marker never takes the marker's name. A marker that cannot be written back
+either way is an explicit failure in remove_root's result, never an exception, and such a root (left
+unmarked) is skipped by later sweeps and must be removed by hand. Before giving up, removal adds owner
+read, write and search permission to the directories of the tree that this user owns (a run killed
+while a fixture directory sat at mode 0000 leaves one that cannot be entered) and tries once more.
 
 The marker is opened without blocking and without following a symbolic link, and checked with fstat
 to be a regular file before anything is read, so a FIFO or other special file named as the marker is
@@ -37,8 +55,14 @@ Residuals (known and not handled here):
   once it is a day old while that run still works in it. Recording the process start time or the PID
   namespace identity would close this.
 - The ownership test is the directory's user id; workers that share one user id are not told apart.
-- The permission repair checks each directory with lstat before chmod; an entry another process of
-  this user swaps for a symbolic link between the two is not prevented.
+- A directory is removed with rmdir by name in its pinned parent, just after that name was checked to
+  still name the pinned (by then empty) directory. A process of this user that swaps the name for
+  another empty directory between the check and the rmdir gets that empty directory removed; rmdir
+  never follows a symbolic link and never removes a directory holding anything.
+- The parent given to remove_root (the root path's directory) and each sweep parent are resolved by
+  name once, when they are opened.
+- Permission repair of a directory this user cannot read or search uses an O_PATH descriptor and
+  /proc/self/fd; without them such a directory is not repaired and its root is reported.
 - tools/_entry_restore_selftest.py still removes its directories with ignore_errors, so a directory
   it fails to remove is not reported there.
 - The plan's temp/failed-test-cleans-root is not a row of its own, and the hooks suite's
@@ -46,10 +70,10 @@ Residuals (known and not handled here):
 
 Imported only by a self-test; nothing here runs on a production path."""
 
+import errno
 import json
 import math
 import os
-import shutil
 import socket
 import stat
 import time
@@ -57,6 +81,16 @@ import time
 MARKER = ".aiqt-selftest-root.json"
 STALE_SECONDS = 24 * 60 * 60
 _MARKER_LIMIT = 4096
+
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_PARENT_FLAGS = os.O_RDONLY | _O_DIRECTORY | _O_CLOEXEC
+_DIR_FLAGS = _PARENT_FLAGS | _O_NOFOLLOW
+
+
+class _Replaced(OSError):
+    """A pinned directory's name no longer names it (it was replaced after it was checked)."""
 
 
 def write_marker(root, suite):
@@ -68,23 +102,106 @@ def write_marker(root, suite):
         handle.write(json.dumps(record, sort_keys=True))
 
 
-def _clear(root):
-    """Remove every entry of the directory root except its marker. Returns the first error, or None
-    when nothing but the marker is left."""
+def _same(a, b):
+    """Whether the stat results a and b are of the same file (device and inode)."""
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def _replaced(name):
+    return _Replaced(
+        "{} was replaced after it was checked; nothing in its place was touched".format(name))
+
+
+def _check_name(dir_fd, name, expect):
+    """Raise _Replaced unless name in the pinned directory dir_fd still names the directory expect."""
     try:
-        names = os.listdir(root)
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise _Replaced("{} could not be checked again ({})".format(name, exc)) from None
+    if not stat.S_ISDIR(st.st_mode) or not _same(st, expect):
+        raise _replaced(name)
+
+
+def _list(fd):
+    """The names in the pinned directory fd, read from its start."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    return os.listdir(fd)
+
+
+def _unlock_at(dir_fd, name, expect):
+    """Add owner read, write and search permission to the directory name in dir_fd, when it is still
+    the directory expect and this user owns it, through an O_PATH descriptor (which needs no permission
+    on the directory itself) and its /proc/self/fd entry, so the name is not resolved again. Errors are
+    ignored: the open or removal that follows judges by what it finds."""
+    o_path = getattr(os, "O_PATH", 0)
+    if not o_path or not os.path.isdir("/proc/self/fd"):
+        return
+    try:
+        fd = os.open(name, o_path | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC, dir_fd=dir_fd)
+    except OSError:
+        return
+    try:
+        st = os.fstat(fd)
+        if _same(st, expect) and stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid():
+            os.chmod("/proc/self/fd/{}".format(fd), stat.S_IMODE(st.st_mode) | stat.S_IRWXU)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _open_dir_at(dir_fd, name, expect, repair=False):
+    """Open the directory name in the pinned directory dir_fd with O_DIRECTORY and O_NOFOLLOW and return
+    its descriptor, which must be the directory expect (else _Replaced). With repair, a directory this
+    user cannot open is given owner access first (_unlock_at) and opened once more."""
+    try:
+        fd = os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
+    except PermissionError:
+        if not repair:
+            raise
+        _unlock_at(dir_fd, name, expect)
+        fd = os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise _replaced(name) from None
+        raise
+    try:
+        if not _same(os.fstat(fd), expect):
+            raise _replaced(name)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _clear(fd, keep_marker):
+    """Remove every entry of the pinned directory fd (except its marker when keep_marker), each through
+    a descriptor, never by path. Returns the first error, or None when nothing (but the marker) is
+    left."""
+    try:
+        names = _list(fd)
     except OSError as exc:
         return exc
     error = None
     for name in names:
-        if name == MARKER:
+        if keep_marker and name == MARKER:
             continue
-        path = os.path.join(root, name)
         try:
-            if stat.S_ISDIR(os.lstat(path).st_mode):
-                shutil.rmtree(path)
-            else:
-                os.unlink(path)
+            st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if not stat.S_ISDIR(st.st_mode):
+                os.unlink(name, dir_fd=fd)
+                continue
+            sub = _open_dir_at(fd, name, st)
+            try:
+                sub_error = _clear(sub, False)
+            finally:
+                os.close(sub)
+            if sub_error is not None:
+                raise sub_error
+            _check_name(fd, name, st)
+            os.rmdir(name, dir_fd=fd)
         except FileNotFoundError:
             pass
         except OSError as exc:
@@ -93,33 +210,40 @@ def _clear(root):
     return error
 
 
-def _grant_owner_access(root):
-    """Add owner read, write and search permission to root and every real directory under it that this
-    user owns, so a directory left at mode 0000 can be entered and emptied. Errors are ignored: the
-    removal that follows judges by what is left."""
+def _grant_owner_access(fd):
+    """Add owner read, write and search permission to the pinned directory fd and every real directory
+    under it that this user owns, so a directory left at mode 0000 can be entered and emptied. Every
+    directory is reached through a descriptor matched against the no-follow stat of its name. Errors
+    are ignored: the removal that follows judges by what is left."""
     uid = os.getuid()
-
-    def grant(path):
-        try:
-            st = os.lstat(path)
-            if stat.S_ISDIR(st.st_mode) and st.st_uid == uid:
-                os.chmod(path, stat.S_IMODE(st.st_mode) | stat.S_IRWXU)
-        except OSError:
-            pass
-
-    grant(root)
-    for dirpath, dirnames, _files in os.walk(root):
-        for name in dirnames:
-            grant(os.path.join(dirpath, name))
-
-
-def _read_marker_bytes(marker):
-    """The raw bytes (at most _MARKER_LIMIT) and modification time of the marker file marker, or None
-    when it is absent, not a regular file or unreadable. Opened with O_NONBLOCK and O_NOFOLLOW and
-    checked with fstat before any read, so a FIFO is rejected without blocking."""
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(marker, flags | getattr(os, "O_CLOEXEC", 0))
+        st = os.fstat(fd)
+        if st.st_uid == uid:
+            os.chmod(fd, stat.S_IMODE(st.st_mode) | stat.S_IRWXU)
+        names = _list(fd)
+    except OSError:
+        return
+    for name in names:
+        try:
+            st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+                continue
+            sub = _open_dir_at(fd, name, st, repair=True)
+        except OSError:
+            continue
+        try:
+            _grant_owner_access(sub)
+        finally:
+            os.close(sub)
+
+
+def _read_marker_bytes(dir_fd):
+    """The raw bytes (at most _MARKER_LIMIT) and stat result of the marker in the pinned directory
+    dir_fd, or None when it is absent, not a regular file or unreadable. Opened with O_NONBLOCK and
+    O_NOFOLLOW and checked with fstat before any read, so a FIFO is rejected without blocking."""
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | _O_NOFOLLOW | _O_CLOEXEC
+    try:
+        fd = os.open(MARKER, flags, dir_fd=dir_fd)
     except OSError:
         return None
     try:
@@ -133,66 +257,164 @@ def _read_marker_bytes(marker):
         os.close(fd)
     if len(data) > _MARKER_LIMIT:
         return None
-    return data, st.st_mtime
+    return data, st
 
 
-def _restore_marker(marker, saved):
-    """Write the marker back from saved ((bytes, mtime) from _read_marker_bytes), exclusively, with its
-    original modification time, so a root whose last step failed stays recognisable to the sweep."""
-    data, mtime = saved
+def _write_all(fd, data):
+    """Write all of data to fd, continuing after every short write; a write that makes no progress, or
+    a file that does not end up holding exactly data's length, is an OSError."""
+    view = memoryview(data)
+    done = 0
+    while done < len(data):
+        count = os.write(fd, view[done:])
+        if count <= 0:
+            raise OSError(errno.EIO, "short write: {} of {} bytes written".format(done, len(data)))
+        done += count
+    size = os.fstat(fd).st_size
+    if size != len(data):
+        raise OSError(errno.EIO, "short write: the file holds {} of {} bytes".format(size, len(data)))
+
+
+def _marker_copy(dir_fd, saved):
+    """An unnamed file (O_TMPFILE) in the pinned directory dir_fd holding the marker saved ((bytes,
+    stat) from _read_marker_bytes) with its modification time, or None where O_TMPFILE or /proc is not
+    available. Any other failure (ENOSPC, a short write) raises, so the marker is never deleted without
+    a full copy where a copy can be made."""
+    o_tmpfile = getattr(os, "O_TMPFILE", 0)
+    if not o_tmpfile or not os.path.isdir("/proc/self/fd"):
+        return None
+    data, st = saved
     try:
-        fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    except OSError:
-        return
+        fd = os.open(".", o_tmpfile | os.O_RDWR | _O_CLOEXEC, 0o600, dir_fd=dir_fd)
+    except OSError as exc:
+        if exc.errno in (errno.EOPNOTSUPP, errno.EISDIR, errno.EINVAL):
+            return None
+        raise
     try:
-        os.write(fd, data)
-    finally:
+        _write_all(fd, data)
+        os.utime(fd, ns=(st.st_mtime_ns, st.st_mtime_ns))
+    except BaseException:
         os.close(fd)
+        raise
+    return fd
+
+
+def _restore_marker(dir_fd, saved, copy):
+    """Put the marker saved back into the pinned directory dir_fd with its modification time: by
+    linking copy (from _marker_copy) as MARKER, else by writing it to a temporary name and renaming that
+    into place. Returns None when the marker is back whole, else the error (never raises)."""
+    link_error = None
+    if copy is not None:
+        try:
+            os.link("/proc/self/fd/{}".format(copy), MARKER, dst_dir_fd=dir_fd, follow_symlinks=True)
+            return None
+        except OSError as exc:
+            link_error = exc
+    data, st = saved
+    temp = "{}.restore-{}".format(MARKER, os.getpid())
     try:
-        os.utime(marker, (mtime, mtime))
-    except OSError:
-        pass
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o600,
+                     dir_fd=dir_fd)
+    except OSError as exc:
+        return exc if link_error is None else "{}; then {}".format(link_error, exc)
+    try:
+        try:
+            _write_all(fd, data)
+            os.utime(fd, ns=(st.st_mtime_ns, st.st_mtime_ns))
+        finally:
+            os.close(fd)
+        os.rename(temp, MARKER, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except OSError as exc:
+        try:
+            os.unlink(temp, dir_fd=dir_fd)
+        except OSError:
+            pass
+        return exc if link_error is None else "{}; then {}".format(link_error, exc)
+    return None
+
+
+def _remove_pinned(parent_fd, name, fd, expect):
+    """Remove the directory fd, pinned as name in the pinned directory parent_fd and matching expect,
+    its marker last (the module docstring). Returns None when it is gone, else the error that stopped
+    the removal (never raises an OSError)."""
+    error = _clear(fd, True)
+    if error is not None:
+        _grant_owner_access(fd)
+        error = _clear(fd, True)
+    if error is not None:
+        return error
+    saved = _read_marker_bytes(fd)
+    copy = None
+    if saved is not None:
+        try:
+            copy = _marker_copy(fd, saved)
+        except OSError as exc:
+            return "its marker could not be copied ({}), so the marker was kept".format(exc)
+    try:
+        try:
+            _check_name(parent_fd, name, expect)
+            os.unlink(MARKER, dir_fd=fd)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            return exc
+        try:
+            _check_name(parent_fd, name, expect)
+            os.rmdir(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if saved is None:
+                return exc
+            failed = _restore_marker(fd, saved, copy)
+            if failed is None:
+                return exc
+            return "{}; its marker could not be written back ({})".format(exc, failed)
+        return None
+    finally:
+        if copy is not None:
+            os.close(copy)
+
+
+def _problem(root, error):
+    return "could not remove the temporary root {} ({})".format(root, error)
 
 
 def remove_root(root):
-    """Remove the directory tree root, its marker last (the module docstring). Returns None when root is
-    gone afterwards, else a one-line description naming root and the error that stopped the removal, so
-    the caller can report the root that survived."""
+    """Remove the directory tree root, its marker last, through pinned descriptors (the module
+    docstring). Returns None when root is gone afterwards, else a one-line description naming root and
+    the error that stopped the removal (a root replaced after it was checked, a marker that could not be
+    written back), so the caller can report the root that survived."""
     root = str(root)
     try:
         st = os.lstat(root)
     except FileNotFoundError:
         return None
     except OSError as exc:
-        return "could not remove the temporary root {} ({})".format(root, exc)
+        return _problem(root, exc)
     if not stat.S_ISDIR(st.st_mode):
-        return "could not remove the temporary root {} (it is not a directory)".format(root)
-    error = _clear(root)
-    if error is not None:
-        _grant_owner_access(root)
-        error = _clear(root)
-    if error is None:
-        marker = os.path.join(root, MARKER)
-        saved = _read_marker_bytes(marker)
+        return _problem(root, "it is not a directory")
+    parent, name = os.path.split(os.path.abspath(root))
+    if name in ("", ".", ".."):
+        return _problem(root, "it has no name in a parent directory")
+    try:
+        parent_fd = os.open(parent, _PARENT_FLAGS)
+    except OSError as exc:
+        return _problem(root, exc)
+    try:
         try:
-            os.unlink(marker)
+            fd = _open_dir_at(parent_fd, name, st, repair=True)
         except FileNotFoundError:
-            pass
+            return None
         except OSError as exc:
-            error = exc
-        if error is None:
-            try:
-                os.rmdir(root)
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                error = exc
-                if saved is not None:
-                    _restore_marker(marker, saved)
-    if os.path.lexists(root):
-        return "could not remove the temporary root {} ({})".format(
-            root, error if error is not None else "it is still present")
-    return None
+            return _problem(root, exc)
+        try:
+            error = _remove_pinned(parent_fd, name, fd, st)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+    return None if error is None else _problem(root, error)
 
 
 def _owner_alive(pid):
@@ -220,29 +442,24 @@ def _reject_constant(name):
     raise ValueError("non-standard JSON constant {}".format(name))
 
 
-def _read_marker(path):
-    """The marker record of the directory path and the marker's modification time, or None when the
-    marker is absent, not a regular file, unreadable, not standard JSON or not a JSON object."""
-    read = _read_marker_bytes(os.path.join(path, MARKER))
+def _read_marker(dir_fd):
+    """The marker record of the pinned directory dir_fd and the marker's modification time, or None
+    when the marker is absent, not a regular file, unreadable, not standard JSON or not a JSON object."""
+    read = _read_marker_bytes(dir_fd)
     if read is None:
         return None
-    data, mtime = read
+    data, st = read
     try:
         record = json.loads(data.decode("utf-8"), parse_constant=_reject_constant)
     except (ValueError, RecursionError):
         return None
-    return (record, mtime) if isinstance(record, dict) else None
+    return (record, st.st_mtime) if isinstance(record, dict) else None
 
 
-def _stale(path, suite, host, now):
-    """Whether the directory path is one of suite's stale marked roots (the module docstring's tests)."""
-    try:
-        st = os.lstat(path)
-    except OSError:
-        return False
-    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
-        return False
-    read = _read_marker(path)
+def _stale(dir_fd, suite, host, now):
+    """Whether the pinned directory dir_fd is one of suite's stale marked roots (the module docstring's
+    tests), judged by the marker read through dir_fd."""
+    read = _read_marker(dir_fd)
     if read is None:
         return False
     record, marker_mtime = read
@@ -264,6 +481,28 @@ def _stale(path, suite, host, now):
     return not _owner_alive(pid)
 
 
+def _sweep_entry(parent_fd, name, suite, host, now):
+    """Judge and, when stale, remove the entry name of the pinned sweep parent parent_fd. Returns
+    (False, None) when it is not one of suite's stale roots, else (True, None when removed or the error
+    that stopped its removal)."""
+    try:
+        st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        return False, None
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        return False, None
+    try:
+        fd = _open_dir_at(parent_fd, name, st)
+    except OSError:
+        return False, None
+    try:
+        if not _stale(fd, suite, host, now):
+            return False, None
+        return True, _remove_pinned(parent_fd, name, fd, st)
+    finally:
+        os.close(fd)
+
+
 def sweep_stale(suite, prefix, parents, now=None):
     """Remove suite's stale marked roots named prefix* directly in each directory of parents.
     Returns (removed, problems): the paths removed and a description of each one that could not be."""
@@ -277,18 +516,25 @@ def sweep_stale(suite, prefix, parents, now=None):
             if real in seen:
                 continue
             seen.add(real)
-            names = sorted(os.listdir(real))
+            parent_fd = os.open(real, _PARENT_FLAGS)
         except OSError:
             continue
-        for name in names:
-            if not name.startswith(prefix):
+        try:
+            try:
+                names = sorted(_list(parent_fd))
+            except OSError:
                 continue
-            path = os.path.join(real, name)
-            if not _stale(path, suite, host, now):
-                continue
-            problem = remove_root(path)
-            if problem is None:
-                removed.append(path)
-            else:
-                problems.append(problem)
+            for name in names:
+                if not name.startswith(prefix):
+                    continue
+                path = os.path.join(real, name)
+                stale, error = _sweep_entry(parent_fd, name, suite, host, now)
+                if not stale:
+                    continue
+                if error is None:
+                    removed.append(path)
+                else:
+                    problems.append(_problem(path, error))
+        finally:
+            os.close(parent_fd)
     return removed, problems

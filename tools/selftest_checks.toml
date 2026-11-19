@@ -2005,6 +2005,13 @@ expected-check-ids = [
   "temp/partial-removal-retried",
   "temp/fifo-marker-rejected",
   "temp/undecidable-owner-alive",
+  # Removal works through pinned descriptors: a root replaced (by a symbolic link or another directory)
+  # after it was checked leaves the outside directory untouched; a marker copy or write-back that fails
+  # (ENOSPC, a short write, a failed link) is reported and the marker keeps its bytes and time; and a
+  # later sweep removes a root whose marker was kept, and skips one whose marker could not be put back.
+  "temp/root-swap-outside-untouched",
+  "temp/marker-restore-failure-reported",
+  "temp/failed-restore-later-sweep",
   "temp/own-root-removed",
   # ---------- the self-test entry point hands the caller's environment back ----------
   "harness/entry-restores-caller-env",
