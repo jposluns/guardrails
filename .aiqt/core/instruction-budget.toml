@@ -197,12 +197,22 @@
 #                        121880 -> 122111; managed block 360 and file headers 16263 unchanged. The ratchet
 #                        rises by the measured delta, 138503 + 231 = 138734, within the maintainer's
 #                        authorization of 2026-11-08 for raises up to 148000.
-#   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
+#                        Raised 138734 -> 138823 on 2026-11-19 under the maintainer's recorded decision of
+#                        2026-10-31 to raise the ratchet by exactly the measured delta, when
+#                        workers-produce-inert-data reworded its digest paragraph, keeping the maintainer's
+#                        decision of 2026-11-18: the two digest sentences that state the opt-out condition
+#                        now say the opt-out is one the person running the extraction gives for that
+#                        delivery, so each says who may give it when read on its own (wowo01.23 and
+#                        wowo01.24 reworded): measured PACK 138734 at the base 8e20930e -> 138823 (+89
+#                        units); rule files 122111 -> 122200; managed block 360 and file headers 16263
+#                        unchanged. The ratchet rises by the measured delta, 138734 + 89 = 138823, within
+#                        the maintainer's authorization of 2026-11-08 for raises up to 148000.
+#   ceiling             a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 138734
+ratchet = 138823
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
