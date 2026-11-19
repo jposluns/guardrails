@@ -62,10 +62,11 @@ A reader that splits a worker delivery into files at marker lines treats every l
 grammar, so a marker it does not recognize or cannot handle is refused, naming the line, before any file is
 written, never kept as content of the file before it; real content holding such a marker is refused too,
 never passed through. A reader splitting a worker delivery requires it to state a digest for each file it
-carries and checks every extracted file against its digest before any file is written, unless a digest
-opt-out is given for that delivery. Without a digest opt-out, a reader splitting a worker delivery refuses
-the delivery if its digest list is missing, a file has no digest, a digest does not match, or the list
-names a file the delivery does not carry, naming the file or the missing list, so no file of that delivery
+carries and checks every extracted file against its digest before any file is written, unless the person
+running the extraction gives a digest opt-out for that delivery. Without a digest opt-out the person
+running the extraction gives for that delivery, a reader splitting a worker delivery refuses the delivery
+if its digest list is missing, a file has no digest, a digest does not match, or the list names a file the
+delivery does not carry, naming the file or the missing list, so no file of that delivery
 is written. A digest opt-out, given explicitly by the person running the extraction for one delivery, is
 the only exception to a splitting reader's digest requirements and waives them as a whole; the reader then
 prints a warning naming what it does not check. A per-file digest detects a splitting or transport fault,
