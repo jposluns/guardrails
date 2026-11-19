@@ -170,8 +170,8 @@ grade word, a grade word in lower case after a family name, a grade word in lowe
 finding or item with no "review" between, a one-letter id or MAJOR or MINOR before an unnumbered
 finding or item with no "review" or "peer" between, a family possessive before a word that is not
 review vocabulary (notes, points, flags or reports after one word that is not a listed modifier
-included, and flags before a command option or "are passed" style CLI wording included, on the same
-line or across up to two line breaks), a
+included, and flags before a command option or "are passed" style CLI wording included, on the line
+where the attribution starts or across up to two line breaks counted from that line), a
 round-derived helper or fixture name with no round word (a bare r or state number),
 a round number after "retry" or before "of" (whitespace and then "of" followed by an underscore
 and an identifier part included, which the exception also takes as a loop count), a model
@@ -188,9 +188,11 @@ which usually reports review results, is not a hit on one line or wrapped, and n
 such as "flags are" then "honored by the fix" or "flags" then "-x was a false alarm" (a one-letter
 option after flags); command-line documentation of a family's flags is still an over-flag when other
 wording comes between flags and the option ("flags, for example --print") or the option sits more
-than two line breaks after flags; and a line whose own read and joined read both match, such as a
-family's flags with "findings" on the next line, is counted twice in that line's row hits, which
-inflates no finding (findings name each line once).
+than two line breaks after the line where the attribution starts (the breaks are counted from the
+family name's line, not from flags, so "<family>'s", then "flags", then a blank line, then "--print"
+is still a hit although the option is only two breaks after flags); and a line whose own read and
+joined read both match, such as a family's flags with "findings" on the next line, is counted twice
+in that line's row hits, which inflates no finding (findings name each line once).
 
 DISCLOSED SCOPE LIMITS. SCOPE_RELPATHS is a HAND-MAINTAINED allowlist with no drift-guard: a new QA-suite
 surface must be ADDED HERE BY HAND to be covered, and a surface not yet listed is out of this gate's reach
@@ -544,12 +546,13 @@ _SWEPT_REVIEW_NOUN = (r"(?:find" + r"ings?|reviews?|repros?|reproductions?|verdi
 # or after one listed modifier ("<family>'s reported points", "<family>'s detailed notes"); one other
 # word later they are usually verbs ("<family>'s reply notes the date") and stay legal there. "flags"
 # followed by a command option ("<family>'s flags --print"), also after a "- " list bullet or an
-# opening parenthesis and a quote ("<family>'s flags: - --print", "<family>'s flags (`--print`)"), or
+# opening parenthesis (with or without spaces after it) and a quote ("<family>'s flags: - --print",
+# "<family>'s flags (`--print`)", "<family>'s flags ( `--print`)"), or
 # by CLI wording such as "are passed" is command-line documentation, not review provenance.
 _SWEPT_DIRECT_MODIFIER = (r"(?:reported|detailed|earlier|latest|last|previous|prior|original|remaining"
                           r"|open|outstanding|key|main|own|final)")
 _SWEPT_DIRECT_REVIEW_NOUN = (r"(?:notes?|points?|reports?|flags?\b"
-                             r"(?![ \t]*:?[ \t]*(?:-[ \t]+)?\(?[`'\"]?--?[a-z])"
+                             r"(?![ \t]*:?[ \t]*(?:-[ \t]+)?(?:\([ \t]*)?[`'\"]?--?[a-z])"
                              r"(?![ \t]+(?:are|is|were|was)[ \t]+(?:passed|forwarded|parsed|accepted"
                              r"|supported|honou?red|set)\b))")
 # A grade word in any case, used only where the word "review" must follow it.
@@ -4173,7 +4176,24 @@ def _self_test(caller_env=None):
              fam_c + "'s fl" + "ags\n(two were real)"),
             ("family-attribution", fam_x + "'s fl" + "ags: - --print", fam_x + "'s fl" + "ags: - two were real"),
             ("family-attribution", fam_x + "'s fl" + "ags (`--print`, `--model`)",
-             fam_x + "'s fl" + "ags (two were real)"))
+             fam_x + "'s fl" + "ags (two were real)"),
+            # spaces after the opening parenthesis still exempt, on one line and across one break,
+            # while review wording after a spaced parenthesis is still an attribution
+            ("family-attribution", fam_c + "'s fl" + "ags ( `--print`)", fam_c + "'s fl" + "ags ( two were real)"),
+            ("family-attribution", fam_x + "'s fl" + "ags (  --print, --model)",
+             fam_x + "'s fl" + "ags (  two were real)"),
+            ("family-attribution", fam_c + "'s fl" + "ags (\n# `--print`)", fam_c + "'s fl" + "ags (\n# two were real)"),
+            ("family-attribution", fam_x + "'s fl" + "ags ( \n# --print and --model)",
+             fam_x + "'s fl" + "ags ( \n# two were real)"),
+            # a plural verdict must end at a word boundary: a longer word or an underscore suffix after
+            # it is not a verdict, while the plural verdict itself is
+            ("review-item-grade", "it" + "ems 3 (false positively skewed)", "it" + "ems 3 (false positives)"),
+            ("review-item-grade", "FIN" + "DINGS 3 (FALSE NEGATIVES_TOTAL)", "FIN" + "DINGS 3 (FALSE NEGATIVES)"),
+            ("review-item-grade", "it" + "ems 2 (false allows_count)", "it" + "ems 2 (false allows)"),
+            # the two-break read counts from the line where the attribution starts: flags then the
+            # option two breaks later is exempt, while the family name, flags, a blank line and the
+            # option (three breaks from the family name's line, a disclosed residual) is still a hit
+            ("family-attribution", fam_c + "'s fl" + "ags\n\n--print", fam_c + "'s\nfl" + "ags\n\n--print"))
         narrow_flagged = [c for _k, c, _t in swept_narrow
                           if any(_swept_hits("a {} b\n".format(c))[key] for key in SWEPT_ROW_KEYS)]
         check("swept/narrowed-controls-unflagged", not narrow_flagged, narrow_flagged)
