@@ -8231,8 +8231,9 @@ def _gw_mutant_failures(cases):
             # a count failure, not only a result failure, so the count itself shows the lost work
             caught = any(text.startswith("({}) ".format(row)) and " counted " in text for text in got)
         if not caught:
-            out.append("({}) a copy of the hook with {!r} made {!r} passed {}, so its count does not show the lost "
-                       "work: {!r}".format(name, line.strip(), mutated.strip(), row, got))
+            out.append("({}) a copy of the hook with {!r} made {!r} did not trigger the required count failure in "
+                       "{}, so its count does not show the lost work: {!r}".format(name, line.strip(), mutated.strip(),
+                                                                                    row, got))
     return out
 
 
