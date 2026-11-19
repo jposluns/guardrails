@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "5d0425ea2c545a387a762eefe32357ee2d050792fe0c2a984bb3b7e2424abd42"
+tree-sha256 = "ce3521c282b6b541c4c32553db19f0f9e88a01116891c3b334c3ae63728f3389"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4392,8 +4392,8 @@ sha256 = "3aba6654e5757854a967398ac9e512d9b614b6b6c2012fba0d76eae55685ebff"
 
 [[sources]]
 path = "tools/check_pending_pr_claims.py"
-bytes = 145129
-sha256 = "8e2e8d344c6c06ca5c0dc07b8b134bdaf0616d5dbc92095bb2ed978bcae6573a"
+bytes = 158186
+sha256 = "0019678fced0d59cc067043e73ca5a14c3249c21a3bd1aa928652817af8f4df7"
 
 [[sources]]
 path = "tools/check_pending_pr_commit.sh"
@@ -4772,8 +4772,8 @@ sha256 = "94ae6b7299f044b0ff2e66f48d99a6ecddff46250b48ebfc8d58c69d8087e7e5"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 300565
-sha256 = "1d7b3764fc08a9494a2b3ffc9d7fea2f1bdd989dd14a8247041a117b0639dfda"
+bytes = 302267
+sha256 = "9c23a4000e961e848cc2ff1c6fd0d503a61cdd53aacfe1fc7900c25658fe0bcb"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

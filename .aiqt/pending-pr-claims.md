@@ -110,7 +110,8 @@ read.
 
 A Markdown table is read from its header and delimiter rows, with or without outer pipes. A header
 cell wrapped in emphasis or a code span (`**Status**`) names that column, and a leading byte order mark
-is dropped.
+is dropped. Each header cell is also read as prose (`| PR #17 is pending | Status |` is a claim); it is
+never a Status cell, and it keeps naming its column.
 
 Markdown block context is decided once, line by line, before any line's text is read; every reader
 (record units, link definitions, Status cells and the references they resolve) reads only the lines
@@ -126,7 +127,9 @@ marker spacing and blank lines count spaces and tabs only: any other whitespace 
 en space, a form feed) is text, so it never indents a line, never makes a line blank and never puts
 a fence or a list marker after it. The text after the `-->` that closes an HTML comment (a block or an
 inline comment across lines) is paragraph text as it stands: it is not indented afresh, so spaces or a
-tab after `-->` never make it indented code, a fence or a list item.
+tab after `-->` never make it indented code, a fence or a list item. It is still scanned for a comment
+it opens, as any prose line is: in `--> <!-- second` the lines up to the next `-->` are an inline
+comment.
 
 Not read as current claims: fenced code blocks, in a list item as outside one (a line such as
 ```` ```x``` ```` is inline code, not a fence); indented code blocks (four columns of indent past the
@@ -146,20 +149,27 @@ marks and backticks elsewhere do not hide a claim (`PR` followed by a backticked
 still binds). A claim inside any other blockquote is cannot-evaluate until it is given a historical
 lead-in or moved out of the quote.
 
-**Hidden references warn; they never pass silently.** Every line the block context hides (a line of a
-fenced block, indented code, an HTML comment block or an inline comment across lines, the part of a
-prose line a comment cuts away, and a link reference definition) is still scanned for a pull request
-reference, with the same spellings, link forms and issue exclusions as record text (strikethrough,
-historical spans and single-line comments inside the hidden line do not hide a reference from this
-scan). A reference found only in hidden text, that is, one whose repository (or the surface default)
-and number appear in no read line or record unit of the same file, prints a `WARNING:` line naming the
-file, the line, the block kind and the reference. Its pull request state is not read, so the warning
-does not depend on that state and an unreadable state does not make it cannot-evaluate; with no
-finding the run exits 0. `--check-inputs` prints the same warnings and counts them. The only
-exemption is a fenced block whose info string starts with one of the example markers `example` or
-`history` (case-insensitive, for instance ```` ```example ````): its lines are not scanned. Any other
-info string (`python`, `text`, `md`) is scanned. Wording in hidden text is not matched against the
-phrase table; the warning asks for a review, it is not a finding.
+**Unevaluated references warn; they never pass silently.** Coverage is a set difference, so it does
+not depend on knowing what dropped a reference. The check takes the pull request references of the
+whole document, keyed by repository (or the surface default) and number, and removes those that reach
+a record unit the claim matcher evaluates (after the unit's normalization). Every reference left prints
+a `WARNING:` line naming the file, the line and the reference, and saying it was not evaluated. When
+the block context hid the line (a line of a fenced block, indented code, an HTML comment block or an
+inline comment across lines, the part of a prose line a comment cuts away, or a link reference
+definition), the warning also names that block kind. A hidden line is scanned whole, with the same
+spellings, link forms and issue exclusions as record text; strikethrough, historical spans and
+single-line comments inside it do not hide a reference. Any other line is scanned as record text is
+read, so a reference dropped on the way to a unit (by a reader gap, a comment the joining erased, a
+header the table reader skipped) still warns. In a `toml-strings` surface each line of each decoded
+string is scanned the same way; comments are not read or scanned. The pull request state is not read,
+so the warning does not depend on that state, and an unreadable state does not make it
+cannot-evaluate. With no finding the run exits 0. `--check-inputs` prints the same warnings and counts
+them. Only the documented exemptions are left out of the scan: a fenced block whose info string starts
+with one of the example markers `example` or `history` (case-insensitive, for instance
+```` ```example ````), a blockquote with a historical lead-in, and, inside a line read in full,
+struck-through text, historical spans and single-line comments. Any other info string (`python`, `text`, `md`) is scanned.
+Wording in an unevaluated line is not matched against the phrase table; the warning asks for a review,
+it is not a finding.
 
 ## State source
 
@@ -190,7 +200,7 @@ or the origin URL.
 
 | Command | What it does |
 | --- | --- |
-| `check_pending_pr_claims.py --check-inputs` | offline: validates the declaration and every declared surface, counts candidates and prints and counts hidden-reference warnings; does not assess currency |
+| `check_pending_pr_claims.py --check-inputs` | offline: validates the declaration and every declared surface, counts candidates and prints and counts unevaluated-reference warnings; does not assess currency |
 | `check_pending_pr_claims.py --all --live` | every declared surface, live state |
 | `check_pending_pr_claims.py --draft PATH --target REL` | the complete proposed content PATH judged as declared surface REL, live state |
 | `check_pending_pr_claims.py --staged --live` | the staged blob of every declared surface the index changes, read by the object id of its stage-0 index entry, live state; a staged entry that is not a regular file (a symlink, for example) or is unmerged is exit 2 |
@@ -249,13 +259,15 @@ claim was found.
   table header is recognised from the raw text of the line after it, even when that line is itself
   indented code. A paragraph that an inline comment interrupts across lines is joined around it; a
   comment block between two lines ends the paragraph.
-- The hidden-reference warning is keyed by reference, not by claim: a hidden line naming a pull request
-  that a read line of the same file also names raises no warning (`PR #17 merged.` above a plain fence
-  holding `PR #17 is pending` is quiet), and a fence marked `example` or `history` is not scanned at
-  all. A bare `#17` and a qualified `owner/repo#17` are different keys, so one hidden and the other
-  read still warns. The scan covers Markdown surfaces only; comments in a `toml-strings` surface are
-  not read or scanned. Struck-through text, historical spans and single-line comments inside a read
-  line are grammar exemptions, not hidden lines, and are not scanned.
+- The unevaluated-reference warning is keyed by reference, not by claim: a dropped line naming a pull
+  request that an evaluated unit of the same file also names raises no warning (`PR #17 merged.` above
+  a plain fence holding `PR #17 is pending` is quiet), and a fence marked `example` or `history` is not
+  scanned at all. A bare `#17` and a qualified `owner/repo#17` are different keys, so one dropped and
+  the other read still warns. Lines are scanned one at a time, so a strikethrough, historical span,
+  link or HTML anchor split across the lines of one paragraph is read as its text on each line and can
+  warn although the joined unit exempts or resolves it. Comments in a `toml-strings` surface are not
+  read or scanned. Struck-through text, historical spans and single-line comments inside a line read in
+  full are grammar exemptions and are not scanned.
 - A named backlog item is not resolved to a pull request: only explicit references bind.
 - State can change after it is read (a closed pull request can be reopened); the API read and the file
   write are not one transaction.

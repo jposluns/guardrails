@@ -31,11 +31,13 @@ been waiting, Neither #16 nor #17 is open, If #17 is still open) never exempts i
 request has merged or closed, the claim is a warning (exit 0, a WARNING line naming the sentence and
 the pull request) instead of a finding. Only a claim with no such cue is a finding.
 
-Text the Markdown block classifier hides (fenced blocks, indented code, HTML comments, link reference
-definitions) is never read as a claim, but it is still scanned: a pull request reference found only
-there is a WARNING naming the file, line, block kind and reference (no state read, exit 0 with no
-finding), so a hidden claim never passes silently. A fenced block whose info string starts with
-`example` or `history` is the only exemption.
+Every pull request reference of a declared surface that reaches no evaluated record unit, whatever
+dropped it (a fenced block, indented code, an HTML comment, a link reference definition, or a gap in
+a reader), is a WARNING naming the file, line and reference as not evaluated, and the block kind when
+the classifier hid the line (no state read, exit 0 with no finding), so a dropped claim never passes
+silently. The documented exemptions alone are not scanned: a fenced block whose info string starts
+with `example` or `history`, a blockquote with a historical lead-in, and strikethrough, historical
+spans and single-line comments inside a line read in full.
 
 RESIDUALS (disclosed; the full list is in the contract): a prose grammar cannot be complete, and this
 one is partial. The self-test covers only its rule and fix rows. Not caught: a claim before its
@@ -384,6 +386,39 @@ def _list_block_opener(text, nested):
 # The text after the `-->` that closes a comment is paragraph text as it stands (True). The self-test
 # sets it False, re-reading that text as a fresh line, for its red-when-reverted leg.
 COMMENT_TAIL_IS_PARAGRAPH = True
+# That paragraph text is still scanned for a new comment it opens (`--> <!-- second`), as any prose
+# line is (True). The self-test sets it False for its red-when-reverted leg.
+COMMENT_TAIL_SCANNED = True
+# A table header cell names its column and is also read as a prose unit (True). The self-test sets it
+# False, reading header cells as column names only, for its red-when-reverted leg.
+HEADER_CELLS_READ = True
+
+
+def _inline_comment(lines, index, text):
+    """(start, end) when text, the prose of line index, opens an inline comment at index start of text
+    whose `-->` is on line end, the first later line holding one before the paragraph ends (a blank line
+    or a line that starts a fence, heading, blockquote or list item); None otherwise (with no such line,
+    `<!--` is text)."""
+    start = _comment_start(text)
+    if start is None:
+        return None
+    for later in range(index + 1, len(lines)):
+        if _blank(lines[later]) or _interrupts_paragraph(lines[later]):
+            return None
+        if "-->" in lines[later]:
+            return start, later
+    return None
+
+
+def _comment_tail(lines, index, text):
+    """(text, hidden_until) for the paragraph text after the `-->` that closes a comment on line index:
+    text cut where a new inline comment it opens starts, and the index of the line that ends that
+    comment (-1 when it opens none), so `--> <!-- second` hides the lines up to the next `-->`."""
+    if COMMENT_TAIL_SCANNED:
+        opened = _inline_comment(lines, index, text)
+        if opened is not None:
+            return text[:opened[0]], opened[1]
+    return text, -1
 
 
 def block_context(lines):
@@ -397,7 +432,8 @@ def block_context(lines):
     the line holding `-->`, across blank lines; an inline comment that `<!--` opens later in a line runs
     to the first later line holding `-->` before the paragraph ends (with none, `<!--` is text). The text
     after the `-->` that closes either kind of comment is paragraph text as it stands: it is not
-    indented afresh, so it never becomes indented code, a fence or a list item. A fence or an HTML
+    indented afresh, so it never becomes indented code, a fence or a list item, but a comment it opens
+    (`--> <!-- second`) is found as on any prose line and hides the lines to its `-->`. A fence or an HTML
     comment block may open right after a list marker (`- ```` or `1. <!--`); it opens inside that item,
     at the item's content column. Indentation and blank lines count spaces and tabs only. text is the
     line for a prose kind, cut at an inline comment's start or after a comment's end; "" otherwise.
@@ -419,7 +455,8 @@ def block_context(lines):
                 continue
             if COMMENT_TAIL_IS_PARAGRAPH:
                 para, quote, table = True, False, False
-                kinds.append((PARA, text))
+                text, hidden_until = _comment_tail(lines, index, text)
+                kinds.append((INLINE_COMMENT, "") if _blank(text) else (PARA, text))
                 continue
         indent = _indent(text)
         if block is not None:
@@ -442,7 +479,8 @@ def block_context(lines):
                     continue
                 if COMMENT_TAIL_IS_PARAGRAPH:
                     para, quote, table = True, False, False
-                    kinds.append((PARA, text))
+                    text, hidden_until = _comment_tail(lines, index, text)
+                    kinds.append((COMMENT, "") if _blank(text) else (PARA, text))
                     continue
                 indent = _indent(text)
             block = None  # the list item holding the block has ended (or the comment closed)
@@ -538,8 +576,8 @@ def markdown_units(text, label, status_column=None, hidden=None):
     "prose". Wrapped lines of one paragraph or list item are joined into one unit. A link reference
     definition (a definition line, so never one inside code or a comment) is not a unit; a reference
     link to it reads as an inline link. A leading byte order mark is dropped, and a line's trailing
-    carriage return is a line ending, not text. When hidden is a list, the hidden_references entries
-    of the document are appended to it."""
+    carriage return is a line ending, not text. When hidden is a list, the unevaluated_references
+    entries of the document are appended to it."""
     units = []
     if text.startswith("\ufeff"):
         text = text[1:]
@@ -551,6 +589,8 @@ def markdown_units(text, label, status_column=None, hidden=None):
     definitions = {}
     para, para_line = [], 0
     quote, quote_line = [], 0
+    quote_numbers = []    # the line numbers of the open blockquote
+    exempt = set()        # the line numbers of blockquotes with a historical lead-in (never scanned)
     last_prose = ""
     header = None
 
@@ -570,8 +610,11 @@ def markdown_units(text, label, status_column=None, hidden=None):
                           or HISTORY_LEAD_RE.match(joined) is not None)
             if not historical:
                 units.append(("{}:{} (blockquote)".format(label, quote_line), joined, "quote"))
+            else:
+                exempt.update(quote_numbers)
             last_prose = ""
         quote = []
+        quote_numbers.clear()
 
     for number, (kind, line) in enumerate(blocks, 1):
         if kind == INLINE_COMMENT:
@@ -601,6 +644,7 @@ def markdown_units(text, label, status_column=None, hidden=None):
             if not quote:
                 quote_line = number
             quote.append(QUOTE_RE.match(line).group(1).strip())
+            quote_numbers.append(number)
             continue
         flush_quote()
         if kind in (TABLE_HEADER, TABLE_DELIMITER, TABLE_ROW):
@@ -611,6 +655,10 @@ def markdown_units(text, label, status_column=None, hidden=None):
                 continue
             if kind == TABLE_HEADER:
                 header = [_header_name(cell) for cell in cells]
+                if HEADER_CELLS_READ:
+                    # A header cell names its column and is also read as prose (never as a Status cell).
+                    units.extend(("{}:{} (header cell {})".format(label, number, column + 1), cell, "prose")
+                                 for column, cell in enumerate(cells))
                 continue
             for column, cell in enumerate(cells):
                 name = header[column] if header is not None and column < len(header) else None
@@ -636,23 +684,30 @@ def markdown_units(text, label, status_column=None, hidden=None):
     flush_quote()
     units = [(where, _resolve_reference_links(prose, definitions), context) for where, prose, context in units]
     if hidden is not None:
-        hidden.extend(hidden_references(label, lines, blocks, units))
+        hidden.extend(unevaluated_references(label, lines, blocks, units, exempt, definitions))
     return units
 
 
-# The NORMALIZE steps that only exempt text: the hidden-reference scan skips them, so a reference that
+# The NORMALIZE steps that only exempt text: the scan of a hidden line skips them, so a reference that
 # is struck through, commented or quoted inside a hidden line is still found.
 HIDDEN_SCAN_SKIPS = ("html-comment", "history-span", "strikethrough")
+# The reason every unevaluated-reference warning gives, and the location tag of one found in a line that
+# was read in full (any drop other than a hidden block: the warning does not depend on what dropped it).
+NOT_EVALUATED = "not evaluated"
+# A line read in full is scanned too, so the scan is the set difference of the whole document's
+# references and the references of the units evaluated (True). The self-test sets it False, scanning
+# hidden lines only, for its red-when-reverted leg.
+SCAN_READ_LINES = True
 
 
-def _references(text):
+def _references(text, skips=HIDDEN_SCAN_SKIPS):
     """[(key, ref)] for the pull request references in text, found as tokenize finds them (links, issue
-    references and the other spelling steps applied) but with the HIDDEN_SCAN_SKIPS steps left out; key
-    is (repository casefolded or None for the surface default, number), ref is (repository or None,
-    number, original text)."""
+    references and the other spelling steps applied) but with the skips steps left out (none: exactly as
+    a record unit is read); key is (repository casefolded or None for the surface default, number), ref
+    is (repository or None, number, original text)."""
     body = " ".join(text.split())
     for name, regex, replacement in NORMALIZE:
-        if name not in HIDDEN_SCAN_SKIPS:
+        if name not in skips:
             body = regex.sub(replacement, body)
     found = []
     for match in REF_RE.finditer(body):
@@ -669,45 +724,75 @@ def _references(text):
     return found
 
 
-def hidden_references(label, lines, blocks, units):
-    """[(location, block kind name, ref, line)] for every pull request reference that appears only in
-    text the block classifier hides: a line of a fenced block, indented code, an HTML comment (a block,
-    an inline comment across lines, or the part of a prose line a comment cut away) or a link reference
-    definition. A reference also present in a read line or record unit of the same document (the same
-    repository, or the same surface default, and number) is not reported. A line of a fenced block
-    whose info string is in EXAMPLE_FENCE_INFO is not scanned. Each entry is reported as a warning,
-    without reading pull request state, so a claim the classifier hides never passes silently."""
-    visible = set()
-    for _where, prose, _context in units:
-        visible.update(key for key, _ref in _references(prose))
-    for kind, text in blocks:
-        if kind in PROSE_KINDS and kind != DEFINITION:
-            visible.update(key for key, _ref in _references(text))
+def evaluated_keys(units):
+    """The keys of the pull request references that reach the claim matcher: every reference tokenize
+    finds in a record unit (the units find_candidates evaluates)."""
+    keys = set()
+    for _where, prose, context in units:
+        keys.update((repo.casefold() if repo else None, number)
+                    for repo, number, _text in tokenize(prose, context)[1])
+    return keys
+
+
+def unevaluated_references(label, lines, blocks, units, exempt=(), definitions=None):
+    """[(location, reason, ref, line)] for every pull request reference of a Markdown document that
+    reached no evaluated record unit: the set difference of the references of the whole document and
+    evaluated_keys(units), whatever dropped them. A line read in full is scanned as record text is read
+    (reference links resolved, strikethrough, historical spans and single-line comments exempt); a line
+    the block classifier hides or cuts (a fenced block, indented code, an HTML comment, a link reference
+    definition) is scanned whole, with those exemptions left out, and its entry names the block kind. Not
+    scanned: the documented exemptions only, a fenced block whose info string is in EXAMPLE_FENCE_INFO
+    and the lines of a blockquote with a historical lead-in (exempt, their line numbers). A reference
+    is keyed by repository (or the surface default) and number. Each entry is reported as a warning,
+    without reading pull request state, so a dropped claim never passes silently."""
+    evaluated = evaluated_keys(units)
     found = []
     for number, (raw, (kind, text)) in enumerate(zip(lines, blocks), 1):
-        if kind in (BLANK, EXAMPLE_FENCE):
+        if kind in (BLANK, EXAMPLE_FENCE) or number in exempt:
             continue
-        if kind in PROSE_KINDS and kind != DEFINITION:
-            if text == raw:
+        if kind in PROSE_KINDS and kind != DEFINITION and text == raw:
+            if not SCAN_READ_LINES:
                 continue
-            name = "HTML comment"  # the part of a prose line that a comment cut away
+            name, refs = NOT_EVALUATED, _references(_resolve_reference_links(raw, definitions or {}), ())
         else:
-            name = HIDDEN_KIND_NAMES[kind]
+            # A hidden line; a prose line a comment cut is named for the part the comment cut away.
+            name = "HTML comment" if kind in PROSE_KINDS and kind != DEFINITION else HIDDEN_KIND_NAMES[kind]
+            refs = _references(raw)
         seen = set()
-        for key, ref in _references(raw):
-            if key not in visible and key not in seen:
+        for key, ref in refs:
+            if key not in evaluated and key not in seen:
                 seen.add(key)
                 found.append(("{}:{} ({})".format(label, number, name), name, ref, raw.strip()))
     return found
 
 
+def toml_unevaluated_references(units):
+    """The unevaluated_references entries of a toml-strings document: each line of each decoded string
+    is scanned as record text is read, against the references of all its units (comments are not read
+    or scanned)."""
+    evaluated = evaluated_keys(units)
+    found = []
+    for where, prose, _context in units:
+        for offset, line in enumerate(prose.split("\n"), 1):
+            seen = set()
+            for key, ref in _references(line, ()):
+                if key not in evaluated and key not in seen:
+                    seen.add(key)
+                    found.append(("{} (string line {}, {})".format(where, offset, NOT_EVALUATED), NOT_EVALUATED,
+                                  ref, line.strip()))
+    return found
+
+
 def surface_units(surface, data, hidden=None):
     """The record units of one declared surface given its complete bytes; InputError when malformed.
-    For a Markdown surface, the hidden_references entries are appended to hidden when it is a list."""
+    When hidden is a list, the unevaluated-reference entries of the surface are appended to it."""
     label = surface["path"]
     text = _decode(data, label)
     if surface["format"] == "toml-strings":
-        return toml_units(text, label)
+        units = toml_units(text, label)
+        if hidden is not None and SCAN_READ_LINES:
+            hidden.extend(toml_unevaluated_references(units))
+        return units
     return markdown_units(text, label, surface.get("status-column"), hidden)
 
 
@@ -991,7 +1076,7 @@ class Result:
 
 def collect(surfaces_with_bytes):
     """[(surface, location, kind, phrase, ref, clause)] over (surface, bytes) pairs, with a HIDDEN entry
-    (phrase: the block kind; clause: the line) for each hidden_references entry; InputError
+    (phrase: the block kind or not evaluated; clause: the line) for each unevaluated-reference entry; InputError
     propagates."""
     out = []
     for surface, data in surfaces_with_bytes:
@@ -1056,12 +1141,18 @@ def evaluate(candidates, config, root, transport=None, git_runner=_pr_state.run_
 
 
 def _hidden_warning(location, name, ref, line):
-    """The warning for a pull request reference found only in hidden text: the file and line (location),
-    the block kind (name) and the reference; no pull request state is read for it."""
-    return ("{}: {!r}: the pull request reference {} appears only inside a {}, which is not read as a "
-            "current claim; its state was not read; review it (or mark an example fence with the info "
-            "string {})".format(location, line, ref[2], name,
-                                " or ".join("`" + word + "`" for word in EXAMPLE_FENCE_INFO)))
+    """The warning for a pull request reference that reached no evaluated record unit: the file and line
+    (location), the reference and the reason, not evaluated, with the block kind (name) when the block
+    classifier hid the line; no pull request state is read for it."""
+    if name == NOT_EVALUATED:
+        why = "no record unit the check read carries it (a claim there was dropped before it was read)"
+    else:
+        why = "it appears only inside {} {}, which is not read as a current claim".format(
+            "an" if name[0] in "aeiouH" else "a", name)
+    return ("{}: {!r}: the pull request reference {} was {}: {}; its state was not read; review it (or "
+            "mark an example fence with the info string {})".format(
+                location, line, ref[2], NOT_EVALUATED, why,
+                " or ".join("`" + word + "`" for word in EXAMPLE_FENCE_INFO)))
 
 
 def _surface_repo(surface, root, cache, git_runner):
@@ -1121,7 +1212,7 @@ def check_inputs(root):
               for _surface, location, kind, phrase, ref, clause in candidates if kind == HIDDEN]
     for line in hidden:
         print("WARNING: " + line)
-    print("PASS: {} declared surface(s) parse; {} candidate claim(s) found; {} hidden-reference "
+    print("PASS: {} declared surface(s) parse; {} candidate claim(s) found; {} unevaluated-reference "
           "warning(s). Offline input validation only: pull request currency was NOT assessed".format(
               len(pairs), len(candidates) - len(hidden), len(hidden)))
     return 0
@@ -1474,6 +1565,14 @@ NBSP_BACKTICKS = " ```\nPR #17 is pending.\n ```\n"
 # The text after a closing `-->` is paragraph text as it stands, not a line indented four columns.
 COMMENT_TAIL = "<!-- a\n-->    PR #17 is pending.\n"
 INLINE_COMMENT_TAIL = "Intro <!-- a\nb --> ```\nPR #17 is pending.\n"
+# A second comment opened after a closing `-->` (of a comment block, or of an inline comment) hides the
+# lines up to its own `-->`; its contents were joined into one paragraph and erased unseen.
+REOPENED_BLOCK_COMMENT = "<!-- first\n--> <!-- second\nPR #17 is pending.\n-->\n"
+REOPENED_INLINE_COMMENT = "Intro <!-- first\n--> <!-- second\nPR #17 is pending.\n-->\n"
+# A table header cell is read as prose as well as naming its column.
+HEADER_CLAIM = "| PR #17 is pending | Status |\n| --- | --- |\n| release | queued |\n"
+# A toml-strings value whose comment spans its lines: normalization erases the claim inside it.
+TOML_MULTILINE_COMMENT = "note = \"Release notes <!-- a\\nPR #17 is pending --> follow.\"\n"
 # The verb alternation before the modifier suffix applied to `still` and `currently` (a red leg).
 VERB_BEFORE_STILL_MODIFIERS = (r"(?:(?:is|are|remains?|stays?|(?:has|have)\s+been)"
                                r"(?:\s+(?:still|currently|now|also|both)){0,2}|still|currently)")
@@ -1738,8 +1837,8 @@ def _fix_rows(m, o):
     _hidden_rows(m)
 
 
-def _no_hidden_references(_label, _lines, _blocks, _units):
-    """hidden_references as it was before the scan existed: nothing is reported (a red leg)."""
+def _no_unevaluated_references(_label, _lines, _blocks, _units, _exempt=(), _definitions=None):
+    """unevaluated_references as it was before the scan existed: nothing is reported (a red leg)."""
     return []
 
 
@@ -1776,7 +1875,7 @@ def _hidden_rows(m):
         except InputError as exc:
             ok, detail = False, str(exc)
         check(name, ok, detail)
-    code, res, t = _with_globals({"hidden_references": _no_hidden_references},
+    code, res, t = _with_globals({"unevaluated_references": _no_unevaluated_references},
                                  lambda: _judge("```\nPR #17 is pending\n```\n", m))
     check("hidden/fenced-reference-warns/red-when-reverted", code == 0 and not res.warnings and t.calls == [],
           (code, res.warnings))
@@ -1805,12 +1904,110 @@ def _hidden_rows(m):
             ok = code == 0 and t.calls == [] and not res.hard and len(res.warnings) == 1 \
                 and "appears only inside" in res.warnings[0]
             detail = (code, t.calls, res.hard, res.warnings)
-            code, res, t = _with_globals(dict(replacements, hidden_references=_no_hidden_references),
+            code, res, t = _with_globals(dict(replacements, unevaluated_references=_no_unevaluated_references),
                                          lambda: _judge(text, m))
             ok = ok and code == 0 and t.calls == [] and not res.hard and not res.warnings
         except InputError as exc:
             ok, detail = False, str(exc)
         check(name, ok, detail)
+    _unevaluated_rows(m)
+
+
+def _one_warning(res, location, needle):
+    """True when res holds exactly one warning, at location, naming PR #17 and holding needle."""
+    return (len(res.warnings) == 1 and location in res.warnings[0] and "reference PR #17 " in res.warnings[0]
+            and "was not evaluated" in res.warnings[0] and needle in res.warnings[0])
+
+
+def _unevaluated_leg(replacements, text, table, surface, location):
+    """(ok, silent, detail): ok when, with the replacements, text gives exactly the one not-evaluated
+    warning at location with no read and no finding; silent when, with the scan of read lines also
+    removed, it gives no warning, no read and no finding (it passes silently)."""
+    try:
+        code, res, t = _with_globals(replacements, lambda: _judge(text, table, surface))
+        ok = code == 0 and t.calls == [] and not res.hard and _one_warning(
+            res, location, "no record unit the check read carries it")
+        detail = (code, t.calls, res.hard, res.warnings)
+        code, res, t = _with_globals(dict(replacements, SCAN_READ_LINES=False),
+                                     lambda: _judge(text, table, surface))
+        return ok, code == 0 and t.calls == [] and not res.hard and not res.warnings, detail
+    except InputError as exc:
+        return False, False, str(exc)
+
+
+def _unevaluated_rows(m):
+    """Every pull request reference of a document that reached no evaluated unit warns, whatever dropped
+    it: a second comment opened after a closing `-->` hides its lines (a warning naming the inline
+    comment), a table header cell is read as prose (a finding), each under both terminal states. With
+    either fix reverted, the set difference still warns (not evaluated); with the set difference also
+    reverted to the hidden-line scan, the claim passes silently. The documented exemptions stay quiet."""
+    closed = {(REPO, 17): "closed"}
+    for name, text, table in (
+            ("markdown/comment-reopened-after-block-close-warns", REOPENED_BLOCK_COMMENT, m),
+            ("markdown/comment-reopened-after-block-close-warns-closed", REOPENED_BLOCK_COMMENT, closed),
+            ("markdown/comment-reopened-after-inline-close-warns", REOPENED_INLINE_COMMENT, m),
+            ("markdown/comment-reopened-after-inline-close-warns-closed", REOPENED_INLINE_COMMENT, closed)):
+        try:
+            code, res, t = _judge(text, table)
+            ok = code == 0 and t.calls == [] and not res.hard and _one_warning(
+                res, "NOTES.md:3 (inline HTML comment)", "appears only inside")
+            detail = (code, t.calls, res.hard, res.warnings)
+        except InputError as exc:
+            ok, detail = False, str(exc)
+        check(name, ok, detail)
+    for name, text, table, calls in (
+            ("markdown/text-before-reopened-comment-read", "<!-- a\n-->PR #17 is pending <!-- b\nc -->\n", m,
+             [(REPO, 17)]),
+            ("markdown/table-header-claim-read", HEADER_CLAIM, m, [(REPO, 17)]),
+            ("markdown/table-header-claim-read-closed", HEADER_CLAIM, closed, [(REPO, 17)]),
+            ("markdown/table-header-without-pipes-read", "PR #17 is pending | Status\n--- | ---\nx | y\n", m,
+             [(REPO, 17)]),
+            ("markdown/table-header-read-keeps-status-column",
+             "| PR #18 is pending | Status |\n| --- | --- |\n| X-1 | In progress (#17) |\n",
+             {(REPO, 17): "merged", (REPO, 18): "closed"}, [(REPO, 17), (REPO, 18)])):
+        try:
+            code, res, t = _judge(text, table)
+            ok = code == 1 and sorted(t.calls) == calls and len(res.hard) == len(calls) and not res.warnings
+            detail = (code, t.calls, res.hard, res.warnings)
+        except InputError as exc:
+            ok, detail = False, str(exc)
+        check(name, ok, detail)
+    # Each fix reverted: the set difference still warns (not evaluated), with no read; with the scan of
+    # read lines also removed (the hidden-line scan alone), the claim passes silently.
+    for name, closed_name, red_name, fix_red_name, replacements, text, location in (
+            ("unevaluated/reopened-block-comment-warns", "unevaluated/reopened-block-comment-warns-closed",
+             "unevaluated/reopened-block-comment-warns/red-when-reverted",
+             "markdown/comment-reopened-after-block-close-warns/red-when-reverted",
+             {"COMMENT_TAIL_SCANNED": False}, REOPENED_BLOCK_COMMENT, "NOTES.md:3 (not evaluated)"),
+            ("unevaluated/reopened-inline-comment-warns", "unevaluated/reopened-inline-comment-warns-closed",
+             "unevaluated/reopened-inline-comment-warns/red-when-reverted",
+             "markdown/comment-reopened-after-inline-close-warns/red-when-reverted",
+             {"COMMENT_TAIL_SCANNED": False}, REOPENED_INLINE_COMMENT, "NOTES.md:3 (not evaluated)"),
+            ("unevaluated/table-header-warns", "unevaluated/table-header-warns-closed",
+             "unevaluated/table-header-warns/red-when-reverted", "markdown/table-header-claim-read/red-when-reverted",
+             {"HEADER_CELLS_READ": False}, HEADER_CLAIM, "NOTES.md:1 (not evaluated)")):
+        ok, silent, detail = _unevaluated_leg(replacements, text, m, MD_SURFACE, location)
+        check(name, ok, detail)
+        check(red_name, ok and silent, detail)
+        # The fix reverted: its own result (a hidden-comment warning, or a finding) is gone, and only the
+        # not-evaluated warning remains.
+        check(fix_red_name, ok, detail)
+        ok, silent, detail = _unevaluated_leg(replacements, text, {(REPO, 17): "closed"}, MD_SURFACE, location)
+        check(closed_name, ok and silent, detail)
+    toml_location = "changes.toml: note (string line 2, not evaluated)"
+    ok, silent, detail = _unevaluated_leg({}, TOML_MULTILINE_COMMENT, m, TOML_SURFACE, toml_location)
+    check("unevaluated/toml-multiline-comment-warns", ok, detail)
+    check("unevaluated/toml-multiline-comment-warns/red-when-reverted", ok and silent, detail)
+    ok, silent, detail = _unevaluated_leg({}, TOML_MULTILINE_COMMENT, {(REPO, 17): "closed"}, TOML_SURFACE,
+                                          toml_location)
+    check("unevaluated/toml-multiline-comment-warns-closed", ok and silent, detail)
+    for name, text in (("unevaluated/historical-blockquote-quiet", "Earlier note:\n\n> PR #17 is pending.\n"),
+                       ("unevaluated/struck-reference-quiet", "~~PR #17 is pending~~ merged.\n"),
+                       ("unevaluated/single-line-comment-quiet", "<!-- PR #17 is pending -->\n"),
+                       ("unevaluated/historical-span-quiet", "Previously recorded: 'PR #17 is pending.'\n"),
+                       ("unevaluated/issue-reference-quiet", "Issue #17 remains open.\n")):
+        code, res, t = _judge(text, m)
+        check(name, code == 0 and not res.warnings and not res.hard and t.calls == [], (code, res.warnings))
 
 
 def _cue_rows(m):
