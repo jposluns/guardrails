@@ -6633,9 +6633,122 @@ def _temp_root_unreadable_marker_case(tmp):
             [os.path.basename(path) for path in removed], problems, sorted(os.listdir(parent)))
 
 
+def _temp_close_fault_case(fail_at, body):
+    """Run body with os.open tracked and os.close made to release its number and then raise EIO on the
+    fail_at-th close (as close(2) may with EINTR or EIO). A close of a number that is not open (one the
+    case already released) is recorded and never made, so a second close cannot reach a reused number.
+    Returns (whether the injected EIO came out of body, how many numbers were closed again after their
+    release, how many numbers body opened and never closed); those are closed here afterwards."""
+    real_open, real_close = os.open, os.close
+    held, again, calls = set(), [], [0]
+
+    def tracking_open(*args, **kwargs):
+        number = real_open(*args, **kwargs)
+        held.add(number)
+        return number
+
+    def faulty_close(number):
+        if number not in held:
+            again.append(number)
+            return
+        held.discard(number)
+        real_close(number)
+        calls[0] += 1
+        if calls[0] == fail_at:
+            raise OSError(errno.EIO, "injected close failure after release")
+
+    os.open, os.close = tracking_open, faulty_close
+    try:
+        try:
+            body()
+            raised = False
+        except OSError as exc:
+            raised = exc.errno == errno.EIO and "injected close failure" in str(exc)
+    finally:
+        os.open, os.close = real_open, real_close
+    leaked = sorted(held)
+    for number in leaked:
+        try:
+            real_close(number)
+        except OSError:
+            pass
+    return raised, len(again), len(leaked)
+
+
+def _temp_close_fault_cases(tmp):
+    """The descriptor-owning helpers of tools/_selftest_tmproot.py and _make_deep_tree, each driven through
+    a close that releases its number and then raises (_temp_close_fault_case). Returns {case: (raised,
+    closed again, leaked)}."""
+    base = tmp / "close-fault"
+    base.mkdir()
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    results = {}
+
+    # pin: RootPin.close raises once; the caller's later close (remove_root's finally, then a row's own
+    # pin.close()) must not close the released number again.
+    pin_dir = base / "pin"
+    pin_dir.mkdir()
+
+    def pin_body():
+        pin = _selftest_tmproot.pin_root(pin_dir)
+        try:
+            pin.close()
+        finally:
+            pin.close()
+
+    results["pin"] = _temp_close_fault_case(1, pin_body)
+
+    # levels: the first of three walk levels' closes raises; the other two must still be closed.
+    levels_dir = base / "levels"
+    levels_dir.mkdir()
+
+    def levels_body():
+        st = os.stat(levels_dir)
+        stack = [_selftest_tmproot._Level(None, st, None, [])]
+        for index in range(3):
+            stack.append(_selftest_tmproot._Level(str(index), st, os.open(str(levels_dir), flags), []))
+        _selftest_tmproot._close_levels(stack)
+
+    results["levels"] = _temp_close_fault_case(1, levels_body)
+
+    # walk: _clear on a tree deeper than _HELD_DEPTH, whose first close (_push letting go of the top
+    # level's descriptor) raises; the descriptor _push was handed must not leak, and the walk's cleanup
+    # must not close the released number again.
+    walk_dir = base / "walk"
+    walk_dir.mkdir()
+    _make_deep_tree(walk_dir, _selftest_tmproot._HELD_DEPTH + 4, "leaf")
+
+    def walk_body():
+        root_fd = os.open(str(walk_dir), flags)
+        try:
+            _selftest_tmproot._clear(root_fd, False)
+        finally:
+            os.close(root_fd)
+
+    results["walk"] = _temp_close_fault_case(1, walk_body)
+
+    # deep: _make_deep_tree's first close (of the level above) raises; its finally must close the level
+    # it entered, not the released number.
+    deep_dir = base / "deep"
+    deep_dir.mkdir()
+    results["deep"] = _temp_close_fault_case(1, lambda: _make_deep_tree(deep_dir, 3, "leaf"))
+    shutil.rmtree(base, ignore_errors=True)
+    return results
+
+
 def _temp_root_pinning_cases(tmp):
     """The rows for removal through pinned descriptors and for writing a marker back (the module
     docstring of tools/_selftest_tmproot.py)."""
+    # temp/close-fault-single-close: a close that releases its number and then raises (close(2) may, with
+    # EINTR or EIO) in RootPin.close, _close_levels, _push (through _clear) and _make_deep_tree. Each must
+    # let the error out, close no released number a second time (the number may already name another
+    # file), and leave no descriptor it opened unclosed. A close-then-clear body closes the pin's number
+    # again on its next close() and the walk's top number again in _close_levels, a _close_levels that
+    # stops at its first failure leaks the rest, a _push that closes before it stacks the new level leaks
+    # that level, and a _make_deep_tree that closes before it re-binds closes the released number again.
+    check("temp/close-fault-single-close", _temp_close_fault_cases(tmp),
+          {"pin": (True, 0, 0), "levels": (True, 0, 0), "walk": (True, 0, 0), "deep": (True, 0, 0)})
+
     # temp/root-swap-outside-untouched: a stale root replaced after the sweep checked it, by a symbolic
     # link to an outside directory or by that directory itself, must not lead the removal there: the
     # outside directory's file survives, nothing is reported removed, the root is reported as replaced,
@@ -6734,15 +6847,16 @@ _DEEP_LEVELS = 1100
 def _make_deep_tree(top, levels, leaf):
     """Make levels nested directories named "d" under the existing directory top, each made and entered
     through a descriptor of the one above (so no path grows long), with an empty file named leaf at the
-    bottom."""
+    bottom. Each level's descriptor leaves fd before its one close (prev, fd = fd, sub), so a close that
+    raises (the number released all the same) leaves the finally closing sub, never that number again."""
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     fd = os.open(str(top), flags)
     try:
         for _level in range(levels):
             os.mkdir("d", dir_fd=fd)
             sub = os.open("d", flags, dir_fd=fd)
-            os.close(fd)
-            fd = sub
+            prev, fd = fd, sub
+            os.close(prev)
         os.close(os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=fd))
     finally:
         os.close(fd)

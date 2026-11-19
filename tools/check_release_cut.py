@@ -2099,6 +2099,20 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("opf/tools/_opf_oplock.py", "_st_f8_4_body", "REBIND", "[]seen", "", 1,
      _CS_JOINED.format("report = seen[\"report\"]", "joins report to the closed seen[\"fd\"]", "seen",
                        "report bindings", "report string")),
+    ("tools/_selftest_tmproot.py", "__init__", "REBIND", "fd", "", 1,
+     "false positive: RootPin.__init__ closes fd only in the handler of a failed fstat, which re-raises, so "
+     "self.fd = fd never runs after that close; the pin's one close is RootPin.close, which takes the "
+     "number out of self.fd before it closes it"),
+    ("tools/_selftest_tmproot.py", "_climb", "REBIND", "done.fd", "", 1,
+     "false positive: done is popped off the walk's stack before the finally's one close of done.fd, so "
+     "_close_levels, which closes only levels still on the stack, never reaches it, and the climb's caller "
+     "reads only done's name, stat and failed flag; done.fd = None clears a level nothing closes again"),
+    ("tools/selftest_orch_hooks.py", "_make_deep_tree", "TRY", "prev", "fd", 1,
+     _CS_P1.format("prev, fd = fd, sub runs before os.close(prev), so the finally closes sub, never prev")),
+    ("tools/selftest_orch_hooks.py", "pin_body", "TRY", "pin", "pin", 1,
+     "false positive: the deliberate second RootPin.close of temp/close-fault-single-close, whose first "
+     "close releases the number and raises; the second must find the pin already cleared and close "
+     "nothing, which that row checks"),
 ) + tuple(("opf/tools/_opf_init_substrate.py", name, "REBIND", "sub", "", 1,
            "false positive: a self-test step; sub is re-bound to a fresh substrate, the old one never closed again")
           for name in ("_t_s1_sibling_home", "_t_s2_capability_gate", "_t_s13_midread_containment",

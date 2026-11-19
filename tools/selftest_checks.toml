@@ -2033,6 +2033,9 @@ expected-check-ids = [
   "temp/rmdir-swap-reported",
   "temp/rmdir-replacement-kept",
   "temp/unreadable-marker-kept",
+  # A close that releases its number and then raises, in the pin, the walk's levels, the walk's push and
+  # the deep-tree fixture, lets the error out, closes no released number again and leaks no descriptor.
+  "temp/close-fault-single-close",
   "temp/own-root-removed",
   # ---------- the self-test entry point hands the caller's environment back ----------
   "harness/entry-restores-caller-env",

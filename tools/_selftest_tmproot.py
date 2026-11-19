@@ -264,12 +264,15 @@ _HELD_DEPTH = 64
 
 def _push(stack, name, st, fd, names):
     """Enter the directory fd (name, st) below the top of stack, closing the top's descriptor when the
-    stack is deeper than _HELD_DEPTH. The bottom of the stack (the caller's descriptor) is never closed."""
-    if len(stack) > _HELD_DEPTH:
-        top = stack[-1]
-        os.close(top.fd)
-        top.fd = None
+    stack is deeper than _HELD_DEPTH. The bottom of the stack (the caller's descriptor) is never closed.
+    The new level goes on the stack first and the top's descriptor leaves its level before its one close,
+    so a close that raises (the number released all the same) leaves fd owned by the stack and no level
+    still naming the released number for _close_levels to close again."""
+    top = stack[-1] if len(stack) > _HELD_DEPTH else None
     stack.append(_Level(name, st, fd, names))
+    if top is not None:
+        held, top.fd = top.fd, None
+        os.close(held)
 
 
 def _climb(stack):
@@ -292,11 +295,19 @@ def _climb(stack):
 
 
 def _close_levels(stack):
-    """Close every descriptor the walk opened (all but the bottom level's, which is the caller's)."""
+    """Close every descriptor the walk opened (all but the bottom level's, which is the caller's), each
+    once: it leaves its level before its close, and every close is attempted even when an earlier one
+    raises (the number released all the same); the first close error is raised once all were tried."""
+    error = None
     for level in stack[1:]:
-        if level.fd is not None:
-            os.close(level.fd)
-            level.fd = None
+        held, level.fd = level.fd, None
+        if held is not None:
+            try:
+                os.close(held)
+            except OSError as exc:
+                error = exc if error is None else error
+    if error is not None:
+        raise error
 
 
 def _clear(fd, keep_marker):
@@ -646,10 +657,12 @@ class RootPin:
         self.fd = fd
 
     def close(self):
-        """Close the held descriptor (once; remove_root closes the pin it is given)."""
-        if self.fd is not None:
-            os.close(self.fd)
-            self.fd = None
+        """Close the held descriptor (once; remove_root closes the pin it is given, and a caller may call
+        this again). The descriptor leaves the pin before its one close, so a close that raises (the
+        number released all the same) is never followed by a second close of that number."""
+        held, self.fd = self.fd, None
+        if held is not None:
+            os.close(held)
 
 
 def pin_root(root):

@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "660249f16d47933906375d1407848450c65edd6cc9a5f05ffd043247732d5313"
+tree-sha256 = "79fc6f4183213150692d8829e6308e5ae370970b989ac0f7ca2d9b50228ba28f"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4152,8 +4152,8 @@ sha256 = "50ba7641dfc3dcdae1618dbfc7398ce8402f57574ed7279081d5e041be28abbd"
 
 [[sources]]
 path = "tools/_selftest_tmproot.py"
-bytes = 41509
-sha256 = "bd804571644884a940a2bf0b1bfe35791ee575ea8bfccbaef0174375f5113baa"
+bytes = 42430
+sha256 = "9eb8ebff9d8300c91d2adb1c194cff7ed78288a20ee8f3c2b62784057f421fef"
 
 [[sources]]
 path = "tools/_site_markup.py"
@@ -4427,8 +4427,8 @@ sha256 = "1062f2cdf038f39b3a88bb1a124c4e9d6bc58d89e5aa3b4b8855dadf04d8c447"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 306755
-sha256 = "a4b3efdd8b760d8ce726145dd5aac75e7ab4ba9429df988fe321371e0639b987"
+bytes = 307993
+sha256 = "aa90e92ef27e921271ec1aacacb6e21aee8cfdf5d563614345e0a31ab07dd141"
 
 [[sources]]
 path = "tools/check_release_delta.py"
@@ -4752,8 +4752,8 @@ sha256 = "01cc5a82268d81467782b5faaabbcdd853954f670cb12722784e55363ccb4131"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 286485
-sha256 = "960c0c62b1fa90f933f7b41b598ff9720e1c211439ee244bb36dd671dbe2879d"
+bytes = 286729
+sha256 = "83abf3c9be25eb16f12d515afebffed121bbe56848fe054ea8ef3e7cd412deee"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -4792,8 +4792,8 @@ sha256 = "5db515bd671b5573e258cb3548903af302b6ac98b00f7a5ef1287cfbadf88304"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 1321100
-sha256 = "982587a57215cade88d7461bbda0124fc939767c795ac9aad7801623e5f69004"
+bytes = 1326085
+sha256 = "6b8df252bdc0d40616519d864f9892ec3b104165fd336109fc128ce5a808bf2c"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"
