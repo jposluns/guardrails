@@ -4990,6 +4990,11 @@ expected-check-ids = [
   "retry/existing-destination-preserved",
   "deadline/no-attempt-after-deadline",
   "deadline/no-wait-past-deadline",
+  # ---------- fallback sources: ftp.gnu.org, then the GNU mirrors ----------
+  "sources/first-unreachable-second-completes",
+  "sources/all-unreachable-names-each",
+  "sources/mirror-wrong-bytes-refused-at-once",
+  "sources/deadline-between-sources",
   # ---------- the CI entry ----------
   "env/missing-runner-temp-exits-2",
   "env/relative-github-path-exits-2",

@@ -18,25 +18,35 @@ test lane that starts this suite's runner bare (the git-fixture-env lanes start 
 fetches and never writes GITHUB_PATH, even where RUNNER_TEMP and GITHUB_PATH are set. Any other argument is a usage
 error.
 
-Every URL, byte count and sha256 is a literal in PINS. Every file is fetched and checked against its pin (its
-sha256, and the archive's byte count too) before anything is extracted. Each file gets up to FETCH_ATTEMPTS (4)
-attempts, with waits of RETRY_DELAYS (2, 4 and 8 seconds) between them, but only after a transient transport
-failure: a network or host that is unreachable, a connection reset (including a server that closes the connection
-before it answers), a timeout, a temporary DNS failure (EAI_AGAIN) or a response read cut short (IncompleteRead),
-each also when urllib wraps it in URLError, and a body that ends before the byte count its Content-Length header
-declares. Nothing else is retried: no HTTP status (an HTTPError of any code), no certificate or other TLS failure,
-no permanent DNS failure, no URL that is not https, no Content-Length that is not a byte count, no body over
-FETCH_LIMIT, no local file error and no other exception. Every attempt writes into a fresh temporary file in the downloads
-directory, created exclusively; a failed attempt's file is removed, and only that one. A completed attempt's file
-is linked to its pinned name, which must not exist yet, and is checked against its pin there, outside the retry,
-before the next file is fetched: a size or sha256 mismatch is a refusal at once and is never retried. All ten files,
-their retries and their waits share one DOWNLOAD_DEADLINE (300 seconds) on a monotonic clock: no attempt starts once
-it has passed, no wait starts that would end after it, and an attempt that finds it passed before a body read stops
-without a retry. Each attempt opens its connection with a socket timeout of FETCH_TIMEOUT cut down to the time left
-then, and before each body read the timeout is set again to FETCH_TIMEOUT cut down to the time left at that read.
-That bound is checked by this process between blocking operations, not enforced during them: while urlopen
-connects and reads the response head, each socket operation it makes may wait up to the timeout the attempt began
-with, so the opening can overrun the deadline by that much per operation (name resolution is not covered by the
+Every path under the GNU tree, byte count and sha256 is a literal in PINS, one pin per file, and every source is a
+literal base URL in GNU_SOURCES: the GNU project's own server (https://ftp.gnu.org/gnu/), then two mirrors from the
+GNU mirror list (https://mirrors.kernel.org/gnu/ and https://mirrors.ocf.berkeley.edu/gnu/), each serving a copy of
+that tree. A file's URL from a source is the source's base URL followed by the file's pinned path, so every source is
+asked for the same file by construction. The sources only supply bytes: the pin is the one acceptance test whichever
+source served them, and every file is fetched and checked against its pin (its sha256, and the archive's byte count
+too) before anything is extracted. Each file gets up to FETCH_ATTEMPTS (4) attempts, and each attempt tries the
+sources in GNU_SOURCES order: a transient transport failure from one source moves on to the next source at once (no
+wait), and only an attempt whose every source failed so is retried, with waits of RETRY_DELAYS (2, 4 and 8 seconds)
+before the second, third and fourth attempt. A transient transport failure is a network or host that is unreachable,
+a connection reset (including a server that closes the connection before it answers), a timeout, a temporary DNS
+failure (EAI_AGAIN) or a response read cut short (IncompleteRead), each also when urllib wraps it in URLError, and a
+body that ends before the byte count its Content-Length header declares. Nothing else moves on to another source or
+is retried: no HTTP status (an HTTPError of any code), no certificate or other TLS failure, no permanent DNS failure,
+no URL that is not https, no Content-Length that is not a byte count, no body over FETCH_LIMIT, no local file error
+and no other exception; each stops the build at once. Every download writes into a fresh temporary file in the
+downloads directory, created exclusively; a failed download's file is removed, and only that one. The first
+download of a file that completes, from whichever source, is linked to its pinned name, which must not exist yet,
+and is checked against its pin there before the next file is fetched: a size or sha256 mismatch is a refusal at
+once, never retried and never fetched again from another source. Every failure line names the source it concerns,
+the sources that already failed in that attempt and the sources not tried; once every attempt is spent, the line
+names each source with its last failure. All ten files, their sources, their retries and their waits share one
+DOWNLOAD_DEADLINE (300 seconds) on a monotonic clock: no download from any source starts once it has passed, no wait
+starts that would end after it, and a download that finds it passed before a body read stops without trying
+another source or retrying. Each download opens its connection with a socket timeout of FETCH_TIMEOUT cut down to
+the time left then, and before each body read the timeout is set again to FETCH_TIMEOUT cut down to the time
+left at that read. That bound is checked by this process between blocking operations, not enforced during them:
+while urlopen connects and reads the response head, each socket operation it makes may wait up to the timeout the
+download began with, so the opening can overrun the deadline by that much per operation (name resolution is not covered by the
 socket timeout at all); a body read is one read1, one socket read for a body of declared length (a chunked body
 also reads its chunk size lines, one socket read or more), and each of those may wait up to the time left when
 the read began. No separate process is terminated at the deadline. The patches are applied in PINS order
@@ -48,7 +58,8 @@ from bash itself. GITHUB_PATH is written only after both checks pass.
 Exit of --build: 0 installed and added to GITHUB_PATH; 1 refused (a file that is missing or differs from its pin,
 or a built bash that does not print 5 3 9 or exits non-zero); 2 not completed (RUNNER_TEMP or GITHUB_PATH unset,
 relative or not an existing directory and file; the install or work directory already present; a fetch error that
-is not retried, or a transient one still failing after the last attempt; the download deadline passed; an archive
+is not retried, or transient failures from every source still failing in the last attempt; the download deadline
+passed; an archive
 that does not extract; a patch, configure, make or make install step that fails; a built bash that cannot
 be started). On exit 1 or 2 nothing is installed: the install directory is removed if make install created it,
 and GITHUB_PATH is not written. The work directory (the downloads and the build tree) is left under the runner's
@@ -56,15 +67,19 @@ temporary directory. Exit of the self-test: 0 every vector passed; 1 any failed;
 the report's finalizer refuses the run (tools/_selftest_exit_report.py). A usage error exits 2.
 
 Not checked: the GNU signature of the archive and the patches (the pinned digests stand in for it, so a changed
-upstream file is a refusal, never a silent update); the compiler, make and patch that the runner image supplies,
+upstream file, or a mirror's copy that differs, is a refusal, never a silent update); that a mirror is current or
+answers at all (a mirror is only a source, so one that lags or is gone costs a failed download, never acceptance);
+whether a source redirects (urllib follows a redirect, so the bytes may come from the place it names; the pin still
+decides); the compiler, make and patch that the runner image supplies,
 which run as trusted tools; and which bash a later step runs. The hooks self-test looks bash up on its PATH, and
 the runner adds each GITHUB_PATH line to the front of PATH for the later steps of the same job; that is GitHub's
 documented behaviour, which this script does not observe. In a config lane the execution gate and the lane pass
 that PATH on to the rerun hooks self-test with only the lane's git wrapper directories in front. The self-test
 drives the whole pipeline over fixture files with sh, patch and make; it never fetches, and a fetch attempted while
-it runs fails it. The download attempt, the wait and the clock are injected (provision and build take fetcher, sleep
-and clock), so the retry, the waits and the shared deadline are tested with fixture fetchers, a recording sleep and
-a fake clock, never the network and never a real wait.
+it runs fails it. The sources, the download, the wait and the clock are injected (download and provision take
+sources, fetcher, sleep and clock; build takes all but the sources, which are GNU_SOURCES), so the move to the next
+source, the retry, the waits and the shared deadline are tested with fixture sources and fetchers, a recording sleep
+and a fake clock, never the network and never a real wait.
 """
 import sys
 
@@ -107,30 +122,39 @@ REGISTRY_REL = "tools/selftest_checks.toml"
 # This script's own self-test suite in the registry.
 SUITE_ID = "ci-build-bash-selftest"
 
-# (file name, URL, byte count or None, sha256): the GNU bash 5.3 archive, then its official patches in the order
-# they apply. Every value is a literal, so a new patch level is a reviewed change to this table and to
-# WANT_VERSINFO together.
+# (file name, path under the GNU tree, byte count or None, sha256): the GNU bash 5.3 archive, then its official
+# patches in the order they apply; one pin per file, whichever source serves it. Every value is a literal, so a new
+# patch level is a reviewed change to this table and to WANT_VERSINFO together.
 PINS = (
-    ("bash-5.3.tar.gz", "https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz", 11355854,
+    ("bash-5.3.tar.gz", "bash/bash-5.3.tar.gz", 11355854,
      "0d5cd86965f869a26cf64f4b71be7b96f90a3ba8b3d74e27e8e9d9d5550f31ba"),
-    ("bash53-001", "https://ftp.gnu.org/gnu/bash/bash-5.3-patches/bash53-001", None,
+    ("bash53-001", "bash/bash-5.3-patches/bash53-001", None,
      "1f608434364af86b9b45c8b0ea3fb3b165fb830d27697e6cdfc7ac17dee3287f"),
-    ("bash53-002", "https://ftp.gnu.org/gnu/bash/bash-5.3-patches/bash53-002", None,
+    ("bash53-002", "bash/bash-5.3-patches/bash53-002", None,
      "e385548a00130765ec7938a56fbdca52447ab41fabc95a25f19ade527e282001"),
-    ("bash53-003", "https://ftp.gnu.org/gnu/bash/bash-5.3-patches/bash53-003", None,
+    ("bash53-003", "bash/bash-5.3-patches/bash53-003", None,
      "f245d9c7dc3f5a20d84b53d249334747940936f09dc97e1dcb89fc3ab37d60ed"),
-    ("bash53-004", "https://ftp.gnu.org/gnu/bash/bash-5.3-patches/bash53-004", None,
+    ("bash53-004", "bash/bash-5.3-patches/bash53-004", None,
      "9591d245045529f32f0812f94180b9d9ce9023f5a765c039b852e5dfc99747d0"),
-    ("bash53-005", "https://ftp.gnu.org/gnu/bash/bash-5.3-patches/bash53-005", None,
+    ("bash53-005", "bash/bash-5.3-patches/bash53-005", None,
      "cca1ef52dbbf433bc98e33269b64b2c814028efe2538be1e2c9a377da90bc99d"),
-    ("bash53-006", "https://ftp.gnu.org/gnu/bash/bash-5.3-patches/bash53-006", None,
+    ("bash53-006", "bash/bash-5.3-patches/bash53-006", None,
      "29119addefed8eff91ae37fd51822c31780ee30d4a28376e96002706c995ff10"),
-    ("bash53-007", "https://ftp.gnu.org/gnu/bash/bash-5.3-patches/bash53-007", None,
+    ("bash53-007", "bash/bash-5.3-patches/bash53-007", None,
      "c0976bbfffa1453c7cfdd62058f206a318568ff2d690f5d4fa048793fa3eb299"),
-    ("bash53-008", "https://ftp.gnu.org/gnu/bash/bash-5.3-patches/bash53-008", None,
+    ("bash53-008", "bash/bash-5.3-patches/bash53-008", None,
      "097cd723cbfb8907674ac32214063a3fd85282657ec5b4e544d2c0f719653fb4"),
-    ("bash53-009", "https://ftp.gnu.org/gnu/bash/bash-5.3-patches/bash53-009", None,
+    ("bash53-009", "bash/bash-5.3-patches/bash53-009", None,
      "eee30fe78a4b0cb2fe20e010e00308899cfc613e0774ebb3c8557a1552f24f8c"),
+)
+# The official GNU sources, tried in this order by every attempt: the GNU project's own server, then two mirrors
+# from the GNU mirror list on separate networks. Each base URL is the top of a copy of the GNU tree (the gnu/
+# directory of ftp.gnu.org), so a file's URL from a source is its base URL followed by the file's PINS path. A source
+# only supplies bytes; the file's pin alone decides whether they are accepted.
+GNU_SOURCES = (
+    "https://ftp.gnu.org/gnu/",
+    "https://mirrors.kernel.org/gnu/",
+    "https://mirrors.ocf.berkeley.edu/gnu/",
 )
 SOURCE_DIR = "bash-5.3"  # the archive's top directory
 # BASH_VERSINFO[0], [1] and [2] (major, minor, patch level) as VERSION_SCRIPT prints them.
@@ -266,61 +290,111 @@ def fetch_attempt(url, out, remaining):
             url, total, declared))
 
 
-def _fetch_with_retries(name, url, downloads, fetcher, sleep, remaining, log):
-    """Up to FETCH_ATTEMPTS attempts of fetcher(url, out, remaining), each into a fresh temporary file created
-    exclusively in downloads; returns the path of the first attempt that completes. Only Transient is retried,
-    after the RETRY_DELAYS wait; a failed attempt's own file is closed and removed. No attempt starts once the
-    deadline has passed and no wait starts that would end after it; those, the last attempt failing and any other
-    failure raise, NotCompleted for all but an OSError of the run itself."""
+def _sources_note(failed, untried):
+    """The part of a failure line that names the other sources of the attempt: failed holds the failure messages of
+    the sources that already failed in it (each names its URL), untried the URLs not tried in it."""
+    parts = []
+    if failed:
+        parts.append("earlier sources in this attempt: " + "; ".join(failed))
+    if untried:
+        parts.append("not tried: " + ", ".join(untried))
+    return " ({})".format("; ".join(parts)) if parts else ""
+
+
+def _publish(part, dest, size, digest):
+    """Link the completed download part to its pinned name dest, which must not exist yet, remove part, and check
+    dest against its pin (verify)."""
+    try:
+        os.link(part, dest)
+    except FileExistsError:
+        raise NotCompleted("{} already exists; it was left as it was".format(dest)) from None
+    finally:
+        os.unlink(part)
+    verify(dest, size, digest)
+
+
+def _fetch_from_sources(name, urls, dest, size, digest, downloads, fetcher, sleep, remaining, log):
+    """Up to FETCH_ATTEMPTS attempts of the file name; each attempt tries urls (the file's URL from each source, in
+    source order) in turn with fetcher(url, out, remaining), each download into a fresh temporary file created
+    exclusively in downloads. The first download that completes is published to dest and checked against its pin
+    (_publish), and its URL is returned; a Refused from that check is raised at once, so a file that differs from
+    its pin is never fetched again, from that source or any other. Only Transient moves on to the next source, at
+    once, and only an attempt whose every source failed with Transient is retried, after the RETRY_DELAYS wait; a
+    failed download's own file is closed and removed. No download starts once the deadline has passed and no wait
+    starts that would end after it; those, the last attempt failing and any other failure raise, NotCompleted for
+    all but an OSError of the run itself. Every failure message names the source it concerns and the other sources
+    of its attempt."""
     for attempt in range(1, FETCH_ATTEMPTS + 1):
-        if remaining() <= 0:
-            raise NotCompleted("{}: the {} s download deadline passed before attempt {}".format(
-                url, DOWNLOAD_DEADLINE, attempt))
-        handle, part = tempfile.mkstemp(prefix=name + ".attempt-", dir=downloads)
-        try:
-            with os.fdopen(handle, "wb") as out:
-                fetcher(url, out, remaining)
-        except Transient as exc:
-            os.unlink(part)
-            if attempt == FETCH_ATTEMPTS:
-                raise NotCompleted("{} (still failing after {} attempts)".format(exc, FETCH_ATTEMPTS)) from None
-            delay = RETRY_DELAYS[attempt - 1]
-            if delay > remaining():
-                raise NotCompleted("{} (not retried: a {} s wait would end after the {} s download deadline)".format(
-                    exc, delay, DOWNLOAD_DEADLINE)) from None
-            log("attempt {} of {} failed ({}); retrying in {} s".format(attempt, FETCH_ATTEMPTS, exc, delay))
-            sleep(delay)
-        except BaseException:
-            with contextlib.suppress(OSError):
+        failed = []
+        for index, url in enumerate(urls):
+            if remaining() <= 0:
+                raise NotCompleted("{}: the {} s download deadline passed before attempt {} from {}{}".format(
+                    name, DOWNLOAD_DEADLINE, attempt, url, _sources_note(failed, urls[index + 1:])))
+            handle, part = tempfile.mkstemp(prefix=name + ".attempt-", dir=downloads)
+            try:
+                with os.fdopen(handle, "wb") as out:
+                    fetcher(url, out, remaining)
+            except Transient as exc:
                 os.unlink(part)
-            raise
-        else:
-            return part
+                failed.append(str(exc))
+                if index + 1 < len(urls):
+                    log("attempt {} of {} from {} failed ({}); trying {}".format(
+                        attempt, FETCH_ATTEMPTS, url, exc, urls[index + 1]))
+                continue
+            except NotCompleted as exc:
+                with contextlib.suppress(OSError):
+                    os.unlink(part)
+                raise NotCompleted("{}{}".format(exc, _sources_note(failed, urls[index + 1:]))) from None
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(part)
+                raise
+            try:
+                _publish(part, dest, size, digest)
+            except Refused as exc:
+                raise Refused("{} (fetched from {}; refused at once, not fetched again from any source){}".format(
+                    exc, url, _sources_note(failed, urls[index + 1:]))) from None
+            return url
+        every = "; ".join(failed)
+        if attempt == FETCH_ATTEMPTS:
+            raise NotCompleted("{}: every source failed in each of {} attempts (attempt {}: {})".format(
+                name, FETCH_ATTEMPTS, attempt, every))
+        delay = RETRY_DELAYS[attempt - 1]
+        if delay > remaining():
+            raise NotCompleted("{}: attempt {} failed from every source ({}); not retried: a {} s wait would end "
+                               "after the {} s download deadline".format(name, attempt, every, delay,
+                                                                          DOWNLOAD_DEADLINE))
+        log("attempt {} of {} failed from every source ({}); retrying in {} s".format(
+            attempt, FETCH_ATTEMPTS, every, delay))
+        sleep(delay)
     raise AssertionError("unreachable: every attempt returns or raises")
 
 
-def download(pins, downloads, fetcher, sleep, clock, log=print):
-    """Fetch every file of a PINS-shaped table into the directory downloads, in order, with retries, all under one
+def download(pins, sources, downloads, fetcher, sleep, clock, log=print):
+    """Fetch every file of a PINS-shaped table into the directory downloads, in order, from sources (a
+    GNU_SOURCES-shaped tuple of base URLs, tried in order by every attempt), with retries, all under one
     DOWNLOAD_DEADLINE on clock (a monotonic clock in seconds). Each completed file is linked to its pinned name,
-    which must not exist yet, and checked against its pin there, outside the retry, before the next file is
-    fetched. Raises Refused for a file that differs from its pin and NotCompleted when a fetch does not
-    complete."""
+    which must not exist yet, and checked against its pin there before the next file is fetched. Returns, for each
+    file in order, the source that served it. Raises Refused for a file that differs from its pin and NotCompleted
+    when a fetch does not complete."""
     deadline = clock() + DOWNLOAD_DEADLINE
 
     def remaining():
         return deadline - clock()
 
-    for name, url, size, digest in pins:
-        part = _fetch_with_retries(name, url, downloads, fetcher, sleep, remaining, log)
-        dest = Path(downloads) / name
-        try:
-            os.link(part, dest)
-        except FileExistsError:
-            raise NotCompleted("{} already exists; it was left as it was".format(dest)) from None
-        finally:
-            os.unlink(part)
-        verify(dest, size, digest)
-        log("fetched {}".format(url))
+    served = []
+    for name, path, size, digest in pins:
+        urls = tuple(base + path for base in sources)
+        url = _fetch_from_sources(name, urls, Path(downloads) / name, size, digest, downloads, fetcher, sleep,
+                                  remaining, log)
+        served.append(sources[urls.index(url)])
+        log("fetched {} from {}".format(name, url))
+    return tuple(served)
+
+
+def served_summary(sources, served):
+    """How many files each source served, in source order, for the sources that served any."""
+    return ", ".join("{} from {}".format(served.count(base), base) for base in sources if base in served)
 
 
 def verify(path, size, digest):
@@ -377,11 +451,12 @@ def check_version(bindir, label):
             proc.stderr.decode("utf-8", "replace").strip(), WANT_VERSINFO))
 
 
-def provision(pins, fetcher, runner_temp, github_path, log=print, sleep=time.sleep, clock=time.monotonic):
+def provision(pins, sources, fetcher, runner_temp, github_path, log=print, sleep=time.sleep, clock=time.monotonic):
     """Fetch, verify, extract, patch, build, check, install, check again, then append the install's bin directory
-    to github_path. pins is a PINS-shaped table (the archive first, then the patches in order); fetcher(url, out,
-    remaining) is one download attempt as fetch_attempt is; sleep and clock serve the retries and the download
-    deadline. Returns the bin directory; raises Refused or NotCompleted, with nothing installed."""
+    to github_path. pins is a PINS-shaped table (the archive first, then the patches in order); sources is a
+    GNU_SOURCES-shaped tuple of base URLs; fetcher(url, out, remaining) is one download as fetch_attempt is; sleep
+    and clock serve the retries and the download deadline. Returns the bin directory and, for each file, the source
+    that served it; raises Refused or NotCompleted, with nothing installed."""
     runner_temp = Path(runner_temp)
     prefix = runner_temp / INSTALL_NAME
     work = runner_temp / (INSTALL_NAME + "-build")
@@ -390,8 +465,9 @@ def provision(pins, fetcher, runner_temp, github_path, log=print, sleep=time.sle
             raise NotCompleted("{} already exists; nothing was changed".format(path))
     downloads = work / "downloads"
     os.makedirs(downloads)
-    download(pins, downloads, fetcher, sleep, clock, log)
-    log("verified {} files against their pinned sha256".format(len(pins)))
+    served = download(pins, sources, downloads, fetcher, sleep, clock, log)
+    log("verified {} files against their pinned sha256 (fetched {})".format(len(pins), served_summary(sources,
+                                                                                                    served)))
     try:
         with tarfile.open(downloads / pins[0][0], "r:gz") as archive:
             archive.extractall(work, filter="data")
@@ -400,7 +476,7 @@ def provision(pins, fetcher, runner_temp, github_path, log=print, sleep=time.sle
     src = work / SOURCE_DIR
     if not src.is_dir():
         raise NotCompleted("{}: holds no {} directory".format(pins[0][0], SOURCE_DIR))
-    for name, _url, _size, _digest in pins[1:]:
+    for name, _path, _size, _digest in pins[1:]:
         with _step("patch " + name):
             proc = subprocess.run(["patch", "-p0", "--force", "--no-backup-if-mismatch", "--input",
                                    str(downloads / name)], cwd=str(src), stdin=subprocess.DEVNULL,
@@ -430,11 +506,12 @@ def provision(pins, fetcher, runner_temp, github_path, log=print, sleep=time.sle
     except BaseException:
         shutil.rmtree(prefix, ignore_errors=True)
         raise
-    return bindir
+    return bindir, served
 
 
 def build(environ, fetcher=fetch_attempt, log=print, sleep=time.sleep, clock=time.monotonic):
-    """The CI entry: provision PINS under environ's RUNNER_TEMP and append to its GITHUB_PATH. Returns the exit."""
+    """The CI entry: provision PINS from GNU_SOURCES under environ's RUNNER_TEMP and append to its GITHUB_PATH.
+    Returns the exit."""
     runner_temp = environ.get("RUNNER_TEMP", "")
     github_path = environ.get("GITHUB_PATH", "")
     if not (os.path.isabs(runner_temp) and os.path.isdir(runner_temp)):
@@ -446,15 +523,16 @@ def build(environ, fetcher=fetch_attempt, log=print, sleep=time.sleep, clock=tim
               "Nothing was installed.".format(github_path), file=sys.stderr)
         return 2
     try:
-        bindir = provision(PINS, fetcher, runner_temp, github_path, log, sleep, clock)
+        bindir, served = provision(PINS, GNU_SOURCES, fetcher, runner_temp, github_path, log, sleep, clock)
     except Refused as exc:
         print("REFUSED: {}. Nothing was installed.".format(exc), file=sys.stderr)
         return 1
     except (NotCompleted, OSError) as exc:
         print("NOT COMPLETED: {}. Nothing was installed.".format(exc), file=sys.stderr)
         return 2
-    print("PASS: bash {} installed; {} is added to GITHUB_PATH for the later steps of this job".format(
-        WANT_VERSINFO.replace(" ", "."), bindir))
+    print("PASS: bash {} installed from {} files that each passed its pin (fetched {}); {} is added to GITHUB_PATH "
+          "for the later steps of this job".format(WANT_VERSINFO.replace(" ", "."), len(PINS),
+                                                   served_summary(GNU_SOURCES, served), bindir))
     return 0
 
 
@@ -496,13 +574,14 @@ def _fixture_archive(path, minor="3", installed_minor=None):
 
 
 def _fixture_pins(directory, archive="bash-5.3.tar.gz", order=range(1, 10), skew=None):
-    """A PINS-shaped table over the fixture files in directory: the archive, then the patches in order. skew names
-    one file whose pinned sha256 is replaced by the digest of other bytes."""
+    """A PINS-shaped table over the fixture files in directory: the archive, then the patches in order, each at its
+    own name as its path (so the source "fixture://" serves it at fixture://NAME). skew names one file whose pinned
+    sha256 is replaced by the digest of other bytes."""
     rows = []
     for name in [archive] + ["bash53-{:03d}".format(level) for level in order]:
         data = (Path(directory) / name).read_bytes()
         digest = hashlib.sha256(b"other bytes" if name == skew else data).hexdigest()
-        rows.append((name, "fixture://" + name, len(data) if name == archive else None, digest))
+        rows.append((name, name, len(data) if name == archive else None, digest))
     return tuple(rows)
 
 
@@ -619,15 +698,22 @@ def self_test(report_path=None):
         results.append((check_id, bool(ok), detail))
         executed.append(check_id)
 
-    # The pin table: the archive, then patches 001 to 009 in order, each at its GNU URL with a sha256 digest.
+    # The pin table: the archive, then patches 001 to 009 in order, each at its path under the GNU tree with one
+    # sha256 digest; and the sources: ftp.gnu.org first, then the two mirrors, each an https base URL of the GNU tree
+    # on a host of its own.
     names = ["bash-5.3.tar.gz"] + ["bash53-{:03d}".format(level) for level in range(1, 10)]
-    urls = (["https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz"]
-            + ["https://ftp.gnu.org/gnu/bash/bash-5.3-patches/" + name for name in names[1:]])
+    paths = ["bash/bash-5.3.tar.gz"] + ["bash/bash-5.3-patches/" + name for name in names[1:]]
     shape = [(len(row) == 4 and isinstance(row[3], str) and len(row[3]) == 64
               and set(row[3]) <= set("0123456789abcdef")) for row in PINS]
-    check("pins/table-shape", [row[0] for row in PINS] == names and [row[1] for row in PINS] == urls
+    hosts = [base.split("/")[2] for base in GNU_SOURCES]
+    check("pins/table-shape", [row[0] for row in PINS] == names and [row[1] for row in PINS] == paths
           and [row[2] for row in PINS] == [11355854] + [None] * 9 and all(shape)
-          and len(set(row[3] for row in PINS)) == len(PINS), PINS)
+          and len(set(row[3] for row in PINS)) == len(PINS)
+          and GNU_SOURCES == ("https://ftp.gnu.org/gnu/", "https://mirrors.kernel.org/gnu/",
+                              "https://mirrors.ocf.berkeley.edu/gnu/")
+          and all(base.startswith("https://") and base.endswith("/gnu/") for base in GNU_SOURCES)
+          and len(set(hosts)) == len(hosts), (PINS, GNU_SOURCES))
+    fixture_sources = ("fixture://",)
 
     # Any fetch while the self-test runs is a failure: it never touches the network.
     reached = []
@@ -689,21 +775,22 @@ def self_test(report_path=None):
 
             # the whole pipeline over the fixtures: each run gets its own runner temp and GITHUB_PATH
             # (a fake clock serves every run, so no run ever really waits)
-            def run(name, pins, fetcher=None, clock=None):
+            def run(name, pins, fetcher=None, clock=None, sources=fixture_sources, log=None):
                 clock = clock or _FakeClock()
                 temp = base / name
                 os.makedirs(temp)
                 github_path = temp / "github_path"
                 github_path.write_text("/already/listed\n", encoding="utf-8")
-                got = _outcome(lambda: provision(pins, fetcher or _fixture_fetcher(fixtures), temp, github_path,
-                                                 log=lambda line: None, sleep=clock.sleep, clock=clock.now))
+                got = _outcome(lambda: provision(pins, sources, fetcher or _fixture_fetcher(fixtures), temp,
+                                                 github_path, log=log or (lambda line: None), sleep=clock.sleep,
+                                                 clock=clock.now))
                 untouched = (github_path.read_text(encoding="utf-8") == "/already/listed\n"
                              and not os.path.lexists(temp / INSTALL_NAME))
                 return got, temp, github_path, untouched
 
             got, temp, github_path, _untouched = run("success", _fixture_pins(fixtures))
             bindir = temp / INSTALL_NAME / "bin"
-            check("provision/success-installs-and-appends", got == ("ok", bindir)
+            check("provision/success-installs-and-appends", got == ("ok", (bindir, fixture_sources * 10))
                   and github_path.read_text(encoding="utf-8") == "/already/listed\n" + str(bindir) + "\n"
                   and (bindir / "bash").is_file(), got)
             got, temp, _github_path, untouched = run("skewed", _fixture_pins(fixtures, skew="bash53-005"))
@@ -727,7 +814,7 @@ def self_test(report_path=None):
             temp = base / "present"
             os.makedirs(temp / INSTALL_NAME)
             (temp / "github_path").write_text("", encoding="utf-8")
-            got = _outcome(lambda: provision(_fixture_pins(fixtures), _fixture_fetcher(fixtures), temp,
+            got = _outcome(lambda: provision(_fixture_pins(fixtures), fixture_sources, _fixture_fetcher(fixtures), temp,
                                              temp / "github_path", log=lambda line: None, sleep=_FakeClock().sleep,
                                              clock=_FakeClock().now))
             check("provision/existing-install-refuses", got[0] == "not-completed" and "already exists" in got[1]
@@ -836,17 +923,18 @@ def self_test(report_path=None):
                 response.fp.raw._sock.settimeout(timeout)
                 return response
 
+            gnu_urls = [GNU_SOURCES[0] + row[1] for row in PINS]
             urllib.request.urlopen = fake_urlopen
             try:
                 slow, cut = io.BytesIO(), io.BytesIO()
-                slow_exc = raised(lambda: fetch_attempt(PINS[1][1], slow, lambda: ends - fake.now()))
-                cut_exc = raised(lambda: fetch_attempt(PINS[2][1], cut, lambda: DOWNLOAD_DEADLINE))
+                slow_exc = raised(lambda: fetch_attempt(gnu_urls[1], slow, lambda: ends - fake.now()))
+                cut_exc = raised(lambda: fetch_attempt(gnu_urls[2], cut, lambda: DOWNLOAD_DEADLINE))
             finally:
                 urllib.request.urlopen = no_network
             check("fetch/deadline-stops-attempt-between-reads",
                   type(slow_exc) is NotCompleted and "passed during the download" in str(slow_exc)
                   and slow.getvalue() == b"a" * 10 + b"b" * 10 and type(cut_exc) is Transient
-                  and opened == [(PINS[1][1], 45), (PINS[2][1], FETCH_TIMEOUT)], (slow_exc, cut_exc, opened))
+                  and opened == [(gnu_urls[1], 45), (gnu_urls[2], FETCH_TIMEOUT)], (slow_exc, cut_exc, opened))
 
             # each body read gets FETCH_TIMEOUT cut down to the time left when it begins, not the timeout the
             # attempt opened with: the slow attempt above opened with 45 s left and read again with 15 s left. Over
@@ -870,7 +958,7 @@ def self_test(report_path=None):
             urllib.request.urlopen = real_urlopen_chunked
             try:
                 chunked = io.BytesIO()
-                chunked_exc = raised(lambda: fetch_attempt(PINS[3][1], chunked, ticking))
+                chunked_exc = raised(lambda: fetch_attempt(gnu_urls[3], chunked, ticking))
             finally:
                 urllib.request.urlopen = no_network
             if real:
@@ -886,7 +974,8 @@ def self_test(report_path=None):
             body = sample.read_bytes()
             head = "HTTP/1.1 200 OK\r\nContent-Length: {}".format(len(body)).encode("ascii")
             bodies = [body[:5], body]
-            short_url = "https://fixture.invalid/bash53-001"
+            short_source = ("https://fixture.invalid/",)
+            short_url = short_source[0] + "bash53-001"
 
             def short_then_whole(url, timeout=None):
                 return http_response(head, bodies.pop(0), timeout)[0]
@@ -897,11 +986,11 @@ def self_test(report_path=None):
             clock = _FakeClock()
             urllib.request.urlopen = short_then_whole
             try:
-                got = _outcome(lambda: download((("bash53-001", short_url, None, digest),), short_dir, fetch_attempt,
-                                                clock.sleep, clock.now, log=logged.append))
+                got = _outcome(lambda: download((("bash53-001", "bash53-001", None, digest),), short_source, short_dir,
+                                                fetch_attempt, clock.sleep, clock.now, log=logged.append))
             finally:
                 urllib.request.urlopen = no_network
-            check("fetch/short-body-retried", got == ("ok", None) and not bodies and clock.sleeps == [2]
+            check("fetch/short-body-retried", got == ("ok", short_source) and not bodies and clock.sleeps == [2]
                   and len(logged) == 2 and "the body has 5 bytes; its Content-Length declares {}".format(len(body))
                   in logged[0] and os.listdir(short_dir) == ["bash53-001"]
                   and (short_dir / "bash53-001").read_bytes() == body, (got, bodies, clock.sleeps, logged))
@@ -916,8 +1005,9 @@ def self_test(report_path=None):
                 clock = _FakeClock()
                 urllib.request.urlopen = lambda url, timeout=None: http_response(*queue.pop(0), timeout)[0]
                 try:
-                    got = _outcome(lambda: download((("bash53-001", short_url, None, digest),), directory,
-                                                    fetch_attempt, clock.sleep, clock.now, log=lambda line: None))
+                    got = _outcome(lambda: download((("bash53-001", "bash53-001", None, digest),), short_source,
+                                                    directory, fetch_attempt, clock.sleep, clock.now,
+                                                    log=lambda line: None))
                 finally:
                     urllib.request.urlopen = no_network
                 return got, len(heads_and_bodies) - len(queue), clock.sleeps, sorted(os.listdir(directory))
@@ -936,7 +1026,8 @@ def self_test(report_path=None):
             chunked_body = "{:x}\r\n".format(len(body)).encode("ascii") + body + b"\r\n0\r\n\r\n"
             got = one_download("chunked-with-length", [(
                 b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 3", chunked_body)])
-            check("fetch/chunked-ignores-content-length", got[0] == ("ok", None) and got[1] == 1 and got[2] == []
+            check("fetch/chunked-ignores-content-length", got[0] == ("ok", short_source) and got[1] == 1
+                  and got[2] == []
                   and got[3] == ["bash53-001"] and (base / "chunked-with-length" / "bash53-001").read_bytes() == body,
                   got)
 
@@ -963,10 +1054,13 @@ def self_test(report_path=None):
             # the retry: a transient failure, then success. The archive's first attempt leaves partial bytes and
             # fails with a connection reset; one 2 s wait, then a second attempt into a new empty file completes and
             # the build installs. Each attempt saw only its own attempt file, and none is left behind.
+            def fixture_url(row, source=fixture_sources[0]):
+                return source + row[1]
+
             pins = _fixture_pins(fixtures)
-            archive_url = pins[0][1]
+            archive_url = fixture_url(pins[0])
             archive_bytes = (fixtures / pins[0][0]).read_bytes()
-            script = {row[1]: [(fixtures / row[0]).read_bytes()] for row in pins}
+            script = {fixture_url(row): [(fixtures / row[0]).read_bytes()] for row in pins}
             script[archive_url] = [fetch_error(archive_url, ConnectionResetError(errno.ECONNRESET, "reset")),
                                    archive_bytes]
             watch = base / "retry-success" / (INSTALL_NAME + "-build") / "downloads"
@@ -975,12 +1069,80 @@ def self_test(report_path=None):
             got, temp, github_path, _untouched = run("retry-success", pins, fetcher, clock)
             bindir = temp / INSTALL_NAME / "bin"
             archive_calls = [call for call in calls if call[0] == archive_url]
-            check("retry/transient-then-success", got == ("ok", bindir) and len(calls) == len(pins) + 1
+            check("retry/transient-then-success", got == ("ok", (bindir, fixture_sources * 10))
+                  and len(calls) == len(pins) + 1
                   and len(archive_calls) == 2 and clock.sleeps == [2] and all(call[1] == 0 for call in calls)
                   and all(len([n for n in call[2] if ".attempt-" in n]) == 1 for call in calls)
                   and not [n for n in os.listdir(watch) if ".attempt-" in n]
                   and (watch / pins[0][0]).read_bytes() == archive_bytes
                   and github_path.read_text(encoding="utf-8") == "/already/listed\n" + str(bindir) + "\n",
+                  (got, calls, clock.sleeps))
+
+            # the sources: three fixture sources stand in for GNU_SOURCES. The first is unreachable for every file
+            # (Errno 101, as urllib reports it); each file moves on to the second source at once, with no wait and
+            # into a new empty file, and the build installs from it. The third is never asked.
+            mirror_sources = ("fixture-a://", "fixture-b://", "fixture-c://")
+            unreachable = urllib.error.URLError(OSError(errno.ENETUNREACH, "Network is unreachable"))
+            script = {}
+            for row in pins:
+                script[fixture_url(row, mirror_sources[0])] = [fetch_error(fixture_url(row, mirror_sources[0]),
+                                                                           unreachable)]
+                for source in mirror_sources[1:]:
+                    script[fixture_url(row, source)] = [(fixtures / row[0]).read_bytes()]
+            watch = base / "second-source" / (INSTALL_NAME + "-build") / "downloads"
+            fetcher, calls = _scripted_fetcher(script, watch)
+            clock = _FakeClock()
+            logged = []
+            got, temp, github_path, _untouched = run("second-source", pins, fetcher, clock, mirror_sources,
+                                                     logged.append)
+            bindir = temp / INSTALL_NAME / "bin"
+            check("sources/first-unreachable-second-completes",
+                  got == ("ok", (bindir, mirror_sources[1:2] * len(pins)))
+                  and served_summary(mirror_sources, got[1][1]) == "{} from fixture-b://".format(len(pins))
+                  and [call[0] for call in calls] == [fixture_url(row, source) for row in pins
+                                                      for source in mirror_sources[:2]]
+                  and clock.sleeps == [] and all(call[1] == 0 for call in calls)
+                  and all(len([n for n in call[2] if ".attempt-" in n]) == 1 for call in calls)
+                  and not [n for n in os.listdir(watch) if ".attempt-" in n]
+                  and "attempt 1 of 4 from fixture-a://bash-5.3.tar.gz failed (fixture-a://bash-5.3.tar.gz: fetch "
+                      "failed (URLError: <urlopen error [Errno 101] Network is unreachable>)); trying "
+                      "fixture-b://bash-5.3.tar.gz" in logged
+                  and "fetched bash-5.3.tar.gz from fixture-b://bash-5.3.tar.gz" in logged
+                  and github_path.read_text(encoding="utf-8") == "/already/listed\n" + str(bindir) + "\n",
+                  (got, calls, clock.sleeps, logged))
+
+            # a mirror serving wrong bytes: the first source is unreachable and the second serves an archive of
+            # another byte count. That is refused at once by the archive's one pin, naming the source that served
+            # it, the one that failed before it and the one not tried; the third, which would serve the right
+            # bytes, is never asked, nothing waits and nothing is installed.
+            script[fixture_url(pins[0], mirror_sources[1])] = [b"not the pinned archive"]
+            fetcher, calls = _scripted_fetcher(script, base / "wrong-mirror" / (INSTALL_NAME + "-build")
+                                               / "downloads")
+            clock = _FakeClock()
+            got, temp, _github_path, untouched = run("wrong-mirror", pins, fetcher, clock, mirror_sources)
+            archive_urls = [fixture_url(pins[0], source) for source in mirror_sources]
+            check("sources/mirror-wrong-bytes-refused-at-once", got[0] == "refused"
+                  and got[1].startswith("bash-5.3.tar.gz: 22 bytes, pinned {} (fetched from {}; refused at once".format(
+                      pins[0][2], archive_urls[1]))
+                  and "earlier sources in this attempt: {}: fetch failed".format(archive_urls[0]) in got[1]
+                  and got[1].endswith("not tried: {})".format(archive_urls[2]))
+                  and [call[0] for call in calls] == archive_urls[:2] and clock.sleeps == [] and untouched
+                  and not (temp / (INSTALL_NAME + "-build") / SOURCE_DIR).exists(), (got, calls, clock.sleeps))
+
+            # the deadline crossing between sources: the first source's failed download of the archive ends 1 s
+            # past the 300 s deadline, so the second source is never asked; the build stops at once, without a
+            # wait, and the failure line names the source not started, the one that failed and the one not tried
+            script[fixture_url(pins[0], mirror_sources[1])] = [archive_bytes]
+            clock = _FakeClock()
+            fetcher, calls = _scripted_fetcher(script, base / "deadline-sources" / (INSTALL_NAME + "-build")
+                                               / "downloads", clock, DOWNLOAD_DEADLINE + 1)
+            got, _temp, _github_path, untouched = run("deadline-sources", pins, fetcher, clock, mirror_sources)
+            check("sources/deadline-between-sources", got[0] == "not-completed"
+                  and got[1].startswith("bash-5.3.tar.gz: the {} s download deadline passed before attempt 1 from "
+                                        "{} (earlier sources in this attempt: {}: fetch failed".format(
+                                            DOWNLOAD_DEADLINE, archive_urls[1], archive_urls[0]))
+                  and got[1].endswith("not tried: {})".format(archive_urls[2]))
+                  and [call[0] for call in calls] == archive_urls[:1] and clock.sleeps == [] and untouched,
                   (got, calls, clock.sleeps))
 
             # the CI entry over the real pin table with a scripted fetcher (nothing reaches the network): a
@@ -994,32 +1156,56 @@ def self_test(report_path=None):
                 fetcher, calls = _scripted_fetcher(script, work / "downloads")
                 clock = _FakeClock()
                 err = io.StringIO()
+                logged = []
 
                 def call():
                     with contextlib.redirect_stderr(err):
                         return build({"RUNNER_TEMP": str(temp), "GITHUB_PATH": str(listed_here)}, fetcher,
-                                     log=lambda line: None, sleep=clock.sleep, clock=clock.now)
+                                     log=logged.append, sleep=clock.sleep, clock=clock.now)
                 got = _outcome(call)
                 untouched = (listed_here.read_text(encoding="utf-8") == "/already/listed\n"
                              and not os.path.lexists(temp / INSTALL_NAME) and not (work / SOURCE_DIR).exists()
                              and not [n for n in os.listdir(work / "downloads") if ".attempt-" in n])
-                return got, calls, clock.sleeps, untouched, err.getvalue()
+                return got, calls, clock.sleeps, untouched, err.getvalue(), logged
 
-            url0 = PINS[0][1]
-            got, calls, sleeps, untouched, _err = entry_run(
-                "retry-exhausted", {url0: [fetch_error(url0, TimeoutError("timed out"))]})
-            check("retry/persistent-transient-exits-2", got == ("ok", 2) and [call[0] for call in calls] == [url0] * 4
-                  and sleeps == [2, 4, 8] and untouched, (got, calls, sleeps))
+            # the archive's URL from each of GNU_SOURCES, in order
+            urls0 = [source + PINS[0][1] for source in GNU_SOURCES]
+            url0 = urls0[0]
+            got, calls, sleeps, untouched, _err, _logged = entry_run(
+                "retry-exhausted", {url: [fetch_error(url, TimeoutError("timed out"))] for url in urls0})
+            check("retry/persistent-transient-exits-2", got == ("ok", 2)
+                  and [call[0] for call in calls] == urls0 * 4 and sleeps == [2, 4, 8] and untouched,
+                  (got, calls, sleeps))
+            # every source unreachable, as on a runner with no route out (Errno 101 from each): every attempt asks
+            # each source in order, the three waits are taken, the run exits 2 with nothing installed, and the
+            # failure line and each retry line name every source with its failure
+            got, calls, sleeps, untouched, err, logged = entry_run(
+                "sources-all-unreachable", {url: [fetch_error(url, unreachable)] for url in urls0})
+            each = "; ".join("{}: fetch failed (URLError: <urlopen error [Errno 101] Network is unreachable>)".format(
+                url) for url in urls0)
+            retried = [line for line in logged if "retrying in" in line]
+            check("sources/all-unreachable-names-each", got == ("ok", 2)
+                  and [call[0] for call in calls] == urls0 * FETCH_ATTEMPTS and sleeps == [2, 4, 8] and untouched
+                  and err == "NOT COMPLETED: bash-5.3.tar.gz: every source failed in each of 4 attempts (attempt 4: "
+                             "{}). Nothing was installed.\n".format(each)
+                  and retried == ["attempt {} of 4 failed from every source ({}); retrying in {} s".format(
+                      attempt, each, delay) for attempt, delay in zip((1, 2, 3), RETRY_DELAYS)],
+                  (got, calls, sleeps, err, logged))
             # a completed archive of another byte count is refused by its size pin; one of the pinned byte count with
             # another sha256 gets past the size pin and is refused by its digest. Neither is retried, and both exit 1.
-            got, calls, sleeps, untouched, err = entry_run("retry-size-mismatch", {url0: [b"not the pinned archive"]})
+            got, calls, sleeps, untouched, err, _logged = entry_run("retry-size-mismatch",
+                                                                    {url0: [b"not the pinned archive"]})
             check("retry/size-mismatch-not-retried", got == ("ok", 1) and [call[0] for call in calls] == [url0]
-                  and sleeps == [] and untouched and "bash-5.3.tar.gz: 22 bytes, pinned {}".format(PINS[0][2]) in err,
-                  (got, calls, sleeps, err))
-            got, calls, sleeps, untouched, err = entry_run("retry-digest-mismatch", {url0: [bytes(PINS[0][2])]})
+                  and sleeps == [] and untouched and "bash-5.3.tar.gz: 22 bytes, pinned {} (fetched from {}".format(
+                      PINS[0][2], url0) in err, (got, calls, sleeps, err))
+            got, calls, sleeps, untouched, err, _logged = entry_run("retry-digest-mismatch",
+                                                                    {url0: [bytes(PINS[0][2])]})
             check("retry/digest-mismatch-not-retried", got == ("ok", 1) and [call[0] for call in calls] == [url0]
-                  and sleeps == [] and untouched and "bash-5.3.tar.gz: sha256 {}, pinned {}".format(
-                      hashlib.sha256(bytes(PINS[0][2])).hexdigest(), PINS[0][3]) in err, (got, calls, sleeps, err))
+                  and sleeps == [] and untouched and "bash-5.3.tar.gz: sha256 {}, pinned {} (fetched from {}".format(
+                      hashlib.sha256(bytes(PINS[0][2])).hexdigest(), PINS[0][3], url0) in err,
+                  (got, calls, sleeps, err))
+            # a failure that is not transient stops the build at once: no other source is asked, and the failure
+            # line names the sources not tried
             outcomes = []
             for index, exc in enumerate([ssl.SSLCertVerificationError(1, "certificate verify failed"),
                                          urllib.error.HTTPError(url0, 503, "unavailable", None, None),
@@ -1027,7 +1213,8 @@ def self_test(report_path=None):
                 outcomes.append(entry_run("retry-permanent-{}".format(index), {url0: [fetch_error(url0, exc)]}))
             check("retry/non-transient-not-retried", all(
                 got == ("ok", 2) and [call[0] for call in calls] == [url0] and sleeps == [] and untouched
-                for got, calls, sleeps, untouched, _err in outcomes), outcomes)
+                and "(not tried: {}, {})".format(urls0[1], urls0[2]) in err
+                for got, calls, sleeps, untouched, err, _logged in outcomes), outcomes)
 
             # a file already at a pinned name in the downloads directory is never replaced, even after a failed
             # attempt was cleaned up: the completed download is refused and the file keeps its bytes
@@ -1036,10 +1223,12 @@ def self_test(report_path=None):
             (keep / "bash53-001").write_bytes(b"kept")
             one = _fixture_pins(fixtures)[1:2]
             fetcher, calls = _scripted_fetcher(
-                {one[0][1]: [fetch_error(one[0][1], ConnectionResetError(errno.ECONNRESET, "reset")),
-                             sample.read_bytes()]}, keep)
+                {fixture_url(one[0]): [fetch_error(fixture_url(one[0]), ConnectionResetError(errno.ECONNRESET,
+                                                                                            "reset")),
+                                       sample.read_bytes()]}, keep)
             clock = _FakeClock()
-            got = _outcome(lambda: download(one, keep, fetcher, clock.sleep, clock.now, log=lambda line: None))
+            got = _outcome(lambda: download(one, fixture_sources, keep, fetcher, clock.sleep, clock.now,
+                                            log=lambda line: None))
             check("retry/existing-destination-preserved", got[0] == "not-completed" and "already exists" in got[1]
                   and (keep / "bash53-001").read_bytes() == b"kept" and os.listdir(keep) == ["bash53-001"]
                   and len(calls) == 2 and clock.sleeps == [2], (got, calls, clock.sleeps, os.listdir(keep)))
@@ -1047,19 +1236,20 @@ def self_test(report_path=None):
             # the shared deadline across the files: each attempt costs 110 s of the 300, so three files complete,
             # the fourth attempt is never started, and nothing is installed
             pins = _fixture_pins(fixtures)
-            script = {row[1]: [(fixtures / row[0]).read_bytes()] for row in pins}
+            script = {fixture_url(row): [(fixtures / row[0]).read_bytes()] for row in pins}
             clock = _FakeClock()
             fetcher, calls = _scripted_fetcher(script, base / "deadline-files" / (INSTALL_NAME + "-build")
                                                / "downloads", clock, 110)
             got, _temp, _github_path, untouched = run("deadline-files", pins, fetcher, clock)
             check("deadline/no-attempt-after-deadline", got[0] == "not-completed"
-                  and "deadline passed before attempt 1" in got[1] and pins[3][1] in got[1]
-                  and [call[0] for call in calls] == [row[1] for row in pins[:3]] and clock.sleeps == []
+                  and "deadline passed before attempt 1" in got[1] and fixture_url(pins[3]) in got[1]
+                  and [call[0] for call in calls] == [fixture_url(row) for row in pins[:3]] and clock.sleeps == []
                   and untouched, (got, calls, clock.sleeps))
 
             # no wait that would end after the deadline: the first two files take 200 s; the third fails at 295 s
             # (2 s wait, 5 s left: taken) and again at 299 s (4 s wait, 1 s left: not taken), so it stops at once
-            script[pins[2][1]] = [fetch_error(pins[2][1], ConnectionResetError(errno.ECONNRESET, "reset"))]
+            script[fixture_url(pins[2])] = [fetch_error(fixture_url(pins[2]),
+                                                        ConnectionResetError(errno.ECONNRESET, "reset"))]
             clock = _FakeClock()
             fetcher, calls = _scripted_fetcher(script, base / "deadline-wait" / (INSTALL_NAME + "-build")
                                                / "downloads", clock, (100, 100, 95, 2))
@@ -1169,12 +1359,16 @@ def self_test(report_path=None):
         for check_id, detail in failed:
             print("  {}: {!r}".format(check_id, detail))
         return 1
-    print("SELF-TEST PASS: ci-build-bash {} checks (the pin table; a sha256 or size mismatch and a missing file "
+    print("SELF-TEST PASS: ci-build-bash {} checks (the pin table, one pin per file, and the three GNU sources in "
+          "order; a source that fails transiently moves on to the next at once and the build completes from it, "
+          "every source failing exits 2 naming each, a source serving wrong bytes is refused at once with no "
+          "further source asked, and no source is asked once the deadline has passed; a sha256 or size mismatch "
+          "and a missing file "
           "refuse; a non-https URL is refused before any fetch; only BASH_VERSINFO 5 3 9 passes; over fixture "
           "files, a full build installs and appends to GITHUB_PATH, and a mismatch, a failed download, patches out "
           "of order, a wrong built or installed version, an existing install and an unexpected OSError each leave "
-          "nothing installed; only the named transient transport failures are retried, four attempts with 2, 4 "
-          "and 8 s waits into fresh files, exit 2 once exhausted, a body cut short of its Content-Length is "
+          "nothing installed; only the named transient transport failures move on or are retried, four attempts "
+          "over every source with 2, 4 and 8 s waits into fresh files, exit 2 once exhausted, a body cut short of its Content-Length is "
           "retried, a malformed Content-Length stops at once, a chunked body ignores a Content-Length beside it, "
           "the read timeout reach fails closed, each body read's socket timeout is cut to the time left, a size or digest mismatch exits 1 "
           "without a retry, an existing download is never replaced, and no attempt starts and no wait is planned past the shared 300 s deadline (opening, header and chunk reads can still overrun it, as the module docstring states); a bare run is the self-test even with RUNNER_TEMP and GITHUB_PATH set, only --build "
