@@ -14,7 +14,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   git_explicit_binding PreToolUse expbnd allow+note an ambient git target or broad scope before relocation/publish
   git_discard         PreToolUse  prsunc  allow / snapshot-then-allow / deny a git command that discards work
   branch_root         PreToolUse  brnrot  deny branch creation from an orphaned or unprovable start point
-  gate_weakening      PreToolUse  gatdis  deny a git hook bypass and a verification run piped into a truncating sink; allow+note another swallowed or truncated checker
+  gate_weakening      PreToolUse  gatdis  deny a git hook bypass, a verification run piped into a truncating sink, and one piped into any stage before a git commit/push/merge/tag/am; allow+note another swallowed, truncated or piped checker
   commit_msg_subst    PreToolUse  sectvl  deny shell substitution in a git commit argument
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
@@ -18828,6 +18828,219 @@ def _verification_sink_message(hit):
         "write the full output to a file and read it.".format(label))
 
 
+# --- gatdis deny tier: a VERIFICATION RUN piped into any stage and joined to a gated git action --------------
+# A second canonical shape, held to the producer allow-list and the conditions on earlier commands that
+# _verification_sink uses: the first command of a pipeline is a known verification run, every later stage of
+# that pipeline is a simple command of any kind (a pass-through tee, cat, tr or uniq, a filter, a sink) or a
+# reserved-word compound whose extent the walk can place (_gate_compound_stage: a while, until, for or select
+# loop, an if compound or a '{ ...; }' group), and the last stage is joined by '&&', ';' or a newline to a git
+# command that commits, pushes, merges, tags or applies patches (_GATE_ACTION_VERBS). By default a pipeline's
+# exit status is that of its last stage, so the check's own status never reaches the join: after '&&' the git
+# action runs whenever that last stage succeeds, and after ';' or a newline it runs whatever the status. An
+# earlier 'set -o pipefail' in the same command is not a known-benign command (_gate_benign_prefix), so that form
+# only notes (_gate_action_note), as does every other shape outside this one. A check joined to the git action
+# with no pipe ('pytest && git commit') passes its own status to '&&' and is not judged here.
+# RESIDUALS this shape and its note cannot see (disclosed, also in gate_weakening's docstring):
+#   - pipefail set by an EARLIER tool call, or in BASHOPTS/SHELLOPTS inherited from the environment, is invisible,
+#     so a command that is safe under it still denies (a predicted false refusal), and one typed inline only notes;
+#   - the subcommand's options are not read, so a dry-run, listing, verify or abort form after such a pipeline
+#     (git push --dry-run, git tag -l, git tag -v, git merge --abort, git am --abort) denies too (false refusal);
+#   - a git action behind a wrapper ('nice git commit', 'env X=1 git push'), inside a compound ('if ...; then git
+#     commit; fi'), inside a subshell, an sh -c/bash -c, eval or xargs body, or joined by '||' or '&' is not judged;
+#   - a stage that is a subshell '( ... )', a case compound, or holds a command substitution or backquote is not a
+#     stage the walk can place, so that pipeline only notes, and so does a git action after a command between it
+#     and the pipeline;
+#   - on a parse error only the complete segments recovered before the construct the lexer stopped at are judged
+#     for the deny, and the note needs a parsed command: where the lexer stops at or before the git action (a
+#     process substitution, here-string or unquoted here-document in the pipeline or on the git segment), the raw
+#     fallback decides and does not read this shape, so 'pytest | tee >(cat) && git commit -m x' and
+#     'pytest | cat <<< x && git commit -m x' are allowed silently (the old branch's raw parse-error probe was not
+#     replayed onto main's fallback);
+#   - a check not on the producer allow-list (_is_verification_run), an alias or shell function standing for git
+#     or for the check, and a check whose status is lost without a pipe (echo "$(pytest)" && git commit, cat
+#     <(pytest) && git commit) are not judged.
+_GATE_ACTION_VERBS = frozenset(("commit", "push", "merge", "tag", "am"))
+# The joins after which the git action runs whenever the command before it succeeds, or always; the value
+# names the join in a message ('' is a newline here: a command follows it).
+_GATE_ACTION_JOINS = dict((("&&", "'&&'"), (";", "';'"), ("", "a newline")))
+# The reserved words that open a compound a pipeline stage may be, each with the word that closes it. A case
+# compound is left out: its pattern words and the ')' and '|' between them lex as commands and separators.
+_GATE_COMPOUND_CLOSERS = dict((("while", "done"), ("until", "done"), ("for", "done"), ("select", "done"),
+                               ("if", "fi"), ("{", "}")))
+_GATE_COMPOUND_ENDS = frozenset(_GATE_COMPOUND_CLOSERS.values())
+
+
+def _gate_git_action(seg):
+    """The gated git subcommand a segment runs, or None: its command word is git (leading VAR=value words
+    skipped, _command_word), it is no help invocation (_has_info_flag), and its subcommand (_git_sub_and_args)
+    is one of _GATE_ACTION_VERBS. The subcommand's other options are not read, so a dry run or a listing form
+    of these subcommands counts too. A git command behind a wrapper ('nice git commit') or opening a compound
+    ('if git commit') is not read."""
+    if _command_word(seg.argv) != "git" or _has_info_flag(seg.argv):
+        return None
+    sub = _git_sub_and_args(seg.argv)[0]
+    return sub if sub in _GATE_ACTION_VERBS else None
+
+
+def _gate_live(seg):
+    """True when a segment is not an empty newline segment (bash continues a pipeline or a list across one)."""
+    return bool(seg.argv or seg.redirects or seg.sep_after)
+
+
+def _gate_next_command(records, k):
+    """The index of the first segment after records[k] that is not an empty newline segment, or None."""
+    return next((j for j in range(k + 1, len(records)) if _gate_live(records[j])), None)
+
+
+def _gate_join_before(records, g):
+    """The operator that joins records[g] to the command before it, empty newline segments skipped ('' for
+    a newline), or None at the start of the command."""
+    return next((seg.sep_after for seg in reversed(records[:g]) if _gate_live(seg)), None)
+
+
+def _gate_compound_stage(records, j):
+    """For a pipeline stage that starts at records[j] with a reserved word opening a compound
+    (_GATE_COMPOUND_CLOSERS), the index of the segment holding its matching closing word and the stage's label
+    ('while ... done'), or None. Only the leading reserved words of each segment are read, the words bash reads
+    in command position, so 'echo done' closes nothing. A segment ended by '(' or ')', one holding a command
+    substitution or backquote, a case compound, a closing word that does not match the innermost opener, or a
+    compound that never closes returns None: its extent is not proved, so the pipeline only notes."""
+    stack = []
+    for k in range(j, len(records)):
+        seg = records[k]
+        if seg.sep_after in ("(", ")") or "$(" in seg.raw or "`" in seg.raw:
+            return None
+        for word in seg.argv:
+            if word == "case":
+                return None
+            if word in _GATE_COMPOUND_CLOSERS:
+                stack.append(word)
+            elif word in _GATE_COMPOUND_ENDS:
+                if not stack or _GATE_COMPOUND_CLOSERS[stack[-1]] != word:
+                    return None
+                opener = stack.pop()
+                if not stack:
+                    return k, "{} ... {}".format(opener, word)
+            if word not in _GATE_RESERVED:
+                break
+        if k == j and not stack:
+            return None   # the stage opens no compound
+    return None
+
+
+def _verification_action(records):
+    """gatdis deny tier: (producer word, last stage label, join, git subcommand) for the first canonical
+    verification pipeline joined to a gated git action, or None. The producer meets the conditions of
+    _verification_sink: every segment before it is _gate_benign_prefix, it is outside every case compound
+    (_gate_case_depths), it is the first command of its pipeline and not joined to the command before it by '||'
+    (_gate_conditional_run), _gate_simple, stdout not redirected, ending in '|' or '|&', and a listed run form
+    (_is_verification_run). Every later stage of its pipeline (an empty newline segment after a pipe is skipped)
+    is _gate_simple or a compound _gate_compound_stage can place, whatever it runs and wherever its stdin and
+    stdout go, since the pipeline's status is its last stage's either way; the last stage ends in '&&', ';' or a
+    newline (_GATE_ACTION_JOINS); and the next command runs a gated git action (_gate_git_action). Any other
+    shape returns None and is left to the note tier (_gate_action_note). Each segment is read a bounded number
+    of times: the walk starts at the first producer and returns there."""
+    for (i, seg), case_depth in zip(enumerate(records), _gate_case_depths(records)):
+        if i and not _gate_benign_prefix(records[i - 1]):
+            return None   # an earlier command may set the run's environment or options (set -o pipefail): it notes
+        if (seg.sep_after not in _GATE_PIPES or case_depth or not _gate_simple(seg)
+                or _gate_stdout_redirected(seg) or not _is_verification_run(seg.argv)):
+            continue
+        if _gate_conditional_run(records, i):
+            return None   # a pipeline run only when an earlier command fails, or never: it only notes
+        last, label = i, None
+        while records[last].sep_after in _GATE_PIPES:
+            nxt = _gate_next_command(records, last)
+            if nxt is None:
+                return None
+            if _gate_simple(records[nxt]):
+                stage = records[nxt].argv
+                last, label = nxt, _command_word(stage) or stage[0]
+                continue
+            placed = _gate_compound_stage(records, nxt)
+            if placed is None:
+                return None   # a subshell, case or other stage whose extent is not proved: it only notes
+            last, label = placed
+        join = records[last].sep_after
+        action = _gate_next_command(records, last) if join in _GATE_ACTION_JOINS else None
+        sub = None if action is None else _gate_git_action(records[action])
+        if sub is None:
+            return None
+        return _gate_word(_gate_peel(seg.argv, producer=True)[0]), label, join, sub
+    return None
+
+
+def _verification_action_message(hit):
+    """The (reason, banner) of the deny-and-educate decision for a _verification_action hit. It claims only the
+    canonical shape: a known verification run that is the first command of a pipeline whose last stage is another
+    command, whose status by default is the pipeline's, and a git action joined after it, saying what that join
+    does with the status. It does not claim that the check's output reaches the last stage (a stage may read its
+    stdin from a redirection). The fix it names runs the check alone, its full output in a file at an ABSOLUTE
+    path (bash_absolute_paths denies a relative truncating redirect target), and the git action as a separate
+    step once the check's own exit status is a success; it never suggests an exit-status echo trailer."""
+    word, last, join, sub = hit
+    if join == "&&":
+        effect = ("runs whenever '{}' succeeds, so a failing check can still lead to it ('set -o pipefail' typed "
+                  "earlier in the same command makes a failing check fail the pipeline, so '&&' then withholds the "
+                  "git action; the hook only notes that form)".format(last))
+    else:
+        effect = "runs whatever that status is, so a failing check does not stop it, and 'set -o pipefail' would not"
+    return (
+        "AIQT rule gatdis (gate-discipline): this '{}' command is on the hook's list of known verification runs, "
+        "and it is the first command of a pipeline whose last stage is '{}'. By default a pipeline's exit status is "
+        "that of its last stage, not the check's. This pipeline is joined by {} to 'git {}', which {}. The rule: a "
+        "gate verdict is read from the gate's own unmasked exit status, and the gated action is withheld until "
+        "that verdict is a success. Run the check alone with its full output in a file at an absolute path and no "
+        "pipe after it, for example `<command> > /abs/path/check.log 2>&1`, take the verdict from that command's "
+        "own exit status, and run 'git {}' as a separate step only once that status is a success."
+        .format(word, last, _GATE_ACTION_JOINS[join], sub, effect, sub),
+        "AIQT guardrail: denied a known verification run piped into '{}' and joined by {} to 'git {}' (rule "
+        "gatdis); run the check alone, take the verdict from its own exit status, then run the git action."
+        .format(last, _GATE_ACTION_JOINS[join], sub))
+
+
+def _gate_action_note(records):
+    """gatdis note tier, for a gated git action the canonical deny (_verification_action) does not prove: the
+    note text, or None. It notes when a checker-shaped command (_gate_checker_suffix) is followed, there or later,
+    by a pipe, and a later command runs a gated git action (_gate_git_action) joined to the command before it by
+    '&&', ';' or a newline (_gate_join_before). This is where an inline 'set -o pipefail' lands, with every other
+    shape outside the canonical deny (an unlisted tool, mode or option, a wrapper beyond nice, timeout and time,
+    an earlier command that is not known-benign, a subshell or case stage, a git action after a later command).
+    The text claims neither that the git action follows the check's own pipeline nor that the check's status is
+    lost. One or more newlines after a subshell's ')' are read as the newline join ('(pytest | tee l)', a newline,
+    'git commit' notes as its ';' form does), except inside a case compound (_gate_case_depths), where a ')' may end
+    a pattern and a newline after it joins nothing. Over-matching by design: it costs a note, never a refusal.
+    Linear: the case depths once, one pass to the first checker, one to its pipe, one over the later segments,
+    each join read from the last live segment kept in that pass."""
+    first = next((i for i, seg in enumerate(records) if seg.argv and _gate_checker_suffix(seg.argv)), None)
+    if first is None:
+        return None
+    pipe = next((p for p in range(first, len(records)) if records[p].sep_after in _GATE_PIPES), None)
+    if pipe is None:
+        return None
+    depths = list(_gate_case_depths(records))
+    join = records[pipe].sep_after
+    for g in range(pipe + 1, len(records)):
+        seg = records[g]
+        if not _gate_live(seg) and join == ")" and not depths[g]:
+            join = ""   # a newline after a subshell's ')' ends that command: the next one is joined by a newline
+        sub = _gate_git_action(seg) if seg.argv else None
+        if sub is not None and join in _GATE_ACTION_JOINS:
+            return ("AIQT guardrail (rule gatdis, gate-discipline): a command that looks like a check is followed by a "
+                    "pipe and, later in this command, by 'git {}' joined by {} to the command before it. By default "
+                    "a pipeline's exit status is that of its last stage, not the check's, so if that git action "
+                    "depends on the check's pipeline, a failing check need not stop it ('set -o pipefail' makes a "
+                    "failing check fail the pipeline, so '&&' then withholds the action, but ';' or a newline does "
+                    "not). The hook does not prove that this is a verification run, that the git action follows the "
+                    "check's own pipeline, or that pipefail is off, so this is a note, not a refusal. If the check "
+                    "gates this git action, run it alone with its full output in a file at an absolute path, take the "
+                    "verdict from its own exit status, and run the git action as a separate step."
+                    .format(sub, _GATE_ACTION_JOINS[join]))
+        if _gate_live(seg):
+            join = seg.sep_after
+    return None
+
+
 # The note tier's view of a checker or a sink the canonical deny cannot prove: wrappers beyond the four the
 # deny peels, a checker word right inside a command substitution, a sink anywhere after a later pipe.
 _GATE_NOTE_WRAPPERS = frozenset((
@@ -20316,8 +20529,18 @@ def gate_weakening(data):
     the fix (run the check alone with its full output in a file at an absolute path and read it). The rule
     forbids piping a check to a truncating sink without conditions, and 'set -o pipefail' gives no exemption
     (it makes the pipeline fail when any stage fails, though not always with the check's own status, and the
-    output is still cut). The deny is held until the segment loop ends so a
-    --no-verify deny keeps its own message, and it suppresses the note. NOTE tier: every
+    output is still cut). A second DENY shape (_verification_action) holds the same producer to the same
+    conditions and pipes it into any stages that are simple commands (a pass-through tee, cat, tr or uniq, a
+    filter, a sink) or reserved-word compounds the walk can place (a while-read loop, an if compound, a '{ ...; }'
+    group), whose last stage is joined by '&&', ';' or a newline to a git commit, push, merge, tag or am
+    (_gate_git_action): by default the pipeline's status is its last stage's, so a failing check can still lead to
+    the git action. A check joined to the git action with no pipe ('pytest && git commit') passes its own status on
+    and is not judged. Both deny shapes are held until the segment loop ends so a --no-verify deny keeps its own
+    message, the truncating-sink deny is tried first, and either suppresses the note; on a parse error the
+    recovered complete segments are judged for both. Its residuals are listed beside _GATE_ACTION_VERBS (pipefail
+    set by an earlier call or inherited, unread dry-run and listing options as false refusals, a git action behind
+    a wrapper, in a compound or subshell or joined by '||' or '&', a subshell or case stage, which only notes).
+    NOTE tier: every
     other checker-shaped segment (the broad heuristic) whose failure signal is swallowed by a following
     '|| true'/'|| :', or piped into an adjacent head/tail, ALLOWS-WITH-NOTE, and so does a shape outside the
     canonical deny that _gate_flow_note sees (an unlisted tool, mode or option, a compound or grouped stage,
@@ -20325,7 +20548,11 @@ def gate_weakening(data):
     pipeline after an earlier command in the same line that is not known-benign (_gate_benign_prefix) or joined
     to one by '||' (_gate_conditional_run), a sed,
     awk, sort or grep stage, a sink spelling off the list or cut, a checker-shaped or verify-option command
-    followed by a pipe and later a stage that may pass on only part of its input). On a parse error
+    followed by a pipe and later a stage that may pass on only part of its input), and, last, a checker-shaped
+    or verify-option command followed by a pipe and later by a gated git action joined by '&&', ';' or a newline
+    that the second deny shape does not prove (_gate_action_note: an inline 'set -o pipefail' or any other earlier
+    command that is not known-benign, an unlisted run, a subshell or case stage, a command between the pipeline
+    and the git action). On a parse error
     the partially lexed complete segments are judged for the deny tier first (DENY outranks the parse error);
     otherwise the raw fallback stands. A '#' whose comment reading depends on context (the shared lexer's
     comment rule) is judged under both readings: the deny tier on each reading alone, everything else on the
@@ -20449,6 +20676,10 @@ def gate_weakening(data):
         hit = _verification_sink(recovered)
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
+            return _deny(reason, banner)
+        action = _verification_action(recovered)
+        if action is not None:
+            reason, banner = _verification_action_message(action)
             return _deny(reason, banner)
         # A git command that runs under a git alias the command defines denies as on a parsed command
         # (_git_alias_recovered: a text naming a git configuration variable and git, a text naming git that defines
@@ -20657,6 +20888,11 @@ def gate_weakening(data):
     if hit is not None:
         reason, banner = _verification_sink_message(hit)
         return _deny(reason, banner)
+    action = next((found for found in (_verification_action(reading) for reading in readings) if found is not None),
+                  None)
+    if action is not None:
+        reason, banner = _verification_action_message(action)
+        return _deny(reason, banner)
     if floor:
         # The path main's failed lex takes denies here before any note: a sink main's partial lex proves past
         # the body, or a raw bypass spelling anywhere in the text.
@@ -20680,6 +20916,10 @@ def gate_weakening(data):
     flow_note = _gate_flow_note(records, command)
     if flow_note is not None:
         return _allow_note(flow_note)
+    action_note = next((found for found in (_gate_action_note(reading) for reading in readings) if found is not None),
+                       None)
+    if action_note is not None:
+        return _allow_note(action_note)
     if floor:
         # its note, or the allow, in place of this allow
         return _gate_weakening_fallback(command, heredoc_message=True)

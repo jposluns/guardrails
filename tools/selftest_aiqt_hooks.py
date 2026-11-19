@@ -30271,6 +30271,79 @@ def _main_isolated(monitor):
         ]
         for _ct_label, _ct_cmd, _ct_want in _ct:
             gexpect(_ct_label, _ct_cmd, _ct_want)
+        # === gatdis deny tier, second shape: a VERIFICATION RUN piped into ANY stage and joined to a gated git action ==
+        # (_verification_action, _gate_action_note). Rows derived from the hook's own grammar: the producer allow-list
+        # (_is_verification_run), the stage walk (_gate_simple, _gate_compound_stage), the joins (_GATE_ACTION_JOINS)
+        # and the gated verbs (_GATE_ACTION_VERBS). Each '_ct_act' row has a different outcome without the shape (it
+        # allowed silently before), so reverting the shape turns it red; each '_ct_act_keep' row has the same outcome
+        # either way.
+        _ct_act = [
+            ("(gw-act-1) the incident: a check piped into tee, '&&' git commit, denies",
+             "pytest | tee /tmp/check.log && git commit -m x", "deny"),
+            ("(gw-act-2) a check piped into cat, '&&' git commit, denies",
+             "pytest | cat && git commit -m x", "deny"),
+            ("(gw-act-3) a two-stage pipe (tee then cat), '&&' git push, denies",
+             "pytest | tee /var/tmp/x/l | cat && git push", "deny"),
+            ("(gw-act-4) a newline join to git commit denies",
+             "pytest | tee /var/tmp/x/l\ngit commit -m x", "deny"),
+            ("(gw-act-5) a ';' join to git merge denies",
+             "pytest | tee /var/tmp/x/l; git merge topic", "deny"),
+            ("(gw-act-6) a while-read loop stage, '&&' git commit, denies",
+             "pytest | while read l; do echo ok; done && git commit -m x", "deny"),
+            ("(gw-act-7) a '{ ...; }' group stage, '&&' git tag, denies",
+             "make test | { cat; } && git tag v1", "deny"),
+            ("(gw-act-8) a '|&' pipe into tee, '&&' git am, denies",
+             "npm run lint |& tee /var/tmp/x/l && git am /var/tmp/x/p.patch", "deny"),
+            ("(gw-act-9) a known-benign 'cd' before the pipeline still denies",
+             "cd /var/tmp/x && pytest | tee /var/tmp/x/l && git commit -m x", "deny"),
+            ("(gw-act-10) a newline after the pipe continues the pipeline, denies",
+             "pytest |\ntee /var/tmp/x/l && git commit -m x", "deny"),
+            ("(gw-act-11) a filter stage that is not a sink (grep -v), '&&' git push, denies",
+             "pytest | grep -v DEBUG && git push", "deny"),
+            ("(gw-act-12) an inline 'set -o pipefail' notes (not known-benign before the producer)",
+             "set -o pipefail; pytest | tee /var/tmp/x/l && git commit -m x", "allow-note"),
+            ("(gw-act-13) an unlisted run mode (pytest --collect-only) notes",
+             "pytest --collect-only | tee /var/tmp/x/l && git commit -m x", "allow-note"),
+            ("(gw-act-14) a subshell stage is not placed by the walk, notes",
+             "pytest | (cat) && git commit -m x", "allow-note"),
+            ("(gw-act-15) a command between the pipeline and the git action notes",
+             "pytest | tee /var/tmp/x/l && echo done && git commit -m x", "allow-note"),
+            ("(gw-act-16) a newline after a subshell's ')' is the newline join, notes",
+             "(pytest | tee /var/tmp/x/l)\ngit commit -m x", "allow-note"),
+            ("(gw-act-17) a newline after a subshell stage's ')' is the newline join, notes",
+             "pytest | (tee /var/tmp/x/l)\ngit push", "allow-note"),
+        ]
+        _ct_act_keep = [
+            ("(gw-act-k1) no gated git action after the pipe (git status) allows",
+             "pytest | tee /var/tmp/x/l && git status", "allow"),
+            ("(gw-act-k2) no git action at all allows", "pytest | tee /var/tmp/x/l", "allow"),
+            ("(gw-act-k3) a check not piped passes its own status to '&&', allows",
+             "pytest && git commit -m x", "allow"),
+            ("(gw-act-k4) a git action joined by '||' is not judged, allows",
+             "pytest | tee /var/tmp/x/l || git commit -m x", "allow"),
+            ("(gw-act-k5) a git action inside the loop body is not after the pipeline, allows",
+             "pytest | while read l; do git commit -m x; done", "allow"),
+            ("(gw-act-k6) a truncating sink keeps the sink deny and its message",
+             "pytest | tail -5 && git commit -m x", "deny"),
+            ("(gw-act-k7) a --no-verify after the pipeline keeps its own deny",
+             "pytest | tee /var/tmp/x/l && git commit -n -m x", "deny"),
+            ("(gw-act-k8) the check alone, its output in a file, then the git action, allows",
+             "pytest > /var/tmp/x/l 2>&1 && git commit -m x", "allow"),
+            ("(gw-act-k9) '||' after a subshell's ')' is not judged, allows",
+             "(pytest | tee /var/tmp/x/l) || git commit -m x", "allow"),
+            ("(gw-act-k10) a case pattern's ')' and a newline join nothing, allows",
+             "pytest | tee /var/tmp/x/l; case x in a)\ngit commit -m x;; esac", "allow"),
+        ]
+        for _ct_label, _ct_cmd, _ct_want in _ct_act + _ct_act_keep:
+            gexpect(_ct_label, _ct_cmd, _ct_want)
+        gdeny_names("(gw-act-t1) the deny names the last stage, the join and the git action",
+                    "pytest | tee /tmp/check.log && git commit -m x", "last stage is 'tee'. By default")
+        gdeny_names("(gw-act-t2) the deny names a newline join",
+                    "pytest | tee /var/tmp/x/l\ngit push", "joined by a newline to 'git push'")
+        gdeny_names("(gw-act-t3) the deny names a compound stage",
+                    "pytest | while read l; do echo ok; done; git commit -m x", "last stage is 'while ... done'")
+        gdeny_names("(gw-act-t4) the sink deny keeps its own message before the git action",
+                    "pytest | tail -5 && git commit -m x", "truncating sink")
         # Round 4: the deny is held to the canonical shape (a simple first-stage verification run piped through plain
         # filters into a stage that cuts its stdin); every form named in the first QA keeps its new verdict here.
         _ct_r4 = [
