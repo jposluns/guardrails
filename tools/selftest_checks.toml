@@ -6832,6 +6832,16 @@ expected-check-ids = [
   "flip/write-own-line-unchecked-markdown",
   "fail-closed/write-own-line-r8-python",
   "flip/write-own-line-unchecked-python",
+  # the writer judges each proposal on the candidate with that proposal substituted for its baseline
+  "write/roundtrip-freed-baseline-line-credits-copy",
+  "flip/write-freed-line-judged-on-candidate",
+  "fail-closed/write-settle-bound",
+  "write/roundtrip-stale-baseline-line-frees-credit",
+  "flip/write-stale-line-judged-on-candidate",
+  "write/own-line-judged-with-substituted-credit",
+  "flip/write-own-line-judged-without-credit",
+  "write/excluded-baseline-own-lines-not-judged",
+  "flip/write-excluded-baseline-lines-judged",
   # a cannot-evaluate message is escaped like a listing line
   "review/cannot-evaluate-message-escaped",
   "flip/cannot-evaluate-message-raw",

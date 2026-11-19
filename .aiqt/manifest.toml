@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "fa38fcab562b2d91eb45dcdffa9d94d58ac6c5c8b64e10029888a2952e0a4b10"
+tree-sha256 = "e594aa69033153b82a1e3239d65fdb9d0fc01f7169ea40fe00e2d56dfd2232a2"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 643196
-sha256 = "467f56a6cf541ce30d9ed96f08dedca97f88f326182d500ca23412ae5496b730"
+bytes = 644283
+sha256 = "0419f2bb2573fd60cf98fe7c5cb32d6e8b53740d094909f83188c3a51c24112a"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -4437,8 +4437,8 @@ sha256 = "62cba7c3a3a459fbd31a27c52bc7ab11a792bd52189db8ba826e27c0327fd55b"
 
 [[sources]]
 path = "tools/check_review_labels.py"
-bytes = 224855
-sha256 = "1d3758eefadaf7346cf0297e33b0a83d9cb7e241eea72c7cfad1263c571130a0"
+bytes = 242824
+sha256 = "f635e03d329d833ab5b5082f500d6759c6a2d696b28141039bc459c52aefe22c"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
@@ -4747,8 +4747,8 @@ sha256 = "94ae6b7299f044b0ff2e66f48d99a6ecddff46250b48ebfc8d58c69d8087e7e5"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 285475
-sha256 = "52dedd2ee23350a71b3cc4d7f895bfbf8a2721ecbdbf2b371c1819ae340c0b21"
+bytes = 286009
+sha256 = "31d331db72070fce57a1d489c412ca0b608fd16daee2d76693de7e0830acf63b"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

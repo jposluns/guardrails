@@ -167,32 +167,42 @@ the NOTE line included, and --write-baseline's) and every CANNOT EVALUATE messag
 path decoded from the diff included) each byte below 0x20 (a tab and a carriage return included) and
 DEL is printed as \\xNN and every non-ASCII character as its backslash escape, so a terminal control
 sequence in a line cannot hide the path or the label the maintainer authorizes from.
---write-baseline reads committed objects only (B..C and C's blobs; the configuration, like the gate's,
-from the working tree) and proposes the fixed point of the pinned move credit, not C's own pins. A pass
-starts from no pinned line; each round credits moves with the lines the proposal so far has entries
-for, then adds to the proposal each key with a finding on a charged line B..C adds, at its count in C,
-and every carried entry, at the least of its count, its count in C and its count at the merge base
-(zeros dropped, so a carried entry is never stale and never growth); a round only adds a key or raises
-a count, and the pass ends when a round adds nothing. The first pass carries C's baseline; each later
-pass carries the proposal of the pass before it, as a writer run with that proposal committed as C's
-baseline would, and the passes stop when one proposes the same entries as the pass before it, so the
-writer run on the proposal committed proposes the same entries by construction. For K candidate keys
-(the keys of the findings on the lines B..C adds and of C's baseline) a pass runs at most 2K+1 rounds
-and the writer at most K+2 passes (writer_round_bound and writer_pass_bound give the reasoning); a pass
-or the passes still changing at their bound is cannot-evaluate. The settled proposal is then judged by
-the gate's own predicate (baseline_verdict, the function the gate calls) with its entries as the
-candidate baseline, twice. First on the same B..C diff, which holds the baseline file's lines as they
-are at C: a charged finding or a stale entry is cannot-evaluate. Then on the proposal's own canonical
-render, every line of it read as a line added to the baseline file, with no move credit (none when the
-configuration excludes that file): a charged finding there is cannot-evaluate naming R8 and the entry
-whose line it is. A commit of the proposal on top of C adds at most those lines to the baseline file,
-and a credit only spares a line, so a proposal is printed only when, committed on top of C, it leaves
-the gate only the growth it lists. A ROUND TRIP line on stderr says so, with the passes and rounds run
-against their bounds. The proposal is not guaranteed minimal: a
-key a round adds stays even when the final pins no longer need it, so a smaller baseline that passes
-can exist and the GROWTH listing then asks for more than the change needs (R15). Its canonical render
-with source-commit = C goes to stdout only when it is at most MAX_BASELINE_BYTES (the gate's own read
-limit), else cannot-evaluate with nothing printed; no file is written. BOOTSTRAP: commit
+--write-baseline reads committed objects only (B..C, C's blobs and C's tree; the configuration, like the
+gate's, from the working tree) and proposes the fixed point of the pinned move credit, not C's own pins,
+judged on the candidate as it is with that proposal committed. One evaluation of a candidate runs passes.
+A pass starts from no pinned line; each round credits moves with the lines the proposal so far has
+entries for, then adds to the proposal each key with a finding on a charged line the diff adds (none for
+a line of the baseline file itself, which no entry can name), at its count in C, and every carried entry,
+at the least of its count, its count in C and its count at the merge base (zeros dropped, so a carried
+entry is never stale and never growth); a round only adds a key or raises a count, and the pass ends
+when a round adds nothing. The first pass carries the candidate's baseline; each later pass carries the
+proposal of the pass before it, and the passes stop when one proposes the same entries as the pass
+before it. The first evaluation reads B..C. Committing a proposal replaces the baseline file, which
+changes the lines the diff deletes and adds there and so the move credits left, so each later
+evaluation reads B..C', the diff from the merge base to C' (C's tree with the last proposal's canonical
+render as its baseline file, built in a temporary object store outside the repository that the run
+removes), carrying that proposal as a writer run on it committed would; the writer stops when an
+evaluation of C' proposes the entries substituted in it. For K candidate keys of an evaluation (the keys
+of the findings on the lines its diff adds and of its candidate baseline) a pass runs at most 2K+1 rounds
+and an evaluation at most K+2 passes (writer_round_bound and writer_pass_bound give the reasoning), and
+the writer runs at most K+2 evaluations of C' for the K of its first evaluation (writer_settle_bound), a
+cap rather than a proof that every layout settles, since a substitution can add a key or drop one. A
+pass, the passes or the evaluations of C' still changing at their bound is cannot-evaluate naming that
+bound. The settled proposal is then judged by the gate's own predicate (baseline_verdict, the function
+the gate calls) with its entries as the candidate baseline, on the B..C' diff it settled on, where the
+proposal's render is the baseline file: its lines are judged with the move credit C' leaves (not at all
+when the configuration excludes that file, as the gate then judges none of them), and a charged finding
+or a stale entry is cannot-evaluate, naming R8 and the entry when the charged line is the baseline
+file's own. C' is the tree of a commit of the printed bytes on top of C with nothing else changed, so a
+proposal is printed only when, committed so, it leaves the gate's predicate only the growth it lists,
+and a writer run on that commit proposes the same entries in its first evaluation, which reads that same
+tree (R16). A ROUND TRIP line on stderr says so, with the most passes and rounds an evaluation ran, the
+most candidate keys and the bounds they give, and the evaluations of C' against their bound. The
+proposal is not guaranteed minimal: a key a round adds stays even when the final pins no longer need
+it, so a smaller baseline that passes can exist and the GROWTH listing then asks for more than the
+change needs (R15). Its canonical render with source-commit = C goes to stdout only when it is at most
+MAX_BASELINE_BYTES (the gate's own read limit), else cannot-evaluate with nothing printed; no file is
+written in the repository. BOOTSTRAP: commit
 the import at C, run python3 -I -B tools/check_review_labels.py --write-baseline --head C, redirect its
 stdout into the baseline and commit it; the gate then fails on the pull request with GROWTH lines, which
 are the review artefact, and the maintainer records an authorization naming the baseline's sha256 and
@@ -209,10 +219,11 @@ source-commit is provenance, checked only for ancestry when the file changes, so
 file that does not grow passes; (R5) growth authorization depends on an override mechanism outside the
 repository, which this gate does not name or check; (R6) exclude-paths can still be widened inside a
 change; (R7) a working-tree baseline with CRLF line ends is non-canonical, so cannot-evaluate; (R8) the
-baseline file is judged like any other, so an entry whose path matches a shape is charged there and such
-a file cannot be grandfathered; --write-baseline refuses such a proposal (exit 2, nothing printed), and
-since it judges every line of its render, also one whose line the merge base's copy already holds; (R9) digests are not secret: a known label line can be hashed and
-matched; (R10) editing a shape's regex can make entries stale, forcing a baseline shrink in the same
+baseline file is judged like any other, so an entry whose path matches a shape is charged there, unless
+a line the change deletes credits that line as a move, and such a file cannot be grandfathered;
+--write-baseline judges its proposal's render as the baseline file on B..C' and refuses such a proposal
+(exit 2, nothing printed); (R9) digests are not secret: a known label line can be hashed and matched;
+(R10) editing a shape's regex can make entries stale, forcing a baseline shrink in the same
 change; (R11) the gate's trust in origin/main carries over to the merge-base baseline; (R12) a malformed
 baseline on main is cannot-evaluate for every branch based on it; (R13) the cost of the extra diff is
 unmeasured; (R14) the pinned move credit makes a baselined line moved to another file with its entry
@@ -222,7 +233,15 @@ holds copies, so a move of some of a file's copies to another file is proposed a
 the writer's proposal is not guaranteed minimal (see --write-baseline above), and a chain of moves can
 turn one new copy into one GROWTH key per file in the chain: when N files each move an unbaselined
 identical line within themselves and one new copy is added in diff order before them, every pin moves
-the charge to the previous file, so the proposal has N+1 keys for one added line.
+the charge to the previous file, so the proposal has N+1 keys for one added line; (R16) the
+source-commit line names the commit the writer ran on, so a writer run on the committed proposal
+proposes the same entries in its first evaluation by construction, then checks them on its own C', which
+differs from that commit only in the commit id of that line; the predicate reads that line like any
+other, so a configured shape matching it under one id and not the other, or git's rename detection
+pairing a baseline file new since the merge base with a file the change deletes across a similarity
+threshold the id change moves, could make that run propose other entries or refuse. No shipped shape
+matches a source-commit line (its id is lower-case hex), and a move credit for it would need the merge
+base to hold a line naming a commit that descends from the merge base.
 """
 import sys
 
@@ -469,12 +488,18 @@ def _git_env():
 
 
 def _git(root, *args):
+    return _run_git(root, _git_env(), None, *args)
+
+
+def _run_git(root, env, data, *args):
+    """git with `args` in `root` under `env`, `data` on its stdin (none when it is None)."""
     try:
         # The auto-maintenance pins ride the argv in option position, so no read here can start a
         # detached gc or maintenance child that outlives the gate.
         return subprocess.run([GIT, "-C", str(root), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
                                "-c", "maintenance.auto=false", *args], capture_output=True,
-                              timeout=TIMEOUT, env=_git_env(), stdin=subprocess.DEVNULL)
+                              timeout=TIMEOUT, env=env, input=data,
+                              stdin=subprocess.DEVNULL if data is None else None)
     except (OSError, subprocess.SubprocessError) as exc:
         raise CannotEvaluate("git {} could not run ({})".format(args[0], exc)) from None
 
@@ -708,6 +733,12 @@ def _allowed(text, marker):
 
 def _excluded(path, excluded):
     return path in excluded
+
+
+def _judged_lines(added, config):
+    """The added lines that are judged: every one outside the excluded files. The gate and the writer
+    (on every tree it evaluates, the baseline file's own lines included) share this filter."""
+    return [line for line in added if not _excluded(line.path, config.excluded)]
 
 
 def _credits(deleted, excluded):
@@ -1139,16 +1170,19 @@ def _carried(old, before, counts):
 
 def _writer_round(judged, deleted, config, proposal, by_line, counts, carried):
     """One round of the writer: the move credit pinned by the lines `proposal` has entries for, then the
-    carried entries with each key a charged finding has set to its count in C, zeros dropped."""
+    carried entries with each key a charged finding has set to its count in C, zeros dropped. A charged
+    finding on a line of the baseline file adds no key (no entry can name that file); the gate's predicate
+    judges those lines once the proposal settles (R8)."""
     charged, _moved = credit_moves(judged, _move_credits(deleted, config.excluded,
                                                          _pinned_lines(Baseline(None, proposal, None))))
     out = dict(carried)
     for line in charged:
         for item in by_line[id(line)]:
-            if not _baseline_path_ok(item.path) or item.path == BASELINE_RELPATH:
-                raise CannotEvaluate("{}:{} cannot be baselined (a path that is not printable ASCII, holds "
-                                     "a quote or backslash, or is the baseline itself)".format(
-                                         _printable(item.path), item.number))
+            if item.path == BASELINE_RELPATH:
+                continue
+            if not _baseline_path_ok(item.path):
+                raise CannotEvaluate("{}:{} cannot be baselined (a path that is not printable ASCII, or "
+                                     "holds a quote or backslash)".format(_printable(item.path), item.number))
             out[_finding_key(item)] = counts.get(_finding_key(item), 0)
     return {key: count for key, count in out.items() if count > 0}
 
@@ -1195,18 +1229,131 @@ def _writer_pass(judged, deleted, config, by_line, counts, carried, limit):
                          "baseline is proposed".format(limit))
 
 
-def _own_lines(data, config):
-    """The lines of the rendered baseline `data` as added lines of BASELINE_RELPATH, every line in order
-    (none when the configuration excludes that path, as the gate then judges none of them). A commit of
-    `data` on top of the candidate adds at most these lines there: a line the merge base's copy already
-    holds is not added, so judging it too can only refuse more."""
-    if _excluded(BASELINE_RELPATH, config.excluded):
-        return []
-    rows = data.split(b"\n")
-    if rows and rows[-1] == b"":
-        rows.pop()
-    return [Added(BASELINE_RELPATH, number, raw.decode("utf-8", "replace"), "+", raw)
-            for number, raw in enumerate(rows, 1)]
+def _writer_run(root, config, revision, raw, old, before):
+    """A WriterRun: one evaluation of a candidate by --write-baseline, given the raw diff `raw` from the
+    merge base and the candidate baseline's entries `old`. Passes (_writer_pass) from no pinned line,
+    the first carrying `old` and each later one the proposal of the pass before it, until a pass
+    proposes what the one before it did. m(k) is counted at `revision` for every path but the baseline
+    file, which no key names (C' differs from C only there)."""
+    diff = added_lines(raw)
+    judged = _judged_lines(diff.added, config)
+    by_line = {id(line): judge([line], config) for line in judged}
+    paths = {item.path for items in by_line.values() for item in items} | {key[0] for key in old}
+    found = occurrences(root, revision, paths - {BASELINE_RELPATH}, config)
+    counts = {key: _occurrence_count(items) for key, items in found.items()}
+    keys = len({_finding_key(item) for items in by_line.values() for item in items} | set(old))
+    rounds, passes = writer_round_bound(keys), writer_pass_bound(keys)
+    proposal, most = None, 0
+    for done in range(1, passes + 1):
+        carried = _carried(old if proposal is None else proposal, before, counts)
+        following, used = _writer_pass(judged, diff.deleted, config, by_line, counts, carried, rounds)
+        most = max(most, used)
+        if following == proposal:
+            break
+        proposal = following
+    else:
+        raise CannotEvaluate("a writer run with the proposal committed as the candidate's baseline still "
+                             "proposed other entries after {} passes; no baseline is proposed".format(passes))
+    return WriterRun(proposal, judged, diff.deleted, found, counts, keys, done, most)
+
+
+def writer_settle_bound(keys):
+    """The most evaluations of the candidate with a proposal substituted for its baseline (the tree C'
+    of _substituted_tree) --write-baseline runs for `keys` candidate keys of its run on C: keys + 2, the
+    run on C's own proposal, one per candidate key and one that finds no change. It is a cap that keeps
+    the writer finite, not a proof that every layout settles within it: the substitution changes which
+    baseline lines the diff deletes and adds, and so which move credits are left, which can add a key or
+    drop one; a proposal still changing at the cap is cannot-evaluate."""
+    return keys + 2
+
+
+Store = namedtuple("Store", ("objects", "alternates"))
+WriterRun = namedtuple("WriterRun", ("proposal", "judged", "deleted", "found", "counts", "keys", "passes",
+                                     "rounds"))
+
+
+@contextlib.contextmanager
+def _scratch_store(root):
+    """A Store: an empty temporary object directory outside the repository, which the repository's own
+    object directory backs as an alternate, removed when the block ends. The writer builds C' there, so
+    it writes nothing into the repository."""
+    lines = _git_lines(root, "the object directory cannot be found", "rev-parse", "--path-format=absolute",
+                       "--git-path", "objects")
+    if len(lines) != 1:
+        raise CannotEvaluate("git rev-parse printed {!r} for the object directory".format(lines))
+    with tempfile.TemporaryDirectory(prefix="review-label-writer-") as tmp:
+        objects = os.path.join(tmp, "objects")
+        os.mkdir(objects)
+        yield Store(objects, lines[0])
+
+
+def _store_git(root, store, data, *args):
+    """git under the gate's environment (_git_env) with `store` as its object directory, the
+    repository's objects read through it as an alternate."""
+    env = _git_env()
+    env.update(GIT_OBJECT_DIRECTORY=store.objects, GIT_ALTERNATE_OBJECT_DIRECTORIES=store.alternates)
+    proc = _run_git(root, env, data, *args)
+    if proc.returncode != 0:
+        raise CannotEvaluate("git {} exited {} ({})".format(args[0], proc.returncode, _stderr(proc)))
+    return proc.stdout
+
+
+def _store_id(output, what):
+    lines = output.decode("ascii", "replace").split()
+    if len(lines) != 1 or not COMMIT_RE.fullmatch(lines[0]):
+        raise CannotEvaluate("git printed {!r} for {}".format(output[:200], what))
+    return lines[0]
+
+
+def _tree_with_blob(root, store, treeish, parts, blob):
+    """The id of the tree `treeish` (None for an empty tree) with the blob `blob` at the path `parts`
+    (in the mode of the regular file it replaces, else 100644), every other entry kept as it is: built
+    with git ls-tree and git mktree in `store`."""
+    entries, name, sub, mode = [], parts[0].encode("ascii"), None, b"100644"
+    if treeish is not None:
+        listing = _store_git(root, store, None, "ls-tree", "-z", "--end-of-options", treeish)
+        for record in listing.split(b"\0"):
+            if not record:
+                continue
+            meta, _tab, entry = record.partition(b"\t")
+            fields = meta.split(b" ")
+            if len(fields) != 3 or not entry:
+                raise CannotEvaluate("git ls-tree printed {!r}".format(record[:200]))
+            if entry == name:
+                if len(parts) > 1 and fields[1] != b"tree":
+                    raise CannotEvaluate("{} is not a directory in the candidate".format(parts[0]))
+                sub = fields[2].decode("ascii")
+                if len(parts) == 1 and fields[0] in (b"100644", b"100755"):
+                    mode = fields[0]
+                continue
+            entries.append(record)
+    if len(parts) > 1:
+        entries.append(b"040000 tree " + _tree_with_blob(root, store, sub, parts[1:], blob).encode("ascii")
+                       + b"\t" + name)
+    else:
+        entries.append(mode + b" blob " + blob.encode("ascii") + b"\t" + name)
+    return _store_id(_store_git(root, store, b"".join(record + b"\0" for record in entries), "mktree", "-z"),
+                     "a tree of the substituted candidate")
+
+
+def _substituted_tree(root, store, head_sha, data):
+    """C': the id of the candidate commit's tree with the baseline file's blob replaced by `data` (added
+    when C has none), every other path as it is in C, built in `store`. A commit of `data` on top of C
+    with nothing else changed has this tree."""
+    blob = _store_id(_store_git(root, store, data, "hash-object", "-w", "--no-filters", "--stdin"),
+                     "the proposed baseline's blob")
+    return _tree_with_blob(root, store, head_sha, BASELINE_RELPATH.split("/"), blob)
+
+
+def _store_diff(root, store, base, tree):
+    """The raw diff bytes from `base` to the tree `tree` of `store`, with the gate's own diff options."""
+    return _store_git(root, store, None, "-c", "core.quotePath=true", "diff", *DIFF_OPTIONS, base, tree, "--")
+
+
+def _settled_deleted(deleted):
+    """The deleted lines the settled proposal is judged with: those of the B..C' diff it settled on, so
+    a line of the proposal's own render is judged with the move credit C' leaves, as the gate would."""
+    return deleted
 
 
 def _owning_entry(data, number):
@@ -1228,37 +1375,43 @@ def _owning_entry(data, number):
     return "the entry " + "; ".join(body)
 
 
-def _require_own_lines_uncharged(data, config, proposal, before, counts):
-    """CannotEvaluate (R8) when the gate's own predicate (baseline_verdict), with `proposal` as the
-    candidate baseline, charges a finding on a line of the rendered proposal `data` read as a line added
-    to BASELINE_RELPATH with no move credit. The B..C diff the proposal is otherwise checked on holds the
-    candidate's own baseline lines, not these, and an entry whose path matches a shape writes a label
-    line into the baseline file, which no entry can grandfather (a baseline entry never names the
-    baseline itself), so committed it would be charged and a second writer run would refuse it."""
-    verdict = baseline_verdict(_own_lines(data, config), Counter(), config, proposal, before, counts)
-    if verdict.charged:
-        item = verdict.charged[0]
+def _require_settled_verdict(verdict, data):
+    """CannotEvaluate when the gate's own predicate (baseline_verdict), judging the B..C' diff with the
+    proposal as the candidate baseline, charges a finding or finds a stale entry. A charged line of the
+    baseline file itself is named as R8 with the entry of `data` (the proposal's render) it sits in: an
+    entry whose path matches a shape writes a label line into the baseline file, which no entry can
+    grandfather, unless a line the diff deletes credits it as a move."""
+    own = [item for item in verdict.charged if item.path == BASELINE_RELPATH]
+    if own:
+        item = own[0]
         raise CannotEvaluate(
             "R8: committed on top of the candidate, the proposal's own line {}:{} would be charged as {} "
             "({}): {}, in {}; the baseline file is judged like any other and cannot grandfather its own "
             "lines ({} charged finding(s) on its lines); no baseline is proposed".format(
                 BASELINE_RELPATH, item.number, item.shape, item.description, item.text,
-                _owning_entry(data, item.number), len(verdict.charged)))
+                _owning_entry(data, item.number), len(own)))
+    if verdict.charged or verdict.stale:
+        raise CannotEvaluate("committed on top of the candidate, the proposal would leave the gate {} "
+                             "charged finding(s) and {} stale entr(ies); no baseline is proposed".format(
+                                 len(verdict.charged), len(verdict.stale)))
 
 
 def propose_baseline(root, protected=None, head=None, environ=None):
     """(canonical bytes, review lines, growth keys) of the baseline --write-baseline proposes for the
-    candidate commit C, the fixed point the docstring describes. A pass (_writer_pass) starts from no
-    pinned line; each round pins the lines the proposal so far has entries for, credits moves, and adds
-    each key a charged finding has (at its count in C) and every carried entry (_carried). The first pass
-    carries C's baseline, each later one the proposal of the pass before it, as a further writer run with
-    that proposal committed would, and the passes stop when one proposes what the pass before it did.
-    The proposal is then judged by the gate's own predicate (baseline_verdict) with its entries as the
-    candidate baseline, on the B..C diff and on its own rendered lines read as lines added to the
-    baseline file (_require_own_lines_uncharged). A pass still changing after writer_round_bound rounds,
-    passes still changing after writer_pass_bound passes, a proposal that predicate charges a finding for
-    or finds an entry of stale on the B..C diff, one with a line of its own render that predicate charges
-    (R8), or one whose render is larger than MAX_BASELINE_BYTES, is CannotEvaluate (nothing is printed)."""
+    candidate commit C, the fixed point the docstring describes. One evaluation (_writer_run) runs passes
+    (_writer_pass) from no pinned line; each round pins the lines the proposal so far has entries for,
+    credits moves, and adds each key a charged finding has (at its count in C) and every carried entry
+    (_carried); the first pass carries the candidate's baseline, each later one the proposal of the pass
+    before it, until a pass proposes what the one before it did. The first evaluation reads B..C; each
+    later one reads B..C', C with the last proposal's render substituted for its baseline
+    (_substituted_tree), carrying that proposal, as a writer run on that proposal committed would, until
+    an evaluation of C' proposes the entries substituted in it. The gate's own predicate
+    (baseline_verdict) then judges that B..C' diff, its deleted and added baseline lines included, with
+    the proposal as the candidate baseline (_require_settled_verdict). A pass still changing after
+    writer_round_bound rounds, passes still changing after writer_pass_bound passes, a proposal still
+    changing after writer_settle_bound evaluations of C', a proposal that predicate charges a finding for
+    or finds an entry of stale on B..C' (R8 when the charged line is the baseline file's own), or one whose
+    render is larger than MAX_BASELINE_BYTES, is CannotEvaluate (nothing is printed)."""
     environ = os.environ if environ is None else environ
     config = load_config(Path(root) / CONFIG_RELPATH)
     require_excluded_files(root, config.excluded)
@@ -1268,56 +1421,54 @@ def propose_baseline(root, protected=None, head=None, environ=None):
     head_sha = _resolve_commit(root, "HEAD" if head is None else head, "candidate")
     base = merge_base(root, protected_sha, head_sha)
     revision = _write_revision(head_sha)
-    diff = added_lines(read_diff(root, base, revision))
-    judged = [line for line in diff.added if not _excluded(line.path, config.excluded)]
     current = read_baseline(root, head_sha, config)
     prior = read_baseline(root, base, _merge_base_config(config))
     old = {} if current is None else current.entries
     before = {} if prior is None else prior.entries
-    by_line = {id(line): judge([line], config) for line in judged}
-    found = occurrences(root, revision, {item.path for items in by_line.values() for item in items}
-                        | {key[0] for key in old}, config)
-    counts = {key: _occurrence_count(items) for key, items in found.items()}
-    keys = len({_finding_key(item) for items in by_line.values() for item in items} | set(old))
-    rounds, passes = writer_round_bound(keys), writer_pass_bound(keys)
-    proposal, most = None, 0
-    for done in range(1, passes + 1):
-        carried = _carried(old if proposal is None else proposal, before, counts)
-        following, used = _writer_pass(judged, diff.deleted, config, by_line, counts, carried, rounds)
-        most = max(most, used)
-        if following == proposal:
-            break
-        proposal = following
-    else:
-        raise CannotEvaluate("a writer run with the proposal committed as the candidate's baseline still "
-                             "proposed other entries after {} passes; no baseline is proposed".format(passes))
-    verdict = baseline_verdict(judged, diff.deleted, config, proposal, before, counts)
-    if verdict.charged or verdict.stale:
-        raise CannotEvaluate("committed on top of the candidate, the proposal would leave the gate {} "
-                             "charged finding(s) and {} stale entr(ies); no baseline is proposed".format(
-                                 len(verdict.charged), len(verdict.stale)))
+    run = _writer_run(root, config, revision, read_diff(root, base, revision), old, before)
+    runs, limit = [run], writer_settle_bound(run.keys)
+    with _scratch_store(root) as store:
+        for settled in range(1, limit + 1):
+            proposal = run.proposal
+            tree = _substituted_tree(root, store, head_sha, render_baseline(head_sha, proposal))
+            run = _writer_run(root, config, revision, _store_diff(root, store, base, tree), proposal, before)
+            runs.append(run)
+            if run.proposal == proposal:
+                break
+        else:
+            raise CannotEvaluate("with each proposal substituted for the candidate's baseline, the writer "
+                                 "still proposed other entries after {} evaluation(s) of that candidate; no "
+                                 "baseline is proposed".format(limit))
     data = render_baseline(head_sha, proposal)
-    _require_own_lines_uncharged(data, config, proposal, before, counts)
+    verdict = baseline_verdict(run.judged, _settled_deleted(run.deleted), config, proposal, before,
+                               run.counts)
+    _require_settled_verdict(verdict, data)
     if len(data) > MAX_BASELINE_BYTES:
         raise CannotEvaluate("the proposed baseline is {} bytes ({} entr(ies)), larger than the {} bytes the "
                              "gate reads; it is not printed".format(len(data), len(proposal),
                                                                     MAX_BASELINE_BYTES))
     growth = verdict.growth
-    ledger = Ledger(None, [(key, before.get(key, 0), proposal[key], found.get(key, [])) for key in growth],
+    ledger = Ledger(None, [(key, before.get(key, 0), proposal[key], run.found.get(key, []))
+                           for key in growth],
                     [], [(key, count, proposal.get(key, 0)) for key, count in sorted(before.items())
                          if proposal.get(key, 0) < count], [])
+    keys = max(item.keys for item in runs)
     checked = ("ROUND TRIP: settled in {} pass(es) (bound {}), the longest {} round(s) (bound {}), for {} "
-               "candidate key(s); committed, the gate's own predicate charges no finding and finds no stale "
-               "entry, and a further writer run proposes the same entries".format(done, passes, most, rounds,
-                                                                                 keys))
+               "candidate key(s), and stable with it substituted for the candidate's baseline after {} "
+               "evaluation(s) of that candidate (bound {}); committed with nothing else changed, the "
+               "gate's own predicate charges no finding and finds no stale entry, and a writer run on that "
+               "commit proposes the same entries in its first evaluation (R16)".format(
+                   max(item.passes for item in runs), writer_pass_bound(keys),
+                   max(item.rounds for item in runs), writer_round_bound(keys), keys, settled, limit))
     return data, _review_lines(ledger) + [checked], growth
 
 
 def write_baseline(root, protected=None, head=None, environ=None):
-    """--write-baseline: the proposal on stdout (no file is written), its review listing and its ROUND
-    TRIP line on stderr; exit 1 when it grows against the merge base's baseline, 0 otherwise, 2 when it
-    cannot evaluate (an oversized or unsettled proposal, and one the gate's predicate would charge a
-    finding on, its own lines included, with nothing on stdout)."""
+    """--write-baseline: the proposal on stdout (no file is written in the repository), its review
+    listing and its ROUND TRIP line on stderr; exit 1 when it grows against the merge base's baseline, 0
+    otherwise, 2 when it cannot evaluate (an oversized or unsettled proposal, and one the gate's
+    predicate would charge a finding on with the proposal committed, its own lines included, with
+    nothing on stdout)."""
     try:
         data, review, growth = propose_baseline(root, protected, head, environ)
     except CannotEvaluate as exc:
@@ -1343,7 +1494,7 @@ def evaluate(root, protected=None, head=None, environ=None):
     head_sha = _resolve_commit(root, "HEAD" if head is None else head, "candidate")
     base = merge_base(root, protected_sha, head_sha)
     diff = added_lines(read_diff(root, base, None if head is None else head_sha))
-    judged = [line for line in diff.added if not _excluded(line.path, config.excluded)]
+    judged = _judged_lines(diff.added, config)
     skipped = len(diff.added) - len(judged)
     candidate = read_baseline(root, None if head is None else head_sha, config)
     verdict, ledger = apply_baseline(root, config, base, head_sha, head, judged, diff.deleted, candidate)
@@ -1642,6 +1793,7 @@ def _rows(tmp):
     _baseline_pin_rows(tmp, labels)
     _baseline_writer_fixpoint_rows(tmp, labels)
     _baseline_writer_roundtrip_rows(tmp, labels)
+    _baseline_writer_substitution_rows(tmp, labels)
     _message_rows(tmp)
     _ref_rows(tmp)
     _baseline_listing_rows(tmp, labels)
@@ -2342,7 +2494,10 @@ def _baseline_write_rows(tmp, labels):
                                                           config) == "refused", out_f)
     check("write/reads-committed-objects", isinstance(parsed, Baseline) and _sha(uncommitted.encode("utf-8"))
           not in out, out)
-    with _patched(_write_revision=lambda head_sha: None):
+    # The flip reads the working tree in every evaluation: the first one's diff and counts, and the diff
+    # of each evaluation of C' (built from the committed tree, so it cannot hold an uncommitted line).
+    with _patched(_write_revision=lambda head_sha: None,
+                  _store_diff=lambda root, store, base, tree: read_diff(root, base, None)):
         code_f, out_f, _err_f = _write_exit(repo)
     check("flip/write-reads-working-tree", _sha(uncommitted.encode("utf-8")) in out_f, out_f)
     check("write/records-source-commit", "source-commit = \"{}\"\n".format(head_sha) in out
@@ -2678,9 +2833,9 @@ def _uncharged_verdict(*args):
 
 
 def _baseline_writer_roundtrip_rows(tmp, labels):
-    """--write-baseline round-trips by construction: its passes carry their own proposal as C's baseline
-    until it stops changing, the gate's own predicate checks the result before it is printed, and the
-    round and pass bounds come from the number of candidate keys."""
+    """--write-baseline round-trips: its passes carry their own proposal as C's baseline until it stops
+    changing, the gate's own predicate checks the result before it is printed, and the round and pass
+    bounds come from the number of candidate keys."""
     la = labels["backlog-id"]
     la_raw = la.encode("utf-8")
     config = _REAL_LOAD_CONFIG(ROOT / CONFIG_RELPATH)
@@ -2784,10 +2939,10 @@ def _baseline_writer_roundtrip_rows(tmp, labels):
 
     # R8 by construction: a branch adds a file whose path matches a shape and whose line is a finding (a
     # Markdown file and a Python file, the path and the line assembled at run time). The B..C diff holds
-    # no baseline line, so only the proposal's own rendered lines show that its path line would be
-    # charged in the baseline file: the writer exits 2 with nothing printed, naming R8 and the entry.
-    # With that check removed it prints the proposal and a ROUND TRIP line, yet committed the gate
-    # charges the baseline file's own line 8 and a second writer run exits 2.
+    # no baseline line, so only B..C', with the proposal's render substituted for the baseline, shows that
+    # its path line would be charged in the baseline file: the writer exits 2 with nothing printed, naming
+    # R8 and the entry. Judged on B..C instead, it prints the proposal and a ROUND TRIP line, yet
+    # committed the gate charges the baseline file's own line 8 and a second writer run exits 2.
     fx = "FI" + "X-"
     for check_id, flip_id, name, path, line in (
             ("fail-closed/write-own-line-r8-markdown", "flip/write-own-line-unchecked-markdown",
@@ -2803,12 +2958,144 @@ def _baseline_writer_roundtrip_rows(tmp, labels):
         check(check_id, code == 2 and out == "" and "R8: " in err and own in err
               and 'the entry path = "{}"'.format(path) in err and "ROUND TRIP" not in err,
               (code, out, err))
-        with _patched(_require_own_lines_uncharged=lambda *args: None):
-            code_f, out_f, err_f, entries_f, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+        with _patched(_substituted_tree=_unsubstituted_tree):
+            code_f, out_f, err_f, entries_f, gate_code, gate_out, code2, out2 = _writer_roundtrip(
+                repo, config)
         check(flip_id, code_f == 1 and entries_f == {(path, _sha(line.encode("utf-8")), "backlog-id"): 1}
               and "ROUND TRIP: " in err_f and gate_code == 1 and charged_text in gate_out
               and "  {}:8: backlog-id".format(BASELINE_RELPATH) in gate_out and code2 == 2 and out2 == "",
               (code_f, err_f, entries_f, gate_code, gate_out, code2, out2))
+
+
+def _unsubstituted_tree(root, store, head_sha, data):
+    """A flip of _substituted_tree: C itself, so every evaluation and the settled proposal's judgement
+    read B..C, which holds the candidate's own baseline lines in place of the proposal's."""
+    return head_sha
+
+
+def _baseline_lines_judged(added, config):
+    """A flip of _judged_lines: the baseline file's lines are judged even when the configuration excludes
+    that file."""
+    return [line for line in added
+            if not _excluded(line.path, config.excluded) or line.path == BASELINE_RELPATH]
+
+
+def _baseline_writer_substitution_rows(tmp, labels):
+    """--write-baseline judges each proposal on B..C', the candidate with the proposal's render
+    substituted for its baseline: a baseline line C' deletes credits an identical line added elsewhere, a
+    stale baseline line of C takes no credit C' frees, the proposal's own lines are judged with the move
+    credit C' leaves, the lines of an excluded baseline file are not judged, and the evaluations of C'
+    are bounded."""
+    config = _REAL_LOAD_CONFIG(ROOT / CONFIG_RELPATH)
+    charged_text = "review or work label(s) on added lines"
+    fx = "FI" + "X-"
+    doc, doc_line = "docs/" + fx + "7.md", "see " + fx + "7"
+    path_line = 'path = "{}"'.format(doc)
+
+    def key(path, line):
+        return (path, _sha(line.encode("utf-8")), "backlog-id")
+
+    # Main holds a document with a baseline entry; the branch deletes the document, keeps the baseline
+    # and adds x.txt holding exactly the baseline's path line. On B..C the copy is charged; C' (any
+    # proposal without that entry) deletes the baseline's path line, which credits the copy, so the writer
+    # proposes no entry, the gate passes with the proposal committed, and a second run proposes none.
+    repo, base = _baseline_repo(tmp, "baseline-writer-freed-path-line")
+    _write(repo, doc, doc_line + "\n")
+    _put_baseline(repo, base, {(doc, doc_line.encode("utf-8"), "backlog-id"): 1})
+    _commit_all(repo, "a baselined document")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _fx_git(repo, "rm", "-q", doc)
+    _write(repo, "x.txt", path_line + "\n")
+    freed_head = _commit_all(repo, "the document deleted, its baseline path line copied into x.txt")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/roundtrip-freed-baseline-line-credits-copy", code == 0 and entries == {}
+          and "RELEASED " + doc in err and "ROUND TRIP: " in err and gate_code == 0
+          and "1 moved line(s) not charged" in gate_out and code2 == 0
+          and _proposed_entries(out2, config) == {},
+          (code, err, entries, gate_code, gate_out, code2, out2))
+    with _patched(_substituted_tree=_unsubstituted_tree):
+        code_f, out_f, err_f = _write_exit(repo, head=freed_head)
+    check("flip/write-freed-line-judged-on-candidate", code_f == 1
+          and _proposed_entries(out_f, config) == {key("x.txt", path_line): 1}, (code_f, out_f, err_f))
+
+    # The evaluations of C' are bounded: that layout is stable on its second evaluation of C' (the first
+    # drops x.txt's key), so a bound of one refuses it with nothing printed and a bound of two proposes it.
+    with _patched(writer_settle_bound=lambda keys: 1):
+        code_1, out_1, err_1 = _write_exit(repo, head=freed_head)
+    with _patched(writer_settle_bound=lambda keys: 2):
+        code_2, out_2, _err_2 = _write_exit(repo, head=freed_head)
+    check("fail-closed/write-settle-bound", code_1 == 2 and out_1 == "" and "after 1 evaluation(s)" in err_1
+          and code_2 == 0 and _entries_text(out_2) == _entries_text(out),
+          (code_1, out_1, err_1, code_2, out_2))
+
+    # Main holds x.toml with the path line; the branch moves it to notes/a.toml and its baseline holds a
+    # stale entry for the document. On B..C the stale path line comes first in diff order and takes the
+    # move credit, so the copy is charged; C' drops that line, the credit spares the copy, and the writer
+    # proposes no entry, the gate passes with it committed, and a second run proposes none.
+    repo, base = _baseline_repo(tmp, "baseline-writer-stale-line-credit")
+    _write(repo, "x.toml", "a = 1\n" + path_line + "\n")
+    _commit_all(repo, "a path line on main, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "x.toml", "a = 1\n")
+    _write(repo, "notes/a.toml", path_line + "\n")
+    _put_baseline(repo, base, {(doc, doc_line.encode("utf-8"), "backlog-id"): 1})
+    stale_head = _commit_all(repo, "the path line moved, a stale baseline entry")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/roundtrip-stale-baseline-line-frees-credit", code == 0 and entries == {} and gate_code == 0
+          and "1 moved line(s) not charged" in gate_out and code2 == 0
+          and _proposed_entries(out2, config) == {},
+          (code, err, entries, gate_code, gate_out, code2, out2))
+    with _patched(_substituted_tree=_unsubstituted_tree):
+        code_f, out_f, err_f = _write_exit(repo, head=stale_head)
+    check("flip/write-stale-line-judged-on-candidate", code_f == 1
+          and _proposed_entries(out_f, config) == {key("notes/a.toml", path_line): 1}, (code_f, out_f, err_f))
+
+    # Main holds x.toml with the path line; the branch deletes it and adds the document. The proposal's
+    # own path line is credited by that deletion on B..C', so the writer proposes the document's entry,
+    # the gate lists only its growth with the proposal committed, and a second run proposes the same.
+    # Judged with no move credit (as when the proposal's render was read apart from the diff), that line
+    # is charged and the writer refuses a proposal the gate accepts.
+    repo, base = _baseline_repo(tmp, "baseline-writer-own-line-credited")
+    _write(repo, "x.toml", "a = 1\n" + path_line + "\n")
+    _commit_all(repo, "a path line on main, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "x.toml", "a = 1\n")
+    _write(repo, doc, doc_line + "\n")
+    credited_head = _commit_all(repo, "the path line deleted, the document added")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/own-line-judged-with-substituted-credit", code == 1 and entries == {key(doc, doc_line): 1}
+          and "  GROWTH {}:1: backlog-id".format(doc) in err and gate_code == 1
+          and charged_text not in gate_out and "STALE" not in gate_out
+          and "1 moved line(s) not charged" in gate_out
+          and "  GROWTH {}:1: backlog-id".format(doc) in gate_out and code2 == 1
+          and _entries_text(out2) == _entries_text(out),
+          (code, err, entries, gate_code, gate_out, code2, out2))
+    with _patched(_settled_deleted=lambda deleted: Counter()):
+        code_f, out_f, err_f = _write_exit(repo, head=credited_head)
+    check("flip/write-own-line-judged-without-credit", code_f == 2 and out_f == "" and "R8: " in err_f
+          and "{}:8 would be charged as backlog-id".format(BASELINE_RELPATH) in err_f, (code_f, out_f, err_f))
+
+    # The configuration excludes the baseline file: the gate judges none of its lines, so neither does the
+    # writer, and an entry whose path matches a shape is proposed; committed, the gate lists only its
+    # growth, and a second run proposes the same. Judging the excluded file's lines refuses it as R8.
+    repo, base = _baseline_repo(tmp, "baseline-writer-excluded-baseline")
+    _write(repo, CONFIG_RELPATH, _config_with_excluded(sorted(config.excluded) + [BASELINE_RELPATH]))
+    _put_baseline(repo, base, {})
+    _commit_all(repo, "the baseline file excluded, an empty baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, doc, doc_line + "\n")
+    excluded_head = _commit_all(repo, "a document whose path matches a shape")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/excluded-baseline-own-lines-not-judged", code == 1 and entries == {key(doc, doc_line): 1}
+          and gate_code == 1 and charged_text not in gate_out and "STALE" not in gate_out
+          and "  GROWTH {}:1: backlog-id".format(doc) in gate_out
+          and "line(s) in excluded file(s) not judged" in gate_out and code2 == 1
+          and _entries_text(out2) == _entries_text(out),
+          (code, err, entries, gate_code, gate_out, code2, out2))
+    with _patched(_judged_lines=_baseline_lines_judged):
+        code_f, out_f, err_f = _write_exit(repo, head=excluded_head)
+    check("flip/write-excluded-baseline-lines-judged", code_f == 2 and out_f == "" and "R8: " in err_f,
+          (code_f, out_f, err_f))
 
 
 def _cannot_evaluate_outputs(repo):
