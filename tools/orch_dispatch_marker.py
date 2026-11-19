@@ -18,11 +18,15 @@ that the result must carry before it is accepted.
   orch_dispatch_marker.py write --marker PATH --id HEX --status N
       Write the line `aiqt-dispatch-marker v1 <id> <status>` to a temporary file in PATH's directory,
       fsync it, then rename it onto PATH, so PATH keeps its previous complete content until the
-      rename. N is an integer from 0 to 255 with no sign or leading zero.
+      rename. N is an integer from 0 to 255 with no sign or leading zero. The publish is atomic but
+      not durable: the directory is not fsynced after the rename, so after a host crash PATH may
+      hold its previous complete content again.
       Exit 0 published; 2 cannot evaluate (bad arguments, an oversized or unconvertible number
       included, a missing directory, a target that is a directory, a failure to create the temporary
       file, or a write, fsync or rename failure, after which the temporary file this process created
-      is removed and PATH is left as it was; an entry it did not create is never removed).
+      is removed and PATH is left as it was; an entry it did not create is never removed). Any other
+      exception that escapes the publish (an interrupt included) also removes that temporary file
+      and is then raised again.
   orch_dispatch_marker.py wait --marker PATH --expect-id HEX --deadline-s S [--interval-s I]
       Poll PATH on a monotonic clock until S seconds (an integer from 1 to 86400) pass, every I seconds
       (from 0.05 to 60, default 1). A marker is accepted only when lstat shows a regular file of at
@@ -49,6 +53,11 @@ that the result must carry before it is accepted.
       that gap is still pending.
   orch_dispatch_marker.py --self-test [--execution-report ABS_PATH]
       Run the self-test (exit 0 pass, 1 a failed check, 2 a harness error).
+
+Output: only the id or the matched status is ever written to stdout; every diagnostic goes to stderr
+alone. A stderr that is unavailable or fails (descriptor 2 closed before or after Python starts, a full
+device, a pipe with no reader) loses those diagnostics, but never changes the exit codes above, the
+interpreter's final flush of either stream included, and they are never written to stdout instead.
 
 The dispatcher is meant to use both bindings: claim a fresh directory for each dispatch attempt
 (retries included), pass the id it prints to the producer, and always wait with that id. Each covers a
@@ -324,7 +333,7 @@ def write_marker(path, dispatch_id, status):
         return EXIT_CANNOT_EVALUATE, "", ["cannot evaluate: marker path {} is a directory".format(path)]
     temp = os.path.join(directory, ".{}.tmp-{}".format(os.path.basename(path), _temp_suffix_hex(8)))
     data = marker_line(dispatch_id, status).encode("ascii")
-    created = False
+    created = published = False
     try:
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
         created = True
@@ -336,14 +345,18 @@ def write_marker(path, dispatch_id, status):
         finally:
             os.close(fd)
         _replace_path(temp, path)
-    except OSError as exc:
-        # Only a temporary file this process created is removed; an entry already at that name (another
-        # writer's) is left alone.
-        if created:
+        published = True
+    except BaseException as exc:
+        # Only a temporary file this process created, and has not yet renamed, is removed; an entry
+        # already at that name (another writer's) is left alone. Anything other than an operating-system
+        # error (an interrupt, for one) is raised again once the temporary file is gone.
+        if created and not published:
             try:
                 os.unlink(temp)
             except OSError:
                 pass
+        if not isinstance(exc, OSError):
+            raise
         return EXIT_CANNOT_EVALUATE, "", ["cannot evaluate: cannot publish {} ({})".format(path, exc)]
     return EXIT_OK, "", []
 
@@ -1093,6 +1106,28 @@ def _self_test():
                   and (_read_or_none(os.path.join(d, temp_name)) == foreign_data if foreign else True)
                   and any("cannot publish" in line for line in err), (code, err, left))
 
+        # Any other exception that escapes the publish (here an interrupt half way through the temporary
+        # write) removes the temporary file and is raised again, and the previous marker stays.
+        d, m = fresh()
+        _publish(m, old_id, 0)
+
+        def half_then_interrupt(fd, data):
+            real_write(fd, bytes(data[:len(data) // 2]))
+            raise KeyboardInterrupt
+
+        globals()["_write_fd"] = half_then_interrupt
+        try:
+            try:
+                write_marker(m, new_id, 0)
+                outcome = "returned"
+            except KeyboardInterrupt:
+                outcome = "raised again"
+        finally:
+            globals()["_write_fd"] = real_write
+        check("write/interrupt-temp-removed-raised-again", outcome == "raised again"
+              and _read_or_none(m) == previous and sorted(os.listdir(d)) == ["exit-status"],
+              (outcome, _read_or_none(m), sorted(os.listdir(d))))
+
         # --- output: a stdout write that fails is exit 2, never Python's own 120 or a silent loss ---
         import io
 
@@ -1169,22 +1204,39 @@ def _self_test():
         # the same launcher with descriptor 1 left open. ---
         import subprocess
         script = os.path.abspath(__file__)
+        # Each launcher takes a mode (keep, close, full: the descriptor on /dev/full, pipe: on a pipe whose
+        # reader is closed, or unflushable: sys.stderr replaced by an object with no descriptor whose
+        # write and flush always fail, so it cannot be pointed at the null device) and a comma-separated
+        # list of descriptors to apply it to.
+        redirect = ("class Unflushable:\n"
+                    "    def write(self, text):\n"
+                    "        raise OSError(5, 'stderr failure injected by the self-test')\n"
+                    "    def flush(self):\n"
+                    "        raise OSError(5, 'stderr failure injected by the self-test')\n"
+                    "mode, fds = sys.argv[1], [int(fd) for fd in sys.argv[2].split(',')]\n"
+                    "for fd in fds:\n"
+                    "    if mode == 'unflushable':\n"
+                    "        sys.stderr = Unflushable()\n"
+                    "    elif mode == 'close':\n"
+                    "        os.close(fd)\n"
+                    "    elif mode == 'full':\n"
+                    "        os.dup2(os.open('/dev/full', os.O_WRONLY), fd)\n"
+                    "    elif mode == 'pipe':\n"
+                    "        read_end, write_end = os.pipe()\n"
+                    "        os.close(read_end)\n"
+                    "        os.dup2(write_end, fd)\n")
         launchers = {
-            "at-start": ("import os, sys\n"
-                         "if sys.argv[1] == 'close':\n"
-                         "    os.close(1)\n"
-                         "os.execv(sys.executable, [sys.executable, '-I', '-B'] + sys.argv[2:])\n"),
-            "after-start": ("import os, runpy, sys\n"
-                            "if sys.argv[1] == 'close':\n"
-                            "    os.close(1)\n"
-                            "sys.argv = sys.argv[2:]\n"
+            "at-start": ("import os, sys\n" + redirect +
+                         "os.execv(sys.executable, [sys.executable, '-I', '-B'] + sys.argv[3:])\n"),
+            "after-start": ("import os, runpy, sys\n" + redirect +
+                            "sys.argv = sys.argv[3:]\n"
                             "runpy.run_path(sys.argv[0], run_name='__main__')\n"),
         }
 
-        def run_process(when, close, argv):
+        def run_process(when, close, argv, mode=None, fds="1"):
             try:
                 proc = subprocess.run([sys.executable, "-I", "-B", "-c", launchers[when],
-                                       "close" if close else "keep", script] + argv,
+                                       mode or ("close" if close else "keep"), fds, script] + argv,
                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE, cwd=base, timeout=120)
             except (OSError, subprocess.SubprocessError) as exc:
@@ -1218,6 +1270,76 @@ def _self_test():
             code, out, err = run_process(when, False, wait_argv)
             check(wait_open, code == EXIT_OK and err == "" and out == "9\n", (code, out, err[-400:]))
 
+        # --- output, as real processes: a stderr that is closed before or after Python starts, on a full
+        # device, on a pipe with no reader or that cannot be flushed at all keeps every exit code of the
+        # table (never Python's own 120 from the final flush) and never moves a diagnostic to stdout. Each
+        # control runs the same command with stderr open and finds its diagnostic there. ---
+        d, m = fresh()
+        _publish(m, old_id, 0)
+        _d, never_marker = fresh()
+        existing = os.path.join(base, "output-stderr-existing")
+        os.mkdir(existing)
+        stderr_commands = {
+            "claim-existing": (["claim", existing], EXIT_EXISTS, "refused: something already exists"),
+            "claim-missing-parent": (["claim", os.path.join(base, "output-stderr-no-parent", "dispatch")],
+                                     EXIT_CANNOT_EVALUATE, "cannot evaluate: cannot create"),
+            "wait-unbound": (["wait", "--marker", m, "--expect-id", new_id, "--deadline-s", "1",
+                              "--interval-s", "0.05"], EXIT_ONLY_UNBOUND, "unbound marker at"),
+            "wait-never-seen": (["wait", "--marker", never_marker, "--expect-id", new_id, "--deadline-s", "1",
+                                 "--interval-s", "0.05"], EXIT_NEVER_SEEN, "no marker appeared at"),
+        }
+        for name, when, mode, command in (
+                ("output/process-claim-existing-stderr-closed-at-start-5", "at-start", "close", "claim-existing"),
+                ("output/process-claim-missing-parent-stderr-closed-at-start-2", "at-start", "close",
+                 "claim-missing-parent"),
+                ("output/process-wait-unbound-stderr-closed-at-start-4", "at-start", "close", "wait-unbound"),
+                ("output/process-wait-never-seen-stderr-closed-at-start-3", "at-start", "close",
+                 "wait-never-seen"),
+                ("output/process-claim-existing-stderr-closed-after-start-5", "after-start", "close",
+                 "claim-existing"),
+                ("output/process-claim-missing-parent-stderr-closed-after-start-2", "after-start", "close",
+                 "claim-missing-parent"),
+                ("output/process-wait-unbound-stderr-closed-after-start-4", "after-start", "close",
+                 "wait-unbound"),
+                ("output/process-wait-never-seen-stderr-closed-after-start-3", "after-start", "close",
+                 "wait-never-seen"),
+                ("output/process-claim-existing-stderr-on-dev-full-5", "at-start", "full", "claim-existing"),
+                ("output/process-claim-missing-parent-stderr-on-dev-full-2", "at-start", "full",
+                 "claim-missing-parent"),
+                ("output/process-wait-unbound-stderr-on-dev-full-4", "at-start", "full", "wait-unbound"),
+                ("output/process-wait-never-seen-stderr-on-dev-full-3", "at-start", "full", "wait-never-seen"),
+                ("output/process-claim-existing-stderr-on-pipe-without-reader-5", "at-start", "pipe",
+                 "claim-existing"),
+                ("output/process-claim-missing-parent-stderr-on-pipe-without-reader-2", "at-start", "pipe",
+                 "claim-missing-parent"),
+                ("output/process-wait-unbound-stderr-on-pipe-without-reader-4", "at-start", "pipe",
+                 "wait-unbound"),
+                ("output/process-wait-never-seen-stderr-on-pipe-without-reader-3", "at-start", "pipe",
+                 "wait-never-seen"),
+                ("output/process-claim-existing-stderr-unflushable-after-start-5", "after-start", "unflushable",
+                 "claim-existing"),
+                ("output/process-claim-missing-parent-stderr-unflushable-after-start-2", "after-start",
+                 "unflushable", "claim-missing-parent"),
+                ("output/process-wait-unbound-stderr-unflushable-after-start-4", "after-start", "unflushable",
+                 "wait-unbound"),
+                ("output/process-wait-never-seen-stderr-unflushable-after-start-3", "after-start",
+                 "unflushable", "wait-never-seen")):
+            argv, want, _needle = stderr_commands[command]
+            code, out, err = run_process(when, None, argv, mode, "2")
+            check(name, code == want and out == "" and err == "", (code, out, err[-400:]))
+        for name, command in (("output/process-claim-existing-stderr-open-control-5", "claim-existing"),
+                              ("output/process-claim-missing-parent-stderr-open-control-2", "claim-missing-parent"),
+                              ("output/process-wait-unbound-stderr-open-control-4", "wait-unbound"),
+                              ("output/process-wait-never-seen-stderr-open-control-3", "wait-never-seen")):
+            argv, want, needle = stderr_commands[command]
+            code, out, err = run_process("at-start", None, argv, "keep", "2")
+            check(name, code == want and out == "" and needle in err and "Traceback" not in err,
+                  (code, out, err[-400:]))
+        claim_path = os.path.join(base, "output-claim-stdout-stderr-closed")
+        code, out, err = run_process("after-start", None, ["claim", claim_path], "close", "1,2")
+        check("output/process-claim-stdout-and-stderr-closed-after-start-2", code == EXIT_CANNOT_EVALUATE
+              and out == "" and err == "" and os.path.isdir(claim_path), (code, out, err[-400:]))
+
         # --- revert: with the id comparison removed, the incident case would pass as a match ---
         d, m = fresh()
         _publish(m,old_id, 0)
@@ -1247,8 +1369,10 @@ def _self_test():
           "is pending; a claim never adopts an existing entry, one of two racing claims wins, and claims "
           "issue distinct ids, one claim's marker refused under another's; a write keeps the previous "
           "marker until the rename, fails cleanly on an fsync or rename error, leaves a temporary name it "
-          "did not create alone and refuses a bad status; a failed stdout write is exit 2, as is a "
-          "descriptor 1 closed before or after Python starts, measured as the process's exit; with the id "
+          "did not create alone, removes its temporary file when interrupted and refuses a bad status; a "
+          "failed stdout write is exit 2, as is a descriptor 1 closed before or after Python starts, "
+          "measured as the process's exit; a stderr closed before or after start, full, without a reader "
+          "or unflushable keeps exits 2, 3, 4 and 5 and puts nothing on stdout; with the id "
           "comparison removed the incident case would pass)".format(
               len(EXECUTED)))
     return 0
@@ -1300,7 +1424,8 @@ def _deliver(code, out, err, stdout, stderr):
     """The exit code after writing out to stdout and err to stderr. A stdout write or flush that fails
     (a broken pipe or any other operating-system error) is exit 2: the id or status never reached the
     caller, so the command cannot be relied on, whatever its own exit would have been. So is a stdout
-    that is unavailable (None, as Python leaves sys.stdout when descriptor 1 is closed at start)."""
+    that is unavailable (None, as Python leaves sys.stdout when descriptor 1 is closed at start). The
+    diagnostics go to stderr only, and a stderr that fails never changes the exit code (_diagnose)."""
     if out and stdout is None:
         code = EXIT_CANNOT_EVALUATE
         err = list(err) + ["cannot evaluate: the result could not be written to stdout (stdout is "
@@ -1309,17 +1434,57 @@ def _deliver(code, out, err, stdout, stderr):
         try:
             stdout.write(out)
             stdout.flush()
-        except OSError as exc:
+        except Exception as exc:
             _discard_unwritten(stdout)
             code = EXIT_CANNOT_EVALUATE
             err = list(err) + ["cannot evaluate: the result could not be written to stdout ({}: {})".format(
                 type(exc).__name__, exc)]
-    for line in err:
-        print(line, file=stderr)
+    _diagnose(err, stderr)
     return code
+
+
+def _diagnose(lines, stderr):
+    """Write the diagnostic lines to stderr and nowhere else. None (as Python leaves sys.stderr when
+    descriptor 2 is closed at start) drops them; print would send them to stdout. A write or flush that
+    fails (a closed descriptor, a full device, a pipe with no reader) drops the rest and points the
+    stream at the null device, so neither the failure nor the interpreter's final flush can change the
+    exit code."""
+    if not lines or stderr is None:
+        return
+    try:
+        for line in lines:
+            stderr.write(line + "\n")
+        stderr.flush()
+    except Exception:
+        _discard_unwritten(stderr)
+
+
+def _flushed(stream):
+    """True when the stream is unavailable or holds nothing that a later flush could fail on."""
+    if stream is None:
+        return True
+    try:
+        stream.flush()
+    except Exception:
+        return False
+    return True
+
+
+def _exit_settled(code):
+    """Exit with code, which the interpreter's final flush of stdout or stderr must not replace with its
+    own 120. Each stream is flushed here first; one that still fails is pointed at the null device and
+    flushed again, and if one fails even then the process ends at once with code, skipping that flush."""
+    settled = True
+    for stream in (sys.stdout, sys.stderr):
+        if not _flushed(stream):
+            _discard_unwritten(stream)
+            settled = _flushed(stream) and settled
+    if not settled:
+        os._exit(code)
+    sys.exit(code)
 
 
 if __name__ == "__main__":
     _code = main(sys.argv[1:])
     _finalizer = sys.modules.get("_selftest_exit_report")
-    (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)
+    (_exit_settled if _finalizer is None else _finalizer.exit_with)(_code)

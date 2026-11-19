@@ -7117,6 +7117,8 @@ expected-check-ids = [
   # write: only a temporary file this process created is removed on failure
   "write/temp-name-taken-left-alone-2",
   "write/temp-name-own-removed-control-2",
+  # write: an interrupt removes the temporary file and is raised again
+  "write/interrupt-temp-removed-raised-again",
   # output: a failed stdout write is exit 2
   "output/claim-broken-pipe-2",
   "output/wait-broken-pipe-2",
@@ -7133,6 +7135,32 @@ expected-check-ids = [
   "output/process-wait-stdout-closed-after-start-2",
   "output/process-claim-stdout-open-after-start-control-0",
   "output/process-wait-stdout-open-after-start-control-0",
+  # output, as real processes: a closed, full or reader-less stderr keeps the exit and leaves stdout empty
+  "output/process-claim-existing-stderr-closed-at-start-5",
+  "output/process-claim-missing-parent-stderr-closed-at-start-2",
+  "output/process-wait-unbound-stderr-closed-at-start-4",
+  "output/process-wait-never-seen-stderr-closed-at-start-3",
+  "output/process-claim-existing-stderr-closed-after-start-5",
+  "output/process-claim-missing-parent-stderr-closed-after-start-2",
+  "output/process-wait-unbound-stderr-closed-after-start-4",
+  "output/process-wait-never-seen-stderr-closed-after-start-3",
+  "output/process-claim-existing-stderr-on-dev-full-5",
+  "output/process-claim-missing-parent-stderr-on-dev-full-2",
+  "output/process-wait-unbound-stderr-on-dev-full-4",
+  "output/process-wait-never-seen-stderr-on-dev-full-3",
+  "output/process-claim-existing-stderr-on-pipe-without-reader-5",
+  "output/process-claim-missing-parent-stderr-on-pipe-without-reader-2",
+  "output/process-wait-unbound-stderr-on-pipe-without-reader-4",
+  "output/process-wait-never-seen-stderr-on-pipe-without-reader-3",
+  "output/process-claim-existing-stderr-unflushable-after-start-5",
+  "output/process-claim-missing-parent-stderr-unflushable-after-start-2",
+  "output/process-wait-unbound-stderr-unflushable-after-start-4",
+  "output/process-wait-never-seen-stderr-unflushable-after-start-3",
+  "output/process-claim-existing-stderr-open-control-5",
+  "output/process-claim-missing-parent-stderr-open-control-2",
+  "output/process-wait-unbound-stderr-open-control-4",
+  "output/process-wait-never-seen-stderr-open-control-3",
+  "output/process-claim-stdout-and-stderr-closed-after-start-2",
   # revert: the incident case turns red when the id comparison is removed
   "revert/id-check-removed",
 ]
