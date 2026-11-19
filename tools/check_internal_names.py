@@ -172,6 +172,8 @@ identifier opening a
 quoted string, a QA round number written as a path or pattern segment, a label split across more
 than one line break, inside a word or with other punctuation at the break, or encoded) is not
 matched, and SWEPT_PREFIXES is hand-grown, so an area is covered only once a sweep adds it.
+RESIDUALS: further lookalike forms beyond the tested set may be missed or over-flagged by these rows,
+and the tested set is the self-test table (the swept-path vectors, controls and twins of --self-test).
 
 DISCLOSED SCOPE LIMITS. SCOPE_RELPATHS is a HAND-MAINTAINED allowlist with no drift-guard: a new QA-suite
 surface must be ADDED HERE BY HAND to be covered, and a surface not yet listed is out of this gate's reach
@@ -593,8 +595,8 @@ SWEPT_LABELS = (
                 + _SWEPT_GRADE + r"(?![\w-])|(?i:false[ -](?:deny|allow|positive|negative|block)\b))"
                 r"|\b(?:" + _SWEPT_GRADE_STRONG + r"[ -](?:" + _SWEPT_REVIEW_WORD + r")?|" + _SWEPT_GRADE
                 + r"[ -]" + _SWEPT_REVIEW_WORD + r"|" + _SWEPT_GRADE_WORD_ANY_CASE
-                + r"[ -](?i:peer[ -])?(?i:review)[ -])(?i:find" + r"ing|item)s?\b"
-                r"|\b" + _SWEPT_GRADE + r"[ -](?i:find" + r"ing|item)s?[ -]?[0-9]+[a-z]?\b"),
+                + r"[ -](?i:peer[ -])?(?i:review)[ -])(?i:(?:find" + r"ing|item)s?)\b"
+                r"|\b" + _SWEPT_GRADE + r"[ -](?i:(?:find" + r"ing|item)s?)[ -]?[0-9]+[a-z]?\b"),
      "a review finding or item with a grade"),
     # a review-round-derived test name, here with no internal-allow exemption
     (re.compile(r"\btest_r" + r"[0-9]+[a-z]?_"), "a review-round test name"),
@@ -609,6 +611,11 @@ SWEPT_ROW_KEYS = ("family-grade", "qa-then-family", "bare-qa-round", "family-rou
 # a hit on this line (a match wholly on either line is counted by that line's own read).
 _SWEPT_SEAM_TAIL = re.compile(r"(?:\s|\\n|[\"'])*$")
 _SWEPT_SEAM_LEAD = re.compile(r"^\s*(?:#+|//+|\*+|>+|[rRbBuUfF]{0,2}[\"']+)?\s*")
+# Rows whose exception context trails the match (the attribution row's flags exemptions: a command
+# option or "are passed" style CLI wording after it) and so may sit on the next line: a line hit of
+# such a row is kept only when the joined read also matches at the same start, so a wrapped
+# "<family>'s flags" then "--print", or a wrap between "are" and "passed", is not a hit.
+_SWEPT_SEAM_CONTEXT_ROWS = ("family-attribution",)
 
 
 def _swept_hits(text, rows=None, seams=True):
@@ -620,13 +627,17 @@ def _swept_hits(text, rows=None, seams=True):
     hits = {key: [] for key in SWEPT_ROW_KEYS}
     lines = text.splitlines()
     for number, line in enumerate(lines, 1):
+        seam = None
+        if seams and number < len(lines):
+            left = _SWEPT_SEAM_TAIL.sub("", line)
+            following = lines[number]
+            seam = left + " " + following[_SWEPT_SEAM_LEAD.match(following).end():]
         for key, (pattern, _label) in zip(SWEPT_ROW_KEYS, rows):
-            hits[key] += [number for _ in pattern.finditer(line)]
-        if not seams or number == len(lines):
+            hits[key] += [number for match in pattern.finditer(line)
+                          if seam is None or key not in _SWEPT_SEAM_CONTEXT_ROWS
+                          or match.start() >= len(left) or pattern.match(seam, match.start())]
+        if seam is None:
             continue
-        left = _SWEPT_SEAM_TAIL.sub("", line)
-        following = lines[number]
-        seam = left + " " + following[_SWEPT_SEAM_LEAD.match(following).end():]
         for key, (pattern, _label) in zip(SWEPT_ROW_KEYS, rows):
             hits[key] += [number for match in pattern.finditer(seam)
                           if match.start() < len(left) < match.end() - 1]
@@ -4093,7 +4104,22 @@ def _self_test(caller_env=None):
             ("family-attribution", fam_c + "'s fl" + "ags --print and --model",
              fam_c + "'s fl" + "ags - two were real"),
             ("family-attribution", fam_x + "'s own fl" + "ags --model and --sandbox are forwarded",
-             fam_x + "'s own fl" + "ags: a missing guard"))
+             fam_x + "'s own fl" + "ags: a missing guard"),
+            # an upper-case plural finding or item is matched like a lower-case one, numbered after any
+            # upper-case grade, id, MAJOR or MINOR, or unnumbered after a grade word that is not a
+            # SemVer class or with review between
+            ("review-item-grade", "MIN" + "OR IT" + "EMS in the changelog", "R" + "11 IT" + "EMS 4"),
+            ("review-item-grade", "never a MIN" + "OR FIN" + "DINGS", "MAJ" + "OR FIN" + "DINGS 2"),
+            ("review-item-grade", "a C" + "3 FIN" + "DINGS list", "a MED" + "IUM FIN" + "DINGS list"),
+            ("review-item-grade", "C" + "3 IT" + "EMS here", "C" + "3 REVIEW IT" + "EMS here"),
+            # the flags exemptions hold across one line break: the command option or the CLI wording
+            # on the next line still exempts, while other wording there is still an attribution
+            ("family-attribution", fam_c + "'s fl" + "ags\n# --print and --model",
+             fam_c + "'s fl" + "ags\n# - two were real"),
+            ("family-attribution", fam_x + "'s fl" + "ags are\n# passed unchanged",
+             fam_x + "'s fl" + "ags are\n# fixed"),
+            ("family-attribution", fam_x + "'s own fl" + "ags\n# are forwarded unchanged",
+             fam_x + "'s own fl" + "ags\n# are fixed"))
         narrow_flagged = [c for _k, c, _t in swept_narrow
                           if any(_swept_hits("a {} b\n".format(c))[key] for key in SWEPT_ROW_KEYS)]
         check("swept/narrowed-controls-unflagged", not narrow_flagged, narrow_flagged)
