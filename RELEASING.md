@@ -32,7 +32,11 @@ pull request (CLAUDE.md, Gates and CI).
    links to, and `site/downloads/aiqt-instructions.txt`) and their generating inputs (the corpus and
    `tools/gen_skill.py`) do not change; `site/downloads/aiqt-skill.zip` is a stable "latest" alias kept
    byte-identical to the version-numbered copy (both are written from the same bytes, and `gen_skill
-   --check` compares each to disk, so they cannot diverge). The
+   --check` compares each to disk, so they cannot diverge). The hooks plugin's copy of the skill,
+   `plugin/aiqt-guardrails-hooks/skills/aiqt/SKILL.md`, does not change after the freeze either: `gen_skill.py`
+   writes it from the same bytes as `site/downloads/aiqt/SKILL.md` (the `SKILL.md` inside the zip), and
+   `gen_skill --check` compares the two copies on disk. It is pack content, not a separate release artifact
+   (step 2). The
    release-metadata edits prescribed below (the recorded digests, the evidence fields, the attestation
    row with its regenerated branch-integrity artifacts, and the tag key) are the only changes permitted
    after this point. For the genesis (first recorded) release, the freeze pull request also carries the
@@ -142,6 +146,9 @@ pull request (CLAUDE.md, Gates and CI).
    the evidence page and the `changelog.toml` reserved-key example. The mapping exports under
    `site/downloads/` (`mappings.csv`, `mappings.json`) are reference data regenerated from the corpus and
    covered by the drift and reference-facts gates, so they are not part of the release-integrity set.
+   Neither is the hooks plugin's copy of the skill, `plugin/aiqt-guardrails-hooks/skills/aiqt/SKILL.md`: it
+   is pack content recorded in `.aiqt/manifest.toml`, and `gen_skill --check` ties its bytes to
+   `site/downloads/aiqt/SKILL.md`, the `SKILL.md` packed inside the recorded zip.
 3. Record. Add a `[release.artifacts]` sub-table to the latest `[[release]]` in `changelog.toml`,
    listing every release artifact from step 2 with its `sha256:<64 lowercase hex>` digest. This arms the
    artifact-checksum gate, which hashes the latest recorded release's artifacts and fails if any recorded
