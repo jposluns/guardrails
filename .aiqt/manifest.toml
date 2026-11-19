@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "aef856be3b301b0ecdd6a962f5bd47b5b4c4e486f9a21634c886a6a0c9f42908"
+tree-sha256 = "04d4a925473b05d9bdb851b66023effddd28d81b7bf53d0b00cfe62433381719"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4592,8 +4592,8 @@ sha256 = "b0fa40d1f94ac44b818660015db141d889882c48c31f3576994f9083dc1e8bcc"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 128508
-sha256 = "b7ce2fd24e315a1766f24b9cbc148b4773b6f1815634bea53f319918f74b481e"
+bytes = 150051
+sha256 = "10bd9a881df965a0db49c55fe2622bc5ce90b78698f4399c3fdf3e32357243c8"
 
 [[sources]]
 path = "tools/doctor.py"
