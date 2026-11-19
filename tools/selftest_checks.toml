@@ -6846,6 +6846,14 @@ expected-check-ids = [
   # holding ':' are refused
   "fail-closed/write-tmpdir-inside-repository",
   "flip/write-tmpdir-unchecked",
+  # TMPDIR inside the repository in a fresh process's environment: nothing is opened or created there,
+  # not even tempfile's probe file
+  "fail-closed/write-tmpdir-env-no-probe-write",
+  "flip/write-tmpdir-env-discovery-probe",
+  # a checkout path holding a byte that is not UTF-8 is compared as the filesystem's bytes
+  "write/checkout-path-non-utf8",
+  "fail-closed/write-tmpdir-inside-non-utf8-checkout",
+  "flip/write-non-utf8-checkout-escaped",
   "fail-closed/write-checkout-path-colon",
   "flip/write-checkout-path-colon-raw",
   # a cannot-evaluate message is escaped like a listing line

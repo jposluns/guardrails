@@ -181,10 +181,14 @@ before it. The first evaluation reads B..C. Committing a proposal replaces the b
 changes the lines the diff deletes and adds there and so the move credits left, so each later
 evaluation reads B..C', the diff from the merge base to C' (C's tree with the last proposal's canonical
 render as its baseline file, built in a temporary object store outside the repository that the run
-removes; a temporary directory (TMPDIR) whose real path lies in the worktree or the git directory, and
-a checkout whose object directory path holds ':', which git splits alternates on, are cannot-evaluate
-before anything is created), carrying that proposal as a writer run on it committed would; the writer stops when an
-evaluation of C' proposes the entries substituted in it. For K candidate keys of an evaluation (the keys
+removes; a checkout whose object directory path holds ':', which git splits alternates on, is
+cannot-evaluate before anything is created; the store's parent is the first of TMPDIR, TEMP, TMP, the
+platform defaults and the current directory, in tempfile's order, that is a writable directory, tested
+by creating the store in it, never by tempfile's probe file; each candidate's real path is checked
+against the worktree and the git directory, whose paths git prints read as the filesystem's bytes,
+before anything is created under it, and one inside them is cannot-evaluate), carrying that proposal as
+a writer run on it committed would; the writer stops when an evaluation of C' proposes the entries
+substituted in it. For K candidate keys of an evaluation (the keys
 of the findings on the lines its diff adds and of its candidate baseline) a pass runs at most 2K+1 rounds
 and an evaluation at most K+2 passes (writer_round_bound and writer_pass_bound give the reasoning), and
 the writer runs at most K+2 evaluations of C' for the K of its first evaluation (writer_settle_bound), a
@@ -1277,29 +1281,66 @@ WriterRun = namedtuple("WriterRun", ("proposal", "judged", "deleted", "found", "
 def _repository_areas(root):
     """(object directory, areas): the repository's object directory as git rev-parse prints it, and the
     real paths of its worktree, its git directory, its common git directory and that object directory
-    (each resolved by git rev-parse, then os.path.realpath, so a symbolic link is followed)."""
-    lines = _git_lines(root, "the repository's directories cannot be found", "rev-parse",
-                       "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--git-common-dir",
-                       "--git-path", "objects")
-    if len(lines) != 4:
+    (each resolved by git rev-parse, then os.path.realpath, so a symbolic link is followed). git prints
+    the paths as the filesystem's bytes, one per line; they are read as bytes and decoded with
+    os.fsdecode, so a path holding a byte that is not UTF-8 names the same directory it names on disk
+    (decoded as text with escapes, it would name another path and pass the containment check)."""
+    proc = _git(root, "rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir",
+                "--git-common-dir", "--git-path", "objects")
+    if proc.returncode != 0:
+        raise CannotEvaluate("the repository's directories cannot be found: git exited {} ({})".format(
+            proc.returncode, _stderr(proc)))
+    lines = proc.stdout.split(b"\n")
+    if len(lines) != 5 or lines[4] != b"" or not all(lines[:4]):
         raise CannotEvaluate("git rev-parse printed {!r} for the worktree, the git directory, the common "
-                             "git directory and the object directory".format(lines))
-    return lines[3], [os.path.realpath(line) for line in lines]
+                             "git directory and the object directory".format(proc.stdout))
+    paths = [os.fsdecode(line) for line in lines[:4]]
+    return paths[3], [os.path.realpath(path) for path in paths]
 
 
-def _store_parent(areas):
-    """The real path of the directory the writer's temporary object store is created in: the ambient
-    temporary directory (tempfile.gettempdir, so TMPDIR), CannotEvaluate when that real path is one of
-    `areas` (_repository_areas) or lies inside one, so nothing is created before the parent is known to
-    sit outside the repository."""
-    parent = os.path.realpath(tempfile.gettempdir())
-    for area in areas:
-        if os.path.commonpath([parent, area]) == area:
-            raise CannotEvaluate("the temporary directory {} (TMPDIR) lies inside the repository ({}); the "
-                                 "writer builds its object store outside the worktree and the git directory "
-                                 "only, so no baseline is proposed; set TMPDIR to a directory outside the "
-                                 "repository".format(parent, area))
-    return parent
+def _temporary_candidates():
+    """(source, path) for each directory tempfile would try for its temporary directory, in the order
+    its documentation gives: the TMPDIR, TEMP and TMP environment variables (each when set and not
+    empty), the platform's defaults, then the current directory. Only names are read; nothing is
+    created or probed."""
+    candidates = [(name, os.environ[name]) for name in ("TMPDIR", "TEMP", "TMP") if os.environ.get(name)]
+    if os.name == "nt":
+        defaults = [os.path.expanduser(r"~\AppData\Local\Temp"), os.path.expandvars(r"%SYSTEMROOT%\Temp"),
+                    r"c:\temp", r"c:\tmp", r"\temp", r"\tmp"]
+    else:
+        defaults = ["/tmp", "/var/tmp", "/usr/tmp"]
+    candidates += [("a platform default", path) for path in defaults]
+    try:
+        candidates.append(("the current directory", os.getcwd()))
+    except OSError:
+        candidates.append(("the current directory", os.curdir))
+    return candidates
+
+
+def _store_directory(areas):
+    """A tempfile.TemporaryDirectory (not yet entered) for the writer's temporary object store, created
+    under the real path of the first of _temporary_candidates that is a writable directory. Each
+    candidate's real path is checked against `areas` (_repository_areas) before anything is created
+    under it: one that is an area or lies inside one is CannotEvaluate, even when a later candidate
+    would serve, so a temporary directory the caller named inside the repository is refused, not
+    passed over. Writability is tested by creating the store's directory itself (no probe file, unlike
+    tempfile.gettempdir); a candidate where that fails is passed over, and none left is
+    CannotEvaluate."""
+    for source, candidate in _temporary_candidates():
+        parent = os.path.realpath(candidate)
+        for area in areas:
+            if os.path.commonpath([parent, area]) == area:
+                raise CannotEvaluate("the temporary directory {} ({}) lies inside the repository ({}); the "
+                                     "writer builds its object store outside the worktree and the git "
+                                     "directory only, so no baseline is proposed; set TMPDIR to a directory "
+                                     "outside the repository".format(parent, source, area))
+        try:
+            return tempfile.TemporaryDirectory(prefix="review-label-writer-", dir=parent)
+        except OSError:
+            continue
+    raise CannotEvaluate("no temporary directory (TMPDIR, TEMP, TMP, the platform defaults, the current "
+                         "directory) is a writable directory outside the repository, so no baseline is "
+                         "proposed; set TMPDIR to one")
 
 
 def _alternate_entry(objects):
@@ -1318,14 +1359,14 @@ def _alternate_entry(objects):
 def _scratch_store(root):
     """A Store: an empty temporary object directory outside the repository, which the repository's own
     object directory backs as an alternate, removed when the block ends. The writer builds C' there, so
-    it writes nothing into the repository. Before anything is created, the temporary directory's real
-    path is checked against the real paths of the worktree, the git directory, the common git directory
-    and the object directory (_store_parent), and the object directory against the alternates separator
-    (_alternate_entry); either refusal is CannotEvaluate."""
+    it writes nothing into the repository. Before anything is created, the object directory is checked
+    against the alternates separator (_alternate_entry), and each temporary directory candidate's real
+    path against the real paths of the worktree, the git directory, the common git directory and the
+    object directory before anything is created under it (_store_directory); either refusal is
+    CannotEvaluate."""
     objects, areas = _repository_areas(root)
     alternates = _alternate_entry(objects)
-    parent = _store_parent(areas)
-    with tempfile.TemporaryDirectory(prefix="review-label-writer-", dir=parent) as tmp:
+    with _store_directory(areas) as tmp:
         store = os.path.join(tmp, "objects")
         os.mkdir(store)
         yield Store(store, alternates)
@@ -3144,15 +3185,99 @@ def _baseline_writer_substitution_rows(tmp, labels):
 
 
 @contextlib.contextmanager
-def _ambient_tempdir(path):
-    """tempfile's ambient temporary directory set to `path` for the length of a block (as TMPDIR would
-    set it at start-up), then restored."""
-    saved = tempfile.tempdir
-    tempfile.tempdir = str(path)
+def _ambient_tmpdir(path):
+    """TMPDIR set to `path` in this process's environment for the length of a block, then restored. The
+    writer reads the environment itself (_temporary_candidates), so tempfile's cached directory is left
+    as it is."""
+    saved = os.environ.get("TMPDIR")
+    os.environ["TMPDIR"] = str(path)
     try:
         yield
     finally:
-        tempfile.tempdir = saved
+        if saved is None:
+            os.environ.pop("TMPDIR", None)
+        else:
+            os.environ["TMPDIR"] = saved
+
+
+def _unchecked_store_directory(areas):
+    """A flip of _store_directory: the store created under TMPDIR's real path, never checked."""
+    parent = os.path.realpath(os.environ["TMPDIR"])
+    return tempfile.TemporaryDirectory(prefix="review-label-writer-", dir=parent)
+
+
+def _discovered_store_directory(areas):
+    """A flip of _store_directory: the parent found by tempfile.gettempdir, whose discovery writes and
+    removes a probe file in a candidate directory, and only then checked against `areas`."""
+    parent = os.path.realpath(tempfile.gettempdir())
+    for area in areas:
+        if os.path.commonpath([parent, area]) == area:
+            raise CannotEvaluate("the temporary directory {} (TMPDIR) lies inside the repository ({}) "
+                                 "(flip)".format(parent, area))
+    return tempfile.TemporaryDirectory(prefix="review-label-writer-", dir=parent)
+
+
+def _text_repository_areas(root):
+    """A flip of _repository_areas: git's paths decoded as UTF-8 text with backslash escapes (_git_lines),
+    so a byte that is not UTF-8 becomes escape text naming another path."""
+    lines = _git_lines(root, "the repository's directories cannot be found", "rev-parse",
+                       "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--git-common-dir",
+                       "--git-path", "objects")
+    return lines[3], [os.path.realpath(line) for line in lines]
+
+
+def _tree_listing(path):
+    """Every entry below `path`, as sorted relative paths."""
+    return sorted(os.path.relpath(os.path.join(top, name), path)
+                  for top, dirs, files in os.walk(path) for name in dirs + files)
+
+
+# The fresh child for the TMPDIR rows: it records every open, mkdir, rename and removal whose path lies
+# in argv[3] (an audit hook installed before the module is imported, so a transient probe file that a
+# directory listing taken before and after cannot see is recorded), then runs --write-baseline's
+# writer on argv[2] and prints its exit code, stdout, stderr and the recorded events as JSON. With
+# argv[4] "discovery", _store_directory is replaced by its flip _discovered_store_directory.
+_TMPDIR_CHILD = r"""
+import contextlib, io, json, os, sys
+tools, repo, inside, flip = sys.argv[1:5]
+touched = []
+
+
+def hook(event, args):
+    if event in ("open", "os.mkdir", "os.rename", "os.remove", "os.rmdir") and args \
+            and isinstance(args[0], (str, bytes, os.PathLike)):
+        path = os.path.abspath(os.fsdecode(args[0]))
+        if path == inside or path.startswith(inside + os.sep):
+            touched.append([event, path])
+
+
+sys.addaudithook(hook)
+sys.path.insert(0, tools)
+import check_review_labels as labels
+if flip == "discovery":
+    labels._store_directory = labels._discovered_store_directory
+out, err = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    code = labels.write_baseline(repo, "main", None, {})
+sys.__stdout__.write(json.dumps({"code": code, "out": out.getvalue(), "err": err.getvalue(),
+                                 "touched": touched}))
+"""
+
+
+def _child_write_exit(repo, tmpdir, flip=""):
+    """(exit code, stdout, stderr, recorded events) of the writer run on `repo` in a fresh python3 -I
+    process whose environment sets TMPDIR to `tmpdir`, or (None, ...) when the child printed no
+    result."""
+    import json
+    env = dict(os.environ, TMPDIR=str(tmpdir))
+    tools = str(Path(__file__).resolve().parent)
+    proc = subprocess.run([sys.executable, "-I", "-B", "-c", _TMPDIR_CHILD, tools, str(repo), str(tmpdir), flip],
+                          capture_output=True, text=True, timeout=TIMEOUT, env=env, stdin=subprocess.DEVNULL)
+    try:
+        result = json.loads(proc.stdout)
+    except ValueError:
+        return None, proc.stdout, proc.stderr, None
+    return result["code"], result["out"], result["err"], result["touched"]
 
 
 def _recorded_store_git(seen):
@@ -3167,9 +3292,11 @@ def _recorded_store_git(seen):
 
 def _baseline_writer_store_rows(tmp, labels):
     """--write-baseline's temporary object store: a temporary directory whose real path lies in the
-    worktree or the git directory is refused before anything is created, and a checkout whose object
-    directory path holds ':' (which git splits GIT_ALTERNATE_OBJECT_DIRECTORIES on) is refused with a
-    message naming that separator rather than failing on a split alternate."""
+    worktree or the git directory is refused before anything is created (no tempfile probe file either,
+    in a fresh process whose environment sets TMPDIR), also in a checkout whose path holds a byte that
+    is not UTF-8, and a checkout whose object directory path holds ':' (which git splits
+    GIT_ALTERNATE_OBJECT_DIRECTORIES on) is refused with a message naming that separator rather than
+    failing on a split alternate."""
     la = labels["backlog-id"]
     added = {("aa/A.py", _sha(la.encode("utf-8")), "backlog-id"): 1}
     config = _REAL_LOAD_CONFIG(ROOT / CONFIG_RELPATH)
@@ -3186,19 +3313,34 @@ def _baseline_writer_store_rows(tmp, labels):
     code, out, _err = _write_exit(repo)
     refused = []
     for parent in (repo / ".git" / "objects", repo / "aa", link / "objects"):
-        with _ambient_tempdir(parent):
+        with _ambient_tmpdir(parent):
             refused.append(_write_exit(repo))
     check("fail-closed/write-tmpdir-inside-repository", code == 1 and _proposed_entries(out, config) == added
           and all(code_r == 2 and out_r == "" and "(TMPDIR) lies inside the repository" in err_r
                   for code_r, out_r, err_r in refused), (code, out, refused))
     seen = set()
-    with _ambient_tempdir(repo / ".git" / "objects"), _patched(
-            _store_parent=lambda areas: os.path.realpath(tempfile.gettempdir()),
-            _store_git=_recorded_store_git(seen)):
+    with _ambient_tmpdir(repo / ".git" / "objects"), _patched(
+            _store_directory=_unchecked_store_directory, _store_git=_recorded_store_git(seen)):
         code_f, out_f, err_f = _write_exit(repo)
     inside = str(os.path.realpath(repo / ".git" / "objects")) + os.sep
     check("flip/write-tmpdir-unchecked", code_f == 1 and seen
           and all(os.path.realpath(path).startswith(inside) for path in seen), (code_f, err_f, seen))
+
+    # A fresh process with TMPDIR at .git/objects in its environment: the writer exits 2 with nothing
+    # printed, and no open, mkdir, rename or removal ever touches that directory, whose listing is the
+    # same before and after. With the parent found by tempfile.gettempdir, the refusal still comes, but
+    # only after its discovery opened (and removed) a probe file there, which the listing cannot show.
+    objects = os.path.realpath(repo / ".git" / "objects")
+    before = _tree_listing(objects)
+    code, out, err, touched = _child_write_exit(repo, objects)
+    check("fail-closed/write-tmpdir-env-no-probe-write", code == 2 and out == ""
+          and "(TMPDIR) lies inside the repository" in err and touched == []
+          and _tree_listing(objects) == before, (code, out, err, touched))
+    code_f, out_f, err_f, touched_f = _child_write_exit(repo, objects, "discovery")
+    check("flip/write-tmpdir-env-discovery-probe", code_f == 2 and bool(touched_f)
+          and any(event == "open" for event, _path in touched_f) and _tree_listing(objects) == before,
+          (code_f, out_f, err_f, touched_f))
+    _baseline_writer_non_utf8_rows(tmp, la, added, config)
 
     # The same layout in a checkout whose path holds ':': the writer exits 2 with nothing printed, naming
     # the separator; with the path passed raw, git splits it into alternates that do not exist.
@@ -3213,6 +3355,45 @@ def _baseline_writer_store_rows(tmp, labels):
         code_f, out_f, err_f = _write_exit(repo)
     check("flip/write-checkout-path-colon-raw", code_f == 2 and out_f == "" and "alternate" in err_f
           and "GIT_ALTERNATE_OBJECT_DIRECTORIES on" not in err_f, (code_f, out_f, err_f))
+
+
+def _baseline_writer_non_utf8_rows(tmp, la, added, config):
+    """The writer's store in a checkout whose path holds the byte 0xff (not UTF-8), skipped (not run,
+    so the self-test is incomplete) where the filesystem refuses such a name. With the ambient temporary
+    directory the writer proposes its entry, reading the repository's objects through the path as it is
+    on disk; with TMPDIR at its .git/objects, it exits 2 with nothing printed and no store created. With
+    git's paths decoded as text with escapes, the containment check passes and the store is created
+    there."""
+    name = "baseline-writer-non-utf8-" + os.fsdecode(b"\xff")
+    try:
+        os.mkdir(Path(tmp) / name)
+        os.rmdir(Path(tmp) / name)
+    except (OSError, UnicodeError) as exc:
+        NOT_RUN.append("write/checkout-path-non-utf8 and its two rows (the filesystem refuses a directory "
+                       "name holding the byte 0xff: {})".format(exc))
+        return
+    repo, _base = _baseline_repo(tmp, name)
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "aa/A.py", la + "\n")
+    _commit_all(repo, "a label line")
+    code, out, err = _write_exit(repo)
+    check("write/checkout-path-non-utf8", code == 1 and _proposed_entries(out, config) == added,
+          (code, out, err))
+    objects = repo / ".git" / "objects"
+    before = _tree_listing(objects)
+    seen = set()
+    with _ambient_tmpdir(objects), _patched(_store_git=_recorded_store_git(seen)):
+        code, out, err = _write_exit(repo)
+    check("fail-closed/write-tmpdir-inside-non-utf8-checkout", code == 2 and out == ""
+          and "(TMPDIR) lies inside the repository" in err and not seen and _tree_listing(objects) == before,
+          (code, out, err, seen))
+    seen = set()
+    with _ambient_tmpdir(objects), _patched(_repository_areas=_text_repository_areas,
+                                            _store_git=_recorded_store_git(seen)):
+        code_f, out_f, err_f = _write_exit(repo)
+    inside = os.path.realpath(objects) + os.sep
+    check("flip/write-non-utf8-checkout-escaped", bool(seen)
+          and all(os.path.realpath(path).startswith(inside) for path in seen), (code_f, err_f, seen))
 
 
 def _cannot_evaluate_outputs(repo):
