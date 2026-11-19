@@ -7724,12 +7724,23 @@ def _gate_runtime_cost_failures(cost_inputs):
     return out
 
 
-_GW_FLOOR = 0.1
-_GW_SIZES = 9
-# The most a gw-lin row's t_2n/t_n may be, and how many timings of each size a ratio over it may take: a ratio
-# over the bound times both sizes again and compares the least time of each (_gw_scan_ratio).
-_GW_RATIO = 3.0
-_GW_TIMINGS = 3
+# The smaller input of a gw-lin row repeats its unit _GW_REPS times; the doubled input repeats it twice as often.
+_GW_REPS = 4000
+# The most a gw-lin row's work count may grow when its input doubles: count(2n) <= 2 * count(n) + _GW_COUNT_SLACK,
+# the count being what the hook's work-count seam (aiqt_hooks._GATE_SCAN_COUNTER, _gate_scan_count) adds over one
+# scan. On these inputs (prefix + unit * n + suffix) each counted pass reads a stretch that is a fixed multiple of
+# n plus a fixed part, and a fixed part adds to count(2n) - 2 * count(n) only when it is negative. The slack covers
+# the two ways the code makes a pass's stretch shorter than whole units, or grow by a step instead of a multiple:
+# - the dequoted-word walk (_gate_novrf_dequoted_bypass) finds a terminator over slices of 16, 32, 64, ... words,
+#   whose full slices sum to 16 * (2 ** k - 1); doubling the input makes that 2 * 16 * (2 ** k - 1) + 16, at most
+#   16 over twice for each verb's walk, and a walk that finds no bypass covers every later git word of its verb,
+#   so a row takes at most one such walk for each roster verb its words hold, and none holds more than one;
+# - a pass that stops at the next unit (the grammar lexer's off-roster stop at the next ambiguous quote) reads the
+#   last unit only to the end of the text, at most one unit short: no unit here is longer than 18 characters, and
+#   the lexer counts a character at most twice (its main pass and its read of a quote's interior), so at most 36.
+# 16 + 36 = 52, rounded up to 64. A walk restarted at each unit, or a copy of the suffix after each unit, adds
+# about n * n / 2 counted items, millions at these sizes, so the slack cannot hide one.
+_GW_COUNT_SLACK = 64
 # The getrusage fields a gw-lin row reports, then (name, format) for each reported reading, in order: user and
 # system CPU time, minor page faults, involuntary context switches, and the collector's collection count.
 _GW_RUSAGE_FIELDS = ("ru_utime", "ru_stime", "ru_minflt", "ru_nivcsw")
@@ -7769,145 +7780,157 @@ def _gw_usage_text(use_n, use_2n):
     return ", ".join(parts)
 
 
-def _gw_scan_once(cmd, scan):
-    """(CPU seconds, decision, usage) for one scan of cmd; usage is what _gw_usage grew by across the call,
-    read outside the timed region, with None for a reading unavailable before or after it."""
+def _gw_count_once(cmd, scan):
+    """(work count, CPU seconds, decision, usage) for one scan of cmd with the hook's work-count seam on: the
+    seam (aiqt_hooks._GATE_SCAN_COUNTER) holds a fresh counter for the call and is None again after it, whether
+    the scan returns or raises. usage is what _gw_usage grew by across the call, read outside the timed region,
+    with None for a reading unavailable before or after it. The CPU time and the usage are diagnostics that a
+    failing row reports; no verdict reads them."""
+    counter = [0]
     u0 = _gw_usage()
-    t0 = time.process_time()
-    decision = scan(cmd)
-    t = time.process_time() - t0
-    return t, decision, tuple(None if a is None or b is None else b - a for a, b in zip(u0, _gw_usage()))
+    aiqt_hooks._GATE_SCAN_COUNTER = counter
+    try:
+        t0 = time.process_time()
+        decision = scan(cmd)
+        t = time.process_time() - t0
+    finally:
+        aiqt_hooks._GATE_SCAN_COUNTER = None
+    return counter[0], t, decision, tuple(None if a is None or b is None else b - a for a, b in zip(u0, _gw_usage()))
 
 
-def _gw_scan_ratio(unit, prefix, suffix, scan, once=_gw_scan_once):
-    """Double n (from 4000, at most _GW_SIZES sizes) until t_n clears the _GW_FLOOR floor, then compare
-    t_2n/t_n. While that ratio is over _GW_RATIO, both sizes are timed again (at most _GW_TIMINGS timings of
-    each) and the least time of each is compared, so one call charged for stray work cannot fail a linear scan,
-    while a scan that grows faster than its input in every timing still fails. Returns (ratio, t_n, t_2n,
-    length_2n, decisions, (usage_n, usage_2n), timings), the times and usages being those of the least timing
-    of each size and timings how many of each were taken, or (None, t_n, None, length, decisions, None, 1) when
-    the floor was never cleared in the bound, so the caller fails 'linearity not evaluated'; decisions lists
-    every timed scan's decision, in order. The input is a command string for the whole-command scan or a word
-    list for the dequoted-word scan; once times one scan (a check stands in scripted times through it)."""
-    reps = 4000
-    decisions = []
-    for _ in range(_GW_SIZES):
-        cmd_n = prefix + unit * reps + suffix
-        t_n, decision, use_n = once(cmd_n, scan)
-        decisions.append(decision)
-        if t_n > _GW_FLOOR:
-            cmd_2n = prefix + unit * (reps * 2) + suffix
-            t_2n, decision, use_2n = once(cmd_2n, scan)
-            decisions.append(decision)
-            timings = 1
-            while t_2n / t_n > _GW_RATIO and timings < _GW_TIMINGS:
-                timings += 1
-                again_n, decision, again_use_n = once(cmd_n, scan)
-                decisions.append(decision)
-                again_2n, decision, again_use_2n = once(cmd_2n, scan)
-                decisions.append(decision)
-                if again_n < t_n:
-                    t_n, use_n = again_n, again_use_n
-                if again_2n < t_2n:
-                    t_2n, use_2n = again_2n, again_use_2n
-            return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions, (use_n, use_2n), timings
-        reps *= 2
-    return None, t_n, None, len(prefix + unit * reps + suffix), decisions, None, 1
+def _gw_count_growth(unit, prefix, suffix, scan, once=_gw_count_once):
+    """One scan of prefix + unit * _GW_REPS + suffix and one of the input with twice as many units, each through
+    once (a check stands in scripted readings through it). Returns (count_n, count_2n, length_n, length_2n,
+    decisions, (t_n, t_2n), (usage_n, usage_2n)): the work counts, the input lengths, both decisions in order,
+    and the CPU times and usages, diagnostics only. The input is a command string for the text scans or a word
+    list for the dequoted-word scan, so a length counts characters or words."""
+    readings = []
+    for reps in (_GW_REPS, 2 * _GW_REPS):
+        cmd = prefix + unit * reps + suffix
+        count, t, decision, use = once(cmd, scan)
+        readings.append((count, len(cmd), decision, t, use))
+    (count_n, length_n, decision_n, t_n, use_n), (count_2n, length_2n, decision_2n, t_2n, use_2n) = readings
+    return count_n, count_2n, length_n, length_2n, [decision_n, decision_2n], (t_n, t_2n), (use_n, use_2n)
 
 
-def _gw_lin_failures(cases):
-    """What the gw-lin timing rows got wrong: cases are (label, unit, prefix, suffix, scan, want) rows, each
-    timed by _gw_scan_ratio, and a row fails on a decision other than want, on a t_n that never cleared the
-    floor, or on a ratio of the least timings over _GW_RATIO (reporting the usage of the two calls those
-    least timings came from)."""
+def _gw_lin_failures(cases, once=_gw_count_once):
+    """What the gw-lin growth rows got wrong: cases are (label, unit, prefix, suffix, scan, want) rows, each read
+    by _gw_count_growth through once. A row fails on a decision other than want (with the seam on, at both
+    sizes, and, for a row with a scan, with the seam off at the smaller size, so the seam changes no decision),
+    on a smaller input whose work count is under its length (the seam did not count the scan's own pass over its
+    input, so growth was not evaluated), on a seam left on after the row, or on a doubled input whose work count
+    is over twice the smaller one's plus _GW_COUNT_SLACK. The CPU times and the usage of both calls are reported
+    with a growth failure as diagnostics; no verdict reads them, so a loaded host cannot change one."""
     out = []
     for label, unit, prefix, suffix, scan, want in cases:
-        ratio, t_n, t_2n, length_2n, got, use, timings = _gw_scan_ratio(unit, prefix, suffix, scan)
+        count_n, count_2n, length_n, length_2n, got, (t_n, t_2n), use = _gw_count_growth(
+            unit, prefix, suffix, scan, once)
+        if aiqt_hooks._GATE_SCAN_COUNTER is not None:
+            out.append("({}) the work-count seam was left on after the row: {!r}".format(
+                label, aiqt_hooks._GATE_SCAN_COUNTER))
+            aiqt_hooks._GATE_SCAN_COUNTER = None
+        if scan is not None:
+            got.append(scan(prefix + unit * _GW_REPS + suffix))
         wrong = [decision for decision in got if decision != want]
         if wrong:
-            out.append("({}) the timed scan decided {!r} on {} of its {} inputs, expected {!r}"
+            out.append("({}) the counted scan decided {!r} on {} of its {} inputs, expected {!r}"
                        .format(label, wrong[0], len(wrong), len(got), want))
-        if ratio is None:
-            out.append("({}) linearity not evaluated: t_n stayed under the {}s floor through "
-                       "{} sizes (last {:.4f}s)".format(label, _GW_FLOOR, _GW_SIZES, t_n))
-        elif ratio > _GW_RATIO:
-            out.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear): "
-                       "{:.3f}s then {:.3f}s, the least of {} timings of each, for an input of length {} ({})"
-                       .format(label, ratio, t_n, t_2n, timings, length_2n, _gw_usage_text(*use)))
+        if count_n < length_n:
+            out.append("({}) growth not evaluated: the work count on an input of length {} was {}, under that "
+                       "length, so the seam did not count the scan's pass over its input".format(
+                           label, length_n, count_n))
+        elif count_2n > 2 * count_n + _GW_COUNT_SLACK:
+            out.append("({}) doubling the input grew the scan's work count from {} to {}, over twice that plus {} "
+                       "(super-linear), for inputs of length {} then {}; diagnostics only, not judged: CPU {:.3f}s "
+                       "then {:.3f}s, {}".format(label, count_n, count_2n, _GW_COUNT_SLACK, length_n, length_2n,
+                                                t_n, t_2n, _gw_usage_text(*use)))
     return out
 
 
-def _gw_retime_failures():
-    """(gw-lin-retime-edge) _gw_scan_ratio over scripted times (no scan runs): the first size's time clears the
-    floor, then each pair is (t_n, t_2n) for one timing of both sizes. A first ratio just under or exactly at
-    _GW_RATIO is final with one timing; one just over it retimes, and a retimed pair at the bound ends the
-    retiming. One slow timing of either size is outvoted by the least of the others (the CI shape: 0.109 s then
-    0.328 s, then 0.115 s then 0.230 s), a slow retimed t_n never replaces a faster one, a ratio over the bound
-    in all but the last allowed timing passes on that last one, and a ratio over the bound in every timing stops
-    at _GW_TIMINGS timings of each and stays over it."""
+def _gw_count_edge_failures():
+    """(gw-lin-count-edge) _gw_lin_failures over scripted readings (no scan runs): each case is (count_n, count_2n,
+    t_n, t_2n, decision) for the smaller input (4000 characters) and the doubled one, and the failure kinds the row
+    must give. A doubled count exactly at twice plus _GW_COUNT_SLACK passes and one over it fails; a smaller
+    count under the input's length fails 'growth not evaluated'; a linear count passes whatever the CPU times
+    (a doubled input charged 50 times the CPU time of the smaller, the shape of a call on a loaded host) and a
+    quadratic count fails with CPU times in proportion to the input; a decision other than the row's fails."""
     out = []
-    for name, pairs, want_ratio, want_timings in (
-            ("under", [(0.25, 0.7499)], 0.7499 / 0.25, 1),
-            ("at", [(0.25, 0.75)], 0.75 / 0.25, 1),
-            ("over-then-at", [(0.25, 0.7501), (0.25, 0.75)], 0.75 / 0.25, 2),
-            ("slow-2n", [(0.109, 0.328), (0.115, 0.230)], 0.230 / 0.109, 2),
-            ("slow-n-retimed", [(0.109, 0.33), (0.3, 0.22), (0.11, 0.44)], 0.22 / 0.109, 2),
-            ("over-until-last", [(0.25, 0.7501), (0.25, 0.7502), (0.25, 0.5)], 0.5 / 0.25, _GW_TIMINGS),
-            ("quadratic", [(0.11, 0.44), (0.12, 0.46), (0.115, 0.45), (0.1, 0.1)], 0.44 / 0.11, _GW_TIMINGS)):
-        times = [t for pair in pairs for t in pair]
+    slack = _GW_COUNT_SLACK
+    for name, readings, want in (
+            ("at", (5000, 10000 + slack, 0.1, 0.2, None), ()),
+            ("over", (5000, 10001 + slack, 0.1, 0.2, None), ("doubling the input grew",)),
+            ("length", (4000, 8000, 0.1, 0.2, None), ()),
+            ("under-length", (3999, 7998, 0.1, 0.2, None), ("growth not evaluated",)),
+            ("loaded-linear", (5000, 10000, 0.01, 0.5, None), ()),
+            ("quadratic", (5000, 20000, 0.1, 0.2, None), ("doubling the input grew",)),
+            ("decision", (5000, 10000, 0.1, 0.2, "deny"), ("the counted scan decided 'deny' on 2 of its 2",))):
+        count_n, count_2n, t_n, t_2n, decision = readings
         taken = []
 
         def once(cmd, _scan):
             taken.append(len(cmd))
-            return times[len(taken) - 1], None, (len(taken),) * len(_GW_USAGE_LABELS)
+            first = len(taken) == 1
+            return (count_n if first else count_2n), (t_n if first else t_2n), decision, \
+                (len(taken),) * len(_GW_USAGE_LABELS)
 
-        ratio, _t_n, _t_2n, length_2n, decisions, _use, timings = _gw_scan_ratio("x", "", "", None, once)
-        if (ratio is None or abs(ratio - want_ratio) > 1e-9 or timings != want_timings
-                or taken != [4000, 8000] * timings or len(decisions) != 2 * timings or length_2n != 8000):
-            out.append("(gw-lin-retime-edge) {}: the scripted times {} gave ratio {!r} over {} timings of lengths "
-                       "{}, want {!r} over {} timings of 4000 then 8000".format(
-                           name, pairs, ratio, timings, taken, want_ratio, want_timings))
+        got = _gw_lin_failures((("gw-lin-count-edge-" + name, "x", "", "", None, None),), once)
+        if taken != [_GW_REPS, 2 * _GW_REPS] or len(got) != len(want) \
+                or any(part not in line for part, line in zip(want, got)):
+            out.append("(gw-lin-count-edge) {}: the scripted readings {} over inputs of lengths {} gave {!r}, want "
+                       "one failure holding each of {!r}".format(name, readings, taken, got, want))
     return out
 
 
-def _gw_spin_scan(power):
-    """A stand-in scan that spends CPU time growing with the input's length to the given power: 0.12 s at
-    4000 characters, so the first size clears the floor and the ratio is about 2 ** power."""
+def _gw_count_scan(power, spin_doubled=0.0):
+    """A stand-in scan that adds len(cmd) ** power // 4000 ** (power - 1) to the hook's work count through its seam
+    (aiqt_hooks._gate_scan_count), so its count grows in proportion to the input (power 1) or to its square (power
+    2), and decides None. With spin_doubled, a call on the doubled input (over 4000 characters) also spends that
+    many seconds of CPU time, standing in for a call charged for stray work on a loaded host."""
     def scan(cmd):
-        until = time.process_time() + 1.2 * _GW_FLOOR * (len(cmd) / 4000) ** power
-        while time.process_time() < until:
-            pass
+        aiqt_hooks._gate_scan_count(len(cmd) ** power // _GW_REPS ** (power - 1))
+        if spin_doubled and len(cmd) > _GW_REPS:
+            until = time.process_time() + spin_doubled
+            while time.process_time() < until:
+                pass
         return None
     return scan
 
 
-def _gw_slow_once_scan(power):
-    """_gw_spin_scan(power) whose second call (the first timing of the doubled input) also spends 2 * _GW_FLOOR
-    more CPU time, standing in for one timed call charged for stray work."""
-    spin = _gw_spin_scan(power)
-    calls = []
-
-    def scan(cmd):
-        calls.append(None)
-        if len(calls) == 2:
-            until = time.process_time() + 2 * _GW_FLOOR
-            while time.process_time() < until:
-                pass
-        return spin(cmd)
-    return scan
-
-
-def _gw_retime_cpu_failures():
-    """(gw-lin-retime-linear, gw-lin-retime-super) The retiming in CPU time: with one timing of the doubled input
-    charged 0.2 s more (a first ratio of about 3.7 for a linear stand-in), the linear row still passes on its
-    least timings and the quadratic one still fails after _GW_TIMINGS timings of each."""
+def _gw_count_seam_failures():
+    """(gw-lin-count-linear, gw-lin-count-super, gw-lin-count-off-default, gw-lin-count-off-inert,
+    gw-lin-count-raise-propagates, gw-lin-count-raise-restores) The count verdict through the hook's real seam. A
+    linear stand-in passes even when its doubled call is charged 0.2 s more CPU time (a time ratio far over 2), and
+    a quadratic one fails, with nothing else reported. The seam is None before the rows, _gate_scan_count with it
+    None leaves it None and returns None, and a scan that raises propagates its exception and leaves the seam None."""
     out = []
-    got = _gw_lin_failures((("gw-lin-retime-linear", "x", "", "", _gw_slow_once_scan(1), None),
-                            ("gw-lin-retime-super", "x", "", "", _gw_slow_once_scan(2), None)))
-    if len(got) != 1 or not got[0].startswith("(gw-lin-retime-super) doubling the input scaled the scan ") \
-            or ", the least of {} timings of each, ".format(_GW_TIMINGS) not in got[0]:
-        out.append("(gw-lin-retime-linear/super) the rows gave {!r}, want only the quadratic row's failure after "
-                   "{} timings of each".format(got, _GW_TIMINGS))
+    if aiqt_hooks._GATE_SCAN_COUNTER is not None:
+        out.append("(gw-lin-count-off-default) the hook's work-count seam is {!r} before any row, want None (off)".format(
+            aiqt_hooks._GATE_SCAN_COUNTER))
+        aiqt_hooks._GATE_SCAN_COUNTER = None
+    got = aiqt_hooks._gate_scan_count(5)
+    if got is not None or aiqt_hooks._GATE_SCAN_COUNTER is not None:
+        out.append("(gw-lin-count-off-inert) _gate_scan_count with the seam off returned {!r} and left the seam {!r}, "
+                   "want None and None".format(got, aiqt_hooks._GATE_SCAN_COUNTER))
+        aiqt_hooks._GATE_SCAN_COUNTER = None
+    got = _gw_lin_failures((("gw-lin-count-linear", "x", "", "", _gw_count_scan(1, 0.2), None),
+                            ("gw-lin-count-super", "x", "", "", _gw_count_scan(2), None)))
+    if len(got) != 1 or not got[0].startswith("(gw-lin-count-super) doubling the input grew the scan's work count "
+                                              "from 4000 to 16000, over twice that plus "):
+        out.append("(gw-lin-count-linear/super) the rows gave {!r}, want only the quadratic row's failure".format(got))
+
+    def raising(_cmd):
+        aiqt_hooks._gate_scan_count(1)
+        raise ValueError("stand-in")
+
+    try:
+        _gw_count_once("x", raising)
+        out.append("(gw-lin-count-raise-propagates) a scan that raised returned through _gw_count_once")
+    except ValueError:
+        pass
+    if aiqt_hooks._GATE_SCAN_COUNTER is not None:
+        out.append("(gw-lin-count-raise-restores) a scan that raised left the seam {!r}, want None".format(
+            aiqt_hooks._GATE_SCAN_COUNTER))
+        aiqt_hooks._GATE_SCAN_COUNTER = None
     return out
 
 
@@ -7929,12 +7952,12 @@ def _gw_module_as(name, stand_in):
 
 def _gw_lin_usage_failures():
     """(gw-lin-usage-readable, gw-lin-usage-no-resource, gw-lin-usage-no-field, gw-lin-usage-no-collections)
-    The gw-lin rows' usage report, through stand-in scans that spend CPU time in proportion to the input
-    (linear) or to its square (super-linear). With every reading available, a super-linear row fails with each
-    usage field for both timed calls. With no resource module, with a getrusage result missing a field and
-    with collector statistics without 'collections' (each stood in through sys.modules), the rows still reach
-    their verdict instead of raising: a linear row passes and a super-linear one fails reporting 'usage
-    unavailable' for each reading it lost and the readings it kept."""
+    The gw-lin rows' diagnostic usage report, through stand-in scans whose work count grows in proportion to the
+    input (linear) or to its square (super-linear, _gw_count_scan). With every reading available, a super-linear
+    row fails with its CPU times and each usage field for both counted calls. With no resource module, with a
+    getrusage result missing a field and with collector statistics without 'collections' (each stood in through
+    sys.modules), the rows still reach their verdict instead of raising: a linear row passes and a super-linear
+    one fails reporting 'usage unavailable' for each reading it lost and the readings it kept."""
     pair_s = r"\d+\.\d{3}s then \d+\.\d{3}s"
     pair = r"\d+ then \d+"
     lost = "usage unavailable"
@@ -7958,12 +7981,13 @@ def _gw_lin_usage_failures():
             ("gw-lin-usage-no-collections", "gc", no_collections,
              "user CPU {0}, system CPU {0}, minor page faults {1}, involuntary context switches {1}, "
              "cyclic collections {2}".format(pair_s, pair, lost))):
-        want = re.compile(r"\(" + re.escape(label + "-super") + r"\) doubling the input scaled the scan "
-                          r"\d+\.\d\dx \(>3x, super-linear\): \d+\.\d{3}s then \d+\.\d{3}s, the least of "
-                          + str(_GW_TIMINGS) + r" timings of each, for an input of length 8000 \(" + clause + r"\)\Z")
-        rows = ((label + "-super", "x", "", "", _gw_spin_scan(2), None),)
+        want = re.compile(r"\(" + re.escape(label + "-super") + r"\) doubling the input grew the scan's work count "
+                          r"from 4000 to 16000, over twice that plus " + str(_GW_COUNT_SLACK) + r" \(super-linear\), "
+                          r"for inputs of length 4000 then 8000; diagnostics only, not judged: CPU \d+\.\d{3}s then "
+                          r"\d+\.\d{3}s, " + clause + r"\Z")
+        rows = ((label + "-super", "x", "", "", _gw_count_scan(2), None),)
         if module is not None:
-            rows = ((label + "-linear", "x", "", "", _gw_spin_scan(1), None),) + rows
+            rows = ((label + "-linear", "x", "", "", _gw_count_scan(1), None),) + rows
         try:
             with _gw_module_as(module, stand_in) if module is not None else contextlib.nullcontext():
                 got = _gw_lin_failures(rows)
@@ -29864,42 +29888,31 @@ def _main_isolated(monitor):
         gexpect("(gw-dq-q2) a single quote inside a double-quoted span marks the pairing ambiguous, so the "
                 "hidden git commit -nv is re-judged and denies (pins the double-quote branch's \"'\" "
                 "trigger)", "git log \"a'\" git commit -nv", "deny")
-        # Timing: the whole-command scan, the hides-roster-git helper and the dequoted-word scan are linear in
-        # their input length on these shapes, so doubling the input should roughly double the time (ratio
-        # ~2); a quadratic re-walk quadruples it
-        # (ratio ~4). The assertion is a RATIO, not a fixed wall-clock bound, so a threshold between 2x and
-        # 4x discriminates regardless of host speed (a fixed bound passes a quadratic scan on a fast host).
-        # Each scan is timed with time.process_time (this process's CPU time, as in the lex-cost rows), so
-        # time the process spends waiting for a CPU on a busy runner is not counted. Because a short t_n gives
-        # a noisy ratio, n is DOUBLED (bounded: from 4000 repetitions, at most 9 sizes) until t_n clears a
-        # 0.1 s floor; if it never does, the check FAILS 'linearity not evaluated' rather than passing
-        # silently (the former early-pass path). The floor sets how much stray cost one comparison absorbs:
-        # extra work counted in t_2n moves a linear row's ratio of about 2 past 3 only when it costs more
-        # than t_n itself. With a 0.02 s floor and a wall clock, one CI row failed at 3.24x (0.030 s then
-        # 0.097 s); at 0.1 s the clock's resolution and the cost of the call itself are negligible against
-        # t_n. On one host the slowest-growing rows (gw-lin-dq-off, gw-lin-dq-chain) clear 0.1 s only at
-        # 512000 repetitions, so the cap of 1024000 leaves a host about twice as fast room to clear it too.
-        # What else a timed call is charged for was measured on Python 3.14.4 with the whole suite running:
-        # no cyclic collection ran inside any timed call (the dequoted-word scan makes no lasting
-        # collector-tracked allocation, so none starts there even with the collector's count at its
-        # threshold), and every row's ratio stayed between 1.93 and 2.09 with the collector left on and with
-        # it disabled around each call. The one cost that grew faster than the input was the kernel's work
-        # on the page faults that first touch the memory a scan allocates (about 2.5 times the faults per
-        # doubling), under a tenth of t_2n there. A ratio above 3 that a CI runner measured for gw-lin-dq-off
-        # was not reproduced that way, nor with other processes loading the same CPU, so its cause is not
-        # known. A failing row therefore reports what the process used across each of its two timed calls,
-        # read outside the timed region: user and system CPU time, minor page faults, involuntary context
-        # switches and cyclic collections. Those readings are best effort (_gw_usage): one the host cannot
-        # give (no resource module, a missing getrusage field, a collector statistic without 'collections')
-        # is reported as unavailable, never raised, and gw-lin-usage-* pins both the report and that.
-        # A CI runner later measured gw-lin-span-optgit at 3.01x (0.109 s then 0.327 s, with 2763 then 7290
-        # minor page faults) where 14 local runs gave 2.00 to 2.04x, so one call charged for stray work still
-        # failed a linear row. A ratio over 3 now times both sizes again, at most _GW_TIMINGS timings of each,
-        # and judges the least time of each size: stray work only adds time, so the least timing is the one
-        # nearest the scan's own cost, a linear row needs one clean timing of each size to pass, and a scan that
-        # grows faster than its input fails on every timing. A passing first ratio is final, so a passing run
-        # times what it did before. gw-lin-retime-edge pins the retiming over scripted times (each end of the
-        # bound, a slow timing of either size, the timing cap) and gw-lin-retime-linear/super in CPU time.
+        # Growth: the whole-command scan, the hides-roster-git helper, the dequoted-word scan, the de-quoted text
+        # reading and the run-time word reading are linear in their input length on these shapes, so doubling
+        # the input at most doubles the WORK the scan does, plus a fixed part; a quadratic re-walk or a copy of
+        # the suffix after each unit quadruples it. The verdict reads that work as a COUNT, not a time: the
+        # hook's work-count seam (_GATE_SCAN_COUNTER, off and None in the hook) adds the characters or words each
+        # counted pass reads (_gate_scan_count), and a row fails when the count on the doubled input is over
+        # twice the count on the smaller one plus _GW_COUNT_SLACK (its derivation is at the constant). A count
+        # does not depend on the host, its load, its clock or its collector, so a linear row gives the same
+        # verdict on a loaded runner as on an idle one. The rows judged CPU time before (a ratio of 3 over a
+        # 0.1 s floor, retimed up to three times), and a linear row failed on CI runners that charged one timed
+        # call for stray work: gw-lin-dq-off was reported at 3.21x on one lane, and gw-lin-span-optgit at 3.01x
+        # (0.109 s then 0.327 s) where local runs gave about 2x. Each row still times both counted calls with time.process_time and
+        # reads the process's usage around them, outside the timed region (_gw_usage: user and system CPU time,
+        # minor page faults, involuntary context switches and cyclic collections, each best effort and reported
+        # as unavailable when the host cannot give it); a failing row reports them as diagnostics, and no verdict
+        # reads them. A row whose smaller count is under its input's length fails 'growth not evaluated', since
+        # every scan's own pass over its input is counted, so a seam the scan never reaches cannot pass a row.
+        # Each row also runs its smaller input with the seam off and asserts the same decision. gw-lin-count-edge
+        # pins the verdict over scripted readings (each end of the bound, the length floor, a doubled call
+        # charged 50 times the CPU time, a quadratic count, a wrong decision), gw-lin-count-linear/super pin it
+        # through the seam with stand-in scans, gw-lin-count-off-default/inert pin the seam off by default and
+        # inert there, gw-lin-count-raise-propagates/restores pin a raising scan's exception passing through and
+        # the seam off again after it, and gw-lin-usage-* pin the report.
+        # The seam counts the passes it instruments: a new loop added to a scan outside every counted pass is
+        # not counted, so the rows catch a re-walk or a suffix copy made through a counted pass or helper.
         # A ROSTER-verb-dense line is still super-linear by design and relies on the deadline's fail-closed,
         # as the scan docstring states.
         # gw-dq-lin-sq / gw-dq-lin-dq: the two originals, linear before this change and here.
@@ -29914,7 +29927,7 @@ def _main_isolated(monitor):
         #   ` -C git`*n + ` x'`): every option word holds a 'git' match, or each '-C' consumes a git word as
         #   its value, so an option walk per match crossed every later option word (quadratic). The helper
         #   now reads each match's walk outcome from a table filled once from the end, so both are linear.
-        # gw-lin-dq-off (`sudo` + `git log`*n) and gw-lin-dq-chain (`sudo git` + `-C git`*n + `log`) time
+        # gw-lin-dq-off (`sudo` + `git log`*n) and gw-lin-dq-chain (`sudo git` + `-C git`*n + `log`) count
         #   _gate_novrf_dequoted_bypass over the word list itself: it copied the words after each git word
         #   and re-walked a '-C git' chain from each, both quadratic. It now reads each git word's
         #   subcommand from tables filled once from the end, so both are linear.
@@ -29922,28 +29935,29 @@ def _main_isolated(monitor):
         #   `-n`) pack ROSTER-verb git words before a '-n' that is a bypass for none of them (push's dry run,
         #   or -m's value): each git word's walk read every later word, quadratic. A walk that found no bypass
         #   now passes over every later git word of the same verb whose words it already read, so both are
-        #   linear. gw-lin-unread-roster times the de-quoted text reading over the quote-concatenated shape.
-        # gw-lin-runtime (`$x log -m y `*n + `commit -m y`) times the run-time word reading (_gate_runtime_bypass)
+        #   linear. gw-lin-unread-roster counts the de-quoted text reading over the quote-concatenated shape.
+        # gw-lin-runtime (`$x log -m y `*n + `commit -m y`) counts the run-time word reading (_gate_runtime_bypass)
         #   over one piece in which every unit holds a word built at run time and an off-roster verb, and a roster
         #   verb with no hook-skip spelling and no word built at run time after it ends the piece (a word built at
         #   run time after a roster verb denies, so no unit can repeat both): the walk and the verb search start
         #   at the first such word only, so they are linear; a walk restarted at every such word reads every later
-        #   word again, quadratic. gw-lin-runtime-extglob (`@(x);` + ` x commit -m y;`*n) times the whole-text
+        #   word again, quadratic. gw-lin-runtime-extglob (`@(x);` + ` x commit -m y;`*n) counts the whole-text
         #   read an extglob opener adds over many raw pieces that hold no word built at run time.
         #   gw-lin-runtime-tilde (`~ log -m y `*n + `commit -m y`) is gw-lin-runtime with a tilde word in each unit.
-        #   gw-lin-runtime-heredoc (`cat <<E` + a body line `'$x log` + `E`, *n, then `commit -m y`) times the
+        #   gw-lin-runtime-heredoc (`cat <<E` + a body line `'$x log` + `E`, *n, then `commit -m y`) counts the
         #   here-document mask and the second split it gives: each body's quote pairs with the next one for the
         #   first split, so the pieces of the two splits differ throughout. gw-lin-runtime-case (`case;` + ` $x log
-        #   -m y;`*n + ` commit -m y`) times the read from a case word's piece to the end of the text, over many
-        #   raw pieces. gw-lin-runtime-assembled (` g'i't -C`*n + ` x log $x commit`) times the walk from each
+        #   -m y;`*n + ` commit -m y`) counts the read from a case word's piece to the end of the text, over many
+        #   raw pieces. gw-lin-runtime-assembled (` g'i't -C`*n + ` x log $x commit`) counts the walk from each
         #   quote-assembled git (_gate_assembled_reading) over one piece in which every git's -C takes the next git
         #   as its value, so each git's subcommand is the one log near the end: the tables built from the end find
         #   each in one step, where a subcommand search restarted at every git reads every later word again,
         #   quadratic. Every runtime row holds a roster verb with no hook-skip spelling and no word built at run
         #   time after it, since text with no roster verb is passed over before any reading (_gate_runtime_may_hit).
-        # Each timed scan's decision is asserted too (the last column of _gw_lin_cases, the decision the scan
-        # gives each shape at every size: none of them names a refused segment or a bypass), so a scan made
-        # linear by deciding these shapes wrongly fails here instead of passing on its timing alone.
+        # Each counted scan's decision is asserted too (the last column of _gw_lin_cases, the decision the scan
+        # gives each shape at both sizes with the seam on and at the smaller with it off: none of them names a
+        # refused segment or a bypass), so a scan made linear by deciding these shapes wrongly fails here
+        # instead of passing on its count alone.
         _gw_cmd_scan = aiqt_hooks._gate_closed_grammar_scan
         _gw_dq_scan = aiqt_hooks._gate_novrf_dequoted_bypass
         _gw_unread_scan = aiqt_hooks._gate_unread_bypass
@@ -29968,10 +29982,10 @@ def _main_isolated(monitor):
             ("gw-lin-runtime-case", " $x log -m y;", "case;", " commit -m y", _gw_runtime_scan, None),
             ("gw-lin-runtime-assembled", " g'i't -C", "", " x log $x commit", _gw_runtime_scan, None),
         )
+        failures.extend(_gw_count_seam_failures())
         failures.extend(_gw_lin_failures(_gw_lin_cases))
         failures.extend(_gw_lin_usage_failures())
-        failures.extend(_gw_retime_failures())
-        failures.extend(_gw_retime_cpu_failures())
+        failures.extend(_gw_count_edge_failures())
 
         # A glob character can match a filename that becomes an option word (a file named -n makes
         # 'git commit *-n' hand git a bare -n), so a glob or a quote glued to one denies.
