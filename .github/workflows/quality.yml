@@ -1355,6 +1355,10 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 
+      - name: Dispatch-marker self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite dispatch-marker-selftest
+
       - name: Site-scope self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite ci-site-scope-selftest

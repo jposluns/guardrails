@@ -197,12 +197,23 @@
 #                        121880 -> 122111; managed block 360 and file headers 16263 unchanged. The ratchet
 #                        rises by the measured delta, 138503 + 231 = 138734, within the maintainer's
 #                        authorization of 2026-11-08 for raises up to 148000.
+#                        Raised 138734 -> 139171 on 2026-11-19 under the maintainer's recorded decision of
+#                        2026-10-31 to raise the ratchet by exactly the measured delta, when
+#                        explicit-binding-over-ambient-context gained its sentence that a path binds an
+#                        asynchronous result to its dispatch only when no other dispatch can have written to
+#                        it, so each dispatch writes into a location created exclusively for it or its result
+#                        carries an id the dispatcher issued before launch and is accepted only on a match
+#                        (expbnd.6): measured PACK 139171, 437 units above 138734 at the base d2544383 (the
+#                        sentence adds 437 units and no other loaded file changed); rule files 122111 ->
+#                        122548; managed block 360 and file headers 16263 unchanged. The ratchet rises by the
+#                        measured delta, 138734 + 437 = 139171, within the maintainer's authorization of
+#                        2026-11-08 for raises up to 148000.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 138734
+ratchet = 139171
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
