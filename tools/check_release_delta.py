@@ -734,6 +734,8 @@ _STAGE2_RESULT = _stage2_arm_result() if __name__ == "__main__" else None
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml            # noqa: E402
 from check_versions import _parse                        # noqa: E402  bare-SemVer (sibling idiom)
+from check_versions import DEV_SUFFIX, parse_tree_version, unreleased_problem  # noqa: E402  the ONE
+#                              tree-version grammar and [unreleased] shape check (_semver, re-exported)
 from check_clauses import split_clause_id                # noqa: E402  authoritative clause-id syntax (7.1)
 from gen_rules import SLUG_RE                             # noqa: E402  the authoritative renderer-id slug syntax
 from check_manifest import _min_for, CLASS_STRENGTH, DISPOSITION_KINDS  # noqa: E402  minimum table + the
@@ -1126,6 +1128,55 @@ def _strict(fn, data, rel):
         return fn(data, rel)
     except SchemaError as exc:
         raise GateError(str(exc))
+
+
+def _strict_head_manifest(data, where):
+    """strict_manifest for the GENESIS/DELTA HEAD manifest only (the checkout, which between release cuts
+    carries the development form X.Y.Z-dev): development_ok=True. Every other manifest this gate reads
+    (the post-release HEAD, the release commit, every predecessor) stays on the strict default, which
+    refuses a -dev value by name. Which -dev value is acceptable is bound separately in run(): exactly
+    the changelog [unreleased] version plus DEV_SUFFIX, and never without an open [unreleased]."""
+    return _release_schema.strict_manifest(data, where, development_ok=True)
+
+
+# The one remedy every "declare a new version" refusal names (the development model: between cuts main
+# declares the next planned version in changelog.toml [unreleased]; RELEASING step 8 reopens development).
+DECLARE_NEW_VERSION = "declare a new version: open [unreleased] in changelog.toml (RELEASING step 8)"
+
+
+def _unreleased_version(changelog, where):
+    """The bare X.Y.Z of a changelog's optional top-level [unreleased] table, or None when the table is
+    absent. A present but malformed table (shape per _semver.unreleased_problem: keys within version,
+    title, items; version a bare X.Y.Z, never authored with the -dev suffix) is GateError, exit 2."""
+    if not isinstance(changelog, dict) or "unreleased" not in changelog:
+        return None
+    problem = unreleased_problem(changelog["unreleased"])
+    if problem is not None:
+        raise GateError("{}: {}".format(where, problem))
+    return changelog["unreleased"]["version"]
+
+
+def _assert_dev_manifest_binding(head_manifest, unreleased_v, label):
+    """Bind a checkout HEAD manifest's release-version to changelog.toml [unreleased] (genesis and delta
+    heads; the only manifests _strict_head_manifest lets carry X.Y.Z-dev). With [unreleased] open the
+    release-version must be EXACTLY its version plus DEV_SUFFIX: a plain X.Y.Z, or a -dev form of any
+    other version, is GateError (exit 2). With no [unreleased] a -dev release-version is GateError: the
+    suffix is generated only from an open [unreleased]. A plain release-version without [unreleased] is
+    left to the caller (the delta branch binds it to the newest [[release]]; genesis binds no version)."""
+    rv = head_manifest.get("release-version")
+    if unreleased_v is not None:
+        want = unreleased_v + DEV_SUFFIX
+        if rv != want:
+            raise GateError("{} manifest release-version {!r} != {!r}, the {} [unreleased] version {} plus "
+                            "the {} suffix (development between cuts, RELEASING step 8); the surface is "
+                            "inconsistent".format(label, rv, want, CHANGELOG_REL, unreleased_v, DEV_SUFFIX))
+        return
+    parsed = parse_tree_version(rv)
+    if parsed is not None and parsed[1]:
+        raise GateError("{} manifest release-version {!r} is a development version but {} carries no "
+                        "[unreleased] table; the {} suffix is generated only from an open [unreleased] "
+                        "(RELEASING step 8); the surface is inconsistent".format(
+                            label, rv, CHANGELOG_REL, DEV_SUFFIX))
 
 
 def take_row(rows, kind, target, release):
@@ -1607,8 +1658,8 @@ def _assert_only_post_release_paths(changed):
     extra = sorted(set(changed) - POST_RELEASE_PATHS)
     if extra:
         raise GateError("post-release head (the head version equals the newest release row) changes {} "
-                        "beyond the post-release paths {}; declare a new version".format(
-                            extra[:5], sorted(POST_RELEASE_PATHS)))
+                        "beyond the post-release paths {}; {}".format(
+                            extra[:5], sorted(POST_RELEASE_PATHS), DECLARE_NEW_VERSION))
 
 
 def _assert_tree_entry_regular(path, src_mode, dst_mode, status):
@@ -2034,8 +2085,8 @@ def _post_release_head(root, prev_row, release_rows, head_version):
     if CHANGELOG_REL in changed and not _post_release_changelog_ok(
             _show(root, commit, CHANGELOG_REL), head_cl_bytes, head_version):
         raise GateError("post-release head: {} differs from the release commit by more than the newest "
-                        "release's tag = \"v{}\" key; declare a new version".format(CHANGELOG_REL,
-                                                                                    head_version))
+                        "release's tag = \"v{}\" key; {}".format(CHANGELOG_REL, head_version,
+                                                                DECLARE_NEW_VERSION))
     _head_committed_manifest_integrity(root, head_oid)
     findings = _release_checks_at_commit(root, release_rows, newest_manifest)
     return sorted(changed), findings
@@ -2494,7 +2545,13 @@ def _committed_post_release_state(root, head_oid):
     genesis- or delta-shaped. No checkout byte participates, so reverting the checkout copies of the
     routing records to the release state can no longer route a post-release head into the genesis or
     delta branch. With committed rows present, an unreadable or malformed committed routing record is
-    cannot-evaluate (GateError, exit 2), never a silent fall-through to a checkout-judged branch."""
+    cannot-evaluate (GateError, exit 2), never a silent fall-through to a checkout-judged branch.
+
+    DEVELOPMENT REOPENED (RELEASING step 8): a committed changelog carrying a top-level [unreleased]
+    table declares the next planned version, so the head is a development head, never a post-release
+    one, whatever its newest [[release]]: the table is shape-validated from the COMMITTED bytes (a
+    malformed one is GateError, exit 2) and the route is the delta branch (None). The delta branch then
+    requires the newest [[release]] to be the newest attested row before development may reopen."""
     rows = _strict(_release_schema.strict_releases, _show_toml(root, head_oid, RELEASES_REL),
                    "HEAD " + RELEASES_REL)
     if not rows:
@@ -2511,6 +2568,8 @@ def _committed_post_release_state(root, head_oid):
     if not isinstance(head_version, str) or _parse(head_version) is None:
         raise GateError("HEAD {}: latest release version {!r} is malformed".format(
             CHANGELOG_REL, head_version))
+    if _unreleased_version(cl, "HEAD " + CHANGELOG_REL) is not None:
+        return None
     if head_version != rows[-1]["version"]:
         return None
     return rows, head_version
@@ -2552,8 +2611,10 @@ def run(root):
         head_manifest = _load(root, MANIFEST_REL)
         # Strict-validate the manifest BEFORE branching genesis/delta (round-3 finding 1): a bad
         # format-version, an unknown top-level key, or a malformed/duplicate source row is exit 2, never a
-        # clean genesis over an unvalidated manifest (spec 2.5/L299).
-        _strict(_release_schema.strict_manifest, head_manifest, MANIFEST_REL)
+        # clean genesis over an unvalidated manifest (spec 2.5/L299). This HEAD manifest is the checkout's,
+        # so it alone may carry the development form X.Y.Z-dev (_strict_head_manifest); which -dev value
+        # is acceptable is bound to changelog.toml [unreleased] below, in both branches.
+        _strict(_strict_head_manifest, head_manifest, MANIFEST_REL)
         rows = load_dispositions(root)
         # Profiles/groups (2.6 arm-or-fail-closed): the real diff leg is not built. While the artifact is
         # ABSENT the leg is legitimately NOT APPLICABLE; the moment it SHIPS a gate that cannot diff it must
@@ -2593,6 +2654,14 @@ def run(root):
             # malformed renderer target is caught before a clean genesis return.
             _assert_renderer_targets_declared(rows, _renderer_ids(genesis_renderers))
             _genesis_structural(root)
+            # The development model at genesis (main before its first cut): an open changelog.toml
+            # [unreleased] binds the HEAD manifest to exactly [unreleased].version + "-dev"; a -dev manifest
+            # with no [unreleased] is refused. This is the ONLY manifest-to-changelog binding at genesis: a
+            # plain manifest with no [unreleased] stays unbound to the changelog here, as before. Read after
+            # the structural validators so a malformed-record genesis tree still fails at its own validator.
+            _assert_dev_manifest_binding(
+                head_manifest, _unreleased_version(_load(root, CHANGELOG_REL), CHANGELOG_REL),
+                "genesis head")
             print("release-delta: GENESIS (zero release rows, manifest genesis = true); consumed records "
                   "validate their internal structure (dispositions, inventory, id-history register, "
                   "renderer freshness); no delta computed")
@@ -2601,17 +2670,33 @@ def run(root):
         commit = prev_row["commit_sha"]
         # Anchor the predecessor to a real commit + annotated tag before reading its tree (round-7 finding 2).
         _anchor_predecessor(root, prev_row)
-        changelog = _load(root, CHANGELOG_REL).get("release", [])
+        changelog_data = _load(root, CHANGELOG_REL)
+        changelog = changelog_data.get("release", [])
         if not isinstance(changelog, list) or not changelog or not isinstance(changelog[-1], dict):
             raise GateError("{}: no [[release]] tables to read the head version from".format(CHANGELOG_REL))
         head_version = changelog[-1].get("version")
         if not isinstance(head_version, str) or _parse(head_version) is None:
             raise GateError("{}: latest release version {!r} is malformed".format(
                 CHANGELOG_REL, head_version))
+        unreleased_v = _unreleased_version(changelog_data, CHANGELOG_REL)
+        if unreleased_v is not None:
+            # DEVELOPMENT REOPENED (RELEASING step 8): the head under classification is the planned next
+            # version [unreleased].version, PLAIN (born, retired and disposition rows name it without the
+            # suffix). Development reopens only after the newest release is attested: the newest
+            # [[release]] must BE the newest attested row, else a cut release would be skipped unattested.
+            if head_version != prev_row["version"]:
+                raise GateError("{} opens [unreleased] {} but its newest [[release]] {} is not the newest "
+                                "attested release row {}; development reopens only after the newest "
+                                "release is attested (RELEASING step 6b, then step 8)".format(
+                                    CHANGELOG_REL, unreleased_v, head_version, prev_row["version"]))
+            head_version = unreleased_v
+            # The head manifest carries exactly [unreleased].version + "-dev" (never the plain version).
+            _assert_dev_manifest_binding(head_manifest, unreleased_v, "head")
         # Bind the classified HEAD version to the head manifest (round-7 finding 2): the changelog version
         # the gate classifies against MUST equal the manifest's release-version, or the surface is
-        # inconsistent and the delta cannot be trusted (exit 2).
-        if head_manifest.get("release-version") != head_version:
+        # inconsistent and the delta cannot be trusted (exit 2). With no [unreleased] this also refuses a
+        # -dev manifest (a plain changelog version never equals it).
+        elif head_manifest.get("release-version") != head_version:
             raise GateError("head manifest release-version {!r} != changelog head version {!r}; the "
                             "surface is inconsistent".format(head_manifest.get("release-version"),
                                                              head_version))
@@ -2619,8 +2704,10 @@ def run(root):
         # claude M1). A checkout whose records claim the post-release state (a head version equal to
         # the newest attested row) while HEAD's COMMITTED records do not is never certified from
         # checkout inputs: refuse. Refusal-only: this can never accept a state the committed routing
-        # rejected, and a head version BELOW the row still fails at _claimed_rank.
-        if head_version == prev_row["version"]:
+        # rejected, and a head version BELOW the row still fails at _claimed_rank. With [unreleased]
+        # open the head is a development head, never a post-release claim, so an [unreleased] version
+        # not above the newest row is left to _claimed_rank's "does not increase" refusal.
+        if unreleased_v is None and head_version == prev_row["version"]:
             raise GateError("the checkout claims the post-release state (head version {} equals the "
                             "newest attested release row) but HEAD's COMMITTED records do not; the "
                             "post-release branch routes from committed objects only; commit the "
@@ -6781,6 +6868,182 @@ def _post_release_e2e(tmp, failures, only=None):
                 _forge_one(labelFB, _gout(repo, "rev-parse", "HEAD:" + RELEASES_REL),
                            "release-row blob is not loose")
 
+    _dev_model_e2e(tmp, failures, _sel, _extract_to, _g, _gout, _commit_all, _row_text, _check, env)
+    return True
+
+
+def _dev_model_e2e(tmp, failures, _sel, _extract_to, _g, _gout, _commit_all, _row_text, _check, env):
+    """(G) THE DEVELOPMENT MODEL: between release cuts main declares the next planned version in a
+    changelog.toml top-level [unreleased] table, and the generated VERSION and manifest release-version
+    carry it with the -dev suffix (RELEASING step 8 reopens development after step 6b). Over a REAL
+    full-pack fixture with ONE attested row (1.0.0): a head whose COMMITTED changelog carries
+    [unreleased] 1.0.7 with manifest 1.0.7-dev takes the DELTA branch and passes (red with the routing
+    exclusion in _committed_post_release_state dropped: it then routes POST-RELEASE); a plain manifest
+    1.0.7 there is exit 2; [unreleased] open while the newest [[release]] 1.0.1 has no attested row is
+    exit 2 naming RELEASING step 6b (red with that guard dropped: the delta then passes); with no
+    [unreleased] an extra path or a changelog edit on the post-release head still says "declare a new
+    version", now naming step 8; and the classification uses the PLAIN version: a disposition row at
+    1.0.7 is consumed (exit 0), one at 1.0.7-dev is refused (exit 2), and run() hands the legs 1.0.7;
+    a committed malformed [unreleased] is refused by the routing read itself (exit 2). Born rows are
+    covered at the leg and schema level only (a born row at 1.0.7 consumed by clause_text_leg at head
+    1.0.7; a born-release 1.0.7-dev refused by strict_id_history): adding a real clause to the
+    full-pack fixture consistently is not built here. GENESIS (zero rows, the archived
+    tree): [unreleased] 1.1.1 with manifest 1.1.1-dev passes; manifest 1.1.1 or 1.1.2-dev, or a -dev
+    manifest with no [unreleased], is exit 2; a plain manifest with no [unreleased] still passes."""
+    labelD1 = "(DEV G1) a committed [unreleased] 1.0.7 over the attested 1.0.0 with manifest 1.0.7-dev"
+    labelD2 = "(DEV G2) a plain manifest 1.0.7 beside a committed [unreleased] 1.0.7"
+    labelD3 = "(DEV G3) [unreleased] open while the newest [[release]] 1.0.1 has no attested row"
+    labelD4 = "(DEV G4) no [unreleased]: an extra path on the post-release head names step 8"
+    labelD4b = "(DEV G4b) no [unreleased]: a changelog edit beyond the tag key names step 8"
+    labelD5 = "(DEV G5) a disposition row at the plain 1.0.7 is consumed"
+    labelD5b = "(DEV G5b) a disposition row at 1.0.7-dev is refused"
+    labelD6 = "(DEV G6) a committed malformed [unreleased] (version 1.0.7-dev) refuses at routing"
+    labelDB = "(DEV born) born rows bind to the plain version (leg and schema level)"
+    labelDG = "(DEV genesis) zero rows with [unreleased] 1.1.1 binds the manifest to 1.1.1-dev"
+
+    # Pure, fixture-free pins (they hold whatever state the post-release branch is in).
+    if _sel(labelD4):
+        try:
+            _assert_only_post_release_paths({"AGENTS.md"})
+            failures.append("{}: an extra path was accepted by _assert_only_post_release_paths".format(
+                labelD4))
+        except GateError as exc:
+            if "declare a new version" not in str(exc) or DECLARE_NEW_VERSION not in str(exc):
+                failures.append("{}: the refusal must name {!r} (got: {})".format(
+                    labelD4, DECLARE_NEW_VERSION, exc))
+    if _sel(labelDB):
+        reg_ok = {"born": [{"id": "prjint1.1", "born-release": "1.0.7"}]}
+        _ev, fs_b = clause_text_leg([], [{"clause-id": "prjint1.1", "canonical-text": "x"}],
+                                    {"born": reg_ok["born"] + [{"id": "prjint1", "born-release": "1.0.7"}]},
+                                    [], "1.0.7")
+        if fs_b:
+            failures.append("{}: a born row at 1.0.7 must satisfy an add at head 1.0.7 (got {})".format(
+                labelDB, fs_b))
+        try:
+            _release_schema.strict_id_history(reg_ok, "dev-model born control")
+        except SchemaError as exc:
+            failures.append("{}: the born-release 1.0.7 control was refused ({})".format(labelDB, exc))
+        try:
+            _release_schema.strict_id_history(
+                {"born": [{"id": "prjint1.1", "born-release": "1.0.7-dev"}]}, "dev-model born")
+            failures.append("{}: a born-release 1.0.7-dev was accepted by strict_id_history".format(
+                labelDB))
+        except SchemaError as exc:
+            if "born-release is not a bare SemVer" not in str(exc):
+                failures.append("{}: expected the born-release refusal, got: {}".format(labelDB, exc))
+
+    if any(_sel(x) for x in (labelD1, labelD2, labelD3, labelD4, labelD4b, labelD5, labelD5b, labelD6)):
+        rU = _extract_to("dev-reopen")
+        if rU is None or not _pin_fixture_version(rU, failures):
+            return False
+        for args in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "release 1.0.0"),
+                     ("tag", "-a", "v1.0.0", "-m", "1.0.0")):
+            if _g(rU, *args).returncode != 0:
+                failures.append("fixture setup (DEV reopen): could not build the release 1.0.0 commit "
+                                "(git {} failed)".format(args[0]))
+                return False
+        cU = _gout(rU, "rev-parse", "HEAD")
+        tU = _gout(rU, "rev-parse", "refs/tags/v1.0.0")
+        (rU / RELEASES_REL).write_text("format-version = 1\n\n" + _row_text("1.0.0", "v1.0.0", tU, cU),
+                                       encoding="utf-8")
+        # The attestation commit (step 6a) first, so every reopen below is a later commit on top of it.
+        if not (_regen_fixture_manifest(rU, "DEV reopen attestation", failures, env)
+                and _commit_all(rU, "DEV reopen attestation")):
+            return False
+        cA = _gout(rU, "rev-parse", "HEAD")
+        cl_rel = '[[release]]\nversion = "1.0.0"\n'
+        cl_open = cl_rel + '\n[unreleased]\nversion = "1.0.7"\n'
+
+        def _dev_state(label_, changelog_, version_, mutate_=None):
+            for a_ in (("reset", "-q", "--hard", cA), ("clean", "-q", "-fdx")):
+                _g(rU, *a_)
+            (rU / CHANGELOG_REL).write_text(changelog_, encoding="utf-8")
+            (rU / "VERSION").write_text(version_ + "\n", encoding="utf-8")
+            if mutate_ is not None and mutate_() is False:
+                return False
+            return _regen_fixture_manifest(rU, label_, failures, env) and _commit_all(rU, label_)
+
+        def _check_all(label_, want_rc, needles):
+            rc_, out_ = _run_capture_root(rU)
+            if rc_ != want_rc or any(n not in out_ for n in needles):
+                failures.append("{}: expected exit {} with {!r} (got rc={}: {})".format(
+                    label_, want_rc, needles, rc_, out_.strip()[-400:]))
+
+        if _sel(labelD1) and _dev_state(labelD1, cl_open, "1.0.7-dev"):
+            seen_hv = []
+            real_leg = clause_text_leg
+
+            def _spy_leg(prev_inv, head_inv, register, rows_, head_version):
+                seen_hv.append(head_version)
+                return real_leg(prev_inv, head_inv, register, rows_, head_version)
+            globals()["clause_text_leg"] = _spy_leg
+            try:
+                _check(rU, labelD1, 0, "PASS: whole-surface delta")
+            finally:
+                globals()["clause_text_leg"] = real_leg
+            if seen_hv != ["1.0.7"]:
+                failures.append("{}: run() must classify with the PLAIN [unreleased] version 1.0.7 "
+                                "(the legs received {})".format(labelD1, seen_hv))
+        if _sel(labelD2) and _dev_state(labelD2, cl_open, "1.0.7"):
+            _check(rU, labelD2, 2, "plus the -dev suffix")
+        if _sel(labelD3) and _dev_state(
+                labelD3, cl_rel + '\n[[release]]\nversion = "1.0.1"\n\n[unreleased]\nversion = "1.0.7"\n',
+                "1.0.7-dev"):
+            _check(rU, labelD3, 2, "RELEASING step 6b")
+
+        def _append_agents():
+            p_ = rU / "AGENTS.md"
+            p_.write_text(p_.read_text(encoding="utf-8") + "\nDEV G4 edit\n", encoding="utf-8")
+        if _sel(labelD4) and _dev_state(labelD4, cl_rel, "1.0.0", _append_agents):
+            _check_all(labelD4, 2, ("beyond the post-release paths", DECLARE_NEW_VERSION))
+        if _sel(labelD4b) and _dev_state(labelD4b, cl_rel + 'date = "2000-01-01"\n', "1.0.0"):
+            _check_all(labelD4b, 2, ("by more than the newest", DECLARE_NEW_VERSION))
+
+        def _disp_edit(release_):
+            def _m():
+                cid_ = _edit_clause_consistently(rU)
+                if cid_ is None:
+                    failures.append("fixture setup (DEV G5): no clause admits a consistent edit")
+                    return False
+                (rU / DISPOSITIONS_REL).write_text(
+                    'format-version = 1\n\n[[disposition]]\nid = "{}"\nrelease = "{}"\n'
+                    'kind = "behaviour-neutral"\nimpact = "byte-only wording"\n'
+                    'rationale = "dev-model test"\n'.format(cid_, release_), encoding="utf-8")
+                return True
+            return _m
+        if _sel(labelD5) and _dev_state(labelD5, cl_open, "1.0.7-dev", _disp_edit("1.0.7")):
+            _check(rU, labelD5, 0, "PASS: whole-surface delta")
+        if _sel(labelD5b) and _dev_state(labelD5b, cl_open, "1.0.7-dev", _disp_edit("1.0.7-dev")):
+            _check(rU, labelD5b, 2, "is not a bare SemVer")
+        # The routing read validates the COMMITTED [unreleased] itself (the "HEAD " prefix names the
+        # committed read, before any checkout record is consulted).
+        if _sel(labelD6) and _dev_state(labelD6, cl_rel + '\n[unreleased]\nversion = "1.0.7-dev"\n',
+                                        "1.0.7-dev"):
+            _check(rU, labelD6, 2, "HEAD changelog.toml: [unreleased] version '1.0.7-dev'")
+
+    if _sel(labelDG):
+        rg = _extract_to("dev-genesis")
+        if rg is None:
+            return False
+        for args in (("init", "-q"), ("add", "-A")):
+            if _g(rg, *args).returncode != 0:
+                failures.append("fixture setup ({}): could not stage the extracted tree (git {} "
+                                "failed)".format(labelDG, args[0]))
+                return False
+        cl_g_plain = '[[release]]\nversion = "1.0.5"\n'
+        cl_g_open = cl_g_plain + '\n[unreleased]\nversion = "1.1.1"\n'
+        for sub_, cl_, ver_, want_, msg_ in (
+                ("manifest 1.1.1-dev", cl_g_open, "1.1.1-dev", 0, "release-delta: GENESIS"),
+                ("plain manifest 1.1.1", cl_g_open, "1.1.1", 2, "plus the -dev suffix"),
+                ("manifest 1.1.2-dev", cl_g_open, "1.1.2-dev", 2, "plus the -dev suffix"),
+                ("manifest 1.1.1-dev with no [unreleased]", cl_g_plain, "1.1.1-dev", 2,
+                 "carries no [unreleased]"),
+                ("control: plain 1.0.5 with no [unreleased]", cl_g_plain, "1.0.5", 0,
+                 "release-delta: GENESIS")):
+            (rg / CHANGELOG_REL).write_text(cl_, encoding="utf-8")
+            (rg / "VERSION").write_text(ver_ + "\n", encoding="utf-8")
+            if _regen_fixture_manifest(rg, "{} [{}]".format(labelDG, sub_), failures, env):
+                _check(rg, "{} [{}]".format(labelDG, sub_), want_, msg_)
     return True
 
 

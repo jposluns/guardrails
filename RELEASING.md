@@ -44,6 +44,17 @@ pull request (CLAUDE.md, Gates and CI).
    in the candidate tree, so the file must be committed before the freeze. Its content is not defined
    here; it remains open under the first-release-evidence item.
 
+   Fold the version declaration. Between cuts `changelog.toml` ends with an `[unreleased]` table whose
+   `version` is the planned release N (a bare `X.Y.Z`), and the generators write `N-dev` into `VERSION`,
+   `.aiqt/manifest.toml`, the announce snippet and the site version labels. The freeze pull request moves
+   that table into a new last `[[release]]` with `version = N`, a real `date` (a quoted `YYYY-MM-DD`), a
+   `title` and the collected `items`, deletes `[unreleased]`, and writes `.aiqt/release-cut.toml`
+   (`operation = "append"`, `previous-version` the previous release, `next-version = N`, and the base
+   changelog digest). The generator sweep below then turns every one of those outputs back into the plain
+   `N`. `python3 -I -B tools/check_release_cut.py` refuses a cut that releases another version than the
+   declared N or that keeps `[unreleased]`, and step 5b refuses a candidate whose manifest carries a `-dev`
+   version or whose `changelog.toml` still carries `[unreleased]`.
+
    Skill version bump checklist. The skill is independently versioned before the 1.1.1 pack release
    (skill 1.0.6 under pack release 1.0.5); from the 1.1.1 pack release on, the skill version equals the
    pack version. `gen_skill.build_outputs` enforces this: once `VERSION` is at or above
@@ -53,7 +64,9 @@ pull request (CLAUDE.md, Gates and CI).
    so the release cut also sets that value to the pack version and regenerates
    `plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json` with `python3 tools/gen_hooks.py`. The root
    `VERSION` is the pack version only in this repository (the tree carrying `.aiqt/authoring.toml`), so the
-   rule is a release-time rule of this repository and is enforced only here; in an adopter's tree, where
+   rule is a release-time rule of this repository and is enforced only here. A development `VERSION`
+   (`X.Y.Z-dev`, main between cuts) skips both checks, and the freeze's fold makes `VERSION` plain again, so
+   the rule re-arms exactly at the cut; any other suffix still fails closed (exit 2); in an adopter's tree, where
    `VERSION` is the adopter's own, neither generator nor `conformance.py` re-checks it (a release ships only
    after this check passed). A deleted `.aiqt/authoring.toml` that the git index still tracks is refused
    (exit 2), not read as an adopter tree. Only the latest skill version is served: exactly
@@ -165,7 +178,8 @@ pull request (CLAUDE.md, Gates and CI).
    `bash tools/run_all_checks.sh` must be green end to end. Steps 3, 4, and 5 land as one pull request,
    merged on green. Main stays frozen from this merge until step 6b has merged: the freeze covers the
    tag and BOTH post-release pull requests (6a and 6b), which is what makes the release-delta gate print
-   its `release-delta: POST-RELEASE` line on each of them. If the freeze is broken and a commit declaring
+   its `release-delta: POST-RELEASE` line on each of them. Reopening development (step 8) declares a later
+   version, so it waits for step 6b too. If the freeze is broken and a commit declaring
    a later version lands before step 6b, the step 6b gate prints its ordinary `PASS:` line instead of
    `POST-RELEASE`; treat that as evidence the freeze was broken and re-check the intervening commits, not
    as the step 6b 'exit 0' evidence.
@@ -217,6 +231,19 @@ pull request (CLAUDE.md, Gates and CI).
      request either: the tag does not exist yet at that point, so the tag-monotonicity check cannot
      resolve it.
 7. Publish. The public flip is a separate, maintainer-owned step; nothing in steps 1 to 6 depends on it.
+8. Reopen development. After step 6b has merged, one pull request adds an `[unreleased]` table at the end
+   of `changelog.toml` with `version` set to the next planned release (a bare `X.Y.Z` above the release
+   just cut; never write the `-dev` suffix, the generators add it) and runs every `tools/gen_*.py`
+   generator, with `python3 tools/gen_manifest.py` last. `VERSION`, the manifest and the announce snippet
+   then say `X.Y.Z-dev`, the snippet calls it a development build that is not a release, the site shows
+   "Unreleased" beside the last published release, and `CHANGELOG.md` gains an "Unreleased" section. The
+   release-delta gate leaves its post-release route and checks the declared version against the attested
+   release; it refuses a reopen while the newest `changelog.toml` release has no `releases.toml` row. A
+   later pull request whose required version bump is larger than the declared version raises it; the
+   version-monotonicity gate allows raising it and refuses lowering it or removing `[unreleased]` without a
+   cut. Between step 6a and this pull request main shows the plain release version with a root that
+   differs from the one published for the tag (6a regenerates the manifest), so verify a release against
+   the root published for its tag, never against main.
 
 ## Note on the evidence "Built from" field
 

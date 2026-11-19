@@ -544,25 +544,43 @@ def check_authoring_only(root, tracked, classes, exclusions):
             raise GateError("authoring-only path {} must be a regular file".format(rel))
 
 
+def snippet_text(version, root_hex):
+    """The publishable announce snippet, the ONE formula gen_manifest writes and check_manifest recomputes.
+
+    A plain X.Y.Z (a cut or tag tree) is announced as a release. A development X.Y.Z-dev (main between cuts)
+    is announced as a development build that is not a release, so main never claims a published version.
+    Any other value is GateError: read_version admits only these two forms."""
+    parsed = check_versions.parse_tree_version(version)
+    if parsed is None:
+        raise GateError("version {!r} is neither X.Y.Z nor X.Y.Z{}".format(version, check_versions.DEV_SUFFIX))
+    if parsed[1]:
+        return "aiqt-guardrails development build {} (unreleased, not a release)\nroot sha256:{}\n".format(
+            version, root_hex)
+    return "aiqt-guardrails release {}\nroot sha256:{}\n".format(version, root_hex)
+
+
 def read_version(root):
     # Validate the RAW VERSION file grammar FIRST, then parse. Read the raw BYTES (not read_text): read_text
     # applies universal-newline translation, which silently rewrites a CR-terminated "1.0.0\r\n" to "1.0.0\n"
     # and masks the CR. Do NOT .strip() either: .strip() masks surrounding Unicode whitespace, so an
     # NBSP-wrapped " 1.0.0 \n" would collapse to "1.0.0" and seed release-version at exit 0. The canonical
-    # VERSION file is exactly `X.Y.Z` followed by a single trailing LF and nothing else (no leading/trailing/
-    # embedded whitespace, no NBSP, no CR, exactly one final "\n"), the same standard check_versions holds the
-    # on-disk VERSION to (both read raw bytes and reject anything but `latest + "\n"`); the two gates agree.
+    # VERSION file is exactly `X.Y.Z` (a cut or tag tree) or `X.Y.Z-dev` (main between cuts) followed by a
+    # single trailing LF and nothing else (no leading/trailing/embedded whitespace, no NBSP, no CR, exactly one
+    # final "\n"), the same standard check_versions holds the on-disk VERSION to (both read raw bytes and reject
+    # anything but the exact single-source text); the two gates agree.
     try:
         raw = (root / VERSION_REL).read_bytes().decode("utf-8")
     except UnicodeDecodeError as exc:
         raise GateError("VERSION is not valid UTF-8 ({})".format(exc))
     if not raw.endswith("\n") or raw.count("\n") != 1:
-        raise GateError("VERSION {!r} is not a bare SemVer with a single trailing newline".format(raw))
+        raise GateError("VERSION {!r} is not a tree version with a single trailing newline".format(raw))
     version = raw[:-1]
-    # Parse the X.Y.Z body with the SHARED ASCII SemVer validator, never a second grammar: it rejects a
-    # Unicode digit, a leading zero, and any surrounding or embedded whitespace (an NBSP/CR body fails here).
-    if check_versions._parse(version) is None:
-        raise GateError("VERSION {!r} is not a bare SemVer".format(raw))
+    # Parse the body with the SHARED ASCII tree-version validator (_semver.parse_tree_version), never a second
+    # grammar: exactly X.Y.Z (a cut or tag tree) or X.Y.Z-dev (main between cuts). It rejects a Unicode digit,
+    # a leading zero, any other suffix, and any surrounding or embedded whitespace (an NBSP/CR body fails here).
+    if check_versions.parse_tree_version(version) is None:
+        raise GateError("VERSION {!r} is neither a bare SemVer X.Y.Z nor X.Y.Z{}".format(
+            raw, check_versions.DEV_SUFFIX))
     return version
 
 
@@ -813,9 +831,8 @@ def compute_all(root, write_mode):
     # 3 + 4. ROOT over the exact manifest bytes; the publishable snippet.
     root_hex = _sha256(manifest_text.encode("utf-8"))
     root_text = "sha256:{}\n".format(root_hex)
-    snippet_text = "aiqt-guardrails release {}\nroot sha256:{}\n".format(version, root_hex)
     return {ATTRIBUTES_REL: attributes_text, MANIFEST_REL: manifest_text,
-            ROOT_REL: root_text, SNIPPET_REL: snippet_text, FROZEN_REL: frozen_text}
+            ROOT_REL: root_text, SNIPPET_REL: snippet_text(version, root_hex), FROZEN_REL: frozen_text}
 
 
 def run(root, check):

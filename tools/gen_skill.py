@@ -141,7 +141,10 @@ ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.6.zip")  # the versi
 # repository: it is enforced only in the authoring tree, where the root VERSION is the pack version
 # (resolve_pack_version); an adopter tree is not re-checked (a release ships only after the authoring check
 # passed). Below the first version the two stay independent, so a tree at pack 1.0.5 with skill 1.0.6 still
-# builds.
+# builds. Between release cuts the authoring tree's VERSION carries the planned next version with the fixed
+# development suffix (X.Y.Z-dev, generated from changelog.toml [unreleased]); the rule does not apply to such a
+# development VERSION (components stay independently versioned on main) and re-arms when the cut makes VERSION a
+# bare X.Y.Z again. Component versions (the skill meta version, the plugin version) stay bare MAJOR.MINOR.PATCH.
 # The hooks plugin carries the same chat skill: PLUGIN_SKILL_PARTS is written from the SAME string as the
 # reserved SKILL.md (one source, no plugin-specific variant), so the two copies are byte-identical by
 # construction, and --check also compares them on disk (the pair leg). PLUGIN_SKILLS_PARTS is the plugin's
@@ -166,10 +169,19 @@ _ECHO_MAX_CHARS = 80
 # tools/gen_hooks.py, which imports this constant) must equal the pack version. One constant for both rules,
 # so the two cannot start at different releases. Exact MAJOR.MINOR.PATCH, compared numerically.
 PACK_ALIGN_FIRST_VERSION = "1.1.1"
-# A pack VERSION file is exactly a bare MAJOR.MINOR.PATCH and one LF (the grammar tools/gen_manifest.py and
-# tools/check_versions.py hold it to): [0-9] never \d, no leading zero, \Z never $.
-_PACK_VERSION_FILE = re.compile(r"((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))\n\Z")
+# The fixed development suffix of a tree version between release cuts. The reference grammar is
+# opf/tools/_semver.py (DEV_SUFFIX, parse_tree_version, re-exported by tools/check_versions.py); it is held here
+# as a self-contained copy rather than imported, because importing either module would add files to this
+# generator's declared import closure (.aiqt/core/renderers.toml) and to gen_hooks', which imports this module.
+_PACK_DEV_SUFFIX = "-dev"
+# A pack VERSION file is exactly a bare MAJOR.MINOR.PATCH, optionally followed by exactly _PACK_DEV_SUFFIX, and
+# one LF (the tree-version grammar of _semver.parse_tree_version plus the file's single LF): [0-9] never \d, no
+# leading zero, \Z never $, the suffix literal and case-sensitive (no counter, no other pre-release or build tag).
+_PACK_VERSION_FILE = re.compile(
+    r"((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-dev)?)\n\Z")
 _PLAIN_SEMVER = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
+# The pack version as parse_pack_version returns it (no LF): the same tree-version grammar.
+_PACK_TREE_VERSION = re.compile(r"((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))(-dev)?\Z")
 
 
 def _semver_tuple(text):
@@ -179,6 +191,17 @@ def _semver_tuple(text):
     return tuple(int(part) for part in text.split("."))
 
 
+def _pack_tree_version(text):
+    """((MAJOR, MINOR, PATCH), is_dev) for exactly X.Y.Z or X.Y.Z-dev, or None for anything else (the
+    grammar of _semver.parse_tree_version: no other suffix, no trailing newline)."""
+    if not isinstance(text, str):
+        return None
+    m = _PACK_TREE_VERSION.match(text)
+    if m is None:
+        return None
+    return _semver_tuple(m.group(1)), m.group(2) is not None
+
+
 def _echo(raw, limit=_ECHO_MAX_CHARS):
     """repr of raw for an error message, cut to limit characters, so a large hostile file never floods a log."""
     text = repr(raw)
@@ -186,13 +209,15 @@ def _echo(raw, limit=_ECHO_MAX_CHARS):
 
 
 def parse_pack_version(raw, where="VERSION"):
-    """The pack version a VERSION file's raw text declares. Raises ValueError unless the text is exactly a
-    bare MAJOR.MINOR.PATCH followed by one LF (no CR, no other whitespace, no prefix or suffix). The text is
-    echoed cut to _ECHO_MAX_CHARS characters."""
+    """The pack version a VERSION file's raw text declares, without its LF and with any development suffix
+    kept ("1.1.1" or "1.1.1-dev"). Raises ValueError unless the text is exactly a bare MAJOR.MINOR.PATCH,
+    optionally followed by exactly _PACK_DEV_SUFFIX ("-dev": no counter, no other suffix, case-sensitive),
+    followed by one LF (no CR, no other whitespace, no prefix). The text is echoed cut to _ECHO_MAX_CHARS
+    characters."""
     m = _PACK_VERSION_FILE.match(raw) if isinstance(raw, str) else None
     if m is None:
-        raise ValueError("{} {} is not a bare MAJOR.MINOR.PATCH followed by one newline; fail-closed".format(
-            where, _echo(raw)))
+        raise ValueError("{} {} is not a bare MAJOR.MINOR.PATCH (or MAJOR.MINOR.PATCH{}) followed by one newline; "
+                         "fail-closed".format(where, _echo(raw), _PACK_DEV_SUFFIX))
     return m.group(1)
 
 
@@ -273,17 +298,23 @@ def pack_alignment_problem(component, component_version, pack_version, first=Non
     that would let deleting the source turn the rule off. A pack version below first (PACK_ALIGN_FIRST_VERSION
     when None) leaves the component independently versioned. At or above it, the component version must equal
     the pack version exactly. source names where the pack version was read (resolve_pack_version), for the
-    message."""
+    message. The rule is a release-time rule: a development pack version (X.Y.Z-dev, main between release cuts)
+    is not judged (None, whatever the component version), and the rule re-arms when the cut makes the pack
+    version a bare X.Y.Z again. Any other pack version form (another suffix, a counter, build metadata) cannot be
+    compared: ValueError."""
     if pack_version is None:
         raise ValueError("{} version alignment cannot be evaluated: the pack VERSION file is absent (VERSION is "
                          "a declared input of the rule; tools/gen_changelog.py generates it); fail-closed".format(
                              component))
     first = PACK_ALIGN_FIRST_VERSION if first is None else first
     first_t = _semver_tuple(first)
-    pack_t = _semver_tuple(pack_version)
-    if first_t is None or pack_t is None:
+    pack_parsed = _pack_tree_version(pack_version)
+    if first_t is None or pack_parsed is None:
         raise ValueError("pack alignment: cannot compare pack version {!r} with first version {!r}".format(
             pack_version, first))
+    pack_t, pack_is_dev = pack_parsed
+    if pack_is_dev:
+        return None
     if pack_t < first_t or component_version == pack_version:
         return None
     return ("{} version {!r} differs from the pack version {!r} ({}); from pack {} on the {} version "
@@ -2121,7 +2152,8 @@ def self_test_main():
         #     cannot-evaluate, never a skip that would let deleting VERSION turn the rule off (every fixture
         #     carries VERSION through _write_fixture). Removing the alignment check turns the differing-version
         #     and malformed legs red; treating an absent VERSION as outside the rule turns the absent legs red;
-        #     comparing the versions as strings instead of numbers turns the 1.10.0 vector red.
+        #     comparing the versions as strings instead of numbers turns the 1.10.0 vector red. A development
+        #     VERSION (X.Y.Z-dev) is not judged (7b2); any other suffix stays malformed.
         if PACK_ALIGN_FIRST_VERSION != "1.1.1":
             failures.append("PACK_ALIGN_FIRST_VERSION must be 1.1.1 (the documented first aligned pack "
                             "release), got {!r}".format(PACK_ALIGN_FIRST_VERSION))
@@ -2174,9 +2206,59 @@ def self_test_main():
                                 "release), got {}\n{}".format(code, out))
         finally:
             globals()["ZIP_VERSIONED_PARTS"] = real_parts
+        # 7b2. The development VERSION (test H). Between release cuts main's VERSION is the planned next version
+        #      with the fixed -dev suffix, and the alignment rule is a release-time rule, so an authoring tree at
+        #      VERSION 1.2.0-dev with the skill at its own version (independent of 1.2.0) generates and checks
+        #      clean; the same tree at 1.2.0 (the cut) is exit 2 in both modes naming the pack version, writing
+        #      nothing (alignment enforced again); at 1.2.0-rc1 it is exit 2 naming the grammar. Rejecting the
+        #      development form turns the first leg red; accepting any suffix turns the 1.2.0-rc1 leg (and the
+        #      other-suffix rows below) red.
+        dev = pack_fixture("dev", good_src)
+        (dev / "VERSION").write_bytes(b"1.2.0-dev\n")
+        for chk in (False, True):
+            code, out = capture(dev, chk)
+            if code != 0:
+                failures.append("VERSION 1.2.0-dev with skill {} (a development VERSION between cuts; the rule is "
+                                "release-time) expected exit 0 ({}), got {}\n{}".format(
+                                    zip_versioned_version(), "--check" if chk else "generate", code, out))
+        before = {p: p.read_bytes() for p in sorted(dev.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
+        (dev / "VERSION").write_bytes(b"1.2.0\n")
+        for chk in (True, False):
+            code, out = capture(dev, chk)
+            if code != 2 or "differs from the pack version '1.2.0'" not in out:
+                failures.append("VERSION 1.2.0 (the cut of 1.2.0-dev) with skill {} expected exit 2 naming the pack "
+                                "version ({}), got {}\n{}".format(
+                                    zip_versioned_version(), "--check" if chk else "generate", code, out))
+        (dev / "VERSION").write_bytes(b"1.2.0-rc1\n")
+        for chk in (True, False):
+            code, out = capture(dev, chk)
+            if code != 2 or "not a bare MAJOR.MINOR.PATCH" not in out:
+                failures.append("VERSION 1.2.0-rc1 (a suffix other than -dev) expected exit 2 naming the grammar "
+                                "({}), got {}\n{}".format("--check" if chk else "generate", code, out))
+        after = {p: p.read_bytes() for p in sorted(dev.joinpath(*ZIP_PARTS[:-1]).rglob("*")) if p.is_file()}
+        if after != before:
+            failures.append("a refused run at VERSION 1.2.0 or 1.2.0-rc1 must write nothing")
+        try:
+            got = parse_pack_version("1.2.0-dev\n")
+        except ValueError as exc:
+            got = "raised: {}".format(exc)
+        if got != "1.2.0-dev":
+            failures.append("parse_pack_version('1.2.0-dev\\n') expected '1.2.0-dev', got {!r}".format(got))
+        for raw in ("1.2.0-rc1", "1.2.0-dev.0", "1.2.0-DEV", "1.2.0+dev", "1.2.0-dev1", "1.2.0-dev-dev",
+                    "1.2.0-dev\n", "01.2.0-dev"):
+            try:
+                pack_alignment_problem("skill", "1.2.0", raw)
+                failures.append("pack_alignment_problem with pack version {!r} must raise (cannot compare), not "
+                                "judge".format(raw))
+            except ValueError:
+                pass
         for label, raw in (("no-newline", b"1.0.5"), ("crlf", b"1.0.5\r\n"), ("prefixed", b"v1.0.5\n"),
                            ("leading-zero", b"01.0.5\n"), ("two-newlines", b"1.0.5\n\n"),
-                           ("prerelease", b"1.0.5-rc1\n"), ("empty", b"")):
+                           ("prerelease", b"1.0.5-rc1\n"), ("empty", b""),
+                           ("dev-counter", b"1.2.0-dev.0\n"), ("dev-number", b"1.2.0-dev1\n"),
+                           ("dev-upper", b"1.2.0-DEV\n"), ("dev-build", b"1.2.0+dev\n"),
+                           ("dev-no-newline", b"1.2.0-dev"), ("dev-crlf", b"1.2.0-dev\r\n"),
+                           ("dev-only", b"-dev\n"), ("dev-leading-zero", b"01.2.0-dev\n")):
             bad = pack_fixture("malformed-" + label, good_src)
             (bad / "VERSION").write_bytes(raw)
             code, out = capture(bad, False)
@@ -2216,7 +2298,9 @@ def self_test_main():
         for comp, pack, first, want_problem in (
                 ("1.1.1", "1.2.0", None, True), ("1.2.0", "1.2.0", None, False), ("1.0.6", "1.1.0", None, False),
                 ("1.0.6", "1.1.1", None, True), ("1.1.1", "1.1.1", None, False),
-                ("1.0.0", "1.10.0", "1.9.0", True), ("1.0.0", "1.9.9", "1.10.0", False)):
+                ("1.0.0", "1.10.0", "1.9.0", True), ("1.0.0", "1.9.9", "1.10.0", False),
+                ("1.0.6", "1.2.0-dev", None, False), ("1.2.0", "1.2.0-dev", None, False),
+                ("1.0.6", "1.1.1-dev", None, False), ("1.0.0", "1.0.5-dev", None, False)):
             got = pack_alignment_problem("skill", comp, pack, first) is not None
             if got != want_problem:
                 failures.append("pack_alignment_problem(skill {}, pack {}, first {}) expected {}, got {}".format(
@@ -3367,7 +3451,9 @@ def self_test_main():
           "source round-trips clean (SKILL.md and the zips); an unknown "
           "corpus-id, an invalid-UTF-8 target, and a version/zip-literal mismatch each fail closed (exit 2); "
           "from pack 1.1.1 on a skill version that differs from VERSION fails closed (exit 2, writing nothing) "
-          "while the equal twin builds clean and a pack below 1.1.1 leaves the skill independent, and a "
+          "while the equal twin builds clean and a pack below 1.1.1 leaves the skill independent; a development "
+          "VERSION (1.2.0-dev) leaves the skill independent while its cut (1.2.0) fails closed and any other "
+          "suffix (1.2.0-rc1, -dev.0, -DEV, +dev) is malformed (exit 2); and a "
           "malformed, symlinked, hard-linked or absent VERSION fails closed (exit 2); the rule applies only in "
           "the authoring tree: an adopter tree is not re-checked (no manifest, a manifest at 1.0.5, 1.1.1 or "
           "unparseable, and an own VERSION of 1.1.1, 1.2.0, another format, CRLF, absent, dangling or a "

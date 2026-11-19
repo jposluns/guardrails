@@ -1213,6 +1213,14 @@ count = 2
 class = "EXEMPT"
 reason = "test-code"
 
+[[site]]
+path = "tools/check_release_build.py"
+function = "_self_test_main_isolated"
+form = "call"
+count = 2
+class = "EXEMPT"
+reason = "test-code"
+
 # head bytes its caller parsed under a full handler; the predecessor differs by one removed tag line
 [[site]]
 path = "tools/check_release_delta.py"
@@ -1267,6 +1275,14 @@ path = "tools/check_version_monotonicity.py"
 function = "self_test_main"
 form = "alias"
 count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/check_versions.py"
+function = "self_test"
+form = "call"
+count = 9
 class = "EXEMPT"
 reason = "test-code"
 
