@@ -17978,8 +17978,9 @@ def _gate_grammar_redirect(command, i, start, fd):
 # input rather than how long a scan takes. None, the value the hook always runs with, counts nothing. The self-test
 # sets a one-element list here around one call and each pass of a scan adds the characters or words it read
 # (_gate_scan_count): a lex or reading of text adds the length of the text it reads, a walk or table fill adds
-# the words it visits, and a slice a scan copies to read adds its length. The count changes no decision, no
-# return value and no other state.
+# the words it visits, and a slice a scan copies to read adds its length. A walk counts the steps it takes, never
+# how far a cached pointer moved, and a reading reused from a cache or passed over by a skip adds nothing, so a
+# lost cache or skip shows as added work. The count changes no decision, no return value and no other state.
 _GATE_SCAN_COUNTER = None
 
 
@@ -17989,6 +17990,19 @@ def _gate_scan_count(items):
     counter = _GATE_SCAN_COUNTER
     if counter is not None:
         counter[0] += items
+
+
+def _gate_scan_first(indices, test):
+    """The first index of indices (a range) for which test(index) is true, or None when none is, adding each index
+    it tried to the work count (_gate_scan_count), so the count is the steps the search took wherever it starts."""
+    tried = 0
+    for p in indices:
+        tried += 1
+        if test(p):
+            _gate_scan_count(tried)
+            return p
+    _gate_scan_count(tried)
+    return None
 
 
 def _gate_span_hides_roster_git(interior):
@@ -18017,15 +18031,16 @@ def _gate_span_hides_roster_git(interior):
             hides[k] = hides[k + (2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1)]
         else:
             hides[k] = w.lower() in _NOVERIFY_VERBS
-    # The work count: the interior's two regex passes and the table fill, then each step of the base pointer.
+    # The work count: the interior's two regex passes and the table fill, then each step the pointer walk takes.
     _gate_scan_count(2 * len(interior) + len(toks))
     base = 0
     for gm in _GATE_GIT_WORD_RE.finditer(interior):
         gend = gm.end()
-        moved = base
+        visited = 0
         while base < len(toks) and toks[base][0] < gend:
+            visited += 1
             base += 1
-        _gate_scan_count(base - moved)
+        _gate_scan_count(visited)
         if hides[base]:
             return True
     return False
@@ -18126,14 +18141,16 @@ def _gate_grammar_lex(command, start, heredoc_message=False):
         # it returns False, so the lexer keeps scanning and the segment still fails closed.
         if _sub_off[0] is None:
             p = _sub_scan[0]
+            visited = 0  # the work count: the steps this walk takes, not how far the cached pointer moved
             while p < len(words):
+                visited += 1
                 w = words[p]
                 if w.startswith("-") and w != "-":
                     p += 2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1
                     continue
                 _sub_off[0] = w.lower() not in _NOVERIFY_VERBS
                 break
-            _gate_scan_count(p - _sub_scan[0])  # the work count: the words this resumed walk visited
+            _gate_scan_count(visited)
             _sub_scan[0] = p
         return _sub_off[0] is True
 
@@ -19539,6 +19556,7 @@ def _gate_bash_readings(text):
     for reading in (outer, _gate_shell_level(outer), decoded):
         plain = _gate_reading_plain(reading)
         if plain not in split:
+            _gate_scan_count(len(plain))  # the work count: each split this pass makes, none it reuses
             split[plain] = _gate_plain_words(plain)
         readings.append(split[plain])
     return tuple(readings)
@@ -19554,12 +19572,13 @@ def _gate_any_word_bypass(words, first=None):
     in the word count. first, when given, is the index of the word the walk reads after instead (a word built
     at run time that may be git, _gate_runtime_bypass)."""
     if first is None:
-        first = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
-        _gate_scan_count(first)  # the work count: the words the search for the first git read
-    _gate_scan_count(len(words) - first)  # the work count: the words the walk from the end reads
+        first = _gate_scan_first(range(len(words)), lambda k: _gate_word(words[k]) == "git")
+        first = len(words) if first is None else first
+    walk = range(len(words) - 1, first, -1)
+    _gate_scan_count(len(walk))  # the work count: the words the walk from the end reads (it never stops early)
     long_at = short_at = None  # the nearest long and short spelling words after the word being read
     found = None
-    for p in range(len(words) - 1, first, -1):
+    for p in walk:
         w = words[p]
         if w in _NOVERIFY_VERBS:
             if long_at is not None:
@@ -19750,11 +19769,9 @@ def _gate_runtime_hit(words, k, tilde=False):
     bypass = _gate_any_word_bypass(words, k)
     if bypass is not None:
         return words[k], bypass[0], "{}, a hook-skip spelling for it".format(bypass[1])
-    verb = next((p for p in range(k + 1, len(words)) if words[p] in _NOVERIFY_VERBS), None)
-    _gate_scan_count((len(words) if verb is None else verb + 1) - k)  # the work count: the verb search
+    verb = _gate_scan_first(range(k + 1, len(words)), lambda p: words[p] in _NOVERIFY_VERBS)
     if verb is not None:
-        later = next((p for p in range(verb + 1, len(words)) if _gate_runtime_at(words, p, tilde)), None)
-        _gate_scan_count((len(words) if later is None else later + 1) - verb)  # the work count: that search
+        later = _gate_scan_first(range(verb + 1, len(words)), lambda p: _gate_runtime_at(words, p, tilde))
         if later is not None:
             return (words[k], words[verb], "the word {!r}, also built at run time, which may expand to a hook-skip "
                     "spelling for it".format(words[later][:40]))
@@ -19792,8 +19809,7 @@ def _gate_runtime_reading(words, tilde):
     """(word, sub, what) for the words of one de-quoted reading of a raw piece (_gate_runtime_bypass), else None:
     the walk from its first word built at run time (_gate_runtime_at, _gate_runtime_hit; tilde as there). Linear
     in the word count."""
-    k = next((p for p in range(len(words)) if _gate_runtime_at(words, p, tilde)), None)
-    _gate_scan_count(len(words) if k is None else k + 1)  # the work count: the words the search read
+    k = _gate_scan_first(range(len(words)), lambda p: _gate_runtime_at(words, p, tilde))
     if k is None:
         return None
     return _gate_runtime_hit(words, k, tilde)
@@ -20052,8 +20068,7 @@ def _gate_runtime_bypass(text):
         _gate_scan_count(len(text))  # the work count: the tilde search over text
         tilde = _GATE_TILDE_START_RE.search(text) is not None
         for words in (_gate_dequoted_words(text),) + _gate_bash_readings(text):
-            k = next((k for k, w in enumerate(words) if _gate_extglob_word(w)), None)
-            _gate_scan_count(len(words) if k is None else k + 1)  # the work count: the words the search read
+            k = _gate_scan_first(range(len(words)), lambda p: _gate_extglob_word(words[p]))
             if k is not None:
                 hit = _gate_runtime_hit(words, k, tilde)
                 if hit is not None:

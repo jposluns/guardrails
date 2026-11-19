@@ -7731,16 +7731,36 @@ _GW_REPS = 4000
 # scan. On these inputs (prefix + unit * n + suffix) each counted pass reads a stretch that is a fixed multiple of
 # n plus a fixed part, and a fixed part adds to count(2n) - 2 * count(n) only when it is negative. The slack covers
 # the two ways the code makes a pass's stretch shorter than whole units, or grow by a step instead of a multiple:
-# - the dequoted-word walk (_gate_novrf_dequoted_bypass) finds a terminator over slices of 16, 32, 64, ... words,
-#   whose full slices sum to 16 * (2 ** k - 1); doubling the input makes that 2 * 16 * (2 ** k - 1) + 16, at most
-#   16 over twice for each verb's walk, and a walk that finds no bypass covers every later git word of its verb,
-#   so a row takes at most one such walk for each roster verb its words hold, and none holds more than one;
+# - the dequoted-word walk (_gate_novrf_dequoted_bypass) finds a terminator over slices of 16, 32, 64, ... words.
+#   A walk over L words that finds no terminator counts _gw_walk_count(L) = 16 * (2 ** k - 1) + 2 * L, where
+#   16 * 2 ** k is the least slice size not under L (k = 0 when L <= 16): the full slices of 16 to 8 * 2 ** k
+#   words, the last slice, truncated to L, and the slice of L words read for the spelling. The rows' words give
+#   L(2n) = 2 * L(n) + 1 (L = 2n - 1 for gw-lin-dq-roster and 3n - 1 for gw-lin-dq-roster-m). When the doubled
+#   walk's truncated last slice crosses one more slice size than the smaller walk's (16 * 2 ** k < L(2n) <=
+#   32 * 2 ** k), the full slices add 16 over twice and the two truncated reads add 2 * 1, so 18 (_GW_WALK_SLACK).
+#   When it crosses two, which happens only when L(n) is a slice size itself (L(2n) = 32 * 2 ** k + 1), the next
+#   full slice of 16 * 2 ** k words is added too: 32 * 2 ** k + 18, about twice L(n), which no fixed slack can
+#   cover. At n = 11 roster-m's L(n) = 32 is such a size: its walk counts 80 then 242, and the linear row grows
+#   from 149 to 377, 79 over twice. So the bound is derived for the pinned sizes, not for every n: at _GW_REPS
+#   L(n) is 7999 and 11999, not over the slice sizes 8192 and 16384, and L(2n) is 15999 and 23999, not over the
+#   next sizes 16384 and 32768; at _GW_MUT_REPS (the mutated-copy rows) L(n) is 599 and 899, not over 1024, and
+#   L(2n) is 1199 and 1799, not over 2048. gw-lin-slice-count pins _gw_walk_count to the hook's own count at
+#   those sizes and at the boundary size n = 11 (gw-lin-slice-boundary checks the crossing there),
+#   gw-lin-slice-pinned fails when a size the rows use crosses two slice sizes, and gw-lin-slice-slack when the
+#   two parts below exceed the slack. A walk that finds no bypass covers every later git word of its verb, so a
+#   row takes at most one such walk for each roster verb its words hold, and none holds more than one;
 # - a pass that stops at the next unit (the grammar lexer's off-roster stop at the next ambiguous quote) reads the
 #   last unit only to the end of the text, at most one unit short: no unit here is longer than 18 characters, and
-#   the lexer counts a character at most twice (its main pass and its read of a quote's interior), so at most 36.
-# 16 + 36 = 52, rounded up to 64. A walk restarted at each unit, or a copy of the suffix after each unit, adds
+#   the lexer counts a character at most twice (its main pass and its read of a quote's interior), so at most 36
+#   (_GW_LEX_SLACK).
+# 18 + 36 = 54, rounded up to 64. A walk restarted at each unit, or a copy of the suffix after each unit, adds
 # about n * n / 2 counted items, millions at these sizes, so the slack cannot hide one.
 _GW_COUNT_SLACK = 64
+_GW_WALK_SLACK = 18
+_GW_LEX_SLACK = 36
+# The smaller input of a row run on a mutated copy of the hook (gw-lin-mut-*): a quadratic mutant is already
+# hundreds of thousands of counted items over the bound at 300 units, and each such row stays near a second.
+_GW_MUT_REPS = 300
 # The getrusage fields a gw-lin row reports, then (name, format) for each reported reading, in order: user and
 # system CPU time, minor page faults, involuntary context switches, and the collector's collection count.
 _GW_RUSAGE_FIELDS = ("ru_utime", "ru_stime", "ru_minflt", "ru_nivcsw")
@@ -7780,32 +7800,33 @@ def _gw_usage_text(use_n, use_2n):
     return ", ".join(parts)
 
 
-def _gw_count_once(cmd, scan):
+def _gw_count_once(cmd, scan, hooks=None):
     """(work count, CPU seconds, decision, usage) for one scan of cmd with the hook's work-count seam on: the
-    seam (aiqt_hooks._GATE_SCAN_COUNTER) holds a fresh counter for the call and is None again after it, whether
-    the scan returns or raises. usage is what _gw_usage grew by across the call, read outside the timed region,
-    with None for a reading unavailable before or after it. The CPU time and the usage are diagnostics that a
-    failing row reports; no verdict reads them."""
+    seam (aiqt_hooks._GATE_SCAN_COUNTER, or that of hooks, a mutated copy of the hook module, when given) holds a
+    fresh counter for the call and is None again after it, whether the scan returns or raises. usage is what
+    _gw_usage grew by across the call, read outside the timed region, with None for a reading unavailable before
+    or after it. The CPU time and the usage are diagnostics that a failing row reports; no verdict reads them."""
+    hooks = aiqt_hooks if hooks is None else hooks
     counter = [0]
     u0 = _gw_usage()
-    aiqt_hooks._GATE_SCAN_COUNTER = counter
+    hooks._GATE_SCAN_COUNTER = counter
     try:
         t0 = time.process_time()
         decision = scan(cmd)
         t = time.process_time() - t0
     finally:
-        aiqt_hooks._GATE_SCAN_COUNTER = None
+        hooks._GATE_SCAN_COUNTER = None
     return counter[0], t, decision, tuple(None if a is None or b is None else b - a for a, b in zip(u0, _gw_usage()))
 
 
-def _gw_count_growth(unit, prefix, suffix, scan, once=_gw_count_once):
-    """One scan of prefix + unit * _GW_REPS + suffix and one of the input with twice as many units, each through
-    once (a check stands in scripted readings through it). Returns (count_n, count_2n, length_n, length_2n,
-    decisions, (t_n, t_2n), (usage_n, usage_2n)): the work counts, the input lengths, both decisions in order,
-    and the CPU times and usages, diagnostics only. The input is a command string for the text scans or a word
-    list for the dequoted-word scan, so a length counts characters or words."""
+def _gw_count_growth(unit, prefix, suffix, scan, once=_gw_count_once, size=_GW_REPS):
+    """One scan of prefix + unit * size + suffix (size is _GW_REPS but on a mutated copy) and one of the input with
+    twice as many units, each through once (a check stands in scripted readings through it). Returns (count_n,
+    count_2n, length_n, length_2n, decisions, (t_n, t_2n), (usage_n, usage_2n)): the work counts, the input
+    lengths, both decisions in order, and the CPU times and usages, diagnostics only. The input is a command
+    string for the text scans or a word list for the dequoted-word scan, so a length counts characters or words."""
     readings = []
-    for reps in (_GW_REPS, 2 * _GW_REPS):
+    for reps in (size, 2 * size):
         cmd = prefix + unit * reps + suffix
         count, t, decision, use = once(cmd, scan)
         readings.append((count, len(cmd), decision, t, use))
@@ -7813,10 +7834,10 @@ def _gw_count_growth(unit, prefix, suffix, scan, once=_gw_count_once):
     return count_n, count_2n, length_n, length_2n, [decision_n, decision_2n], (t_n, t_2n), (use_n, use_2n)
 
 
-def _gw_lin_failures(cases, once=_gw_count_once):
+def _gw_lin_failures(cases, once=_gw_count_once, size=_GW_REPS):
     """What the gw-lin growth rows got wrong: cases are (label, unit, prefix, suffix, scan, want) rows, each read
-    by _gw_count_growth through once. A row fails on a decision other than want (with the seam on, at both
-    sizes, and, for a row with a scan, with the seam off at the smaller size, so the seam changes no decision),
+    by _gw_count_growth through once at size units. A row fails on a decision other than want (with the seam on, at
+    both sizes, and, for a row with a scan, with the seam off at the smaller size, so the seam changes no decision),
     on a smaller input whose work count is under its length (the seam did not count the scan's own pass over its
     input, so growth was not evaluated), on a seam left on after the row, or on a doubled input whose work count
     is over twice the smaller one's plus _GW_COUNT_SLACK. The CPU times and the usage of both calls are reported
@@ -7824,13 +7845,13 @@ def _gw_lin_failures(cases, once=_gw_count_once):
     out = []
     for label, unit, prefix, suffix, scan, want in cases:
         count_n, count_2n, length_n, length_2n, got, (t_n, t_2n), use = _gw_count_growth(
-            unit, prefix, suffix, scan, once)
+            unit, prefix, suffix, scan, once, size)
         if aiqt_hooks._GATE_SCAN_COUNTER is not None:
             out.append("({}) the work-count seam was left on after the row: {!r}".format(
                 label, aiqt_hooks._GATE_SCAN_COUNTER))
             aiqt_hooks._GATE_SCAN_COUNTER = None
         if scan is not None:
-            got.append(scan(prefix + unit * _GW_REPS + suffix))
+            got.append(scan(prefix + unit * size + suffix))
         wrong = [decision for decision in got if decision != want]
         if wrong:
             out.append("({}) the counted scan decided {!r} on {} of its {} inputs, expected {!r}"
@@ -7931,6 +7952,216 @@ def _gw_count_seam_failures():
         out.append("(gw-lin-count-raise-restores) a scan that raised left the seam {!r}, want None".format(
             aiqt_hooks._GATE_SCAN_COUNTER))
         aiqt_hooks._GATE_SCAN_COUNTER = None
+    return out
+
+
+def _gw_walk_count(length):
+    """What one dequoted-word walk over length words that finds no terminator adds to the work count
+    (_gate_novrf_dequoted_bypass; derivation at _GW_COUNT_SLACK): the slices of 16, 32, ... words it copies to find
+    the terminator, the last one truncated to length, then the slice of length words it reads for the spelling."""
+    total, size = 0, 16
+    while size < length:
+        total += size
+        size *= 2
+    return total + 2 * length
+
+
+# The dequoted-word growth rows whose words hold one roster verb's walk: (label, unit, prefix, suffix). Their words
+# are echo, the units, then a -n, so the walk starts after the first verb (index 2) and reads to the -n, the last
+# word the spelling test can read: it reads len(words) - 3 words.
+_GW_WALK_ROWS = (
+    ("gw-lin-dq-roster", ["git", "push"], ["echo"], ["-n"]),
+    ("gw-lin-dq-roster-m", ["git", "commit", "-m"], ["echo"], ["-n"]),
+)
+
+
+def _gw_slice_failures():
+    """(gw-lin-slice-count, gw-lin-slice-pinned, gw-lin-slice-slack, gw-lin-slice-boundary) The slack's derivation
+    for the dequoted-word walk, its truncated last slice included (_GW_COUNT_SLACK). gw-lin-slice-count: on each
+    _GW_WALK_ROWS row at 11 and 22 units (11 puts roster-m's walk on the slice size 32, so its doubled walk crosses
+    two sizes), at _GW_REPS, at _GW_MUT_REPS and at twice each, the hook's count is the table fill (one per word),
+    the git-word pass (one per word before the -n) and one walk (_gw_walk_count), and the scan decides None.
+    gw-lin-slice-pinned: at _GW_REPS and at _GW_MUT_REPS each row's walk grows at most _GW_WALK_SLACK over twice.
+    gw-lin-slice-slack: that with _GW_LEX_SLACK is within _GW_COUNT_SLACK. gw-lin-slice-boundary: at 11 units
+    roster-m's walk grows more than _GW_COUNT_SLACK over twice, the boundary the pinned sizes keep off."""
+    out = []
+    for label, unit, prefix, suffix in _GW_WALK_ROWS:
+        for reps in (11, 22, _GW_REPS, 2 * _GW_REPS, _GW_MUT_REPS, 2 * _GW_MUT_REPS):
+            words = prefix + unit * reps + suffix
+            want = len(words) + (len(words) - 1) + _gw_walk_count(len(words) - 3)
+            got, _t, decision, _use = _gw_count_once(words, aiqt_hooks._gate_novrf_dequoted_bypass)
+            if got != want or decision is not None:
+                out.append("(gw-lin-slice-count) {} at {} units counted {} and decided {!r}, want {} (the table fill, "
+                           "the git-word pass and one walk over {} words) and None".format(
+                               label, reps, got, decision, want, len(words) - 3))
+        for reps in (_GW_REPS, _GW_MUT_REPS):
+            small = len(prefix + unit * reps + suffix) - 3
+            large = len(prefix + unit * (2 * reps) + suffix) - 3
+            grew = _gw_walk_count(large) - 2 * _gw_walk_count(small)
+            if grew > _GW_WALK_SLACK:
+                out.append("(gw-lin-slice-pinned) {} at {} units: the walk over {} then {} words grows {} over twice, "
+                           "past {}: the doubled walk's last slice crosses two slice sizes".format(
+                               label, reps, small, large, grew, _GW_WALK_SLACK))
+    if _GW_WALK_SLACK + _GW_LEX_SLACK > _GW_COUNT_SLACK:
+        out.append("(gw-lin-slice-slack) _GW_WALK_SLACK {} plus _GW_LEX_SLACK {} is over _GW_COUNT_SLACK {}".format(
+            _GW_WALK_SLACK, _GW_LEX_SLACK, _GW_COUNT_SLACK))
+    boundary = _gw_walk_count(3 * 22 - 1) - 2 * _gw_walk_count(3 * 11 - 1)
+    if boundary <= _GW_COUNT_SLACK:
+        out.append("(gw-lin-slice-boundary) roster-m's walk at the boundary size 11 grows {} over twice, want over "
+                   "{}: the derivation's two-size crossing is not where it says".format(boundary, _GW_COUNT_SLACK))
+    return out
+
+
+def _gw_counted(hooks, name, *args):
+    """(count, result) of hooks.<name>(*args), one call with the seam on (_gw_count_once)."""
+    count, _t, result, _use = _gw_count_once(args, lambda call_args: getattr(hooks, name)(*call_args), hooks)
+    return count, result
+
+
+def _gw_work_failures(hooks=None):
+    """(gw-cnt-split-cache, gw-cnt-walked, gw-cnt-git-skip, gw-cnt-runtime-skip, gw-cnt-piece-skip,
+    gw-cnt-masked-reuse, gw-cnt-assembly-skip, gw-cnt-heredoc-skip, gw-cnt-span-dedup, gw-cnt-walk-first,
+    gw-cnt-verb-search) The work count of one call on an input where a cache, a reuse, a skip or a start past the
+    first word of a counted scan applies, against the passes the call makes there. Losing one of these costs a
+    fixed multiple of the input, not a growth the gw-lin rows can see, so each row pins the count itself: the
+    reading split once for the three bash-model readings that share one plain text, one walk for the four readings
+    with the same words, the translate alone where no reading can name git, the run-time test alone where no walk
+    can hit (for a whole text and for one piece), the readings of a piece with no standalone git serving the masked
+    walk too, no masked readings where the masked piece holds no quote, backslash or git, one split where there is
+    no here-document body to mask, each distinct span of the two splits read once, the any-word walk reading only
+    the words after the word it is given, and the run-time walk's verb search starting after that word too. hooks
+    is the hook module (aiqt_hooks, or a mutated copy, _gw_mutant_failures); the counts of the passes a row adds up
+    are read from it too."""
+    hooks = aiqt_hooks if hooks is None else hooks
+
+    def count(name, *args):
+        return _gw_counted(hooks, name, *args)[0]
+
+    plain = "git status x " * 20
+    no_git = "echo x " * 20
+    quoted = "$x 'a' log -m y " * 10 + "commit -m y"
+    bare = "$x git log -m y " * 10 + "commit -m y"
+    pieces = "echo x; " * 20
+    heredoc = "cat <<E\na$b\nE\n" + pieces
+    plain_words = ["x"] * 40  # read from word 20 on: 19 words after it, no git and no roster verb among them
+
+    def piece_want(piece, assembled_same):
+        # _gate_runtime_piece_hit on a piece no reading hits: the run-time test, the tilde search, the readings,
+        # the mask, then over each reading the run-time walk and the masked walk (over the same words, or none).
+        tilde = hooks._GATE_TILDE_START_RE.search(piece) is not None
+        readings = (hooks._gate_dequoted_words(piece),) + hooks._gate_bash_readings(piece)
+        want = (count("_gate_runtime_may_hit", piece) + len(piece) + count("_gate_dequoted_words", piece)
+                + count("_gate_bash_readings", piece) + count("_gate_runtime_masked_git", piece))
+        for words in readings:
+            want += count("_gate_runtime_reading", words, tilde)
+            want += count("_gate_assembled_reading", words if assembled_same else ())
+        return want
+
+    spans = sorted(set(hooks._gate_split_spans(heredoc)[1]))
+    out = []
+    for label, name, text, want in (
+            ("gw-cnt-split-cache", "_gate_bash_readings", plain, 2 * len(plain)),
+            ("gw-cnt-walked", "_gate_text_bypass", plain, len(plain) + count("_gate_dequoted_words", plain)
+             + count("_gate_bash_readings", plain) + len(plain.split())),
+            ("gw-cnt-git-skip", "_gate_text_bypass", no_git, len(no_git)),
+            ("gw-cnt-runtime-skip", "_gate_runtime_bypass", no_git, len(no_git)),
+            ("gw-cnt-piece-skip", "_gate_runtime_piece_hit", no_git, len(no_git)),
+            ("gw-cnt-masked-reuse", "_gate_runtime_piece_hit", quoted, piece_want(quoted, True)),
+            ("gw-cnt-assembly-skip", "_gate_runtime_piece_hit", bare, piece_want(bare, False)),
+            ("gw-cnt-heredoc-skip", "_gate_split_spans", pieces, 3 * len(pieces)),
+            ("gw-cnt-span-dedup", "_gate_unread_bypass", heredoc,
+             5 * len(heredoc) + 2 * sum(end - start for start, end in spans)),
+            ("gw-cnt-walk-first", "_gate_any_word_bypass", (plain_words, 20), 19),
+            ("gw-cnt-verb-search", "_gate_runtime_hit", (plain_words, 20), 2 * 19)):
+        args = text if isinstance(text, tuple) else (text,)
+        got, result = _gw_counted(hooks, name, *args)
+        if got != want:
+            out.append("({}) {} on an input of length {} counted {}, want {}".format(
+                label, name, len(args[0]), got, want))
+        if name not in ("_gate_split_spans", "_gate_bash_readings") and result is not None:
+            out.append("({}) {} on {!r} gave {!r}, want None".format(label, name, args[0][:40], result))
+    return out
+
+
+# One-line mutations of the hook, each losing one cache, reuse, skip or early stop a counted scan relies on: (label,
+# anchor, line, mutated line, row). The mutated line is the first occurrence of line (the anchor when line is None)
+# at or after the anchor, which the hook holds once. A row naming a gw-lin growth row runs that row on the mutated
+# copy at _GW_MUT_REPS units, and one naming a gw-cnt row runs _gw_work_failures on it; gw-lin-mut-<label> fails
+# unless that row fails on the copy, so a count that hides the lost work (a count read from a cached pointer, a
+# reading reused or passed over without being counted) is caught.
+_GW_MUTANTS = (
+    ("lex-restart", "            p = _sub_scan[0]\n", None, "            p = 1\n", "gw-lin-opts"),
+    ("span-restart", "        visited = 0\n        while base", "        visited = 0\n",
+     "        visited = base = 0\n", "gw-lin-span-roster"),
+    ("scan-watermark", "        if p < consumed:\n", None, "        if False:\n", "gw-lin-span-off"),
+    ("sq-off-roster-stop", "never re-walks the words from the start, so the stop stays O(1).",
+     "            if data_stop is not None and offroster_resolved():\n", "            if False:\n", "gw-dq-lin-sq"),
+    ("dq-off-roster-stop", "data_stop = i  # an all-literal interior still re-judged",
+     "            if data_stop is not None and offroster_resolved():\n", "            if False:\n", "gw-dq-lin-dq"),
+    ("dq-read-to", "        read_to[sub] = end\n", None, "        read_to[sub] = 0\n", "gw-lin-dq-roster-m"),
+    ("split-cache", "        if plain not in split:\n", None, "        if True:\n", "gw-cnt-split-cache"),
+    ("walked", "        if words in walked:\n", None, "        if False:\n", "gw-cnt-walked"),
+    ("git-skip", "    if not _gate_text_may_name_git(text):\n", None, "    if False:\n", "gw-cnt-git-skip"),
+    ("runtime-skip", "    if not _gate_runtime_may_hit(text):\n", None, "    if False:\n", "gw-cnt-runtime-skip"),
+    ("piece-skip", "    if not _gate_runtime_may_hit(piece):\n", None, "    if False:\n", "gw-cnt-piece-skip"),
+    ("masked-reuse", "    if masked == piece:\n", None, "    if False:\n", "gw-cnt-masked-reuse"),
+    ("assembly-skip", "    elif _GATE_ASSEMBLY_CHARS.isdisjoint(masked)", None,
+     "    elif False and _GATE_ASSEMBLY_CHARS.isdisjoint(masked)", "gw-cnt-assembly-skip"),
+    ("heredoc-skip", "    if masked != text:\n", None, "    if True:\n", "gw-cnt-heredoc-skip"),
+    ("span-dedup", "if span not in seen]", None, "if True]", "gw-cnt-span-dedup"),
+    ("walk-first", "    walk = range(len(words) - 1, first, -1)\n", None, "    walk = range(len(words) - 1, -1, -1)\n",
+     "gw-cnt-walk-first"),
+    ("verb-search-start", "    verb = _gate_scan_first(range(k + 1, len(words))", None,
+     "    verb = _gate_scan_first(range(1, len(words))", "gw-cnt-verb-search"),
+)
+
+
+def _gw_mutant(anchor, line, mutated):
+    """A copy of the hook module, loaded from its source with one line changed (_GW_MUTANTS), or None when the
+    anchor is not in the source exactly once or line does not follow it."""
+    path = Path(aiqt_hooks.__file__)
+    source = path.read_text(encoding="utf-8")
+    if source.count(anchor) != 1:
+        return None
+    at = source.find(line, source.index(anchor))
+    if at < 0:
+        return None
+    module = types.ModuleType("aiqt_hooks_mutant")
+    module.__file__ = str(path)
+    exec(compile(source[:at] + mutated + source[at + len(line):], str(path), "exec"), module.__dict__)
+    return module
+
+
+def _gw_mutant_failures(cases):
+    """(gw-lin-mut-control, gw-lin-mut-<label>) Each _GW_MUTANTS mutation run on a copy of the hook must fail the
+    row it names; cases are the gw-lin growth rows. gw-lin-mut-control: every growth row passes on the hook itself
+    at _GW_MUT_REPS units, so a failure on a copy is the mutation's."""
+    out = []
+    by_label = {case[0]: case for case in cases}
+    for got in _gw_lin_failures(cases, size=_GW_MUT_REPS):
+        out.append("(gw-lin-mut-control) at {} units: {}".format(_GW_MUT_REPS, got))
+    for label, anchor, line, mutated, row in _GW_MUTANTS:
+        name = "gw-lin-mut-" + label
+        line = anchor if line is None else line
+        hooks = _gw_mutant(anchor, line, mutated)
+        if hooks is None:
+            out.append("({}) the hook does not hold the anchor {!r} once with {!r} after it".format(name, anchor, line))
+            continue
+        if row in by_label:
+            _row, unit, prefix, suffix, scan, want = by_label[row]
+
+            def once(cmd, scan_fn, hooks=hooks):
+                return _gw_count_once(cmd, scan_fn, hooks)
+
+            got = _gw_lin_failures(((row, unit, prefix, suffix, getattr(hooks, scan.__name__), want),), once,
+                                   _GW_MUT_REPS)
+            caught = any(text.startswith("({}) doubling the input grew".format(row)) for text in got)
+        else:
+            got = _gw_work_failures(hooks)
+            caught = any(text.startswith("({}) ".format(row)) for text in got)
+        if not caught:
+            out.append("({}) a copy of the hook with {!r} made {!r} passed {}, so its count does not show the lost "
+                       "work: {!r}".format(name, line.strip(), mutated.strip(), row, got))
     return out
 
 
@@ -29912,13 +30143,21 @@ def _main_isolated(monitor):
         # inert there, gw-lin-count-raise-propagates/restores pin a raising scan's exception passing through and
         # the seam off again after it, and gw-lin-usage-* pin the report.
         # The seam counts the passes it instruments: a new loop added to a scan outside every counted pass is
-        # not counted, so the rows catch a re-walk or a suffix copy made through a counted pass or helper.
+        # not counted, so the rows catch a re-walk or a suffix copy made through a counted pass or helper. A
+        # counted walk adds the steps it takes, never how far a cached pointer moved, and a reading reused from a
+        # cache or passed over by a skip adds nothing, so losing the cache or the skip shows as added work:
+        # gw-lin-mut-* run each such site's one-line mutation (_GW_MUTANTS) on a copy of the hook and require the
+        # row it names to fail there, a gw-lin growth row for a loss that makes a scan quadratic and a gw-cnt row
+        # (_gw_work_failures, which pins the count of one call) for a loss that costs a fixed multiple.
+        # gw-lin-slice-count, -pinned, -slack and -boundary pin the slack's derivation for the dequoted-word walk's
+        # slices, its truncated last slice included, at the sizes the rows use and at a boundary size.
         # A ROSTER-verb-dense line is still super-linear by design and relies on the deadline's fail-closed,
         # as the scan docstring states.
         # gw-dq-lin-sq / gw-dq-lin-dq: the two originals, linear before this change and here.
         # gw-lin-opts (`git ` + `-C 'a;' `*n): the subcommand never resolves (all global options), so the
         #   off-roster stop never fires and the former per-quote re-walk of `words` was quadratic; the
-        #   cached offroster_resolved makes it linear. Quadratic before that cache.
+        #   cached offroster_resolved makes it linear. Quadratic before that cache, and quadratic again when the
+        #   walk restarts at the first option (gw-lin-mut-lex-restart), which its count now shows.
         # gw-lin-span-roster (`git commit -m '` + `git x `*n + `'`) and gw-lin-span-off (`git log '` +
         #   `git log `*n + `'`): one quoted span naming many inner git words. The former
         #   _gate_span_hides_roster_git re-split the suffix per 'git' match (quadratic); the one-pass token
@@ -29984,6 +30223,9 @@ def _main_isolated(monitor):
         )
         failures.extend(_gw_count_seam_failures())
         failures.extend(_gw_lin_failures(_gw_lin_cases))
+        failures.extend(_gw_slice_failures())
+        failures.extend(_gw_work_failures())
+        failures.extend(_gw_mutant_failures(_gw_lin_cases))
         failures.extend(_gw_lin_usage_failures())
         failures.extend(_gw_count_edge_failures())
 
