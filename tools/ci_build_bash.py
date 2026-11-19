@@ -44,9 +44,10 @@ that ends before the byte count its Content-Length header declares. Everything e
 build at once, without asking another source or retrying: a URL that is not https, a deadline that has passed, a
 local file error (creating, writing, linking or removing a download file), any other network exception and a
 completed download that differs from its pin. A redirect is followed only to an https URL on the host and port of
-the URL it redirects from (a URL that names no port is on 443; one that names a port, 0 included, is on that port);
-any other is refused before it is opened, and the refusal names the hop that returned the redirect and the Location
-it gave. A redirect's own body is never read, a redirect that arrives once the deadline has passed is not followed
+the URL it redirects from (a URL that names no port is on 443; one that names a port, 0 included, is on that port)
+that carries no userinfo (no @ in its netloc, so no username, a percent-encoded or backslash form included); any
+other is refused before it is opened, and the refusal names the hop that returned the redirect and the Location
+it gave, and says that only https on the same host and port is followed. A redirect's own body is never read, a redirect that arrives once the deadline has passed is not followed
 (the build stops, as at any passed deadline), and the next hop opens with FETCH_TIMEOUT cut down to the time then
 left. A failure while opening a followed hop names that hop. Every download writes into a fresh temporary file in
 the downloads directory, created exclusively; a failed download's file is removed, and only that one. The first
@@ -247,7 +248,10 @@ def is_source_failure(exc):
     """Whether a network exception is tied to the one source it came from, so the next source is worth asking: a
     transient transport failure, an HTTPError (any status), a TLS failure (a certificate one included), a refused
     connection, a permanent DNS failure (DNS_PERMANENT) or a malformed response head (MALFORMED_HEAD), also as the
-    reason of a URLError. Every other exception (a local error, an invalid URL, an unknown URL type) is not."""
+    reason of a URLError. Every other exception (a local error, an invalid URL, an unknown URL type) is not. This is
+    the classification of the exception alone: fetch_attempt raises SourceFailed for every ValueError and every
+    http.client exception raised while it opens a URL, so an invalid URL found there (http.client's InvalidURL for a
+    nonnumeric port, say) is tied to the source and the next source is tried."""
     if is_transient(exc) or isinstance(exc, urllib.error.HTTPError):
         return True
     if isinstance(exc, urllib.error.URLError):
@@ -287,11 +291,14 @@ def _https_port(parts):
 
 
 def _same_host_https(url, other):
-    """Whether other is an https URL on the host and port of url, itself an https URL. A URL that names no port is on
-    port 443; one that names a port, 0 included, is on that port."""
+    """Whether other is an https URL on the host and port of url, itself an https URL, with no userinfo. A URL that
+    names no port is on port 443; one that names a port, 0 included, is on that port. A URL that carries userinfo
+    (an @ in its netloc, which any username needs, a percent-encoded or backslash form before it included) is never
+    on that host: urllib connects to its whole netloc, not to the host urlsplit reports. A netloc whose @ is itself
+    percent-encoded (%40) has no userinfo to urlsplit, and its host then differs from the host of url."""
     try:
         old, new = urllib.parse.urlsplit(url), urllib.parse.urlsplit(other)
-        return (old.scheme == "https" and new.scheme == "https" and new.hostname is not None
+        return (old.scheme == "https" and new.scheme == "https" and new.hostname is not None and "@" not in new.netloc
                 and new.hostname == old.hostname and _https_port(new) == _https_port(old))
     except ValueError:
         return False
@@ -402,7 +409,9 @@ def fetch_attempt(url, out, remaining, opener=None):
     NotCompleted, as does a response whose socket cannot be reached (_set_read_timeout); a redirect not followed
     (naming the hop that returned it and the Location it gave), a ValueError or another http.client exception raised
     while opening (a Location urllib cannot parse, a response head http.client refuses, such as one of too many
-    header lines), a response served from a URL that is not https on the host and port of url, a status other than
+    header lines, or an invalid URL found there, such as a nonnumeric port, which is_source_failure alone would not
+    tie to the source), a response served from a URL that is not https on the host and port of url or that carries
+    userinfo, a status other than
     200, a Content-Length that is not a byte count, a body over FETCH_LIMIT bytes and one longer than its
     Content-Length raise SourceFailed; a body that ends before its Content-Length raises Transient, as a read cut
     short; any other network error raises what fetch_error gives for it. A local write error propagates as the
@@ -421,13 +430,14 @@ def fetch_attempt(url, out, remaining, opener=None):
         if exc.deadline:
             raise NotCompleted("{}: the {} s download deadline passed before its redirect ({}) to {} was "
                                "followed".format(where, DOWNLOAD_DEADLINE, exc.code, exc.target)) from None
-        raise SourceFailed("{}: redirect ({}) to {} refused, as only a redirect to https on the same host is "
-                           "followed".format(where, exc.code, exc.target)) from None
+        raise SourceFailed("{}: redirect ({}) to {} refused, as only a redirect to https on the same host and port "
+                           "is followed".format(where, exc.code, exc.target)) from None
     except (OSError, http.client.HTTPException, ValueError) as exc:
         failure = fetch_error(url, exc, request.hops[-1])
         if type(failure) is NotCompleted and not isinstance(exc, OSError):
             # a ValueError or an http.client exception raised while opening (a response head urllib or
-            # http.client cannot take) is tied to the server that sent it
+            # http.client cannot take, or an invalid URL found there, such as a nonnumeric port) is tied to the
+            # source, whatever is_source_failure says of it elsewhere
             failure = SourceFailed(str(failure))
         raise failure from None
     with response:
@@ -436,7 +446,8 @@ def fetch_attempt(url, out, remaining, opener=None):
             final = url
         where = _where(url, final)
         if not _same_host_https(url, final):
-            raise SourceFailed("{}: served from a URL that is not https on the same host; refused".format(where))
+            raise SourceFailed("{}: served from a URL that is not https on the same host and port; refused".format(
+                where))
         if response.status != 200:
             raise SourceFailed("{}: HTTP status {}".format(where, response.status))
         declared = _declared_length(where, response)
@@ -1366,7 +1377,8 @@ def self_test(report_path=None):
             check("sources/redirect-not-https-same-host-refused", all(
                 got == ("ok", redirect_sources[1:]) and opened == [first_url, second_url] and sleeps == []
                 and logged == ["attempt 1 of 4 from {0} failed ({0}: redirect (302) to {1} refused, as only a "
-                               "redirect to https on the same host is followed) (not tried: {2}); trying {2}".format(
+                               "redirect to https on the same host and port is followed) (not tried: {2}); trying "
+                               "{2}".format(
                                    first_url, target, second_url),
                                "fetched bash53-001 from {}".format(second_url)]
                 for target, (got, opened, logged, sleeps) in outcomes) and not reached, (outcomes, reached))
@@ -1388,7 +1400,7 @@ def self_test(report_path=None):
                 return ["attempt 1 of 4 from {0} failed ({1}) (not tried: {2}); trying {2}".format(
                     first_url, failure, second_url), "fetched bash53-001 from {}".format(second_url)]
 
-            refusal = "redirect ({}) to {} refused, as only a redirect to https on the same host is followed"
+            refusal = "redirect ({}) to {} refused, as only a redirect to https on the same host and port is followed"
 
             # the port: a URL that names no port is on 443 and one that names a port, 0 included, is on that port.
             # A redirect to the same host on explicit port 0 or on another port is refused before it is opened; one
@@ -1455,8 +1467,74 @@ def self_test(report_path=None):
                                             through(served_elsewhere), clock.sleep, clock.now, log=logged.append))
             check("sources/final-url-rechecked", got == ("ok", redirect_sources[1:]) and clock.sleeps == []
                   and logged == moved_on("{} (redirected to {}): served from a URL that is not https on the same "
-                                         "host; refused".format(first_url, elsewhere))
+                                         "host and port; refused".format(first_url, elsewhere))
                   and os.listdir(recheck) == ["bash53-001"], (got, logged, clock.sleeps))
+
+            # userinfo: a URL that carries a username, or an @ in its netloc (percent-encoded or after a backslash
+            # included), is not on the host urlsplit reports, since urllib connects to its whole netloc. Such a
+            # redirect is refused before it is opened, and a response served from such a URL is refused after the
+            # opening; in both the next source serves the file
+            userinfo_forms = ("https://u@first.invalid/gnu/bash53-001", "https://u:p@first.invalid/gnu/bash53-001",
+                              "https://@first.invalid/gnu/bash53-001",
+                              "https://elsewhere.invalid%2F@first.invalid/gnu/bash53-001",
+                              "https://elsewhere.invalid\\@first.invalid/gnu/bash53-001",
+                              "https://elsewhere.invalid%40first.invalid/gnu/bash53-001",
+                              "//u@first.invalid/gnu/bash53-001")
+            userinfo_table = [(target, _same_host_https(first_url, urllib.parse.urljoin(first_url, target)))
+                              for target in userinfo_forms]
+            userinfo_redirects = []
+            for index, target in enumerate(userinfo_forms[:2] + userinfo_forms[3:5]):
+                userinfo_redirects.append((target, redirected("redirect-userinfo-{}".format(index),
+                                                              {first_url: location(302, target)})))
+            with_userinfo = userinfo_forms[0]
+
+            def served_with_userinfo(url, timeout):
+                response = http_response(*whole, timeout)[0]
+                response.url = with_userinfo if url == first_url else url
+                return response
+
+            userinfo_final = base / "final-url-userinfo"
+            os.makedirs(userinfo_final)
+            final_logged = []
+            clock = _FakeClock()
+            got = _outcome(lambda: download((("bash53-001", "bash53-001", None, digest),), redirect_sources,
+                                            userinfo_final, through(served_with_userinfo), clock.sleep, clock.now,
+                                            log=final_logged.append))
+            check("sources/redirect-userinfo-refused", all(not same for _target, same in userinfo_table) and all(
+                outcome == (("ok", redirect_sources[1:]), [first_url, second_url],
+                            moved_on("{}: {}".format(first_url, refusal.format(302, target))), [])
+                for target, outcome in userinfo_redirects)
+                and got == ("ok", redirect_sources[1:]) and clock.sleeps == []
+                and final_logged == moved_on("{} (redirected to {}): served from a URL that is not https on the same "
+                                             "host and port; refused".format(first_url, with_userinfo))
+                and os.listdir(userinfo_final) == ["bash53-001"] and not reached,
+                (userinfo_table, userinfo_redirects, got, final_logged, reached))
+
+            # redirect_request checks urllib's own resolution of the Location again, called directly here (the
+            # Location check before it is at least as strict, so no redirect through the opener reaches this one): a
+            # newurl on another host, or carrying userinfo, is refused with its response closed and no hop added; one
+            # on the same host gets a request that carries the hops list and remaining(), and is added to the hops
+            class Closable(io.BytesIO):
+                pass
+
+            direct = []
+            for newurl in ("https://elsewhere.invalid/gnu/bash53-001", "http://first.invalid/gnu/bash53-001",
+                           with_userinfo, "https://first.invalid/m/bash53-001"):
+                request = urllib.request.Request(first_url)
+                request.hops, request.remaining = [first_url], _FakeClock().now
+                response = Closable(b"")
+                try:
+                    new = _SameHostHttpsRedirect().redirect_request(request, response, 302, "Found",
+                                                                    http.client.HTTPMessage(), newurl)
+                    result = ("followed", new.full_url, new.hops is request.hops,
+                              new.remaining is request.remaining)
+                except _RedirectRefused as exc:
+                    result = ("refused", exc.code, exc.target, exc.source)
+                direct.append((newurl, result, response.closed, request.hops))
+            check("sources/redirect-request-rechecked", [row[1:] for row in direct] == [
+                (("refused", 302, newurl, first_url), True, [first_url]) for newurl, *_rest in direct[:3]] + [
+                (("followed", "https://first.invalid/m/bash53-001", True, True), False,
+                 [first_url, "https://first.invalid/m/bash53-001"])], direct)
 
             # a failure line names the hop that returned the redirect or the error, and never a refused target as
             # one redirected to: a cross-host 302 from the second hop of a same-host 301, a redirect to file:, and a
@@ -1978,8 +2056,9 @@ def self_test(report_path=None):
           "the rest of the run, an attempt is retried only when a source in it failed transiently, every source "
           "failing exits 2 naming each, a source serving wrong bytes is refused at once with no further source "
           "asked, no source is asked or announced once the deadline has passed, a redirect is followed only to "
-          "https on the same host and port (explicit port 0 or another port refused) and the fetched line names "
-          "where it led, a redirect's body is never read, one after the deadline is not followed and its next hop's "
+          "https on the same host and port (explicit port 0 or another port refused) with no userinfo (refused "
+          "before the opening and as the served URL, and by redirect_request called directly, as is another host) "
+          "and the fetched line names where it led, a redirect's body is never read, one after the deadline is not followed and its next hop's "
           "timeout is cut to the time left, a failure line names the hop that returned it, an unparsable Location, "
           "a ValueError while opening and an over-long head move on, a response served from another host is "
           "refused after the opening, no wait ending exactly at the deadline is taken and a stop line that is not "

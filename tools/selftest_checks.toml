@@ -5010,6 +5010,8 @@ expected-check-ids = [
   "sources/open-value-error-moves-on",
   "sources/head-http-exception-moves-on",
   "sources/final-url-rechecked",
+  "sources/redirect-userinfo-refused",
+  "sources/redirect-request-rechecked",
   "sources/redirect-failure-names-hop",
   "sources/redirect-body-never-read",
   "sources/redirect-deadline-cuts-next-hop",
