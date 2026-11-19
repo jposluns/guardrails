@@ -207,7 +207,7 @@
 #                        units); rule files 122111 -> 122200; managed block 360 and file headers 16263
 #                        unchanged. The ratchet rises by the measured delta, 138734 + 89 = 138823, within
 #                        the maintainer's authorization of 2026-11-08 for raises up to 148000.
-#   ceiling             a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
+#   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.

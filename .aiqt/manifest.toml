@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "3df6559b94edfc499863ed742359a4e9f1a58a58b62c620dd380e1d0ff0c2139"
+tree-sha256 = "c97923b5bffc27235bd03cee09c08b1a9d33fc5711c96e38825e7a06d642db50"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -112,8 +112,8 @@ sha256 = "83830f478d942eed696b42da11aca380add3f3819837ab39fa894dfd21efbc0d"
 
 [[sources]]
 path = ".aiqt/core/instruction-budget.toml"
-bytes = 21667
-sha256 = "64a9ab3732e3a2633a0905f04ba815a0041db514786f7de9b04a908c83652017"
+bytes = 21668
+sha256 = "fef45be3989a36ec0f7573f8ecf1eae130d5e32894459ba4c94d7dcb20c3da67"
 
 [[sources]]
 path = ".aiqt/core/migration/crosswalk-schema.toml"
