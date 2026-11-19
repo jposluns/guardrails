@@ -1990,7 +1990,7 @@ expected-check-ids = [
   "temp/partial-allocation-cleans-earlier-roots",
   "temp/partial-allocation-cleans-earlier-mutant-roots",
   "temp/stale-marked-root-swept",
-  # Round 3: the run sweeps only its root's own directory; a non-finite, overflowing or non-standard
+  # The run sweeps only its root's own directory; a non-finite, overflowing or non-standard
   # marker time keeps the root; a locked directory is repaired and removed; a removal that stops part way
   # keeps the marker so the next sweep retries; a FIFO marker is rejected without blocking; and an owner
   # whose /proc entry cannot be read reads as alive.
