@@ -195,15 +195,22 @@ def self_test():
         ("unreleased-below-latest", head + '\n[unreleased]\nversion = "1.0.4"\n', "1.0.4-dev\n", 1),  # guard: >
         ("unreleased-authored-suffix", head + '\n[unreleased]\nversion = "1.1.0-dev"\n', "1.1.0-dev\n", 2),
         ("unreleased-rc", head + '\n[unreleased]\nversion = "1.1.0-rc1"\n', "1.1.0-rc1-dev\n", 2),
-        ("unreleased-unknown-key", dev + 'date = "2026-11-19"\n', "1.1.0-dev\n", 2),
-        ("unreleased-no-version", head + '\n[unreleased]\ntitle = "x"\n', "1.0.5\n", 2),
+        ("unreleased-unknown-key", dev + 'date = "2026-11-19"\n', "1.1.0-dev\n", 2),  # guard: the shape check
+        ("unreleased-no-version", head + '\n[unreleased]\ntitle = "x"\n', "1.0.5\n", 2),  # guard: the shape check
         ("unreleased-items-type", dev + 'items = "x"\n', "1.1.0-dev\n", 2),
-        ("unreleased-not-table", 'unreleased = "1.1.0"\n' + head, "1.1.0-dev\n", 2),
+        ("unreleased-not-table", 'unreleased = "1.1.0"\n' + head, "1.1.0-dev\n", 2),  # guard: the shape check
         ("unreleased-blank-title", dev + 'title = " "\n', "1.1.0-dev\n", 2),
+        ("unreleased-version-int", head + '\n[unreleased]\nversion = 7\n', "7-dev\n", 2),  # guard: the shape check
     ]
     failures = []
     for name, text, on_disk, want in cases:
-        got = _exit_of(tomllib.loads(text), on_disk)
+        # A vector whose input reaches past a missing guard (the shape check, say) fails by its own name,
+        # never by a traceback that hides every later vector.
+        try:
+            got = _exit_of(tomllib.loads(text), on_disk)
+        except Exception as exc:  # noqa: BLE001  a raised error is this vector's failure, reported by name
+            failures.append("{}: raised {} (expected exit {})".format(name, type(exc).__name__, want))
+            continue
         if got != want:
             failures.append("{}: exit {} (expected {})".format(name, got, want))
 

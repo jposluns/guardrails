@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "9135bcb22a706979851facd9e9000afaf0b534c2f691041deba2c951386184a5"
+tree-sha256 = "77928b1984e99f65bf81506ae12d2e725c050b2e1f4696f045257c42754aa318"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 641272
-sha256 = "3fec44e10b4a8c38b5840a2003005524aa3a18362efe2a8e2a4eb06ba9c1628e"
+bytes = 644408
+sha256 = "51889c9acc141d3f6c92371e69b8c1ba3af119a5baf9218fa08e13c3bee7d573"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -837,8 +837,8 @@ sha256 = "622683b912a6c2720502d096f737f59326fa2b6319776dfdaf029cdd2243d1b7"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 1189745
-sha256 = "2d787c6f4b64d1650b7acd4d7f3c86066342d78f51df5c7e907e04a35aa0ec8e"
+bytes = 1190615
+sha256 = "7361e565817360c2b52ef490dc8cfcec980db5931d6e8c9452f20690dc80f5a9"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2457,8 +2457,8 @@ sha256 = "b845e896ec04415f73c65ed5c52ccd0e03db62bc889f8d9a1e5cc72c196117c4"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 696100
-sha256 = "06497719d8987b8ee9c6570f72edd2a171c78fb5984184d59ef1d71d092cf763"
+bytes = 696970
+sha256 = "1587200250463e9d3bbec77a34d107872ef6da225b4c642d0f35c61808d81406"
 
 [[sources]]
 path = "GEMINI.md"
@@ -2487,8 +2487,8 @@ sha256 = "d46c725ff08fb25c20a3f25a8d6a02a1a3e7fd72472207d694394154aa07979f"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 22284
-sha256 = "122ff0edbd4a0dad55c4391dd718d819addca021b0563921a802e5a2245fa920"
+bytes = 25511
+sha256 = "1f17ae5a14d7df380d7afd575936dc5b78cdd4bca910b159b00ab8aac169e7ec"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -4062,8 +4062,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 760135
-sha256 = "3bba6c95ebbb6439e52a2386720c4f2e700ddd91f429bd40624a10800b71aeaa"
+bytes = 761005
+sha256 = "a4714212b8ce3ea618f6b607200fe725e7da4608ca43d69c2b5d2ce8d64d66f6"
 
 [[sources]]
 path = "site/evidence.html"
@@ -4477,8 +4477,8 @@ sha256 = "0defa1b803a9a3ea3f68f3ed07d262ec152ee6084de3344a7eca8cfe0816f073"
 
 [[sources]]
 path = "tools/check_release_build.py"
-bytes = 223353
-sha256 = "20705c3ddf7b4403a1f1129bacc9825db5c636b5d27b910772fdf0941129321f"
+bytes = 223484
+sha256 = "6ac110c29569fd422c4f354a0f9855bd1894cc9ff58a051aa62a1eeeb9b35a2e"
 
 [[sources]]
 path = "tools/check_release_cut.py"
@@ -4567,13 +4567,13 @@ sha256 = "e131caaff9af4252901a7dcad13193d6f07bf1d7ba30f8e5ee6044ade26e5532"
 
 [[sources]]
 path = "tools/check_version_monotonicity.py"
-bytes = 274289
-sha256 = "fc8b81d934976407e74a5b2fcd3df4dc2a5936842456a94c4de5e95d20b91291"
+bytes = 274907
+sha256 = "a1f01b14a2c74a778cd9daa9dd9242c16f78fca796901d5540604cb352b114ec"
 
 [[sources]]
 path = "tools/check_versions.py"
-bytes = 12909
-sha256 = "33203ddf2a3f6916e13bd1a1dfb2b5278140e21db0ce1fe2c02067e17c0919bf"
+bytes = 13520
+sha256 = "d26f0ac312155884874d30f598e8d39f8ab706df56293806b5a2d3084ff7fa1b"
 
 [[sources]]
 path = "tools/ci-status.sh"
@@ -4672,8 +4672,8 @@ sha256 = "d86022449956a9ae587188483666091b44794e8a0011a044d005cb84ec86d7d0"
 
 [[sources]]
 path = "tools/gen_manifest.py"
-bytes = 108183
-sha256 = "0a8ad30442bf589147a368fe07cc77acf5406e5ab95a613567489e80d93b158b"
+bytes = 113679
+sha256 = "575c253456b11666cd677108d186ca2b2d599d1caa6be9140b33891f3f5acf10"
 
 [[sources]]
 path = "tools/gen_mappings.py"
@@ -4863,7 +4863,7 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
 bytes = 29687
-sha256 = "d04b4e56f6a1b42f756fb0ad1032e6cb057ffd19d513b8b32eee9ab7c1d96c16"
+sha256 = "f4ca4fef2c67f97bcb71d9b4d18e71ebc40c9a1cf0d9ef6431d41336e445f6e4"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"

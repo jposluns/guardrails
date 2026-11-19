@@ -980,6 +980,24 @@ pattern = "tools/**"
 class = "pack-immutable"
 '''
 
+# The ownership rows a release cut adds to .aiqt/core/ownership.toml in the same change that first tracks the
+# cut records tools/check_release_cut.py reads (RELEASING.md step 1 prints these rows). The map cannot carry
+# them earlier: a [[release-class]] or [[exclusion]] row whose path is not tracked is refused (NO-STRAYS, or
+# a stale exclusion; exit 2), while a tracked record with no row is refused too (COMPLETENESS; exit 2).
+# Self-test case (n) stages a cut through manifest generation with exactly these rows.
+CUT_RECORD_OWNERSHIP_ROWS = '''
+[[release-class]]
+path = ".aiqt/release-cut.toml"
+class = "pack-immutable"
+note = "The release-cut declaration tools/check_release_cut.py reads (RELEASING step 1). Added by the first cut that writes it and tracked from then on, since that gate refuses a change that removes it. Release metadata beside changelog.toml, whose digest it binds, and shipped like it."
+'''
+
+PENDING_FIXES_OWNERSHIP_ROWS = '''
+[[exclusion]]
+path = ".aiqt/pending-fixes.toml"
+reason = "Repository-local hand-kept pending-fix list tools/check_release_cut.py reads on a cut; tracked, not shipped, like .aiqt/check-removals.toml. Added with the change that first tracks the list and removed with the change that deletes it."
+'''
+
 _OWN_TAIL = '''
 [[namespace-class]]
 pattern = ".aiqt/archive/**"
@@ -1670,6 +1688,55 @@ def _self_test_main_isolated():
             failures.append("authoring-only roster: tools/gen_hooks.py must roster exactly .aiqt/authoring.toml and "
                             ".claude/settings.json, got {!r}".format(real_roster))
 
+        # (n) A release cut staged through manifest generation (RELEASING step 1). A development tree
+        #     (VERSION 1.1.0-dev) generates clean; the cut then stages the plain VERSION and the cut records
+        #     (.aiqt/release-cut.toml and a .aiqt/pending-fixes.toml). Without their ownership rows that is
+        #     COMPLETENESS (exit 2) naming the declaration; with exactly the documented rows the cut generates
+        #     a plain release-version, hashes the declaration as a SOURCES member, leaves the excluded list
+        #     out, and regenerates drift-clean. The rows cannot land before the records are tracked: on the
+        #     development tree each row alone is refused (NO-STRAYS, or a stale exclusion; exit 2).
+        cut_decl = ('schema = 1\noperation = "append"\nprevious-version = "1.0.0"\nnext-version = "1.1.0"\n'
+                    'base-changelog-sha256 = "' + "0" * 64 + '"\n')
+        cut_pending = 'schema = 1\nrelease = "1.1.0"\n'
+        for label, rows, want in (("release-cut row", CUT_RECORD_OWNERSHIP_ROWS, "NO-STRAYS"),
+                                  ("pending-fixes exclusion", PENDING_FIXES_OWNERSHIP_ROWS,
+                                   "stale deny-list entry")):
+            early = _build_fixture(tmp / ("cut-early-" + want.split()[0].lower()), own_extra=rows,
+                                   extra_files={"VERSION": "1.1.0-dev\n"})
+            rc, err = run_stderr(early) if early is not None else (None, "")
+            if rc not in (2, "raised SystemExit(2)") or want not in err:
+                failures.append("release cut: the {} on a development tree that does not track its path "
+                                "expected exit 2 ({}), got {}".format(label, want, rc))
+        cutfx = _build_fixture(tmp / "cut-staged", extra_files={"VERSION": "1.1.0-dev\n"})
+        if cutfx is None or run_quiet(cutfx, check=False) != 0:
+            failures.append("release cut: the development tree (VERSION 1.1.0-dev) expected to generate exit 0")
+        else:
+            _git(cutfx, "add", "-A").check_returncode()
+            (cutfx / "VERSION").write_text("1.1.0\n", encoding="utf-8")
+            (cutfx / ".aiqt" / "release-cut.toml").write_text(cut_decl, encoding="utf-8")
+            (cutfx / ".aiqt" / "pending-fixes.toml").write_text(cut_pending, encoding="utf-8")
+            _git(cutfx, "add", "-A").check_returncode()
+            rc, err = run_stderr(cutfx)
+            if rc not in (2, "raised SystemExit(2)") or "COMPLETENESS" not in err \
+                    or ".aiqt/release-cut.toml" not in err:
+                failures.append("release cut: staged cut records with no ownership rows expected exit 2 "
+                                "(COMPLETENESS naming .aiqt/release-cut.toml), got {} ({!r})".format(rc, err[-300:]))
+            (cutfx / OWNERSHIP_REL).write_text(
+                _OWN_BASE + CUT_RECORD_OWNERSHIP_ROWS + PENDING_FIXES_OWNERSHIP_ROWS + _OWN_TAIL,
+                encoding="utf-8")
+            _git(cutfx, "add", "-A").check_returncode()
+            rc = run_quiet(cutfx, check=False)
+            cut_manifest = (cutfx / MANIFEST_REL).read_text(encoding="utf-8") if rc == 0 else ""
+            _git(cutfx, "add", "-A").check_returncode()
+            if rc != 0 or 'release-version = "1.1.0"\n' not in cut_manifest \
+                    or 'path = ".aiqt/release-cut.toml"' not in cut_manifest \
+                    or ".aiqt/pending-fixes.toml" in cut_manifest:
+                failures.append("release cut: with the documented ownership rows the staged cut expected exit 0, "
+                                "a plain release-version 1.1.0, the declaration in SOURCES and the excluded "
+                                "pending-fix list absent (got exit {})".format(rc))
+            elif run_quiet(cutfx, check=True) != 0:
+                failures.append("release cut: the regenerated cut expected --check drift-clean exit 0")
+
         partition_failure = _frozen_partition_vector()
         if partition_failure is not None:
             failures.append(partition_failure)
@@ -1709,6 +1776,9 @@ def _self_test_main_isolated():
           "under a symlinked directory at any of three levels or under a directory whose lstat fails each fail "
           "closed (exit 2); an exact exclusion of an authoring-scoped (shipped) gensrc target fails closed "
           "(exit 2) while the same target given a class passes; "
+          "a release cut staged through manifest generation fails closed (exit 2, COMPLETENESS) without "
+          "the documented cut-record ownership rows and generates a plain, drift-clean release with them, "
+          "while those rows on a tree that does not yet track the records fail closed (exit 2); "
           "and a vocabulary class "
           "recorded in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class recorded in both, and a frozen "
           "class outside the vocabulary each fail the frozen floor closed")

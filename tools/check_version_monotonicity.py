@@ -4389,6 +4389,13 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             _write(rf7, _changelog_text(["1.0.5", "1.1.0"], tag_on=tags105, unreleased="1.1.0"))
             _f_check("F7 (stale head [unreleased] beside its release)", rf7, 1,
                      "the head [unreleased] version 1.1.0 is not above the head latest release 1.1.0", 1)
+            # F8 (M5) a lower fold: [unreleased] 1.2.0 folded into an appended release 1.1.5, below the
+            # declared version, 1.2.0-dev -> 1.1.5: the tree version decreases, so M5 alone refuses it
+            # (the appended 1.1.5 is above 1.0.5, so M2 and the head-side rule stay quiet).
+            rf8 = _dev_base("unreleased-lower-fold", "1.2.0")
+            _write(rf8, _changelog_text(["1.0.5", "1.1.5"], tag_on=tags105))
+            _f_check("F8 (1.2.0-dev -> appended 1.1.5, a lower fold)", rf8, 1,
+                     "the head tree version 1.1.5 is lower than the base tree version 1.2.0-dev", 1)
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 

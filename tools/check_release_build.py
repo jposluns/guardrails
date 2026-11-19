@@ -504,11 +504,12 @@ def _regen_fixture_version_outputs(repo, case, failures, env):
     """Self-test setup: regenerate every version-bearing output of an archive-extracted fixture that is
     already git-init'd and staged (gen_manifest enumerates the tracked set), running the fixture's OWN
     generator copies from inside it, as reproduce_gate runs them, so the fixture stays internally
-    self-consistent. A nonzero generator exit is a fixture-setup failure: it appends a DISTINCT "fixture
+    self-consistent. Each runs isolated (python3 -I -B): no user site, no PYTHON* environment and no
+    bytecode written into the fixture. A nonzero generator exit is a fixture-setup failure: it appends a DISTINCT "fixture
     setup" entry to `failures` (the child's stderr retained) and returns None, so the case never reaches
     its verdict assertion. Returns the regenerated VERSION text on success."""
     for script in _FIXTURE_VERSION_GENERATORS:
-        gen = subprocess.run(["python3", script], cwd=str(repo), capture_output=True, env=env)
+        gen = subprocess.run(["python3", "-I", "-B", script], cwd=str(repo), capture_output=True, env=env)
         if gen.returncode != 0:
             failures.append("fixture setup ({}): {} exited {} while regenerating the version-bearing "
                             "outputs; a fixture-setup failure FAILS the self-test rather than reaching the "
