@@ -207,9 +207,12 @@ def _declared_length(url, response):
 
 def _set_read_timeout(url, response, seconds):
     """Give the next body read of response, an http.client.HTTPResponse as urlopen returns it, a socket timeout of
-    seconds. A response whose body is all read (http.client drops its file then) reads no socket again and is left
-    as it is; one whose socket cannot be reached raises NotCompleted, so no read runs on an unbounded timeout."""
-    stream = getattr(response, "fp", None)
+    seconds. A response whose body is all read (http.client sets its file to None then) reads no socket again and
+    is left as it is; one with no file attribute at all, or whose socket cannot be reached, raises NotCompleted, so
+    no read runs on a timeout this attempt did not set."""
+    if not hasattr(response, "fp"):
+        raise NotCompleted("{}: the response has no file to bound its read timeout".format(url))
+    stream = response.fp
     if stream is None:
         return
     sock = getattr(getattr(stream, "raw", None), "_sock", None)
@@ -902,6 +905,58 @@ def self_test(report_path=None):
                   and len(logged) == 2 and "the body has 5 bytes; its Content-Length declares {}".format(len(body))
                   in logged[0] and os.listdir(short_dir) == ["bash53-001"]
                   and (short_dir / "bash53-001").read_bytes() == body, (got, bodies, clock.sleeps, logged))
+
+            # a Content-Length that is not one decimal byte count (one http.client's int() would accept, a signed
+            # one, and two headers joined) stops the download at once: NotCompleted, one attempt, no wait, and no
+            # file left in the downloads directory
+            def one_download(name, heads_and_bodies):
+                queue = list(heads_and_bodies)
+                directory = base / name
+                os.makedirs(directory)
+                clock = _FakeClock()
+                urllib.request.urlopen = lambda url, timeout=None: http_response(*queue.pop(0), timeout)[0]
+                try:
+                    got = _outcome(lambda: download((("bash53-001", short_url, None, digest),), directory,
+                                                    fetch_attempt, clock.sleep, clock.now, log=lambda line: None))
+                finally:
+                    urllib.request.urlopen = no_network
+                return got, len(heads_and_bodies) - len(queue), clock.sleeps, sorted(os.listdir(directory))
+
+            malformed = []
+            for index, value in enumerate(("5_0", "+{}".format(len(body)), "{0}\r\nContent-Length: {0}".format(
+                    len(body)))):
+                malformed.append(one_download("malformed-length-{}".format(index), [(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}".format(value).encode("ascii"), body)] * FETCH_ATTEMPTS))
+            check("fetch/malformed-content-length-not-retried", all(
+                got[0] == "not-completed" and "is not a byte count" in got[1] and used == 1 and sleeps == []
+                and listing == [] for got, used, sleeps, listing in malformed), malformed)
+
+            # a chunked body is framed by its chunks, not by a Content-Length sent beside them (which http.client
+            # ignores too): the whole body is published under its pinned name
+            chunked_body = "{:x}\r\n".format(len(body)).encode("ascii") + body + b"\r\n0\r\n\r\n"
+            got = one_download("chunked-with-length", [(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 3", chunked_body)])
+            check("fetch/chunked-ignores-content-length", got[0] == ("ok", None) and got[1] == 1 and got[2] == []
+                  and got[3] == ["bash53-001"] and (base / "chunked-with-length" / "bash53-001").read_bytes() == body,
+                  got)
+
+            # the read timeout reach fails closed: a response with no file attribute, or whose file reaches no
+            # socket, stops the attempt with NotCompleted (never retried); a response whose body is all read (its
+            # file set to None) is left as it is
+            class NoFile:
+                pass
+
+            class Unreachable:
+                fp = FakeFile(None)
+
+            class Drained:
+                fp = None
+
+            reach = [_outcome(lambda: _set_read_timeout(short_url, obj, 5)) for obj in (NoFile(), Unreachable(),
+                                                                                        Drained())]
+            check("fetch/socket-reach-fails-closed", reach[0][0] == "not-completed" and "no file" in reach[0][1]
+                  and reach[1][0] == "not-completed" and "cannot be reached" in reach[1][1]
+                  and reach[2] == ("ok", None), reach)
             for sock in pairs:
                 sock.close()
 
@@ -1120,7 +1175,8 @@ def self_test(report_path=None):
           "of order, a wrong built or installed version, an existing install and an unexpected OSError each leave "
           "nothing installed; only the named transient transport failures are retried, four attempts with 2, 4 "
           "and 8 s waits into fresh files, exit 2 once exhausted, a body cut short of its Content-Length is "
-          "retried, each body read's socket timeout is cut to the time left, a size or digest mismatch exits 1 "
+          "retried, a malformed Content-Length stops at once, a chunked body ignores a Content-Length beside it, "
+          "the read timeout reach fails closed, each body read's socket timeout is cut to the time left, a size or digest mismatch exits 1 "
           "without a retry, an existing download is never replaced, and no attempt or wait passes the shared 300 s deadline; a bare run is the self-test even with RUNNER_TEMP and GITHUB_PATH set, only --build "
           "reaches the build, which exits 2 without them, and any other argument exits 2; no fetch reached the "
           "network)".format(len(results)))
