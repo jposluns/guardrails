@@ -9040,9 +9040,16 @@ _DEADLINE_CHILD_TIMEOUT = 900
 # 1 MB), whose calls spent 583.8 s on the calling thread's own CPU clock and 0.4 s queued for a CPU, so
 # the length is the handlers' own work, not queueing; launched as the self-test launches it, at a load
 # falling from about 52 to 20, the child took 570.4 s. The failing runs were thus at least 1.38 to 1.58
-# times these. The 226 roster pairs split round-robin into 3 slices whose measured case times sum to
-# 200.8, 191.4 and 194.7 s, and the timer checks took 63.4 s: the slowest slice leaves 900 s a margin of
-# about 4.5 times, and about 2.8 times after the 1.58 slowdown the failing runs showed.
+# times these. HISTORICAL (measured at a979bf05, whose roster held 226 pairs): split round-robin into 3
+# slices, their measured case times summed to 200.8, 191.4 and 194.7 s, and the timer checks took 63.4 s,
+# so the slowest slice left 900 s a margin of about 4.5 times, and about 2.8 times after the 1.58 slowdown
+# the failing runs showed. The roster has grown since (heredoc_terminator pairs, which also move later
+# pairs to other slices); the current count is len(_deadline_shape_roster()), split as
+# _deadline_shape_slice assigns it, and dl-child-partition checks the split. MEASURED (2026-11-19, same
+# host, Python 3.14.4, at 343a6199, whose roster held 233 pairs split 78, 78 and 77): each shape child's
+# checks run in-process one after another (interpreter start and import not included), beside a full
+# self-test run, at a 1-minute load of about 26 to 31, took 189.4, 199.0 and 147.6 s, so the slowest
+# leaves 900 s a margin of about 4.5 times, and about 2.9 times after a 1.58 slowdown.
 _DEADLINE_SHAPE_CHILDREN = 3
 
 
@@ -13065,28 +13072,55 @@ def _test_deadline_posture(failures, tmp):
         failures.append("(dl-child-partition) the {} shape children's slices must each be nonempty and together "
                         "time every one of the {} roster pairs exactly once, got slice sizes {}".format(
                             _DEADLINE_SHAPE_CHILDREN, len(roster), [len(pairs) for pairs in slices]))
+    failures.extend(_deadline_child_named_failures())
     code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "
             "sys.stdout.write(json.dumps(m._deadline_child(sys.argv[2], int(sys.argv[3]))))")
     for part in range(_DEADLINE_SHAPE_CHILDREN + 1):
-        label = ("the timer and disposition checks" if not part else
-                 "shape slice {} of {}".format(part, _DEADLINE_SHAPE_CHILDREN))
         child_tmp = tmp / "deadline-{}".format(part)
         child_tmp.mkdir()
         proc, waited = _deadline_child_wait(
             code, (str(Path(__file__).resolve().parent), str(child_tmp), str(part)), _DEADLINE_CHILD_TIMEOUT)
-        if proc is None:
-            failures.append("(dl-child-timeout) deadline child {} ({}) did not finish within its {}s wall-clock "
-                            "limit ({})".format(part, label, _DEADLINE_CHILD_TIMEOUT, waited))
-            continue
-        try:
-            found = json.loads(proc.stdout)
-        except ValueError:
-            found = None
-        if proc.returncode != 0 or not isinstance(found, list):
-            failures.append("(dl-child-failed) deadline child {} ({}) failed (exit {}): {}".format(
-                part, label, proc.returncode, (proc.stdout + proc.stderr)[-2000:]))
-            continue
-        failures.extend(found)
+        failures.extend(_deadline_child_outcome(part, proc, waited))
+
+
+def _deadline_child_label(part):
+    """What deadline child part runs, as the failures that child causes name it."""
+    return ("the timer and disposition checks" if not part else
+            "shape slice {} of {}".format(part, _DEADLINE_SHAPE_CHILDREN))
+
+
+def _deadline_child_outcome(part, proc, waited):
+    """The failures deadline child part caused, given what _deadline_child_wait returned for it (proc, or
+    None when it was stopped, and waited): one dl-child-timeout or dl-child-failed failure, or else every
+    failure the child returned, each still led by its own check identifier, so a match on that identifier
+    still finds it, and followed by the child's part number and label."""
+    label = _deadline_child_label(part)
+    if proc is None:
+        return ["(dl-child-timeout) deadline child {} ({}) did not finish within its {}s wall-clock "
+                "limit ({})".format(part, label, _DEADLINE_CHILD_TIMEOUT, waited)]
+    try:
+        found = json.loads(proc.stdout)
+    except ValueError:
+        found = None
+    if proc.returncode != 0 or not isinstance(found, list):
+        return ["(dl-child-failed) deadline child {} ({}) failed (exit {}): {}".format(
+            part, label, proc.returncode, (proc.stdout + proc.stderr)[-2000:])]
+    return ["{} [in deadline child {} ({})]".format(item, part, label) for item in found]
+
+
+def _deadline_child_named_failures():
+    """(dl-child-named) A failure a deadline child returns reaches the suite still led by its own check
+    identifier and naming the child, its part number and label: checked on a synthetic result from shape
+    child 2, with no child run."""
+    out = []
+    synthetic = "(dl-synthetic) failed"
+    proc = subprocess.CompletedProcess([], 0, stdout=json.dumps([synthetic]), stderr="")
+    got = _deadline_child_outcome(2, proc, "0.1s wall-clock")
+    named = "deadline child 2 ({})".format(_deadline_child_label(2))
+    if len(got) != 1 or not got[0].startswith(synthetic + " ") or named not in got[0]:
+        out.append("(dl-child-named) a failure returned by deadline child 2 must keep its check identifier "
+                   "first and name {!r}, got {!r}".format(named, got))
+    return out
 
 
 # --- clock hooks: future_stamp_write (the dispatcher handler ported from the former standalone preview
