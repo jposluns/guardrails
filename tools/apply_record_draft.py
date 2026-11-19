@@ -5,8 +5,9 @@ check passes on the exact bytes that will be written.
   apply_record_draft.py --draft PATH --target REL    exit 0 written; 1 withheld (stale claim);
                                                      2 withheld (incomplete evaluation or usage)
 
-REL is a repo-relative path declared as a surface in .aiqt/pending-pr-claims.toml. The draft is read
-ONCE; those bytes are judged by tools/check_pending_pr_claims.py (live pull request state) and those
+REL is a repo-relative path declared as a surface in .aiqt/pending-pr-claims.toml. The draft is opened
+ONCE without following a symlink or waiting on a FIFO, its type is checked on that descriptor, and it
+is read ONCE; those bytes are judged by tools/check_pending_pr_claims.py (live pull request state) and those
 same bytes are written. The destination's preimage (its SHA-256, or its absence) is taken before the
 judgement and taken again just before the write: a changed preimage withholds the write and asks for a
 re-evaluation. A destination that is not a regular file (a FIFO, device or directory) is refused

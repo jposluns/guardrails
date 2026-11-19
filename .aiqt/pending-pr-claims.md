@@ -28,7 +28,11 @@ cannot-evaluate (exit 2), never a pass.
 | `TODO.md` | `markdown`, with `Status` as the status column | generated view of the maintainer's private backlog; a correction belongs in that source |
 
 A declared surface that is missing, not a regular file, larger than 4 MiB, not UTF-8 or malformed (TOML
-that does not parse, a fenced block never closed) is cannot-evaluate. Undeclared files are not read.
+that does not parse, a fenced block never closed) is cannot-evaluate. Each file (a declared surface or
+a draft) is opened once without following a symlink and without waiting on a FIFO, and its type is
+checked on that open descriptor. In `--staged`, a declared surface whose index entry is not a regular
+file (mode `100644` or `100755`; a symlink `120000` or a gitlink is refused), is unmerged or is absent
+is cannot-evaluate. Undeclared files are not read.
 Private backlog and release-note sources need their own authorized declaration and invocation; none is
 declared here.
 
@@ -42,23 +46,28 @@ one.
 ## Grammar
 
 A pull request reference is `#17`, `PR #17`, `PR#17`, `pull request #17`, `pr:17` (with `pr:#17`
-accepted as a prose-only alias), `owner/repo#17` or a GitHub pull request URL (optionally ending in
-`/files`, `/commits` or `/checks`). A Markdown link or autolink to a pull request URL counts as that URL
-(`[#17](https://github.com/OWNER/REPO/pull/17)` binds OWNER/REPO#17); a link to any other URL counts as
-its text. A bare number (`PR 17`) is not a reference. Coordinated lists (`#17, #18 and #19`, `#17/#18`)
-bind every member. An issue reference (`issue #17`, `issue owner/repo#17`, `issues #17 and
-owner/repo#18`, or a link to an `/issues/N` URL) is not a pull request reference: it is never read from
-the pulls API and never binds. A link URL is matched with ASCII classes, so a pull request URL whose
-fragment holds a non-ASCII letter or digit is not a pull request URL and the link counts as its text.
+accepted as a prose-only alias), `owner/repo#17` or a GitHub pull request URL (`https://` or `http://`,
+optionally ending in `/files`, `/commits` or `/checks`, and optionally in `/`). These link forms to a
+pull request URL count as that URL (`[#17](https://github.com/OWNER/REPO/pull/17)` binds
+OWNER/REPO#17): an inline Markdown link, a reference link (`[#17][pr17]`, `[#17][]` or `[#17]`) whose
+definition (`[pr17]: URL`) is in the same Markdown document, an autolink (`<URL>`), and an HTML anchor
+(`<a href="URL">#17</a>`) inside one unit. A link to any other URL counts as its text, and brackets
+that form no link are dropped (`[#17] is pending` with no definition binds `#17`). A link reference
+definition is not read as record text. A bare number (`PR 17`) is not a reference. Coordinated lists
+(`#17, #18 and #19`, `#17/#18`, `#17 & #18`) bind every member. An issue reference (`issue #17`, `issue
+owner/repo#17`, `issues #17 and owner/repo#18`, or a link to an `/issues/N` URL) is not a pull request
+reference: it is never read from the pulls API and never binds. Only the plural `issues` takes a list,
+so in `Closes issue #12, and #17 is still open` the `#17` is a pull request reference. A link URL is
+matched with ASCII classes, so a pull request URL whose fragment holds a non-ASCII letter or digit is
+not a pull request URL and the link counts as its text.
 
 Units are complete: a Markdown paragraph or list item is joined across wrapped lines, and a TOML string
 is decoded before it is read. Inside a unit, a claim binds within one clause; a clause ends at `.`
 followed by a space, `;`, `:`, `!`, `?` or a spaced dash.
 
-| Phrase | Result when the bound pull request is merged or closed |
-| --- | --- |
-Below, "is" stands for `is`, `are`, `remains`, `stays` or `still`, optionally followed by `still`,
-`currently` or `now` (`#N is currently pending`).
+Below, "is" stands for `is`, `are`, `remains`, `stays`, `has been`, `have been` or `still`, optionally
+followed by up to two of `still`, `currently`, `now`, `also` and `both` (`#N is currently pending`, `#N
+has been open`, `#A and #B are both still open`).
 
 | Phrase | Result when the bound pull request is merged or closed |
 | --- | --- |
@@ -67,7 +76,7 @@ Below, "is" stands for `is`, `are`, `remains`, `stays` or `still`, optionally fo
 | `#N is open`, `#N (open)`, `#N (in progress)`, `open PR #N`, `open pull requests #A and #B` | finding |
 | `#N is under review`, `#N is in review`, `#N is awaiting review` | finding |
 | `#N is in progress` | finding |
-| `In progress (#A, #B)`, `In progress: #N`, `Open (#N)`, `Pending: #N` at the start of a declared Status column cell | finding for each member that is not open |
+| `In progress (#A, #B)`, `In progress: #N`, `In progress #N`, `Open (#N)`, `Pending: #N` at the start of a declared Status column cell | finding for each member that is not open |
 | `waiting for/on #N to merge`, `awaiting merge of #N`, `until #N merges`, `once/after #N lands` | finding |
 | `#N is not yet merged`, `#N is yet to be merged`, `#N has yet to merge`, `#N hasn't merged (yet)` | finding |
 | `waiting on/for #N`, `awaiting #N`, `blocked on/by #N` | warning (a dependency may need interpretation) |
@@ -75,25 +84,43 @@ Below, "is" stands for `is`, `are`, `remains`, `stays` or `still`, optionally fo
 | `Open #N ...` at the start of a clause or after a comma (`To review it, open #N`) | warning (an instruction as likely as a claim) |
 | `#N is unmerged` | nothing |
 
-`open #N` after an instruction word (`leave open #N`, `keep open #N`) is not a claim. A lead phrase
-(`waiting for`, `awaiting`, `until`, `once`, `blocked on`, `stacked on`, `pending`, `open`) directly
-after a negation or a past auxiliary (`not waiting for #N to merge`, `no longer waiting on #N`, `isn't
-waiting`, `were waiting for #N to merge`, `was stacked on #N`, `had been waiting`, `haven't been
-waiting`; adverbs such as `still` are skipped) is not a current claim. Still current claims: present
-perfect (`have been waiting for #N to merge`), a negator followed by `only` or `just` (`not only waiting
-for #N to merge`), and a negator before `until`, `once` or `after` (`Not until #N merges can we ship`).
-A phrase such as `the pending PR` with no named pull request is an ambiguous
-binding: cannot-evaluate, even when a named claim binds in the same clause.
+`open #N` after an instruction word (`leave open #N`, `keep open #N`) is not a claim.
 
-A Markdown table is read from its header and delimiter rows, with or without outer pipes.
+**Cues downgrade; they never exempt.** A claim from the table above whose phrase or reference follows
+a cue word is a warning, not a finding: when its pull request has merged or closed, the run prints a
+`WARNING:` line naming the record location, the sentence and the qualified pull request, and exits 0.
+It is never a silent pass, and an unreadable state is still cannot-evaluate. The cue words are a
+negation (`not`, `never`, `no`, `no longer`, `n't`, `cannot`, `neither`, `nor`, `none`), a past or
+past-perfect auxiliary (`was`, `were`, `had`, `did`, `'d`), a condition or question (`if`, `whether`,
+`unless`, a clause opening with `Was #N`), and `previously`, `formerly`, `once`, `merged`, `closed` and
+`landed`. They are read back from the phrase or reference over adverbs (`still`, `only`, `just`, ...),
+auxiliaries (`is`, `have`, `been`, ...), contraction stems (`haven`, `isn`, ...) and the words `the`,
+`all`, `any` and `of`, and the first other word ends the look-back. So `not waiting for #N to merge`,
+`We have not only been waiting for #N to merge`, `We'd been waiting` (straight or curly apostrophe),
+`We were not only waiting`, `Not until #N merges`, `Neither #M nor #N is still open`, `If #N is still
+open` and `The previously pending PR #N` all warn. Only a claim with no cue is a finding: `We have
+been waiting for #N to merge`, `It's been waiting`, `Do not merge until #N merges` (the look-back stops
+at `merge`) and `We merged the fix and #N remains open` (it stops at `and`). A phrase such as `the
+pending PR` with no named pull request is an ambiguous binding: cannot-evaluate, even when a named
+claim binds in the same clause. After a cue (`There are no pending PRs`, `Merged all pending pull
+requests`), the same phrase is a warning that names the sentence and says that no pull request was
+read.
 
-Not read as current claims: fenced code blocks (a line such as ```` ```x``` ```` is inline code, not a
-fence); indented code blocks (four columns of indent outside a paragraph or list); HTML comments within
-one unit (`<!-- ... -->`); struck-through text (`~~PR #17 is pending~~`); a blockquote introduced by `Earlier note:` or
-`Previously recorded:` (in the paragraph before it or its own first words); a quoted span (curly or
-straight quotes, or backticks) directly after a historical lead-in such as `Previously recorded:` or
-`The old note read`; past tense (`#17 was pending`); negation (`#17 is no longer pending`). Only the
-quoted span is exempt: `Previously blocked; #17 remains pending` is still a current claim. Quotation
+A Markdown table is read from its header and delimiter rows, with or without outer pipes. A header
+cell wrapped in emphasis or a code span (`**Status**`) names that column, and a leading byte order mark
+is dropped.
+
+Not read as current claims: fenced code blocks, including a fence indented inside a list item (a line
+such as ```` ```x``` ```` is inline code, not a fence); indented code blocks (four columns of indent
+past the left margin outside a list, or past a list item's content column inside one); HTML comments
+within one unit (`<!-- ... -->`); struck-through text (`~~PR #17 is pending~~`, or GFM
+`~PR #17 is pending~` with flanking tildes, so `~5 min ... ~10 min` is not struck); a blockquote
+introduced by `Earlier note:` or `Previously recorded:` (in the paragraph before it or its own first
+words); a quoted span (curly or straight quotes, or backticks) directly after a historical lead-in such
+as `Previously recorded:` or `The old note read`, where an apostrophe inside a word (`isn't`, `isn’t`)
+does not end the span; and wording that matches no phrase in the table (`#17 was pending`, `#17 is no
+longer pending`). Only the quoted span is exempt: `Previously blocked; #17 remains pending` is still a
+current claim. Quotation
 marks and backticks elsewhere do not hide a claim (`PR` followed by a backticked `#17` and `is pending`
 still binds). A claim inside any other blockquote is cannot-evaluate until it is given a historical
 lead-in or moved out of the quote.
@@ -130,7 +157,7 @@ or the origin URL.
 | `check_pending_pr_claims.py --check-inputs` | offline: validates the declaration and every declared surface and counts candidates; does not assess currency |
 | `check_pending_pr_claims.py --all --live` | every declared surface, live state |
 | `check_pending_pr_claims.py --draft PATH --target REL` | the complete proposed content PATH judged as declared surface REL, live state |
-| `check_pending_pr_claims.py --staged --live` | the staged blob of every declared surface the index changes, live state |
+| `check_pending_pr_claims.py --staged --live` | the staged blob of every declared surface the index changes, read by the object id of its stage-0 index entry, live state; a staged entry that is not a regular file (a symlink, for example) or is unmerged is exit 2 |
 | `apply_record_draft.py --draft PATH --target REL` | judges the draft bytes read once and writes those same bytes only on exit 0, keeping the target's permission bits; a changed destination preimage, a symlinked parent directory or a parent that changed after it was opened withholds the write; a target that is not a regular file (a FIFO is refused without waiting on it) or cannot be read is exit 2 |
 | `check_pending_pr_commit.sh` | runs `--staged --live`, prints the result, and always lets the commit continue; an incomplete evaluation is reported as not passed |
 
@@ -141,14 +168,29 @@ claim was found.
 
 ## Residuals
 
-- The grammar is partial: an unfamiliar paraphrase, a pronoun, an undeclared record or a misleading
-  history annotation can evade or confuse it. A date alone does not mark text historical. The
-  self-test covers only the forms in its rule and fix rows; forms known not to be caught include a
-  claim before its reference (`still pending: #17` outside a Status cell), a reference after other
-  words in a Status cell (`Blocked, in progress (#17)`), a `pull/N` URL with a suffix other than
-  `/files`, `/commits` or `/checks` (`/checks/123`), and a reference split inside a word across a
-  line break. A reference in the text of a link to any other URL is read as plain text, so it binds to
-  the surface's default repository.
+- A prose grammar cannot be complete, and this one is partial: an unfamiliar paraphrase, a pronoun,
+  an undeclared record or a misleading history annotation can evade or confuse it. Fixing one wording
+  can expose the next, so a pass is never proof that no stale claim exists. A date alone does not
+  mark text historical. The self-test covers only the forms in its rule, fix and cue rows. Forms
+  known not to be caught:
+  - a claim before its reference (`still pending: #17` outside a Status cell);
+  - words between a reference and its phrase (`PR #17, which fixes the parser, is still open`, `PR
+    #17 (the parser fix) is still pending`, `Depends on #17, which is still open`);
+  - wordings outside the table (`Release 1.2 (#17 pending)`, `PR #17 is awaiting merge`, `PR #17 is
+    not merged yet`, `PR #17 awaits review`, `PR #17 is ready to merge`);
+  - a reference after other words in a Status cell (`Blocked, in progress (#17)`);
+  - a `pull/N` URL with a suffix other than `/files`, `/commits` or `/checks` (`/checks/123`);
+  - a reference split inside a word across a line break.
+  A reference in the text of a link to any other URL is read as plain text, so it binds to the
+  surface's default repository. A reference link whose definition is in another file, any reference
+  link in a TOML string, and an HTML anchor split across units are read as their text.
+- Cues are read only from the words directly before a claim (adverbs, auxiliaries, contraction stems
+  and `the`, `all`, `any` and `of` aside). A cue further back is not seen, so the claim stays a
+  finding: `We were told to wait for #17 to merge` and `not sure whether we are waiting for #17 to
+  merge` are findings. A cue word can also turn a current claim into a warning only, for example `We'd
+  wait for #17 to merge` (`'d` read as `had`, though here it is `would`). A question is recognised
+  only by a cue word (`Was #17 still open?`), not by its question mark, so `Is #17 still open?` is a
+  finding.
 - A blockquote with a historical lead-in is exempt as a whole, so a current claim later added inside
   it is not read. An `Earlier note:` lead-in applies only to the blockquote directly after it (a
   table, fence, indented block or heading between them ends it).
@@ -156,18 +198,15 @@ claim was found.
   closed) is not detected. A `#N` with no `issue` word is always read as a pull request; when it names
   an issue, the pulls API answers 404 and the run is cannot-evaluate.
 - An imperative `Open #N` at the start of a clause warns rather than finds, so `Open PR #17 needs
-  review` written as a claim is a warning only. Negation and past tense are judged only from the word
-  directly before a lead phrase (adverbs skipped), so a negation or past tense further back is not
-  seen: `We were told to wait for #17 to merge` and `not sure whether we are waiting for #17 to merge`
-  are still findings.
+  review` written as a claim is a warning only.
 - An HTML comment that spans a blank line is not removed, so its text is read as record text.
 - A named backlog item is not resolved to a pull request: only explicit references bind.
 - State can change after it is read (a closed pull request can be reopened); the API read and the file
   write are not one transaction.
 - `gh`'s handling of `--hostname` and its own configuration is `gh`'s behaviour and is not verified
   here. No live API read was made by the self-test: every lifecycle response in it is synthetic.
-- The self-test drives the staged mode through an injected git reader, so its real `git diff --cached`
-  and `git cat-file` calls are not exercised there.
+- The self-test drives the staged mode through an injected git reader, so its real `git diff --cached`,
+  `git ls-files --stage` and `git cat-file` calls are not exercised there.
 - Hooks can be absent or bypassed, and with no scheduled reconciliation a stale claim stays until a
   live run is made. A closed pull request does not prove deployment, acceptance or completion of the
   related backlog item; the check flags wording only.

@@ -26,13 +26,19 @@ The declaration is .aiqt/pending-pr-claims.toml; the contract, grammar and resid
 a caller-supplied state map is never accepted as authority. The --check-inputs mode is the only
 mode the Quality workflow runs: it is deterministic and offline and does not assess currency.
 
-RESIDUALS (disclosed; the full list is in the contract): the grammar is partial and the self-test
-covers only its RULE_ROWS and fix rows. Not caught: a claim before its reference outside a Status
-cell (still pending: #17), a Status cell whose state word is not first (Blocked, in progress (#17)),
-a pull URL suffix other than /files, /commits or /checks, a reference split inside a word, a current
-claim added inside a blockquote that has a historical lead-in, an issue claim (issue references are
-never read), and a negation or past tense more than one word (adverbs aside) before a lead phrase.
-An imperative-looking `Open #N` at a clause start warns instead of finding.
+A negation, past-tense or conditional cue directly before a claim (not waiting for #17 to merge, had
+been waiting, Neither #16 nor #17 is open, If #17 is still open) never exempts it: when the pull
+request has merged or closed, the claim is a warning (exit 0, a WARNING line naming the sentence and
+the pull request) instead of a finding. Only a claim with no such cue is a finding.
+
+RESIDUALS (disclosed; the full list is in the contract): a prose grammar cannot be complete, and this
+one is partial. The self-test covers only its rule and fix rows. Not caught: a claim before its
+reference outside a Status cell (still pending: #17), words between a reference and its phrase (PR
+#17, which fixes the parser, is still open), a Status cell whose state word is not first, a pull URL
+suffix other than /files, /commits or /checks, a reference split inside a word, a current claim
+added inside a blockquote that has a historical lead-in, and an issue claim (issue references are
+never read). A cue further back than the words directly before a claim is not seen, so that claim
+stays a finding. An imperative-looking `Open #N` at a clause start warns instead of finding.
 """
 import sys
 
@@ -48,6 +54,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import errno
 import os
 import re
 import stat
@@ -142,19 +149,28 @@ def validate_config(data):
     return data
 
 
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+
+
 def _read_bytes(path, label):
-    """The bytes of a regular, non-symlink file of at most MAX_BYTES; InputError otherwise."""
+    """The bytes of a regular, non-symlink file of at most MAX_BYTES; InputError otherwise. The file is
+    opened once (O_NOFOLLOW: a symlink is refused; O_NONBLOCK: a FIFO is not waited on) and its type
+    is checked on that descriptor, so the bytes read are the bytes of the file whose type was checked."""
     try:
-        st = os.lstat(path)
+        handle = os.open(path, _READ_FLAGS)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise InputError("{}: is not a regular file (a symlink or directory is refused)".format(label))
+        raise InputError("{}: cannot be read ({})".format(label, exc.strerror or type(exc).__name__))
+    try:
+        if not stat.S_ISREG(os.fstat(handle).st_mode):
+            raise InputError("{}: is not a regular file (a symlink or directory is refused)".format(label))
+        with os.fdopen(handle, "rb", closefd=False) as source:
+            data = source.read(MAX_BYTES + 1)
     except OSError as exc:
         raise InputError("{}: cannot be read ({})".format(label, exc.strerror or type(exc).__name__))
-    if not stat.S_ISREG(st.st_mode):
-        raise InputError("{}: is not a regular file (a symlink or directory is refused)".format(label))
-    try:
-        with open(path, "rb") as handle:
-            data = handle.read(MAX_BYTES + 1)
-    except OSError as exc:
-        raise InputError("{}: cannot be read ({})".format(label, exc.strerror or type(exc).__name__))
+    finally:
+        os.close(handle)
     if len(data) > MAX_BYTES:
         raise InputError("{}: larger than {} bytes".format(label, MAX_BYTES))
     return data
@@ -199,6 +215,14 @@ def toml_units(text, label):
 
 
 FENCE_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
+# Inside a list item a fence may be indented to the item's content column (CommonMark).
+LIST_FENCE_RE = re.compile(r"[ \t]*(`{3,}|~{3,})")
+# A link reference definition ([label]: URL "title"); it is not record prose.
+LINK_DEFINITION_RE = re.compile(
+    r" {0,3}\[([^\]]{1,999})\]:\s*<?([^\s<>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\s*$")
+# A full ([text][label]), collapsed ([text][]) or shortcut ([label]) reference link.
+REFERENCE_LINK_RE = re.compile(r"(!?)\[([^\[\]]*)\](?:\[([^\[\]]*)\])?(?![(:])")
+HEADER_EMPHASIS_RE = re.compile(r"^(\*{1,2}|_{1,2}|`)(.+)\1$")
 QUOTE_RE = re.compile(r" {0,3}>[ ]?(.*)")
 HEADING_RE = re.compile(r" {0,3}#{1,6}(?:\s+(.*))?$")
 ITEM_RE = re.compile(r"\s*(?:[-*+]|[0-9]{1,9}[.)])\s+(?:\[[ xX]\]\s+)?(.*)")
@@ -216,20 +240,48 @@ def _cells(line):
     return [cell.replace("\ue002", "\\|").strip() for cell in body.replace("\\|", "\ue002").split("|")]
 
 
+def _header_name(cell):
+    """A header cell's name with one wrapping emphasis or code span removed (**Status** is Status)."""
+    match = HEADER_EMPHASIS_RE.match(cell)
+    return match.group(2).strip() if match else cell
+
+
+def _resolve_reference_links(prose, definitions):
+    """prose with each reference link whose label is defined in the document rewritten as the inline
+    link it stands for, so the markdown-link step reads its URL; an undefined one is left as text."""
+    def replace(match):
+        bang, text, label = match.group(1), match.group(2), match.group(3)
+        key = " ".join((label if label else text).split()).casefold()
+        if key not in definitions:
+            return match.group(0)
+        return "{}[{}]({})".format(bang, text, definitions[key])
+    return REFERENCE_LINK_RE.sub(replace, prose) if definitions else prose
+
+
 def markdown_units(text, label, status_column=None):
-    """[(location, prose, context)] for a Markdown document. Fenced blocks are skipped; a blockquote
-    whose lead-in (the paragraph just before it, or its own first words) is `Earlier note:` or
-    `Previously recorded:` is historical and skipped; any other blockquote is context "quote"; a cell
-    of the declared status column is context "status"; everything else is "prose". Wrapped lines of
-    one paragraph or list item are joined into one unit."""
+    """[(location, prose, context)] for a Markdown document. Fenced blocks (also inside a list item)
+    and indented code blocks are skipped; a blockquote whose lead-in (the paragraph just before it,
+    or its own first words) is `Earlier note:` or `Previously recorded:` is historical and skipped;
+    any other blockquote is context "quote"; a cell of the declared status column is context
+    "status"; everything else is "prose". Wrapped lines of one paragraph or list item are joined into
+    one unit. A link reference definition is not a unit; a reference link to it reads as an inline
+    link. A leading byte order mark is dropped."""
     units = []
+    if text.startswith("\ufeff"):
+        text = text[1:]
     lines = text.split("\n")
+    definitions = {}
+    for line in lines:
+        match = LINK_DEFINITION_RE.match(line)
+        if match:
+            definitions.setdefault(" ".join(match.group(1).split()).casefold(), match.group(2))
     fence = None
     para, para_line = [], 0
     quote, quote_line = [], 0
     last_prose = ""
     header = None
     in_list = False
+    item_column = 0
 
     def flush_para():
         nonlocal para, last_prose
@@ -256,7 +308,7 @@ def markdown_units(text, label, status_column=None):
             if stripped.startswith(fence) and set(stripped) == {fence[0]}:
                 fence = None
             continue
-        match = FENCE_RE.match(line)
+        match = FENCE_RE.match(line) or (LIST_FENCE_RE.match(line) if in_list else None)
         # A backtick fence's info string cannot hold a backtick (CommonMark): ```x``` is inline code.
         if match and not (match.group(1)[0] == "`" and "`" in line[match.end():]):
             flush_para()
@@ -270,9 +322,15 @@ def markdown_units(text, label, status_column=None):
             flush_quote()
             header = None
             continue
-        # An indented code block: four columns of indent outside a paragraph and a list.
-        if not para and not quote and not in_list and (line.startswith("    ") or line.startswith("\t")):
+        # An indented code block: four columns of indent outside a paragraph, measured from the left
+        # margin outside a list and from the item's content column inside one.
+        indent = len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip(" "))
+        if not para and not quote and indent >= (item_column + 4 if in_list else 4):
             last_prose = ""
+            continue
+        if not para and LINK_DEFINITION_RE.match(line):
+            flush_quote()
+            header = None
             continue
         match = QUOTE_RE.match(line)
         if match:
@@ -295,7 +353,7 @@ def markdown_units(text, label, status_column=None):
                 continue
             if header is None and "|" in following and all(
                     SEPARATOR_CELL_RE.fullmatch(cell) for cell in _cells(following)):
-                header = cells
+                header = [_header_name(cell) for cell in cells]
                 continue
             for column, cell in enumerate(cells):
                 name = header[column] if header is not None and column < len(header) else None
@@ -315,6 +373,7 @@ def markdown_units(text, label, status_column=None):
         if match:
             flush_para()
             in_list = True
+            item_column = match.start(1)
             para, para_line = [match.group(1).strip()], number
             continue
         if not line.startswith(" ") and not line.startswith("\t") and not para:
@@ -326,7 +385,8 @@ def markdown_units(text, label, status_column=None):
         raise InputError("{}: a fenced block opened is never closed".format(label))
     flush_para()
     flush_quote()
-    return units
+    return [(where, _resolve_reference_links(prose, definitions), context)
+            for where, prose, context in units]
 
 
 def surface_units(surface, data):
@@ -345,8 +405,8 @@ _O = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?"
 _R = r"[A-Za-z0-9._-]{1,100}"
 REF_RE = re.compile(
     r"(?:\b(?:pull\s+requests?|PRs?)\s+)?"
-    r"(?:https://github\.com/(?P<uo>" + _O + r")/(?P<ur>" + _R + r")/pull/(?P<un>[0-9]{1,9})"
-    r"(?:/(?:files|commits|checks))?(?![\w/])"
+    r"(?:https?://github\.com/(?P<uo>" + _O + r")/(?P<ur>" + _R + r")/pull/(?P<un>[0-9]{1,9})"
+    r"(?:/(?:files|commits|checks))?/?(?![\w/])"
     r"|(?<![\w./-])(?P<qo>" + _O + r")/(?P<qr>" + _R + r")#(?P<qn>[0-9]{1,9})(?![\w])"
     r"|\bpr:#?(?P<pn>[0-9]{1,9})(?![\w])"
     r"|(?<![\w&#/])#(?P<hn>[0-9]{1,9})(?![\w]))",
@@ -355,56 +415,72 @@ REF_RE = re.compile(
 # characters, so no record text can spell it).
 REF_MARK = "\ue000[0-9]+\ue001"
 REF_MARK_RE = re.compile("\ue000([0-9]+)\ue001")
-LIST = r"(?P<l>{0}(?:\s*,\s*(?:and\s+|or\s+)?{0}|\s+(?:and|or)\s+{0})*)".format(REF_MARK)
-VERB = r"(?:(?:is|are|remains?|stays?)(?:\s+(?:still|currently|now))?|still|currently)"
+LIST = r"(?P<l>{0}(?:\s*,\s*(?:and\s+|or\s+)?{0}|\s+(?:and|or|&)\s+{0})*)".format(REF_MARK)
+VERB = (r"(?:(?:is|are|remains?|stays?|(?:has|have)\s+been)(?:\s+(?:still|currently|now|also|both)){0,2}"
+        r"|still|currently)")
 # A historical lead-in followed by a quoted span: only that span is exempt. A straight single-quoted
 # span ends at a quote that no letter follows, so an apostrophe inside it (isn't) does not end it.
-HISTORY_SPAN_RE = re.compile(
-    r"(?i)\b(?:previously recorded|earlier note|the old note read|old note read|was recorded as|"
-    r"previously read)\s*:?\s*(?:\u201c[^\u201d]*\u201d|\"[^\"]*\"|`[^`]*`|\u2018[^\u2019]*\u2019"
-    r"|'(?:[^']|'(?=\w))*'(?!\w))")
+STRAIGHT_SPAN = r"'(?:[^']|'(?=\w))*'(?!\w)"
+
+
+def _history_span_re(straight):
+    return re.compile(
+        r"(?i)\b(?:previously recorded|earlier note|the old note read|old note read|was recorded as|"
+        r"previously read)\s*:?\s*(?:\u201c[^\u201d]*\u201d|\"[^\"]*\"|`[^`]*`|\u2018[^\u2019]*\u2019"
+        r"|" + straight + r")")
+
+
+HISTORY_SPAN_RE = _history_span_re(STRAIGHT_SPAN)
 CLAUSE_SPLIT_RE = re.compile(r"[;:!?\u00a6]|\.(?=\s|$)|\s[\u2013\u2014]\s|\s-\s")
 # A status cell keeps its colon (In progress: #17) inside one clause.
 STATUS_CLAUSE_SPLIT_RE = re.compile(r"[;!?\u00a6]|\.(?=\s|$)|\s[\u2013\u2014]\s|\s-\s")
 FORMATTING_RE = re.compile("[`\u201c\u201d\u2018\u2019\"*]|~~")
 INSTRUCTION_WORDS = {"leave", "leaves", "left", "keep", "keeps", "kept", "to", "will", "should",
                      "must", "please", "re"}
-# Words that, directly before a lead phrase (waiting for, awaiting, until, blocked on ...), make it
-# negated or past: "not waiting for #17 to merge", "were waiting for #17 to merge".
-NEGATORS = {"not", "never", "longer", "t", "isnt", "arent", "wasnt", "werent", "hasnt", "havent",
-            "hadnt", "dont", "doesnt", "didnt"}
-PAST_AUXILIARIES = {"was", "were", "had"}
-# Before "been", only these make it past ("had been waiting", "we'd been waiting"); "have been
-# waiting" and "it's been waiting" are present perfect, a current claim.
-PAST_PERFECT = {"had", "d"}
-ADVERBS = {"still", "also", "then", "currently", "yet", "just", "only", "now", "already"}
-# A focus adverb directly after a negator adds to the claim rather than negating it: "not only
-# waiting for #17 to merge", "isn't just waiting on #17".
-FOCUS_ADVERBS = {"only", "just"}
-# Lead phrases a negator directly before does not negate: "Not until #17 merges can we ship" and "not
-# after #17 lands" still say #17 has not merged.
-NEGATION_KEEPS_CLAIM = {"until-merge", "once-merge"}
-# An issue number, bare or qualified by its repository (acme/widgets#17).
+# Cue words: one of these among the words directly before a claim (read back over CUE_PASSES words
+# only) makes the claim negated, past, conditional or a question, so a merged or closed pull request
+# gives a warning, never a finding and never a silent pass. "we'd" reads as "we d" (had or would).
+CUES = {"not", "never", "longer", "no", "t", "isnt", "arent", "wasnt", "werent", "hasnt", "havent",
+        "hadnt", "dont", "doesnt", "didnt", "cannot", "neither", "nor", "none", "was", "were", "had", "d",
+        "did", "if", "whether", "unless", "previously", "formerly", "once", "merged", "closed", "landed"}
+# Words read past while looking back for a cue: adverbs, auxiliaries, contraction stems and a few
+# determiners ("have not only been waiting", "haven't been", "no pending PRs", "all pending PRs").
+CUE_PASSES = {"still", "also", "then", "currently", "yet", "just", "only", "now", "already", "even",
+              "been", "be", "being", "is", "are", "am", "have", "has", "s", "re", "ve", "do", "does",
+              "isn", "aren", "wasn", "weren", "hasn", "haven", "hadn", "don", "doesn", "didn", "can",
+              "won", "wouldn", "couldn", "shouldn", "the", "all", "any", "of"}
+# An issue number, bare or qualified by its repository (acme/widgets#17). Only the plural `issues`
+# takes a list: after `issue #12,` a following `#17` is read as a pull request.
 _ISSUE_NUMBER = r"(?:" + _O + r"/" + _R + r")?#[0-9]{1,9}"
 ISSUE_LIST_RE = re.compile(
-    r"\bissues?\s*(?P<l>" + _ISSUE_NUMBER + r"(?:\s*(?:,|/|&|\band\b|\bor\b)\s*(?:and\s+|or\s+)?"
+    r"\bissue\s*(?P<one>" + _ISSUE_NUMBER + r")"
+    r"|\bissues\s*(?P<l>" + _ISSUE_NUMBER + r"(?:\s*(?:,|/|&|\band\b|\bor\b)\s*(?:and\s+|or\s+)?"
     + _ISSUE_NUMBER + r")*)", re.I)
-PULL_URL_RE = re.compile(r"https://github\.com/" + _O + r"/" + _R + r"/pull/[0-9]{1,9}"
+PULL_URL_RE = re.compile(r"https?://github\.com/" + _O + r"/" + _R + r"/pull/[0-9]{1,9}"
                          r"(?:/(?:files|commits|checks))?/?(?:#[\w-]*)?", re.ASCII)
-ISSUE_URL_RE = re.compile(r"https://github\.com/" + _O + r"/" + _R + r"/issues/(?P<n>[0-9]{1,9})/?(?:#[\w-]*)?",
+ISSUE_URL_RE = re.compile(r"https?://github\.com/" + _O + r"/" + _R + r"/issues/(?P<n>[0-9]{1,9})/?(?:#[\w-]*)?",
                           re.ASCII)
 
 
-def _link(match):
-    """A Markdown link or image: a pull request URL stands for its target (it carries the repository);
-    an issue URL becomes an issue reference; any other link keeps only its text."""
-    text, url = match.group(1), match.group(2)
+def _link_target(text, url):
+    """A link's replacement: a pull request URL stands for its target (it carries the repository); an
+    issue URL becomes an issue reference; any other link keeps only its text."""
     if PULL_URL_RE.fullmatch(url):
         return " " + url.split("#")[0].rstrip("/") + " "
     issue = ISSUE_URL_RE.fullmatch(url)
     if issue:
         return " issue #{} ".format(issue.group("n"))
     return text
+
+
+def _link(match):
+    """A Markdown inline link or image."""
+    return _link_target(match.group(1), match.group(2))
+
+
+def _html_link(match):
+    """An HTML anchor on one unit: <a href="URL">text</a>."""
+    return _link_target(match.group(2), match.group(1))
 
 
 def _issue(match):
@@ -419,9 +495,15 @@ NORMALIZE = (
     ("html-comment", re.compile(r"<!--.*?-->"), " "),
     ("markdown-link", re.compile(r"!?\[([^\]]*)\]\(\s*<?([^\s()<>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)"),
      _link),
-    ("autolink", re.compile(r"<(https://github\.com/[^\s<>]+)>"), r" \1 "),
+    ("html-link", re.compile(r"(?i)<a\s+[^>]*?\bhref\s*=\s*[\"']([^\"'\s<>]+)[\"'][^>]*>(.*?)</a\s*>"), _html_link),
+    ("autolink", re.compile(r"<(https?://github\.com/[^\s<>]+)>"), r" \1 "),
+    # A bracket that is not a link ([#17] with no definition) is text: its brackets are dropped.
+    ("bracket", re.compile(r"\[([^\[\]]*)\]"), r" \1 "),
+    # A curly apostrophe inside a word (isn\u2019t, we\u2019d) is an apostrophe, not a closing quotation mark.
+    ("apostrophe", re.compile(r"(?<=[A-Za-z])\u2019(?=[A-Za-z])"), "'"),
     ("history-span", HISTORY_SPAN_RE, " \u00a6 "),
-    ("strikethrough", re.compile(r"~~[^~]*~~"), " "),
+    # GFM strikethrough: ~~text~~, or ~text~ with flanking tildes (so ~5 min and ~10 is not struck).
+    ("strikethrough", re.compile(r"~~[^~]*~~|(?<![~\w])~(?![\s~])[^~]*(?<![\s~])~(?![~\w])"), " "),
     ("formatting", FORMATTING_RE, ""),
     ("underscore-emphasis", re.compile(r"(?<!\w)_{1,2}(?=#[0-9])|(?<=[0-9])_{1,2}(?!\w)"), ""),
     ("issue-reference", ISSUE_LIST_RE, _issue),
@@ -433,9 +515,9 @@ PATTERNS = (
     # (rule id, kind, phrase, regex, contexts) in priority order; a token bound HARD is not also a
     # warning. The self-test exercises every rule id on both sides and with the rule removed.
     ("status-in-progress", HARD, "in progress (an open pull request under review)",
-     re.compile(r"^\s*in\s+progress\s*[(:]\s*" + LIST, re.I), ("status",)),
+     re.compile(r"^\s*in\s+progress\s*[(:]?\s*" + LIST, re.I), ("status",)),
     ("status-open", HARD, "open (status)",
-     re.compile(r"^\s*(?:open|pending|under\s+review|in\s+review)\s*[(:]\s*" + LIST, re.I), ("status",)),
+     re.compile(r"^\s*(?:open|pending|under\s+review|in\s+review)\s*[(:]?\s*" + LIST, re.I), ("status",)),
     ("pending-verb", HARD, "pending", re.compile(LIST + r"\s+" + VERB + r"\s+pending\b", re.I), None),
     ("pending-paren", HARD, "pending", re.compile(LIST + r"\s*\(\s*pending\s*\)", re.I), None),
     ("open-paren", HARD, "open", re.compile(
@@ -479,6 +561,8 @@ AMBIGUOUS_RES = (
     re.compile(r"\b(?:the|this|that)\s+(?:PR|pull\s+request)\s+" + VERB + r"\s+(?:pending|open)\b", re.I),
 )
 IMPERATIVE_OPEN = (WARN, "open (an instruction or a claim; review it)")
+# An unnamed pending or open phrase after a cue (There are no pending PRs): a warning, not ambiguous.
+CUED_AMBIGUOUS = "cued-ambiguous"
 
 
 def tokenize(prose, context="prose"):
@@ -526,34 +610,25 @@ def _imperative_open(clause, start):
     return before == "" or before.endswith(",")
 
 
-def _negated_or_past_before(clause, start, rule=None):
-    """True when the words directly before a lead phrase (adverbs such as still skipped) negate it or
-    put it in the past: not waiting, no longer waiting, isn't waiting, were waiting, had been waiting,
-    haven't been waiting. Not exempt: present perfect (have been waiting), a focus adverb after a
-    negator (not only waiting) and a negator before a rule in NEGATION_KEEPS_CLAIM (Not until #17
-    merges)."""
-    words = _words_before(clause, start)
-    skipped = []
-    while words and words[-1] in ADVERBS:
-        skipped.append(words.pop())
-    if not words:
-        return False
-    if words[-1] == "been":
-        words.pop()
-        while words and words[-1] in ADVERBS:
-            words.pop()
-        return bool(words) and (words[-1] in PAST_PERFECT or words[-1] in NEGATORS)
-    if words[-1] in PAST_AUXILIARIES:
-        return True
-    if words[-1] in NEGATORS:
-        return rule not in NEGATION_KEEPS_CLAIM and not (skipped and skipped[-1] in FOCUS_ADVERBS)
-    return False
+def _cue_before(clause, start):
+    """The cue word (CUES) among the words directly before a claim, read back over CUE_PASSES words
+    only, or None: "not waiting", "have not only been waiting", "we'd been waiting", "were not only
+    waiting", "Neither #16 nor #17 is open", "If #17 is still open", "no pending PRs". The cue never
+    exempts a claim; it makes it a warning. Present perfect with no cue ("have been waiting", "it's
+    been waiting") has none, so it stays a finding."""
+    for word in reversed(_words_before(clause, start)):
+        if word in CUES:
+            return word
+        if word not in CUE_PASSES:
+            return None
+    return None
 
 
 def find_candidates(prose, context):
     """[(kind, phrase, ref, clause text)] for one unit. A quote context reports any claim as QUOTE (it
     needs a historical lead-in or a move out of the quote); an ambiguous phrase is AMBIGUOUS, whether
-    or not a named claim also binds in the same clause."""
+    or not a named claim also binds in the same clause, unless every match of it follows a cue
+    (CUED_AMBIGUOUS, a warning). A claim after a cue binds as a warning naming the cue."""
     clauses, refs = tokenize(prose, context)
     found = []
     for clause in clauses:
@@ -561,16 +636,16 @@ def find_candidates(prose, context):
         for rule, kind, phrase, regex, contexts in PATTERNS:
             if contexts is not None and context not in contexts:
                 continue
-            lead = not regex.pattern.startswith("(?P<l>")
             for match in regex.finditer(clause):
                 hit_kind, hit_phrase = kind, phrase
-                if lead and _negated_or_past_before(clause, match.start(), rule):
+                if rule == "open-lead" and _instruction_before(clause, match.start()):
                     continue
-                if rule == "open-lead":
-                    if _instruction_before(clause, match.start()):
-                        continue
-                    if context != "status" and _imperative_open(clause, match.start()):
-                        hit_kind, hit_phrase = IMPERATIVE_OPEN
+                cue = _cue_before(clause, match.start())
+                if cue is not None:
+                    hit_kind, hit_phrase = WARN, "{} (after the cue {!r}: negated, past, conditional or a " \
+                                                 "question; review it)".format(phrase, cue)
+                elif rule == "open-lead" and context != "status" and _imperative_open(clause, match.start()):
+                    hit_kind, hit_phrase = IMPERATIVE_OPEN
                 for index in REF_MARK_RE.findall(match.group("l")):
                     index = int(index)
                     if index not in bound or (bound[index][0] == WARN and hit_kind == HARD):
@@ -581,8 +656,11 @@ def find_candidates(prose, context):
             if context == "quote":
                 kind = QUOTE
             found.append((kind, phrase, refs[index], shown))
-        if any(regex.search(clause) for regex in AMBIGUOUS_RES):
+        cues = [_cue_before(clause, match.start()) for regex in AMBIGUOUS_RES for match in regex.finditer(clause)]
+        if None in cues:
             found.append((AMBIGUOUS, "pending or open", None, shown))
+        elif cues:
+            found.append((CUED_AMBIGUOUS, cues[0], None, shown))
     return found
 
 
@@ -618,6 +696,11 @@ def evaluate(candidates, config, root, transport=None, git_runner=_pr_state.run_
         if kind == AMBIGUOUS:
             result.unknown.append("{}: {!r}: a pending or open phrase whose pull request is not named; "
                                   "the binding is ambiguous".format(location, clause))
+            continue
+        if kind == CUED_AMBIGUOUS:
+            result.warnings.append("{}: {!r}: a pending or open phrase whose pull request is not named, "
+                                   "after the cue {!r} (negated, past, conditional or a question); no "
+                                   "pull request was read; review it".format(location, clause, phrase))
             continue
         if kind == QUOTE:
             result.unknown.append("{}: {!r}: a claim inside a blockquote with no historical lead-in "
@@ -745,21 +828,53 @@ def run_draft(root, draft, target, transport=None):
 
 
 STAGED_NAMES = ["diff", "--cached", "--name-only", "-z", "--no-renames"]
+OBJECT_ID_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+# Index modes of a regular file; a symlink (120000), a gitlink (160000) or anything else is refused.
+REGULAR_INDEX_MODES = ("100644", "100755")
 
 
 def _git(root, args):
-    """(returncode, stdout bytes) of one of the two read-only index reads run_staged makes: the staged
-    path list (args == STAGED_NAMES) or one staged blob (args == ["cat-file", "blob", ":PATH"]). Each
-    launch is a literal argument list; any other args is a ValueError."""
+    """(returncode, stdout bytes) of one of the three read-only index reads run_staged makes: the staged
+    path list (args == STAGED_NAMES), one path's index entry (args == ["ls-files", "--stage", "-z",
+    "--", PATH], pathspecs read literally) or one blob by object id (args == ["cat-file", "blob",
+    OID]). Each launch is a literal argument list; any other args is a ValueError."""
     if args == STAGED_NAMES:
         child = subprocess.run(["git", "-C", str(root), "diff", "--cached", "--name-only", "-z",
                                 "--no-renames"], capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
-    elif len(args) == 3 and args[:2] == ["cat-file", "blob"] and args[2].startswith(":"):
+    elif len(args) == 5 and args[:4] == ["ls-files", "--stage", "-z", "--"]:
+        child = subprocess.run(["git", "--literal-pathspecs", "-C", str(root), "ls-files", "--stage", "-z",
+                                "--", args[4]], capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+    elif len(args) == 3 and args[:2] == ["cat-file", "blob"] and OBJECT_ID_RE.fullmatch(args[2]):
         child = subprocess.run(["git", "-C", str(root), "cat-file", "blob", args[2]], capture_output=True,
                                stdin=subprocess.DEVNULL, timeout=60)
     else:
         raise ValueError("unsupported git read {!r}".format(args))
     return child.returncode, child.stdout
+
+
+def _staged_object(path, listing):
+    """The object id of path's single stage-0 index entry given `git ls-files --stage -z` output;
+    InputError when the entry is missing, unmerged, or not a regular file (a symlink, gitlink or other
+    mode is refused as cannot-evaluate, as a non-regular declared surface is in the other modes)."""
+    entries = []
+    for record in listing.decode("utf-8", "surrogateescape").split("\0"):
+        if not record:
+            continue
+        meta, _tab, name = record.partition("\t")
+        fields = meta.split(" ")
+        if name == path and len(fields) == 3:
+            entries.append(fields)
+    if not entries:
+        raise InputError("{}: has no staged index entry (deleted or unreadable)".format(path))
+    if len(entries) != 1 or entries[0][2] != "0":
+        raise InputError("{}: the index entry is unmerged".format(path))
+    mode, oid, _stage = entries[0]
+    if mode not in REGULAR_INDEX_MODES:
+        raise InputError("{}: is staged as mode {}, not a regular file (a symlink or other non-regular "
+                         "entry is refused)".format(path, mode))
+    if not OBJECT_ID_RE.fullmatch(oid):
+        raise InputError("{}: the index entry names no valid object id".format(path))
+    return oid
 
 
 def run_staged(root, transport=None, git_runner=_pr_state.run_git_origin, git=_git):
@@ -775,7 +890,11 @@ def run_staged(root, transport=None, git_runner=_pr_state.run_git_origin, git=_g
         for surface in config["surface"]:
             if surface["path"] not in staged:
                 continue
-            code, blob = git(root, ["cat-file", "blob", ":" + surface["path"]])
+            code, listing = git(root, ["ls-files", "--stage", "-z", "--", surface["path"]])
+            if code != 0:
+                raise InputError("{}: the index entry cannot be read (git exited {})".format(
+                    surface["path"], code))
+            code, blob = git(root, ["cat-file", "blob", _staged_object(surface["path"], listing)])
             if code != 0:
                 raise InputError("{}: the staged blob cannot be read (git exited {})".format(
                     surface["path"], code))
@@ -906,14 +1025,19 @@ def _without_imperative_open(fn):
 
 
 def _without_negation(fn):
-    """Run fn() with the negated or past lead-in exemption disabled (the red-when-reverted leg)."""
-    global _negated_or_past_before
-    saved = _negated_or_past_before
-    _negated_or_past_before = lambda _clause, _start, _rule=None: False  # noqa: E731
+    """Run fn() with the cue reading disabled, so no claim is downgraded (the red-when-reverted leg)."""
+    return _with_globals({"_cue_before": lambda _clause, _start: None}, fn)
+
+
+def _with_globals(replacements, fn):
+    """Run fn() with the named module globals replaced, restoring them afterwards (a red leg)."""
+    names = globals()
+    saved = {name: names[name] for name in replacements}
+    names.update(replacements)
     try:
         return fn()
     finally:
-        _negated_or_past_before = saved
+        names.update(saved)
 
 
 def _status_table(cell):
@@ -953,7 +1077,7 @@ def _rule_rows(m, o):
              "rule/awaiting-review/merged", "rule/awaiting-review/merged/red-when-reverted", "rule/awaiting-review/open-passes", "rule/awaiting-review/unknown-cannot-evaluate", "rule/awaiting-review/no-flag-twin"),
             ("in-progress-verb", "PR #17 is in progress.\n", "PR #17 was in progress.\n",
              "rule/in-progress-verb/merged", "rule/in-progress-verb/merged/red-when-reverted", "rule/in-progress-verb/open-passes", "rule/in-progress-verb/unknown-cannot-evaluate", "rule/in-progress-verb/no-flag-twin"),
-            ("waiting-to-merge", "Waiting for #17 to merge.\n", "We were waiting for #17 to merge.\n",
+            ("waiting-to-merge", "Waiting for #17 to merge.\n", "We waited for #17 to merge.\n",
              "rule/waiting-to-merge/merged", "rule/waiting-to-merge/merged/red-when-reverted", "rule/waiting-to-merge/open-passes", "rule/waiting-to-merge/unknown-cannot-evaluate", "rule/waiting-to-merge/no-flag-twin"),
             ("awaiting-merge", "Awaiting merge of #17.\n", "Awaiting deployment of #17.\n",
              "rule/awaiting-merge/merged", "rule/awaiting-merge/merged/red-when-reverted", "rule/awaiting-merge/open-passes", "rule/awaiting-merge/unknown-cannot-evaluate", "rule/awaiting-merge/no-flag-twin"),
@@ -969,13 +1093,13 @@ def _rule_rows(m, o):
              "rule/not-yet-merged/merged", "rule/not-yet-merged/merged/red-when-reverted", "rule/not-yet-merged/open-passes", "rule/not-yet-merged/unknown-cannot-evaluate", "rule/not-yet-merged/no-flag-twin"),
             ("has-not-merged", "PR #17 hasn't merged yet.\n", "PR #17 has merged since.\n",
              "rule/has-not-merged/merged", "rule/has-not-merged/merged/red-when-reverted", "rule/has-not-merged/open-passes", "rule/has-not-merged/unknown-cannot-evaluate", "rule/has-not-merged/no-flag-twin"),
-            ("waiting-dependency", "Still waiting on #17.\n", "No longer waiting on #17.\n",
+            ("waiting-dependency", "Still waiting on #17.\n", "Waited on #17 last week.\n",
              "rule/waiting-dependency/merged", "rule/waiting-dependency/merged/red-when-reverted", "rule/waiting-dependency/open-passes", "rule/waiting-dependency/unknown-cannot-evaluate", "rule/waiting-dependency/no-flag-twin"),
-            ("awaiting-dependency", "Awaiting #17.\n", "Was awaiting #17 last week.\n",
+            ("awaiting-dependency", "Awaiting #17.\n", "Awaited #17 last week.\n",
              "rule/awaiting-dependency/merged", "rule/awaiting-dependency/merged/red-when-reverted", "rule/awaiting-dependency/open-passes", "rule/awaiting-dependency/unknown-cannot-evaluate", "rule/awaiting-dependency/no-flag-twin"),
-            ("blocked-dependency", "Blocked on #17.\n", "Was blocked on #17.\n",
+            ("blocked-dependency", "Blocked on #17.\n", "Unblocked by #17.\n",
              "rule/blocked-dependency/merged", "rule/blocked-dependency/merged/red-when-reverted", "rule/blocked-dependency/open-passes", "rule/blocked-dependency/unknown-cannot-evaluate", "rule/blocked-dependency/no-flag-twin"),
-            ("stacked", "This branch is stacked on #17.\n", "This branch was stacked on #17.\n",
+            ("stacked", "This branch is stacked on #17.\n", "This branch was unstacked from #17.\n",
              "rule/stacked/merged", "rule/stacked/merged/red-when-reverted", "rule/stacked/open-passes", "rule/stacked/unknown-cannot-evaluate", "rule/stacked/no-flag-twin"),
     ):
         seen.append((rule, merged_id, red_id, open_id, unknown_id, twin_id))
@@ -1043,18 +1167,50 @@ def _fix_rows(m, o):
              [(REPO, 17)]),
             ("markdown/table-without-pipes-other-column",
              "ID | Status | Item\n--- | --- | ---\nX-1 | Planned | In progress (#17)\n", m, 0, []),
-            ("negation/not-waiting", "We are not waiting for #17 to merge.\n", m, 0, []),
-            ("negation/past-waiting", "We were waiting for #17 to merge.\n", m, 0, []),
-            ("negation/contracted-not-waiting", "It isn't waiting on #17.\n", m, 0, []),
             ("negation/still-waiting-binds", "We are still waiting for #17 to merge.\n", m, 1, [(REPO, 17)]),
             ("negation/do-not-merge-until-binds", "Do not merge until #17 merges.\n", m, 1, [(REPO, 17)]),
             ("negation/present-perfect-binds", "We have been waiting for #17 to merge.\n", m, 1, [(REPO, 17)]),
-            ("negation/past-perfect-waiting", "We had been waiting for #17 to merge.\n", m, 0, []),
-            ("negation/not-been-waiting", "We haven't been waiting for #17 to merge.\n", m, 0, []),
-            ("negation/not-only-binds", "We are not only waiting for #17 to merge.\n", m, 1, [(REPO, 17)]),
-            ("negation/past-only-waiting", "We were only waiting for #17 to merge.\n", m, 0, []),
-            ("negation/not-until-binds", "Not until #17 merges can we ship.\n", m, 1, [(REPO, 17)]),
-            ("negation/not-waiting-to-merge", "Not waiting for #17 to merge.\n", m, 0, []),
+            ("cue/contracted-present-perfect-binds", "It\u2019s been waiting for #17 to merge.\n", m, 1,
+             [(REPO, 17)]),
+            ("cue/cue-in-earlier-words-not-read", "We merged the fix and #17 remains open.\n", m, 1, [(REPO, 17)]),
+            ("ref/reference-style-link", "[#17][pr17] is pending.\n\n[pr17]: https://github.com/peer/repo/pull/17\n",
+             {("peer/repo", 17): "merged"}, 1, [("peer/repo", 17)]),
+            ("ref/reference-style-link-no-claim",
+             "[#17][pr17] merged.\n\n[pr17]: https://github.com/peer/repo/pull/17\n", m, 0, []),
+            ("ref/shortcut-reference-link", "[#17] is pending.\n\n[#17]: https://github.com/peer/repo/pull/17\n",
+             {("peer/repo", 17): "merged"}, 1, [("peer/repo", 17)]),
+            ("ref/bracketed-reference-binds", "[#17] is pending.\n", m, 1, [(REPO, 17)]),
+            ("ref/autolink-trailing-slash", "<https://github.com/acme/widgets/pull/17/> is pending.\n", m, 1,
+             [(REPO, 17)]),
+            ("ref/url-trailing-slash", "https://github.com/acme/widgets/pull/17/ is pending.\n", m, 1, [(REPO, 17)]),
+            ("ref/http-url", "http://github.com/acme/widgets/pull/17 is pending.\n", m, 1, [(REPO, 17)]),
+            ("ref/html-link", "<a href=\"https://github.com/peer/repo/pull/17\">#17</a> is pending.\n",
+             {("peer/repo", 17): "merged"}, 1, [("peer/repo", 17)]),
+            ("ref/html-link-no-claim", "<a href=\"https://github.com/peer/repo/pull/17\">#17</a> merged.\n", m, 0,
+             []),
+            ("markdown/fence-in-list-item-skipped", "- Item\n\n    ```\n    PR #17 is pending\n    ```\n", m,
+             0, []),
+            ("markdown/indented-code-in-list-item-skipped", "- Item\n\n      PR #17 is pending\n", m, 0, []),
+            ("markdown/list-text-after-fence-read", "- Item\n\n  ```\n  code\n  ```\n\n  PR #17 is pending.\n", m,
+             1, [(REPO, 17)]),
+            ("status/no-separator-binds", _status_table("In progress #17"), m, 1, [(REPO, 17)]),
+            ("status/emphasised-header-binds", "| ID | **Status** |\n| --- | --- |\n| X-1 | In progress (#17) |\n",
+             m, 1, [(REPO, 17)]),
+            ("status/byte-order-mark-binds", "\ufeff" + _status_table("In progress (#17)"), m, 1, [(REPO, 17)]),
+            ("bind/ampersand-list-binds-both", "#17 & #18 are pending.\n", two, 1, [(REPO, 17), (REPO, 18)]),
+            ("bind/singular-issue-then-pull-request", "Closes issue #12, and #17 is still open.\n", m, 1,
+             [(REPO, 17)]),
+            ("verb/present-perfect-open", "PR #17 has been open since March.\n", m, 1, [(REPO, 17)]),
+            ("verb/both-still-open", "PRs #17 and #18 are both still open.\n", two, 1, [(REPO, 17), (REPO, 18)]),
+            ("verb/also-pending", "PR #17 is also pending.\n", m, 1, [(REPO, 17)]),
+            ("verb/past-perfect-open-no-claim", "PR #17 had been open since March.\n", m, 0, []),
+            ("history/curly-span-apostrophe-inside",
+             "Previously recorded: \u2018PR #18 isn\u2019t merged; PR #17 is pending\u2019\n", two, 0, []),
+            ("history/straight-span-apostrophe-inside",
+             "Previously recorded: 'PR #18 isn't merged; PR #17 is pending.'\n", two, 0, []),
+            ("format/single-tilde-strikethrough-not-current", "~PR #17 is pending~ merged.\n", m, 0, []),
+            ("format/approximate-tildes-not-struck", "Takes ~5 min; PR #17 is pending, ~10 min left.\n", m, 1,
+             [(REPO, 17)]),
             ("ref/qualified-issue-not-a-pull-request", "Issue acme/widgets#17 remains open.\n", {}, 0, []),
             ("ref/mixed-issue-list-not-pull-requests", "Issues #18 and acme/widgets#17 remain open.\n", {}, 0,
              []),
@@ -1075,6 +1231,7 @@ def _fix_rows(m, o):
         except InputError as exc:
             ok, detail = False, str(exc)
         check(name, ok, detail)
+    _cue_rows(m)
     code, res, _t = _judge("Earlier note:\n\n| A | B |\n| --- | --- |\n| x | y |\n\n> PR #17 is pending\n", m)
     check("markdown/lead-in-not-across-table", code == 2 and "blockquote" in " ".join(res.unknown), res.unknown)
     for name, red_name, text in (
@@ -1104,19 +1261,105 @@ def _fix_rows(m, o):
             ("format/html-comment-not-current/red-when-reverted", "<!-- PR #17 is pending -->\n",
              {"html-comment"}, m),
             ("history/straight-single-quoted-span/red-when-reverted",
-             "Previously recorded: 'PR #17 is pending.'\n", {"history-span"}, m)):
+             "Previously recorded: 'PR #17 is pending.'\n", {"history-span"}, m),
+            ("ref/bracketed-reference-binds/red-when-reverted", "[#17] is pending.\n", {"bracket"}, m),
+            ("ref/html-link/red-when-reverted",
+             "<a href=\"https://github.com/peer/repo/pull/17\">#17</a> is pending.\n", {"html-link"},
+             {("peer/repo", 17): "merged", (REPO, 17): "open"}),
+            ("history/curly-span-apostrophe-inside/red-when-reverted",
+             "Previously recorded: \u2018PR #18 isn\u2019t merged; PR #17 is pending\u2019\n", {"apostrophe"}, two),
+            ("format/single-tilde-strikethrough-not-current/red-when-reverted", "~PR #17 is pending~ merged.\n",
+             {"strikethrough"}, m)):
         code, res, _t = _with_steps_removed(steps, lambda: _judge(text, table))
         # Reverted, a flag row stops flagging (0) and a no-flag row starts flagging (1).
         want = 1 if name.split("/red-when-reverted")[0] in (
             "format/strikethrough-not-current", "format/html-comment-not-current",
-            "history/straight-single-quoted-span") else 0
+            "history/straight-single-quoted-span", "history/curly-span-apostrophe-inside",
+            "format/single-tilde-strikethrough-not-current") else 0
         check(name, code == want and (not res.hard if want == 0 else len(res.hard) >= 1), (code, res.hard))
     code, res, t = _with_steps_removed({"issue-reference"}, lambda: _judge("Issue #17 remains open.\n", {}))
     check("ref/issue-not-a-pull-request/red-when-reverted", code == 2 and t.calls == [(REPO, 17)], res.unknown)
-    for name, text in (("negation/not-waiting/red-when-reverted", "We are not waiting for #17 to merge.\n"),
-                       ("negation/past-waiting/red-when-reverted", "We were waiting for #17 to merge.\n")):
-        red = _without_negation(lambda: _judge(text, m)[0])
-        check(name, red == 1, red)
+    # The straight-quote alternative of the history span: the naive '[^']*' form ends the span at the
+    # apostrophe of isn't, so the claim after it is read (red); the shipped form keeps it inside.
+    code, res, _t = _with_globals(
+        {"NORMALIZE": tuple((n, _history_span_re(r"'[^']*'") if n == "history-span" else r, s)
+                            for n, r, s in NORMALIZE)},
+        lambda: _judge("Previously recorded: 'PR #18 isn't merged; PR #17 is pending.'\n", two))
+    check("history/straight-span-apostrophe-inside/red-when-reverted", code == 1 and len(res.hard) >= 1,
+          (code, res.hard))
+    code, _res, t = _with_globals({"_resolve_reference_links": lambda prose, _definitions: prose},
+                                  lambda: _judge("[#17][pr17] is pending.\n\n"
+                                                 "[pr17]: https://github.com/peer/repo/pull/17\n",
+                                                 {("peer/repo", 17): "merged"}))
+    check("ref/reference-style-link/red-when-reverted", code == 0 and t.calls == [], (code, t.calls))
+
+
+def _cue_rows(m):
+    """A claim after a negation, past-tense, conditional or question cue: a warning naming the clause
+    and the pull request when it has merged (never a silent pass), a clean pass when it is open, and
+    cannot-evaluate when its state is unreadable. With the cue reading removed, each is a finding."""
+    three = {(REPO, n): "merged" for n in (16, 17, 18)}
+    opened = {key: "open" for key in three}
+    open_bad, unknown_bad = [], []
+    for name, text, count in (
+        ("negation/not-waiting", "We are not waiting for #17 to merge.\n", 1),
+        ("negation/past-waiting", "We were waiting for #17 to merge.\n", 1),
+        ("negation/contracted-not-waiting", "It isn't waiting on #17.\n", 1),
+        ("negation/past-perfect-waiting", "We had been waiting for #17 to merge.\n", 1),
+        ("negation/not-been-waiting", "We haven't been waiting for #17 to merge.\n", 1),
+        ("negation/not-only-binds", "We are not only waiting for #17 to merge.\n", 1),
+        ("negation/past-only-waiting", "We were only waiting for #17 to merge.\n", 1),
+        ("negation/not-until-binds", "Not until #17 merges can we ship.\n", 1),
+        ("negation/not-waiting-to-merge", "Not waiting for #17 to merge.\n", 1),
+        ("negation/present-perfect-not-only-warns", "We have not only been waiting for #17 to merge.\n", 1),
+        ("negation/curly-past-perfect-warns", "We\u2019d been waiting for #17 to merge.\n", 1),
+        ("negation/straight-past-perfect-warns", "We'd been waiting for #17 to merge.\n", 1),
+        ("negation/past-not-only-warns", "We were not only waiting for #17 to merge.\n", 1),
+        ("negation/past-perfect-not-only-warns", "We had been not only waiting for #17 to merge.\n", 1),
+        ("negation/cannot-wait-warns", "We cannot wait for #17 to merge.\n", 1),
+        ("negation/contracted-cannot-wait-warns", "We can't wait for #17 to merge.\n", 1),
+        ("cue/previously-pending-warns", "The previously pending PR #17 has merged.\n", 1),
+        ("cue/formerly-open-warns", "The formerly open PR #17 was closed without merging.\n", 1),
+        ("cue/once-pending-warns", "The once-pending PR #17 merged on Monday.\n", 1),
+        ("cue/neither-nor-warns", "Neither #16 nor #17 is still open.\n", 1),
+        ("cue/none-of-warns", "None of #16, #17 and #18 remain open.\n", 3),
+        ("cue/question-warns", "Was #17 still open at the freeze?\n", 1),
+        ("cue/conditional-warns", "If #17 is still open, rebase it.\n", 1),
+        ("cue/whether-warns", "Check whether #17 is still open.\n", 1)):
+        code, res, _t = _judge(text, three)
+        named = all("acme/widgets#1" in line and "after the cue" in line for line in res.warnings)
+        check(name, code == 0 and not res.hard and len(res.warnings) == count and named,
+              (code, res.hard, res.warnings))
+        code, res, _t = _judge(text, opened)
+        if code != 0 or res.hard or res.warnings:
+            open_bad.append((name, code, res.hard, res.warnings))
+        code, res, _t = _judge(text, {})
+        if code != 2 or res.hard:
+            unknown_bad.append((name, code, res.hard))
+    check("cue/every-cue-row-open-passes", not open_bad, open_bad)
+    check("cue/every-cue-row-unknown-cannot-evaluate", not unknown_bad, unknown_bad)
+    code, res, _t = _judge("We are not waiting for #17 to merge.\n", three)
+    check("cue/warning-names-sentence-and-pull-request", len(res.warnings) == 1
+          and "We are not waiting for #17 to merge" in res.warnings[0]
+          and "acme/widgets#17" in res.warnings[0] and "MERGED" in res.warnings[0], res.warnings)
+    for name, text in (("cue/no-pending-prs-warns", "There are no pending PRs.\n"),
+                       ("cue/merged-all-pending-prs-warns", "Merged all pending pull requests for 1.2.\n")):
+        code, res, t = _judge(text, three)
+        check(name, code == 0 and not res.unknown and len(res.warnings) == 1 and t.calls == []
+              and "not named" in res.warnings[0], (code, res.unknown, res.warnings))
+    for name, text, want in (
+            ("negation/not-waiting/red-when-reverted", "We are not waiting for #17 to merge.\n", 1),
+            ("negation/past-waiting/red-when-reverted", "We were waiting for #17 to merge.\n", 1),
+            ("cue/neither-nor-warns/red-when-reverted", "Neither #16 nor #17 is still open.\n", 1),
+            ("negation/present-perfect-not-only-warns/red-when-reverted",
+             "We have not only been waiting for #17 to merge.\n", 1),
+            ("cue/no-pending-prs-warns/red-when-reverted", "There are no pending PRs.\n", 2)):
+        red = _without_negation(lambda: _judge(text, three)[0])
+        check(name, red == want, red)
+    code, res, _t = _with_steps_removed({"apostrophe"}, lambda: _judge("We\u2019d been waiting for #17 to merge.\n",
+                                                                         three))
+    check("negation/curly-past-perfect-warns/red-when-reverted", code == 1 and len(res.hard) == 1,
+          (code, res.hard))
 
 
 def _self_test():
@@ -1400,11 +1643,12 @@ def _self_test():
         return 1
     print("SELF-TEST PASS: check_pending_pr_claims {} checks over synthetic responses: each of the {} "
           "grammar rules binds its example to a merged pull request (finding or warning), "
-          "passes it when open, is cannot-evaluate when unreadable, leaves its no-flag twin alone and "
-          "stops binding with that rule removed; the listed reference spellings, Markdown structures, "
-          "negated and past lead-ins, historical spans and ambiguous phrases are exercised on both sides; "
-          "wording outside those rows is not claimed to be covered (see the contract's residuals)".format(
-              len(EXECUTED), len(PATTERNS)))
+          "passes it when open, is cannot-evaluate when unreadable and leaves its no-flag twin alone, and "
+          "with that rule removed its example loses that finding or warning (another rule may still "
+          "warn on it); the listed reference spellings, Markdown structures, cue rows, historical spans "
+          "and ambiguous phrases are exercised by the named rows, not all of them with a twin; a prose "
+          "grammar cannot be complete, and wording outside those rows is not claimed to be covered (see "
+          "the contract's residuals)".format(len(EXECUTED), len(PATTERNS)))
     return 0
 
 
@@ -1420,21 +1664,88 @@ def _self_test_adapters(tempfile, contextlib, io):
             '[[surface]]\npath = "NOTES.md"\nformat = "markdown"\nrepository = "origin"\nrole = "source"\n'
             '[[surface]]\npath = "sub/LOG.md"\nformat = "markdown"\nrepository = "origin"\nrole = "source"\n')
         (root / "NOTES.md").write_text("PR #17 remains pending.\n")
-        blobs = {":NOTES.md": b"Nothing current here.\n"}
+        oid = "a" * 40
+        blobs = {oid: b"Nothing current here.\n"}
+        index = {"NOTES.md": "100644 {} 0\tNOTES.md\0".format(oid)}
 
         def fake_git(_root, args):
             if args[:2] == ["diff", "--cached"]:
                 return 0, b"NOTES.md\0"
+            if args[0] == "ls-files":
+                return 0, index.get(args[-1], "").encode()
             return (0, blobs[args[2]]) if args[2] in blobs else (128, b"")
 
         sink = io.StringIO()
         with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
             got = run_staged(root, FakeTransport({(REPO, 17): "merged"}), _origin_ok, fake_git)
         check("staged/uses-staged-bytes", got == 0, (got, sink.getvalue()))
-        blobs[":NOTES.md"] = b"Fix is waiting for\n#17 to merge.\n"
+        blobs[oid] = b"Fix is waiting for\n#17 to merge.\n"
         with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
             got = run_staged(root, FakeTransport({(REPO, 17): "merged"}), _origin_ok, fake_git)
         check("staged/complete-unit-evaluated", got == 1, got)
+
+        # A declared surface staged as a symlink (mode 120000; its blob is the link target's path) or
+        # as an unmerged entry is cannot-evaluate, as a non-regular declared file is in --all.
+        link_oid = "b" * 40
+        blobs[link_oid] = b"REAL.md"
+        index["NOTES.md"] = "120000 {} 0\tNOTES.md\0".format(link_oid)
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            got = run_staged(root, FakeTransport({(REPO, 17): "merged"}), _origin_ok, fake_git)
+        check("staged/symlink-entry-refused", got == 2 and "120000" in sink.getvalue(), (got, sink.getvalue()))
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            got = _with_globals({"REGULAR_INDEX_MODES": REGULAR_INDEX_MODES + ("120000",)},
+                                lambda: run_staged(root, FakeTransport({(REPO, 17): "merged"}), _origin_ok, fake_git))
+        check("staged/symlink-entry-refused/red-when-reverted", got == 0, got)
+        index["NOTES.md"] = "".join("100644 {} {}\tNOTES.md\0".format(oid, stage) for stage in (1, 2, 3))
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            got = run_staged(root, FakeTransport({(REPO, 17): "merged"}), _origin_ok, fake_git)
+        check("staged/unmerged-entry-refused", got == 2, got)
+        index["NOTES.md"] = "100755 {} 0\tNOTES.md\0".format(oid)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            got = run_staged(root, FakeTransport({(REPO, 17): "merged"}), _origin_ok, fake_git)
+        check("staged/executable-regular-entry-read", got == 1, got)
+
+        # The draft is opened once and its type checked on that descriptor: a draft swapped for a
+        # symlink just after a path-based type check (simulated by an os.lstat that swaps it) is not
+        # followed, because no path-based check precedes the open.
+        draft_path, secret = root / "swap-draft.md", root / "swap-secret.md"
+        draft_path.write_bytes(b"draft bytes\n")
+        secret.write_bytes(b"secret bytes\n")
+        real_lstat = os.lstat
+        swapped = []
+
+        def swapping_lstat(path, *args, **kwargs):
+            result = real_lstat(path, *args, **kwargs)
+            if not swapped and Path(path) == draft_path:
+                swapped.append(path)
+                os.unlink(draft_path)
+                os.symlink(secret, draft_path)
+            return result
+        os.lstat = swapping_lstat
+        try:
+            got = _read_bytes(draft_path, "swap-draft.md")
+        except InputError as exc:
+            got = str(exc)
+        finally:
+            os.lstat = real_lstat
+        check("input/draft-type-checked-on-descriptor", got == b"draft bytes\n", got)
+        os.unlink(draft_path)
+        os.symlink(secret, draft_path)
+        try:
+            got = _read_bytes(draft_path, "swap-draft.md")
+        except InputError as exc:
+            got = str(exc)
+        check("input/draft-symlink-refused", isinstance(got, str) and "not a regular file" in got, got)
+        os.unlink(draft_path)
+        os.mkfifo(draft_path)
+        try:
+            got = _read_bytes(draft_path, "swap-draft.md")
+        except InputError as exc:
+            got = str(exc)
+        check("input/draft-fifo-refused-without-blocking", isinstance(got, str) and "not a regular file" in got,
+              got)
+        os.unlink(draft_path)
 
         target = root / "NOTES.md"
         before = target.read_bytes()
