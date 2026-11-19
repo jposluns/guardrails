@@ -490,6 +490,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_standards_currency.py",
     "tools/check_standards_urls_live.py",
     "tools/check_version_monotonicity.py",
+    "tools/ci_build_bash.py",
     "tools/ci_site_scope.py",
     "tools/conformance.py",
     "tools/doctor.py",

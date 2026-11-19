@@ -1199,6 +1199,22 @@ ALLOWLIST = (
         "backlog": "GD-123",
     },
     {
+        "side": "ci-only",
+        "identity": "tools/ci_build_bash.py --build",
+        "reason": (
+            "The bash 5.3 build, which runs only on the explicit --build, "
+            "installs into RUNNER_TEMP and writes GITHUB_PATH, which only a CI "
+            "runner provides; it gives the hooks behaviour self-test a bash "
+            "the runner image need not ship, in the generated surfaces job "
+            "and in each git-fixture-env config lane shard job (host patch), "
+            "whose lanes rerun that self-test as a roster member. The local "
+            "runner builds nothing: that self-test, and the config lanes that "
+            "rerun it, use the host's bash and fail below 5.3, and only the "
+            "build script's offline self-test runs locally."
+        ),
+        "backlog": "GD-123",
+    },
+    {
         "side": "local-only",
         "identity": "opf/tools/opf.py --self-test-group core",
         "reason": (
