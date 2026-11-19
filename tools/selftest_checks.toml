@@ -2026,9 +2026,12 @@ expected-check-ids = [
   "temp/rename-after-marker-unlink",
   # Removal fails closed: a root whose pin failed is left behind and reported, nothing at its path removed;
   # an rmdir that removed a swapped-in replacement is reported (not success) with the root's marker put
-  # back; and a marker that exists but cannot be read is kept and reported, never deleted.
+  # back; an rmdir that fails because another actor removed the empty root and put a nonempty entry at
+  # its name is reported (not success) with that entry kept; and a marker that exists but cannot be read
+  # is kept and reported, never deleted.
   "temp/pin-failure-left-unremoved",
   "temp/rmdir-swap-reported",
+  "temp/rmdir-replacement-kept",
   "temp/unreadable-marker-kept",
   "temp/own-root-removed",
   # ---------- the self-test entry point hands the caller's environment back ----------

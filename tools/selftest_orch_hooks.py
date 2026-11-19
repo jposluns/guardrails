@@ -6552,6 +6552,45 @@ def _temp_root_rmdir_swap_case(tmp):
             [os.path.basename(path) for path in removed], problems, sorted(os.listdir(parent)))
 
 
+def _temp_root_rmdir_replacement_case(tmp):
+    """Pin a stale marked root as a run pins its own, then remove it with remove_root and that pin while,
+    at the final rmdir of the root's name (after its name was last checked), another actor removes the
+    by then empty pinned root and puts a nonempty directory (holding keep.txt) at its name, so that
+    rmdir fails with ENOTEMPTY. Returns (how remove_root ended, whether its result names the root and
+    says another entry was left at its name, the replacement's keep.txt or None when it is gone)."""
+    parent = tmp / "rmdir-replacement"
+    parent.mkdir()
+    root = parent / (_TMPROOT_PREFIX + "rmdirreplace")
+    _make_marked_root(root)
+    pin = _selftest_tmproot.pin_root(root)
+    real_rmdir = os.rmdir
+    fired = []
+
+    def replacing_rmdir(path, *args, **kwargs):
+        if os.fsdecode(path) == root.name and not fired:
+            fired.append(True)
+            real_rmdir(str(root))
+            os.mkdir(root)
+            (root / "keep.txt").write_text("replacement", encoding="utf-8")
+        return real_rmdir(path, *args, **kwargs)
+
+    os.rmdir = replacing_rmdir
+    try:
+        try:
+            result = ("returned", _selftest_tmproot.remove_root(root, pin))
+        except Exception as exc:  # noqa: BLE001  an escaping failure is this row's failure
+            result = ("raised", type(exc).__name__)
+    finally:
+        os.rmdir = real_rmdir
+        pin.close()
+    try:
+        kept = (root / "keep.txt").read_text(encoding="utf-8")
+    except OSError:
+        kept = None
+    return (result[0], isinstance(result[1], str) and str(root) in result[1]
+            and "now names another entry" in result[1], kept)
+
+
 def _temp_root_unreadable_marker_case(tmp):
     """Pin a stale marked root whose marker is at mode 0000 (it exists but cannot be read), then remove it
     with remove_root and that pin while the root's final rmdir fails (injected, matched by the root's
@@ -6649,6 +6688,14 @@ def _temp_root_pinning_cases(tmp):
     # reports success and leaves an unmarked survivor that every sweep skips.
     check("temp/rmdir-swap-reported", _temp_root_rmdir_swap_case(tmp),
           ("returned", True, True, [_TMPROOT_PREFIX + "rmdirswap-renamed"], [], []))
+
+    # temp/rmdir-replacement-kept: at the root's final rmdir (after its name was last checked) another
+    # actor removes the empty pinned root and puts a nonempty directory at its name, so that rmdir fails
+    # with ENOTEMPTY. The pinned root is gone, but remove_root must not report success: it must report
+    # the root (naming it, another entry left at its name) and leave the replacement and its file
+    # untouched. A removal that asks only the held descriptor reports success over the replacement.
+    check("temp/rmdir-replacement-kept", _temp_root_rmdir_replacement_case(tmp),
+          ("returned", True, "replacement"))
 
     # temp/unreadable-marker-kept: a root whose marker exists but cannot be read (mode 0000) and whose
     # final rmdir would fail. remove_root must keep the marker (never delete a marker it could not save)
