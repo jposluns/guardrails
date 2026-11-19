@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "43ac21e68a1caab7ae2c67a53ed2d3a8e495b48f96fa5b3b8a273db96b9abdd3"
+tree-sha256 = "bd317ab68771c2044dfd15f9a97e2ee8ea50c173388083f6c683b0d2c96673be"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4152,8 +4152,8 @@ sha256 = "50ba7641dfc3dcdae1618dbfc7398ce8402f57574ed7279081d5e041be28abbd"
 
 [[sources]]
 path = "tools/_selftest_tmproot.py"
-bytes = 23000
-sha256 = "7d366a9e6cf2d38f0dd67ab2e656b4a9cda416233ff98c50627e796dab6bc9ff"
+bytes = 24677
+sha256 = "2ee067432add1d231ec5c6e30fcf17045fe1b34e7fb11ff425c89101dc770e70"
 
 [[sources]]
 path = "tools/_site_markup.py"
@@ -4747,13 +4747,13 @@ sha256 = "59f6155486925ab9adea0da0203964283937c0dc7543bcfba335d4ac0820279e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 2843882
-sha256 = "dfc04292b67870d3640d6259d7a4b43f75b9962565271d1d43dbc7244c5abcd9"
+bytes = 2848830
+sha256 = "2fe46da333c79b25ce97518a6df9a9366fdb71ac77de45d9603cc4f14a25f637"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 285044
-sha256 = "69af0a5b25c38828f0ee9cf6d0142bbb2824bd6b18bdc0afc37486d1bd2ed274"
+bytes = 285411
+sha256 = "e03105bf9a42437d4720fcd4b131d8a5e8d3bb3ec35ff3eec21ca0df9a4437cb"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -4792,8 +4792,8 @@ sha256 = "5db515bd671b5573e258cb3548903af302b6ac98b00f7a5ef1287cfbadf88304"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 1293116
-sha256 = "da0547ffb4f1f39af2bc8fa17ba0f6eb165715f27dd55e582ff992c513791a6e"
+bytes = 1302471
+sha256 = "0a225dcd5fa9b85ffbb3f25c4567e52f1722e1a0e62c17586d9f95306892c8e5"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"

@@ -57,6 +57,7 @@ import stat
 import subprocess
 import tempfile
 import shutil
+import signal
 import socket
 import threading
 import time
@@ -5800,14 +5801,18 @@ _GONE_PID = 2 ** 22 + 7
 # beside) raises a sentinel, so the run stops at its first step. argv[3] adds injections, comma-separated:
 # "removal" makes os.rmdir fail on the root (matched by its name, so a removal relative to a parent
 # descriptor fails too: an empty root that cannot go, so its marker must be written back), and "restore"
-# makes the finally's restore of the registry probe raise a second sentinel. The child records each
+# makes the finally's restore of the registry probe raise a second sentinel, "sweepstuck" makes os.unlink
+# fail on every file named _SWEEP_STUCK_NAME (a stale root the sweep cannot remove), and "hang" makes the
+# setup step print one _TEMP_KILL_TAG line (this process's identifier and the roots made) and then sleep,
+# so the parent can kill the run for real (temp/killed-run-recovered). The child records each
 # marker's bytes and modification time as written, and prints one tagged JSON line: the name of the
 # exception that came out (None when none did), how many roots were made, those still present, those of
 # them still holding a marker, those whose marker still has exactly the bytes and modification time it
 # was written with, and the run's temp/own-root-removed failure lines.
 _TEMP_SETUP_TAG = "TEMP-SETUP-RESULT "
+_TEMP_KILL_TAG = "TEMP-KILL-READY "
 _TEMP_SETUP_CHILD = (
-    "import errno, json, os, shutil, sys, tempfile, types\n"
+    "import errno, json, os, shutil, sys, tempfile, time, types\n"
     "from pathlib import Path\n"
     "sys.path.insert(0, sys.argv[1])\n"
     "base, modes = sys.argv[2], set(filter(None, sys.argv[3].split(',')))\n"
@@ -5841,6 +5846,18 @@ _TEMP_SETUP_CHILD = (
     "def failing_scrub():\n"
     "    raise InjectedSetupFailure('injected setup failure')\n"
     "suite.scrub_git_environment = failing_scrub\n"
+    "if 'sweepstuck' in modes:\n"
+    "    real_unlink = os.unlink\n"
+    "    def failing_unlink(path, *args, **kwargs):\n"
+    "        if os.path.basename(os.fsdecode(path)) == suite._SWEEP_STUCK_NAME:\n"
+    "            raise PermissionError(errno.EPERM, 'injected removal failure', os.fsdecode(path))\n"
+    "        return real_unlink(path, *args, **kwargs)\n"
+    "    os.unlink = failing_unlink\n"
+    "if 'hang' in modes:\n"
+    "    def hanging_scrub():\n"
+    "        print('" + _TEMP_KILL_TAG + "' + json.dumps({'pid': os.getpid(), 'made': made}), flush=True)\n"
+    "        time.sleep(3600)\n"
+    "    suite.scrub_git_environment = hanging_scrub\n"
     "if 'removal' in modes:\n"
     "    real_rmdir = os.rmdir\n"
     "    def failing_rmdir(path, *args, **kwargs):\n"
@@ -5873,24 +5890,76 @@ _TEMP_SETUP_CHILD = (
 def _temp_setup_child(tmp, name, modes, prepare=None):
     """Run _TEMP_SETUP_CHILD with the injections modes (a comma-separated string) under a fresh base
     directory tmp/name; prepare, when given, is called with that base first and returns extra child
-    arguments. Returns (its result object, or a description of why there is none; its stderr). A root
-    the child leaves is removed here afterwards, so a failing row does not itself leave one."""
+    arguments. Returns (its result object, or a description of why there is none; its stderr; its
+    stdout). A root the child leaves is removed here afterwards, so a failing row does not itself leave
+    one."""
     base = tmp / name
     base.mkdir()
     extra = prepare(base) if prepare is not None else []
-    stderr = ""
+    stderr = stdout = ""
     try:
         proc = subprocess.run([sys.executable, "-I", "-B", "-c", _TEMP_SETUP_CHILD,
                                str(Path(__file__).resolve().parent), str(base), modes] + extra,
                               capture_output=True, text=True, timeout=300)
-        stderr = proc.stderr
+        stderr, stdout = proc.stderr, proc.stdout
         lines = [line for line in proc.stdout.splitlines() if line.startswith(_TEMP_SETUP_TAG)]
         got = (json.loads(lines[0][len(_TEMP_SETUP_TAG):]) if len(lines) == 1
                else {"no-single-result-line": proc.returncode, "stderr": proc.stderr[-2000:]})
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         got = {"child-error": str(exc)}
     shutil.rmtree(base, ignore_errors=True)
-    return got, stderr
+    return got, stderr, stdout
+
+
+def _temp_killed_run(tmp):
+    """Start _TEMP_SETUP_CHILD in mode "hang" under a fresh base directory, wait (at most 300 seconds) until
+    its run has made, marked and swept beside its root, SIGKILL it (so no finally runs) and reap it. Then
+    sweep the base twice: once now, and once as of a day and an hour later (sweep_stale's now), so the
+    real marker of the killed run is judged unaltered. Returns a result object (temp/killed-run-recovered);
+    the base is removed afterwards."""
+    base = tmp / "temp-killed-run"
+    base.mkdir()
+    ready = None
+    proc = subprocess.Popen([sys.executable, "-I", "-B", "-c", _TEMP_SETUP_CHILD,
+                             str(Path(__file__).resolve().parent), str(base), "hang"],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    timer = threading.Timer(300, proc.kill)
+    timer.start()
+    try:
+        for line in proc.stdout:
+            if line.startswith(_TEMP_KILL_TAG):
+                try:
+                    ready = json.loads(line[len(_TEMP_KILL_TAG):])
+                except ValueError:
+                    ready = None
+                break
+    finally:
+        timer.cancel()
+        proc.kill()
+        proc.wait()
+        proc.stdout.close()
+    out = {"returncode": proc.returncode}
+    made = ready.get("made") if isinstance(ready, dict) else None
+    if not (isinstance(made, list) and len(made) == 1):
+        out["ready"] = ready
+        shutil.rmtree(base, ignore_errors=True)
+        return out
+    root = made[0]
+    try:
+        record = json.loads(Path(root, _selftest_tmproot.MARKER).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = {}
+    out["marker_names_killed_run"] = (record.get("pid") == proc.pid == ready.get("pid")
+                                      and record.get("suite") == _TMPROOT_SUITE)
+    swept_now = _selftest_tmproot.sweep_stale(_TMPROOT_SUITE, _TMPROOT_PREFIX, (str(base),))
+    out["kept_while_recent"] = [[os.path.basename(path) for path in swept_now[0]], len(swept_now[1])]
+    later = time.time() + _selftest_tmproot.STALE_SECONDS + 3600
+    swept_later = _selftest_tmproot.sweep_stale(_TMPROOT_SUITE, _TMPROOT_PREFIX, (str(base),), now=later)
+    out["removed_once_stale"] = [[os.path.basename(path) for path in swept_later[0]] == [
+        os.path.basename(root)], len(swept_later[1])]
+    out["left"] = sorted(os.listdir(str(base)))
+    shutil.rmtree(base, ignore_errors=True)
+    return out
 
 
 class _InjectedAllocationFailure(OSError):
@@ -5930,15 +5999,17 @@ def _entry_restore_partial_allocation(tmp, name, call, fail_at):
 def _temp_root_cases(tmp):
     """The temporary-root ownership rows: a setup failure after this suite's root is made removes it and
     keeps its own failure visible; a root that survives removal is reported, fails the run and keeps its
-    marker; a failed probe restore still removes the root; the run sweeps only its root's own directory;
-    an entry-restore allocation that fails removes the directories made before it; and the stale-root
-    sweep removes only a stale marked root of this suite, never on a non-finite or non-standard marker
-    time, a FIFO marker or an undecidable owner, repairs a locked directory, and retries a root whose
-    removal stopped part way; and removal through pinned descriptors never follows a root replaced after
+    marker; a failed probe restore still removes the root; the run sweeps only its root's own directory,
+    reports a stale root it cannot remove on stdout (never stderr) and goes on; a run killed for real
+    leaves a root a later sweep recovers; an entry-restore allocation that fails removes the directories
+    made before it; and the stale-root sweep removes only a stale marked root of this suite, never on a
+    non-finite or non-standard marker time, a FIFO marker or an undecidable owner, repairs a locked
+    directory and a marker-only root that lost owner write, and retries a root whose removal stopped
+    part way; and removal through pinned descriptors never follows a root replaced after
     it was checked, and reports a marker it could not copy or write back while keeping it whole
     (_temp_root_pinning_cases)."""
     # temp/failed-setup-cleans-root: in a child, since the run changes the process environment.
-    got, _stderr = _temp_setup_child(tmp, "temp-setup-failure", "")
+    got, _stderr, _stdout = _temp_setup_child(tmp, "temp-setup-failure", "")
     check("temp/failed-setup-cleans-root", got,
           {"raised": "InjectedSetupFailure", "made": 1, "left": [], "marked": [], "marker_intact": [],
            "base_entries": [], "own_root_failures": []})
@@ -5949,7 +6020,7 @@ def _temp_root_cases(tmp):
     # neither. The survivor must still hold its marker, with exactly the bytes and modification time it
     # was written with (an empty or truncated marker, or a fresh time, is not the one written), so a
     # later sweep can recognise and retry it.
-    got, stderr = _temp_setup_child(tmp, "temp-removal-failure", "removal")
+    got, stderr, _stdout = _temp_setup_child(tmp, "temp-removal-failure", "removal")
     left = got.get("left") or []
     check("temp/failed-removal-reported",
           (got.get("raised"), got.get("made"), len(left),
@@ -5962,7 +6033,7 @@ def _temp_root_cases(tmp):
 
     # temp/probe-restore-failure-removes-root: restoring the registry probe raises in the finally. The
     # nested finally must still remove the root, and the restore failure must come out.
-    got, _stderr = _temp_setup_child(tmp, "temp-restore-failure", "restore")
+    got, _stderr, _stdout = _temp_setup_child(tmp, "temp-restore-failure", "restore")
     check("temp/probe-restore-failure-removes-root", got,
           {"raised": "InjectedRestoreFailure", "made": 1, "left": [], "marked": [], "marker_intact": [],
            "base_entries": [], "own_root_failures": []})
@@ -5978,11 +6049,40 @@ def _temp_root_cases(tmp):
         _make_marked_root(elsewhere / (_TMPROOT_PREFIX + "stale-elsewhere"))
         return [str(elsewhere)]
 
-    got, _stderr = _temp_setup_child(tmp, "temp-sweep-beside", "", stale_beside_and_elsewhere)
+    got, _stderr, _stdout = _temp_setup_child(tmp, "temp-sweep-beside", "", stale_beside_and_elsewhere)
     check("temp/sweep-only-root-parent",
           (got.get("raised"), got.get("made"), got.get("left"), got.get("base_entries"),
            sorted(os.listdir(elsewhere))),
           ("InjectedSetupFailure", 1, [], [], [_TMPROOT_PREFIX + "stale-elsewhere"]))
+
+    # temp/sweep-problem-not-stderr: a stale root beside the run's root that the sweep cannot remove (an
+    # injected unlink failure) is another run's leftover. It must be reported on stdout, naming it, and
+    # the run must go on to its next setup step (the injected scrub failure) and remove its own root;
+    # stderr must stay empty, since the execution gate faults a run on any stderr byte, so a report there
+    # would fault every later run in that directory until someone removed the root.
+    def stuck_beside(base):
+        stuck = base / (_TMPROOT_PREFIX + "stuck-beside")
+        _make_marked_root(stuck)
+        (stuck / "fixture" / _SWEEP_STUCK_NAME).write_text("x", encoding="utf-8")
+        return []
+
+    got, stderr, stdout = _temp_setup_child(tmp, "temp-sweep-stuck", "sweepstuck", stuck_beside)
+    note = "SELF-TEST NOTE: stale-root sweep: could not remove the temporary root "
+    check("temp/sweep-problem-not-stderr",
+          (got.get("raised"), got.get("made"), got.get("left"), got.get("base_entries"), stderr,
+           [os.path.basename(line[len(note):].split(" ", 1)[0]) for line in stdout.splitlines()
+            if line.startswith(note)]),
+          ("InjectedSetupFailure", 1, [], [_TMPROOT_PREFIX + "stuck-beside"], "",
+           [_TMPROOT_PREFIX + "stuck-beside"]))
+
+    # temp/killed-run-recovered: a real run, killed with SIGKILL after it made and marked its root, leaves
+    # that root with the marker it wrote (naming the killed process). A sweep keeps it while it is recent
+    # and removes it, with no problem, once it is a day old (judged through sweep_stale's now, so the
+    # killed run's own marker is not altered); nothing is left. Every other sweep row builds its marker by
+    # hand, so only this row fails when the marker a run really writes is not one a sweep can recover.
+    check("temp/killed-run-recovered", _temp_killed_run(tmp),
+          {"returncode": -signal.SIGKILL, "marker_names_killed_run": True, "kept_while_recent": [[], 0],
+           "removed_once_stale": [True, 0], "left": []})
 
     # temp/partial-allocation-cleans-earlier-roots: the second of the probe child's four allocations
     # fails, so the first, made before any guard was entered in the old code, must be gone.
@@ -6026,25 +6126,43 @@ def _temp_root_cases(tmp):
     # a non-standard constant or as an overflowing standard number), an integer too large for a float, or
     # a non-standard constant anywhere in the marker must keep the root, never skip the age test. Each
     # case has its own directory and sweep, so one case that makes the sweep raise cannot mask another.
+    # Each row also checks each guard on its own, so a revert of one guard fails every row whose input
+    # reaches that guard, not only the row where no other guard stands behind it: the marker reader must
+    # reject a non-standard constant (None), and the age test, given the value that constant stands for
+    # (or the overflowing number's value) directly in a record that is otherwise stale, must keep the
+    # root (False). A creation time of +Infinity reads as the future, so the age test keeps it with or
+    # without the finite guard; that row's age part cannot fail on a revert of that guard.
     old = time.time() - _selftest_tmproot.STALE_SECONDS - 3600
-    for check_id, case, created in (
-            ("temp/sweep-keeps-created-nan", "created-nan", "NaN"),
-            ("temp/sweep-keeps-created-infinity", "created-infinity", "Infinity"),
-            ("temp/sweep-keeps-created-negative-infinity", "created-negative-infinity", "-Infinity"),
-            ("temp/sweep-keeps-created-overflow", "created-overflow", "-1e999"),
-            ("temp/sweep-keeps-created-huge-int", "created-huge-int", "1" + "0" * 400),
+    for check_id, case, created, value, rejected in (
+            ("temp/sweep-keeps-created-nan", "created-nan", "NaN", float("nan"), True),
+            ("temp/sweep-keeps-created-infinity", "created-infinity", "Infinity", float("inf"), True),
+            ("temp/sweep-keeps-created-negative-infinity", "created-negative-infinity", "-Infinity",
+             float("-inf"), True),
+            ("temp/sweep-keeps-created-overflow", "created-overflow", "-1e999", float("-inf"), False),
+            ("temp/sweep-keeps-created-huge-int", "created-huge-int", "1" + "0" * 400, 10 ** 400, False),
             ("temp/sweep-keeps-nonstandard-constant", "nonstandard-constant",
-             '{}, "note": NaN'.format(repr(old)))):
+             '{}, "note": NaN'.format(repr(old)), None, True)):
         parent = tmp / ("nonfinite-" + case)
         parent.mkdir()
-        _make_marked_root(parent / (_TMPROOT_PREFIX + case), created_text=created)
+        root = parent / (_TMPROOT_PREFIX + case)
+        _make_marked_root(root, created_text=created)
+        read = _temp_root_read_marker(root)
         try:
             removed = _selftest_tmproot.sweep_stale(_TMPROOT_SUITE, _TMPROOT_PREFIX, (str(parent),))[0]
             swept = ("removed", [os.path.basename(path) for path in removed])
         except Exception as exc:  # noqa: BLE001  a sweep that raises is this row's failure, not the run's
             swept = ("raised", type(exc).__name__)
-        check(check_id, (swept, sorted(os.listdir(parent))),
-              (("removed", []), [_TMPROOT_PREFIX + case]))
+        judged = None
+        if value is not None:
+            record = {"suite": _TMPROOT_SUITE, "pid": _GONE_PID, "host": socket.gethostname(),
+                      "created": value}
+            try:
+                judged = _selftest_tmproot._stale_record(record, old, _TMPROOT_SUITE, socket.gethostname(),
+                                                         time.time())
+            except Exception as exc:  # noqa: BLE001  an age test that raises is this row's failure
+                judged = "raised " + type(exc).__name__
+        check(check_id, (swept, sorted(os.listdir(parent)), read is None, judged),
+              (("removed", []), [_TMPROOT_PREFIX + case], rejected, None if value is None else False))
 
     # temp/sweep-repairs-unreadable-dir: a stale root holding a directory left at mode 0000 (a run killed
     # while a fixture directory was locked) is removed in one sweep, by granting the owner access first.
@@ -6062,6 +6180,28 @@ def _temp_root_cases(tmp):
     check("temp/sweep-repairs-unreadable-dir",
           ([os.path.basename(path) for path in removed], len(problems), left),
           ([_TMPROOT_PREFIX + "locked"], 0, []))
+
+    # temp/marker-only-root-repaired: a root that holds only its marker and has itself lost owner write
+    # (mode 0500) gives the emptying step nothing to fail on, so the repair must also follow a failure to
+    # copy or delete the marker. The sweep must remove a stale such root in one sweep, and remove_root (the
+    # path a run's own cleanup takes) must remove another, each with no problem reported.
+    parent = tmp / "marker-only-sweep"
+    parent.mkdir()
+    swept_root = parent / (_TMPROOT_PREFIX + "markeronly")
+    own_root = tmp / (_TMPROOT_PREFIX + "markeronly-own")
+    for path in (swept_root, own_root):
+        _make_marked_root(path)
+        shutil.rmtree(str(path / "fixture"))
+        os.chmod(str(path), 0o500)
+    removed, problems = _selftest_tmproot.sweep_stale(_TMPROOT_SUITE, _TMPROOT_PREFIX, (str(parent),))
+    own_result = _selftest_tmproot.remove_root(own_root)
+    for path in (swept_root, own_root):
+        if os.path.isdir(str(path)):
+            os.chmod(str(path), 0o700)
+    check("temp/marker-only-root-repaired",
+          ([os.path.basename(path) for path in removed], len(problems), sorted(os.listdir(parent)),
+           own_result, os.path.lexists(str(own_root))),
+          ([_TMPROOT_PREFIX + "markeronly"], 0, [], None, False))
 
     # temp/partial-removal-retried: the first sweep cannot delete one file inside a stale root (an
     # injected unlink failure that permission repair cannot lift). It must report the root and leave it
@@ -6279,6 +6419,16 @@ def _make_marked_root(path, suite=_TMPROOT_SUITE, pid=_GONE_PID, host=None, crea
         mtime = old if marker_mtime is None else marker_mtime
         os.utime(marker, (mtime, mtime))
     os.utime(path, (old, old))
+
+
+def _temp_root_read_marker(root):
+    """The marker reader's result for root (_selftest_tmproot._read_marker through a descriptor of root):
+    None when it rejects the marker, else (the record, the marker's modification time)."""
+    fd = os.open(str(root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        return _selftest_tmproot._read_marker(fd)
+    finally:
+        os.close(fd)
 
 
 # The child of temp/partial-removal-retried and temp/fifo-marker-rejected: it imports
@@ -13873,10 +14023,14 @@ def _main_isolated(report_path=None):
         # Recover the roots of earlier runs that were killed before their finally ran: only this suite's
         # own marked roots, older than a day, whose owner process is gone (tools/_selftest_tmproot.py), and
         # only in the directory this run's root was made in, so a run confined to one temporary directory
-        # never sweeps another (temp/sweep-only-root-parent). This run's own root has a live owner.
+        # never sweeps another (temp/sweep-only-root-parent). This run's own root has a live owner. A stale
+        # root it cannot remove is reported on stdout and the run goes on: it is another run's leftover,
+        # and on stderr it would fault every later run through the execution gate (any stderr byte is a
+        # fault) until someone removed it (temp/sweep-problem-not-stderr). A root of this run's own that
+        # cannot be removed still fails this run (temp/own-root-removed, temp/failed-removal-reported).
         _swept = _selftest_tmproot.sweep_stale(_TMPROOT_SUITE, _TMPROOT_PREFIX, (str(tmp.parent),))
         for _sweep_problem in _swept[1]:
-            print("SELF-TEST NOTE: stale-root sweep: {}".format(_sweep_problem), file=sys.stderr)
+            print("SELF-TEST NOTE: stale-root sweep: {}".format(_sweep_problem))
         os.environ["XDG_STATE_HOME"] = str(tmp / "xdg")  # hermetic default state root
         # Hermetic registry scope: an inherited opt-in AIQT_ORCH_REQUIRE_REGISTRY would turn every no-registry
         # allow below into a deny; the registry-required checks set and restore it themselves.

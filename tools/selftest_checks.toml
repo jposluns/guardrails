@@ -1990,11 +1990,15 @@ expected-check-ids = [
   "temp/partial-allocation-cleans-earlier-roots",
   "temp/partial-allocation-cleans-earlier-mutant-roots",
   "temp/stale-marked-root-swept",
-  # The run sweeps only its root's own directory; a non-finite, overflowing or non-standard
-  # marker time keeps the root; a locked directory is repaired and removed; a removal that stops part way
-  # keeps the marker so the next sweep retries; a FIFO marker is rejected without blocking; and an owner
-  # whose /proc entry cannot be read reads as alive.
+  # The run sweeps only its root's own directory; a stale root it cannot remove is reported on stdout,
+  # never stderr, and the run goes on; a run killed by SIGKILL leaves a root a later sweep recovers; a
+  # non-finite, overflowing or non-standard marker time keeps the root (the reader and the age test each
+  # checked); a locked directory, and a root holding only its marker that has lost owner write, are
+  # repaired and removed; a removal that stops part way keeps the marker so the next sweep retries; a FIFO
+  # marker is rejected without blocking; and an owner whose /proc entry cannot be read reads as alive.
   "temp/sweep-only-root-parent",
+  "temp/sweep-problem-not-stderr",
+  "temp/killed-run-recovered",
   "temp/sweep-keeps-created-nan",
   "temp/sweep-keeps-created-infinity",
   "temp/sweep-keeps-created-negative-infinity",
@@ -2002,6 +2006,7 @@ expected-check-ids = [
   "temp/sweep-keeps-created-huge-int",
   "temp/sweep-keeps-nonstandard-constant",
   "temp/sweep-repairs-unreadable-dir",
+  "temp/marker-only-root-repaired",
   "temp/partial-removal-retried",
   "temp/fifo-marker-rejected",
   "temp/undecidable-owner-alive",

@@ -38,9 +38,12 @@ not available, or the link fails, the marker is written back instead to a tempor
 (every short write continued, a write that makes no progress treated as an error) and renamed into
 place, so a partly written marker never takes the marker's name. A marker that cannot be written back
 either way is an explicit failure in remove_root's result, never an exception, and such a root (left
-unmarked) is skipped by later sweeps and must be removed by hand. Before giving up, removal adds owner
-read, write and search permission to the directories of the tree that this user owns (a run killed
-while a fixture directory sat at mode 0000 leaves one that cannot be entered) and tries once more.
+unmarked) is skipped by later sweeps and must be removed by hand. When removal stops before the marker
+is deleted (emptying the root, copying the marker or deleting it fails), it adds owner read, write and
+search permission to the directories of the tree that this user owns, the root included (a run killed
+while a fixture directory sat at mode 0000 leaves one that cannot be entered, and a root that has lost
+owner write cannot lose even its marker), and tries once more. A root whose final rmdir fails is not
+retried: that needs write permission on the parent, which is outside the tree and is never changed.
 
 The marker is opened without blocking and without following a symbolic link, and checked with fstat
 to be a regular file before anything is read, so a FIFO or other special file named as the marker is
@@ -66,7 +69,11 @@ Residuals (known and not handled here):
 - tools/_entry_restore_selftest.py still removes its directories with ignore_errors, so a directory
   it fails to remove is not reported there.
 - The plan's temp/failed-test-cleans-root is not a row of its own, and the hooks suite's
-  (temp-failed-setup-cleans-root) is a failure line, not a registered check.
+  (temp-failed-setup-cleans-root), (temp-setup-child-confined), (temp-sweep-only-root-parent) and
+  (temp-sweep-problem-not-stderr) are failure lines, not registered checks.
+- The row that kills a real run (temp/killed-run-recovered) judges the killed process's identifier as
+  gone just after reaping it; a new process given that identifier in between would keep the root and
+  fail the row.
 
 Imported only by a self-test; nothing here runs on a production path."""
 
@@ -336,41 +343,53 @@ def _restore_marker(dir_fd, saved, copy):
 def _remove_pinned(parent_fd, name, fd, expect):
     """Remove the directory fd, pinned as name in the pinned directory parent_fd and matching expect,
     its marker last (the module docstring). Returns None when it is gone, else the error that stopped
-    the removal (never raises an OSError)."""
+    the removal (never raises an OSError). A removal that stops before the marker is deleted (emptying
+    the root, copying the marker or deleting it fails) is retried once after owner access is granted
+    to the tree, so a root that has lost owner write is repaired even when it holds only its marker."""
+    error, retry = _remove_attempt(parent_fd, name, fd, expect)
+    if retry:
+        _grant_owner_access(fd)
+        error = _remove_attempt(parent_fd, name, fd, expect)[0]
+    return error
+
+
+def _remove_attempt(parent_fd, name, fd, expect):
+    """One removal of the pinned directory fd (_remove_pinned). Returns (None when it is gone, else the
+    error that stopped it; whether it stopped before the marker was deleted and a retry after
+    permission repair may succeed)."""
     error = _clear(fd, True)
     if error is not None:
-        _grant_owner_access(fd)
-        error = _clear(fd, True)
-    if error is not None:
-        return error
+        return error, True
     saved = _read_marker_bytes(fd)
     copy = None
     if saved is not None:
         try:
             copy = _marker_copy(fd, saved)
         except OSError as exc:
-            return "its marker could not be copied ({}), so the marker was kept".format(exc)
+            return "its marker could not be copied ({}), so the marker was kept".format(exc), True
     try:
         try:
             _check_name(parent_fd, name, expect)
             os.unlink(MARKER, dir_fd=fd)
         except FileNotFoundError:
             pass
+        except _Replaced as exc:
+            return exc, False
         except OSError as exc:
-            return exc
+            return exc, True
         try:
             _check_name(parent_fd, name, expect)
             os.rmdir(name, dir_fd=parent_fd)
         except FileNotFoundError:
-            return None
+            return None, False
         except OSError as exc:
             if saved is None:
-                return exc
+                return exc, False
             failed = _restore_marker(fd, saved, copy)
             if failed is None:
-                return exc
-            return "{}; its marker could not be written back ({})".format(exc, failed)
-        return None
+                return exc, False
+            return "{}; its marker could not be written back ({})".format(exc, failed), False
+        return None, False
     finally:
         if copy is not None:
             os.close(copy)
@@ -462,7 +481,12 @@ def _stale(dir_fd, suite, host, now):
     read = _read_marker(dir_fd)
     if read is None:
         return False
-    record, marker_mtime = read
+    return _stale_record(read[0], read[1], suite, host, now)
+
+
+def _stale_record(record, marker_mtime, suite, host, now):
+    """Whether a marker record (a dict) with modification time marker_mtime names one of suite's stale
+    roots on host at time now (the module docstring's tests, past reading the marker)."""
     pid, created = record.get("pid"), record.get("created")
     if record.get("suite") != suite or record.get("host") != host:
         return False
