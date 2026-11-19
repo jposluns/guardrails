@@ -1,0 +1,240 @@
+# Fit assessment records for the NIST AI Risk Management Framework 1.0. Schema and definitions:
+# RUBRIC.md in this folder. Own words only; no framework text is reproduced.
+
+[[row]]
+rule-path = ".aiqt/core/rules/progr-decision.md"
+rule-slug = "decision-classification-before-enacting"
+rule-blob = "9ee5e892ac5076036728b82f990a1ec34551e521"
+framework = "nist-airmf"
+id = "MAP 3.5"
+current-fit = "tight"
+edition = "1.0 (NIST AI 100-1)"
+source = "NIST-AI-100-1--AI-Risk-Management-Framework-1.0--full-text.md"
+source-sha256 = "6fb8de85e764bfc8f60065baa47697adc93b39d780fa3cc6d431378f332e7a3b"
+locator = "MAP function, subcategory MAP 3.5"
+text-location = "lines 1240 to 1242"
+edition-check = "match"
+boundary = "decisions the assistant could enact, and which of them go to a human"
+core = "The organisation has a way for people to oversee the AI system; that way is set out, written down and checked for whether it works, consistently with the policies the governance function issues."
+covers = [
+  "defines an oversight process: each decision is classified as the assistant's, the maintainer's, or blocked",
+  "the classification is recorded before acting",
+  "the rule text itself documents the process",
+]
+omits = [
+  "assessment of whether the oversight process works",
+  "a link to organisational policies set by the governance function",
+  "processes for human oversight of AI systems other than the assistant, such as an AI product the organisation builds or runs: the entry's object is human oversight of the AI system, and the rule sets a process for the assistant alone (the whole of the object, met for one AI system only)",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "B"
+proposed = "broad"
+review-state = "assessed"
+conventions = [2, 3]
+rationale = "Reading a pack rule as a process (convention 2) and the AI system as including the assistant (convention 3), the rule defines and documents an oversight process, which carries out the core. Nothing in it assesses the process or ties it to governance policy, and it sets oversight for the assistant alone, not for every AI system the organisation has, so it is broad under B."
+assumptions = [
+  "a pack rule counts as a defined and documented process (convention 2); if it does not, both labels are broad",
+  "the AI system to be overseen includes the assistant whose decisions the rule classifies (convention 3); if it means only the product being built, both labels are broad",
+  "convention 3 is engaged at question (c) of its ordered test: the entry's object, an AI system, is a class that takes in AI software of every kind, so question (a) does not answer; the entry does not act only where the assistant would not be, so question (b) does not answer; and the rule's boundary is the assistant's own decisions",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/progr-decision.md"
+rule-slug = "decision-classification-before-enacting"
+rule-blob = "9ee5e892ac5076036728b82f990a1ec34551e521"
+framework = "nist-airmf"
+id = "GOVERN 3.2"
+current-fit = "tight"
+edition = "1.0 (NIST AI 100-1)"
+source = "NIST-AI-100-1--AI-Risk-Management-Framework-1.0--full-text.md"
+source-sha256 = "6fb8de85e764bfc8f60065baa47697adc93b39d780fa3cc6d431378f332e7a3b"
+locator = "GOVERN function, subcategory GOVERN 3.2"
+text-location = "lines 1030 to 1031"
+edition-check = "match"
+boundary = "decision rights between the assistant and the human maintainer"
+core = "The organisation's policy and procedure both set out what people and what AI are each charged with, and keep those two sets of duties distinct, for two objects: the configurations in which humans and AI work together, and the oversight of AI systems."
+covers = [
+  "setting out the duties (the entry's first verb) for one human and AI configuration, the assistant working with its maintainer: the rule names three kinds of decision right, the assistant's own, the maintainer's, and blocked",
+  "keeping them distinct (the entry's second verb) for that configuration: every decision is placed in exactly one of those kinds, and the placement is recorded before acting",
+  "a recorded maintainer ruling outranks a predicted one, so the human's part cannot be taken over by the assistant's guess, which sets out part of the maintainer's role in overseeing the assistant",
+]
+omits = [
+  "roles and responsibilities for human and AI configurations other than the assistant with its maintainer, such as those of an AI product the organisation builds or runs (the first object, beyond the one configuration the rule governs)",
+  "roles and responsibilities for the oversight of AI systems (the second object): who oversees an AI system, what each overseeing role must do, such as monitor, review or step in, and how those duties are split among people; the rule names only which decisions go to the maintainer, for the assistant alone",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "B"
+proposed = "broad"
+review-state = "assessed"
+conventions = [2, 3]
+rationale = "The statement has two verbs, setting out the human and AI duties and keeping them distinct, and two objects, human and AI configurations and the oversight of AI systems. On the readings of conventions 2 and 3 stated below, the rule carries out both verbs for one configuration, the assistant with its maintainer, which is tight under A. Under B, read over the whole control, it leaves out every other configuration and sets out oversight roles only as far as routing the maintainer's decisions, so it is broad; the B label holds on every reading of every open convention."
+assumptions = [
+  "a pack rule counts as one of the policies and procedures the entry asks for (convention 2); if it does not, both labels are broad",
+  "the AI in the entry's human and AI configurations includes the assistant the rule governs (convention 3); if it means only the product being built, both labels are broad",
+  "convention 3 is engaged at question (c) of its ordered test: the entry names AI and AI systems in general terms, a class that takes in AI software of every kind, so question (a) does not answer; question (b) does not answer; and the rule's boundary is the assistant's own decision rights",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/trust-human-oversight.md"
+rule-slug = "human-oversight-and-autonomy-threshold"
+rule-blob = "e2f24af72cb683c4b723a5eeb73c9c7717ed51a0"
+framework = "nist-airmf"
+id = "MAP 3.5"
+current-fit = "tight"
+edition = "1.0 (NIST AI 100-1)"
+source = "NIST-AI-100-1--AI-Risk-Management-Framework-1.0--full-text.md"
+source-sha256 = "6fb8de85e764bfc8f60065baa47697adc93b39d780fa3cc6d431378f332e7a3b"
+locator = "MAP function, subcategory MAP 3.5"
+text-location = "lines 1240 to 1242"
+edition-check = "match"
+boundary = "the autonomy threshold for the assistant's actions"
+core = "The organisation has a way for people to oversee the AI system; that way is set out, written down and checked for whether it works, consistently with the policies the governance function issues."
+covers = [
+  "defines an oversight process: an autonomy threshold set by consequence and reversibility",
+  "holds for a human when in doubt",
+  "the rule text itself documents the process",
+]
+omits = [
+  "assessment of whether the oversight process works",
+  "a link to organisational policies set by the governance function",
+  "processes for human oversight of AI systems other than the assistant, such as an AI product the organisation builds or runs: the entry's object is human oversight of the AI system, and the rule sets a process for the assistant alone (the whole of the object, met for one AI system only)",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "B"
+proposed = "broad"
+review-state = "assessed"
+conventions = [2, 3]
+rationale = "Same readings of conventions 2 and 3 as the decision classification row: an oversight process for the assistant is defined and documented, but not assessed, not tied to governance policy and not set for any other AI system."
+assumptions = [
+  "a pack rule counts as a defined and documented process (convention 2); if it does not, both labels are broad",
+  "the AI system to be overseen includes the assistant whose autonomy the rule bounds (convention 3); if it means only the product being built, both labels are broad",
+  "convention 3 is engaged at question (c) of its ordered test, as in the decision classification MAP 3.5 row: an AI system is not a kind of software the assistant is by its nature under question (a), question (b) does not answer, and the rule's boundary is the assistant's own actions",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/trust-human-oversight.md"
+rule-slug = "human-oversight-and-autonomy-threshold"
+rule-blob = "e2f24af72cb683c4b723a5eeb73c9c7717ed51a0"
+framework = "nist-airmf"
+id = "GOVERN 3.2"
+current-fit = "tight"
+edition = "1.0 (NIST AI 100-1)"
+source = "NIST-AI-100-1--AI-Risk-Management-Framework-1.0--full-text.md"
+source-sha256 = "6fb8de85e764bfc8f60065baa47697adc93b39d780fa3cc6d431378f332e7a3b"
+locator = "GOVERN function, subcategory GOVERN 3.2"
+text-location = "lines 1030 to 1031"
+edition-check = "match"
+boundary = "responsibility between the assistant and the human for consequential actions"
+core = "The organisation's policy and procedure both set out what people and what AI are each charged with, and keep those two sets of duties distinct, for two objects: the configurations in which humans and AI work together, and the oversight of AI systems."
+covers = [
+  "setting out the duties (the entry's first verb) for one human and AI configuration, the assistant working with a human: high consequence, irreversible or outward facing actions are the human's to authorize, and the rest the assistant may do alone",
+  "keeping them distinct (the entry's second verb) for that configuration: the threshold between the two is set by consequence and reversibility, not by confidence; a doubtful case holds for the human and a timeout never picks the risky path",
+  "the human's part in overseeing the assistant is set out as authorizing consequential actions and taking the cases in doubt (part of the second object)",
+]
+omits = [
+  "roles and responsibilities for human and AI configurations other than the assistant with the human it works for, such as those of an AI product the organisation builds or runs (the first object, beyond the one configuration the rule governs)",
+  "roles and responsibilities for the oversight of AI systems beyond one human approval point for the assistant (the rest of the second object): who oversees an AI system, what each overseeing role must do beyond authorizing actions, such as monitor, review or step in, and how those duties are split among people",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "B"
+proposed = "broad"
+review-state = "assessed"
+conventions = [2, 3]
+rationale = "The statement has two verbs, setting out the human and AI duties and keeping them distinct, and two objects, human and AI configurations and the oversight of AI systems. On the readings of conventions 2 and 3 stated below, the autonomy threshold carries out both verbs for consequential actions in one configuration, which is tight under A. Under B, read over the whole control, it leaves out every other configuration and sets out oversight roles only as one approval point, so it is broad; the B label holds on every reading of every open convention."
+assumptions = [
+  "a pack rule counts as one of the policies and procedures the entry asks for (convention 2); if it does not, both labels are broad",
+  "the AI in the entry's human and AI configurations includes the assistant the rule governs (convention 3); if it means only the product being built, both labels are broad",
+  "convention 3 is engaged at question (c) of its ordered test, as in the decision classification GOVERN 3.2 row: AI named in general terms is not a kind of software the assistant is by its nature under question (a), question (b) does not answer, and the rule's boundary is the assistant's own actions",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-seci-human-authorization.md"
+rule-slug = "human-authorization"
+rule-blob = "07c8e68e15bb0a70c6b3adeb7151c5ec46410a1c"
+framework = "nist-airmf"
+id = "MAP 3.5"
+current-fit = "tight"
+edition = "1.0 (NIST AI 100-1)"
+source = "NIST-AI-100-1--AI-Risk-Management-Framework-1.0--full-text.md"
+source-sha256 = "6fb8de85e764bfc8f60065baa47697adc93b39d780fa3cc6d431378f332e7a3b"
+locator = "MAP function, subcategory MAP 3.5"
+text-location = "lines 1240 to 1242"
+edition-check = "match"
+boundary = "consequential actions that need human authorization"
+core = "The organisation has a way for people to oversee the AI system; that way is set out, written down and checked for whether it works, consistently with the policies the governance function issues."
+covers = [
+  "defines an oversight process: consequential actions need explicit, informed human authorization",
+  "holds when authorization is missing or ambiguous",
+  "the rule text itself documents the process",
+]
+omits = [
+  "assessment of whether the oversight process works",
+  "a link to organisational policies set by the governance function",
+  "processes for human oversight of AI systems other than the assistant, such as an AI product the organisation builds or runs: the entry's object is human oversight of the AI system, and the rule sets a process for the assistant alone (the whole of the object, met for one AI system only)",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "B"
+proposed = "broad"
+review-state = "assessed"
+conventions = [2, 3]
+rationale = "Same readings of conventions 2 and 3 as the other two MAP 3.5 rows: defined and documented for the assistant alone, not assessed or tied to governance policy."
+assumptions = [
+  "a pack rule counts as a defined and documented process (convention 2); if it does not, both labels are broad",
+  "the AI system to be overseen includes the assistant whose actions the rule gates (convention 3); if it means only the product being built, both labels are broad",
+  "convention 3 is engaged at question (c) of its ordered test, as in the other two MAP 3.5 rows: an AI system is not a kind of software the assistant is by its nature under question (a), question (b) does not answer, and the rule's boundary is the assistant's own consequential actions",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/quali-high-assurance-verification.md"
+rule-slug = "high-assurance-verification"
+rule-blob = "4a151205dd11a83bf13b477cf001b2843429e0fd"
+framework = "nist-airmf"
+id = "MEASURE 1.3"
+current-fit = "tight"
+edition = "1.0 (NIST AI 100-1)"
+source = "NIST-AI-100-1--AI-Risk-Management-Framework-1.0--full-text.md"
+source-sha256 = "6fb8de85e764bfc8f60065baa47697adc93b39d780fa3cc6d431378f332e7a3b"
+locator = "MEASURE function, subcategory MEASURE 1.3"
+text-location = "lines 1340 to 1345"
+edition-check = "match"
+boundary = "each substantive change before it integrates"
+core = "The system is evaluated, and its evaluations revised, at set intervals with people who stand apart from its building: staff experts who were not its front line builders, or outside assessors. Where the organisation's appetite for risk calls for it, those evaluations also draw on specialists, users, AI actors from outside the building team, and the communities the system affects."
+covers = [
+  "an independent pass, briefed to refute rather than confirm, checks every substantive change; the rule does not say whether a person or another AI model runs that pass",
+]
+omits = [
+  "people in the independent role: the entry asks for staff experts or outside assessors, and the rule's pass may be run by a model (see convention 7)",
+  "evaluation of the system as a whole at set intervals, rather than of single changes (the regular part of the entry's assessments)",
+  "updating the assessments themselves over time, beyond checking each change once",
+  "input from specialists, users, outside AI actors and affected communities, which the entry makes conditional (see convention 5)",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "B"
+proposed = "broad"
+review-state = "assessed"
+conventions = [7, 9]
+rationale = "Independent review is the core of the entry, and the rule requires an independent pass on the work product, read here as acting on the AI system when the product is one (convention 9) and as able to fill the entry's role for people (convention 7). Under B the rule checks single changes, not the system at set intervals, so it is broad whatever the reading of convention 5, which is therefore not named."
+assumptions = [
+  "a rule whose independent pass checks every product the assistant changes, AI or not, acts on the AI system the entry is about, because AI products are among those it checks (convention 9); if an entry about an AI system is met only by a rule aimed at what makes a system AI, both labels are broad",
+  "an independent pass that another AI model may run can fill the entry's role for staff experts or outside assessors (convention 7); if the role needs a person, both labels are broad",
+  "convention 3 is not engaged, and question (d) of its ordered test is the one that answers: the entry's object, an AI system, is a class that takes in AI software of every kind, so question (a) does not answer; question (b) does not answer; and the rule's boundary is the change to the work product, not the assistant or its tools, so question (c) does not answer",
+  "convention 5 does not decide this row: the consultation element is conditional, but label-b is broad on the regular whole system assessment alone, so either reading of convention 5 gives the same labels",
+]
+assessor = "first-pass review"
+date = "2026-11-18"

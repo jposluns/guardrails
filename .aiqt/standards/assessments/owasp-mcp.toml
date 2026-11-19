@@ -1,0 +1,117 @@
+# Fit assessment records for the OWASP MCP Top 10. Schema and definitions: RUBRIC.md in this folder.
+# Own words only; no entry text is reproduced.
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-seci-guardrail-config-integrity.md"
+rule-slug = "guardrail-config-integrity"
+rule-blob = "08319037e55beb0931ade9d1477035a63839922a"
+framework = "owasp-mcp"
+id = "MCP02"
+current-fit = "tight"
+edition = "2025"
+source = "OWASP-MCP-Top-10-2025--full-text.md"
+source-sha256 = "f2f1c386d75ecef3d0eee2fcd931676bb6ef9dc4eaa050f40db2e3eee65e395b"
+locator = "MCP02:2025 Privilege Escalation via Scope Creep, description, exposure checklist, remediations 1 to 8 and example attack scenarios A to C"
+text-location = "entry from its start to its end at lines 178 to 259; description at lines 187 to 190; exposure checklist at lines 203 to 210, which the entry presents as conditions any one of which may make a deployment vulnerable, so it is part of the control under B; remediations at lines 213 to 238, with 3, 5 and 8 at lines 221 to 223, 227 to 229 and 236 to 238; attack scenarios at lines 241 to 250; the impact list at lines 194 to 200 and the references at lines 253 to 259 add no elements"
+edition-check = "match"
+boundary = "the configuration that constrains the assistant, and the scope the assistant has been granted"
+core = "Narrow or temporary permissions of an agent or tool grow over time, through convenience or drift, until the agent holds broad privileges it can use without human review."
+covers = [
+  "a widening of the assistant's own scope that the human did not ask for is surfaced for renewed approval, not used, which is an alert on a permission increase and an approval of it (the alert and approval parts of remediation 5, for the assistant's own scope)",
+  "a weakening change is never self applied and needs explicit human authorization, which separates the authority to grant from the actor (remediation 8)",
+  "the approval gate for elevation (the approval part of remediation 3)",
+  "a test change that would widen the assistant's own scope or weaken its own configuration takes effect only with human approval (exposure checklist condition 4, for changes to the assistant's own scope and configuration)",
+  "scopes an attacker adds to the agent through an exposed internal interface, which the human the assistant works for did not ask for, are surfaced for renewed approval rather than used by the agent (part of attack scenario B)",
+  "an admin scope written into the agent's manifest by someone else, which the human the assistant works for did not ask for, is surfaced for renewed approval rather than used (part of attack scenario C)",
+]
+omits = [
+  "least privilege design of each agent's permissions before deployment, with its intended actions written down and mapped to fine grained scopes (remediation 1); split by who grants the permissions: for the sub-agents the assistant starts and the tools it hands on to them, the assistant is the granting party, so designing those permissions is at the rule's layer, and the rule leaves it out, since it protects the configuration that constrains the assistant and the scope granted to the assistant, not the permissions the assistant grants; for every other agent, at another layer, since only the party that grants that agent's permissions can carry it out",
+  "permission policy written as code and enforced in the pipeline, rejecting configurations that break it (remediation 2); at another layer: only whoever runs the pipeline can carry it out",
+  "issuing time limited scopes and tokens for each session, revalidation of long running tasks, and just in time elevation, beyond the approval gate (the rest of remediation 3, and exposure checklist condition 3 on enforced expiry); at another layer: only whoever issues the agent's scopes and tokens can carry it out",
+  "a unique identity for each agent, credentials bound to the agent and its session, and token binding or attestation against reuse elsewhere (remediation 4, and exposure checklist condition 2 on shared accounts); at another layer: only the identity provider and the issuer of the credentials can carry it out",
+  "entitlement audits run on a schedule and on each change to find scope that has grown, and a written justification for each increase (the rest of remediation 5, most of it, and exposure checklist condition 6); the audits are split by who granted the permissions: for the sub-agents the assistant starts and the tools it hands on to them, the assistant is the granting party, so auditing those grants is at the rule's layer, and the rule leaves it out, since it surfaces a widening of the assistant's own scope only; for every other agent, at another layer, since only the party that grants those permissions holds the entitlement records the audits read; the written justification is a record of the change, split the same way: for the sub-agents the assistant starts and the tools it hands on to them, keeping that record is at the rule's layer, since the rubric's exception for the assistant as granting party covers keeping the records of the grants it makes, as the MCP07 row marks logging the assistant's own trust decisions, and the rule leaves it out; for every other agent, at another layer, since only the party that grants the permission and the approval process that records the justification hold it",
+  "runtime policy enforcement through a policy decision point (the first part of remediation 6); at another layer: only whoever runs the infrastructure can carry it out",
+  "safe execution sandboxes (part of the rest of remediation 6); at another layer: only whoever runs the execution environment can carry it out",
+  "holding the assistant's own tool calls to an action allowlist and asking for confirmation in several steps before a high impact operation, beyond protecting the allowlists and approval requirements that already constrain the assistant (the rest of remediation 6)",
+  "tracking and review of every permission change, linked to a change request, and tamper evident logs that tie each action to an agent identity and session (remediation 7, and exposure checklist conditions 1 and 5 on change logs and on attribution of actions to agents); the review of each change is split by who granted the permission: for the sub-agents the assistant starts and the tools it hands on to them, reviewing changes to the permissions the assistant grants is auditing those grants, at the rule's layer, and the rule leaves it out; for every other agent, at another layer, since only the party that grants the permissions can review changes to them; tracking each change and linking it to a change request is keeping the records of changes, split the same way: for the sub-agents the assistant starts and the tools it hands on to them, keeping the records of the grants the assistant makes and of changes to them is at the rule's layer, under the rubric's exception for the assistant as granting party, and the rule leaves it out; for every other agent, at another layer, since only the party that grants the permissions holds those records; and only whoever runs the log store can make it tamper evident against the agent that writes to it",
+  "approval gates before ad hoc test changes other than changes to the assistant's own scope or configuration are promoted to production (the rest of exposure checklist condition 4); split by who promotes the change: at another layer where someone other than the assistant promotes it, since only whoever runs the deployment pipeline can gate it there; at the rule's layer where the assistant itself promotes it, since holding its own action for human approval is an act it can carry out alone, and the rule holds only changes to its own scope or configuration for that approval",
+  "a temporary grant a person asked for that is never withdrawn, which the agent later uses to merge a crafted change that is then deployed automatically (attack scenario A); the rule surfaces only a widening the human did not ask for",
+  "a long lived token exposed in logs, the exposed internal interface that lets its holder add scopes, and the attacker's own use of that token (the rest of attack scenario B)",
+  "control over who may change agent manifests through internal tooling, including access gained by social engineering (the rest of attack scenario C)",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "B"
+proposed = "broad"
+review-state = "assessed"
+conventions = [4]
+rationale = "Surfacing an unrequested widening for renewed approval, and keeping the assistant from granting itself scope, directly interrupt scope creep. Under B, read over the whole control, the row is broad: attack scenario A is left out, scenarios B and C are met only in part, and most listed mitigations are left out, whatever layer they sit at (remediations 1, 2, 4 and 7, most of 3, 5 and 6, and exposure checklist conditions 1 to 3, 5 and 6, with condition 4 met only for the assistant's own scope and configuration). The B label holds on every reading of every open convention."
+assumptions = [
+  "a rule on the assistant's own guardrail configuration and granted scope can be tight to an entry whose main remediations act in the identity, policy and pipeline layers that grant and enforce MCP agent and tool permissions (convention 4); if it cannot, label-a is broad; label-b is broad on either reading",
+  "convention 3 is not engaged, and question (a) of its ordered test is the one that answers: the entry's object is an MCP agent or tool, and the assistant is itself one",
+  "each listed mitigation in omits is marked by the rubric's one layer test, the same way as in the MCP07 row: designing, granting, auditing and reviewing permissions, and keeping the records of permission changes and the justification for each increase, other than for the permissions the assistant grants to the sub-agents it starts and the tools it hands on to them, issuing and binding scopes, tokens and credentials, and running pipelines, policy points, sandboxes and log stores are at another layer; the assistant's own allowlist and confirmation steps, changes to its own scope, holding a change it promotes itself for approval, and designing, auditing and reviewing the permissions it grants to the sub-agents it starts, and keeping the records of those grants and of changes to them (as the MCP07 row marks logging the assistant's own trust decisions), are at the rule's layer; the rule does none of those four acts for its sub-agents",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-seci-inter-agent-trust.md"
+rule-slug = "inter-agent-trust"
+rule-blob = "4e3a51c611a2682ab65c15217f45c16faecca164"
+framework = "owasp-mcp"
+id = "MCP07"
+current-fit = "tight"
+edition = "2025"
+source = "OWASP-MCP-Top-10-2025--full-text.md"
+source-sha256 = "f2f1c386d75ecef3d0eee2fcd931676bb6ef9dc4eaa050f40db2e3eee65e395b"
+locator = "MCP07:2025 Insufficient Authentication and Authorization, description, exposure checklist, prevention guidance 1 to 7, attack scenarios 1 to 4, detection and immediate remediation"
+text-location = "entry from its start to its end at lines 666 to 791; description at lines 675 to 689; exposure checklist at lines 699 to 710, which the entry presents as conditions any one of which makes a system likely exposed, so it is part of the control under B; prevention guidance at lines 713 to 748; scenarios at lines 752 to 764, with 3 and 4 at lines 760 to 764; detection at lines 766 to 771; immediate remediation at lines 774 to 780; the impact list at lines 691 to 697 and the references and edit link at lines 782 to 791 add no elements"
+edition-check = "match"
+boundary = "messages and authority passed between orchestrator, peer and sub-agents"
+core = "Agents, tools and servers act without verified identity or proper authorization, so a caller can act with authority it was never given."
+covers = [
+  "agent identity is verified rather than assumed, which stops a spoofed agent (scenario 3) and keeps the assistant from trusting unverified caller identity (the third authorization flaw of the description, for the assistant as the trusting party)",
+  "a sub-agent inherits no authority and gets only the least tools it needs (scenario 4, and the first point of guidance 4)",
+  "an agent cannot grant privileges to itself or another agent, which keeps agents from acting beyond their intended privileges in that way (part of the first authorization flaw of the description)",
+  "an agent whose identity is not verified gets no authority from the assistant, which is denial by default of unrecognised agents in what the assistant itself accepts (part of the third point of guidance 2)",
+]
+omits = [
+  "mutual TLS between clients, agents and servers, short lived scoped tokens tied to a session, binding tokens to agent identity, and validation of every token on the server side (the rest of guidance 1, and exposure checklist conditions 1, 3 and 7 on mutual authentication, server side checks and tokens reused by other agents); at another layer: only whoever runs the servers and issues the tokens, keys and certificates can carry it out",
+  "role based or attribute based access control, evaluation of each request, and blocking unrecognised agents and scopes by default at the tools and servers (the rest of guidance 2, and exposure checklist condition 5); at another layer: only the party that enforces access to those tools and servers can carry it out",
+  "expiry, rotation and revocation policies for every token, and detecting and blocking replayed or duplicated tokens (guidance 3 apart from storage, and exposure checklist conditions 2 and 8 on shared, static or long lived tokens and on missing expiry and rotation); at another layer: only the issuer of the tokens and the servers that accept them can carry it out",
+  "secure storage of the tokens the assistant holds (the storage point of guidance 3)",
+  "splitting high privilege operations into separate workflows with human review, and keeping admin or system tokens out of development and shared contexts (the second and third points of guidance 4)",
+  "central identity and access management, federated identity for every action, and a central policy decision point (guidance 5); at another layer: only the organisation's identity provider and whoever runs the policy point can carry it out",
+  "logging every authentication attempt and authorization decision on the servers, detecting repeated failed logins, invalid tokens and token reuse across tenants, feeding those logs to central monitoring, and access logs that tie each agent action to the user behind it, so that who did what with what authority can be told (guidance 6, and exposure checklist condition 6 and its closing test); at another layer: only whoever runs the servers and the monitoring holds those decisions and logs",
+  "logging the assistant's own decisions to trust or refuse another agent (the part of guidance 6 that falls to the assistant as a party making trust decisions)",
+  "secure defaults on MCP endpoints: no guest or anonymous access, no public exposure of local test servers, and separate credentials per environment (guidance 7); at another layer: only whoever runs those endpoints can carry them out",
+  "missing or optional token validation, shared hard coded secrets, static credentials in configuration or logs, and weakly issued tokens (the insecure authentication variants of the description)",
+  "users acting beyond their intended privileges, and agents doing so by any means other than granting privileges or inheriting authority, such as using a scope no one checked (the rest of the first authorization flaw of the description)",
+  "access checks enforced only on the client side (the second authorization flaw of the description)",
+  "MCP servers and tools that are not the assistant trusting caller identity metadata no one verified (the rest of the third authorization flaw of the description, and exposure checklist condition 4)",
+  "tool endpoints that do not check permission scopes for each user or agent (the fourth authorization flaw of the description)",
+  "a stolen static token replayed against another server (scenario 1)",
+  "a test agent holding the same scope as production (scenario 2)",
+  "watching for tokens reused across agents or addresses, failed authentication followed by a privileged action that succeeds, a sudden rise in refused requests, and tokens used after they expire (detection points 1, 2, 4 and 5); at another layer: only whoever runs the servers and holds their logs can carry it out",
+  "watching for actions by unknown or unregistered agent identities (detection point 3): in the servers' logs at another layer, since only whoever runs the servers holds them; in the messages the assistant itself receives at the rule's layer, where the rule refuses to trust such an agent but does not detect or report it",
+  "revoking compromised or static tokens, rotating service credentials and giving each agent its own identity (immediate remediation points 1 and 2); at another layer: only whoever issues the tokens, credentials and identities can carry it out",
+  "turning on mutual TLS and strict binding of API keys (immediate remediation point 3); at another layer: only whoever runs the servers and issues the keys can carry it out",
+  "auditing the agents, tools and connectors already in place for excessive privileges, beyond giving a new sub-agent only the least tools it needs (immediate remediation point 4); split by who granted the privileges: for the sub-agents the assistant starts and the tools it hands on to them, the assistant is the granting party, so auditing those grants is at the rule's layer, and the rule limits each grant when it is made but does not audit grants already made; for every other agent, tool and connector, at another layer, since only the party that grants those privileges holds the entitlement records the audit reads",
+  "reviewing and patching authorization middleware so that it validates scopes (immediate remediation point 5); at another layer: only whoever runs the servers that hold that middleware can carry it out",
+  "address restrictions as a temporary compensating control (part of immediate remediation point 6); at another layer: only whoever runs the network or the servers can carry it out",
+  "manual approval of sensitive actions as a temporary compensating control (the rest of immediate remediation point 6)",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "B"
+proposed = "broad"
+review-state = "assessed"
+conventions = [4]
+rationale = "Verified identity and no inherited authority directly stop the spoofed agent and inherited token scenarios, on the reading of convention 4 stated below. Under B, read over the whole control, the row is broad: scenarios 1 and 2, the insecure authentication variants and most of the authorization flaws are left out, and so are most listed mitigations, whatever layer they sit at (guidance 1, 3, 5, 6 and 7, most of guidance 2 and 4, the detection points, the immediate remediation points and the exposure checklist conditions). The B label holds on every reading of every open convention."
+assumptions = [
+  "a rule acting on the messages and authority passed between agents can be tight to an entry whose main listed mitigations are checks on the server side and at the identity provider (convention 4); if it cannot, label-a is broad; label-b is broad on either reading",
+  "convention 3 is not engaged, and question (a) of its ordered test is the one that answers: the entry's object is MCP agents, tools and servers, and the assistant is itself an MCP client and agent",
+  "each listed mitigation in omits is marked by the rubric's one layer test, the same way as in the MCP02 row: issuing, binding, expiring, rotating and revoking tokens, keys and identities, granting and auditing privileges other than those the assistant grants to the sub-agents it starts, enforcing access and transport security at servers and networks, and keeping and watching server logs are at another layer; storing the tokens it holds, holding actions for human review, keeping powerful tokens out of shared context, logging its own trust decisions, watching the messages it receives, and auditing the privileges it has granted to the sub-agents it starts are at the rule's layer",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
