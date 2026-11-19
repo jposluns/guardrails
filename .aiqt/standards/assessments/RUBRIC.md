@@ -264,23 +264,25 @@ proposal, not a decision. A record names every convention that decides one of it
     the parent's sub-techniques, and grouping the sub-techniques by the `created-date` the release
     records for each, those created in 2021 repeat 48 of their parents' 92 links, those created in 2023
     repeat 6 of 14, in 2024 0 of 3, in 2025 17 of 26 and in 2026 2 of 22. The pattern is mixed, not a
-    steady fall with age: the 2025 sub-techniques repeat a larger share than the 2021 ones, and the 2024
-    and 2026 ones the smallest shares. The 2026 figure includes the three AML.T0034 sub-techniques, the
-    case in question, which repeat neither of their parent's two links; without them it is 2 of 16. Those
-    three were created on 2026-03-30 (line 1999 for AML.T0034.000), after the `modified-date` of
-    2025-12-23 that AML.M0004 and AML.M0019 both carry (lines 4864 and 5164), so the links missing from
-    them fit a gap in a new entry's links as well as they fit a deliberate choice. A `modified-date` says
-    little about when an entry was last looked at, since most entries share one: 26 of the 35 mitigations
-    carry 2025-12-23, and 170 of the 173 techniques carry 2026-05-27, the three AML.T0034 sub-techniques
-    among them. Against the reading taken, on the same dates: AML.M0019 was created on 2024-01-12 (line
-    5163), after the 11 sub-techniques created in 2021 of the parents it is linked to (AML.T0005,
-    AML.T0024 and AML.T0043), so if that date is when it entered the release, its links to those parents
-    were added while those sub-techniques existed. It is repeated on 1 of those 11, and on 1 of the 17
-    sub-techniques of all the parents it is linked to, while AML.M0004, created on 2023-04-12 (line
-    4863), is repeated on 6 of the same 11. Its absence from AML.T0034.000 then fits the way AML.M0019 is
-    linked across the release as well as it fits the sub-technique being new. The relations themselves
-    carry no dates, so when any one link was added cannot be told. This convention is engaged when a row
-    maps to a sub-technique whose parent has a linked mitigation that the sub-technique does not repeat.
+    steady fall from older sub-techniques to newer ones: the 2025 sub-techniques repeat a larger share
+    than the 2021 ones, and the 2024 and 2026 ones the smallest shares. The 2026 figure includes the
+    three AML.T0034 sub-techniques, the case in question, which repeat neither of their parent's two
+    links; without them it is 2 of 16. Those three were created on 2026-03-30 (line 1999 for
+    AML.T0034.000), after the `modified-date` of 2025-12-23 that AML.M0004 and AML.M0019 both carry
+    (lines 4864 and 5164), so the links missing from them fit a gap in a new entry's links as well as
+    they fit a deliberate choice. A `modified-date` says little about when an entry was last looked at,
+    since most entries share one: 26 of the 35 mitigations carry 2025-12-23, and 170 of the 173
+    techniques carry 2026-05-27, the three AML.T0034 sub-techniques among them. Against the reading
+    taken, on the same dates: AML.M0019 was created on 2024-01-12 (line 5163), after the 11
+    sub-techniques created in 2021 of the parents it is linked to (AML.T0005, AML.T0024 and AML.T0043),
+    so if that date is when it entered the release, its links to those parents were added while those
+    sub-techniques existed. It is repeated on 1 of those 11, and on 1 of the 17 sub-techniques of all the
+    parents it is linked to (1 of 14 without the three AML.T0034 sub-techniques), while AML.M0004,
+    created on 2023-04-12 (line 4863), is repeated on 6 of the same 11. AML.M0019's absence from
+    AML.T0034.000 then fits the way AML.M0019 is linked across the release as well as it fits the
+    sub-technique being new. The relations themselves carry no dates, so when any one link was added
+    cannot be told. This convention is engaged when a row maps to a sub-technique whose parent has a
+    linked mitigation that the sub-technique does not repeat.
 
 ## Record schema
 
