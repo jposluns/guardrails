@@ -1,0 +1,40 @@
+# .aiqt/pending-pr-claims.toml: the declared record surfaces of the stale pending-claim check
+# (tools/check_pending_pr_claims.py; contract in .aiqt/pending-pr-claims.md).
+#
+# A declared surface that is missing, unreadable or malformed is cannot-evaluate (exit 2), never a
+# pass. Undeclared files are not read. No private source path is declared here: a private backlog or
+# release-note source needs its own authorized declaration and host invocation.
+#
+# Keys per [[surface]]:
+#   path                 repo-relative file
+#   format               "toml-strings" (every decoded string value is a unit; comments are not read)
+#                        or "markdown" (paragraphs, list items, table cells and blockquotes are units;
+#                        fenced blocks are skipped)
+#   repository           "origin" (bare #N binds to the checkout's origin remote) or OWNER/REPO
+#   role                 "source" or "generated-view"
+#   generated-from       required for a generated-view: where corrections belong
+#   expected-repository  optional OWNER/REPO the origin must equal (confirmation only)
+#   status-column        markdown only: the table column whose `In progress (#N, ...)` cell asserts
+#                        open pull requests under review
+#   note                 optional free text
+schema-version = 1
+
+[limits]
+max-prs = 100
+call-timeout-seconds = 10
+deadline-seconds = 120
+
+[[surface]]
+path = "changelog.toml"
+format = "toml-strings"
+repository = "origin"
+role = "source"
+note = "The release text; CHANGELOG.md is generated from it by tools/gen_changelog.py."
+
+[[surface]]
+path = "TODO.md"
+format = "markdown"
+repository = "origin"
+role = "generated-view"
+generated-from = "the maintainer's private backlog (not in this repository); correct a finding there"
+status-column = "Status"

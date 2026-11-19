@@ -85,6 +85,14 @@ path = ".aiqt/opf-consumer-switch.toml"
 reason = "Repository-local switch list of this repository's own record readers under tools/, read by tools/check_record_readers.py; tracked, not shipped, like .aiqt/newtab.toml. An adopter has no such tools; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 
 [[exclusion]]
+path = ".aiqt/pending-pr-claims.toml"
+reason = "Repository-local declaration of this repository's record surfaces (changelog.toml and TODO.md) read by tools/check_pending_pr_claims.py; tracked, not shipped, like .aiqt/newtab.toml. An adopter declares its own surfaces; in a tree without this file the shipped tools/run_all_checks.sh pending-pr-claims-inputs gate exits 2 (cannot evaluate), as its cited-standards gate does there."
+
+[[exclusion]]
+path = ".aiqt/pending-pr-claims.md"
+reason = "Repository-local contract for the stale pending-claim check and its wiring in this repository (tools/check_pending_pr_claims.py); tracked, not shipped. Kept outside docs/ because tools/gen_site.py publishes every docs/**/*.md as a declared site page."
+
+[[exclusion]]
 path = ".aiqt/tracker-labels.toml"
 reason = "Repository-local adopter tracker-label shape configuration read by tools/check_internal_names.py (docs/tracker-labels.md); tracked, not shipped. Adopters own their roots (an absent file applies no extra shape), like .aiqt/newtab.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 

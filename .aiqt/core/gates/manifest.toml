@@ -407,6 +407,15 @@ class = "c"
 residue = "It checks that site/.well-known/security.txt and opf/site/.well-known/security.txt each exist as a regular file whose lines are exactly the 6 owner fields (Contact, Expires, Encryption, Policy, Preferred-Languages, Canonical) in that order, each once, with the owner's values and the Canonical URL of that root's own domain; a missing, unreadable, oversized, non-UTF-8 or not field-shaped file fails closed. It covers a recognizable SUBSET (class c, partial): it reads the repository only, so it does not show that Cloudflare serves the file, at that path, with a text/plain type, nor that the Contact, Encryption and Policy targets resolve, nor that the Expires date is still in the future at serving time. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
+id = "pending-pr-claims-inputs"
+script = "tools/check_pending_pr_claims.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = "Input validation and synthetic assurance only, not live lifecycle enforcement. In the Quality roster it runs its execution-reconciled self-test, whose pull request lifecycle responses are all synthetic, and --check-inputs, which checks that .aiqt/pending-pr-claims.toml has the declared shape and that every surface it declares (changelog.toml and TODO.md) is a readable regular UTF-8 file that parses, and counts candidate claims; a missing, unreadable, oversized or malformed declaration or surface fails closed. Neither reads pull request state, so a pass says nothing about whether a record still calls a merged or closed pull request pending or open: that judgement needs a --all --live, --draft or --staged --live run, which reads GitHub through gh and is wired to no workflow, scheduled job, draft applier or commit hook in this repository. It covers a recognizable SUBSET (class c, partial) even when run live: its phrase grammar misses unfamiliar paraphrases, pronouns and named backlog items, undeclared records are not read, and stacking and dependency wording only warn. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
 id = "selftest-removal"
 script = "tools/check_selftest_removal.py"
 rules = ["gatdis"]

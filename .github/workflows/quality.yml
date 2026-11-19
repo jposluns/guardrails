@@ -506,6 +506,17 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_headers.py
 
+      # Offline only: the self-test uses synthetic lifecycle responses and --check-inputs validates the
+      # declared record surfaces without reading pull request state, so this step says nothing about
+      # whether a record is current (.aiqt/pending-pr-claims.md; live reconciliation is not wired here).
+      - name: Pending pull request claims self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite pending-pr-claims-selftest
+
+      - name: Pending pull request claims inputs
+        shell: bash
+        run: python3 -I -B tools/check_pending_pr_claims.py --check-inputs
+
       - name: Render driver behaviour self-test
         shell: bash
         run: python3 -I -B tools/selftest_opf_render.py
