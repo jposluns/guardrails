@@ -66,7 +66,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
-from check_versions import _parse             # noqa: E402
+from check_versions import _parse, DEV_SUFFIX  # noqa: E402
 import gen_manifest                           # noqa: E402  the single shared release-row schema (QA #6)
 import _release_schema                        # noqa: E402  the ONE shared strict validator set
 from _release_schema import SchemaError       # noqa: E402  (round-2 findings 4)
@@ -474,6 +474,53 @@ def _regen_fixture_manifest(root, case, failures, env):
                         "(stderr: {})".format(case, gen.stderr.decode("utf-8", "replace").strip()[-300:]))
         return False
     return True
+
+
+def _strip_unreleased_table(text):
+    """Self-test setup: drop a top-level [unreleased] table (its header line through the line before the
+    next table header, or the end of the file) from changelog.toml text, leaving the cut-state source a
+    release candidate carries (RELEASING step 1 folds and deletes the table). Text-level, so the fixture
+    adds no TOML parse site; the caller checks that the regenerated VERSION is a bare X.Y.Z, so a table
+    this misses fails the fixture rather than passing silently."""
+    kept, skipping = [], False
+    for line in text.splitlines(keepends=True):
+        head = line.strip()
+        if head == "[unreleased]":
+            skipping = True
+            continue
+        if skipping and head.startswith("["):
+            skipping = False
+        if not skipping:
+            kept.append(line)
+    return "".join(kept).rstrip("\n") + "\n"
+
+
+# The generators whose outputs carry the tree version, in dependency order: VERSION and CHANGELOG.md, the
+# site pages (control strip), then the manifest, ROOT and announce snippet, which hash the others.
+_FIXTURE_VERSION_GENERATORS = ("tools/gen_changelog.py", "tools/gen_draft_site.py", "tools/gen_manifest.py")
+
+
+def _regen_fixture_version_outputs(repo, case, failures, env):
+    """Self-test setup: regenerate every version-bearing output of an archive-extracted fixture that is
+    already git-init'd and staged (gen_manifest enumerates the tracked set), running the fixture's OWN
+    generator copies from inside it, as reproduce_gate runs them, so the fixture stays internally
+    self-consistent. A nonzero generator exit is a fixture-setup failure: it appends a DISTINCT "fixture
+    setup" entry to `failures` (the child's stderr retained) and returns None, so the case never reaches
+    its verdict assertion. Returns the regenerated VERSION text on success."""
+    for script in _FIXTURE_VERSION_GENERATORS:
+        gen = subprocess.run(["python3", script], cwd=str(repo), capture_output=True, env=env)
+        if gen.returncode != 0:
+            failures.append("fixture setup ({}): {} exited {} while regenerating the version-bearing "
+                            "outputs; a fixture-setup failure FAILS the self-test rather than reaching the "
+                            "case's verdict (stderr: {})".format(
+                                case, script, gen.returncode,
+                                gen.stderr.decode("utf-8", "replace").strip()[-300:]))
+            return None
+    try:
+        return (repo / "VERSION").read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        failures.append("fixture setup ({}): cannot read the regenerated VERSION ({})".format(case, exc))
+        return None
 
 
 def _materialized_check(root, sha, commands_fn, what):
@@ -1281,6 +1328,15 @@ def _run_pre_tag_quiet(root, candidate_sha, qa_path, qa_sha256, first_pin, evide
         return run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence)
 
 
+def _run_pre_tag_captured(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
+    """run_pre_tag with its output captured: returns (exit code, stdout, stderr), so a case can require
+    the finding or refusal it tests rather than an exit code another rule could also produce."""
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence)
+    return rc, out.getvalue(), err.getvalue()
+
+
 # Re-entrancy guard for the finding-2 archive fail-closed regression, which runs self_test_main recursively
 # under a `git archive`-failing subprocess.run; the nested run must not re-enter that regression.
 _ARCHIVE_FAILCLOSED_REENTRANT = False
@@ -1955,34 +2011,104 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                     with tarfile.open(fileobj=io.BytesIO(arch.stdout), mode="r:") as tf:
                         tf.extractall(gcand)
                     # test-hermeticity: this candidate is GENESIS (zero-row releases, manifest genesis = true)
-                    # and asserts NO 1.0.0 release-order row, so its verdict (run_pre_tag auto-requiring first-
-                    # pin evidence, exit 1) is independent of the pack version: the committed archive tree is
-                    # internally self-consistent at whatever version it carries, so no version pin is needed
-                    # (and pinning it to 1.0.0 would leave a changelog release row against a zero-row releases
-                    # record, tripping the candidate's own reproduce checks to cannot-evaluate). It is version-
-                    # hermetic by construction; only fixtures that assert a fixed 1.0.0 row are pinned.
+                    # and asserts NO 1.0.0 release-order row, so no 1.0.0 pin is needed (pinning it to 1.0.0
+                    # would leave a changelog release row against a zero-row releases record, tripping the
+                    # candidate's own reproduce checks to cannot-evaluate); only fixtures that assert a fixed
+                    # 1.0.0 row are pinned. The verdict does depend on the tree STATE: between release cuts
+                    # HEAD is a development tree (VERSION and the manifest release-version X.Y.Z-dev, an open
+                    # changelog [unreleased]), and run_pre_tag's strict candidate-manifest read refuses that
+                    # exit 2 ("is a development version") before the first-pin auto-require this case tests.
+                    # So the archive is normalized to the cut state a real candidate carries (RELEASING step 1
+                    # leaves no [unreleased], so VERSION is the newest [[release]], a bare X.Y.Z): the table
+                    # is dropped and every version-bearing output is regenerated by the fixture's own
+                    # generators, keeping the tree internally self-consistent at whatever state HEAD is in.
+                    # The development refusal keeps its OWN case below, on a development tree derived from
+                    # this one, so each rule is tested by itself.
+                    gchangelog = gcand / "changelog.toml"
+                    gchangelog.write_text(_strip_unreleased_table(gchangelog.read_text(encoding="utf-8")),
+                                          encoding="utf-8")
+                    gcut = None
                     ok = all(subprocess.run(["git", "-C", str(gcand), *a], capture_output=True,
                                             env=_fresh_git_env()).returncode == 0
                              for a in (["init", "-q"],
-                                       ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "add", "-A"],
-                                       ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-q",
-                                        "-m", "genesis", "--no-verify"]))
+                                       ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "add", "-A"]))
                     if ok:
+                        gver = _regen_fixture_version_outputs(gcand, "genesis cut candidate", failures,
+                                                              _fresh_git_env())
+                        if gver is not None:
+                            gcut = _parse(gver[:-1]) if gver.endswith("\n") else None
+                            if gcut is None:
+                                failures.append("fixture setup (genesis cut candidate): the normalized "
+                                                "archive's VERSION {!r} is not a bare X.Y.Z, so the case "
+                                                "would not test a cut candidate".format(gver))
+                    if ok and gcut is not None:
+                        ok = all(subprocess.run(["git", "-C", str(gcand), *a], capture_output=True,
+                                                env=_fresh_git_env()).returncode == 0
+                                 for a in (["init", "-q"],
+                                           ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "add", "-A"],
+                                           ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit",
+                                            "-q", "-m", "genesis", "--no-verify"]))
+                    if ok and gcut is not None:
                         gsha = subprocess.run(["git", "-C", str(gcand), "rev-parse", "HEAD"],
                                               capture_output=True, text=True).stdout.strip()
                         gqa_body = ('candidate-sha = "{}"\n\n'.format(gsha) + "".join(
                             '[[family]]\nname = "{}"\nfinished-signal = true\nverdict = "PASS"\n'
                             'unresolved-blockers = 0\ntimestamps-utc = [100]\n\n'.format(n)
                             for n in FAMILIES))
-                        gqa = gcand / "qa.toml"
+                        # The QA object lives outside the candidate tree, so the development commit below
+                        # does not pick it up.
+                        gqa = tmp / "genesis-qa.toml"
                         gqa.write_text(gqa_body, encoding="utf-8")
                         gqa_sha = hashlib.sha256(gqa_body.encode("utf-8")).hexdigest()
                         # no --first-pin, no evidence: the genesis auto-require makes it exit 1 (REQUIRED),
-                        # where the pre-round-4 gate returned exit 0.
-                        rc = _run_pre_tag_quiet(gcand, gsha, str(gqa), gqa_sha, False, None)
-                        if rc != 1:
+                        # where the pre-round-4 gate returned exit 0. The REQUIRED finding must be the ONLY
+                        # finding, so no other rule failing the candidate can stand in for it.
+                        rc, gout, gerr = _run_pre_tag_captured(gcand, gsha, str(gqa), gqa_sha, False, None)
+                        if (rc != 1 or "first-pin: --evidence is REQUIRED" not in gout
+                                or "FAIL: 1 release-build finding(s) [pre-tag]" not in gout):
                             failures.append("genesis run_pre_tag without --first-pin must AUTO-REQUIRE "
-                                            "evidence and fail exit 1 (finding 5), got {}".format(rc))
+                                            "evidence and fail exit 1 (finding 5) with that as its only "
+                                            "finding, on a cut candidate at {}; got {} (stdout: {!r}; "
+                                            "stderr: {!r})".format(gver.strip(), rc, gout.strip()[-600:],
+                                                                   gerr.strip()[-300:]))
+                        # The development refusal, by itself: the same tree reopened for development
+                        # (RELEASING step 8: [unreleased] one patch above the newest release, every
+                        # version-bearing output regenerated) is refused exit 2 at the strict
+                        # candidate-manifest read, naming the development version, before the evidence
+                        # requirement or reproduce runs.
+                        gnext = "{}.{}.{}".format(gcut[0], gcut[1], gcut[2] + 1)
+                        with gchangelog.open("a", encoding="utf-8") as fh:
+                            fh.write('\n[unreleased]\nversion = "{}"\n'.format(gnext))
+                        dver = _regen_fixture_version_outputs(gcand, "genesis development candidate",
+                                                              failures, _fresh_git_env())
+                        if dver is not None and dver != gnext + DEV_SUFFIX + "\n":
+                            failures.append("fixture setup (genesis development candidate): the reopened "
+                                            "tree's VERSION is {!r}, not {!r}".format(
+                                                dver, gnext + DEV_SUFFIX + "\n"))
+                        elif dver is not None:
+                            if not all(subprocess.run(["git", "-C", str(gcand), *a], capture_output=True,
+                                                      env=_fresh_git_env()).returncode == 0
+                                       for a in (["-c", "user.name=t", "-c", "user.email=t@e.invalid",
+                                                  "add", "-A"],
+                                                 ["-c", "user.name=t", "-c", "user.email=t@e.invalid",
+                                                  "commit", "-q", "-m", "development", "--no-verify"])):
+                                errors.append("(finding 2) the genesis development candidate could not be "
+                                              "committed; the archive-backed development case cannot be "
+                                              "verified, so the self-test is cannot-evaluate (exit 2)")
+                            else:
+                                dsha = subprocess.run(["git", "-C", str(gcand), "rev-parse", "HEAD"],
+                                                      capture_output=True, text=True).stdout.strip()
+                                dwant = "candidate {}: release-version '{}' is a development version".format(
+                                    MANIFEST_REL, gnext + DEV_SUFFIX)
+                                rc, dout, derr = _run_pre_tag_captured(gcand, dsha, str(gqa), gqa_sha,
+                                                                       False, None)
+                                if rc != 2 or dwant not in derr:
+                                    failures.append("genesis run_pre_tag on a development candidate must be "
+                                                    "refused exit 2 naming {!r}; got {} (stdout: {!r}; "
+                                                    "stderr: {!r})".format(dwant, rc, dout.strip()[-300:],
+                                                                           derr.strip()[-300:]))
+                    elif ok:
+                        pass  # a fixture-setup failure is already recorded in `failures`
                     else:
                         errors.append("(finding 2) the genesis archive candidate could not be built "
                                       "(git init/add/commit failed); the archive-backed case cannot be "
@@ -2967,8 +3093,9 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
               "completeness on a real 3-tag repo (round-2 finding 7), the first-pin evidence bound to the "
               "candidate's AGENTS.md with a recomputed prefix-superset (round-3 finding 5), a strict-manifest "
               "check on every tagged/candidate manifest (round-4 finding 3), _show_bytes absent-vs-git-error "
-              "(round-4 finding 7), a genesis run_pre_tag auto-requiring first-pin evidence (round-4 finding "
-              "5), and a first-pin cannot-evaluate raising exit 2 (round-4 finding 4), all over "
+              "(round-4 finding 7), a genesis run_pre_tag on a cut candidate auto-requiring first-pin evidence "
+              "as its only finding (round-4 finding 5) and refusing the same tree reopened for development "
+              "exit 2, and a first-pin cannot-evaluate raising exit 2 (round-4 finding 4), all over "
               "RAW-materialized (no-worktree) candidate trees (round-4 finding 1); and the round-5 cases "
               "(dormancy needs zero tags AND zero rows with a lightweight/unrecorded tag flagged (finding "
               "2), a raw invalid-UTF-8 release tag exit 2 plus a _git_out decode boundary (finding 3), a "
