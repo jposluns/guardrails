@@ -149,10 +149,28 @@ marks and backticks elsewhere do not hide a claim (`PR` followed by a backticked
 still binds). A claim inside any other blockquote is cannot-evaluate until it is given a historical
 lead-in or moved out of the quote.
 
+Delimiters inside code spans are inert. Each text is given one code-span reading before any
+exemption is recognized (CommonMark backtick-run matching: a run of backticks opens a span that the
+next run of exactly the same length closes; a run with no such closer is literal backticks). Every
+exemption and link recognizer (HTML comments, strikethrough, historical lead-ins and their quoted
+spans, issue references, inline, reference and HTML links, autolinks) then runs only on the text
+outside code spans, so a comment opener in one code span and its closer in another, tildes inside
+code spans, an `issue` word or a lead-in inside a code span, or link brackets inside code spans
+exempt nothing, and the claim between them is read. A code span directly after a historical lead-in
+is still that lead-in's quoted span, and a real comment or strikethrough holding a code span is still
+exempt. The text inside a code span stays available to claim matching as before (a backticked
+`PR #17 is pending` is a claim), and the unevaluated-reference scan uses the same reading. One
+consequence: a number written in a code span after `issue` (`issue` then a backticked `#12`) is
+not an issue reference; it is read as a pull request.
+
 **Unevaluated references warn; they never pass silently.** Coverage is a set difference, so it does
 not depend on knowing what dropped a reference. The check takes the pull request references of the
 whole document, keyed by repository (or the surface default) and number, and removes those that reach
-a record unit the claim matcher evaluates (after the unit's normalization). Every reference left prints
+a record unit the claim matcher evaluates (after the unit's normalization). This is by design and
+does not change: the warning is keyed by pull request, not by occurrence, so one evaluated mention of
+a pull request suppresses the warning for every other dropped occurrence of that pull request in the
+same file (a `See #17.` line read as prose silences a `PR #17 is pending` that a comment, a fence or a
+reader gap dropped elsewhere in that file). Every reference left prints
 a `WARNING:` line naming the file, the line and the reference, and saying it was not evaluated. When
 the block context hid the line (a line of a fenced block, indented code, an HTML comment block or an
 inline comment across lines, the part of a prose line a comment cuts away, or a link reference
@@ -258,10 +276,19 @@ claim was found.
   a fence, heading, blockquote or list item, so a `-->` inside a code span there ends it early. A
   table header is recognised from the raw text of the line after it, even when that line is itself
   indented code. A paragraph that an inline comment interrupts across lines is joined around it; a
-  comment block between two lines ends the paragraph.
-- The unevaluated-reference warning is keyed by reference, not by claim: a dropped line naming a pull
-  request that an evaluated unit of the same file also names raises no warning (`PR #17 merged.` above
-  a plain fence holding `PR #17 is pending` is quiet), and a fence marked `example` or `history` is not
+  comment block between two lines ends the paragraph. The code-span reading is taken first and wins
+  over every other inline construct: CommonMark lets whichever starts first win, so text such as
+  `<!--` followed by a backtick, `-->` and a closing backtick is read here as an unclosed comment
+  opener and a code span, not as a comment. Backslash escapes before backticks are not read. Code
+  spans are read per record unit and per scanned line, so a code span that wraps across lines is a
+  code span in the joined unit but literal backticks in the line scan. The unit reading decides what
+  is evaluated and the line reading only adds warnings, so the two can disagree only by a warning.
+- The unevaluated-reference warning is keyed by reference, not by claim: one evaluated mention of a
+  pull request suppresses the warning for its other dropped occurrences in the same file, so a dropped
+  line naming a pull request that an evaluated unit of the same file also names raises no warning
+  (`PR #17 merged.` above a plain fence holding `PR #17 is pending` is quiet; so is `See #17.` above a
+  comment that hides `PR #17 is pending`). This is the documented design, not a defect; a claim-level
+  guarantee would need evaluated occurrences tracked, not keys. A fence marked `example` or `history` is not
   scanned at all. A bare `#17` and a qualified `owner/repo#17` are different keys, so one dropped and
   the other read still warns. Lines are scanned one at a time, so a strikethrough, historical span,
   link or HTML anchor split across the lines of one paragraph is read as its text on each line and can

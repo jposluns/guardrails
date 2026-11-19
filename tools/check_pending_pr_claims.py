@@ -37,7 +37,14 @@ a reader), is a WARNING naming the file, line and reference as not evaluated, an
 the classifier hid the line (no state read, exit 0 with no finding), so a dropped claim never passes
 silently. The documented exemptions alone are not scanned: a fenced block whose info string starts
 with `example` or `history`, a blockquote with a historical lead-in, and strikethrough, historical
-spans and single-line comments inside a line read in full.
+spans and single-line comments inside a line read in full. The warning is keyed by pull request, by
+design: one evaluated mention of a pull request suppresses it for that pull request's other dropped
+occurrences in the same file.
+
+Delimiters inside code spans are inert: each text is given one code-span reading (CommonMark
+backtick-run matching) before normalization, and every exemption and link recognizer (comments,
+strikethrough, historical spans, issue references, links) runs only on the text outside code spans,
+while the text inside them is still read for claims.
 
 RESIDUALS (disclosed; the full list is in the contract): a prose grammar cannot be complete, and this
 one is partial. The self-test covers only its rule and fix rows. Not caught: a claim before its
@@ -62,6 +69,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import bisect
 import errno
 import os
 import re
@@ -230,8 +238,8 @@ FENCE_OPEN_RE = re.compile(r"(`{3,}|~{3,})")
 # list item's content column), at which a fence opens or closes (CommonMark); a deeper line is
 # indented code, or paragraph text when a paragraph is open.
 FENCE_MAX_RELATIVE_INDENT = 3
-# An inline code span (CommonMark: a backtick run closed by a run of the same length).
-CODE_SPAN_RE = re.compile(r"(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)")
+# A maximal backtick run: an inline code span opens at one and closes at the next run of the same length.
+BACKTICK_RUN_RE = re.compile(r"`+")
 # A link reference definition ([label]: URL "title"); it is not record prose.
 LINK_DEFINITION_RE = re.compile(
     r" {0,3}\[([^\]]{1,999})\]:\s*<?([^\s<>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\s*$")
@@ -270,14 +278,20 @@ def _header_name(cell):
 
 def _resolve_reference_links(prose, definitions):
     """prose with each reference link whose label is defined in the document rewritten as the inline
-    link it stands for, so the markdown-link step reads its URL; an undefined one is left as text."""
+    link it stands for, so the markdown-link step reads its URL; an undefined one is left as text.
+    Brackets inside a code span are inert (code_spans), as to the markdown-link step."""
     def replace(match):
         bang, text, label = match.group(1), match.group(2), match.group(3)
         key = " ".join((label if label else text).split()).casefold()
         if key not in definitions:
             return match.group(0)
         return "{}[{}]({})".format(bang, text, definitions[key])
-    return REFERENCE_LINK_RE.sub(replace, prose) if definitions else prose
+    if not definitions:
+        return prose
+    flags = _code_flags(prose)
+    if flags is None:
+        return REFERENCE_LINK_RE.sub(replace, prose)
+    return _masked_sub(REFERENCE_LINK_RE, replace, prose, flags, True)[0]
 
 
 # The kinds block_context gives a Markdown line. The first five are never read: a blank line, a line
@@ -336,10 +350,45 @@ def _content_column(text, match):
     return len(text[:match.start(1)].expandtabs(4))
 
 
+def code_spans(text):
+    """[(start, end, inner_start, inner_end)] for the inline code spans of text, read as CommonMark reads
+    them: a backtick run opens a span that the next run of exactly the same length closes; a run with no
+    such closer is literal backticks, and the scan goes on after it. start and end bound the span with
+    its backticks, inner_start and inner_end its content. This is the one code-span reading: every
+    exemption recognizer (comments, strikethrough, historical spans, issue references, links) uses it,
+    so a delimiter inside a code span never opens or closes anything. Backslash escapes are not read."""
+    runs = [(match.start(), match.end()) for match in BACKTICK_RUN_RE.finditer(text)]
+    by_length = {}
+    for index, (start, end) in enumerate(runs):
+        by_length.setdefault(end - start, []).append(index)
+    spans, index = [], 0
+    while index < len(runs):
+        start, end = runs[index]
+        same = by_length[end - start]
+        later = bisect.bisect_right(same, index)
+        if later < len(same):
+            closer = runs[same[later]]
+            spans.append((start, closer[1], end, closer[0]))
+            index = same[later] + 1
+        else:
+            index += 1
+    return spans
+
+
+def _blank_code_spans(text, spans):
+    """text with each code span (backticks included) replaced by spaces of the same length."""
+    pieces, last = [], 0
+    for start, end, _inner_start, _inner_end in spans:
+        pieces.extend((text[last:start], " " * (end - start)))
+        last = end
+    pieces.append(text[last:])
+    return "".join(pieces)
+
+
 def _comment_start(text):
     """The index in text of the first `<!--` outside a code span whose `-->` is not on the same line, or
     None (a comment that ends on its own line is left to the html-comment normalization)."""
-    masked = CODE_SPAN_RE.sub(lambda match: " " * len(match.group(0)), text)
+    masked = _blank_code_spans(text, code_spans(text))
     position = 0
     while True:
         start = masked.find("<!--", position)
@@ -705,10 +754,7 @@ def _references(text, skips=HIDDEN_SCAN_SKIPS):
     references and the other spelling steps applied) but with the skips steps left out (none: exactly as
     a record unit is read); key is (repository casefolded or None for the surface default, number), ref
     is (repository or None, number, original text)."""
-    body = " ".join(text.split())
-    for name, regex, replacement in NORMALIZE:
-        if name not in skips:
-            body = regex.sub(replacement, body)
+    body = _normalize(" ".join(text.split()), skips)
     found = []
     for match in REF_RE.finditer(body):
         if match.group("un"):
@@ -743,8 +789,10 @@ def unevaluated_references(label, lines, blocks, units, exempt=(), definitions=N
     definition) is scanned whole, with those exemptions left out, and its entry names the block kind. Not
     scanned: the documented exemptions only, a fenced block whose info string is in EXAMPLE_FENCE_INFO
     and the lines of a blockquote with a historical lead-in (exempt, their line numbers). A reference
-    is keyed by repository (or the surface default) and number. Each entry is reported as a warning,
-    without reading pull request state, so a dropped claim never passes silently."""
+    is keyed by repository (or the surface default) and number, by design: one evaluated mention of a
+    pull request suppresses the entry for its other dropped occurrences in the same document. Each entry
+    is reported as a warning, without reading pull request state. Exemption delimiters inside code spans
+    are inert in the scan as in the matcher (one shared reading, code_spans)."""
     evaluated = evaluated_keys(units)
     found = []
     for number, (raw, (kind, text)) in enumerate(zip(lines, blocks), 1):
@@ -909,6 +957,106 @@ NORMALIZE = (
     ("glued-pr", re.compile(r"\b(PRs?)#(?=[0-9])", re.I), r"\1 #"),
     ("slash-list", re.compile(r"(?<=[0-9])\s*/\s*(?=#[0-9])"), " and "),
 )
+# The NORMALIZE steps that recognize an exemption or a link by its delimiters: each runs only on text
+# outside code spans (code_spans, read once per text before the first step), so a delimiter inside a
+# code span is inert. The other steps are spellings and run on all text, code-span text included, so a
+# claim inside a code span is still read.
+CODE_SPAN_INERT_STEPS = ("html-comment", "markdown-link", "html-link", "autolink", "history-span",
+                         "strikethrough", "issue-reference")
+# Delimiters inside code spans are inert to those steps (True). The self-test sets it False, letting
+# them see code-span text, for its red-when-reverted leg.
+CODE_SPANS_INERT = True
+# What a code span's content reads as to an exemption recognizer: a private-use character no delimiter,
+# space or word pattern matches (its backticks stay, so a backticked span after a historical lead-in is
+# still that span).
+CODE_FILLER = ""
+
+
+class _RealMatch:
+    """A match found in a code-masked view, read back from the real text at the same positions."""
+
+    def __init__(self, match, text):
+        self._match, self._text = match, text
+
+    def start(self, group=0):
+        return self._match.start(group)
+
+    def end(self, group=0):
+        return self._match.end(group)
+
+    def group(self, group=0):
+        start = self._match.start(group)
+        return None if start < 0 else self._text[start:self._match.end(group)]
+
+
+_TEMPLATE_GROUP_RE = re.compile(r"\\([0-9])")
+
+
+def _replacement(match, replacement, flags):
+    """(text, flags) for one match: the replacement text, and per character whether it is code-span
+    content (a group copied from the match keeps its flags; any other text is not code)."""
+    if callable(replacement):
+        text = replacement(match)
+        for group in range(1, (match._match.re.groups or 0) + 1):
+            if match.start(group) >= 0 and text == match.group(group):
+                return text, flags[match.start(group):match.end(group)]
+        return text, bytearray(len(text))
+    pieces, out_flags, last = [], bytearray(), 0
+    for ref in _TEMPLATE_GROUP_RE.finditer(replacement):
+        literal, group = replacement[last:ref.start()], int(ref.group(1))
+        pieces.append(literal)
+        out_flags += bytearray(len(literal))
+        if match.start(group) >= 0:
+            pieces.append(match.group(group))
+            out_flags += flags[match.start(group):match.end(group)]
+        last = ref.end()
+    pieces.append(replacement[last:])
+    out_flags += bytearray(len(replacement) - last)
+    return "".join(pieces), out_flags
+
+
+def _masked_sub(regex, replacement, text, flags, outside_code):
+    """(text, flags) after regex.sub(replacement): when outside_code, the regex sees the code-span
+    content as CODE_FILLER, so it matches only by delimiters outside code spans; the replacement is
+    built from the real text either way, and flags follow every character that is kept."""
+    view = text
+    if outside_code:
+        view = "".join(CODE_FILLER if flag else char for char, flag in zip(text, flags))
+    pieces, out_flags, last = [], bytearray(), 0
+    for found in regex.finditer(view):
+        new_text, new_flags = _replacement(_RealMatch(found, text), replacement, flags)
+        pieces.extend((text[last:found.start()], new_text))
+        out_flags += flags[last:found.start()] + new_flags
+        last = found.end()
+    pieces.append(text[last:])
+    out_flags += flags[last:]
+    return "".join(pieces), out_flags
+
+
+def _code_flags(text):
+    """A bytearray, one entry per character of text: 1 for code-span content, else 0; None when text
+    holds no code-span content (every step then runs on the text as it stands)."""
+    spans = code_spans(text) if CODE_SPANS_INERT and "`" in text else []
+    if not any(inner_end > inner_start for _start, _end, inner_start, inner_end in spans):
+        return None
+    flags = bytearray(len(text))
+    for _start, _end, inner_start, inner_end in spans:
+        flags[inner_start:inner_end] = b"\x01" * (inner_end - inner_start)
+    return flags
+
+
+def _normalize(text, skips=()):
+    """text with the NORMALIZE steps applied in order, except those named in skips. The code spans are
+    read once, before the first step; a CODE_SPAN_INERT_STEPS step never sees their content."""
+    flags = _code_flags(text)
+    for name, regex, replacement in NORMALIZE:
+        if name in skips:
+            continue
+        if flags is None:
+            text = regex.sub(replacement, text)
+        else:
+            text, flags = _masked_sub(regex, replacement, text, flags, name in CODE_SPAN_INERT_STEPS)
+    return text
 
 PATTERNS = (
     # (rule id, kind, phrase, regex, contexts) in priority order; a token bound HARD is not also a
@@ -968,10 +1116,7 @@ def tokenize(prose, context="prose"):
     """(clauses, refs): the prose normalized (NORMALIZE), each pull request reference replaced by a
     token, split into clauses; refs[k] = (repo or None for the surface default, number, original
     text)."""
-    text = " ".join(prose.split())
-    for _name, regex, replacement in NORMALIZE:
-        text = regex.sub(replacement, text)
-    text = " ".join(text.split())
+    text = " ".join(_normalize(" ".join(prose.split())).split())
     refs = []
 
     def replace(match):
@@ -1835,6 +1980,98 @@ def _fix_rows(m, o):
     check("ref/reference-style-link/red-when-reverted", code == 0 and t.calls == [], (code, t.calls))
     _block_context_rows(m)
     _hidden_rows(m)
+    _code_span_rows(m)
+
+
+def _code_span_leg(replacements, text, table, surface):
+    """(code, Result, transport) for text judged with the module globals replaced; InputError is
+    returned as (None, message, None)."""
+    try:
+        return _with_globals(replacements, lambda: _judge(text, table, surface))
+    except InputError as exc:
+        return None, str(exc), None
+
+
+def _code_span_found(judged):
+    """(ok, detail): ok when the judged text gave exactly one finding for #17, one read and no warning."""
+    code, res, t = judged
+    if code is None:
+        return False, res
+    return (code == 1 and t.calls == [(REPO, 17)] and len(res.hard) == 1 and not res.warnings,
+            (code, t.calls, res.hard, res.warnings))
+
+
+def _code_span_rows(m):
+    """Exemption delimiters written inside separate code spans are inert, so the claim between them is
+    read: a finding under both terminal states. With the code-span reading removed, the matcher and the
+    unevaluated-reference scan both erase it and the document passes silently (the red leg). Real
+    exemptions beside or around code spans still exempt, a claim inside a code span is still read, and
+    the hidden-line scan reads link delimiters inside code spans as inert too."""
+    closed = {(REPO, 17): "closed"}
+    for name, closed_name, red_name, text, surface in (
+            ("code-span/comment-delimiters-inert", "code-span/comment-delimiters-inert-closed",
+             "code-span/comment-delimiters-inert/red-when-reverted", "`<!--` PR #17 is pending `-->`\n",
+             MD_SURFACE),
+            ("code-span/double-tilde-inert", "code-span/double-tilde-inert-closed",
+             "code-span/double-tilde-inert/red-when-reverted", "`~~` PR #17 is pending `~~`\n", MD_SURFACE),
+            ("code-span/single-tilde-inert", "code-span/single-tilde-inert-closed",
+             "code-span/single-tilde-inert/red-when-reverted", "`~` PR #17 is pending `~`\n", MD_SURFACE),
+            ("code-span/history-lead-in-inert", "code-span/history-lead-in-inert-closed",
+             "code-span/history-lead-in-inert/red-when-reverted",
+             "`Previously recorded: '` PR #17 is pending `'`\n", MD_SURFACE),
+            ("code-span/issue-word-inert", "code-span/issue-word-inert-closed",
+             "code-span/issue-word-inert/red-when-reverted", "`issue` #17 is pending.\n", MD_SURFACE),
+            ("code-span/markdown-link-inert", "code-span/markdown-link-inert-closed",
+             "code-span/markdown-link-inert/red-when-reverted",
+             "`[` PR #17 is pending `](https://github.com/acme/widgets/issues/1)`\n", MD_SURFACE),
+            ("code-span/html-link-inert", "code-span/html-link-inert-closed",
+             "code-span/html-link-inert/red-when-reverted",
+             "`<a href=\"https://github.com/acme/widgets/issues/1\">` PR #17 is pending `</a>`\n", MD_SURFACE),
+            ("code-span/reference-link-inert", "code-span/reference-link-inert-closed",
+             "code-span/reference-link-inert/red-when-reverted",
+             "`[` PR #17 is pending `][i1]`\n\n[i1]: https://github.com/acme/widgets/issues/1\n", MD_SURFACE),
+            ("code-span/double-backtick-run-inert", "code-span/double-backtick-run-inert-closed",
+             "code-span/double-backtick-run-inert/red-when-reverted", "``<!--`` PR #17 is pending ``-->``\n",
+             MD_SURFACE),
+            ("code-span/toml-comment-delimiters-inert", "code-span/toml-comment-delimiters-inert-closed",
+             "code-span/toml-comment-delimiters-inert/red-when-reverted",
+             "note = \"`<!--` PR #17 is pending `-->`\"\n", TOML_SURFACE)):
+        ok, detail = _code_span_found(_code_span_leg({}, text, m, surface))
+        check(name, ok, detail)
+        ok, detail = _code_span_found(_code_span_leg({}, text, closed, surface))
+        check(closed_name, ok, detail)
+        code, res, t = _code_span_leg({"CODE_SPANS_INERT": False}, text, m, surface)
+        check(red_name, code == 0 and t.calls == [] and not res.hard and not res.warnings,
+              res if code is None else (code, t.calls, res.hard, res.warnings))
+    for name, text, want, calls in (
+            ("code-span/real-comment-beside-code-still-exempt", "`x` <!-- PR #17 is pending --> `y`\n", 0, []),
+            ("code-span/comment-around-code-span-still-exempt", "<!-- `PR #17 is pending` -->\n", 0, []),
+            ("code-span/real-strikethrough-beside-code-still-exempt", "`x` ~~PR #17 is pending~~ merged `y`.\n",
+             0, []),
+            ("code-span/strikethrough-around-code-span-still-exempt", "~~`PR #17 is pending`~~ merged.\n", 0, []),
+            ("code-span/real-single-tilde-beside-code-still-exempt", "`x` ~PR #17 is pending~ merged.\n", 0, []),
+            ("code-span/history-code-span-quote-still-exempt", "Previously recorded: `PR #17 is pending`\n", 0,
+             []),
+            ("code-span/issue-beside-code-still-exempt", "`x` Issue #17 remains open.\n", 0, []),
+            ("code-span/claim-inside-code-span-read", "`PR #17 is pending`\n", 1, [(REPO, 17)]),
+            ("code-span/unmatched-backtick-run-is-text", "`` <!-- PR #17 is pending --> `\n", 0, [])):
+        try:
+            code, res, t = _judge(text, m)
+            ok = code == want and t.calls == calls and len(res.hard) == want and not res.warnings
+            detail = (code, t.calls, res.hard, res.warnings)
+        except InputError as exc:
+            ok, detail = False, str(exc)
+        check(name, ok, detail)
+    # A fenced line is scanned whole: link delimiters inside its code spans are inert, so the reference
+    # between them warns; with the reading removed, the issue link erases it and the fence is silent.
+    fenced = "```\n`[` PR #17 is pending `](https://github.com/acme/widgets/issues/1)`\n```\n"
+    for name, replacements in (("code-span/fenced-link-delimiters-warn", {}),
+                               ("code-span/fenced-link-delimiters-warn/red-when-reverted",
+                                {"CODE_SPANS_INERT": False})):
+        code, res, t = _with_globals(replacements, lambda: _judge(fenced, m))
+        warned = len(res.warnings) == 1 and "NOTES.md:2 (fenced block)" in res.warnings[0]
+        ok = code == 0 and t.calls == [] and not res.hard and (warned if not replacements else not res.warnings)
+        check(name, ok, (code, t.calls, res.hard, res.warnings))
 
 
 def _no_unevaluated_references(_label, _lines, _blocks, _units, _exempt=(), _definitions=None):
