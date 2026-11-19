@@ -1177,7 +1177,7 @@ def self_test(report_path=None):
           "and 8 s waits into fresh files, exit 2 once exhausted, a body cut short of its Content-Length is "
           "retried, a malformed Content-Length stops at once, a chunked body ignores a Content-Length beside it, "
           "the read timeout reach fails closed, each body read's socket timeout is cut to the time left, a size or digest mismatch exits 1 "
-          "without a retry, an existing download is never replaced, and no attempt or wait passes the shared 300 s deadline; a bare run is the self-test even with RUNNER_TEMP and GITHUB_PATH set, only --build "
+          "without a retry, an existing download is never replaced, and no attempt starts and no wait is planned past the shared 300 s deadline (opening, header and chunk reads can still overrun it, as the module docstring states); a bare run is the self-test even with RUNNER_TEMP and GITHUB_PATH set, only --build "
           "reaches the build, which exits 2 without them, and any other argument exits 2; no fetch reached the "
           "network)".format(len(results)))
     return 0

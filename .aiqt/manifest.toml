@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "bc56bd1b5de88d2e1b73c778311942bb69c0ddf2bf18eb30978d25957f96ac4a"
+tree-sha256 = "c7660b56ee100dde73e4242a415afbef60cae4b7bd97384c26a91e2e8ea08705"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4582,8 +4582,8 @@ sha256 = "116e7acb4fe99f5c9ced0787d088ea9b8dba12e94f610be3be9287cc3290842f"
 
 [[sources]]
 path = "tools/ci_build_bash.py"
-bytes = 71631
-sha256 = "ccf39955adb45242bacd7783f5ebb8947bbcac1b1c9ae428e1d88bc35ccfa384"
+bytes = 71738
+sha256 = "1c0bb774992783cdc755ba37d6d33647dd4f9ddc4fc5e09b81f16007fc97e21e"
 
 [[sources]]
 path = "tools/ci_site_scope.py"
