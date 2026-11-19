@@ -24,28 +24,43 @@ GNU mirror list (https://mirrors.kernel.org/gnu/ and https://mirrors.ocf.berkele
 that tree. A file's URL from a source is the source's base URL followed by the file's pinned path, so every source is
 asked for the same file by construction. The sources only supply bytes: the pin is the one acceptance test whichever
 source served them, and every file is fetched and checked against its pin (its sha256, and the archive's byte count
-too) before anything is extracted. Each file gets up to FETCH_ATTEMPTS (4) attempts, and each attempt tries the
-sources in GNU_SOURCES order: a transient transport failure from one source moves on to the next source at once (no
-wait), and only an attempt whose every source failed so is retried, with waits of RETRY_DELAYS (2, 4 and 8 seconds)
-before the second, third and fourth attempt. A transient transport failure is a network or host that is unreachable,
-a connection reset (including a server that closes the connection before it answers), a timeout, a temporary DNS
-failure (EAI_AGAIN) or a response read cut short (IncompleteRead), each also when urllib wraps it in URLError, and a
-body that ends before the byte count its Content-Length header declares. Nothing else moves on to another source or
-is retried: no HTTP status (an HTTPError of any code), no certificate or other TLS failure, no permanent DNS failure,
-no URL that is not https, no Content-Length that is not a byte count, no body over FETCH_LIMIT, no local file error
-and no other exception; each stops the build at once. Every download writes into a fresh temporary file in the
+too) before anything is extracted. Each file gets up to FETCH_ATTEMPTS (4) attempts, and each attempt tries every
+source once, in the run's source order. That order starts as GNU_SOURCES and is kept for the rest of the run: a
+source that fails a download moves to the back of it, so the source that served the previous file is the first one
+tried for the next, and a source that keeps failing (or keeps timing out) is asked last. A failure tied to one
+source moves on to the next source at once (no wait): a transient transport failure (below), any HTTP status (an
+HTTPError of any code, or a final status other than 200), a refused connection, a permanent DNS failure (EAI_NONAME
+or EAI_FAIL, and EAI_NODATA or EAI_ADDRFAMILY where the platform defines them), a certificate or other TLS failure,
+a malformed response head (a bad status line, an over-long header line, an unknown protocol or transfer encoding), a
+redirect that is not followed (below), a Content-Length that is not a byte count, a body over FETCH_LIMIT and a body
+longer than its Content-Length. An attempt whose every source failed so is retried only when at least one of those
+failures was transient, with waits of RETRY_DELAYS (2, 4 and 8 seconds) before the second, third and fourth
+attempt; when none was, the build stops after that attempt. A transient transport failure is a network or host that
+is unreachable, a connection reset (including a server that closes the connection before it answers), a timeout, a
+temporary DNS failure (EAI_AGAIN) or a response read cut short (IncompleteRead), each also when urllib wraps it in
+URLError, and a body that ends before the byte count its Content-Length header declares. Everything else stops the
+build at once, without asking another source or retrying: a URL that is not https, a deadline that has passed, a
+local file error (creating, writing, linking or removing a download file), any other network exception and a
+completed download that differs from its pin. A redirect is followed only to an https URL on the host and port of
+the URL it redirects from; any other is refused before it is opened, and the refusal names the URL it pointed to.
+Every download writes into a fresh temporary file in the
 downloads directory, created exclusively; a failed download's file is removed, and only that one. The first
 download of a file that completes, from whichever source, is linked to its pinned name, which must not exist yet,
 and is checked against its pin there before the next file is fetched: a size or sha256 mismatch is a refusal at
-once, never retried and never fetched again from another source. Every failure line names the source it concerns,
-the sources that already failed in that attempt and the sources not tried; once every attempt is spent, the line
-names each source with its last failure. All ten files, their sources, their retries and their waits share one
+once, never retried and never fetched again from another source. Every failure line of a download (each line
+logged for a source that failed, and the line the build stops with) names the source it concerns, the sources that
+already failed in that attempt, the sources not tried in it and, from the second attempt on, each source's failure
+in the previous attempt; the next source is announced only after the deadline check before it has passed; once
+every attempt is spent, the line names each source with its failure in the last attempt. Every fetched line and
+every refusal of a completed download names the URL that served the bytes (where a followed redirect led). All ten
+files, their sources, their retries and their waits share one
 DOWNLOAD_DEADLINE (300 seconds) on a monotonic clock: no download from any source starts once it has passed, no wait
-starts that would end after it, and a download that finds it passed before a body read stops without trying
+starts that would not end before it, and a download that finds it passed before a body read stops without trying
 another source or retrying. Each download opens its connection with a socket timeout of FETCH_TIMEOUT cut down to
 the time left then, and before each body read the timeout is set again to FETCH_TIMEOUT cut down to the time
 left at that read. That bound is checked by this process between blocking operations, not enforced during them:
-while urlopen connects and reads the response head, each socket operation it makes may wait up to the timeout the
+while urllib connects, follows a redirect and reads the response head, each socket operation it makes (in every
+redirect hop) may wait up to the timeout the
 download began with, so the opening can overrun the deadline by that much per operation (name resolution is not covered by the
 socket timeout at all); a body read is one read1, one socket read for a body of declared length (a chunked body
 also reads its chunk size lines, one socket read or more), and each of those may wait up to the time left when
@@ -58,8 +73,8 @@ from bash itself. GITHUB_PATH is written only after both checks pass.
 Exit of --build: 0 installed and added to GITHUB_PATH; 1 refused (a file that is missing or differs from its pin,
 or a built bash that does not print 5 3 9 or exits non-zero); 2 not completed (RUNNER_TEMP or GITHUB_PATH unset,
 relative or not an existing directory and file; the install or work directory already present; a fetch error that
-is not retried, or transient failures from every source still failing in the last attempt; the download deadline
-passed; an archive
+stops the build at once; an attempt whose every source failed with none failing transiently, or every source still
+failing in the last attempt; the download deadline passed; an archive
 that does not extract; a patch, configure, make or make install step that fails; a built bash that cannot
 be started). On exit 1 or 2 nothing is installed: the install directory is removed if make install created it,
 and GITHUB_PATH is not written. The work directory (the downloads and the build tree) is left under the runner's
@@ -69,8 +84,8 @@ the report's finalizer refuses the run (tools/_selftest_exit_report.py). A usage
 Not checked: the GNU signature of the archive and the patches (the pinned digests stand in for it, so a changed
 upstream file, or a mirror's copy that differs, is a refusal, never a silent update); that a mirror is current or
 answers at all (a mirror is only a source, so one that lags or is gone costs a failed download, never acceptance);
-whether a source redirects (urllib follows a redirect, so the bytes may come from the place it names; the pin still
-decides); the compiler, make and patch that the runner image supplies,
+where on its own host a followed redirect leads (the pin still decides); the compiler, make and patch that the
+runner image supplies,
 which run as trusted tools; and which bash a later step runs. The hooks self-test looks bash up on its PATH, and
 the runner adds each GITHUB_PATH line to the front of PATH for the later steps of the same job; that is GitHub's
 documented behaviour, which this script does not observe. In a config lane the execution gate and the lane pass
@@ -78,8 +93,9 @@ that PATH on to the rerun hooks self-test with only the lane's git wrapper direc
 drives the whole pipeline over fixture files with sh, patch and make; it never fetches, and a fetch attempted while
 it runs fails it. The sources, the download, the wait and the clock are injected (download and provision take
 sources, fetcher, sleep and clock; build takes all but the sources, which are GNU_SOURCES), so the move to the next
-source, the retry, the waits and the shared deadline are tested with fixture sources and fetchers, a recording sleep
-and a fake clock, never the network and never a real wait.
+source, the source order, the retry, the waits and the shared deadline are tested with fixture sources and
+fetchers, a recording sleep and a fake clock, never the network and never a real wait; fetch_attempt takes an
+opener, so the redirect rule is tested through urllib's own redirect handling over offline https responses.
 """
 import sys
 
@@ -111,6 +127,7 @@ import tempfile
 import time
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -168,6 +185,12 @@ RETRY_DELAYS = (2, 4, 8)  # seconds waited before the second, third and fourth a
 DOWNLOAD_DEADLINE = 300  # seconds on a monotonic clock for all the files, their retries and their waits together
 # errno values of an OSError that are a transient network failure: a network or host that cannot be reached.
 TRANSIENT_ERRNOS = frozenset((errno.ENETUNREACH, errno.EHOSTUNREACH))
+# getaddrinfo error codes of a permanent DNS failure (the name or its address does not resolve), the platform's own.
+DNS_PERMANENT = frozenset(code for code in (getattr(socket, name, None) for name in (
+    "EAI_NONAME", "EAI_FAIL", "EAI_NODATA", "EAI_ADDRFAMILY")) if code is not None)
+# http.client exceptions of a malformed response head, as a server sends it.
+MALFORMED_HEAD = (http.client.BadStatusLine, http.client.LineTooLong, http.client.UnknownProtocol,
+                  http.client.UnknownTransferEncoding)
 READ_CHUNK = 1 << 16
 STEP_TIMEOUT = 1800  # seconds for one patch, configure, make or make install
 VERSION_TIMEOUT = 30
@@ -182,8 +205,16 @@ class NotCompleted(Exception):
     """A fetch, extract, patch or build step that did not complete, or an unusable environment: exit 2."""
 
 
-class Transient(NotCompleted):
-    """A transient transport failure of one download attempt: retried, and exit 2 once the attempts run out."""
+class SourceFailed(NotCompleted):
+    """A failure of one download tied to the source that served it (an HTTP status, a refused connection, a
+    permanent DNS failure, a TLS failure, a malformed response head, a redirect not followed, a Content-Length that is
+    not a byte count, a body over FETCH_LIMIT or longer than its Content-Length): the next source is tried at once;
+    exit 2 when no source completes."""
+
+
+class Transient(SourceFailed):
+    """A transient transport failure of one download: the next source is tried at once, and an attempt with one of
+    these is retried; exit 2 once the attempts run out."""
 
 
 def is_transient(exc):
@@ -204,19 +235,83 @@ def is_transient(exc):
     return isinstance(exc, OSError) and exc.errno in TRANSIENT_ERRNOS
 
 
-def fetch_error(url, exc):
-    """The exception that stands for a network exception exc of a download attempt of url: Transient when it is a
-    transient transport failure, NotCompleted otherwise."""
+def is_source_failure(exc):
+    """Whether a network exception is tied to the one source it came from, so the next source is worth asking: a
+    transient transport failure, an HTTPError (any status), a TLS failure (a certificate one included), a refused
+    connection, a permanent DNS failure (DNS_PERMANENT) or a malformed response head (MALFORMED_HEAD), also as the
+    reason of a URLError. Every other exception (a local error, an invalid URL, an unknown URL type) is not."""
+    if is_transient(exc) or isinstance(exc, urllib.error.HTTPError):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        return isinstance(exc.reason, BaseException) and is_source_failure(exc.reason)
+    if isinstance(exc, ssl.SSLError):
+        return True
+    if isinstance(exc, socket.gaierror):
+        return exc.errno in DNS_PERMANENT
+    return isinstance(exc, (ConnectionRefusedError,) + MALFORMED_HEAD)
+
+
+def _where(url, final):
+    """url, and the URL a followed redirect led to when that is another."""
+    return url if final == url else "{} (redirected to {})".format(url, final)
+
+
+def fetch_error(url, exc, final=None):
+    """The exception that stands for a network exception exc of a download attempt of url (final: the URL a followed
+    redirect led to): Transient when it is a transient transport failure, SourceFailed when it is another failure
+    tied to the source (is_source_failure), NotCompleted otherwise. An HTTPError names the URL that answered with
+    its status when that is another than url."""
     if isinstance(exc, urllib.error.HTTPError):
-        return NotCompleted("{}: HTTP status {}".format(url, exc.code))
-    kind = Transient if is_transient(exc) else NotCompleted
-    return kind("{}: fetch failed ({}: {})".format(url, type(exc).__name__, exc))
+        answered = exc.filename if isinstance(exc.filename, str) else final
+        return SourceFailed("{}: HTTP status {}".format(_where(url, answered or url), exc.code))
+    if is_transient(exc):
+        kind = Transient
+    elif is_source_failure(exc):
+        kind = SourceFailed
+    else:
+        kind = NotCompleted
+    return kind("{}: fetch failed ({}: {})".format(_where(url, final or url), type(exc).__name__, exc))
+
+
+def _same_host_https(url, other):
+    """Whether other is an https URL on the host and port of url, itself an https URL."""
+    try:
+        old, new = urllib.parse.urlsplit(url), urllib.parse.urlsplit(other)
+        return (old.scheme == "https" and new.scheme == "https" and new.hostname is not None
+                and new.hostname == old.hostname and (new.port or 443) == (old.port or 443))
+    except ValueError:
+        return False
+
+
+class _RedirectRefused(Exception):
+    """A redirect to a URL that is not https on the host and port it redirects from: never opened."""
+
+    def __init__(self, code, target):
+        super().__init__(code, target)
+        self.code, self.target = code, target
+
+
+class _SameHostHttpsRedirect(urllib.request.HTTPRedirectHandler):
+    """urllib's own redirect handling, following a redirect only to an https URL on the host and port of the URL it
+    redirects from; any other closes the redirect response and raises _RedirectRefused, so it is never opened."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _same_host_https(req.full_url, newurl):
+            fp.close()
+            raise _RedirectRefused(code, newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _opener(*handlers):
+    """A urllib opener with its default handlers, the redirect one replaced by _SameHostHttpsRedirect; handlers are
+    added to it (the self-test adds offline ones)."""
+    return urllib.request.build_opener(_SameHostHttpsRedirect(), *handlers)
 
 
 def _declared_length(url, response):
     """The body length that the Content-Length header of response declares, or None when it sends none or a chunked
     body (whose own framing http.client checks, raising IncompleteRead when it is cut short). A Content-Length that
-    is not one decimal byte count raises NotCompleted."""
+    is not one decimal byte count raises SourceFailed."""
     encoding = response.getheader("Transfer-Encoding")
     if encoding is not None and encoding.lower() == "chunked":
         return None
@@ -225,7 +320,7 @@ def _declared_length(url, response):
         return None
     value = value.strip()
     if not (value.isascii() and value.isdigit()):
-        raise NotCompleted("{}: Content-Length {!r} is not a byte count".format(url, value))
+        raise SourceFailed("{}: Content-Length {!r} is not a byte count".format(url, value))
     return int(value)
 
 
@@ -245,55 +340,72 @@ def _set_read_timeout(url, response, seconds):
     sock.settimeout(seconds)
 
 
-def fetch_attempt(url, out, remaining):
-    """One download attempt: write the body of url into out, an open binary file. remaining() gives the seconds
-    the shared download deadline leaves. urlopen gets FETCH_TIMEOUT or that, whichever is less, for each socket
-    operation it makes; before each body read the socket timeout is set again to FETCH_TIMEOUT or the time then
-    left, whichever is less, and each read is one read1, so for a body of declared length it makes at most one
-    socket read. A URL that is not https, a status other than 200, a Content-Length that is not a byte count, a
-    body over FETCH_LIMIT bytes and a deadline that has passed (before the attempt or before a read) raise
-    NotCompleted; a body that ends before its Content-Length raises Transient, as a read cut short; a network
-    error raises what fetch_error gives for it. A local write error propagates as the OSError it is."""
+def fetch_attempt(url, out, remaining, opener=None):
+    """One download attempt: write the body of url into out, an open binary file, and return the URL that served it
+    (url, or the https URL on its host that a followed redirect led to). remaining() gives the seconds the shared
+    download deadline leaves. opener (_opener() when None) gets FETCH_TIMEOUT or that, whichever is less, for each
+    socket operation it makes, and follows a redirect only to https on the same host and port; before each body read
+    the socket timeout is set again to FETCH_TIMEOUT or the time then left, whichever is less, and each read is one
+    read1, so for a body of declared length it makes at most one socket read. A URL that is not https and a deadline
+    that has passed (before the attempt or before a read) raise NotCompleted, as does a response whose socket cannot
+    be reached (_set_read_timeout); a redirect not followed, a response served from a URL that is not https on the
+    host and port of url, a status other than 200, a Content-Length that is not a byte count, a body over FETCH_LIMIT
+    bytes and one longer than its Content-Length raise SourceFailed; a body that ends before its Content-Length
+    raises Transient, as a read cut short; a network error raises what fetch_error gives for it. A local write error
+    propagates as the OSError it is."""
     if not url.startswith("https://"):
         raise NotCompleted("{}: not an https URL".format(url))
     timeout = min(FETCH_TIMEOUT, remaining())
     if timeout <= 0:
         raise NotCompleted("{}: the {} s download deadline has passed".format(url, DOWNLOAD_DEADLINE))
     try:
-        response = urllib.request.urlopen(url, timeout=timeout)
+        response = (_opener() if opener is None else opener).open(url, timeout=timeout)
+    except _RedirectRefused as exc:
+        raise SourceFailed("{}: redirect ({}) to {} refused, as only a redirect to https on the same host is "
+                           "followed".format(url, exc.code, exc.target)) from None
     except (OSError, http.client.HTTPException, ValueError) as exc:
         raise fetch_error(url, exc) from None
     with response:
+        final = getattr(response, "url", None)
+        if not isinstance(final, str):
+            final = url
+        where = _where(url, final)
+        if not _same_host_https(url, final):
+            raise SourceFailed("{}: served from a URL that is not https on the same host; refused".format(where))
         if response.status != 200:
-            raise NotCompleted("{}: HTTP status {}".format(url, response.status))
-        declared = _declared_length(url, response)
+            raise SourceFailed("{}: HTTP status {}".format(where, response.status))
+        declared = _declared_length(where, response)
         total = 0
         while True:
             left = remaining()
             if left <= 0:
                 raise NotCompleted("{}: the {} s download deadline passed during the download".format(
-                    url, DOWNLOAD_DEADLINE))
-            _set_read_timeout(url, response, min(FETCH_TIMEOUT, left))
+                    where, DOWNLOAD_DEADLINE))
+            _set_read_timeout(where, response, min(FETCH_TIMEOUT, left))
             try:
                 chunk = response.read1(READ_CHUNK)
             except (OSError, http.client.HTTPException, ValueError) as exc:
-                raise fetch_error(url, exc) from None
+                raise fetch_error(url, exc, final) from None
             if not chunk:
                 break
             total += len(chunk)
             if total > FETCH_LIMIT:
-                raise NotCompleted("{}: more than {} bytes".format(url, FETCH_LIMIT))
+                raise SourceFailed("{}: more than {} bytes".format(where, FETCH_LIMIT))
             out.write(chunk)
     if declared is not None and total != declared:
-        kind = Transient if total < declared else NotCompleted
+        kind = Transient if total < declared else SourceFailed
         raise kind("{}: fetch failed (the body has {} bytes; its Content-Length declares {})".format(
-            url, total, declared))
+            where, total, declared))
+    return final
 
 
-def _sources_note(failed, untried):
+def _sources_note(failed, untried, previous=None):
     """The part of a failure line that names the other sources of the attempt: failed holds the failure messages of
-    the sources that already failed in it (each names its URL), untried the URLs not tried in it."""
+    the sources that already failed in it (each names its URL), untried the URLs not tried in it, and previous, from
+    the second attempt on, the failure messages of the previous attempt joined."""
     parts = []
+    if previous:
+        parts.append("previous attempt: " + previous)
     if failed:
         parts.append("earlier sources in this attempt: " + "; ".join(failed))
     if untried:
@@ -301,50 +413,92 @@ def _sources_note(failed, untried):
     return " ({})".format("; ".join(parts)) if parts else ""
 
 
+def _remove_part(part):
+    """Remove a download's own temporary file: None, or what kept it (an OSError) as text."""
+    try:
+        os.unlink(part)
+    except OSError as exc:
+        return "its download file {} was not removed ({}: {})".format(part, type(exc).__name__, exc)
+    return None
+
+
 def _publish(part, dest, size, digest):
     """Link the completed download part to its pinned name dest, which must not exist yet, remove part, and check
-    dest against its pin (verify)."""
+    dest against its pin (verify). A link or removal that fails raises NotCompleted, naming dest or part."""
+    problems = []
     try:
         os.link(part, dest)
     except FileExistsError:
-        raise NotCompleted("{} already exists; it was left as it was".format(dest)) from None
-    finally:
-        os.unlink(part)
+        problems.append("{} already exists; it was left as it was".format(dest))
+    except OSError as exc:
+        problems.append("{} could not be linked to the download ({}: {})".format(dest, type(exc).__name__, exc))
+    kept = _remove_part(part)
+    if kept is not None:
+        problems.append(kept)
+    if problems:
+        raise NotCompleted("; ".join(problems))
     verify(dest, size, digest)
 
 
-def _fetch_from_sources(name, urls, dest, size, digest, downloads, fetcher, sleep, remaining, log):
-    """Up to FETCH_ATTEMPTS attempts of the file name; each attempt tries urls (the file's URL from each source, in
-    source order) in turn with fetcher(url, out, remaining), each download into a fresh temporary file created
-    exclusively in downloads. The first download that completes is published to dest and checked against its pin
-    (_publish), and its URL is returned; a Refused from that check is raised at once, so a file that differs from
-    its pin is never fetched again, from that source or any other. Only Transient moves on to the next source, at
-    once, and only an attempt whose every source failed with Transient is retried, after the RETRY_DELAYS wait; a
-    failed download's own file is closed and removed. No download starts once the deadline has passed and no wait
-    starts that would end after it; those, the last attempt failing and any other failure raise, NotCompleted for
-    all but an OSError of the run itself. Every failure message names the source it concerns and the other sources
-    of its attempt."""
+def _fetch_from_sources(name, path, order, dest, size, digest, downloads, fetcher, sleep, remaining, log):
+    """Up to FETCH_ATTEMPTS attempts of the file name at path under the GNU tree. Each attempt tries every source
+    once, in the order the list order holds when the attempt starts, with fetcher(url, out, remaining), each
+    download into a fresh temporary file created exclusively in downloads; a source whose download fails is moved to
+    the back of order, which the caller keeps for the next file. The first download that completes is published to
+    dest and checked against its pin (_publish), and its source and the URL that served it (what fetcher returns,
+    or the URL asked for when it returns None) are returned; a Refused from that check is raised at once, so a file
+    that differs from its pin is never fetched again, from that source or any other. SourceFailed (Transient among
+    it) moves on to the next source at once, and an attempt whose every source failed so is retried, after the
+    RETRY_DELAYS wait, only when one of them was Transient. No download starts once the deadline has passed (the
+    next source is announced only after that check) and no wait starts that would not end before it; those, an
+    attempt not retried, the last attempt failing, any other NotCompleted and any OSError of the downloads
+    directory raise NotCompleted. Every such failure message, and every line logged for a failed source, names the
+    source it concerns, the sources that failed earlier in the attempt and those not tried, and the previous
+    attempt's failures; another exception (a programming error) propagates as it is, after the download's file is
+    removed."""
+    previous = None
     for attempt in range(1, FETCH_ATTEMPTS + 1):
+        tried = tuple(order)
+        urls = tuple(base + path for base in tried)
         failed = []
-        for index, url in enumerate(urls):
+        transient = False
+        pending = None
+        for index, (base, url) in enumerate(zip(tried, urls)):
+            untried = urls[index + 1:]
             if remaining() <= 0:
                 raise NotCompleted("{}: the {} s download deadline passed before attempt {} from {}{}".format(
-                    name, DOWNLOAD_DEADLINE, attempt, url, _sources_note(failed, urls[index + 1:])))
-            handle, part = tempfile.mkstemp(prefix=name + ".attempt-", dir=downloads)
+                    name, DOWNLOAD_DEADLINE, attempt, url, _sources_note(failed, untried, previous)))
+            if pending is not None:
+                log("{}; trying {}".format(pending, url))
+            try:
+                handle, part = tempfile.mkstemp(prefix=name + ".attempt-", dir=downloads)
+            except OSError as exc:
+                raise NotCompleted("{}: no download file could be created in {} for attempt {} from {} ({}: {}){}"
+                                   .format(name, downloads, attempt, url, type(exc).__name__, exc,
+                                           _sources_note(failed, untried, previous))) from None
             try:
                 with os.fdopen(handle, "wb") as out:
-                    fetcher(url, out, remaining)
-            except Transient as exc:
-                os.unlink(part)
+                    final = fetcher(url, out, remaining) or url
+            except SourceFailed as exc:
+                kept = _remove_part(part)
+                if kept is not None:
+                    raise NotCompleted("{}; {}{}".format(exc, kept, _sources_note(failed, untried, previous))) from None
+                pending = "attempt {} of {} from {} failed ({}){}".format(
+                    attempt, FETCH_ATTEMPTS, url, exc, _sources_note(failed, untried, previous))
                 failed.append(str(exc))
-                if index + 1 < len(urls):
-                    log("attempt {} of {} from {} failed ({}); trying {}".format(
-                        attempt, FETCH_ATTEMPTS, url, exc, urls[index + 1]))
+                transient = transient or isinstance(exc, Transient)
+                order.remove(base)
+                order.append(base)
                 continue
             except NotCompleted as exc:
-                with contextlib.suppress(OSError):
-                    os.unlink(part)
-                raise NotCompleted("{}{}".format(exc, _sources_note(failed, urls[index + 1:]))) from None
+                kept = _remove_part(part)
+                raise NotCompleted("{}{}{}".format(exc, "; " + kept if kept else "",
+                                                   _sources_note(failed, untried, previous))) from None
+            except OSError as exc:
+                kept = _remove_part(part)
+                raise NotCompleted("{}: local error in attempt {} from {} ({}: {}){}{}".format(
+                    name, attempt, url, type(exc).__name__, exc, "; " + kept if kept else "",
+                    _sources_note(failed, untried, previous))) from None
             except BaseException:
                 with contextlib.suppress(OSError):
                     os.unlink(part)
@@ -353,42 +507,53 @@ def _fetch_from_sources(name, urls, dest, size, digest, downloads, fetcher, slee
                 _publish(part, dest, size, digest)
             except Refused as exc:
                 raise Refused("{} (fetched from {}; refused at once, not fetched again from any source){}".format(
-                    exc, url, _sources_note(failed, urls[index + 1:]))) from None
-            return url
+                    exc, final, _sources_note(failed, untried, previous))) from None
+            except NotCompleted as exc:
+                raise NotCompleted("{}: {} (fetched from {}; not published){}".format(
+                    name, exc, final, _sources_note(failed, untried, previous))) from None
+            return base, final
         every = "; ".join(failed)
+        if not transient:
+            raise NotCompleted("{}: every source failed in attempt {} of {} and none of the failures is transient, "
+                               "so it is not retried ({}){}".format(name, attempt, FETCH_ATTEMPTS, every,
+                                                                    _sources_note((), (), previous)))
         if attempt == FETCH_ATTEMPTS:
             raise NotCompleted("{}: every source failed in each of {} attempts (attempt {}: {})".format(
                 name, FETCH_ATTEMPTS, attempt, every))
         delay = RETRY_DELAYS[attempt - 1]
-        if delay > remaining():
-            raise NotCompleted("{}: attempt {} failed from every source ({}); not retried: a {} s wait would end "
-                               "after the {} s download deadline".format(name, attempt, every, delay,
-                                                                          DOWNLOAD_DEADLINE))
+        if delay >= remaining():
+            raise NotCompleted("{}: attempt {} failed from every source ({}); not retried: a {} s wait would not end "
+                               "before the {} s download deadline{}".format(name, attempt, every, delay,
+                                                                            DOWNLOAD_DEADLINE,
+                                                                            _sources_note((), (), previous)))
         log("attempt {} of {} failed from every source ({}); retrying in {} s".format(
             attempt, FETCH_ATTEMPTS, every, delay))
         sleep(delay)
+        previous = every
     raise AssertionError("unreachable: every attempt returns or raises")
 
 
 def download(pins, sources, downloads, fetcher, sleep, clock, log=print):
     """Fetch every file of a PINS-shaped table into the directory downloads, in order, from sources (a
-    GNU_SOURCES-shaped tuple of base URLs, tried in order by every attempt), with retries, all under one
-    DOWNLOAD_DEADLINE on clock (a monotonic clock in seconds). Each completed file is linked to its pinned name,
-    which must not exist yet, and checked against its pin there before the next file is fetched. Returns, for each
-    file in order, the source that served it. Raises Refused for a file that differs from its pin and NotCompleted
-    when a fetch does not complete."""
+    GNU_SOURCES-shaped tuple of base URLs), with retries, all under one DOWNLOAD_DEADLINE on clock (a monotonic
+    clock in seconds). The source order starts as sources and is kept across the files: a source whose download
+    fails moves to the back, so the source that served a file is the first one tried for the next. Each completed
+    file is linked to its pinned name, which must not exist yet, and checked against its pin there before the next
+    file is fetched; its fetched line names the URL that served it. Returns, for each file in order, the source that
+    served it. Raises Refused for a file that differs from its pin and NotCompleted when a fetch does not
+    complete."""
     deadline = clock() + DOWNLOAD_DEADLINE
 
     def remaining():
         return deadline - clock()
 
+    order = list(sources)
     served = []
     for name, path, size, digest in pins:
-        urls = tuple(base + path for base in sources)
-        url = _fetch_from_sources(name, urls, Path(downloads) / name, size, digest, downloads, fetcher, sleep,
-                                  remaining, log)
-        served.append(sources[urls.index(url)])
-        log("fetched {} from {}".format(name, url))
+        base, final = _fetch_from_sources(name, path, order, Path(downloads) / name, size, digest, downloads, fetcher,
+                                          sleep, remaining, log)
+        served.append(base)
+        log("fetched {} from {}".format(name, final))
     return tuple(served)
 
 
@@ -620,12 +785,16 @@ def _scripted_fetcher(script, watch, clock=None, cost=0):
     repeats): bytes are written whole; an exception is raised after b"partial" is written, so a failed attempt
     leaves partial bytes behind it. Each call moves clock by cost seconds first and is recorded in the returned
     list as (url, the attempt file's size when the attempt began, the sorted names in the directory watch). cost is
-    a number of seconds, or a tuple of them used one per call (the last one repeats)."""
+    a number of seconds, a tuple of them used one per call (the last one repeats), or a function of the URL giving
+    them."""
     calls = []
 
     def fetcher(url, out, remaining):
         if clock is not None:
-            clock.advance(cost[min(len(calls), len(cost) - 1)] if isinstance(cost, tuple) else cost)
+            if callable(cost):
+                clock.advance(cost(url))
+            else:
+                clock.advance(cost[min(len(calls), len(cost) - 1)] if isinstance(cost, tuple) else cost)
         calls.append((url, out.tell(), sorted(os.listdir(watch))))
         steps = script[url]
         step = steps[min(sum(1 for call in calls if call[0] == url), len(steps)) - 1]
@@ -722,8 +891,18 @@ def self_test(report_path=None):
         reached.append(args[:1])
         raise OSError("the self-test never fetches")
 
+    def no_network_open(handler, req):
+        reached.append((req.full_url,))
+        raise OSError("the self-test never fetches")
+
+    # urlopen, and urllib's own https and http handlers (which every opener fetch_attempt builds has, unless a
+    # self-test vector replaces its https handler with an offline one), all refuse while the self-test runs
     real_urlopen = urllib.request.urlopen
+    real_https_open = urllib.request.HTTPSHandler.https_open
+    real_http_open = urllib.request.HTTPHandler.http_open
     urllib.request.urlopen = no_network
+    urllib.request.HTTPSHandler.https_open = no_network_open
+    urllib.request.HTTPHandler.http_open = no_network_open
     try:
         with tempfile.TemporaryDirectory(prefix="ci-build-bash-selftest-") as base:
             base = Path(base)
@@ -821,9 +1000,11 @@ def self_test(report_path=None):
                   and set(os.listdir(temp)) == {INSTALL_NAME, "github_path"} and not os.listdir(temp / INSTALL_NAME)
                   and (temp / "github_path").read_text(encoding="utf-8") == "", got)
 
-            # the classification: only the named transient transport failures, bare or as a URLError's reason, are
-            # retried; an HTTP status of any code, a TLS or certificate failure, a permanent DNS failure, a refused
-            # connection, a local file error and an invalid URL are not
+            # the classification: the named transient transport failures, bare or as a URLError's reason, are
+            # Transient (the next source, and a retry); an HTTP status of any code, a TLS or certificate failure, a
+            # permanent DNS failure, a refused connection and a malformed response head are SourceFailed (the next
+            # source, no retry of their own); a local file error, another DNS failure, an unknown URL type and an
+            # invalid URL are NotCompleted (the build stops at once)
             def kind(exc):
                 return type(fetch_error("https://fixture.invalid/f", exc)).__name__
 
@@ -838,23 +1019,30 @@ def self_test(report_path=None):
                          urllib.error.URLError(socket.gaierror(socket.EAI_AGAIN, "temporary failure"))]
             got = [(repr(exc), kind(exc)) for exc in transient]
             check("fetch/transient-errors-classified", all(name == "Transient" for _exc, name in got), got)
-            permanent = [urllib.error.HTTPError("https://fixture.invalid/f", code, "status", None, None)
-                         for code in (404, 408, 429, 500, 502, 503, 504)]
-            permanent += [ssl.SSLCertVerificationError(1, "certificate verify failed"), ssl.SSLError(1, "tls"),
-                          socket.gaierror(socket.EAI_NONAME, "name or service not known"),
-                          urllib.error.URLError(socket.gaierror(socket.EAI_NONAME, "not known")),
-                          urllib.error.URLError(ssl.SSLCertVerificationError(1, "certificate verify failed")),
-                          urllib.error.URLError("unknown url type: fixture"),
-                          ConnectionRefusedError(errno.ECONNREFUSED, "refused"), PermissionError(errno.EACCES, "no"),
-                          FileNotFoundError(errno.ENOENT, "absent"), OSError(errno.ENOSPC, "disk full"),
-                          OSError("no errno"), ValueError("unknown url type"), http.client.InvalidURL("bad")]
+            tied = [urllib.error.HTTPError("https://fixture.invalid/f", code, "status", None, None)
+                    for code in (404, 408, 429, 500, 502, 503, 504)]
+            tied += [ssl.SSLCertVerificationError(1, "certificate verify failed"), ssl.SSLError(1, "tls"),
+                     socket.gaierror(socket.EAI_NONAME, "name or service not known"),
+                     socket.gaierror(socket.EAI_FAIL, "non-recoverable failure in name resolution"),
+                     urllib.error.URLError(socket.gaierror(socket.EAI_NONAME, "not known")),
+                     urllib.error.URLError(ssl.SSLCertVerificationError(1, "certificate verify failed")),
+                     ConnectionRefusedError(errno.ECONNREFUSED, "refused"),
+                     urllib.error.URLError(ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")),
+                     http.client.BadStatusLine("garbage"), http.client.LineTooLong("header line"),
+                     http.client.UnknownProtocol("HTTP/9"), http.client.UnknownTransferEncoding()]
+            got = [(repr(exc), kind(exc)) for exc in tied]
+            check("fetch/source-errors-classified", all(name == "SourceFailed" for _exc, name in got), got)
+            permanent = [urllib.error.URLError("unknown url type: fixture"), PermissionError(errno.EACCES, "no"),
+                         FileNotFoundError(errno.ENOENT, "absent"), OSError(errno.ENOSPC, "disk full"),
+                         socket.gaierror(socket.EAI_MEMORY, "memory allocation failure"),
+                         OSError("no errno"), ValueError("unknown url type"), http.client.InvalidURL("bad")]
             got = [(repr(exc), kind(exc)) for exc in permanent]
             check("fetch/other-errors-not-retried", all(name == "NotCompleted" for _exc, name in got), got)
 
             # one attempt: urlopen gets FETCH_TIMEOUT cut down to the time left, and a deadline found passed before
             # a read stops the attempt with NotCompleted, never Transient (so it is not retried); a read cut short
-            # is Transient. urlopen is replaced by an offline fake for these calls, which sets the timeout it is
-            # given on the response's socket as urlopen does. The fake responses read through a real socket pair's
+            # is Transient. fetch_attempt gets an offline fake opener for these calls, which sets the timeout it is
+            # given on the response's socket as urllib does. The fake responses read through a real socket pair's
             # socket, reached as http.client's own responses are (fp.raw._sock), so each read records the socket
             # timeout in force when it began.
             def raised(call):
@@ -911,6 +1099,20 @@ def self_test(report_path=None):
                 response.begin()
                 return response, near
 
+            class FakeOpener:
+                """An opener whose open(url, timeout) is open_url(url, timeout), as fetch_attempt calls one."""
+
+                def __init__(self, open_url):
+                    self.open_url = open_url
+
+                def open(self, url, timeout=None):
+                    return self.open_url(url, timeout)
+
+            def through(open_url):
+                """A download through fetch_attempt with a FakeOpener over open_url."""
+                opener = FakeOpener(open_url)
+                return lambda url, out, remaining: fetch_attempt(url, out, remaining, opener)
+
             opened = []
             fake = _FakeClock()
             ends = fake.now() + 45
@@ -924,13 +1126,10 @@ def self_test(report_path=None):
                 return response
 
             gnu_urls = [GNU_SOURCES[0] + row[1] for row in PINS]
-            urllib.request.urlopen = fake_urlopen
-            try:
-                slow, cut = io.BytesIO(), io.BytesIO()
-                slow_exc = raised(lambda: fetch_attempt(gnu_urls[1], slow, lambda: ends - fake.now()))
-                cut_exc = raised(lambda: fetch_attempt(gnu_urls[2], cut, lambda: DOWNLOAD_DEADLINE))
-            finally:
-                urllib.request.urlopen = no_network
+            fake_opener = FakeOpener(fake_urlopen)
+            slow, cut = io.BytesIO(), io.BytesIO()
+            slow_exc = raised(lambda: fetch_attempt(gnu_urls[1], slow, lambda: ends - fake.now(), fake_opener))
+            cut_exc = raised(lambda: fetch_attempt(gnu_urls[2], cut, lambda: DOWNLOAD_DEADLINE, fake_opener))
             check("fetch/deadline-stops-attempt-between-reads",
                   type(slow_exc) is NotCompleted and "passed during the download" in str(slow_exc)
                   and slow.getvalue() == b"a" * 10 + b"b" * 10 and type(cut_exc) is Transient
@@ -955,12 +1154,9 @@ def self_test(report_path=None):
                 real.append(sock)
                 return response
 
-            urllib.request.urlopen = real_urlopen_chunked
-            try:
-                chunked = io.BytesIO()
-                chunked_exc = raised(lambda: fetch_attempt(gnu_urls[3], chunked, ticking))
-            finally:
-                urllib.request.urlopen = no_network
+            chunked = io.BytesIO()
+            chunked_exc = raised(lambda: fetch_attempt(gnu_urls[3], chunked, ticking,
+                                                       FakeOpener(real_urlopen_chunked)))
             if real:
                 seen.append(real[0].gettimeout())
             check("fetch/read-timeout-cut-to-time-left", slow_response.timeouts == [45, 15] and chunked_exc is None
@@ -984,32 +1180,24 @@ def self_test(report_path=None):
             os.makedirs(short_dir)
             logged = []
             clock = _FakeClock()
-            urllib.request.urlopen = short_then_whole
-            try:
-                got = _outcome(lambda: download((("bash53-001", "bash53-001", None, digest),), short_source, short_dir,
-                                                fetch_attempt, clock.sleep, clock.now, log=logged.append))
-            finally:
-                urllib.request.urlopen = no_network
+            got = _outcome(lambda: download((("bash53-001", "bash53-001", None, digest),), short_source, short_dir,
+                                            through(short_then_whole), clock.sleep, clock.now, log=logged.append))
             check("fetch/short-body-retried", got == ("ok", short_source) and not bodies and clock.sleeps == [2]
                   and len(logged) == 2 and "the body has 5 bytes; its Content-Length declares {}".format(len(body))
                   in logged[0] and os.listdir(short_dir) == ["bash53-001"]
                   and (short_dir / "bash53-001").read_bytes() == body, (got, bodies, clock.sleeps, logged))
 
             # a Content-Length that is not one decimal byte count (one http.client's int() would accept, a signed
-            # one, and two headers joined) stops the download at once: NotCompleted, one attempt, no wait, and no
-            # file left in the downloads directory
+            # one, and two headers joined) fails the download from that source with no retry of its own: from the
+            # one source here, one attempt, no wait, and no file left in the downloads directory
             def one_download(name, heads_and_bodies):
                 queue = list(heads_and_bodies)
                 directory = base / name
                 os.makedirs(directory)
                 clock = _FakeClock()
-                urllib.request.urlopen = lambda url, timeout=None: http_response(*queue.pop(0), timeout)[0]
-                try:
-                    got = _outcome(lambda: download((("bash53-001", "bash53-001", None, digest),), short_source,
-                                                    directory, fetch_attempt, clock.sleep, clock.now,
-                                                    log=lambda line: None))
-                finally:
-                    urllib.request.urlopen = no_network
+                fetcher = through(lambda url, timeout: http_response(*queue.pop(0), timeout)[0])
+                got = _outcome(lambda: download((("bash53-001", "bash53-001", None, digest),), short_source,
+                                                directory, fetcher, clock.sleep, clock.now, log=lambda line: None))
                 return got, len(heads_and_bodies) - len(queue), clock.sleeps, sorted(os.listdir(directory))
 
             malformed = []
@@ -1019,6 +1207,7 @@ def self_test(report_path=None):
                     "HTTP/1.1 200 OK\r\nContent-Length: {}".format(value).encode("ascii"), body)] * FETCH_ATTEMPTS))
             check("fetch/malformed-content-length-not-retried", all(
                 got[0] == "not-completed" and "is not a byte count" in got[1] and used == 1 and sleeps == []
+                and "every source failed in attempt 1 of 4 and none of the failures is transient" in got[1]
                 and listing == [] for got, used, sleeps, listing in malformed), malformed)
 
             # a chunked body is framed by its chunks, not by a Content-Length sent beside them (which http.client
@@ -1048,6 +1237,69 @@ def self_test(report_path=None):
             check("fetch/socket-reach-fails-closed", reach[0][0] == "not-completed" and "no file" in reach[0][1]
                   and reach[1][0] == "not-completed" and "cannot be reached" in reach[1][1]
                   and reach[2] == ("ok", None), reach)
+
+            # redirects, through urllib's own redirect handling in the opener fetch_attempt builds (_opener), with
+            # its https handler replaced by an offline one that answers each URL from routes over a real
+            # HTTPResponse (and any other URL with the right bytes, so a redirect followed where it must not be is
+            # seen); urllib's http handler is the self-test's refusing one
+            class OfflineHttps(urllib.request.HTTPSHandler):
+                def __init__(self, routes, default):
+                    super().__init__()
+                    self.routes, self.default, self.opened = routes, default, []
+
+                def https_open(self, req):
+                    self.opened.append(req.full_url)
+                    response = http_response(*self.routes.get(req.full_url, self.default), req.timeout)[0]
+                    response.url, response.msg = req.full_url, response.reason  # as urllib's do_open sets them
+                    return response
+
+            whole = (head, body)
+            redirect_sources = ("https://first.invalid/gnu/", "https://second.invalid/gnu/")
+            first_url, second_url = (source + "bash53-001" for source in redirect_sources)
+
+            def redirected(name, routes, pins_digest=digest):
+                https = OfflineHttps(routes, whole)
+                opener = _opener(urllib.request.ProxyHandler({}), https)
+                directory = base / name
+                os.makedirs(directory)
+                logged = []
+                clock = _FakeClock()
+                got = _outcome(lambda: download((("bash53-001", "bash53-001", None, pins_digest),), redirect_sources,
+                                                directory, lambda url, out, remaining: fetch_attempt(
+                                                    url, out, remaining, opener), clock.sleep, clock.now,
+                                                log=logged.append))
+                return got, https.opened, logged, clock.sleeps
+
+            def location(code, target):
+                return ("HTTP/1.1 {} Moved\r\nLocation: {}\r\nContent-Length: 0".format(code, target).encode("ascii"),
+                        b"")
+
+            # a redirect to http (on the same host) and one to https on another host are refused before they are
+            # opened, naming where they pointed; the next source serves the file and the fetched line names it
+            outcomes = []
+            for index, target in enumerate(("http://first.invalid/gnu/bash53-001",
+                                            "https://elsewhere.invalid/gnu/bash53-001")):
+                outcomes.append((target, redirected("redirect-refused-{}".format(index),
+                                                    {first_url: location(302, target)})))
+            check("sources/redirect-not-https-same-host-refused", all(
+                got == ("ok", redirect_sources[1:]) and opened == [first_url, second_url] and sleeps == []
+                and logged == ["attempt 1 of 4 from {0} failed ({0}: redirect (302) to {1} refused, as only a "
+                               "redirect to https on the same host is followed) (not tried: {2}); trying {2}".format(
+                                   first_url, target, second_url),
+                               "fetched bash53-001 from {}".format(second_url)]
+                for target, (got, opened, logged, sleeps) in outcomes) and not reached, (outcomes, reached))
+
+            # a redirect to https on the same host is followed, and the fetched line names where it led; a download
+            # there that differs from its pin is refused naming that URL too
+            moved = "https://first.invalid/mirror/gnu/bash53-001"
+            followed = redirected("redirect-same-host", {first_url: location(301, "/mirror/gnu/bash53-001"),
+                                                         moved: whole})
+            wrong = redirected("redirect-same-host-wrong", {first_url: location(307, moved), moved: whole},
+                               hashlib.sha256(b"other bytes").hexdigest())
+            check("sources/redirect-same-host-https-followed", followed == (
+                ("ok", redirect_sources[:1]), [first_url, moved], ["fetched bash53-001 from {}".format(moved)], [])
+                and wrong[0][0] == "refused" and "(fetched from {}; refused at once".format(moved) in wrong[0][1]
+                and wrong[1] == [first_url, moved] and not reached, (followed, wrong, reached))
             for sock in pairs:
                 sock.close()
 
@@ -1079,8 +1331,9 @@ def self_test(report_path=None):
                   (got, calls, clock.sleeps))
 
             # the sources: three fixture sources stand in for GNU_SOURCES. The first is unreachable for every file
-            # (Errno 101, as urllib reports it); each file moves on to the second source at once, with no wait and
-            # into a new empty file, and the build installs from it. The third is never asked.
+            # (Errno 101, as urllib reports it); the archive moves on to the second source at once, with no wait and
+            # into a new empty file, and the first source, having failed, moves to the back of the order, so every
+            # later file is asked of the second source first; the build installs from it. The third is never asked.
             mirror_sources = ("fixture-a://", "fixture-b://", "fixture-c://")
             unreachable = urllib.error.URLError(OSError(errno.ENETUNREACH, "Network is unreachable"))
             script = {}
@@ -1099,13 +1352,15 @@ def self_test(report_path=None):
             check("sources/first-unreachable-second-completes",
                   got == ("ok", (bindir, mirror_sources[1:2] * len(pins)))
                   and served_summary(mirror_sources, got[1][1]) == "{} from fixture-b://".format(len(pins))
-                  and [call[0] for call in calls] == [fixture_url(row, source) for row in pins
+                  and [call[0] for call in calls] == [fixture_url(row, source) for row in pins[:1]
                                                       for source in mirror_sources[:2]]
+                  + [fixture_url(row, mirror_sources[1]) for row in pins[1:]]
                   and clock.sleeps == [] and all(call[1] == 0 for call in calls)
                   and all(len([n for n in call[2] if ".attempt-" in n]) == 1 for call in calls)
                   and not [n for n in os.listdir(watch) if ".attempt-" in n]
                   and "attempt 1 of 4 from fixture-a://bash-5.3.tar.gz failed (fixture-a://bash-5.3.tar.gz: fetch "
-                      "failed (URLError: <urlopen error [Errno 101] Network is unreachable>)); trying "
+                      "failed (URLError: <urlopen error [Errno 101] Network is unreachable>)) (not tried: "
+                      "fixture-b://bash-5.3.tar.gz, fixture-c://bash-5.3.tar.gz); trying "
                       "fixture-b://bash-5.3.tar.gz" in logged
                   and "fetched bash-5.3.tar.gz from fixture-b://bash-5.3.tar.gz" in logged
                   and github_path.read_text(encoding="utf-8") == "/already/listed\n" + str(bindir) + "\n",
@@ -1130,19 +1385,107 @@ def self_test(report_path=None):
                   and not (temp / (INSTALL_NAME + "-build") / SOURCE_DIR).exists(), (got, calls, clock.sleeps))
 
             # the deadline crossing between sources: the first source's failed download of the archive ends 1 s
-            # past the 300 s deadline, so the second source is never asked; the build stops at once, without a
-            # wait, and the failure line names the source not started, the one that failed and the one not tried
+            # past the 300 s deadline, so the second source is never asked, nor announced as the one tried next; the
+            # build stops at once, without a wait, and the failure line names the source not started, the one that
+            # failed and the one not tried
             script[fixture_url(pins[0], mirror_sources[1])] = [archive_bytes]
             clock = _FakeClock()
             fetcher, calls = _scripted_fetcher(script, base / "deadline-sources" / (INSTALL_NAME + "-build")
                                                / "downloads", clock, DOWNLOAD_DEADLINE + 1)
-            got, _temp, _github_path, untouched = run("deadline-sources", pins, fetcher, clock, mirror_sources)
+            logged = []
+            got, _temp, _github_path, untouched = run("deadline-sources", pins, fetcher, clock, mirror_sources,
+                                                      logged.append)
             check("sources/deadline-between-sources", got[0] == "not-completed"
                   and got[1].startswith("bash-5.3.tar.gz: the {} s download deadline passed before attempt 1 from "
                                         "{} (earlier sources in this attempt: {}: fetch failed".format(
                                             DOWNLOAD_DEADLINE, archive_urls[1], archive_urls[0]))
-                  and got[1].endswith("not tried: {})".format(archive_urls[2]))
+                  and got[1].endswith("not tried: {})".format(archive_urls[2])) and logged == []
                   and [call[0] for call in calls] == archive_urls[:1] and clock.sleeps == [] and untouched,
+                  (got, calls, clock.sleeps, logged))
+
+            # a failure tied to one source that is not transient moves on to the next source too: the archive's
+            # first source resets the connection (transient), its second answers 404 and its third serves it, with
+            # no wait; each failed source is logged naming its failure, the sources that failed before it and those
+            # not tried, and the next source only once its deadline check has passed. Every later file is asked of
+            # the third source first, as the other two failed.
+            def source_script(steps):
+                """A _scripted_fetcher script over the fixture pins: steps maps (file index, source index) to one
+                step list; every other URL serves the file's right bytes."""
+                return {fixture_url(row, source): steps.get((row_index, source_index),
+                                                            [(fixtures / row[0]).read_bytes()])
+                        for row_index, row in enumerate(pins) for source_index, source in enumerate(mirror_sources)}
+
+            reset_a = fetch_error(archive_urls[0], ConnectionResetError(errno.ECONNRESET, "reset"))
+            missing_b = fetch_error(archive_urls[1], urllib.error.HTTPError(archive_urls[1], 404, "Not Found", None,
+                                                                            None))
+            fetcher, calls = _scripted_fetcher(source_script({(0, 0): [reset_a], (0, 1): [missing_b]}),
+                                               base / "transient-404" / (INSTALL_NAME + "-build") / "downloads")
+            clock = _FakeClock()
+            logged = []
+            got, temp, _github_path, _untouched = run("transient-404", pins, fetcher, clock, mirror_sources,
+                                                      logged.append)
+            bindir = temp / INSTALL_NAME / "bin"
+            check("sources/transient-then-404-then-success",
+                  got == ("ok", (bindir, mirror_sources[2:] * len(pins))) and clock.sleeps == []
+                  and [call[0] for call in calls] == archive_urls + [fixture_url(row, mirror_sources[2])
+                                                                     for row in pins[1:]]
+                  and logged[:3] == [
+                      "attempt 1 of 4 from {0} failed ({1}) (not tried: {2}, {3}); trying {2}".format(
+                          archive_urls[0], reset_a, archive_urls[1], archive_urls[2]),
+                      "attempt 1 of 4 from {0} failed ({1}) (earlier sources in this attempt: {2}; not tried: {3}); "
+                      "trying {3}".format(archive_urls[1], missing_b, reset_a, archive_urls[2]),
+                      "fetched bash-5.3.tar.gz from {}".format(archive_urls[2])], (got, calls, clock.sleeps, logged))
+
+            # a refused connection (as urllib wraps it) moves on to the next source, which serves the file
+            refused_a = fetch_error(archive_urls[0], urllib.error.URLError(ConnectionRefusedError(
+                errno.ECONNREFUSED, "Connection refused")))
+            fetcher, calls = _scripted_fetcher(source_script({(0, 0): [refused_a]}),
+                                               base / "refused" / (INSTALL_NAME + "-build") / "downloads")
+            clock = _FakeClock()
+            got, temp, _github_path, _untouched = run("refused", pins, fetcher, clock, mirror_sources)
+            bindir = temp / INSTALL_NAME / "bin"
+            check("sources/refused-then-success", type(refused_a) is SourceFailed
+                  and got == ("ok", (bindir, mirror_sources[1:2] * len(pins))) and clock.sleeps == []
+                  and [call[0] for call in calls][:2] == archive_urls[:2], (got, calls, clock.sleeps))
+
+            # the source order lasts for the run: the first source is unreachable at once, the second times out
+            # after 60 s and the third serves each file in 1 s. Only the archive asks all three; every later file
+            # is asked of the third first, so the ten files take 70 s of the 300 (asked in GNU_SOURCES order every
+            # time, the fifth file would pass the deadline).
+            steps = {}
+            for index, row in enumerate(pins):
+                steps[(index, 0)] = [fetch_error(fixture_url(row, mirror_sources[0]), unreachable)]
+                steps[(index, 1)] = [fetch_error(fixture_url(row, mirror_sources[1]), TimeoutError("timed out"))]
+            costs = {mirror_sources[0]: 0, mirror_sources[1]: 60, mirror_sources[2]: 1}
+            clock = _FakeClock()
+            fetcher, calls = _scripted_fetcher(source_script(steps), base / "slow-second" / (INSTALL_NAME + "-build")
+                                               / "downloads", clock, lambda url: costs[url.split("//")[0] + "//"])
+            got, temp, _github_path, _untouched = run("slow-second", pins, fetcher, clock, mirror_sources)
+            bindir = temp / INSTALL_NAME / "bin"
+            check("sources/slow-second-source-ordering",
+                  got == ("ok", (bindir, mirror_sources[2:] * len(pins))) and clock.sleeps == []
+                  and clock.now() - 1000.0 == 60 + len(pins)
+                  and [call[0] for call in calls] == archive_urls + [fixture_url(row, mirror_sources[2])
+                                                                     for row in pins[1:]],
+                  (got, calls, clock.sleeps, clock.now()))
+
+            # a source that fails moves to the back of the order even when it was not first: the first source
+            # serves the archive; patch 001 fails from it (404) and comes from the second; patch 002 fails from
+            # the second (reset), so the third is asked next, not the first, which failed more recently than the
+            # third was asked
+            urls_001 = [fixture_url(pins[1], source) for source in mirror_sources]
+            urls_002 = [fixture_url(pins[2], source) for source in mirror_sources]
+            fetcher, calls = _scripted_fetcher(source_script({
+                (1, 0): [fetch_error(urls_001[0], urllib.error.HTTPError(urls_001[0], 404, "Not Found", None, None))],
+                (2, 1): [fetch_error(urls_002[1], ConnectionResetError(errno.ECONNRESET, "reset"))]}),
+                base / "moved-back" / (INSTALL_NAME + "-build") / "downloads")
+            clock = _FakeClock()
+            got, temp, _github_path, _untouched = run("moved-back", pins, fetcher, clock, mirror_sources)
+            bindir = temp / INSTALL_NAME / "bin"
+            check("sources/failed-source-moved-back",
+                  got == ("ok", (bindir, (mirror_sources[0], mirror_sources[1]) + mirror_sources[2:] * (len(pins) - 2)))
+                  and [call[0] for call in calls] == [archive_urls[0]] + urls_001[:2] + [urls_002[1], urls_002[2]]
+                  + [fixture_url(row, mirror_sources[2]) for row in pins[3:]] and clock.sleeps == [],
                   (got, calls, clock.sleeps))
 
             # the CI entry over the real pin table with a scripted fetcher (nothing reaches the network): a
@@ -1204,17 +1547,33 @@ def self_test(report_path=None):
                   and sleeps == [] and untouched and "bash-5.3.tar.gz: sha256 {}, pinned {} (fetched from {}".format(
                       hashlib.sha256(bytes(PINS[0][2])).hexdigest(), PINS[0][3], url0) in err,
                   (got, calls, sleeps, err))
-            # a failure that is not transient stops the build at once: no other source is asked, and the failure
-            # line names the sources not tried
+            # an attempt whose every source failed with no failure transient is not retried: each source is asked
+            # once, nothing waits, and the failure line names each source with its failure
             outcomes = []
-            for index, exc in enumerate([ssl.SSLCertVerificationError(1, "certificate verify failed"),
-                                         urllib.error.HTTPError(url0, 503, "unavailable", None, None),
-                                         urllib.error.URLError(socket.gaierror(socket.EAI_NONAME, "not known"))]):
-                outcomes.append(entry_run("retry-permanent-{}".format(index), {url0: [fetch_error(url0, exc)]}))
+            for index, make in enumerate([lambda url: ssl.SSLCertVerificationError(1, "certificate verify failed"),
+                                          lambda url: urllib.error.HTTPError(url, 503, "unavailable", None, None),
+                                          lambda url: urllib.error.URLError(socket.gaierror(socket.EAI_NONAME,
+                                                                                            "not known"))]):
+                script = {url: [fetch_error(url, make(url))] for url in urls0}
+                outcomes.append((entry_run("retry-permanent-{}".format(index), script),
+                                 "; ".join(str(script[url][0]) for url in urls0)))
             check("retry/non-transient-not-retried", all(
-                got == ("ok", 2) and [call[0] for call in calls] == [url0] and sleeps == [] and untouched
-                and "(not tried: {}, {})".format(urls0[1], urls0[2]) in err
-                for got, calls, sleeps, untouched, err, _logged in outcomes), outcomes)
+                got == ("ok", 2) and [call[0] for call in calls] == urls0 and sleeps == [] and untouched
+                and err == "NOT COMPLETED: bash-5.3.tar.gz: every source failed in attempt 1 of 4 and none of the "
+                           "failures is transient, so it is not retried ({}). Nothing was installed.\n".format(each)
+                for (got, calls, sleeps, untouched, err, _logged), each in outcomes), outcomes)
+            # an attempt with one transient failure among failures that are not is retried: the first source times
+            # out, the second answers 404 and the third refuses the connection, in every attempt; all four attempts
+            # run, with the 2, 4 and 8 s waits, and the build exits 2
+            mixed = {urls0[0]: [fetch_error(urls0[0], TimeoutError("timed out"))],
+                     urls0[1]: [fetch_error(urls0[1], urllib.error.HTTPError(urls0[1], 404, "Not Found", None, None))],
+                     urls0[2]: [fetch_error(urls0[2], ConnectionRefusedError(errno.ECONNREFUSED, "refused"))]}
+            got, calls, sleeps, untouched, err, _logged = entry_run("retry-mixed", mixed)
+            check("retry/mixed-failures-retried", got == ("ok", 2)
+                  and [call[0] for call in calls] == urls0 * FETCH_ATTEMPTS and sleeps == [2, 4, 8] and untouched
+                  and err.startswith("NOT COMPLETED: bash-5.3.tar.gz: every source failed in each of 4 attempts "
+                                     "(attempt 4: {})".format("; ".join(str(mixed[url][0]) for url in urls0))),
+                  (got, calls, sleeps, err))
 
             # a file already at a pinned name in the downloads directory is never replaced, even after a failed
             # attempt was cleaned up: the completed download is refused and the file keeps its bytes
@@ -1230,6 +1589,11 @@ def self_test(report_path=None):
             got = _outcome(lambda: download(one, fixture_sources, keep, fetcher, clock.sleep, clock.now,
                                             log=lambda line: None))
             check("retry/existing-destination-preserved", got[0] == "not-completed" and "already exists" in got[1]
+                  and got[1].startswith("bash53-001: ") and got[1].endswith("(fetched from {}; not published) "
+                                                                            "(previous attempt: {}: fetch failed "
+                                                                            "(ConnectionResetError: [Errno 104] reset))"
+                                                                            .format(fixture_url(one[0]),
+                                                                                    fixture_url(one[0])))
                   and (keep / "bash53-001").read_bytes() == b"kept" and os.listdir(keep) == ["bash53-001"]
                   and len(calls) == 2 and clock.sleeps == [2], (got, calls, clock.sleeps, os.listdir(keep)))
 
@@ -1254,7 +1618,9 @@ def self_test(report_path=None):
             fetcher, calls = _scripted_fetcher(script, base / "deadline-wait" / (INSTALL_NAME + "-build")
                                                / "downloads", clock, (100, 100, 95, 2))
             got, _temp, _github_path, untouched = run("deadline-wait", pins, fetcher, clock)
-            check("deadline/no-wait-past-deadline", got[0] == "not-completed" and "would end after" in got[1]
+            check("deadline/no-wait-past-deadline", got[0] == "not-completed" and "would not end before" in got[1]
+                  and got[1].endswith("download deadline (previous attempt: {}: fetch failed (ConnectionResetError: "
+                                      "[Errno 104] reset))".format(fixture_url(pins[2])))
                   and len(calls) == 4 and clock.sleeps == [2] and untouched, (got, calls, clock.sleeps))
 
             # the CI entry: an unusable RUNNER_TEMP or GITHUB_PATH stops it before any fetch
@@ -1276,10 +1642,19 @@ def self_test(report_path=None):
                 raise PermissionError("refused by the self-test")
 
             os.makedirs(base / "os-error")
-            got = _outcome(lambda: build({"RUNNER_TEMP": str(base / "os-error"), "GITHUB_PATH": str(listed)},
-                                         failing, log=lambda line: None))
+            os_error_err = io.StringIO()
+
+            def os_error_build():
+                with contextlib.redirect_stderr(os_error_err):
+                    return build({"RUNNER_TEMP": str(base / "os-error"), "GITHUB_PATH": str(listed)}, failing,
+                                 log=lambda line: None)
+            got = _outcome(os_error_build)
             check("env/os-error-exits-2", got == ("ok", 2) and listed.read_text(encoding="utf-8") == ""
-                  and not os.path.lexists(base / "os-error" / INSTALL_NAME), got)
+                  and not os.path.lexists(base / "os-error" / INSTALL_NAME)
+                  and os_error_err.getvalue() == "NOT COMPLETED: bash-5.3.tar.gz: local error in attempt 1 from {} "
+                                                 "(PermissionError: refused by the self-test) (not tried: {}, {}). "
+                                                 "Nothing was installed.\n".format(*urls0),
+                  (got, os_error_err.getvalue()))
 
             # the entry: with no argument or --self-test (with or without --execution-report) it runs the
             # self-test, and it builds only on the explicit --build. self_test is stubbed for these calls, so the
@@ -1342,6 +1717,8 @@ def self_test(report_path=None):
                   unknown)
     finally:
         urllib.request.urlopen = real_urlopen
+        urllib.request.HTTPSHandler.https_open = real_https_open
+        urllib.request.HTTPHandler.http_open = real_http_open
     check("network/never-reached", not reached, reached)
 
     # the in-run self-guard: the executed set is exactly this suite's registered set
@@ -1360,16 +1737,20 @@ def self_test(report_path=None):
             print("  {}: {!r}".format(check_id, detail))
         return 1
     print("SELF-TEST PASS: ci-build-bash {} checks (the pin table, one pin per file, and the three GNU sources in "
-          "order; a source that fails transiently moves on to the next at once and the build completes from it, "
-          "every source failing exits 2 naming each, a source serving wrong bytes is refused at once with no "
-          "further source asked, and no source is asked once the deadline has passed; a sha256 or size mismatch "
+          "order; a source that fails transiently, with an HTTP status or with a refused connection moves on to the "
+          "next at once and the build completes from it, a source that failed moves to the back of the order for "
+          "the rest of the run, an attempt is retried only when a source in it failed transiently, every source "
+          "failing exits 2 naming each, a source serving wrong bytes is refused at once with no further source "
+          "asked, no source is asked or announced once the deadline has passed, a redirect is followed only to "
+          "https on the same host and the fetched line names where it led; a sha256 or size mismatch "
           "and a missing file "
           "refuse; a non-https URL is refused before any fetch; only BASH_VERSINFO 5 3 9 passes; over fixture "
           "files, a full build installs and appends to GITHUB_PATH, and a mismatch, a failed download, patches out "
           "of order, a wrong built or installed version, an existing install and an unexpected OSError each leave "
-          "nothing installed; only the named transient transport failures move on or are retried, four attempts "
+          "nothing installed; the named transient transport failures and the failures tied to one source move on, "
+          "a local or other error stops at once, four attempts "
           "over every source with 2, 4 and 8 s waits into fresh files, exit 2 once exhausted, a body cut short of its Content-Length is "
-          "retried, a malformed Content-Length stops at once, a chunked body ignores a Content-Length beside it, "
+          "retried, a malformed Content-Length is not retried, a chunked body ignores a Content-Length beside it, "
           "the read timeout reach fails closed, each body read's socket timeout is cut to the time left, a size or digest mismatch exits 1 "
           "without a retry, an existing download is never replaced, and no attempt starts and no wait is planned past the shared 300 s deadline (opening, header and chunk reads can still overrun it, as the module docstring states); a bare run is the self-test even with RUNNER_TEMP and GITHUB_PATH set, only --build "
           "reaches the build, which exits 2 without them, and any other argument exits 2; no fetch reached the "
