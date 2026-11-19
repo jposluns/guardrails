@@ -15,22 +15,28 @@ that the result must carry before it is accepted.
       parent, any other operating-system error).
   orch_dispatch_marker.py write --marker PATH --id HEX --status N
       Write the line `aiqt-dispatch-marker v1 <id> <status>` to a temporary file in PATH's directory,
-      fsync it, then rename it onto PATH. N is an integer from 0 to 255 with no sign or leading zero.
-      Exit 0 published; 2 cannot evaluate (bad arguments, a missing directory, a target that is a
-      directory, a write or rename failure).
+      fsync it, then rename it onto PATH, so PATH keeps its previous complete content until the
+      rename. N is an integer from 0 to 255 with no sign or leading zero.
+      Exit 0 published; 2 cannot evaluate (bad arguments, an oversized or unconvertible number
+      included, a missing directory, a target that is a directory, a write, fsync or rename failure,
+      after which the temporary file is removed and PATH is left as it was).
   orch_dispatch_marker.py wait --marker PATH --expect-id HEX --deadline-s S [--interval-s I]
       Poll PATH on a monotonic clock until S seconds (an integer from 1 to 86400) pass, every I seconds
       (from 0.05 to 60, default 1). A marker is accepted only when lstat shows a regular file of at
       most MAX_MARKER_BYTES bytes whose whole content is one v1 line carrying the expected id; the
       worker status it carries is then printed on stdout. A missing marker (a temporary file not yet
-      renamed included) is still pending. A marker with another id, a legacy bare status line, or a
-      malformed one is present but unbound: it is never accepted, and waiting continues, since the
-      matching marker may still be renamed over it.
+      renamed included) is still pending. A marker with another id, a legacy bare status line, or
+      malformed content (not ASCII, not one line ending in a line feed, another magic or version, a
+      bad id or status field) is present but unbound: it is never accepted, it never ends the wait
+      early and it never exits 2; waiting continues, since the matching marker may still be renamed
+      over it, and only if none is by the deadline does the wait exit 4.
       Exit 0 matched (the worker status goes on stdout and never becomes this exit code); 3 the
       deadline passed and no marker was ever seen; 4 the deadline passed and only unbound markers
-      were seen, each named on stderr; 2 cannot evaluate, at once (bad arguments, a relative path, a
-      missing result directory, a symlink, FIFO, directory or other non-regular marker, a read or
-      permission error, an oversized marker).
+      (another id, a legacy bare status or malformed content) were seen, each named on stderr; 2
+      cannot evaluate, at once (bad arguments, an oversized or unconvertible number included, a
+      relative path, a missing result directory, a symlink, FIFO, directory or other non-regular
+      marker, a read or permission error, an oversized marker); a regular marker of at most
+      MAX_MARKER_BYTES bytes is never a cause of exit 2, whatever its content.
   orch_dispatch_marker.py --self-test [--execution-report ABS_PATH]
       Run the self-test (exit 0 pass, 1 a failed check, 2 a harness error).
 
@@ -83,6 +89,11 @@ DEADLINE_MAX_S = 86400
 INTERVAL_MIN_S = 0.05
 INTERVAL_MAX_S = 60.0
 INTERVAL_DEFAULT_S = 1.0
+# Numeric arguments longer than these are refused before any conversion (no int or float of an
+# unbounded string).
+STATUS_TEXT_MAX = len(str(STATUS_MAX))
+DEADLINE_TEXT_MAX = len(str(DEADLINE_MAX_S))
+INTERVAL_TEXT_MAX = 16
 
 EXIT_OK = 0
 EXIT_CANNOT_EVALUATE = 2
@@ -102,29 +113,40 @@ def is_dispatch_id(text):
 
 def parse_status(text):
     """The integer of a canonical status (0 to STATUS_MAX, no sign, no leading zero), or None."""
-    if not text or not all(c in DECIMAL_DIGITS for c in text):
+    if not text or len(text) > STATUS_TEXT_MAX or not all(c in DECIMAL_DIGITS for c in text):
         return None
     if len(text) > 1 and text[0] == "0":
         return None
-    value = int(text)
+    try:
+        value = int(text)
+    except (ValueError, OverflowError):
+        return None
     return value if value <= STATUS_MAX else None
 
 
 def parse_deadline(text):
     """The integer deadline in seconds (1 to DEADLINE_MAX_S, canonical digits), or None."""
-    if not text or not all(c in DECIMAL_DIGITS for c in text) or text[0] == "0":
+    if not text or len(text) > DEADLINE_TEXT_MAX or not all(c in DECIMAL_DIGITS for c in text) \
+            or text[0] == "0":
         return None
-    value = int(text)
+    try:
+        value = int(text)
+    except (ValueError, OverflowError):
+        return None
     return value if value <= DEADLINE_MAX_S else None
 
 
 def parse_interval(text):
     """The poll interval in seconds (INTERVAL_MIN_S to INTERVAL_MAX_S, plain decimal), or None."""
-    if not text or text.count(".") > 1 or not all(c in DECIMAL_DIGITS + "." for c in text):
+    if not text or len(text) > INTERVAL_TEXT_MAX or text.count(".") > 1 \
+            or not all(c in DECIMAL_DIGITS + "." for c in text):
         return None
     if not text.replace(".", ""):
         return None
-    value = float(text)
+    try:
+        value = float(text)
+    except (ValueError, OverflowError):
+        return None
     return value if INTERVAL_MIN_S <= value <= INTERVAL_MAX_S else None
 
 
@@ -140,6 +162,10 @@ def _id_matches(got, want):
 def judge_marker(data, expect_id):
     """("match", status) or ("unbound", reason) for a marker's bytes, which are never accepted on
     presence, age or a bare status alone."""
+    # As the plan decided, there is no third outcome here: legacy and malformed content (not ASCII,
+    # not one line, another magic or version, a bad id or status field) is present but unbound, like a
+    # marker with another id. It never exits 2; the wait goes on, because a stale file may still be
+    # replaced by the matching marker, and exits 4 only at the deadline.
     try:
         text = data.decode("ascii")
     except UnicodeDecodeError:
@@ -249,6 +275,13 @@ def claim_dir(path):
     return EXIT_OK, secrets.token_hex(ID_LENGTH // 2) + "\n", []
 
 
+# The publishing system calls, looked up at call time so the self-test can pause a partial write or fail
+# the fsync or the rename and observe the destination meanwhile.
+_write_fd = os.write
+_fsync_fd = os.fsync
+_replace_path = os.replace
+
+
 def write_marker(path, dispatch_id, status):
     """(exit code, stdout text, stderr lines) of an atomic publish of the marker at path."""
     directory = os.path.dirname(path)
@@ -274,11 +307,11 @@ def write_marker(path, dispatch_id, status):
         try:
             view = memoryview(data)
             while view:
-                view = view[os.write(fd, view):]
-            os.fsync(fd)
+                view = view[_write_fd(fd, view):]
+            _fsync_fd(fd)
         finally:
             os.close(fd)
-        os.replace(temp, path)
+        _replace_path(temp, path)
     except OSError as exc:
         try:
             os.unlink(temp)
@@ -386,6 +419,22 @@ def _publish(path, dispatch_id, status):
     os.replace(temp, path)
 
 
+def _read_or_none(path):
+    try:
+        with open(path, "rb") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def _run_guarded(argv, clock=time.monotonic, sleep=time.sleep):
+    """run_command, with an escaped exception reported as a failed check rather than a crashed suite."""
+    try:
+        return run_command(argv, clock, sleep)
+    except Exception as exc:
+        return "raised", "", ["{}: {}".format(type(exc).__name__, str(exc)[:160])]
+
+
 def _self_test():
     import tempfile
     import threading
@@ -423,6 +472,37 @@ def _self_test():
         _publish(m,new_id, 0)
         code, out, err, _f = _wait(m, new_id)
         check("wait/legacy-control-v1-match-0", code == EXIT_OK and out == "0\n", (code, out, err))
+
+        # Malformed content is present but unbound (exit 4 at the deadline, never 2), and the matching
+        # marker renamed over it is still accepted.
+        d, m = fresh()
+        for name, data in (("wait/malformed-unbound-4/garbage", b"garbage\n"),
+                           ("wait/malformed-unbound-4/not-ascii", b"\xff\xfe\n"),
+                           ("wait/malformed-unbound-4/status-256",
+                            "{} {} {} 256\n".format(MARKER_MAGIC, MARKER_VERSION, new_id).encode("ascii"))):
+            _put(m, data)
+            code, out, err, fake = _wait(m, new_id)
+            check(name, code == EXIT_ONLY_UNBOUND and out == "" and fake.sleeps >= 2
+                  and any("malformed" in line for line in err), (code, out, err, fake.sleeps))
+
+        def replace_malformed(n):
+            if n == 2:
+                _publish(m, new_id, 0)
+
+        code, out, err, _f = _wait(m, new_id, on_sleep=replace_malformed)
+        check("wait/malformed-replaced-by-match-0", code == EXIT_OK and out == "0\n", (code, out, err))
+
+        # Marker version: only v1 is read; a nearby wrong version is unbound, the same line at v1 matches.
+        d, m = fresh()
+        for name, version in (("wait/wrong-version-4/v2", "v2"), ("wait/wrong-version-4/v0", "v0"),
+                              ("wait/wrong-version-4/upper-v1", "V1")):
+            _put(m, "{} {} {} 0\n".format(MARKER_MAGIC, version, new_id).encode("ascii"))
+            code, out, err, _f = _wait(m, new_id)
+            check(name, code == EXIT_ONLY_UNBOUND and out == ""
+                  and any("malformed" in line for line in err), (code, out, err))
+        _put(m, "{} {} {} 0\n".format(MARKER_MAGIC, "v1", new_id).encode("ascii"))
+        code, out, err, _f = _wait(m, new_id)
+        check("wait/wrong-version-control-v1-0", code == EXIT_OK and out == "0\n", (code, out, err))
 
         d, m = fresh()
         _publish(m,old_id, 0)
@@ -531,7 +611,10 @@ def _self_test():
         code, out, err, fake = _wait(m, new_id)
         check("wait/missing-dir-2", code == EXIT_CANNOT_EVALUATE and fake.sleeps == 0, (code, out, err))
 
+        # A matching marker is already in place, so an argument wrongly accepted ends at exit 0 at once
+        # instead of passing as a refusal.
         d, m = fresh()
+        _publish(m,new_id, 3)
         for name, argv in (
                 ("wait/bad-args-2/relative-path",
                  ["wait", "--marker", "rel/exit-status", "--expect-id", new_id, "--deadline-s", "5"]),
@@ -541,17 +624,30 @@ def _self_test():
                  ["wait", "--marker", m, "--expect-id", new_id, "--deadline-s", "0"]),
                 ("wait/bad-args-2/deadline-not-integer",
                  ["wait", "--marker", m, "--expect-id", new_id, "--deadline-s", "1.5"]),
+                ("wait/bad-args-2/deadline-86401",
+                 ["wait", "--marker", m, "--expect-id", new_id, "--deadline-s", str(DEADLINE_MAX_S + 1)]),
+                ("wait/bad-args-2/deadline-5000-digits",
+                 ["wait", "--marker", m, "--expect-id", new_id, "--deadline-s", "9" * 5000]),
+                ("wait/bad-args-2/interval-0.04",
+                 ["wait", "--marker", m, "--expect-id", new_id, "--deadline-s", "5", "--interval-s", "0.04"]),
+                ("wait/bad-args-2/interval-60.01",
+                 ["wait", "--marker", m, "--expect-id", new_id, "--deadline-s", "5", "--interval-s", "60.01"]),
+                ("wait/bad-args-2/interval-5000-digits",
+                 ["wait", "--marker", m, "--expect-id", new_id, "--deadline-s", "5", "--interval-s",
+                  "9" * 5000]),
                 ("wait/bad-args-2/missing-expect-id",
                  ["wait", "--marker", m, "--deadline-s", "5"])):
             fake = _FakeClock()
-            code, out, err = run_command(argv, fake.clock, fake.sleep)
+            code, out, err = _run_guarded(argv, fake.clock, fake.sleep)
             check(name, code == EXIT_CANNOT_EVALUATE and fake.sleeps == 0
                   and any("wait needs" in line or "usage:" in line for line in err), (code, out, err))
-        _publish(m,new_id, 3)
-        fake = _FakeClock()
-        code, out, err = run_command(["wait", "--marker", m, "--expect-id", new_id, "--deadline-s", "5",
-                                      "--interval-s", "0.05"], fake.clock, fake.sleep)
-        check("wait/cli-valid-args-0", code == EXIT_OK and out == "3\n", (code, out, err))
+        for name, extra in (("wait/cli-valid-args-0", ["--deadline-s", "5", "--interval-s", "0.05"]),
+                            ("wait/deadline-ceiling-control-86400-0", ["--deadline-s", str(DEADLINE_MAX_S)]),
+                            ("wait/interval-bound-control-60-0", ["--deadline-s", "5", "--interval-s", "60"])):
+            fake = _FakeClock()
+            code, out, err = _run_guarded(["wait", "--marker", m, "--expect-id", new_id] + extra,
+                                          fake.clock, fake.sleep)
+            check(name, code == EXIT_OK and out == "3\n", (code, out, err))
 
         # --- claim ---
         fresh_path = os.path.join(base, "claim-fresh")
@@ -588,7 +684,7 @@ def _self_test():
 
             def one(i):
                 barrier.wait()
-                results[i] = claim_dir(paths[i])[0]
+                results[i] = claim_dir(paths[i])[:2]
 
             threads = [threading.Thread(target=one, args=(i,)) for i in range(len(paths))]
             for thread in threads:
@@ -599,9 +695,31 @@ def _self_test():
 
         same = os.path.join(base, "claim-race")
         got = race([same, same])
-        check("claim/race-one-winner", sorted(got) == [EXIT_OK, EXIT_EXISTS], got)
+        check("claim/race-one-winner", sorted(r[0] for r in got) == [EXIT_OK, EXIT_EXISTS], got)
         got = race([os.path.join(base, "claim-race-a"), os.path.join(base, "claim-race-b")])
-        check("claim/race-distinct-both-0", got == [EXIT_OK, EXIT_OK], got)
+        check("claim/race-distinct-both-0", [r[0] for r in got] == [EXIT_OK, EXIT_OK]
+              and len({r[1] for r in got}) == 2, got)
+
+        # Every successful claim issues a fresh id: several claims keep their ids, which must be valid and
+        # pairwise distinct, and a marker written under one claim's id is refused by a wait for another's.
+        claimed = []
+        for i in range(5):
+            claim_path = os.path.join(base, "claim-many-{}".format(i))
+            code, out, err = run_command(["claim", claim_path])
+            claimed.append((claim_path, out[:-1] if code == EXIT_OK and out.endswith("\n") else None))
+        ids = [dispatch_id for _p, dispatch_id in claimed]
+        check("claim/ids-fresh-distinct", all(is_dispatch_id(x) for x in ids) and len(set(ids)) == len(ids),
+              ids)
+        (dir_a, id_a), (_dir_b, id_b) = claimed[0], claimed[1]
+        marker_a = os.path.join(dir_a, "exit-status")
+        code_w, _o, err_w = run_command(["write", "--marker", marker_a, "--id", str(id_a), "--status", "0"])
+        code, out, err, _f = _wait(marker_a, id_b)
+        check("claim/other-claim-id-refused-4", code_w == EXIT_OK and is_dispatch_id(id_b)
+              and code == EXIT_ONLY_UNBOUND and out == "" and any(str(id_a) in line for line in err),
+              (code_w, err_w, code, out, err))
+        code, out, err, _f = _wait(marker_a, id_a)
+        check("claim/own-claim-id-control-0", code_w == EXIT_OK and code == EXIT_OK and out == "0\n",
+              (code_w, err_w, code, out, err))
 
         # --- write ---
         d, m = fresh()
@@ -613,11 +731,63 @@ def _self_test():
         check("write/publish-atomic-0", code == EXIT_OK and content == marker_line(new_id, 0).encode("ascii")
               and sorted(os.listdir(d)) == ["exit-status"], (code, content, sorted(os.listdir(d))))
 
+        # Atomic publication: pause the temporary write half way and look at the destination, which must
+        # still hold the previous complete marker; it changes only at the rename.
+        previous = marker_line(old_id, 0).encode("ascii")
+        wanted = marker_line(new_id, 0).encode("ascii")
+        d, m = fresh()
+        _publish(m, old_id, 0)
+        paused = []
+        real_write = globals()["_write_fd"]
+
+        def half_then_look(fd, data):
+            if paused:
+                return real_write(fd, data)
+            written = real_write(fd, bytes(data[:len(data) // 2]))
+            others = sorted(name for name in os.listdir(d) if name != "exit-status")
+            paused.append((_read_or_none(m), [_read_or_none(os.path.join(d, name)) for name in others]))
+            return written
+
+        globals()["_write_fd"] = half_then_look
+        try:
+            code, out, err = _run_guarded(["write", "--marker", m, "--id", new_id, "--status", "0"])
+        finally:
+            globals()["_write_fd"] = real_write
+        check("write/paused-partial-keeps-previous", len(paused) == 1 and paused[0][0] == previous
+              and paused[0][1] == [wanted[:len(wanted) // 2]], paused)
+        check("write/paused-partial-then-published-0", code == EXIT_OK and _read_or_none(m) == wanted
+              and sorted(os.listdir(d)) == ["exit-status"], (code, err, _read_or_none(m), os.listdir(d)))
+
+        # An fsync or rename failure is exit 2, the temporary file is removed and the previous complete
+        # marker is left in place.
+        def fail_fsync(fd):
+            raise OSError(5, "fsync failure injected by the self-test")
+
+        def fail_rename(src, dst):
+            raise OSError(5, "rename failure injected by the self-test")
+
+        real_fsync, real_replace = globals()["_fsync_fd"], globals()["_replace_path"]
+        for name, fsync_fn, replace_fn in (("write/fsync-failure-2", fail_fsync, real_replace),
+                                           ("write/rename-failure-2", real_fsync, fail_rename)):
+            d, m = fresh()
+            _publish(m, old_id, 0)
+            globals()["_fsync_fd"], globals()["_replace_path"] = fsync_fn, replace_fn
+            try:
+                code, out, err = _run_guarded(["write", "--marker", m, "--id", new_id, "--status", "0"])
+            finally:
+                globals()["_fsync_fd"], globals()["_replace_path"] = real_fsync, real_replace
+            check(name, code == EXIT_CANNOT_EVALUATE and _read_or_none(m) == previous
+                  and sorted(os.listdir(d)) == ["exit-status"]
+                  and any("injected" in line and "cannot publish" in line for line in err),
+                  (code, err, _read_or_none(m), sorted(os.listdir(d))))
+
         d, m = fresh()
         for name, status in (("write/bad-status-2/256", "256"), ("write/bad-status-2/minus-1", "-1"),
-                             ("write/bad-status-2/leading-zero", "07")):
-            code, out, err = run_command(["write", "--marker", m, "--id", new_id, "--status", status])
-            check(name, code == EXIT_CANNOT_EVALUATE and not os.path.lexists(m), (code, out, err))
+                             ("write/bad-status-2/leading-zero", "07"),
+                             ("write/bad-status-2/5000-digits", "9" * 5000)):
+            code, out, err = _run_guarded(["write", "--marker", m, "--id", new_id, "--status", status])
+            check(name, code == EXIT_CANNOT_EVALUATE and not os.path.lexists(m)
+                  and any("write needs" in line for line in err), (code, out, err))
         code, out, err = run_command(["write", "--marker", m, "--id", new_id, "--status", "255"])
         code2, out2, err2, _f = _wait(m, new_id)
         check("write/status-255-0", code == EXIT_OK and code2 == EXIT_OK and out2 == "255\n",
@@ -654,11 +824,14 @@ def _self_test():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: orch_dispatch_marker {} checks (a stale marker with an earlier id, a legacy bare "
-          "status, a late write by the earlier dispatch and a fresh mtime on a wrong id are never accepted; "
-          "a matching id is accepted whatever its age and its worker status is printed, never used as the "
-          "exit; non-regular, unreadable and oversized markers and bad arguments cannot evaluate; a claim "
-          "never adopts an existing entry and one of two racing claims wins; a write publishes atomically "
-          "and refuses a bad status; with the id comparison removed the incident case would pass)".format(
+          "status, malformed content, another marker version, a late write by the earlier dispatch and a "
+          "fresh mtime on a wrong id are never accepted, and malformed content waits to exit 4, not 2; a "
+          "matching id is accepted whatever its age and its worker status is printed, never used as the "
+          "exit; non-regular, unreadable and oversized markers and bad or out-of-range arguments, oversized "
+          "numbers included, cannot evaluate; a claim never adopts an existing entry, one of two racing "
+          "claims wins, and claims issue distinct ids, one claim's marker refused under another's; a write "
+          "keeps the previous marker until the rename, fails cleanly on an fsync or rename error and "
+          "refuses a bad status; with the id comparison removed the incident case would pass)".format(
               len(EXECUTED)))
     return 0
 
