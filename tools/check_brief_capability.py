@@ -626,8 +626,8 @@ DENIAL REROUTE (beside the preflight, for every family, before the execution rul
                        (TASK:) each open one, the marker not read, and a heading is a paragraph of its own; every
                        other line continues the paragraph, so a wrapped sentence is read whole and nothing is carried
                        from one paragraph to the next. Every . ! or ? ends a SENTENCE (no abbreviation, path or decimal
-                       exception); ; and : end a SEGMENT; a segment end, a comma and the whole words and, or, but and
-                       then end a CLAUSE. A word is a run of ASCII letters (an apostrophe, ' or U+2019, between letters
+                       exception); ; ends a SEGMENT; a segment end, a colon, a comma and the whole words and, or, but
+                       and then end a CLAUSE. A word is a run of ASCII letters (an apostrophe, ' or U+2019, between letters
                        kept), lower-cased; a phrase of several words matches only when spaces, tabs or a joined line
                        break alone separate them. A sentence draws one WARN when it holds an ELIGIBLE REFUSAL (denied,
                        refused, blocked or rejected, with no negation word before it in its clause: "not denied" and
@@ -637,24 +637,33 @@ DENIAL REROUTE (beside the preflight, for every family, before the execution rul
                        accomplish, achieve, implement, retry, rerun, use, invoke, call, write, try); with no negation
                        word (not, never, no, nor, neither, without, don't, mustn't, shouldn't, won't, cannot, can't,
                        isn't, aren't, wasn't, weren't, hasn't, haven't, hadn't) from the start of its segment to the
-                       end of its clause; and MARKED, its clause holding instead, another way, inline, otherwise or by
-                       other means before any instead of or rather than, or the clause before it being only instead or
-                       otherwise, closed by a comma or colon. The refusal may stand before or after the action. The
+                       end of its clause, across colons as across commas and coordinators, except that a clause after
+                       a colon opening with instead or otherwise starts afresh; NOT EXCLUDED: no earlier clause of its
+                       segment holds instead of or rather than with every clause from there to it opened by a comma, a
+                       colon, and or or and none opening with instead or otherwise; and MARKED, its clause holding
+                       instead, another way, inline, otherwise or by other means before any instead of or rather than,
+                       or the clause before it being only instead or otherwise, closed by a comma or colon. The
+                       refusal may stand before or after the action. The
                        WARN names the line of the first such action verb and carries the sentence as its excerpt
                        (whitespace runs as one space, cut after 200 characters with ..., each character that is not
                        printable written as a backslash escape, in the path too), in the summary line after the T1
                        text: "; WARN D1 <brief>:<line>: possible instruction to achieve a refused step another way;
                        review the wording: <excerpt>". So "If denied, run it another way.", "Run it inline if the tool
-                       is refused." and "The tool might be rejected; otherwise you can use a script." warn, and "If
-                       denied, do not run it another way.", "If denied, do not run it and execute it inline.", "If it
-                       has not been denied, run inline.", "If denied, report the refusal instead.", "If denied, stop.
-                       Run inline." and two list items "- If denied," and "- run inline." do not. RESIDUALS: it reads
+                       is refused.", "The tool might be rejected; otherwise you can use a script.", "If denied, do not
+                       wait; run it inline.", "If denied, do not wait: instead, run it inline." and "If denied, stop
+                       rather than wait, then run it inline." warn, and "If denied, do not run it another way.", "If
+                       denied, do not run it and execute it inline.", "If denied, do not do the following: run it
+                       inline.", "If denied, stop rather than retry or run it inline.", "If it has not been denied,
+                       run inline.", "If denied, report the refusal instead.", "If denied, stop. Run inline." and two
+                       list items "- If denied," and "- run inline." do not. RESIDUALS: it reads
                        only its fixed words, so other refusal words (refuses, a permission error told another way),
                        other alternatives (fallback, "a different approach"), third-person requests, and a request
                        split across sentences, paragraphs or list items are missed, and a period inside a path or an
-                       abbreviation can cut a real request short; the negation scope is conservative, so a prohibition
-                       earlier in the segment silences a later real request ("If denied, do not stop early and run
-                       inline." is quiet). FALSE WARNINGS: a quoted or fenced example, a question, a past report, an
+                       abbreviation can cut a real request short; the negation and exclusion scopes are conservative,
+                       so a prohibition earlier in the segment silences a later real request ("If denied, do not stop
+                       early and run inline." and "If denied, do not stop: run it inline." are quiet), and so does an
+                       instead of or rather than before it ("If denied, stop rather than wait, and run it inline." is
+                       quiet). FALSE WARNINGS: a quoted or fenced example, a question, a past report, an
                        unrelated action, blocked in a sense that is not a permission, a legitimate alternative and
                        another leg's text can warn, and D1 cannot tell whether the refusal and the action concern the
                        same step. It reviews wording only: it never authorizes an alternative and does not observe what
@@ -4476,7 +4485,8 @@ D1_ACTIONS = frozenset(("run", "execute", "do", "perform", "complete", "accompli
 D1_LEADS = frozenset(("please", "instead", "otherwise"))
 D1_MODALS = frozenset(("must", "should", "can", "may"))
 # a negation before a refusal in its clause makes the refusal ineligible; one anywhere from the start of an action's
-# segment to the end of the action's clause rejects the action (do not and must not are covered by not)
+# segment to the end of the action's clause rejects the action (do not and must not are covered by not), across a
+# colon too, unless the clause after the colon opens with a D1_SCOPE_OPENERS word
 D1_NEGATIONS = frozenset(("not", "never", "no", "nor", "neither", "without", "don't", "mustn't", "shouldn't", "won't",
                           "cannot", "can't", "isn't", "aren't", "wasn't", "weren't", "hasn't", "haven't", "hadn't"))
 # the whole words that close a clause and open the next
@@ -4486,6 +4496,12 @@ D1_SOLE_MARKERS = frozenset(("instead", "otherwise"))
 D1_SOLE_OPENERS = frozenset((",", ":"))
 # an alternative at or after the first of these phrases in an action clause names what is not to be done
 D1_CUTOFFS = (("instead", "of"), ("rather", "than"))
+# a clause after one holding a D1_CUTOFFS phrase, opened by one of these boundaries, is excluded too (stop rather than
+# retry or run it inline: both verbs are what is not to be done), and so is each later clause opened the same way
+D1_CARRIERS = frozenset((",", ":", "and", "or"))
+# a clause that opens with one of these words names the alternative asked for: an exclusion does not carry into it,
+# and neither does a negation carried across a colon (do not wait: instead, run it inline)
+D1_SCOPE_OPENERS = frozenset(("instead", "otherwise"))
 # a list item line (at any indentation) and a heading each open a paragraph, a heading standing alone; a column-zero
 # upper-case label opens one too; the matched marker is not read
 D1_LIST_RE = re.compile(r"[ \t]*+(?:[-+*]|[0-9]{1,9}[.)])[ \t]++")
@@ -4494,7 +4510,7 @@ D1_LABEL_RE = re.compile(r"[A-Z][A-Z0-9-]*+:")
 D1_LETTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 D1_APOSTROPHES = frozenset("'’")
 # the characters that end a sentence, a segment and a clause; and the only ones a multiword expression may hold
-D1_SENTENCE_STOPS, D1_SEGMENT_STOPS, D1_CLAUSE_STOPS, D1_GAP = ".!?", ";:", ",", " \t\n"
+D1_SENTENCE_STOPS, D1_SEGMENT_STOPS, D1_CLAUSE_STOPS, D1_GAP = ".!?", ";", ",:", " \t\n"
 D1_EXCERPT_CHARS = 200
 D1_MESSAGE = "possible instruction to achieve a refused step another way; review the wording"
 
@@ -4530,8 +4546,9 @@ def d1_paragraphs(text):
 
 def d1_sentences(paragraph):
     """[(sentence text, clauses)] for one paragraph, its lines joined by a line break read as a space. Every `.`, `!`
-    or `?` ends a sentence (no abbreviation, path or decimal exception), `;` and `:` end a segment, and a segment
-    boundary, a comma and the whole words and, or, but and then end a clause. A clause is (segment, opener, words):
+    or `?` ends a sentence (no abbreviation, path or decimal exception), `;` ends a segment, and a segment
+    boundary, a colon, a comma and the whole words and, or, but and then end a clause. A clause is (segment, opener,
+    words):
     its segment's number (counted over the paragraph), the boundary before it (None at a sentence start, a stop
     character, or the coordinator word) and its words, each (word, line, joined): a maximal run of ASCII letters,
     with an apostrophe between letters kept (U+2019 read as '), lower-cased; its source line; and whether only
@@ -4640,21 +4657,31 @@ def d1_hit(clauses):
     """The source line of the first affirmative action a sentence asks to do another way, or None: the sentence holds
     an eligible refusal (d1_refused, before or after the action), and a clause is headed by an action verb
     (d1_action), holds no D1_NEGATIONS word from the start of its segment to its own end (a prohibition carries
-    across commas and coordinators: "do not run it and execute it inline" is quiet), and is marked: it holds an
-    alternative (d1_marked), or the clause before it is only instead or otherwise, closed by a comma or colon."""
+    across commas, coordinators and colons: "do not run it and execute it inline" and "do not do the following: run
+    it inline" are quiet; a clause after a colon that opens with instead or otherwise starts afresh), is not
+    EXCLUDED (an earlier clause of its segment holds instead of or rather than, and every clause from there to this
+    one is opened by a comma, a colon, and or or, and none opens with instead or otherwise: "stop rather than retry
+    or run it inline" is quiet), and is marked: it holds an alternative (d1_marked), or the clause before it is only
+    instead or otherwise, closed by a comma or colon."""
     if not d1_refused(clauses):
         return None
-    negated, segment, previous = False, None, None
+    negated, excluded, segment, previous = False, False, None, None
     for clause in clauses:
         if clause[0] != segment:
-            negated, segment = False, clause[0]
-        words = clause[2]
+            negated, excluded, segment = False, False, clause[0]
+        opener, words = clause[1], clause[2]
+        fresh = words[0][0] in D1_SCOPE_OPENERS
+        if fresh and opener == ":":
+            negated = False
+        if fresh or opener not in D1_CARRIERS:
+            excluded = False
         negated = negated or any(word in D1_NEGATIONS for word, _, _ in words)
         verb = d1_action(words)
-        if verb is not None and not negated and (d1_marked(words) or (
-                previous is not None and clause[1] in D1_SOLE_OPENERS and len(previous[2]) == 1
+        if verb is not None and not negated and not excluded and (d1_marked(words) or (
+                previous is not None and opener in D1_SOLE_OPENERS and len(previous[2]) == 1
                 and previous[2][0][0] in D1_SOLE_MARKERS)):
             return words[verb][1]
+        excluded = excluded or any(d1_phrase_at(words, index, D1_CUTOFFS) for index in range(len(words)))
         previous = clause
     return None
 
@@ -5357,8 +5384,41 @@ D1_SEPARATED = ("If denied, stop. Run inline.\n", "If denied, stop! run inline.\
 # whole words and joined phrases only: no stemming, and a phrase split by a comma is no phrase
 D1_NOT_WORDS = ("If undenied, run inline.\n", "If refusedness, run inline.\n", "If denied, run it inlined.\n",
                 "If denied, run it another, way.\n", "If denied, run it another-way.\n")
-# named misses, pinned: a vocabulary miss and the conservative negation scope
-D1_MISSES = ("If denied, find a different approach.\n", "If denied, do not stop early and run inline.\n")
+# named misses, pinned: a vocabulary miss and the conservative negation and exclusion scopes
+D1_MISSES = ("If denied, find a different approach.\n", "If denied, do not stop early and run inline.\n",
+             "If denied, do not stop: run it inline.\n", "If denied, stop rather than wait, and run it inline.\n")
+# a prohibition carries across a colon into the list it introduces; with ; and : both segment stops (the previous
+# reading) the first four warned on the line given in D1_COLON_CARRIED_WAS; a list on its own lines after the colon
+# is separate paragraphs either way
+D1_COLON_CARRIED = ("If denied, do not do the following: run it inline.\n",
+                    "If denied, do not do the\nfollowing: run it\ninline.\n",
+                    "If denied, do not do the following: 1) retry, 2) run it inline.\n",
+                    "If denied, stop rather than do the following: retry or run it inline.\n",
+                    "If denied, do not do the following:\n1. retry\n2. run it inline.\n")
+D1_COLON_CARRIED_WAS = ([1], [2], [1], [1], [])
+# an instead of or rather than exclusion carries across coordinated clauses opened by or, and, a comma or a colon;
+# with no carry (the previous reading) each warned on the line given in D1_EXCLUSION_CARRIED_WAS
+D1_EXCLUSION_CARRIED = ("If denied, stop rather than retry or run it inline.\n",
+                        "If denied, stop rather than retry and run it inline.\n",
+                        "If denied, stop rather than retry, rerun or run it inline.\n",
+                        "If denied, stop rather than retry or\nrun it inline.\n",
+                        "If denied, stop instead of trying to retry or run it inline.\n",
+                        "If denied, stop instead of trying to retry and run it another way.\n",
+                        "If denied, stop rather than do the following: retry or run it inline.\n")
+D1_EXCLUSION_CARRIED_WAS = ([1], [1], [1], [2], [1], [1], [1])
+# a genuine reroute after a refusal still warns: a semicolon ends a prohibition or an exclusion, but and then end an
+# exclusion, a clause opening with instead or otherwise ends an exclusion and a prohibition carried across a colon,
+# and a colon with no prohibition before it carries nothing (each on the line given in D1_SCOPE_KEPT_LINES)
+D1_SCOPE_KEPT = ("If denied, do not wait; run it inline.\n", "If denied, stop rather than wait; run it inline.\n",
+                 "If denied, stop rather than wait;\nrun it inline.\n",
+                 "If denied, stop rather than wait, then run it inline.\n",
+                 "If denied, stop rather than wait, but run it inline.\n",
+                 "If denied, stop rather than wait, or instead run it inline.\n",
+                 "If denied, stop rather than wait, otherwise run it inline.\n",
+                 "If denied, do not wait: instead, run it inline.\n",
+                 "If denied, do not wait: otherwise run it inline.\n",
+                 "If denied, do the following: run it inline.\n")
+D1_SCOPE_KEPT_LINES = ([1], [1], [2], [1], [1], [1], [1], [1], [1], [1])
 W1_PROHIBITED = ("Do not run `git push`.\n", "Never run git commit -a.\n")
 W1_PROHIBITED_VOIDED = "Do not run `git push`. Run it anyway.\n"
 # the same prohibitions alone in a fence, read as in prose; and a fence whose other sentence asks
@@ -8262,6 +8322,11 @@ def self_test(report_path=None):
     check("d1/separated-quiet", [d1_lines(text) for text in D1_SEPARATED], [[]] * len(D1_SEPARATED))
     check("d1/whole-words-quiet", [d1_lines(text) for text in D1_NOT_WORDS], [[]] * len(D1_NOT_WORDS))
     check("d1/named-misses-quiet", [d1_lines(text) for text in D1_MISSES], [[]] * len(D1_MISSES))
+    check("d1/colon-carries-prohibition-quiet", [d1_lines(text) for text in D1_COLON_CARRIED],
+          [[]] * len(D1_COLON_CARRIED))
+    check("d1/coordination-carries-exclusion-quiet", [d1_lines(text) for text in D1_EXCLUSION_CARRIED],
+          [[]] * len(D1_EXCLUSION_CARRIED))
+    check("d1/scope-boundaries-warned", [d1_lines(text) for text in D1_SCOPE_KEPT], list(D1_SCOPE_KEPT_LINES))
     # a wrapped sentence is read whole and named by the line of its first matching action verb; a semicolon keeps
     # the sentence, so the refusal before it pairs with the action after it
     check("d1/wrapped-line-warned",
@@ -10380,7 +10445,16 @@ def self_test(report_path=None):
                                           [piece] for paragraph in real(text) for piece in paragraph]))
     check("revert/d1-sentence-red", *flip([reroutes(D1_SEPARATED[0])], [[1]], d1_sentences=d1_one_sentence))
     check("revert/d1-list-red", *flip([reroutes(D1_SEPARATED[5])], [[2]], D1_LIST_RE=never))
-    check("revert/every-flip-ran", len(flipped), 299)
+    # the round 2 scope fixes, each reverted: a colon as a segment stop again, no exclusion carry, no fresh start at
+    # instead or otherwise (the kept warnings that rest on it go quiet)
+    check("revert/d1-colon-carry-red", *flip([reroutes(text) for text in D1_COLON_CARRIED + D1_MISSES[2:3]],
+                                             list(D1_COLON_CARRIED_WAS) + [[1]], D1_SEGMENT_STOPS=";:",
+                                             D1_CLAUSE_STOPS=","))
+    check("revert/d1-exclusion-carry-red", *flip([reroutes(text) for text in D1_EXCLUSION_CARRIED + D1_MISSES[3:4]],
+                                                 list(D1_EXCLUSION_CARRIED_WAS) + [[1]], D1_CARRIERS=frozenset()))
+    check("revert/d1-scope-opener-red", *flip([reroutes(D1_SCOPE_KEPT[index]) for index in (5, 6, 7, 8)],
+                                              [[], [], [], []], D1_SCOPE_OPENERS=frozenset()))
+    check("revert/every-flip-ran", len(flipped), 302)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -10458,7 +10532,9 @@ def self_test(report_path=None):
           "each preflight rule and guard patched out flips its fixture; D1 warns, for every family and never "
           "refusing, once per sentence that pairs an eligible refused, denied, blocked or rejected with an action "
           "clause marked as another way, across wrapped lines and semicolons but never across a sentence stop, "
-          "blank line, list item, heading or label, is quiet on prohibitions and negated refusals, and each part "
+          "blank line, list item, heading or label, is quiet on prohibitions (carried across a colon) and negated "
+          "refusals and on actions an instead of or rather than excludes (carried across clauses opened by a comma, "
+          "a colon, and or or), still warns past a semicolon, but, then, instead or otherwise, and each part "
           "patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
