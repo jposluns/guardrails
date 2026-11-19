@@ -115,10 +115,12 @@ is a loop count), a model
 identifier (a family or vendor prefix, a hyphen and a version digit) that does not open a quoted
 string, a family used as an attribution (before a colon or a slash, or a possessive followed within
 one word by review vocabulary, or directly or after one listed modifier such as "reported" or
-"detailed" by notes, points, flags or reports, where flags is not followed by a command option or
-by CLI wording such as "are passed"), a review finding or
+"detailed" by notes, points, flags or reports, where flags is not followed by a command option, a
+"- " list bullet or an opening parenthesis and then a command option, or CLI wording such as "are
+passed"), a review finding or
 item (numbered or not, "peer" or not) followed by
-a parenthesised upper-case grade or a false-deny-style verdict, or preceded by an upper-case grade
+a parenthesised upper-case grade or a false-deny-style verdict (singular or plural, in any case), or
+preceded by an upper-case grade
 word that is not a SemVer class (BLOCKER, BLOCKING, CRITICAL, MEDIUM, MED, HIGH, LOW or NIT), by an
 upper-case id or MAJOR or MINOR and then "review" or "peer", or by a grade word in any case and the
 word "review", a NUMBERED review finding or item directly preceded by any upper-case grade word, id,
@@ -153,7 +155,11 @@ tracker-label ratchet above as well; a preview file has no baseline entry, so a 
 word after a family and a loop count with the round word next to its digit are still ratchet hits
 there, and the real gate fails them. Each line is also read joined to the
 next one (the break, the next line's indentation and comment or quote leader collapsed to one space),
-so a label wrapped across a line break is a hit on the line where it starts. A hit is a finding (exit
+so a label wrapped across a line break is a hit on the line where it starts. The flags exemptions of
+the attribution row also read across breaks: an attribution hit that starts on a line (whether it ends
+there or on the next line) is cancelled when the read joined across up to two breaks (that line, the
+next and the one after) puts a command option or "are passed" style CLI wording after flags, and that
+two-break read never adds a hit. A hit is a finding (exit
 1), never a ratcheted count, there is no baseline, no allowlist and no line marker, and the rows are
 deliberately wider than the four ratchet shapes (so prose such as a product name next to a version
 digit stays legal only OUTSIDE a swept path). Unswept areas are untouched by this layer and stay under the ratchet above. This layer
@@ -164,7 +170,8 @@ grade word, a grade word in lower case after a family name, a grade word in lowe
 finding or item with no "review" between, a one-letter id or MAJOR or MINOR before an unnumbered
 finding or item with no "review" or "peer" between, a family possessive before a word that is not
 review vocabulary (notes, points, flags or reports after one word that is not a listed modifier
-included, and flags before a command option or "are passed" style CLI wording included), a
+included, and flags before a command option or "are passed" style CLI wording included, on the same
+line or across up to two line breaks), a
 round-derived helper or fixture name with no round word (a bare r or state number),
 a round number after "retry" or before "of" (whitespace and then "of" followed by an underscore
 and an identifier part included, which the exception also takes as a loop count), a model
@@ -174,6 +181,16 @@ than one line break, inside a word or with other punctuation at the break, or en
 matched, and SWEPT_PREFIXES is hand-grown, so an area is covered only once a sweep adds it.
 RESIDUALS: further lookalike forms beyond the tested set may be missed or over-flagged by these rows,
 and the tested set is the self-test table (the swept-path vectors, controls and twins of --self-test).
+Known residuals by name: a grade or finding word joined to its neighbour by other punctuation or an
+underscore ("MAJOR ITEMS #4", "MEDIUM_FINDINGS") is missed; the CLI-wording verbs of the flags
+exemption include "accepted" and "set", so "<family>'s flags were accepted" or "... were set aside",
+which usually reports review results, is not a hit on one line or wrapped, and nor is wrapped wording
+such as "flags are" then "honored by the fix" or "flags" then "-x was a false alarm" (a one-letter
+option after flags); command-line documentation of a family's flags is still an over-flag when other
+wording comes between flags and the option ("flags, for example --print") or the option sits more
+than two line breaks after flags; and a line whose own read and joined read both match, such as a
+family's flags with "findings" on the next line, is counted twice in that line's row hits, which
+inflates no finding (findings name each line once).
 
 DISCLOSED SCOPE LIMITS. SCOPE_RELPATHS is a HAND-MAINTAINED allowlist with no drift-guard: a new QA-suite
 surface must be ADDED HERE BY HAND to be covered, and a surface not yet listed is out of this gate's reach
@@ -526,11 +543,13 @@ _SWEPT_REVIEW_NOUN = (r"(?:find" + r"ings?|reviews?|repros?|reproductions?|verdi
 # Nouns that attribute only DIRECTLY after the possessive ("<family>'s report says", "<family>'s notes:")
 # or after one listed modifier ("<family>'s reported points", "<family>'s detailed notes"); one other
 # word later they are usually verbs ("<family>'s reply notes the date") and stay legal there. "flags"
-# followed by a command option ("<family>'s flags --print") or by CLI wording such as "are passed" is
-# command-line documentation, not review provenance.
+# followed by a command option ("<family>'s flags --print"), also after a "- " list bullet or an
+# opening parenthesis and a quote ("<family>'s flags: - --print", "<family>'s flags (`--print`)"), or
+# by CLI wording such as "are passed" is command-line documentation, not review provenance.
 _SWEPT_DIRECT_MODIFIER = (r"(?:reported|detailed|earlier|latest|last|previous|prior|original|remaining"
                           r"|open|outstanding|key|main|own|final)")
-_SWEPT_DIRECT_REVIEW_NOUN = (r"(?:notes?|points?|reports?|flags?\b(?![ \t]*:?[ \t]*[`'\"(]?--?[a-z])"
+_SWEPT_DIRECT_REVIEW_NOUN = (r"(?:notes?|points?|reports?|flags?\b"
+                             r"(?![ \t]*:?[ \t]*(?:-[ \t]+)?\(?[`'\"]?--?[a-z])"
                              r"(?![ \t]+(?:are|is|were|was)[ \t]+(?:passed|forwarded|parsed|accepted"
                              r"|supported|honou?red|set)\b))")
 # A grade word in any case, used only where the word "review" must follow it.
@@ -583,7 +602,8 @@ SWEPT_LABELS = (
                 re.IGNORECASE),
      "a reviewer family used as an attribution"),
     # a numbered or unnumbered review finding or item followed by a parenthesised upper-case grade or
-    # a verdict ("finding 3 (MED)", "item 1 (BLOCKING)", "peer finding (HIGH)", "item 3 (false deny)"),
+    # a verdict, singular or plural, in any case ("finding 3 (MED)", "item 1 (BLOCKING)", "peer finding
+    # (HIGH)", "item 3 (false deny)", "items 3 (False Positives)"),
     # or preceded by its grade: an upper-case grade word that is not a SemVer class, bare or with
     # review or peer between ("MEDIUM finding", "HIGH review item"), an upper-case id or MAJOR or MINOR
     # only with review or peer between ("MAJOR peer item", "M3 review finding"; "a C3 finding" and
@@ -592,7 +612,8 @@ SWEPT_LABELS = (
     # before a NUMBERED finding or item ("<id> item 4", "<id> finding 5"), as rule-id and SemVer
     # prose is never numbered
     (re.compile(r"(?i:\b(?:peer[ -])?(?:find" + r"ing|item)s?)(?:[ -]?[0-9]+[a-z]?)?\s*\(\s*(?:"
-                + _SWEPT_GRADE + r"(?![\w-])|(?i:false[ -](?:deny|allow|positive|negative|block)\b))"
+                + _SWEPT_GRADE + r"(?![\w-])"
+                r"|(?i:false[ -](?:den(?:y|ies)|allows?|positives?|negatives?|blocks?)\b))"
                 r"|\b(?:" + _SWEPT_GRADE_STRONG + r"[ -](?:" + _SWEPT_REVIEW_WORD + r")?|" + _SWEPT_GRADE
                 + r"[ -]" + _SWEPT_REVIEW_WORD + r"|" + _SWEPT_GRADE_WORD_ANY_CASE
                 + r"[ -](?i:peer[ -])?(?i:review)[ -])(?i:(?:find" + r"ing|item)s?)\b"
@@ -612,9 +633,12 @@ SWEPT_ROW_KEYS = ("family-grade", "qa-then-family", "bare-qa-round", "family-rou
 _SWEPT_SEAM_TAIL = re.compile(r"(?:\s|\\n|[\"'])*$")
 _SWEPT_SEAM_LEAD = re.compile(r"^\s*(?:#+|//+|\*+|>+|[rRbBuUfF]{0,2}[\"']+)?\s*")
 # Rows whose exception context trails the match (the attribution row's flags exemptions: a command
-# option or "are passed" style CLI wording after it) and so may sit on the next line: a line hit of
-# such a row is kept only when the joined read also matches at the same start, so a wrapped
-# "<family>'s flags" then "--print", or a wrap between "are" and "passed", is not a hit.
+# option or "are passed" style CLI wording after it) and so may sit on the next line or the one after:
+# a line hit or a seam hit of such a row is kept only when the read joined across up to two line
+# breaks (this line, the next and the one after, joined as above) also matches at the same start, so a
+# wrapped "<family>'s flags" then "--print", "<family>'s" then "flags" then "--print", or a wrap
+# between "are" and "passed", is not a hit. The two-break read only confirms or drops such a hit; it
+# never adds one.
 _SWEPT_SEAM_CONTEXT_ROWS = ("family-attribution",)
 
 
@@ -632,15 +656,21 @@ def _swept_hits(text, rows=None, seams=True):
             left = _SWEPT_SEAM_TAIL.sub("", line)
             following = lines[number]
             seam = left + " " + following[_SWEPT_SEAM_LEAD.match(following).end():]
+            context = seam
+            if number + 1 < len(lines):
+                after = lines[number + 1]
+                context = (_SWEPT_SEAM_TAIL.sub("", seam) + " "
+                           + after[_SWEPT_SEAM_LEAD.match(after).end():])
         for key, (pattern, _label) in zip(SWEPT_ROW_KEYS, rows):
             hits[key] += [number for match in pattern.finditer(line)
                           if seam is None or key not in _SWEPT_SEAM_CONTEXT_ROWS
-                          or match.start() >= len(left) or pattern.match(seam, match.start())]
+                          or match.start() >= len(left) or pattern.match(context, match.start())]
         if seam is None:
             continue
         for key, (pattern, _label) in zip(SWEPT_ROW_KEYS, rows):
             hits[key] += [number for match in pattern.finditer(seam)
-                          if match.start() < len(left) < match.end() - 1]
+                          if match.start() < len(left) < match.end() - 1
+                          and (key not in _SWEPT_SEAM_CONTEXT_ROWS or pattern.match(context, match.start()))]
     return hits
 
 
@@ -3998,6 +4028,13 @@ def _self_test(caller_env=None):
                 (8, "swept/row-review-item-blocking", "it" + "em 1 (BLOCK" + "ING): x"),
                 (8, "swept/row-review-peer-finding", "peer fin" + "ding (HI" + "GH): x"),
                 (8, "swept/row-review-item-verdict", "it" + "em 3 (false" + " deny): x"),
+                # a plural verdict, in upper, title and lower case
+                (8, "swept/row-review-items-verdict-upper", "IT" + "EMS 3 (FALSE" + " POSITIVES): x"),
+                (8, "swept/row-review-items-verdict-title", "It" + "ems 3 (False" + " Positives): x"),
+                (8, "swept/row-review-items-verdict-lower", "it" + "ems 3 (false" + " negatives): x"),
+                (8, "swept/row-review-findings-verdict-upper", "FIN" + "DINGS 3 (FALSE" + " BLOCKS): x"),
+                (8, "swept/row-review-findings-verdict-mixed", "Fin" + "dings 2 (False" + " allows): x"),
+                (8, "swept/row-review-item-verdict-denies", "it" + "em 3 (false" + " denies): x"),
                 (8, "swept/row-review-grade-before-finding", "a blocking review fin" + "ding (x): y"),
                 (8, "swept/row-review-upper-grade-before-item", "a MAJ" + "OR peer it" + "em: y"),
                 (9, "swept/row-review-test-name", "def test" + "_r13_case(self):  # internal" + "-allow")):
@@ -4119,7 +4156,24 @@ def _self_test(caller_env=None):
             ("family-attribution", fam_x + "'s fl" + "ags are\n# passed unchanged",
              fam_x + "'s fl" + "ags are\n# fixed"),
             ("family-attribution", fam_x + "'s own fl" + "ags\n# are forwarded unchanged",
-             fam_x + "'s own fl" + "ags\n# are fixed"))
+             fam_x + "'s own fl" + "ags\n# are fixed"),
+            # and across two line breaks: the option or the CLI wording on the line after next still
+            # exempts a hit that starts on the first line, while other wording there does not
+            ("family-attribution", fam_c + "'s\n# fl" + "ags\n# --print",
+             fam_c + "'s\n# fl" + "ags\n# were wrong"),
+            ("family-attribution", fam_x + "'s fl" + "ags\n# are\n# passed unchanged",
+             fam_x + "'s fl" + "ags\n# are\n# fixed"),
+            ("family-attribution", fam_x + "'s fl" + "ags:\n\n- --print",
+             fam_x + "'s fl" + "ags:\n\n- two were real"),
+            # a "- " list bullet or an opening parenthesis and a quote before the option still
+            # exempts, on one line and across one break
+            ("family-attribution", fam_c + "'s fl" + "ags\n- `--print` sets the mode",
+             fam_c + "'s fl" + "ags\n- two were real"),
+            ("family-attribution", fam_c + "'s fl" + "ags\n(`--print`, `--model`)",
+             fam_c + "'s fl" + "ags\n(two were real)"),
+            ("family-attribution", fam_x + "'s fl" + "ags: - --print", fam_x + "'s fl" + "ags: - two were real"),
+            ("family-attribution", fam_x + "'s fl" + "ags (`--print`, `--model`)",
+             fam_x + "'s fl" + "ags (two were real)"))
         narrow_flagged = [c for _k, c, _t in swept_narrow
                           if any(_swept_hits("a {} b\n".format(c))[key] for key in SWEPT_ROW_KEYS)]
         check("swept/narrowed-controls-unflagged", not narrow_flagged, narrow_flagged)
