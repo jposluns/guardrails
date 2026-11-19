@@ -305,7 +305,32 @@ Stop or TeammateIdle, which has no banner; a denied scheduling call carries it i
 banner), which asks for a manual record, and leaves no row) and the append-only `forced-exit.jsonl`
 (every non-closed-disposition forced exit appended as its
 own row, each normally raised once, at least once if recording that it was raised fails, tracked by a
-companion `forced-exit-surfaced.json`). The whole-file JSON records (`turn-state.json`,
+companion `forced-exit-surfaced.json`). The citation read recorder (the `citation-read-ledger` hook, which
+runs wherever the session cwd resolves to a git toplevel, with or without a registry) keeps a
+`citation-ledger/` subdirectory there, made mode 0700 whatever the umask, holding one append-only
+`<key>.jsonl` per session (`<key>` is the first 16 hex digits of the sha256 of the session id), mode 0600,
+opened without following a symlink and refused unless it is a regular file. Each row names a path resolved through
+symlinks (for `git show`, the blob's repository path under the resolved toplevel, never resolved through
+the working tree), its path relative to the repository root (or null outside it, and for `git show` null
+unless the repository is the session's), a 1-based inclusive line span, the sha256 of the raw bytes of
+those lines (split on LF only, CR kept), the tool that read or wrote them and, for `git show`, the
+revision exactly as the command typed it (not resolved, so the commit a moving name such as `HEAD` named
+then is not recorded). An append that would take a non-empty session file past 4 MiB first renames it
+onto `<key>.jsonl.1`, replacing the older generation (a later reader reads both); a row already present (equal in kind, tool, path,
+span, digest and revision) is skipped only while the file is under 256 KiB; creating a session file (a new
+session's, or the fresh one after a rotation) removes up to 50 regular files of
+the ledger name shape in the directory last modified more than 14 days earlier. A failed append is named
+in a non-blocking note, never swallowed. The citation read check (the `citation-read-check` hook, a
+PreToolUse Bash hook in its warning-only bake) reads both generations of the session's ledger, merged
+over the state directory of each distinct toplevel among the session cwd's, the command's `git -C`
+toplevel and each cited file's (at most 8 state directories; one past that bound or the deadline is named
+in its guard-events row and, when a cited range is judged, in its note, at most 10 in each and the rest
+counted), when a
+`git commit` message or a `gh pr create` or `gh pr edit` body cites a path with a line or line range,
+notes each cited range no row covers at its current content, and appends one `guard-events.jsonl` row of
+kind `citint` per checked command (decision `warn` or `allow`, with each citation's class), the evidence a
+later promotion to deny is decided on; a failed append of a `warn` row is named in its note, and a failed
+append of an `allow` row, the over-fire metric only, is not reported. The whole-file JSON records (`turn-state.json`,
 `backlog-checkpoint.json`, its `checkpoint-init.marker`, `attestations-validated.json` and
 `forced-exit-surfaced.json`; NOT `lease-heartbeat.json`, whose keeper has its OWN writer,
 described under "The lease heartbeat" below: that writer binds to the holder's held
