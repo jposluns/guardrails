@@ -120,8 +120,8 @@ column (the left margin, or the innermost list item's content column, taken as t
 text starts at); a backtick or tilde line four or more columns past it is indented code outside a
 paragraph and paragraph text inside one. A line indented less than a list item's content column (a
 lazy paragraph continuation aside) ends that item, and any fenced block or HTML comment block opened
-inside it. A fence or an HTML comment block may open right after a list marker (`- ```` or
-`1. <!--`, or after a run of markers such as `- 1. ```` ): it opens inside that item, at the item's
+inside it. A fence or an HTML comment block may open right after a list marker (``- ``` `` or
+`1. <!--`, or after a run of markers such as ``- 1. ``` ``): it opens inside that item, at the item's
 content column, so its closing line closes it and the item text after it is read. Indentation, list
 marker spacing and blank lines count spaces and tabs only: any other whitespace (a no-break space, an
 en space, a form feed) is text, so it never indents a line, never makes a line blank and never puts
@@ -140,10 +140,12 @@ ends on a later line of the same paragraph (an unclosed comment block is cannot-
 `<!--` with no `-->` before the paragraph ends is text); struck-through text (`~~PR #17 is pending~~`, or GFM
 `~PR #17 is pending~` with flanking tildes, so `~5 min ... ~10 min` is not struck); a blockquote
 introduced by `Earlier note:` or `Previously recorded:` (in the paragraph before it or its own first
-words); a quoted span (curly or straight quotes, or backticks) directly after a historical lead-in such
+words); a quoted span (curly or straight quotes, or a code span) directly after a historical lead-in such
 as `Previously recorded:` or `The old note read`, where an apostrophe inside a word (`isn't`, `isn’t`)
-does not end the span; and wording that matches no phrase in the table (`#17 was pending`, `#17 is no
-longer pending`). Only the quoted span is exempt: `Previously blocked; #17 remains pending` is still a
+does not end the span, and a code span is bounded as the code-span reading below bounds it (an opening
+run of any number of backticks closed by the next run of the same length, shorter runs inside it
+included; a run with no such closer quotes nothing, so the text after it is read); and wording that
+matches no phrase in the table (`#17 was pending`, `#17 is no longer pending`). Only the quoted span is exempt: `Previously blocked; #17 remains pending` is still a
 current claim. Quotation
 marks and backticks elsewhere do not hide a claim (`PR` followed by a backticked `#17` and `is pending`
 still binds). A claim inside any other blockquote is cannot-evaluate until it is given a historical
@@ -153,15 +155,19 @@ Delimiters inside code spans are inert. Each text is given one code-span reading
 exemption is recognized (CommonMark backtick-run matching: a run of backticks opens a span that the
 next run of exactly the same length closes; a run with no such closer is literal backticks). Every
 exemption and link recognizer (HTML comments, strikethrough, historical lead-ins and their quoted
-spans, issue references, inline, reference and HTML links, autolinks) then runs only on the text
-outside code spans, so a comment opener in one code span and its closer in another, tildes inside
-code spans, an `issue` word or a lead-in inside a code span, or link brackets inside code spans
-exempt nothing, and the claim between them is read. A code span directly after a historical lead-in
-is still that lead-in's quoted span, and a real comment or strikethrough holding a code span is still
-exempt. The text inside a code span stays available to claim matching as before (a backticked
+spans, issue references, inline, reference and HTML links) then runs only on the text outside code
+spans, so a comment opener in one code span and its closer in another, tildes inside code spans, an
+`issue` word or a lead-in inside a code span, or link brackets inside code spans exempt nothing, and
+the claim between them is read. A code span directly after a historical lead-in is still that
+lead-in's quoted span, and a real comment or strikethrough holding a code span is still exempt. The
+text inside a code span stays available to claim matching as before (a backticked
 `PR #17 is pending` is a claim), and the unevaluated-reference scan uses the same reading. One
 consequence: a number written in a code span after `issue` (`issue` then a backticked `#12`) is
-not an issue reference; it is read as a pull request.
+not an issue reference; it is read as a pull request. Angle brackets around a GitHub URL (an
+autolink) are a spelling, not an exemption: they are dropped, keeping the URL, inside code spans as
+outside them, and only after the formatting marks are gone, so a whole autolink in one code span, or
+its `<` and `>` each in a code span of their own around the bare URL, still binds the reference to the
+predicate after it (`is pending`), while link exemptions stay off inside code spans.
 
 **Unevaluated references warn; they never pass silently.** Coverage is a set difference, so it does
 not depend on knowing what dropped a reference. The check takes the pull request references of the
@@ -280,9 +286,22 @@ claim was found.
   over every other inline construct: CommonMark lets whichever starts first win, so text such as
   `<!--` followed by a backtick, `-->` and a closing backtick is read here as an unclosed comment
   opener and a code span, not as a comment. Backslash escapes before backticks are not read. Code
-  spans are read per record unit and per scanned line, so a code span that wraps across lines is a
-  code span in the joined unit but literal backticks in the line scan. The unit reading decides what
-  is evaluated and the line reading only adds warnings, so the two can disagree only by a warning.
+  spans are read three ways: per record unit (the joined text the matcher evaluates); per paragraph
+  when block classification looks for an inline comment opener on a paragraph or list item line (the
+  text the paragraph's earlier lines keep, then that line and its later lines raw up to a blank line or
+  a line that starts a fence, heading, blockquote, list item or HTML comment block), so a code span
+  that wraps a `<!--` across lines keeps it inert and the claim inside it is read; and per scanned
+  line, so a code span that wraps across lines is literal backticks in the line scan. A heading, a
+  table row or a blockquote line is read for a comment opener on its own, so a code span wrapped across
+  blockquote lines is not followed there, and the `-->` that ends an inline comment is still found on
+  the raw later line (above). Block classification decides before any unit is read, and the paragraph
+  reading counts later lines raw where the unit joins only the text left after comments are cut, so
+  backticks inside a hidden comment can pair differently in the two readings: where block
+  classification and the unit reading still differ, block classification can remove a claim before
+  the unit is read. The removed part is scanned and warns, except where one evaluated mention of the
+  same pull request in the file suppresses the warning (the keyed design below), and there a stale
+  claim passes silently. Otherwise the unit reading decides what is evaluated and the line scan only
+  adds warnings.
 - The unevaluated-reference warning is keyed by reference, not by claim: one evaluated mention of a
   pull request suppresses the warning for its other dropped occurrences in the same file, so a dropped
   line naming a pull request that an evaluated unit of the same file also names raises no warning

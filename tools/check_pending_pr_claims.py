@@ -43,8 +43,12 @@ occurrences in the same file.
 
 Delimiters inside code spans are inert: each text is given one code-span reading (CommonMark
 backtick-run matching) before normalization, and every exemption and link recognizer (comments,
-strikethrough, historical spans, issue references, links) runs only on the text outside code spans,
-while the text inside them is still read for claims.
+strikethrough, historical spans, issue references, inline, reference and HTML links) runs only on the
+text outside code spans, while the text inside them is still read for claims. Angle brackets around a
+GitHub URL are a spelling, dropped inside code spans too, so a backticked autolink still binds. A code
+span directly after a historical lead-in is its quotation whatever its backtick run length. Block
+classification reads code spans across a paragraph's lines before it looks for an inline comment
+opener on a paragraph or list item line, so a code span wrapped around `<!--` keeps it inert.
 
 RESIDUALS (disclosed; the full list is in the contract): a prose grammar cannot be complete, and this
 one is partial. The self-test covers only its rule and fix rows. Not caught: a claim before its
@@ -388,7 +392,49 @@ def _blank_code_spans(text, spans):
 def _comment_start(text):
     """The index in text of the first `<!--` outside a code span whose `-->` is not on the same line, or
     None (a comment that ends on its own line is left to the html-comment normalization)."""
-    masked = _blank_code_spans(text, code_spans(text))
+    return _open_comment(_blank_code_spans(text, code_spans(text)))
+
+
+# An inline comment opener on a paragraph line is looked for outside the code spans of the paragraph
+# read across its lines, so a code span that wraps a `<!--` onto later lines keeps it inert (True). The
+# self-test sets it False, reading code spans on the line alone, for its red-when-reverted leg.
+PARAGRAPH_CODE_SPANS = True
+
+
+def _paragraph_ends(line):
+    """True for a line that ends the paragraph read for code spans: a blank line, a line that starts a
+    fence, heading, blockquote or list item, or a line that opens an HTML comment block."""
+    return _blank(line) or _interrupts_paragraph(line) or line.lstrip(MD_SPACE).startswith("<!--")
+
+
+def _single_line_block(text, lines, index, table):
+    """True for a heading, a table row or a blockquote line: its code spans are read on the line alone
+    when an inline comment opener is looked for (a code span wrapped across blockquote lines is not
+    followed)."""
+    following = lines[index + 1] if index + 1 < len(lines) else ""
+    return (HEADING_RE.match(text) is not None or QUOTE_RE.match(text) is not None
+            or text.lstrip().startswith("|") or ("|" in text and (table or _delimiter_row(following))))
+
+
+def _paragraph_comment_start(prefix, lines, index, text):
+    """_comment_start for text, the prose of line index (the line or the part of it after a `-->`), with
+    code spans read across the paragraph: prefix is the text the paragraph's earlier lines keep (what
+    the record unit joins), and the paragraph's later lines are read raw up to its end (_paragraph_ends).
+    A `<!--` inside a code span that opens on an earlier line or closes on a later one is inert."""
+    if not PARAGRAPH_CODE_SPANS:
+        return _comment_start(text)
+    end = index + 1
+    while end < len(lines) and not _paragraph_ends(lines[end]):
+        end += 1
+    head = "\n".join(list(prefix) + [text])
+    window = "\n".join([head] + lines[index + 1:end])
+    base = len(head) - len(text)
+    return _open_comment(_blank_code_spans(window, code_spans(window))[base:base + len(text)])
+
+
+def _open_comment(masked):
+    """The index in masked (text with its code spans blanked) of the first `<!--` whose `-->` is not
+    later on the same text, or None."""
     position = 0
     while True:
         start = masked.find("<!--", position)
@@ -443,12 +489,12 @@ COMMENT_TAIL_SCANNED = True
 HEADER_CELLS_READ = True
 
 
-def _inline_comment(lines, index, text):
+def _inline_comment(lines, index, text, prefix=()):
     """(start, end) when text, the prose of line index, opens an inline comment at index start of text
     whose `-->` is on line end, the first later line holding one before the paragraph ends (a blank line
     or a line that starts a fence, heading, blockquote or list item); None otherwise (with no such line,
-    `<!--` is text)."""
-    start = _comment_start(text)
+    `<!--` is text). prefix is the text the paragraph's earlier lines keep (_paragraph_comment_start)."""
+    start = _paragraph_comment_start(prefix, lines, index, text)
     if start is None:
         return None
     for later in range(index + 1, len(lines)):
@@ -459,12 +505,13 @@ def _inline_comment(lines, index, text):
     return None
 
 
-def _comment_tail(lines, index, text):
+def _comment_tail(lines, index, text, prefix=()):
     """(text, hidden_until) for the paragraph text after the `-->` that closes a comment on line index:
     text cut where a new inline comment it opens starts, and the index of the line that ends that
-    comment (-1 when it opens none), so `--> <!-- second` hides the lines up to the next `-->`."""
+    comment (-1 when it opens none), so `--> <!-- second` hides the lines up to the next `-->`. prefix
+    is the text the paragraph's earlier lines keep."""
     if COMMENT_TAIL_SCANNED:
-        opened = _inline_comment(lines, index, text)
+        opened = _inline_comment(lines, index, text, prefix)
         if opened is not None:
             return text[:opened[0]], opened[1]
     return text, -1
@@ -479,7 +526,9 @@ def block_context(lines):
     continuation), and with it any fenced block or HTML comment block opened inside it. An HTML comment
     block starts at a line opening `<!--` (after at most three columns past the container) and runs to
     the line holding `-->`, across blank lines; an inline comment that `<!--` opens later in a line runs
-    to the first later line holding `-->` before the paragraph ends (with none, `<!--` is text). The text
+    to the first later line holding `-->` before the paragraph ends (with none, `<!--` is text); on a
+    paragraph or list item line that `<!--` is looked for outside the code spans read across the
+    paragraph (_paragraph_comment_start), so a code span wrapped around it keeps it inert. The text
     after the `-->` that closes either kind of comment is paragraph text as it stands: it is not
     indented afresh, so it never becomes indented code, a fence or a list item, but a comment it opens
     (`--> <!-- second`) is found as on any prose line and hides the lines to its `-->`. A fence or an HTML
@@ -492,6 +541,12 @@ def block_context(lines):
     block = None          # (FENCE, fence run, container column, example) or (COMMENT, None, column, False)
     hidden_until = -1     # the index of the line that ends the open inline comment
     para = quote = table = False
+    para_first = 0        # the index of the open paragraph's first line
+
+    def kept(index):
+        """The text the open paragraph's lines before index keep (what its record unit joins)."""
+        return [line for kind, line in kinds[para_first:index] if kind in (PARA, ITEM)] if para else []
+
     for index, text in enumerate(lines):
         if index < hidden_until:
             kinds.append((INLINE_COMMENT, ""))
@@ -503,8 +558,11 @@ def block_context(lines):
                 kinds.append((INLINE_COMMENT, ""))
                 continue
             if COMMENT_TAIL_IS_PARAGRAPH:
+                if not para:
+                    para_first = index
+                prefix = kept(index)
                 para, quote, table = True, False, False
-                text, hidden_until = _comment_tail(lines, index, text)
+                text, hidden_until = _comment_tail(lines, index, text, prefix)
                 kinds.append((INLINE_COMMENT, "") if _blank(text) else (PARA, text))
                 continue
         indent = _indent(text)
@@ -527,7 +585,7 @@ def block_context(lines):
                     kinds.append((COMMENT, ""))
                     continue
                 if COMMENT_TAIL_IS_PARAGRAPH:
-                    para, quote, table = True, False, False
+                    para, quote, table, para_first = True, False, False, index
                     text, hidden_until = _comment_tail(lines, index, text)
                     kinds.append((COMMENT, "") if _blank(text) else (PARA, text))
                     continue
@@ -564,6 +622,10 @@ def block_context(lines):
             para = quote = table = False
             kinds.append((COMMENT, ""))
             continue
+        if not html_block and "<!--" in text and not _single_line_block(text, lines, index, table):
+            # A paragraph or list item line: its code spans are read across the paragraph (a list item
+            # line starts a new one), so a code span that wraps around `<!--` keeps it inert.
+            start = _paragraph_comment_start([] if ITEM_RE.match(text) else kept(index), lines, index, text)
         if start is not None and not html_block:
             for later in range(index + 1, len(lines)):
                 if _blank(lines[later]) or _interrupts_paragraph(lines[later]):
@@ -605,9 +667,11 @@ def block_context(lines):
             continue
         match = ITEM_RE.match(text)
         if match:
-            items, para = nested + [_content_column(text, match)], True
+            items, para, para_first = nested + [_content_column(text, match)], True, index
             kinds.append((ITEM, text))
             continue
+        if not para:
+            para_first = index
         para = True
         kinds.append((PARA, text))
     if block is not None:
@@ -868,12 +932,17 @@ VERB = (r"(?:(?:is|are|remains?|stays?|(?:has|have)\s+been|still|currently)"
 # A historical lead-in followed by a quoted span: only that span is exempt. A straight single-quoted
 # span ends at a quote that no letter follows, so an apostrophe inside it (isn't) does not end it.
 STRAIGHT_SPAN = r"'(?:[^']|'(?=\w))*'(?!\w)"
+# A backticked span after a lead-in: a whole backtick run of any length closed by the next run of the
+# same length. The history-span step reads code-span content as CODE_FILLER (no backtick), so this
+# matches exactly a code span as code_spans bounds it, embedded shorter runs included; a run with no
+# such closer quotes nothing.
+BACKTICK_SPAN = r"(?P<tick>`+)(?!`)[^`]*(?<!`)(?P=tick)(?!`)"
 
 
-def _history_span_re(straight):
+def _history_span_re(straight, backtick=BACKTICK_SPAN):
     return re.compile(
         r"(?i)\b(?:previously recorded|earlier note|the old note read|old note read|was recorded as|"
-        r"previously read)\s*:?\s*(?:\u201c[^\u201d]*\u201d|\"[^\"]*\"|`[^`]*`|\u2018[^\u2019]*\u2019"
+        r"previously read)\s*:?\s*(?:\u201c[^\u201d]*\u201d|\"[^\"]*\"|" + backtick + r"|\u2018[^\u2019]*\u2019"
         r"|" + straight + r")")
 
 
@@ -907,6 +976,8 @@ PULL_URL_RE = re.compile(r"https?://github\.com/" + _O + r"/" + _R + r"/pull/[0-
                          r"(?:/(?:files|commits|checks))?/?(?:#[\w-]*)?", re.ASCII)
 ISSUE_URL_RE = re.compile(r"https?://github\.com/" + _O + r"/" + _R + r"/issues/(?P<n>[0-9]{1,9})/?(?:#[\w-]*)?",
                           re.ASCII)
+# An autolink: a GitHub URL between angle brackets.
+AUTOLINK_RE = re.compile(r"<(https?://github\.com/[^\s<>]+)>")
 
 
 def _link_target(text, url):
@@ -943,7 +1014,6 @@ NORMALIZE = (
     ("markdown-link", re.compile(r"!?\[([^\]]*)\]\(\s*<?([^\s()<>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)"),
      _link),
     ("html-link", re.compile(r"(?i)<a\s+[^>]*?\bhref\s*=\s*[\"']([^\"'\s<>]+)[\"'][^>]*>(.*?)</a\s*>"), _html_link),
-    ("autolink", re.compile(r"<(https?://github\.com/[^\s<>]+)>"), r" \1 "),
     # A bracket that is not a link ([#17] with no definition) is text: its brackets are dropped.
     ("bracket", re.compile(r"\[([^\[\]]*)\]"), r" \1 "),
     # A curly apostrophe inside a word (isn\u2019t, we\u2019d) is an apostrophe, not a closing quotation mark.
@@ -952,6 +1022,10 @@ NORMALIZE = (
     # GFM strikethrough: ~~text~~, or ~text~ with flanking tildes (so ~5 min and ~10 is not struck).
     ("strikethrough", re.compile(r"~~[^~]*~~|(?<![~\w])~(?![\s~])[^~]*(?<![\s~])~(?![~\w])"), " "),
     ("formatting", FORMATTING_RE, ""),
+    # Angle brackets around a GitHub URL are dropped, keeping the URL: a spelling, never an exemption,
+    # so it reads code-span text too, and it runs after the formatting marks are gone, so backticks
+    # inside or around the brackets (`<`URL`>`) do not keep them between the reference and its predicate.
+    ("autolink", AUTOLINK_RE, r" \1 "),
     ("underscore-emphasis", re.compile(r"(?<!\w)_{1,2}(?=#[0-9])|(?<=[0-9])_{1,2}(?!\w)"), ""),
     ("issue-reference", ISSUE_LIST_RE, _issue),
     ("glued-pr", re.compile(r"\b(PRs?)#(?=[0-9])", re.I), r"\1 #"),
@@ -960,9 +1034,10 @@ NORMALIZE = (
 # The NORMALIZE steps that recognize an exemption or a link by its delimiters: each runs only on text
 # outside code spans (code_spans, read once per text before the first step), so a delimiter inside a
 # code span is inert. The other steps are spellings and run on all text, code-span text included, so a
-# claim inside a code span is still read.
-CODE_SPAN_INERT_STEPS = ("html-comment", "markdown-link", "html-link", "autolink", "history-span",
-                         "strikethrough", "issue-reference")
+# claim inside a code span is still read. The autolink step is a spelling (it drops only the angle
+# brackets and keeps the URL), so a backticked `<URL>` still binds to the predicate after it.
+CODE_SPAN_INERT_STEPS = ("html-comment", "markdown-link", "html-link", "history-span", "strikethrough",
+                         "issue-reference")
 # Delimiters inside code spans are inert to those steps (True). The self-test sets it False, letting
 # them see code-span text, for its red-when-reverted leg.
 CODE_SPANS_INERT = True
@@ -2072,6 +2147,102 @@ def _code_span_rows(m):
         warned = len(res.warnings) == 1 and "NOTES.md:2 (fenced block)" in res.warnings[0]
         ok = code == 0 and t.calls == [] and not res.hard and (warned if not replacements else not res.warnings)
         check(name, ok, (code, t.calls, res.hard, res.warnings))
+    _code_span_binding_rows(m)
+
+
+def _autolink_steps_before_formatting():
+    """NORMALIZE with the autolink step back at its earlier place, before the bracket step (a red leg)."""
+    steps = [step for step in NORMALIZE if step[0] != "autolink"]
+    at = [step[0] for step in steps].index("bracket")
+    return tuple(steps[:at] + [("autolink", AUTOLINK_RE, r" \1 ")] + steps[at:])
+
+
+def _single_backtick_history_steps():
+    """NORMALIZE with the history span's backtick alternative read as single backticks only (a red leg)."""
+    return tuple((name, _history_span_re(STRAIGHT_SPAN, r"`[^`]*`") if name == "history-span" else regex,
+                  replacement) for name, regex, replacement in NORMALIZE)
+
+
+def _judged_as(judged, want, calls, warnings):
+    """(ok, detail): ok when the judged text gave exit want, the reads calls, want findings and the
+    number of warnings given."""
+    code, res, t = judged
+    if code is None:
+        return False, res
+    return (code == want and t.calls == calls and len(res.hard) == want and len(res.warnings) == warnings,
+            (code, t.calls, res.hard, res.warnings))
+
+
+def _code_span_binding_rows(m):
+    """A reference inside or between code spans still binds: a backticked autolink, an autolink whose
+    angle brackets are backticked apart from its URL, and a code span that wraps an HTML comment opener
+    across the lines of a paragraph each give a finding under both terminal states, and each is shown
+    silent or warning-only with its fix removed. A code span directly after a historical lead-in is that
+    lead-in's quotation whatever its backtick run length (exempt), and is shown read with the
+    single-backtick reading. Controls: link exemptions stay off inside code spans, a real inline comment
+    across lines still hides, an unmatched run quotes nothing, and a claim after the quotation is read."""
+    closed = {(REPO, 17): "closed"}
+    found, wrapped_warn, silent = (1, [(REPO, 17)], 0), (0, [], 1), (0, [], 0)
+    inert_autolink = {"CODE_SPAN_INERT_STEPS": CODE_SPAN_INERT_STEPS + ("autolink",)}
+    single_backtick = {"NORMALIZE": _single_backtick_history_steps()}
+    for name, closed_name, red_name, text, want, red, red_want in (
+            ("code-span/autolink-whole-backticked-binds", "code-span/autolink-whole-backticked-binds-closed",
+             "code-span/autolink-whole-backticked-binds/red-when-reverted",
+             "`<https://github.com/acme/widgets/pull/17>` is pending.\n", found, inert_autolink, silent),
+            ("code-span/autolink-delimiters-backticked-binds",
+             "code-span/autolink-delimiters-backticked-binds-closed",
+             "code-span/autolink-delimiters-backticked-binds/red-when-reverted",
+             "`<`https://github.com/acme/widgets/pull/17`>` is pending.\n", found,
+             {"NORMALIZE": _autolink_steps_before_formatting()}, silent),
+            ("code-span/autolink-link-exemptions-still-inert", "code-span/autolink-link-exemptions-still-inert-closed",
+             "code-span/autolink-link-exemptions-still-inert/red-when-reverted",
+             "`<a href=\"https://github.com/acme/widgets/issues/1\">` <https://github.com/acme/widgets/pull/17>"
+             " is pending `</a>`\n", found, {"CODE_SPANS_INERT": False}, silent),
+            ("code-span/wrapped-comment-opener-read", "code-span/wrapped-comment-opener-read-closed",
+             "code-span/wrapped-comment-opener-read/red-when-reverted", "`<!--\nPR #17 is pending\n-->`\n", found,
+             {"PARAGRAPH_CODE_SPANS": False}, wrapped_warn),
+            ("code-span/wrapped-comment-opener-beside-evaluated-mention-read",
+             "code-span/wrapped-comment-opener-beside-evaluated-mention-read-closed",
+             "code-span/wrapped-comment-opener-beside-evaluated-mention-read/red-when-reverted",
+             "See #17.\n\n`<!--\nPR #17 is pending\n-->`\n", found, {"PARAGRAPH_CODE_SPANS": False}, silent),
+            ("code-span/wrapped-comment-opener-span-opened-earlier-read",
+             "code-span/wrapped-comment-opener-span-opened-earlier-read-closed",
+             "code-span/wrapped-comment-opener-span-opened-earlier-read/red-when-reverted",
+             "`a\nb <!-- PR #17 is pending\n-->`\n", found, {"PARAGRAPH_CODE_SPANS": False}, wrapped_warn),
+            ("code-span/wrapped-comment-opener-in-list-item-read",
+             "code-span/wrapped-comment-opener-in-list-item-read-closed",
+             "code-span/wrapped-comment-opener-in-list-item-read/red-when-reverted",
+             "- `<!--\n  PR #17 is pending\n  -->`\n", found, {"PARAGRAPH_CODE_SPANS": False}, wrapped_warn),
+            ("history/double-backtick-span-exempt", "history/double-backtick-span-exempt-closed",
+             "history/double-backtick-span-exempt/red-when-reverted",
+             "Previously recorded: ``PR #17 is pending``\n", silent, single_backtick, found),
+            ("history/triple-backtick-span-exempt", "history/triple-backtick-span-exempt-closed",
+             "history/triple-backtick-span-exempt/red-when-reverted",
+             "Previously recorded: ```PR #17 is pending```\n", silent, single_backtick, found),
+            ("history/backtick-span-embedded-run-exempt", "history/backtick-span-embedded-run-exempt-closed",
+             "history/backtick-span-embedded-run-exempt/red-when-reverted",
+             "Previously recorded: ``PR #17 is `still` pending``\n", silent, single_backtick, found)):
+        ok, detail = _judged_as(_code_span_leg({}, text, m, MD_SURFACE), *want)
+        check(name, ok, detail)
+        ok, detail = _judged_as(_code_span_leg({}, text, closed, MD_SURFACE), *want)
+        check(closed_name, ok, detail)
+        ok, detail = _judged_as(_code_span_leg(red, text, m, MD_SURFACE), *red_want)
+        check(red_name, ok, detail)
+    for name, closed_name, text, want in (
+            ("code-span/real-inline-comment-across-lines-still-hides",
+             "code-span/real-inline-comment-across-lines-still-hides-closed",
+             "a `x` <!-- PR #17 is pending\n--> b\n", wrapped_warn),
+            ("code-span/unmatched-backtick-before-comment-still-hides",
+             "code-span/unmatched-backtick-before-comment-still-hides-closed",
+             "a ` b <!-- PR #17 is pending\n--> c\n", wrapped_warn),
+            ("history/unmatched-backtick-run-quotes-nothing", "history/unmatched-backtick-run-quotes-nothing-closed",
+             "Previously recorded: ``PR #17 is pending\n", found),
+            ("history/claim-after-double-backtick-span-read", "history/claim-after-double-backtick-span-read-closed",
+             "Previously recorded: ``x`` but PR #17 is pending.\n", found)):
+        ok, detail = _judged_as(_code_span_leg({}, text, m, MD_SURFACE), *want)
+        check(name, ok, detail)
+        ok, detail = _judged_as(_code_span_leg({}, text, closed, MD_SURFACE), *want)
+        check(closed_name, ok, detail)
 
 
 def _no_unevaluated_references(_label, _lines, _blocks, _units, _exempt=(), _definitions=None):
