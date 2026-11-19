@@ -31,6 +31,12 @@ been waiting, Neither #16 nor #17 is open, If #17 is still open) never exempts i
 request has merged or closed, the claim is a warning (exit 0, a WARNING line naming the sentence and
 the pull request) instead of a finding. Only a claim with no such cue is a finding.
 
+Text the Markdown block classifier hides (fenced blocks, indented code, HTML comments, link reference
+definitions) is never read as a claim, but it is still scanned: a pull request reference found only
+there is a WARNING naming the file, line, block kind and reference (no state read, exit 0 with no
+finding), so a hidden claim never passes silently. A fenced block whose info string starts with
+`example` or `history` is the only exemption.
+
 RESIDUALS (disclosed; the full list is in the contract): a prose grammar cannot be complete, and this
 one is partial. The self-test covers only its rule and fix rows. Not caught: a claim before its
 reference outside a Status cell (still pending: #17), words between a reference and its phrase (PR
@@ -76,6 +82,8 @@ SURFACE_KEYS = {"path", "format", "repository", "role"}
 SURFACE_OPTIONAL = {"expected-repository", "generated-from", "status-column", "note"}
 
 HARD, WARN, AMBIGUOUS, QUOTE = "hard", "warning", "ambiguous", "quote"
+# A pull request reference found only in text the Markdown block classifier hides (a warning, no read).
+HIDDEN = "hidden"
 
 
 class InputError(Exception):
@@ -230,7 +238,14 @@ REFERENCE_LINK_RE = re.compile(r"(!?)\[([^\[\]]*)\](?:\[([^\[\]]*)\])?(?![(:])")
 HEADER_EMPHASIS_RE = re.compile(r"^(\*{1,2}|_{1,2}|`)(.+)\1$")
 QUOTE_RE = re.compile(r" {0,3}>[ ]?(.*)")
 HEADING_RE = re.compile(r" {0,3}#{1,6}(?:\s+(.*))?$")
-ITEM_RE = re.compile(r"\s*(?:[-*+]|[0-9]{1,9}[.)])\s+(?:\[[ xX]\]\s+)?(.*)")
+# A list item: indentation and the space after the marker are spaces and tabs only (CommonMark).
+ITEM_RE = re.compile(r"[ \t]*(?:[-*+]|[0-9]{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?(.*)")
+# Markdown indentation and blank lines are made of spaces and tabs only; any other whitespace (a
+# no-break space, for example) is text, so it never indents a line or makes it a fence.
+MD_SPACE = " \t"
+# The info strings (first word, case-insensitive) that mark a fenced block as an example: a pull
+# request reference only inside such a block raises no hidden-reference warning.
+EXAMPLE_FENCE_INFO = ("example", "history")
 SEPARATOR_CELL_RE = re.compile(r"\s*:?-{3,}:?\s*")
 HISTORY_INTRO_RE = re.compile(r"(?i)(?:earlier note|previously recorded)\s*:\s*$")
 HISTORY_LEAD_RE = re.compile(r"(?i)\s*(?:earlier note|previously recorded)\s*:")
@@ -269,9 +284,40 @@ def _resolve_reference_links(prose, definitions):
 # are the prose kinds, the only lines any reader (record units, link definitions, Status cells and so
 # the references they resolve) consumes.
 BLANK, FENCE, CODE, COMMENT, INLINE_COMMENT = "blank", "fence", "code", "comment", "inline-comment"
+# A line of a fenced block whose info string is one of EXAMPLE_FENCE_INFO: not read, and not scanned for
+# hidden references either.
+EXAMPLE_FENCE = "example-fence"
 DEFINITION, QUOTE_LINE, TABLE_HEADER, TABLE_DELIMITER, TABLE_ROW, HEADING, ITEM, PARA = (
     "definition", "quote", "table-header", "table-delimiter", "table-row", "heading", "item", "para")
 PROSE_KINDS = (DEFINITION, QUOTE_LINE, TABLE_HEADER, TABLE_DELIMITER, TABLE_ROW, HEADING, ITEM, PARA)
+# What a hidden-reference warning calls the block a line was hidden in.
+HIDDEN_KIND_NAMES = {FENCE: "fenced block", CODE: "indented code block", COMMENT: "HTML comment block",
+                     INLINE_COMMENT: "inline HTML comment", DEFINITION: "link reference definition"}
+
+
+def _blank(text):
+    """True for a Markdown blank line: spaces and tabs only (a no-break space is text)."""
+    return not text.strip(MD_SPACE)
+
+
+def _lead(text):
+    """The index of a line's first character that is not a space or a tab."""
+    return len(text) - len(text.lstrip(MD_SPACE))
+
+
+def _fence_opener(text, start):
+    """The FENCE_OPEN_RE match when text opens a fence at index start, else None. A backtick fence's info
+    string cannot hold a backtick, so ```x``` is inline code, not a fence."""
+    opener = FENCE_OPEN_RE.match(text, start)
+    if opener is None or (opener.group(1)[0] == "`" and "`" in text[opener.end():]):
+        return None
+    return opener
+
+
+def _example_fence(text, opener):
+    """True when the fence opener's info string starts with a word in EXAMPLE_FENCE_INFO."""
+    words = text[opener.end():].split()
+    return bool(words) and words[0].casefold() in EXAMPLE_FENCE_INFO
 
 
 def _indent(text):
@@ -310,9 +356,34 @@ def _delimiter_row(line):
 def _interrupts_paragraph(line):
     """True for a line that starts a block and so ends a paragraph: an inline HTML comment does not run
     past it."""
-    body = line.lstrip()
+    body = line.lstrip(MD_SPACE)
     return (FENCE_OPEN_RE.match(body) is not None or HEADING_RE.match(body) is not None
             or QUOTE_RE.match(body) is not None or ITEM_RE.match(body) is not None)
+
+
+def _list_block_opener(text, nested):
+    """(item content columns, block) when text is a list item line (or a run of markers: `- 1. `) whose
+    content opens a fence or an HTML comment block, else None: the block opens inside the innermost
+    item, at its content column; nested holds the content columns of the enclosing open items."""
+    item = ITEM_RE.match(text)
+    if item is None:
+        return None
+    chain, at = nested + [_content_column(text, item)], item.start(1)
+    deeper = ITEM_RE.match(text, at)
+    while deeper is not None and deeper.start(1) > at:
+        chain, at = chain + [_content_column(text, deeper)], deeper.start(1)
+        deeper = ITEM_RE.match(text, at)
+    opener = _fence_opener(text, at)
+    if opener is not None:
+        return chain, (FENCE, opener.group(1), chain[-1], _example_fence(text, opener))
+    if text.startswith("<!--", at) and _comment_start(text) == at:
+        return chain, (COMMENT, None, chain[-1], False)
+    return None
+
+
+# The text after the `-->` that closes a comment is paragraph text as it stands (True). The self-test
+# sets it False, re-reading that text as a fresh line, for its red-when-reverted leg.
+COMMENT_TAIL_IS_PARAGRAPH = True
 
 
 def block_context(lines):
@@ -324,12 +395,16 @@ def block_context(lines):
     continuation), and with it any fenced block or HTML comment block opened inside it. An HTML comment
     block starts at a line opening `<!--` (after at most three columns past the container) and runs to
     the line holding `-->`, across blank lines; an inline comment that `<!--` opens later in a line runs
-    to the first later line holding `-->` before the paragraph ends (with none, `<!--` is text). text is
-    the line for a prose kind, cut at an inline comment's start or after a comment's end; "" otherwise.
+    to the first later line holding `-->` before the paragraph ends (with none, `<!--` is text). The text
+    after the `-->` that closes either kind of comment is paragraph text as it stands: it is not
+    indented afresh, so it never becomes indented code, a fence or a list item. A fence or an HTML
+    comment block may open right after a list marker (`- ```` or `1. <!--`); it opens inside that item,
+    at the item's content column. Indentation and blank lines count spaces and tabs only. text is the
+    line for a prose kind, cut at an inline comment's start or after a comment's end; "" otherwise.
     InputError for a fenced block or HTML comment block that is never closed."""
     kinds = []
     items = []            # the content columns of the open list items, innermost last
-    block = None          # (FENCE, fence run, container column) or (COMMENT, None, container column)
+    block = None          # (FENCE, fence run, container column, example) or (COMMENT, None, column, False)
     hidden_until = -1     # the index of the line that ends the open inline comment
     para = quote = table = False
     for index, text in enumerate(lines):
@@ -339,68 +414,79 @@ def block_context(lines):
         if index == hidden_until:
             hidden_until = -1
             text = text[text.find("-->") + 3:]
-            if not text.strip():
+            if _blank(text):
                 kinds.append((INLINE_COMMENT, ""))
+                continue
+            if COMMENT_TAIL_IS_PARAGRAPH:
+                para, quote, table = True, False, False
+                kinds.append((PARA, text))
                 continue
         indent = _indent(text)
         if block is not None:
-            name, run, column = block
-            if not text.strip() or indent >= column:
+            name, run, column, example = block
+            if _blank(text) or indent >= column:
                 if name == FENCE:
-                    body = text.strip()
+                    body = text.strip(MD_SPACE)
                     if (indent - column <= FENCE_MAX_RELATIVE_INDENT and body.startswith(run)
                             and set(body) == {run[0]}):
                         block = None
-                    kinds.append((FENCE, ""))
+                    kinds.append((EXAMPLE_FENCE if example else FENCE, ""))
                     continue
                 end = text.find("-->")
                 if end < 0:
                     kinds.append((COMMENT, ""))
                     continue
                 block, text = None, text[end + 3:]
-                if not text.strip():
+                if _blank(text):
                     kinds.append((COMMENT, ""))
                     continue
+                if COMMENT_TAIL_IS_PARAGRAPH:
+                    para, quote, table = True, False, False
+                    kinds.append((PARA, text))
+                    continue
                 indent = _indent(text)
-            else:
-                block = None  # the list item holding the block has ended, and the block with it
-        if not text.strip():
+            block = None  # the list item holding the block has ended (or the comment closed)
+        if _blank(text):
             para = quote = table = False
             kinds.append((BLANK, ""))
             continue
-        lead = len(text) - len(text.lstrip())
+        lead = _lead(text)
         nested = [column for column in items if column <= indent]
         column = nested[-1] if nested else 0
         if not para:
             items = nested
-        opener = FENCE_OPEN_RE.match(text, lead)
-        if opener and indent - column <= FENCE_MAX_RELATIVE_INDENT and not (
-                opener.group(1)[0] == "`" and "`" in text[opener.end():]):
-            # (A backtick fence's info string cannot hold a backtick: ```x``` is inline code.)
-            items, block = nested, (FENCE, opener.group(1), column)
+        opener = _fence_opener(text, lead)
+        if opener and indent - column <= FENCE_MAX_RELATIVE_INDENT:
+            items, block = nested, (FENCE, opener.group(1), column, _example_fence(text, opener))
             para = quote = table = False
-            kinds.append((FENCE, ""))
+            kinds.append((EXAMPLE_FENCE if block[3] else FENCE, ""))
             continue
         if not para and not quote and indent - column >= 4:
             kinds.append((CODE, ""))
             continue
+        opened = _list_block_opener(text, nested)
+        if opened is not None:
+            items, block = opened
+            para = quote = table = False
+            kinds.append((EXAMPLE_FENCE if block[3] else block[0], ""))
+            continue
         start = _comment_start(text)
         html_block = text.startswith("<!--", lead) and indent - column <= 3
         if html_block and start == lead:
-            items, block = nested, (COMMENT, None, column)
+            items, block = nested, (COMMENT, None, column, False)
             para = quote = table = False
             kinds.append((COMMENT, ""))
             continue
         if start is not None and not html_block:
             for later in range(index + 1, len(lines)):
-                if not lines[later].strip() or _interrupts_paragraph(lines[later]):
+                if _blank(lines[later]) or _interrupts_paragraph(lines[later]):
                     break
                 if "-->" in lines[later]:
                     hidden_until = later
                     break
             if hidden_until > index:
                 text = text[:start]
-                if not text.strip():
+                if _blank(text):
                     kinds.append((INLINE_COMMENT, ""))
                     continue
         following = lines[index + 1] if index + 1 < len(lines) and hidden_until <= index else ""
@@ -443,7 +529,7 @@ def block_context(lines):
     return kinds
 
 
-def markdown_units(text, label, status_column=None):
+def markdown_units(text, label, status_column=None, hidden=None):
     """[(location, prose, context)] for a Markdown document, read only from the lines block_context
     gives a prose kind (fenced blocks, indented code and HTML comments are never read, in a list item
     as outside one); a blockquote whose lead-in (the paragraph just before it, or its own first words)
@@ -451,12 +537,15 @@ def markdown_units(text, label, status_column=None):
     context "quote"; a cell of the declared status column is context "status"; everything else is
     "prose". Wrapped lines of one paragraph or list item are joined into one unit. A link reference
     definition (a definition line, so never one inside code or a comment) is not a unit; a reference
-    link to it reads as an inline link. A leading byte order mark is dropped."""
+    link to it reads as an inline link. A leading byte order mark is dropped, and a line's trailing
+    carriage return is a line ending, not text. When hidden is a list, the hidden_references entries
+    of the document are appended to it."""
     units = []
     if text.startswith("\ufeff"):
         text = text[1:]
+    lines = [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
     try:
-        blocks = block_context(text.split("\n"))
+        blocks = block_context(lines)
     except InputError as exc:
         raise InputError("{}: {}".format(label, exc))
     definitions = {}
@@ -545,17 +634,81 @@ def markdown_units(text, label, status_column=None):
         para.append(line.strip())
     flush_para()
     flush_quote()
-    return [(where, _resolve_reference_links(prose, definitions), context)
-            for where, prose, context in units]
+    units = [(where, _resolve_reference_links(prose, definitions), context) for where, prose, context in units]
+    if hidden is not None:
+        hidden.extend(hidden_references(label, lines, blocks, units))
+    return units
 
 
-def surface_units(surface, data):
-    """The record units of one declared surface given its complete bytes; InputError when malformed."""
+# The NORMALIZE steps that only exempt text: the hidden-reference scan skips them, so a reference that
+# is struck through, commented or quoted inside a hidden line is still found.
+HIDDEN_SCAN_SKIPS = ("html-comment", "history-span", "strikethrough")
+
+
+def _references(text):
+    """[(key, ref)] for the pull request references in text, found as tokenize finds them (links, issue
+    references and the other spelling steps applied) but with the HIDDEN_SCAN_SKIPS steps left out; key
+    is (repository casefolded or None for the surface default, number), ref is (repository or None,
+    number, original text)."""
+    body = " ".join(text.split())
+    for name, regex, replacement in NORMALIZE:
+        if name not in HIDDEN_SCAN_SKIPS:
+            body = regex.sub(replacement, body)
+    found = []
+    for match in REF_RE.finditer(body):
+        if match.group("un"):
+            repo, number = "{}/{}".format(match.group("uo"), match.group("ur")), match.group("un")
+        elif match.group("qn"):
+            repo, number = "{}/{}".format(match.group("qo"), match.group("qr")), match.group("qn")
+        else:
+            repo, number = None, match.group("pn") or match.group("hn")
+        number = int(number)
+        if number < 1 or (repo is not None and not _pr_state.valid_repo(repo)):
+            continue
+        found.append(((repo.casefold() if repo else None, number), (repo, number, match.group(0))))
+    return found
+
+
+def hidden_references(label, lines, blocks, units):
+    """[(location, block kind name, ref, line)] for every pull request reference that appears only in
+    text the block classifier hides: a line of a fenced block, indented code, an HTML comment (a block,
+    an inline comment across lines, or the part of a prose line a comment cut away) or a link reference
+    definition. A reference also present in a read line or record unit of the same document (the same
+    repository, or the same surface default, and number) is not reported. A line of a fenced block
+    whose info string is in EXAMPLE_FENCE_INFO is not scanned. Each entry is reported as a warning,
+    without reading pull request state, so a claim the classifier hides never passes silently."""
+    visible = set()
+    for _where, prose, _context in units:
+        visible.update(key for key, _ref in _references(prose))
+    for kind, text in blocks:
+        if kind in PROSE_KINDS and kind != DEFINITION:
+            visible.update(key for key, _ref in _references(text))
+    found = []
+    for number, (raw, (kind, text)) in enumerate(zip(lines, blocks), 1):
+        if kind in (BLANK, EXAMPLE_FENCE):
+            continue
+        if kind in PROSE_KINDS and kind != DEFINITION:
+            if text == raw:
+                continue
+            name = "HTML comment"  # the part of a prose line that a comment cut away
+        else:
+            name = HIDDEN_KIND_NAMES[kind]
+        seen = set()
+        for key, ref in _references(raw):
+            if key not in visible and key not in seen:
+                seen.add(key)
+                found.append(("{}:{} ({})".format(label, number, name), name, ref, raw.strip()))
+    return found
+
+
+def surface_units(surface, data, hidden=None):
+    """The record units of one declared surface given its complete bytes; InputError when malformed.
+    For a Markdown surface, the hidden_references entries are appended to hidden when it is a list."""
     label = surface["path"]
     text = _decode(data, label)
     if surface["format"] == "toml-strings":
         return toml_units(text, label)
-    return markdown_units(text, label, surface.get("status-column"))
+    return markdown_units(text, label, surface.get("status-column"), hidden)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -837,23 +990,30 @@ class Result:
 
 
 def collect(surfaces_with_bytes):
-    """[(surface, location, kind, phrase, ref, clause)] over (surface, bytes) pairs; InputError
+    """[(surface, location, kind, phrase, ref, clause)] over (surface, bytes) pairs, with a HIDDEN entry
+    (phrase: the block kind; clause: the line) for each hidden_references entry; InputError
     propagates."""
     out = []
     for surface, data in surfaces_with_bytes:
-        for location, prose, context in surface_units(surface, data):
+        hidden = []
+        for location, prose, context in surface_units(surface, data, hidden):
             for kind, phrase, ref, clause in find_candidates(prose, context):
                 out.append((surface, location, kind, phrase, ref, clause))
+        for location, name, ref, line in hidden:
+            out.append((surface, location, HIDDEN, name, ref, line))
     return out
 
 
 def evaluate(candidates, config, root, transport=None, git_runner=_pr_state.run_git_origin):
     """The Result of judging the candidates against live pull request state."""
     result = Result()
-    result.candidates = len(candidates)
+    result.candidates = sum(1 for candidate in candidates if candidate[2] != HIDDEN)
     origin_cache = {}
     keyed = []
     for surface, location, kind, phrase, ref, clause in candidates:
+        if kind == HIDDEN:
+            result.warnings.append(_hidden_warning(location, phrase, ref, clause))
+            continue
         if kind == AMBIGUOUS:
             result.unknown.append("{}: {!r}: a pending or open phrase whose pull request is not named; "
                                   "the binding is ambiguous".format(location, clause))
@@ -895,6 +1055,15 @@ def evaluate(candidates, config, root, transport=None, git_runner=_pr_state.run_
     return result
 
 
+def _hidden_warning(location, name, ref, line):
+    """The warning for a pull request reference found only in hidden text: the file and line (location),
+    the block kind (name) and the reference; no pull request state is read for it."""
+    return ("{}: {!r}: the pull request reference {} appears only inside a {}, which is not read as a "
+            "current claim; its state was not read; review it (or mark an example fence with the info "
+            "string {})".format(location, line, ref[2], name,
+                                " or ".join("`" + word + "`" for word in EXAMPLE_FENCE_INFO)))
+
+
 def _surface_repo(surface, root, cache, git_runner):
     if surface["repository"] != "origin":
         return surface["repository"], None
@@ -922,8 +1091,8 @@ def report(result, stream=None):
                   "{}".format(result.candidates, " (advisory warnings above)" if result.warnings else ""),
                   file=stream)
         else:
-            print("PASS: no supported current pending-claim found (this is not proof that none exists)",
-                  file=stream)
+            print("PASS: no supported current pending-claim found (this is not proof that none exists)"
+                  "{}".format(" (advisory warnings above)" if result.warnings else ""), file=stream)
     elif code == 2:
         print("INCOMPLETE: the evaluation did not complete; this is not a pass", file=stream)
     return code
@@ -948,8 +1117,13 @@ def check_inputs(root):
     except InputError as exc:
         print("CANNOT EVALUATE: {}".format(exc), file=sys.stderr)
         return 2
-    print("PASS: {} declared surface(s) parse; {} candidate claim(s) found. Offline input validation "
-          "only: pull request currency was NOT assessed".format(len(pairs), len(candidates)))
+    hidden = [_hidden_warning(location, phrase, ref, clause)
+              for _surface, location, kind, phrase, ref, clause in candidates if kind == HIDDEN]
+    for line in hidden:
+        print("WARNING: " + line)
+    print("PASS: {} declared surface(s) parse; {} candidate claim(s) found; {} hidden-reference "
+          "warning(s). Offline input validation only: pull request currency was NOT assessed".format(
+              len(pairs), len(candidates) - len(hidden), len(hidden)))
     return 0
 
 
@@ -1291,6 +1465,15 @@ FENCED_DEFINITION = ("```md\n[pr17]: https://github.com/acme/widgets/issues/17\n
 COMMENT_DEFINITION = ("<!--\n\n[pr17]: https://github.com/acme/widgets/issues/17\n\n-->\n\n[#17][pr17] is pending.\n\n"
                       "[pr17]: https://github.com/acme/widgets/pull/17\n")
 OVERINDENTED_BACKTICKS = "- Item\n\n      ```\n\n  PR #17 is pending.\n\n      ```\n"
+# A fence opened right after a list marker closes inside that item, so the item text after it is read
+# (read as a paragraph, the closing fence would open a fence that `outside` closes, hiding the claim).
+FENCE_AFTER_BULLET = "- ```\n  example\n  ```\n\n  PR #17 is pending.\n\noutside\n"
+FENCE_AFTER_ORDERED = "1. ```\n   example\n   ```\n\n   PR #17 is pending.\n\noutside\n"
+# A no-break space is not indentation: the backticks after it are text, not a fence.
+NBSP_BACKTICKS = " ```\nPR #17 is pending.\n ```\n"
+# The text after a closing `-->` is paragraph text as it stands, not a line indented four columns.
+COMMENT_TAIL = "<!-- a\n-->    PR #17 is pending.\n"
+INLINE_COMMENT_TAIL = "Intro <!-- a\nb --> ```\nPR #17 is pending.\n"
 # The verb alternation before the modifier suffix applied to `still` and `currently` (a red leg).
 VERB_BEFORE_STILL_MODIFIERS = (r"(?:(?:is|are|remains?|stays?|(?:has|have)\s+been)"
                                r"(?:\s+(?:still|currently|now|also|both)){0,2}|still|currently)")
@@ -1446,6 +1629,39 @@ def _fix_rows(m, o):
              [(REPO, 17)]),
             ("markdown/unclosed-inline-comment-is-text", "PR #17 is pending <!-- no end\n\nNext.\n", m, 1,
              [(REPO, 17)]),
+            ("markdown/fence-after-bullet-marker-read", FENCE_AFTER_BULLET, m, 1, [(REPO, 17)]),
+            ("markdown/fence-after-bullet-marker-read-closed", FENCE_AFTER_BULLET, {(REPO, 17): "closed"}, 1,
+             [(REPO, 17)]),
+            ("markdown/fence-after-ordered-marker-read", FENCE_AFTER_ORDERED, m, 1, [(REPO, 17)]),
+            ("markdown/fence-after-nested-markers-read",
+             "- 1. ```\n     example\n     ```\n\n     PR #17 is pending.\n\noutside\n", m, 1, [(REPO, 17)]),
+            ("markdown/fence-after-marker-in-item-skipped", "- ```\n  PR #17 is pending.\n  ```\n\noutside\n", m,
+             0, []),
+            ("markdown/nbsp-before-backticks-is-text", NBSP_BACKTICKS, m, 1, [(REPO, 17)]),
+            ("markdown/nbsp-before-backticks-is-text-closed", NBSP_BACKTICKS, {(REPO, 17): "closed"}, 1,
+             [(REPO, 17)]),
+            ("markdown/em-space-before-backticks-is-text", " ```\nPR #17 is pending.\n ```\n", m, 1,
+             [(REPO, 17)]),
+            ("markdown/nbsp-indent-is-not-code", "Intro.\n\n    PR #17 is pending.\n", m, 1,
+             [(REPO, 17)]),
+            ("markdown/text-after-comment-close-read/0-spaces", "<!-- a\n-->PR #17 is pending.\n", m, 1,
+             [(REPO, 17)]),
+            ("markdown/text-after-comment-close-read/1-space", "<!-- a\n--> PR #17 is pending.\n", m, 1,
+             [(REPO, 17)]),
+            ("markdown/text-after-comment-close-read/2-spaces", "<!-- a\n-->  PR #17 is pending.\n", m, 1,
+             [(REPO, 17)]),
+            ("markdown/text-after-comment-close-read/3-spaces", "<!-- a\n-->   PR #17 is pending.\n", m, 1,
+             [(REPO, 17)]),
+            ("markdown/text-after-comment-close-read/4-spaces", COMMENT_TAIL, m, 1, [(REPO, 17)]),
+            ("markdown/text-after-comment-close-read/4-spaces-closed", COMMENT_TAIL, {(REPO, 17): "closed"}, 1,
+             [(REPO, 17)]),
+            ("markdown/text-after-comment-close-read/tab", "<!-- a\n-->\tPR #17 is pending.\n", m, 1,
+             [(REPO, 17)]),
+            ("markdown/text-after-comment-close-read/in-list-item",
+             "- Item\n\n  <!-- a\n  -->      PR #17 is pending.\n", m, 1, [(REPO, 17)]),
+            ("markdown/text-after-comment-close-read/backticks", "<!-- a\n--> ```\nPR #17 is pending.\n", m, 1,
+             [(REPO, 17)]),
+            ("markdown/text-after-inline-comment-close-read", INLINE_COMMENT_TAIL, m, 1, [(REPO, 17)]),
             ("verb/still-currently-open", "#17 still currently open.\n", m, 1, [(REPO, 17)]),
             ("verb/still-currently-merged-no-claim", "#17 still currently merged.\n", m, 0, []),
             ("format/currently-pending", "PR #17 is currently pending.\n", m, 1, [(REPO, 17)]),
@@ -1519,6 +1735,82 @@ def _fix_rows(m, o):
                                                  {("peer/repo", 17): "merged"}))
     check("ref/reference-style-link/red-when-reverted", code == 0 and t.calls == [], (code, t.calls))
     _block_context_rows(m)
+    _hidden_rows(m)
+
+
+def _no_hidden_references(_label, _lines, _blocks, _units):
+    """hidden_references as it was before the scan existed: nothing is reported (a red leg)."""
+    return []
+
+
+def _hidden_rows(m):
+    """A pull request reference only in text the classifier hides warns, naming the file, line, block
+    kind and reference, with no read and exit 0, whatever the pull request's state; an example fence and
+    a reference also read elsewhere stay quiet. Each classifier fix, reverted, loses its finding and is
+    left with that warning; with the scan removed as well it passes silently."""
+    for name, text, table, line, kind in (
+            ("hidden/fenced-reference-warns", "```\nPR #17 is pending\n```\n", m, 2, "fenced block"),
+            ("hidden/fenced-reference-warns/unreadable-state-still-warns", "```\nPR #17 is pending\n```\n", {}, 2,
+             "fenced block"),
+            ("hidden/info-string-fence-reference-warns", "```python\nPR #17 is pending\n```\n", m, 2,
+             "fenced block"),
+            ("hidden/indented-code-reference-warns", "Example:\n\n    PR #17 is pending\n", m, 3,
+             "indented code block"),
+            ("hidden/comment-block-reference-warns", "<!--\nPR #17 is pending.\n-->\n", m, 2,
+             "HTML comment block"),
+            ("hidden/inline-comment-reference-warns", "Intro <!-- a\nPR #17 is pending -->\n", m, 2,
+             "inline HTML comment"),
+            ("hidden/comment-cut-line-reference-warns", "Intro <!-- PR #17 is pending\nstill -->\n", m, 1,
+             "HTML comment"),
+            ("hidden/definition-reference-warns", "Notes.\n\n[old]: https://github.com/acme/widgets/pull/17\n", m,
+             3, "link reference definition"),
+            ("hidden/fence-in-list-item-reference-warns", "- ```\n  PR #17 is pending.\n  ```\n", m, 2,
+             "fenced block")):
+        try:
+            code, res, t = _judge(text, table)
+            warned = (len(res.warnings) == 1 and "NOTES.md:{} ({})".format(line, kind) in res.warnings[0]
+                      and ("reference PR #17 " in res.warnings[0]
+                           or "reference https://github.com/acme/widgets/pull/17 " in res.warnings[0])
+                      and "appears only inside" in res.warnings[0])
+            ok, detail = code == 0 and t.calls == [] and not res.hard and warned, (code, t.calls, res.warnings)
+        except InputError as exc:
+            ok, detail = False, str(exc)
+        check(name, ok, detail)
+    code, res, t = _with_globals({"hidden_references": _no_hidden_references},
+                                 lambda: _judge("```\nPR #17 is pending\n```\n", m))
+    check("hidden/fenced-reference-warns/red-when-reverted", code == 0 and not res.warnings and t.calls == [],
+          (code, res.warnings))
+    for name, text in (("hidden/example-fence-quiet", "```example\nPR #17 is pending\n```\n"),
+                       ("hidden/history-fence-quiet", "~~~ History\nPR #17 is pending\n~~~\n"),
+                       ("hidden/reference-also-read-quiet", "PR #17 merged.\n\n```\nPR #17 is pending\n```\n"),
+                       ("hidden/used-definition-quiet",
+                        "[#17][pr17] merged.\n\n[pr17]: https://github.com/acme/widgets/pull/17\n")):
+        code, res, t = _judge(text, m)
+        check(name, code == 0 and not res.warnings and not res.hard and t.calls == [], (code, res.warnings))
+    code, res, _t = _with_globals({"EXAMPLE_FENCE_INFO": ()},
+                                  lambda: _judge("```example\nPR #17 is pending\n```\n", m))
+    check("hidden/example-fence-quiet/red-when-reverted", code == 0 and len(res.warnings) == 1, res.warnings)
+    # Each classifier fix reverted: the claim's finding is lost (no read) but the hidden-reference warning
+    # remains; with the scan also removed, the claim passes silently, as it did before both.
+    for name, replacements, text in (
+            ("markdown/fence-after-bullet-marker-read/red-when-reverted",
+             {"_list_block_opener": lambda _text, _nested: None}, FENCE_AFTER_BULLET),
+            ("markdown/fence-after-ordered-marker-read/red-when-reverted",
+             {"_list_block_opener": lambda _text, _nested: None}, FENCE_AFTER_ORDERED),
+            ("markdown/nbsp-before-backticks-is-text/red-when-reverted", {"MD_SPACE": None}, NBSP_BACKTICKS),
+            ("markdown/text-after-comment-close-read/4-spaces/red-when-reverted",
+             {"COMMENT_TAIL_IS_PARAGRAPH": False}, COMMENT_TAIL)):
+        try:
+            code, res, t = _with_globals(replacements, lambda: _judge(text, m))
+            ok = code == 0 and t.calls == [] and not res.hard and len(res.warnings) == 1 \
+                and "appears only inside" in res.warnings[0]
+            detail = (code, t.calls, res.hard, res.warnings)
+            code, res, t = _with_globals(dict(replacements, hidden_references=_no_hidden_references),
+                                         lambda: _judge(text, m))
+            ok = ok and code == 0 and t.calls == [] and not res.hard and not res.warnings
+        except InputError as exc:
+            ok, detail = False, str(exc)
+        check(name, ok, detail)
 
 
 def _cue_rows(m):
@@ -1689,7 +1981,7 @@ def _self_test():
             ("quiet/history-quoted-span", "Previously recorded: \u201cPR #17 is pending.\u201d\n"),
             ("quiet/history-backtick-span", "The old note read `waiting on #17`.\n"),
             ("quiet/history-blockquote", "Earlier note:\n\n> waiting for #17 to merge\n"),
-            ("quiet/fenced-example", "```\nPR #17 is pending\n```\n")):
+            ("quiet/fenced-example", "```example\nPR #17 is pending\n```\n")):
         code, res, t = _judge(text, {(REPO, 17): "closed"})
         check(name, code == 0 and t.calls == [] and not res.hard and not res.warnings, (code, t.calls))
     red = _with_steps_removed({"history-span"},

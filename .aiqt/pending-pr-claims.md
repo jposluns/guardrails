@@ -119,7 +119,14 @@ column (the left margin, or the innermost list item's content column, taken as t
 text starts at); a backtick or tilde line four or more columns past it is indented code outside a
 paragraph and paragraph text inside one. A line indented less than a list item's content column (a
 lazy paragraph continuation aside) ends that item, and any fenced block or HTML comment block opened
-inside it.
+inside it. A fence or an HTML comment block may open right after a list marker (`- ```` or
+`1. <!--`, or after a run of markers such as `- 1. ```` ): it opens inside that item, at the item's
+content column, so its closing line closes it and the item text after it is read. Indentation, list
+marker spacing and blank lines count spaces and tabs only: any other whitespace (a no-break space, an
+en space, a form feed) is text, so it never indents a line, never makes a line blank and never puts
+a fence or a list marker after it. The text after the `-->` that closes an HTML comment (a block or an
+inline comment across lines) is paragraph text as it stands: it is not indented afresh, so spaces or a
+tab after `-->` never make it indented code, a fence or a list item.
 
 Not read as current claims: fenced code blocks, in a list item as outside one (a line such as
 ```` ```x``` ```` is inline code, not a fence); indented code blocks (four columns of indent past the
@@ -138,6 +145,21 @@ current claim. Quotation
 marks and backticks elsewhere do not hide a claim (`PR` followed by a backticked `#17` and `is pending`
 still binds). A claim inside any other blockquote is cannot-evaluate until it is given a historical
 lead-in or moved out of the quote.
+
+**Hidden references warn; they never pass silently.** Every line the block context hides (a line of a
+fenced block, indented code, an HTML comment block or an inline comment across lines, the part of a
+prose line a comment cuts away, and a link reference definition) is still scanned for a pull request
+reference, with the same spellings, link forms and issue exclusions as record text (strikethrough,
+historical spans and single-line comments inside the hidden line do not hide a reference from this
+scan). A reference found only in hidden text, that is, one whose repository (or the surface default)
+and number appear in no read line or record unit of the same file, prints a `WARNING:` line naming the
+file, the line, the block kind and the reference. Its pull request state is not read, so the warning
+does not depend on that state and an unreadable state does not make it cannot-evaluate; with no
+finding the run exits 0. `--check-inputs` prints the same warnings and counts them. The only
+exemption is a fenced block whose info string starts with one of the example markers `example` or
+`history` (case-insensitive, for instance ```` ```example ````): its lines are not scanned. Any other
+info string (`python`, `text`, `md`) is scanned. Wording in hidden text is not matched against the
+phrase table; the warning asks for a review, it is not a finding.
 
 ## State source
 
@@ -168,7 +190,7 @@ or the origin URL.
 
 | Command | What it does |
 | --- | --- |
-| `check_pending_pr_claims.py --check-inputs` | offline: validates the declaration and every declared surface and counts candidates; does not assess currency |
+| `check_pending_pr_claims.py --check-inputs` | offline: validates the declaration and every declared surface, counts candidates and prints and counts hidden-reference warnings; does not assess currency |
 | `check_pending_pr_claims.py --all --live` | every declared surface, live state |
 | `check_pending_pr_claims.py --draft PATH --target REL` | the complete proposed content PATH judged as declared surface REL, live state |
 | `check_pending_pr_claims.py --staged --live` | the staged blob of every declared surface the index changes, read by the object id of its stage-0 index entry, live state; a staged entry that is not a regular file (a symlink, for example) or is unmerged is exit 2 |
@@ -218,12 +240,22 @@ claim was found.
   (one whose content column it does not reach): text laid out that way is not read, as CommonMark
   renders it as code. A line with deeper indentation after a list item's marker (`1.      text`) keeps
   the column its text starts at, not CommonMark's marker column plus one, so text wrapped under it is
-  read. Blockquote containers are not modelled: a fence marker after `>` is quote text. An
+  read. Because only spaces and tabs indent, a list marker after a form feed or a no-break space (a
+  page break or spacing left by PDF extraction) is paragraph text, and lines indented under it four or
+  more columns are indented code: not read as claims, though their references are scanned and warn.
+  Blockquote containers are not modelled: a fence marker after `>` is quote text. An
   inline comment ends at the first later line holding `-->` before a blank line or a line that starts
   a fence, heading, blockquote or list item, so a `-->` inside a code span there ends it early. A
   table header is recognised from the raw text of the line after it, even when that line is itself
   indented code. A paragraph that an inline comment interrupts across lines is joined around it; a
   comment block between two lines ends the paragraph.
+- The hidden-reference warning is keyed by reference, not by claim: a hidden line naming a pull request
+  that a read line of the same file also names raises no warning (`PR #17 merged.` above a plain fence
+  holding `PR #17 is pending` is quiet), and a fence marked `example` or `history` is not scanned at
+  all. A bare `#17` and a qualified `owner/repo#17` are different keys, so one hidden and the other
+  read still warns. The scan covers Markdown surfaces only; comments in a `toml-strings` surface are
+  not read or scanned. Struck-through text, historical spans and single-line comments inside a read
+  line are grammar exemptions, not hidden lines, and are not scanned.
 - A named backlog item is not resolved to a pull request: only explicit references bind.
 - State can change after it is read (a closed pull request can be reopened); the API read and the file
   write are not one transaction.
