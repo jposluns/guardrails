@@ -41,9 +41,13 @@ one.
 
 ## Grammar
 
-A pull request reference is `#17`, `PR #17`, `pull request #17`, `pr:17` (with `pr:#17` accepted as a
-prose-only alias), `owner/repo#17` or a GitHub pull request URL. A bare number (`PR 17`) is not a
-reference. Coordinated lists (`#17, #18 and #19`) bind every member.
+A pull request reference is `#17`, `PR #17`, `PR#17`, `pull request #17`, `pr:17` (with `pr:#17`
+accepted as a prose-only alias), `owner/repo#17` or a GitHub pull request URL (optionally ending in
+`/files`, `/commits` or `/checks`). A Markdown link or autolink to a pull request URL counts as that URL
+(`[#17](https://github.com/OWNER/REPO/pull/17)` binds OWNER/REPO#17); a link to any other URL counts as
+its text. A bare number (`PR 17`) is not a reference. Coordinated lists (`#17, #18 and #19`, `#17/#18`)
+bind every member. An issue reference (`issue #17`, `issues #17 and #18`, or a link to an
+`/issues/N` URL) is not a pull request reference: it is never read from the pulls API and never binds.
 
 Units are complete: a Markdown paragraph or list item is joined across wrapped lines, and a TOML string
 is decoded before it is read. Inside a unit, a claim binds within one clause; a clause ends at `.`
@@ -51,21 +55,36 @@ followed by a space, `;`, `:`, `!`, `?` or a spaced dash.
 
 | Phrase | Result when the bound pull request is merged or closed |
 | --- | --- |
-| `#N is/remains/still pending`, `#N (pending)`, `pending PR #N`, `pending #N`, `pending merge of #N` | finding (exit 1) |
+Below, "is" stands for `is`, `are`, `remains`, `stays` or `still`, optionally followed by `still`,
+`currently` or `now` (`#N is currently pending`).
+
+| Phrase | Result when the bound pull request is merged or closed |
+| --- | --- |
+| `#N is pending`, `#N (pending)`, `pending PR #N`, `pending #N`, `pending merge of #N` | finding (exit 1) |
 | `pending batch (#A, #B)` | finding for each stale member |
-| `#N is/remains/still open`, `open PR #N`, `open pull requests #A and #B` | finding |
-| `#N is under review`, `PR #N is in review` | finding |
-| `In progress (#A, #B)` in the declared Status column | finding for each member that is not open |
+| `#N is open`, `#N (open)`, `#N (in progress)`, `open PR #N`, `open pull requests #A and #B` | finding |
+| `#N is under review`, `#N is in review`, `#N is awaiting review` | finding |
+| `#N is in progress` | finding |
+| `In progress (#A, #B)`, `In progress: #N`, `Open (#N)`, `Pending: #N` at the start of a declared Status column cell | finding for each member that is not open |
 | `waiting for/on #N to merge`, `awaiting merge of #N`, `until #N merges`, `once/after #N lands` | finding |
-| `#N is not yet merged` | finding |
+| `#N is not yet merged`, `#N is yet to be merged`, `#N has yet to merge`, `#N hasn't merged (yet)` | finding |
 | `waiting on/for #N`, `awaiting #N`, `blocked on/by #N` | warning (a dependency may need interpretation) |
 | `stacked on/atop #N`, `stacks on #N` | warning (ancestry can stay accurate after a merge) |
+| `Open #N ...` at the start of a clause or after a comma (`To review it, open #N`) | warning (an instruction as likely as a claim) |
 | `#N is unmerged` | nothing |
 
-`open #N` after an instruction word (`leave open #N`, `keep open #N`) is not a claim. A phrase such as
-`the pending PR` with no named pull request is an ambiguous binding: cannot-evaluate.
+`open #N` after an instruction word (`leave open #N`, `keep open #N`) is not a claim. A lead phrase
+(`waiting for`, `awaiting`, `until`, `once`, `blocked on`, `stacked on`, `pending`, `open`) directly
+after a negation or a past auxiliary (`not waiting for #N to merge`, `no longer waiting on #N`, `isn't
+waiting`, `were waiting for #N to merge`, `was stacked on #N`; adverbs such as `still` are skipped) is
+not a current claim. A phrase such as `the pending PR` with no named pull request is an ambiguous
+binding: cannot-evaluate, even when a named claim binds in the same clause.
 
-Not read as current claims: fenced code blocks; a blockquote introduced by `Earlier note:` or
+A Markdown table is read from its header and delimiter rows, with or without outer pipes.
+
+Not read as current claims: fenced code blocks (a line such as ```` ```x``` ```` is inline code, not a
+fence); indented code blocks (four columns of indent outside a paragraph or list); HTML comments within
+one unit (`<!-- ... -->`); struck-through text (`~~PR #17 is pending~~`); a blockquote introduced by `Earlier note:` or
 `Previously recorded:` (in the paragraph before it or its own first words); a quoted span (curly or
 straight quotes, or backticks) directly after a historical lead-in such as `Previously recorded:` or
 `The old note read`; past tense (`#17 was pending`); negation (`#17 is no longer pending`). Only the
@@ -107,7 +126,7 @@ or the origin URL.
 | `check_pending_pr_claims.py --all --live` | every declared surface, live state |
 | `check_pending_pr_claims.py --draft PATH --target REL` | the complete proposed content PATH judged as declared surface REL, live state |
 | `check_pending_pr_claims.py --staged --live` | the staged blob of every declared surface the index changes, live state |
-| `apply_record_draft.py --draft PATH --target REL` | judges the draft bytes read once and writes those same bytes only on exit 0; a changed destination preimage withholds the write |
+| `apply_record_draft.py --draft PATH --target REL` | judges the draft bytes read once and writes those same bytes only on exit 0, keeping the target's permission bits; a changed destination preimage, a symlinked parent directory or a parent that changed after it was opened withholds the write |
 | `check_pending_pr_commit.sh` | runs `--staged --live`, prints the result, and always lets the commit continue; an incomplete evaluation is reported as not passed |
 
 Exit 0: every bound claim was evaluated and none is contradicted (advisory warnings may remain). Exit 1:
@@ -118,7 +137,25 @@ claim was found.
 ## Residuals
 
 - The grammar is partial: an unfamiliar paraphrase, a pronoun, an undeclared record or a misleading
-  history annotation can evade or confuse it. A date alone does not mark text historical.
+  history annotation can evade or confuse it. A date alone does not mark text historical. The
+  self-test covers only the forms in its rule and fix rows; forms known not to be caught include a
+  claim before its reference (`still pending: #17` outside a Status cell), a reference after other
+  words in a Status cell (`Blocked, in progress (#17)`), a `pull/N` URL with a suffix other than
+  `/files`, `/commits` or `/checks` (`/checks/123`), and a reference split inside a word across a
+  line break. A reference in the text of a link to any other URL is read as plain text, so it binds to
+  the surface's default repository.
+- A blockquote with a historical lead-in is exempt as a whole, so a current claim later added inside
+  it is not read. An `Earlier note:` lead-in applies only to the blockquote directly after it (a
+  table, fence, indented block or heading between them ends it).
+- An issue reference is never read, so a stale claim about an issue (`Issue #17 remains open` after it
+  closed) is not detected. A `#N` with no `issue` word is always read as a pull request; when it names
+  an issue, the pulls API answers 404 and the run is cannot-evaluate.
+- An imperative `Open #N` at the start of a clause warns rather than finds, so `Open PR #17 needs
+  review` written as a claim is a warning only. Negation and past tense are judged only from the word
+  directly before a lead phrase (adverbs skipped), so a negation or past tense further back is not
+  seen: `We were told to wait for #17 to merge` and `not sure whether we are waiting for #17 to merge`
+  are still findings.
+- An HTML comment that spans a blank line is not removed, so its text is read as record text.
 - A named backlog item is not resolved to a pull request: only explicit references bind.
 - State can change after it is read (a closed pull request can be reopened); the API read and the file
   write are not one transaction.

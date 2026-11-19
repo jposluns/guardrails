@@ -25,6 +25,14 @@ The declaration is .aiqt/pending-pr-claims.toml; the contract, grammar and resid
 .aiqt/pending-pr-claims.md. State is read by tools/_pr_state.py (gh api, host pinned to github.com);
 a caller-supplied state map is never accepted as authority. The --check-inputs mode is the only
 mode the Quality workflow runs: it is deterministic and offline and does not assess currency.
+
+RESIDUALS (disclosed; the full list is in the contract): the grammar is partial and the self-test
+covers only its RULE_ROWS and fix rows. Not caught: a claim before its reference outside a Status
+cell (still pending: #17), a Status cell whose state word is not first (Blocked, in progress (#17)),
+a pull URL suffix other than /files, /commits or /checks, a reference split inside a word, a current
+claim added inside a blockquote that has a historical lead-in, an issue claim (issue references are
+never read), and a negation or past tense more than one word (adverbs aside) before a lead phrase.
+An imperative-looking `Open #N` at a clause start warns instead of finding.
 """
 import sys
 
@@ -221,6 +229,7 @@ def markdown_units(text, label, status_column=None):
     quote, quote_line = [], 0
     last_prose = ""
     header = None
+    in_list = False
 
     def flush_para():
         nonlocal para, last_prose
@@ -248,16 +257,22 @@ def markdown_units(text, label, status_column=None):
                 fence = None
             continue
         match = FENCE_RE.match(line)
-        if match:
+        # A backtick fence's info string cannot hold a backtick (CommonMark): ```x``` is inline code.
+        if match and not (match.group(1)[0] == "`" and "`" in line[match.end():]):
             flush_para()
             flush_quote()
             fence = match.group(1)
             header = None
+            last_prose = ""
             continue
         if not line.strip():
             flush_para()
             flush_quote()
             header = None
+            continue
+        # An indented code block: four columns of indent outside a paragraph and a list.
+        if not para and not quote and not in_list and (line.startswith("    ") or line.startswith("\t")):
+            last_prose = ""
             continue
         match = QUOTE_RE.match(line)
         if match:
@@ -267,13 +282,18 @@ def markdown_units(text, label, status_column=None):
             quote.append(match.group(1).strip())
             continue
         flush_quote()
-        if line.lstrip().startswith("|"):
+        following = lines[number] if number < len(lines) else ""
+        # A table row: a line with a leading pipe, a row of the current table, or a header whose next
+        # line is a delimiter row; the outer pipes are optional (GFM).
+        if line.lstrip().startswith("|") or ("|" in line and (header is not None or (
+                "|" in following and all(SEPARATOR_CELL_RE.fullmatch(cell) for cell in _cells(following))))):
             flush_para()
+            last_prose = ""
+            in_list = False
             cells = _cells(line)
             if all(SEPARATOR_CELL_RE.fullmatch(cell) for cell in cells):
                 continue
-            following = lines[number] if number < len(lines) else ""
-            if header is None and following.lstrip().startswith("|") and all(
+            if header is None and "|" in following and all(
                     SEPARATOR_CELL_RE.fullmatch(cell) for cell in _cells(following)):
                 header = cells
                 continue
@@ -287,14 +307,18 @@ def markdown_units(text, label, status_column=None):
         match = HEADING_RE.match(line)
         if match:
             flush_para()
+            in_list = False
             units.append(("{}:{}".format(label, number), (match.group(1) or "").strip(), "prose"))
             last_prose = units[-1][1]
             continue
         match = ITEM_RE.match(line)
         if match:
             flush_para()
+            in_list = True
             para, para_line = [match.group(1).strip()], number
             continue
+        if not line.startswith(" ") and not line.startswith("\t") and not para:
+            in_list = False
         if not para:
             para_line = number
         para.append(line.strip())
@@ -321,7 +345,8 @@ _O = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?"
 _R = r"[A-Za-z0-9._-]{1,100}"
 REF_RE = re.compile(
     r"(?:\b(?:pull\s+requests?|PRs?)\s+)?"
-    r"(?:https://github\.com/(?P<uo>" + _O + r")/(?P<ur>" + _R + r")/pull/(?P<un>[0-9]{1,9})(?![\w/])"
+    r"(?:https://github\.com/(?P<uo>" + _O + r")/(?P<ur>" + _R + r")/pull/(?P<un>[0-9]{1,9})"
+    r"(?:/(?:files|commits|checks))?(?![\w/])"
     r"|(?<![\w./-])(?P<qo>" + _O + r")/(?P<qr>" + _R + r")#(?P<qn>[0-9]{1,9})(?![\w])"
     r"|\bpr:#?(?P<pn>[0-9]{1,9})(?![\w])"
     r"|(?<![\w&#/])#(?P<hn>[0-9]{1,9})(?![\w]))",
@@ -331,55 +356,126 @@ REF_RE = re.compile(
 REF_MARK = "\ue000[0-9]+\ue001"
 REF_MARK_RE = re.compile("\ue000([0-9]+)\ue001")
 LIST = r"(?P<l>{0}(?:\s*,\s*(?:and\s+|or\s+)?{0}|\s+(?:and|or)\s+{0})*)".format(REF_MARK)
-VERB = r"(?:(?:is|are|remains?|stays?)(?:\s+still)?|still)"
-# A historical lead-in followed by a quoted span: only that span is exempt.
+VERB = r"(?:(?:is|are|remains?|stays?)(?:\s+(?:still|currently|now))?|still|currently)"
+# A historical lead-in followed by a quoted span: only that span is exempt. A straight single-quoted
+# span ends at a quote that no letter follows, so an apostrophe inside it (isn't) does not end it.
 HISTORY_SPAN_RE = re.compile(
     r"(?i)\b(?:previously recorded|earlier note|the old note read|old note read|was recorded as|"
-    r"previously read)\s*:?\s*(?:\u201c[^\u201d]*\u201d|\"[^\"]*\"|`[^`]*`|\u2018[^\u2019]*\u2019)")
+    r"previously read)\s*:?\s*(?:\u201c[^\u201d]*\u201d|\"[^\"]*\"|`[^`]*`|\u2018[^\u2019]*\u2019"
+    r"|'(?:[^']|'(?=\w))*'(?!\w))")
 CLAUSE_SPLIT_RE = re.compile(r"[;:!?\u00a6]|\.(?=\s|$)|\s[\u2013\u2014]\s|\s-\s")
+# A status cell keeps its colon (In progress: #17) inside one clause.
+STATUS_CLAUSE_SPLIT_RE = re.compile(r"[;!?\u00a6]|\.(?=\s|$)|\s[\u2013\u2014]\s|\s-\s")
 FORMATTING_RE = re.compile("[`\u201c\u201d\u2018\u2019\"*]|~~")
 INSTRUCTION_WORDS = {"leave", "leaves", "left", "keep", "keeps", "kept", "to", "will", "should",
                      "must", "please", "re"}
+# Words that, directly before a lead phrase (waiting for, awaiting, until, blocked on ...), make it
+# negated or past: "not waiting for #17 to merge", "were waiting for #17 to merge".
+NEGATORS = {"not", "never", "longer", "t", "isnt", "arent", "wasnt", "werent", "hasnt", "havent",
+            "hadnt", "dont", "doesnt", "didnt"}
+PAST_AUXILIARIES = {"was", "were", "had", "been"}
+ADVERBS = {"still", "also", "then", "currently", "yet", "just", "only", "now", "already"}
+ISSUE_LIST_RE = re.compile(
+    r"\bissues?\s*(?P<l>#[0-9]{1,9}(?:\s*(?:,|/|&|\band\b|\bor\b)\s*(?:and\s+|or\s+)?#[0-9]{1,9})*)", re.I)
+PULL_URL_RE = re.compile(r"https://github\.com/" + _O + r"/" + _R + r"/pull/[0-9]{1,9}"
+                         r"(?:/(?:files|commits|checks))?/?(?:#[\w-]*)?")
+ISSUE_URL_RE = re.compile(r"https://github\.com/" + _O + r"/" + _R + r"/issues/(?P<n>[0-9]{1,9})/?(?:#[\w-]*)?")
+
+
+def _link(match):
+    """A Markdown link or image: a pull request URL stands for its target (it carries the repository);
+    an issue URL becomes an issue reference; any other link keeps only its text."""
+    text, url = match.group(1), match.group(2)
+    if PULL_URL_RE.fullmatch(url):
+        return " " + url.split("#")[0].rstrip("/") + " "
+    issue = ISSUE_URL_RE.fullmatch(url)
+    if issue:
+        return " issue #{} ".format(issue.group("n"))
+    return text
+
+
+def _issue(match):
+    """An issue reference list: its numbers are not pull requests, so their '#' is replaced by a
+    private-use mark no pull request reference matches."""
+    return match.group(0).replace("#", "\ue003")
+
+
+# The normalization steps tokenize applies, in order, before pull request references are found:
+# (name, regex, replacement). The self-test removes one at a time by name (red-when-reverted).
+NORMALIZE = (
+    ("html-comment", re.compile(r"<!--.*?-->"), " "),
+    ("markdown-link", re.compile(r"!?\[([^\]]*)\]\(\s*<?([^\s()<>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)"),
+     _link),
+    ("autolink", re.compile(r"<(https://github\.com/[^\s<>]+)>"), r" \1 "),
+    ("history-span", HISTORY_SPAN_RE, " \u00a6 "),
+    ("strikethrough", re.compile(r"~~[^~]*~~"), " "),
+    ("formatting", FORMATTING_RE, ""),
+    ("underscore-emphasis", re.compile(r"(?<!\w)_{1,2}(?=#[0-9])|(?<=[0-9])_{1,2}(?!\w)"), ""),
+    ("issue-reference", ISSUE_LIST_RE, _issue),
+    ("glued-pr", re.compile(r"\b(PRs?)#(?=[0-9])", re.I), r"\1 #"),
+    ("slash-list", re.compile(r"(?<=[0-9])\s*/\s*(?=#[0-9])"), " and "),
+)
 
 PATTERNS = (
-    # (kind, phrase, regex, contexts) in priority order; a token bound HARD is not also a warning.
-    (HARD, "in progress (an open pull request under review)",
-     re.compile(r"^\s*in\s+progress\s*\(\s*" + LIST + r"\s*\)", re.I), ("status",)),
-    (HARD, "pending", re.compile(LIST + r"\s+" + VERB + r"\s+pending\b", re.I), None),
-    (HARD, "pending", re.compile(LIST + r"\s*\(\s*pending\s*\)", re.I), None),
-    (HARD, "a pending batch member", re.compile(r"\bpending\s+batch\s*\(\s*" + LIST + r"\s*\)", re.I),
+    # (rule id, kind, phrase, regex, contexts) in priority order; a token bound HARD is not also a
+    # warning. The self-test exercises every rule id on both sides and with the rule removed.
+    ("status-in-progress", HARD, "in progress (an open pull request under review)",
+     re.compile(r"^\s*in\s+progress\s*[(:]\s*" + LIST, re.I), ("status",)),
+    ("status-open", HARD, "open (status)",
+     re.compile(r"^\s*(?:open|pending|under\s+review|in\s+review)\s*[(:]\s*" + LIST, re.I), ("status",)),
+    ("pending-verb", HARD, "pending", re.compile(LIST + r"\s+" + VERB + r"\s+pending\b", re.I), None),
+    ("pending-paren", HARD, "pending", re.compile(LIST + r"\s*\(\s*pending\s*\)", re.I), None),
+    ("open-paren", HARD, "open", re.compile(
+        LIST + r"\s*\(\s*(?:open|in\s+progress|under\s+review|in\s+review)\s*\)", re.I), None),
+    ("pending-batch", HARD, "a pending batch member",
+     re.compile(r"\bpending\s+batch\s*\(\s*" + LIST + r"\s*\)", re.I), None),
+    ("pending-lead", HARD, "pending", re.compile(r"\bpending\s+(?:merge\s+of\s+)?" + LIST, re.I), None),
+    ("open-verb", HARD, "open", re.compile(LIST + r"\s+" + VERB + r"\s+open\b", re.I), None),
+    ("open-lead", HARD, "open", re.compile(r"(?<![\w-])open\s+" + LIST, re.I), None),
+    ("under-review", HARD, "under review", re.compile(
+        LIST + r"\s+" + VERB + r"\s+(?:under|in)\s+review\b", re.I), None),
+    ("awaiting-review", HARD, "under review", re.compile(
+        LIST + r"\s+" + VERB + r"\s+(?:awaiting|waiting\s+(?:for|on))\s+(?:review|approval)\b", re.I), None),
+    ("in-progress-verb", HARD, "in progress", re.compile(LIST + r"\s+" + VERB + r"\s+in\s+progress\b", re.I),
      None),
-    (HARD, "pending", re.compile(r"\bpending\s+(?:merge\s+of\s+)?" + LIST, re.I), None),
-    (HARD, "open", re.compile(LIST + r"\s+" + VERB + r"\s+open\b", re.I), None),
-    (HARD, "open", re.compile(r"(?<![\w-])open\s+" + LIST, re.I), None),
-    (HARD, "under review", re.compile(LIST + r"\s+(?:is|are)\s+(?:still\s+)?(?:under|in)\s+review\b",
-                                      re.I), None),
-    (HARD, "yet to merge", re.compile(
+    ("waiting-to-merge", HARD, "yet to merge", re.compile(
         r"\b(?:waiting|wait|waits)\s+(?:for|on)\s+" + LIST + r"\s+to\s+(?:merge|land|be\s+merged)\b",
         re.I), None),
-    (HARD, "yet to merge", re.compile(r"\bawaiting\s+(?:the\s+)?merge\s+of\s+" + LIST, re.I), None),
-    (HARD, "yet to merge", re.compile(
+    ("awaiting-merge", HARD, "yet to merge", re.compile(r"\bawaiting\s+(?:the\s+)?merge\s+of\s+" + LIST, re.I),
+     None),
+    ("until-merge", HARD, "yet to merge", re.compile(
         r"\buntil\s+" + LIST + r"\s+(?:merges?|lands?|(?:is|are)\s+merged)\b", re.I), None),
-    (HARD, "yet to merge", re.compile(
+    ("once-merge", HARD, "yet to merge", re.compile(
         r"\b(?:once|after)\s+" + LIST + r"\s+(?:merges?|lands?|(?:is|are)\s+merged)\b", re.I), None),
-    (HARD, "not yet merged", re.compile(LIST + r"\s+(?:is|are)\s+not\s+yet\s+merged\b", re.I), None),
-    (WARN, "a dependency", re.compile(r"\b(?:waiting|wait|waits)\s+(?:for|on)\s+" + LIST, re.I), None),
-    (WARN, "a dependency", re.compile(r"\bawaiting\s+" + LIST, re.I), None),
-    (WARN, "a dependency", re.compile(r"\bblocked\s+(?:on|by)\s+" + LIST, re.I), None),
-    (WARN, "a stack base", re.compile(r"\b(?:stacked|stacks)\s+(?:on|atop)\s+" + LIST, re.I), None),
+    ("has-yet-to-merge", HARD, "yet to merge", re.compile(
+        LIST + r"\s+(?:has|have)\s+yet\s+to\s+(?:merge|land|be\s+merged)\b", re.I), None),
+    ("yet-to-be-merged", HARD, "yet to merge", re.compile(
+        LIST + r"\s+(?:is|are)\s+yet\s+to\s+be\s+(?:merged|landed)\b", re.I), None),
+    ("not-yet-merged", HARD, "not yet merged", re.compile(LIST + r"\s+(?:is|are)\s+not\s+yet\s+merged\b",
+                                                          re.I), None),
+    ("has-not-merged", HARD, "not yet merged", re.compile(
+        LIST + r"\s+(?:has|have)(?:\s+not|n'?t)\s+(?:yet\s+)?(?:been\s+)?(?:merged|landed)\b", re.I), None),
+    ("waiting-dependency", WARN, "a dependency",
+     re.compile(r"\b(?:waiting|wait|waits)\s+(?:for|on)\s+" + LIST, re.I), None),
+    ("awaiting-dependency", WARN, "a dependency", re.compile(r"\bawaiting\s+" + LIST, re.I), None),
+    ("blocked-dependency", WARN, "a dependency", re.compile(r"\bblocked\s+(?:on|by)\s+" + LIST, re.I), None),
+    ("stacked", WARN, "a stack base", re.compile(r"\b(?:stacked|stacks)\s+(?:on|atop)\s+" + LIST, re.I), None),
 )
 AMBIGUOUS_RES = (
     re.compile(r"\bpending\s+(?:PRs?|pull\s+requests?)\b(?!\s*\ue000)", re.I),
     re.compile(r"\b(?:the|this|that)\s+(?:PR|pull\s+request)\s+" + VERB + r"\s+(?:pending|open)\b", re.I),
 )
+IMPERATIVE_OPEN = (WARN, "open (an instruction or a claim; review it)")
 
 
-def tokenize(prose):
-    """(clauses, refs): the prose with each pull request reference replaced by a token, split into
-    clauses; refs[k] = (repo or None for the surface default, number, original text)."""
+def tokenize(prose, context="prose"):
+    """(clauses, refs): the prose normalized (NORMALIZE), each pull request reference replaced by a
+    token, split into clauses; refs[k] = (repo or None for the surface default, number, original
+    text)."""
     text = " ".join(prose.split())
-    text = HISTORY_SPAN_RE.sub(" \u00a6 ", text)
-    text = FORMATTING_RE.sub("", text)
+    for _name, regex, replacement in NORMALIZE:
+        text = regex.sub(replacement, text)
+    text = " ".join(text.split())
     refs = []
 
     def replace(match):
@@ -396,40 +492,68 @@ def tokenize(prose):
         return "\ue000{}\ue001".format(len(refs) - 1)
 
     text = REF_RE.sub(replace, text)
-    clauses = [clause.strip() for clause in CLAUSE_SPLIT_RE.split(text)]
+    splitter = STATUS_CLAUSE_SPLIT_RE if context == "status" else CLAUSE_SPLIT_RE
+    clauses = [clause.strip() for clause in splitter.split(text)]
     return [clause for clause in clauses if clause], refs
 
 
+def _words_before(clause, start):
+    return [word.lower() for word in re.findall(r"[A-Za-z]+", clause[:start])]
+
+
 def _instruction_before(clause, start):
-    words = re.findall(r"[A-Za-z]+", clause[:start])
-    return bool(words) and words[-1].lower() in INSTRUCTION_WORDS
+    words = _words_before(clause, start)
+    return bool(words) and words[-1] in INSTRUCTION_WORDS
+
+
+def _imperative_open(clause, start):
+    """True when `open #N` starts its clause or follows a comma (Open #17 to see it; To review it,
+    open #17): an instruction as likely as a claim, so it warns rather than finds."""
+    before = clause[:start].rstrip()
+    return before == "" or before.endswith(",")
+
+
+def _negated_or_past_before(clause, start):
+    """True when the words directly before a lead phrase (adverbs such as still skipped) negate it or
+    put it in the past: not waiting, no longer waiting, isn't waiting, were waiting, had been waiting."""
+    words = _words_before(clause, start)
+    while words and words[-1] in ADVERBS:
+        words.pop()
+    return bool(words) and (words[-1] in NEGATORS or words[-1] in PAST_AUXILIARIES)
 
 
 def find_candidates(prose, context):
     """[(kind, phrase, ref, clause text)] for one unit. A quote context reports any claim as QUOTE (it
-    needs a historical lead-in or a move out of the quote); an ambiguous phrase is AMBIGUOUS."""
-    clauses, refs = tokenize(prose)
+    needs a historical lead-in or a move out of the quote); an ambiguous phrase is AMBIGUOUS, whether
+    or not a named claim also binds in the same clause."""
+    clauses, refs = tokenize(prose, context)
     found = []
     for clause in clauses:
         bound = {}
-        for kind, phrase, regex, contexts in PATTERNS:
+        for rule, kind, phrase, regex, contexts in PATTERNS:
             if contexts is not None and context not in contexts:
                 continue
+            lead = not regex.pattern.startswith("(?P<l>")
             for match in regex.finditer(clause):
-                if phrase == "open" and regex.pattern.startswith("(?<!") and _instruction_before(
-                        clause, match.start()):
+                hit_kind, hit_phrase = kind, phrase
+                if lead and _negated_or_past_before(clause, match.start()):
                     continue
+                if rule == "open-lead":
+                    if _instruction_before(clause, match.start()):
+                        continue
+                    if context != "status" and _imperative_open(clause, match.start()):
+                        hit_kind, hit_phrase = IMPERATIVE_OPEN
                 for index in REF_MARK_RE.findall(match.group("l")):
                     index = int(index)
-                    if index not in bound or (bound[index][0] == WARN and kind == HARD):
-                        bound[index] = (kind, phrase)
+                    if index not in bound or (bound[index][0] == WARN and hit_kind == HARD):
+                        bound[index] = (hit_kind, hit_phrase)
         shown = REF_MARK_RE.sub(lambda m: refs[int(m.group(1))][2], clause)
         for index in sorted(bound):
             kind, phrase = bound[index]
             if context == "quote":
                 kind = QUOTE
             found.append((kind, phrase, refs[index], shown))
-        if not bound and any(regex.search(clause) for regex in AMBIGUOUS_RES):
+        if any(regex.search(clause) for regex in AMBIGUOUS_RES):
             found.append((AMBIGUOUS, "pending or open", None, shown))
     return found
 
@@ -714,15 +838,239 @@ def _numbers(lines):
                                                                  .split(" is ")[0]))
 
 
-def _with_rules_removed(kinds, fn):
-    """Run fn() with every PATTERNS row of the given phrases removed (the red-when-reverted leg)."""
+def _with_rules_removed(rules, fn):
+    """Run fn() with the PATTERNS rows of the given rule ids removed (the red-when-reverted leg)."""
     global PATTERNS
     saved = PATTERNS
-    PATTERNS = tuple(row for row in saved if row[1] not in kinds)
+    unknown = set(rules) - {row[0] for row in saved}
+    if unknown:
+        raise ValueError("no such rule {}".format(sorted(unknown)))
+    PATTERNS = tuple(row for row in saved if row[0] not in rules)
     try:
         return fn()
     finally:
         PATTERNS = saved
+
+
+def _with_steps_removed(steps, fn):
+    """Run fn() with the NORMALIZE steps of the given names removed (the red-when-reverted leg)."""
+    global NORMALIZE
+    saved = NORMALIZE
+    unknown = set(steps) - {row[0] for row in saved}
+    if unknown:
+        raise ValueError("no such step {}".format(sorted(unknown)))
+    NORMALIZE = tuple(row for row in saved if row[0] not in steps)
+    try:
+        return fn()
+    finally:
+        NORMALIZE = saved
+
+
+def _without_imperative_open(fn):
+    """Run fn() with the imperative `open #N` downgrade disabled (the red-when-reverted leg)."""
+    global _imperative_open
+    saved = _imperative_open
+    _imperative_open = lambda _clause, _start: False  # noqa: E731
+    try:
+        return fn()
+    finally:
+        _imperative_open = saved
+
+
+def _without_negation(fn):
+    """Run fn() with the negated or past lead-in exemption disabled (the red-when-reverted leg)."""
+    global _negated_or_past_before
+    saved = _negated_or_past_before
+    _negated_or_past_before = lambda _clause, _start: False  # noqa: E731
+    try:
+        return fn()
+    finally:
+        _negated_or_past_before = saved
+
+
+def _status_table(cell):
+    return "| ID | Status |\n| --- | --- |\n| X-1 | {} |\n".format(cell)
+
+
+# Every grammar rule has one row in _rule_rows: (rule id, a text the rule alone binds to #17, its
+# no-flag twin, then the five literal check ids). Each is checked merged, open and unreadable, its twin
+# merged, and the text again with the rule removed.
+
+
+def _rule_rows(m, o):
+    kinds = {row[0]: row[1] for row in PATTERNS}
+    seen = []
+    for (rule, text, twin, merged_id, red_id, open_id, unknown_id, twin_id) in (
+            ("status-in-progress", _status_table("In progress: #17"), _status_table("Done: #17"),
+             "rule/status-in-progress/merged", "rule/status-in-progress/merged/red-when-reverted", "rule/status-in-progress/open-passes", "rule/status-in-progress/unknown-cannot-evaluate", "rule/status-in-progress/no-flag-twin"),
+            ("status-open", _status_table("Open (#17)"), _status_table("Merged (#17)"),
+             "rule/status-open/merged", "rule/status-open/merged/red-when-reverted", "rule/status-open/open-passes", "rule/status-open/unknown-cannot-evaluate", "rule/status-open/no-flag-twin"),
+            ("pending-verb", "PR #17 remains pending.\n", "PR #17 was pending.\n",
+             "rule/pending-verb/merged", "rule/pending-verb/merged/red-when-reverted", "rule/pending-verb/open-passes", "rule/pending-verb/unknown-cannot-evaluate", "rule/pending-verb/no-flag-twin"),
+            ("pending-paren", "Fix in PR #17 (pending).\n", "Fix in PR #17 (merged).\n",
+             "rule/pending-paren/merged", "rule/pending-paren/merged/red-when-reverted", "rule/pending-paren/open-passes", "rule/pending-paren/unknown-cannot-evaluate", "rule/pending-paren/no-flag-twin"),
+            ("open-paren", "Fix in PR #17 (open).\n", "Fix in PR #17 (closed).\n",
+             "rule/open-paren/merged", "rule/open-paren/merged/red-when-reverted", "rule/open-paren/open-passes", "rule/open-paren/unknown-cannot-evaluate", "rule/open-paren/no-flag-twin"),
+            ("pending-batch", "This ships in the pending batch (#17).\n", "This shipped in the merged batch (#17).\n",
+             "rule/pending-batch/merged", "rule/pending-batch/merged/red-when-reverted", "rule/pending-batch/open-passes", "rule/pending-batch/unknown-cannot-evaluate", "rule/pending-batch/no-flag-twin"),
+            ("pending-lead", "The pending PR #17 needs a rebase.\n", "The merged PR #17 needed a rebase.\n",
+             "rule/pending-lead/merged", "rule/pending-lead/merged/red-when-reverted", "rule/pending-lead/open-passes", "rule/pending-lead/unknown-cannot-evaluate", "rule/pending-lead/no-flag-twin"),
+            ("open-verb", "PR #17 is still open.\n", "PR #17 is no longer open.\n",
+             "rule/open-verb/merged", "rule/open-verb/merged/red-when-reverted", "rule/open-verb/open-passes", "rule/open-verb/unknown-cannot-evaluate", "rule/open-verb/no-flag-twin"),
+            ("open-lead", "The open PR #17 needs a rebase.\n", "The closed PR #17 needed a rebase.\n",
+             "rule/open-lead/merged", "rule/open-lead/merged/red-when-reverted", "rule/open-lead/open-passes", "rule/open-lead/unknown-cannot-evaluate", "rule/open-lead/no-flag-twin"),
+            ("under-review", "PR #17 remains under review.\n", "PR #17 was under review.\n",
+             "rule/under-review/merged", "rule/under-review/merged/red-when-reverted", "rule/under-review/open-passes", "rule/under-review/unknown-cannot-evaluate", "rule/under-review/no-flag-twin"),
+            ("awaiting-review", "PR #17 is awaiting review.\n", "PR #17 was awaiting review.\n",
+             "rule/awaiting-review/merged", "rule/awaiting-review/merged/red-when-reverted", "rule/awaiting-review/open-passes", "rule/awaiting-review/unknown-cannot-evaluate", "rule/awaiting-review/no-flag-twin"),
+            ("in-progress-verb", "PR #17 is in progress.\n", "PR #17 was in progress.\n",
+             "rule/in-progress-verb/merged", "rule/in-progress-verb/merged/red-when-reverted", "rule/in-progress-verb/open-passes", "rule/in-progress-verb/unknown-cannot-evaluate", "rule/in-progress-verb/no-flag-twin"),
+            ("waiting-to-merge", "Waiting for #17 to merge.\n", "We were waiting for #17 to merge.\n",
+             "rule/waiting-to-merge/merged", "rule/waiting-to-merge/merged/red-when-reverted", "rule/waiting-to-merge/open-passes", "rule/waiting-to-merge/unknown-cannot-evaluate", "rule/waiting-to-merge/no-flag-twin"),
+            ("awaiting-merge", "Awaiting merge of #17.\n", "Awaiting deployment of #17.\n",
+             "rule/awaiting-merge/merged", "rule/awaiting-merge/merged/red-when-reverted", "rule/awaiting-merge/open-passes", "rule/awaiting-merge/unknown-cannot-evaluate", "rule/awaiting-merge/no-flag-twin"),
+            ("until-merge", "Hold the release until #17 merges.\n", "Held the release until #17 merged.\n",
+             "rule/until-merge/merged", "rule/until-merge/merged/red-when-reverted", "rule/until-merge/open-passes", "rule/until-merge/unknown-cannot-evaluate", "rule/until-merge/no-flag-twin"),
+            ("once-merge", "Rebase once #17 lands.\n", "Rebased once #17 landed.\n",
+             "rule/once-merge/merged", "rule/once-merge/merged/red-when-reverted", "rule/once-merge/open-passes", "rule/once-merge/unknown-cannot-evaluate", "rule/once-merge/no-flag-twin"),
+            ("has-yet-to-merge", "PR #17 has yet to merge.\n", "PR #17 has merged.\n",
+             "rule/has-yet-to-merge/merged", "rule/has-yet-to-merge/merged/red-when-reverted", "rule/has-yet-to-merge/open-passes", "rule/has-yet-to-merge/unknown-cannot-evaluate", "rule/has-yet-to-merge/no-flag-twin"),
+            ("yet-to-be-merged", "PR #17 is yet to be merged.\n", "PR #17 is merged.\n",
+             "rule/yet-to-be-merged/merged", "rule/yet-to-be-merged/merged/red-when-reverted", "rule/yet-to-be-merged/open-passes", "rule/yet-to-be-merged/unknown-cannot-evaluate", "rule/yet-to-be-merged/no-flag-twin"),
+            ("not-yet-merged", "#17 is not yet merged.\n", "#17 is merged now.\n",
+             "rule/not-yet-merged/merged", "rule/not-yet-merged/merged/red-when-reverted", "rule/not-yet-merged/open-passes", "rule/not-yet-merged/unknown-cannot-evaluate", "rule/not-yet-merged/no-flag-twin"),
+            ("has-not-merged", "PR #17 hasn't merged yet.\n", "PR #17 has merged since.\n",
+             "rule/has-not-merged/merged", "rule/has-not-merged/merged/red-when-reverted", "rule/has-not-merged/open-passes", "rule/has-not-merged/unknown-cannot-evaluate", "rule/has-not-merged/no-flag-twin"),
+            ("waiting-dependency", "Still waiting on #17.\n", "No longer waiting on #17.\n",
+             "rule/waiting-dependency/merged", "rule/waiting-dependency/merged/red-when-reverted", "rule/waiting-dependency/open-passes", "rule/waiting-dependency/unknown-cannot-evaluate", "rule/waiting-dependency/no-flag-twin"),
+            ("awaiting-dependency", "Awaiting #17.\n", "Was awaiting #17 last week.\n",
+             "rule/awaiting-dependency/merged", "rule/awaiting-dependency/merged/red-when-reverted", "rule/awaiting-dependency/open-passes", "rule/awaiting-dependency/unknown-cannot-evaluate", "rule/awaiting-dependency/no-flag-twin"),
+            ("blocked-dependency", "Blocked on #17.\n", "Was blocked on #17.\n",
+             "rule/blocked-dependency/merged", "rule/blocked-dependency/merged/red-when-reverted", "rule/blocked-dependency/open-passes", "rule/blocked-dependency/unknown-cannot-evaluate", "rule/blocked-dependency/no-flag-twin"),
+            ("stacked", "This branch is stacked on #17.\n", "This branch was stacked on #17.\n",
+             "rule/stacked/merged", "rule/stacked/merged/red-when-reverted", "rule/stacked/open-passes", "rule/stacked/unknown-cannot-evaluate", "rule/stacked/no-flag-twin"),
+    ):
+        seen.append((rule, merged_id, red_id, open_id, unknown_id, twin_id))
+        hard = kinds.get(rule) == HARD
+        code, res, t = _judge(text, m)
+        flagged = (code == 1 and len(res.hard) == 1) if hard else (
+            code == 0 and len(res.warnings) == 1 and not res.hard)
+        check(merged_id, flagged and t.calls == [(REPO, 17)], (code, res.hard, res.warnings))
+        red = _with_rules_removed({rule}, lambda: _judge(text, m)[1]) if rule in kinds else None
+        check(red_id, red is not None and (not red.hard if hard else not red.warnings),
+              None if red is None else (red.hard, red.warnings))
+        code, res, _t = _judge(text, o)
+        check(open_id, code == 0 and not res.hard and not res.warnings, (code, res.hard, res.warnings))
+        code, res, _t = _judge(text, {})
+        check(unknown_id, code == 2 and not res.hard, res.unknown)
+        code, res, _t = _judge(twin, m)
+        check(twin_id, code == 0 and not res.hard and not res.warnings, (code, res.hard, res.warnings))
+    ids_match = all(all(cid.startswith("rule/{}/".format(row[0])) for cid in row[1:]) for row in seen)
+    check("rule/every-rule-has-a-row", ids_match and sorted(row[0] for row in seen) == sorted(kinds),
+          sorted(set(kinds) ^ {row[0] for row in seen}))
+
+
+def _fix_rows(m, o):
+    """Reference spellings, Markdown structure, negation and binding fixes, each with a twin on the
+    other side and, where a step or function carries the fix, its red-when-reverted leg."""
+    two = {(REPO, 17): "merged", (REPO, 18): "merged"}
+    link = "[#17](https://github.com/acme/widgets/pull/17) is pending.\n"
+    for name, text, table, want, calls in (
+            ("ref/markdown-link-hash", link, m, 1, [(REPO, 17)]),
+            ("ref/markdown-link-words", "[PR #17](https://github.com/acme/widgets/pull/17) remains open.\n",
+             m, 1, [(REPO, 17)]),
+            ("ref/markdown-link-target-repository", "[#17](https://github.com/peer/repo/pull/17) is pending.\n",
+             {("peer/repo", 17): "merged"}, 1, [("peer/repo", 17)]),
+            ("ref/markdown-link-no-claim", "[#17](https://github.com/acme/widgets/pull/17) merged.\n", m, 0, []),
+            ("ref/autolink", "<https://github.com/acme/widgets/pull/17> is pending.\n", m, 1, [(REPO, 17)]),
+            ("ref/glued-pr", "PR#17 is pending.\n", m, 1, [(REPO, 17)]),
+            ("ref/glued-pr-no-claim", "PR#17 merged.\n", m, 0, []),
+            ("ref/underscore-emphasis", "_#17_ is pending.\n", m, 1, [(REPO, 17)]),
+            ("ref/underscore-emphasis-no-claim", "_#17_ merged.\n", m, 0, []),
+            ("ref/slash-list", "#17/#18 are pending.\n", two, 1, [(REPO, 17), (REPO, 18)]),
+            ("ref/slash-list-no-claim", "#17/#18 merged.\n", two, 0, []),
+            ("ref/url-files-suffix", "https://github.com/acme/widgets/pull/17/files is pending.\n", m, 1,
+             [(REPO, 17)]),
+            ("ref/url-files-suffix-no-claim", "https://github.com/acme/widgets/pull/17/files merged.\n", m, 0, []),
+            ("ref/issue-not-a-pull-request", "Issue #17 remains open.\n", {}, 0, []),
+            ("ref/issue-list-not-pull-requests", "Issues #17 and #18 remain open.\n", {}, 0, []),
+            ("ref/issue-link-not-a-pull-request",
+             "[#17](https://github.com/acme/widgets/issues/17) remains open.\n", {}, 0, []),
+            ("ref/pull-request-beside-issue", "Issue #18 is fixed; PR #17 remains open.\n", m, 1, [(REPO, 17)]),
+            ("format/strikethrough-not-current", "~~PR #17 is pending~~ merged.\n", m, 0, []),
+            ("format/strikethrough-word-removed", "PR #17 is ~~open~~ pending.\n", m, 1, [(REPO, 17)]),
+            ("format/html-comment-not-current", "<!-- PR #17 is pending -->\n", m, 0, []),
+            ("format/text-beside-html-comment", "<!-- note --> PR #17 is pending.\n", m, 1, [(REPO, 17)]),
+            ("history/straight-single-quoted-span", "Previously recorded: 'PR #17 is pending.'\n", m, 0, []),
+            ("history/straight-quote-then-current-claim",
+             "Previously recorded: 'PR #17 isn't pending.' Now PR #18 remains open.\n",
+             {(REPO, 18): "merged"}, 1, [(REPO, 18)]),
+            ("markdown/indented-code-not-read", "Example:\n\n    PR #17 is pending\n", m, 0, []),
+            ("markdown/indented-list-continuation-read", "- Item one\n\n    PR #17 is pending\n", m, 1,
+             [(REPO, 17)]),
+            ("markdown/inline-triple-backticks-not-a-fence", "```x``` is inline code.\n\nPR #17 is pending.\n",
+             m, 1, [(REPO, 17)]),
+            ("markdown/info-string-fence-skipped", "```python\nPR #17 is pending\n```\n", m, 0, []),
+            ("markdown/table-without-outer-pipes", "ID | Status\n--- | ---\nX-1 | In progress (#17)\n", m, 1,
+             [(REPO, 17)]),
+            ("markdown/table-without-pipes-other-column",
+             "ID | Status | Item\n--- | --- | ---\nX-1 | Planned | In progress (#17)\n", m, 0, []),
+            ("negation/not-waiting", "We are not waiting for #17 to merge.\n", m, 0, []),
+            ("negation/past-waiting", "We were waiting for #17 to merge.\n", m, 0, []),
+            ("negation/contracted-not-waiting", "It isn't waiting on #17.\n", m, 0, []),
+            ("negation/still-waiting-binds", "We are still waiting for #17 to merge.\n", m, 1, [(REPO, 17)]),
+            ("negation/do-not-merge-until-binds", "Do not merge until #17 merges.\n", m, 1, [(REPO, 17)]),
+            ("format/currently-pending", "PR #17 is currently pending.\n", m, 1, [(REPO, 17)]),
+            ("format/now-open", "PR #17 is now open.\n", m, 1, [(REPO, 17)]),
+            ("format/currently-merged-no-claim", "PR #17 is currently merged.\n", m, 0, [])):
+        try:
+            code, res, t = _judge(text, table)
+            ok, detail = code == want and sorted(t.calls) == calls, (code, t.calls, res.hard, res.unknown)
+        except InputError as exc:
+            ok, detail = False, str(exc)
+        check(name, ok, detail)
+    code, res, _t = _judge("Earlier note:\n\n| A | B |\n| --- | --- |\n| x | y |\n\n> PR #17 is pending\n", m)
+    check("markdown/lead-in-not-across-table", code == 2 and "blockquote" in " ".join(res.unknown), res.unknown)
+    for name, red_name, text in (
+            ("bind/imperative-open-warns", "bind/imperative-open-warns/red-when-reverted",
+             "Open #17 to see the discussion.\n"),
+            ("bind/imperative-open-after-comma-warns", "bind/imperative-open-after-comma-warns/red-when-reverted",
+             "To review it, open #17 in a browser.\n")):
+        code, res, _t = _judge(text, m)
+        check(name, code == 0 and not res.hard and len(res.warnings) == 1, (code, res.hard, res.warnings))
+        red = _without_imperative_open(lambda: _judge(text, m)[0])
+        check(red_name, red == 1, red)
+    code, res, _t = _judge(_status_table("Open #17"), m)
+    check("bind/status-cell-open-still-hard", code == 1 and len(res.hard) == 1, res.hard)
+    code, res, t = _judge("#17 remains open and the pending PR needs review.\n", o)
+    check("ambiguous/beside-named-claim", code == 2 and not res.hard and t.calls == [(REPO, 17)]
+          and "ambiguous" in " ".join(res.unknown), res.unknown)
+    code, res, _t = _judge("#17 remains open and pending PR #18 needs review.\n",
+                           {(REPO, 17): "open", (REPO, 18): "open"})
+    check("ambiguous/named-only-passes", code == 0 and not res.unknown, res.unknown)
+    for name, text, steps, table in (
+            ("ref/markdown-link-hash/red-when-reverted", link, {"markdown-link"}, m),
+            ("ref/glued-pr/red-when-reverted", "PR#17 is pending.\n", {"glued-pr"}, m),
+            ("ref/underscore-emphasis/red-when-reverted", "_#17_ is pending.\n", {"underscore-emphasis"}, m),
+            ("ref/slash-list/red-when-reverted", "#17/#18 are pending.\n", {"slash-list"}, two),
+            ("format/strikethrough-not-current/red-when-reverted", "~~PR #17 is pending~~ merged.\n",
+             {"strikethrough"}, m),
+            ("format/html-comment-not-current/red-when-reverted", "<!-- PR #17 is pending -->\n",
+             {"html-comment"}, m),
+            ("history/straight-single-quoted-span/red-when-reverted",
+             "Previously recorded: 'PR #17 is pending.'\n", {"history-span"}, m)):
+        code, res, _t = _with_steps_removed(steps, lambda: _judge(text, table))
+        # Reverted, a flag row stops flagging (0) and a no-flag row starts flagging (1).
+        want = 1 if name.split("/red-when-reverted")[0] in (
+            "format/strikethrough-not-current", "format/html-comment-not-current",
+            "history/straight-single-quoted-span") else 0
+        check(name, code == want and (not res.hard if want == 0 else len(res.hard) >= 1), (code, res.hard))
+    code, res, t = _with_steps_removed({"issue-reference"}, lambda: _judge("Issue #17 remains open.\n", {}))
+    check("ref/issue-not-a-pull-request/red-when-reverted", code == 2 and t.calls == [(REPO, 17)], res.unknown)
+    for name, text in (("negation/not-waiting/red-when-reverted", "We are not waiting for #17 to merge.\n"),
+                       ("negation/past-waiting/red-when-reverted", "We were waiting for #17 to merge.\n")):
+        red = _without_negation(lambda: _judge(text, m)[0])
+        check(name, red == 1, red)
 
 
 def _self_test():
@@ -737,7 +1085,7 @@ def _self_test():
     # --- lifecycle outcomes for one hard claim ---
     code, res, _t = _judge("PR #17 remains pending.\n", m)
     check("state/merged-hard-finding", code == 1 and len(res.hard) == 1 and "MERGED" in res.hard[0], res.hard)
-    red = _with_rules_removed({"pending"}, lambda: _judge("PR #17 remains pending.\n", m)[0])
+    red = _with_rules_removed({"pending-verb"}, lambda: _judge("PR #17 remains pending.\n", m)[0])
     check("state/merged-hard-finding/red-when-reverted", red == 0, red)
     code, res, _t = _judge("PR #17 remains pending.\n", c)
     check("state/closed-hard-finding-names-closed", code == 1 and "CLOSED" in res.hard[0]
@@ -763,7 +1111,7 @@ def _self_test():
     text = "This is stacked on the pending batch (#17, #18).\n"
     code, res, _t = _judge(text, {(REPO, 17): "closed", (REPO, 18): "closed"})
     check("batch/both-closed-two-findings", code == 1 and _numbers(res.hard) == [17, 18], res.hard)
-    red = _with_rules_removed({"a pending batch member"},
+    red = _with_rules_removed({"pending-batch"},
                               lambda: _judge(text, {(REPO, 17): "closed", (REPO, 18): "closed"})[1])
     check("batch/both-closed-two-findings/red-when-reverted", not red.hard, red.hard)
     code, res, _t = _judge(text, {(REPO, 17): "open", (REPO, 18): "merged"})
@@ -772,7 +1120,7 @@ def _self_test():
     check("bind/semicolon-binds-only-second", code == 1 and t.calls == [(REPO, 18)], t.calls)
     code, res, t = _judge("#17 and #18 remain open\n", {(REPO, 17): "merged", (REPO, 18): "closed"})
     check("bind/coordinated-list-binds-both", code == 1 and _numbers(res.hard) == [17, 18], res.hard)
-    red = _with_rules_removed({"open"}, lambda: _judge("#17 and #18 remain open\n",
+    red = _with_rules_removed({"open-verb"}, lambda: _judge("#17 and #18 remain open\n",
                                                        {(REPO, 17): "merged", (REPO, 18): "closed"})[0])
     check("bind/coordinated-list-binds-both/red-when-reverted", red == 0, red)
     code, res, _t = _judge("The open pull requests #17 and #18 carry it.\n",
@@ -785,14 +1133,14 @@ def _self_test():
     code, res, _t = _judge("This branch is stacked on #17.\n", m)
     check("warn/stacked-merged-is-warning", code == 0 and len(res.warnings) == 1 and not res.hard,
           (code, res.warnings))
-    red = _with_rules_removed({"a stack base"}, lambda: _judge("This branch is stacked on #17.\n", m)[1])
+    red = _with_rules_removed({"stacked"}, lambda: _judge("This branch is stacked on #17.\n", m)[1])
     check("warn/stacked-merged-is-warning/red-when-reverted", not red.warnings, red.warnings)
     code, res, _t = _judge("Still waiting on #17.\n", c)
     check("warn/waiting-on-closed-is-warning", code == 0 and len(res.warnings) == 1, res.warnings)
     code, res, _t = _judge("Waiting for #17 to merge.\n", c)
     check("hard/waiting-to-merge-closed", code == 1 and len(res.hard) == 1 and not res.warnings,
           (res.hard, res.warnings))
-    red = _with_rules_removed({"yet to merge"}, lambda: _judge("Waiting for #17 to merge.\n", c)[1])
+    red = _with_rules_removed({"waiting-to-merge"}, lambda: _judge("Waiting for #17 to merge.\n", c)[1])
     check("hard/waiting-to-merge-closed/red-when-reverted", not red.hard and len(red.warnings) == 1,
           (red.hard, red.warnings))
     code, res, _t = _judge("#17 is not yet merged\n", m)
@@ -805,7 +1153,7 @@ def _self_test():
     code, res, t = _judge(table, {(REPO, 17): "open", (REPO, 18): "merged"})
     check("status/in-progress-binds-both", code == 1 and sorted(t.calls) == [(REPO, 17), (REPO, 18)]
           and _numbers(res.hard) == [18], (t.calls, res.hard))
-    red = _with_rules_removed({"in progress (an open pull request under review)"},
+    red = _with_rules_removed({"status-in-progress"},
                               lambda: _judge(table, {(REPO, 17): "open", (REPO, 18): "merged"})[0])
     check("status/in-progress-binds-both/red-when-reverted", red == 0, red)
     code, _res, t = _judge("| ID | Status | Item |\n| --- | --- | --- |\n| X-1 | Planned | In progress (#17) |\n", m)
@@ -828,15 +1176,8 @@ def _self_test():
             ("quiet/fenced-example", "```\nPR #17 is pending\n```\n")):
         code, res, t = _judge(text, {(REPO, 17): "closed"})
         check(name, code == 0 and t.calls == [] and not res.hard and not res.warnings, (code, t.calls))
-    saved = HISTORY_SPAN_RE
-
-    def _no_history():
-        globals()["HISTORY_SPAN_RE"] = re.compile(r"(?!x)x")
-        try:
-            return _judge("Previously recorded: \u201cPR #17 is pending.\u201d\n", c)[0]
-        finally:
-            globals()["HISTORY_SPAN_RE"] = saved
-    red = _no_history()
+    red = _with_steps_removed({"history-span"},
+                              lambda: _judge("Previously recorded: \u201cPR #17 is pending.\u201d\n", c)[0])
     check("quiet/history-quoted-span/red-when-reverted", red == 1, red)
 
     code, res, _t = _judge("Previously recorded: \u201cPR #17 is pending.\u201d Now PR #18 remains open.\n",
@@ -853,6 +1194,10 @@ def _self_test():
           res.unknown)
     code, res, _t = _judge("The pending PR still needs review.\n", m)
     check("ambiguous/unnamed-target-incomplete", code == 2 and "ambiguous" in res.unknown[0], res.unknown)
+
+    # --- every grammar rule on both sides, and the reference, structure and negation fixes ---
+    _rule_rows(m, o)
+    _fix_rows(m, o)
 
     # --- TOML decoding and wrapped prose ---
     toml_text = 'items = ["""Fix is\\u0020waiting for #17\n   to merge."""]\n'
@@ -1007,11 +1352,13 @@ def _self_test():
         for failure in FAILURES:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: check_pending_pr_claims {} checks (merged and closed pull requests under a "
-          "pending, open, in-progress or yet-to-merge claim are findings, an open one passes, an "
-          "unreadable state is cannot-evaluate, stacking and dependency wording warn, historical, "
-          "fenced, negated, past-tense and cross-sentence text does not trigger, and each "
-          "red-when-reverted row fails with its rule removed)".format(len(EXECUTED)))
+    print("SELF-TEST PASS: check_pending_pr_claims {} checks over synthetic responses: each of the {} "
+          "grammar rules binds its example to a merged pull request (finding or warning), "
+          "passes it when open, is cannot-evaluate when unreadable, leaves its no-flag twin alone and "
+          "stops binding with that rule removed; the listed reference spellings, Markdown structures, "
+          "negated and past lead-ins, historical spans and ambiguous phrases are exercised on both sides; "
+          "wording outside those rows is not claimed to be covered (see the contract's residuals)".format(
+              len(EXECUTED), len(PATTERNS)))
     return 0
 
 
@@ -1022,7 +1369,8 @@ def _self_test_adapters(tempfile, contextlib, io):
         os.makedirs(root / ".aiqt")
         (root / CONFIG_REL).write_text(
             'schema-version = 1\n[limits]\nmax-prs = 100\ncall-timeout-seconds = 10\ndeadline-seconds = 120\n'
-            '[[surface]]\npath = "NOTES.md"\nformat = "markdown"\nrepository = "origin"\nrole = "source"\n')
+            '[[surface]]\npath = "NOTES.md"\nformat = "markdown"\nrepository = "origin"\nrole = "source"\n'
+            '[[surface]]\npath = "sub/LOG.md"\nformat = "markdown"\nrepository = "origin"\nrole = "source"\n')
         (root / "NOTES.md").write_text("PR #17 remains pending.\n")
         blobs = {":NOTES.md": b"Nothing current here.\n"}
 
@@ -1067,6 +1415,43 @@ def _self_test_adapters(tempfile, contextlib, io):
         with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
             got = apply_record_draft.apply(root, str(draft), "OTHER.md", FakeTransport({}), _origin_ok)
         check("apply/undeclared-target-withheld", got == 2 and not (root / "OTHER.md").exists(), got)
+
+        # The target's permission bits survive the replace (0644 and 0640 both kept).
+        for name, mode in (("apply/mode-kept-0644", 0o644), ("apply/mode-kept-0640", 0o640)):
+            target.write_bytes(b"old\n")
+            os.chmod(target, mode)
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                got = apply_record_draft.apply(root, str(draft), "NOTES.md", FakeTransport({(REPO, 17): "open"}),
+                                               _origin_ok)
+            check(name, got == 0 and stat.S_IMODE(os.stat(target).st_mode) == mode,
+                  (got, oct(os.stat(target).st_mode)))
+
+        # A symlinked parent directory is refused; a real one is written (the twin).
+        outside = Path(tmp) / "outside"
+        os.makedirs(outside)
+        os.symlink(outside, root / "sub")
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            got = apply_record_draft.apply(root, str(draft), "sub/LOG.md", FakeTransport({(REPO, 17): "open"}),
+                                           _origin_ok)
+        check("apply/symlinked-parent-refused", got == 2 and not (outside / "LOG.md").exists(), got)
+        os.unlink(root / "sub")
+        os.makedirs(root / "sub")
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            got = apply_record_draft.apply(root, str(draft), "sub/LOG.md", FakeTransport({(REPO, 17): "open"}),
+                                           _origin_ok)
+        check("apply/real-parent-written", got == 0 and (root / "sub" / "LOG.md").read_bytes()
+              == b"PR #17 remains pending.\n" and not (outside / "LOG.md").exists(), got)
+
+        # A parent swapped for a symlink after it was opened withholds the write.
+        def swap():
+            os.rename(root / "sub", root / "sub-held")
+            os.symlink(outside, root / "sub")
+        os.unlink(root / "sub" / "LOG.md")
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            got = apply_record_draft.apply(root, str(draft), "sub/LOG.md", FakeTransport({(REPO, 17): "open"}),
+                                           _origin_ok, after_judge=swap)
+        check("apply/parent-swapped-after-open-withheld", got == 2 and not (outside / "LOG.md").exists()
+              and not (root / "sub-held" / "LOG.md").exists(), got)
 
     adapter = ROOT / "tools" / "check_pending_pr_commit.sh"
     with tempfile.TemporaryDirectory(prefix="pending-pr-claims-hook-") as tmp:
