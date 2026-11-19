@@ -6835,6 +6835,11 @@ expected-check-ids = [
   # an R8 refusal's way out comes from the empty start: every file it charges, every finding line there
   "fail-closed/write-r8-way-out-other-file",
   "fail-closed/write-r8-way-out-two-digests",
+  # a rename is named only when the path line is the entry's one charged line; only the finding lines the
+  # diff adds are listed; a charged header line names no way out
+  "fail-closed/write-r8-way-out-shape-line-no-rename",
+  "fail-closed/write-r8-way-out-added-lines-only",
+  "fail-closed/write-r8-way-out-header-line",
   # the writer judges each proposal on the candidate with that proposal substituted for its baseline
   "write/roundtrip-freed-baseline-line-credits-copy",
   "flip/write-freed-line-judged-on-candidate",
@@ -6843,6 +6848,8 @@ expected-check-ids = [
   # proposal; with no empty start to fall back on it is refused, naming only the way out that applies
   "write/unsettled-swap-empty-start-proposed",
   "fail-closed/write-unsettled-swap-names-way-out",
+  # an unsettled refusal whose empty start is refused as R8 names that start's own way out
+  "fail-closed/write-unsettled-names-empty-start-r8-way-out",
   # a start from the candidate's baseline refused as R8 while an empty start passes proposes the latter
   "write/r8-empty-start-proposed",
   "flip/write-r8-without-empty-start",
@@ -6872,6 +6879,9 @@ expected-check-ids = [
   "fail-closed/write-tmpdir-other-drive",
   # with the repository's own areas on two drives, no TMPDIR setting is advised, as none avoids it
   "fail-closed/write-tmpdir-areas-on-two-drives",
+  # the drives are checked before any candidate, and a worktree on another drive is named for removal
+  "fail-closed/write-tmpdir-two-drives-before-containment",
+  "fail-closed/write-tmpdir-other-worktree-on-other-drive",
   # the store leaves the repository's object files, refs and index as they were and is removed
   "write/store-leaves-repository-unchanged",
   "flip/write-store-objects-in-repository",

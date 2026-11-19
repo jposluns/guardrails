@@ -1307,7 +1307,9 @@ def writer_settle_bound(keys):
     run on C's own proposal, one per candidate key and one that finds no change. It is a cap that keeps
     the writer finite, not a proof that every layout settles within it: the substitution changes which
     baseline lines the diff deletes and adds, and so which move credits are left, which can add a key or
-    drop one; a proposal still changing at the cap is cannot-evaluate."""
+    drop one. It bounds one settlement attempt: a start from the candidate's baseline still changing at
+    the cap is followed by the start from an empty proposal (_empty_start, with its own cap from its own
+    first run), and the writer refuses (cannot-evaluate) only when that start does not pass either."""
     return keys + 2
 
 
@@ -1373,34 +1375,59 @@ def _temporary_candidates():
     return candidates
 
 
-def _store_directory(areas):
+def _drive_refusal(areas, own):
+    """None when every one of `areas` (_repository_areas) lies on one drive (os.path.splitdrive, compared
+    after os.path.normcase); else the cannot-evaluate message, checked before any temporary directory
+    candidate, as no directory on any one drive can be compared with all of them (os.path.commonpath
+    raises ValueError on Windows for paths on different drives), so no TMPDIR setting avoids it. `own`
+    are the areas of the checkout the writer runs in (_current_worktree_areas). When those lie on one
+    drive, the way out is to remove the repository's other worktrees on other drives (each named), or to
+    run from a separate clone; when they span drives, only a checkout whose worktree, git directory and
+    every other worktree lie on one drive avoids it."""
+    def drive(path):
+        return os.path.normcase(os.path.splitdrive(path)[0])
+
+    if len({drive(item) for item in areas}) < 2:
+        return None
+    listed = ", ".join(dict.fromkeys(areas))
+    head = ("the repository's own areas lie on different drives ({}), so no temporary directory on any one "
+            "drive can be compared with all of them, whether it lies inside the repository is unknown and no "
+            "baseline is proposed; no TMPDIR setting avoids this: ".format(listed))
+    drives = {drive(item) for item in own}
+    if len(drives) == 1:
+        others = [item for item in dict.fromkeys(areas) if drive(item) not in drives]
+        return head + ("this checkout's worktree and git directory lie on {}, so remove the repository's "
+                       "worktree(s) on another drive ({}) with git worktree remove (git worktree prune for one "
+                       "whose directory is gone), or run the writer from a separate clone with no worktree on "
+                       "another drive".format(
+                           os.path.splitdrive(own[0])[0], ", ".join(others)))
+    return head + ("run the writer from a separate clone whose worktree, git directory and every other "
+                   "worktree lie on one drive")
+
+
+def _store_directory(areas, own=None):
     """A tempfile.TemporaryDirectory (not yet entered) for the writer's temporary object store, created
-    under the real path of the first of _temporary_candidates that is a writable directory. Each
+    under the real path of the first of _temporary_candidates that is a writable directory. Areas on more
+    than one drive are CannotEvaluate before any candidate is read (_drive_refusal, `own` the current
+    checkout's areas, all of `areas` when None), so a candidate inside one of them is not advised to move
+    to another TMPDIR that could not be compared either. Each
     candidate's real path is checked against `areas` (_repository_areas) before anything is created
     under it: one that is an area or lies inside one is CannotEvaluate, even when a later candidate
     would serve, so a temporary directory the caller named inside the repository is refused, not
     passed over. Writability is tested by creating the store's directory itself (no probe file, unlike
     tempfile.gettempdir); a candidate where that fails is passed over, and none left is
     CannotEvaluate. A candidate whose real path cannot be compared with an area (os.path.commonpath
-    raises ValueError, as on Windows for paths on different drives) is CannotEvaluate too, naming both
-    paths, rather than a traceback; when the areas themselves lie on more than one drive
-    (os.path.splitdrive, compared after os.path.normcase), no single drive can hold a temporary
-    directory comparable with all of them, and the message says so instead of advising a drive."""
+    raises ValueError, as on Windows for a candidate on another drive than the repository's areas) is
+    CannotEvaluate too, naming both paths, rather than a traceback."""
+    refusal = _drive_refusal(areas, areas if own is None else own)
+    if refusal is not None:
+        raise CannotEvaluate(refusal)
     for source, candidate in _temporary_candidates():
         parent = os.path.realpath(candidate)
         for area in areas:
             try:
                 common = os.path.commonpath([parent, area])
             except ValueError as exc:
-                drives = sorted({os.path.normcase(os.path.splitdrive(item)[0]) for item in areas})
-                if len(drives) > 1:
-                    raise CannotEvaluate(
-                        "the temporary directory {} ({}) cannot be compared with the repository's {} ({}); "
-                        "the repository's own areas lie on different drives ({}), so no temporary "
-                        "directory on any one drive can be compared with all of them, whether it lies "
-                        "inside the repository is unknown and no baseline is proposed; no TMPDIR setting "
-                        "avoids this: run the writer from a checkout whose worktree and git directory are "
-                        "on one drive".format(parent, source, area, exc, ", ".join(areas))) from None
                 raise CannotEvaluate("the temporary directory {} ({}) cannot be compared with the repository's "
                                      "{} ({}; on Windows, paths on different drives), so whether it lies "
                                      "inside the repository is unknown and no baseline is proposed; set TMPDIR "
@@ -1447,7 +1474,9 @@ def _scratch_store(root):
     either refusal is CannotEvaluate."""
     objects, areas = _repository_areas(root)
     alternates = _alternate_entry(objects)
-    with _store_directory(areas) as tmp:
+    # The first four areas are the current checkout's own (_current_worktree_areas); the rest are the
+    # repository's worktrees as git worktree list names them.
+    with _store_directory(areas, areas[:4]) as tmp:
         store = os.path.join(tmp, "objects")
         os.mkdir(store)
         yield Store(store, alternates)
@@ -1596,16 +1625,18 @@ def _owning_entry(data, number):
     return "the header" if body is None else "the entry " + "; ".join(body)
 
 
-def _r8_way_out(own, proposal, found):
+def _r8_way_out(own, proposal, findings):
     """(way, reason): the way out of an R8 refusal built from the empty start's own refusal, as
     _empty_start finds it: `own` the charged lines of the baseline file on that start's settled
-    proposal `proposal` (its render), `found` the finding lines (Occurrence) its settled evaluation
-    counted. `way` names every file with an entry that holds a charged line, each once however many of
-    its lines are charged: renaming that file to a path no shape matches, when its path line is
-    charged, or removing from it every finding line that needs an entry there (each line of the file
-    counted at a key of the proposal for that file), so the candidate needs no entry for it; `reason`
-    is None then. For a charged line of the header every proposal holds, `way` is None and `reason`
-    says why no way out is named."""
+    proposal `proposal` (its render), `findings` the findings of the gate's verdict on that start (the
+    Verdict's findings: on the lines the diff adds that the move credit leaves). `way` names every file
+    with an entry that holds a charged line, each once however many of its lines are charged: renaming
+    that file to a path no shape matches, only when the path line is the one line of its entries that is
+    charged (a charged shape, digest or count line is rendered again after a rename, so renaming is then
+    named as no way out), or removing from it every finding line that needs an entry there (each finding
+    of `findings` on that file, so a line the merge base already holds and the diff does not add is not
+    listed), so the candidate needs no entry for it; `reason` is None then. For a charged line of the
+    header every proposal holds, `way` is None and `reason` says why no way out is named."""
     header = len(BASELINE_HEADER) + 2
     keys = sorted(proposal)
     files = {}
@@ -1614,18 +1645,24 @@ def _r8_way_out(own, proposal, found):
         if item.number <= header or index >= len(keys):
             return None, ("the empty start's charged line {}:{} is in the header every proposal holds, so "
                           "no baseline the writer can propose avoids it".format(BASELINE_RELPATH, item.number))
-        path = keys[index][0]
-        files[path] = files.get(path, False) or offset == 2
+        files.setdefault(keys[index][0], []).append((offset, item.number))
     parts = []
-    for path, renamable in sorted(files.items()):
-        lines = sorted((item for key in keys if key[0] == path for item in found.get(key, [])),
+    for path, charged in sorted(files.items()):
+        lines = sorted((item for item in findings if item.path == path),
                        key=lambda item: (item.number, item.shape))
         listed = ", ".join("{}:{}: {} ({}): {}".format(_printable(item.path), item.number, _escaped(item.shape),
                                                        _escaped(item.description), _printable(item.text))
                            for item in lines)
-        rename = ("rename {} to a path no shape matches, or ".format(_escaped(path)) if renamable else "")
-        parts.append("for {}, {}remove from {} every finding line that needs an entry there ({})".format(
-            _escaped(path), rename, _escaped(path), listed or "none found"))
+        others = sorted(number for offset, number in charged if offset != 2)
+        rename, note = "", ""
+        if not others:
+            rename = "rename {} to a path no shape matches, or ".format(_escaped(path))
+        elif len(others) < len(charged):
+            note = (" (renaming {} is no way out: its entry's line(s) {} other than the path line are charged "
+                    "too, and are rendered again under any path)".format(_escaped(path), ", ".join(
+                        "{}:{}".format(BASELINE_RELPATH, number) for number in others)))
+        parts.append("for {}, {}remove from {} every finding line that needs an entry there ({}){}".format(
+            _escaped(path), rename, _escaped(path), listed or "none found", note))
     return ("make a candidate that needs no entry for each of the {} file(s) whose entry puts a charged line "
             "into the baseline file on the empty start: {}".format(len(parts), "; ".join(parts))), None
 
@@ -1723,7 +1760,7 @@ def _empty_start(root, config, revision, store, head_sha, base, before):
         return EmptyStart(settled, None, verdict, None, None)
     if not refusal[0]:
         return EmptyStart(settled, refusal[1], verdict, None, "the empty start is not refused as R8")
-    way, reason = _r8_way_out(refusal[0], settled.proposal, settled.run.found)
+    way, reason = _r8_way_out(refusal[0], settled.proposal, verdict.findings)
     return EmptyStart(settled, refusal[1], verdict, way, reason)
 
 
@@ -3373,6 +3410,60 @@ def _baseline_writer_roundtrip_rows(tmp, labels):
           and ", {}:2: backlog-id".format(doc) in way and code_r == 0 and _proposed_entries(out_r, config) == {},
           (code, out, err, code_r, out_r))
 
+    # A configuration whose extra shape matches the entry's own shape line: the empty start charges the
+    # document's path line and its shape line, which a rename renders again under the new path, so the
+    # way out names no rename (it says renaming is none, naming the shape line) and only the removal of
+    # the finding line, which clears it.
+    repo, base = _baseline_repo(tmp, "baseline-writer-r8-way-out-shape-line")
+    _write(repo, CONFIG_RELPATH, _config_text() + '\n[[shape]]\nid = "quoted-shape"\ndescription = "a quoted '
+           'shape id"\nregex = \'shape = "backlog-id"\'\n')
+    _commit_all(repo, "a shape matching an entry's shape line")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, doc, "see " + fx + "7\n")
+    _commit_all(repo, "a finding in a file whose path matches a shape")
+    code, out, err = _write_exit(repo)
+    way = err.partition("committing an empty baseline first is no way out; ")[2]
+    _write(repo, doc, "a = 1\n")
+    _commit_all(repo, "the finding line removed as the way out names")
+    code_r, out_r, err_r = _write_exit(repo)
+    check("fail-closed/write-r8-way-out-shape-line-no-rename", code == 2 and out == ""
+          and "(2 charged finding(s) on its lines)" in err and "rename {} to".format(doc) not in way
+          and "for {}, remove from {} every finding line that needs an entry there ({}:1: backlog-id".format(
+              doc, doc, doc) in way
+          and "(renaming {} is no way out: its entry's line(s) {}:10 other than the path line".format(
+              doc, BASELINE_RELPATH) in way and code_r == 0 and _proposed_entries(out_r, config) == {},
+          (code, out, err, code_r, out_r, err_r))
+
+    # Main holds the document with one finding line; the branch adds another line and a second copy. Only
+    # the copy the diff adds needs an entry, so the way out lists line 3, not line 1 that main holds, and
+    # with line 3 removed the writer proposes no entry.
+    repo, base = _baseline_repo(tmp, "baseline-writer-r8-way-out-added-lines")
+    _write(repo, doc, "see " + fx + "7\n")
+    _commit_all(repo, "the document with one finding line, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, doc, "see " + fx + "7\nmore = 1\nsee " + fx + "7\n")
+    _commit_all(repo, "a second copy of the finding line")
+    code, out, err = _write_exit(repo)
+    way = err.partition("committing an empty baseline first is no way out; ")[2]
+    _write(repo, doc, "see " + fx + "7\nmore = 1\n")
+    _commit_all(repo, "the added copy removed as the way out names")
+    code_r, out_r, err_r = _write_exit(repo)
+    check("fail-closed/write-r8-way-out-added-lines-only", code == 2 and out == "" and "R8: " in err
+          and "every finding line that needs an entry there ({}:3: backlog-id".format(doc) in way
+          and "{}:1: backlog-id".format(doc) not in way and code_r == 0
+          and _proposed_entries(out_r, config) == {}, (code, out, err, code_r, out_r, err_r))
+
+    # A charged line of the header (before the first entry, or past the last) names no way out, as every
+    # proposal holds it; a line of an entry names that entry's file.
+    one = {(doc, _sha(b"x"), "backlog-id"): 1}
+    finding = Finding(doc, 1, "backlog-id", "a tracker backlog id", "see", b"see")
+    header_way = _r8_way_out([Finding(BASELINE_RELPATH, 1, "backlog-id", "d", "t", b"t")], one, [finding])
+    entry_way = _r8_way_out([Finding(BASELINE_RELPATH, 8, "backlog-id", "d", "t", b"t")], one, [finding])
+    check("fail-closed/write-r8-way-out-header-line", header_way[0] is None
+          and "{}:1 is in the header every proposal holds".format(BASELINE_RELPATH) in header_way[1]
+          and entry_way[1] is None and "for {}, rename {}".format(doc, doc) in entry_way[0],
+          (header_way, entry_way))
+
 
 def _failing_empty_start(*args):
     """A flip of _empty_start: the empty start never passes and names no way out of its own."""
@@ -3473,6 +3564,33 @@ def _baseline_writer_substitution_rows(tmp, labels):
           and "still proposed other entries after" in err_f and "flip: no empty start" in err_f
           and "commit an empty baseline first" not in err_f and "remove the" not in err_f
           and "no way out is named (the gate reports no stale entry" in err_f, (code_f, out_f, err_f))
+
+    # The same swap with a further note holding its own path line: the start from the candidate's
+    # baseline does not settle and the empty start is refused as R8 on that note alone, so the unsettled
+    # refusal names the empty start's own way out (rename or clear that note), not that none is named;
+    # renamed as named, the writer proposes from the empty start, listing that note's growth only.
+    nine = "notes/" + fx + "9.toml"
+    repo, base = _baseline_repo(tmp, "baseline-writer-swap-r8")
+    _write(repo, "x.toml", path_line + "\n" + note_line + "\n")
+    _commit_all(repo, "two path lines on main, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "x.toml", "")
+    _write(repo, doc, note_line + "\n")
+    _write(repo, note, path_line + "\n")
+    _write(repo, nine, 'path = "{}"\n'.format(nine))
+    _put_baseline(repo, base, {(doc, note_line.encode("utf-8"), "backlog-id"): 1})
+    _commit_all(repo, "the swap and a note holding its own path line")
+    code, out, err = _write_exit(repo)
+    _fx_git(repo, "mv", nine, "notes/nine.toml")
+    _commit_all(repo, "the note renamed as the way out names")
+    code_r, out_r, err_r = _write_exit(repo)
+    check("fail-closed/write-unsettled-names-empty-start-r8-way-out", code == 2 and out == ""
+          and "still proposed other entries after" in err and "R8: " in err
+          and "to get out, make a candidate that needs no entry for each of the 1 file(s)" in err
+          and "for {}, rename {} to a path no shape matches".format(nine, nine) in err
+          and "no way out is named" not in err and code_r == 1
+          and "  GROWTH notes/nine.toml:1: backlog-id" in err_r and err_r.count("  GROWTH ") == 1
+          and "from an empty starting proposal" in err_r, (code, out, err, code_r, out_r, err_r))
 
     # Main holds the document with its own path line first, then three lines; the branch moves that line
     # to the end of the file and its baseline holds one entry for it. From the candidate's baseline the
@@ -3600,13 +3718,13 @@ def _ambient_tmpdir(path):
             os.environ["TMPDIR"] = saved
 
 
-def _unchecked_store_directory(areas):
+def _unchecked_store_directory(areas, own=None):
     """A flip of _store_directory: the store created under TMPDIR's real path, never checked."""
     parent = os.path.realpath(os.environ["TMPDIR"])
     return tempfile.TemporaryDirectory(prefix="review-label-writer-", dir=parent)
 
 
-def _discovered_store_directory(areas):
+def _discovered_store_directory(areas, own=None):
     """A flip of _store_directory: the parent found by tempfile.gettempdir, whose discovery writes and
     removes a probe file in a candidate directory, and only then checked against `areas`."""
     parent = os.path.realpath(tempfile.gettempdir())
@@ -3795,11 +3913,52 @@ def _baseline_writer_store_rows(tmp, labels):
         "the repository's own areas lie on different drives (D:\\wt, C:\\repo\\.git)" in outcome
         and "no TMPDIR setting avoids this" in outcome and "on the drive the repository is on" not in outcome
         for outcome in outcomes), outcomes)
+
+    # The same two-drive layout with TMPDIR inside the worktree on D: the drives are checked before any
+    # candidate, so the refusal says no TMPDIR setting avoids it, never advising a TMPDIR outside the
+    # repository (which, on either drive, still could not be compared with the other area).
+    with _patched(os=types.SimpleNamespace(path=ntpath),
+                  _temporary_candidates=lambda: [("TMPDIR", "D:\\wt\\tmp")]):
+        try:
+            _store_directory(["D:\\wt", "C:\\repo\\.git"])
+            outcome = "accepted"
+        except CannotEvaluate as exc:
+            outcome = str(exc)
+        except Exception as exc:
+            outcome = "error {}: {}".format(type(exc).__name__, exc)
+    check("fail-closed/write-tmpdir-two-drives-before-containment",
+          "the repository's own areas lie on different drives (D:\\wt, C:\\repo\\.git)" in outcome
+          and "no TMPDIR setting avoids this" in outcome and "lies inside the repository (" not in outcome
+          and "set TMPDIR" not in outcome, outcome)
+
+    # The checkout runs from C:\repo (worktree and git directory on C:) while another worktree of the
+    # repository lies on D:. Running from a checkout on one drive is what the user already does, so the
+    # refusal names the worktree on D: to remove, or a separate clone; with that worktree gone, the areas
+    # are compared with the candidate again (one inside the worktree is refused as inside, so nothing is
+    # created).
+    own = ["C:\\repo", "C:\\repo\\.git", "C:\\repo\\.git", "C:\\repo\\.git\\objects"]
+    outcomes = []
+    for areas in (own + ["C:\\repo", "D:\\wt"], own + ["C:\\repo"]):
+        with _patched(os=types.SimpleNamespace(path=ntpath),
+                      _temporary_candidates=lambda: [("TMPDIR", "C:\\repo\\tmp")]):
+            try:
+                _store_directory(areas, own)
+                outcomes.append("accepted")
+            except CannotEvaluate as exc:
+                outcomes.append(str(exc))
+            except Exception as exc:
+                outcomes.append("error {}: {}".format(type(exc).__name__, exc))
+    check("fail-closed/write-tmpdir-other-worktree-on-other-drive", len(outcomes) == 2
+          and "this checkout's worktree and git directory lie on C:, so remove the repository's worktree(s) on "
+              "another drive (D:\\wt) with git worktree remove (git worktree prune for one whose directory is "
+              "gone), or run the writer from a separate clone"
+          in outcomes[0] and "whose worktree and git directory are on one drive" not in outcomes[0]
+          and "(TMPDIR) lies inside the repository (C:\\repo)" in outcomes[1], outcomes)
     _baseline_writer_store_isolation_rows(tmp, la, added, config)
 
 
 @contextlib.contextmanager
-def _kept_store_directory(areas):
+def _kept_store_directory(areas, own=None):
     """A flip of _store_directory: the store created under TMPDIR's real path and never removed."""
     yield tempfile.mkdtemp(prefix="review-label-writer-", dir=os.path.realpath(os.environ["TMPDIR"]))
 
