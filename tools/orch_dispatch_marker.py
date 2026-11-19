@@ -12,14 +12,16 @@ that the result must carry before it is accepted.
       and print a fresh id (32 lowercase hexadecimal characters) on stdout.
       Exit 0 created; 5 something already exists at DIR (a directory, a file or a symlink, even an
       empty one); 2 cannot evaluate (bad arguments, a relative path, a missing or non-directory
-      parent, any other operating-system error).
+      parent, any other operating-system error, a failed write of the id to stdout included, such as
+      a broken pipe, after which DIR exists but no id was delivered, so DIR is never used).
   orch_dispatch_marker.py write --marker PATH --id HEX --status N
       Write the line `aiqt-dispatch-marker v1 <id> <status>` to a temporary file in PATH's directory,
       fsync it, then rename it onto PATH, so PATH keeps its previous complete content until the
       rename. N is an integer from 0 to 255 with no sign or leading zero.
       Exit 0 published; 2 cannot evaluate (bad arguments, an oversized or unconvertible number
-      included, a missing directory, a target that is a directory, a write, fsync or rename failure,
-      after which the temporary file is removed and PATH is left as it was).
+      included, a missing directory, a target that is a directory, a failure to create the temporary
+      file, or a write, fsync or rename failure, after which the temporary file this process created
+      is removed and PATH is left as it was; an entry it did not create is never removed).
   orch_dispatch_marker.py wait --marker PATH --expect-id HEX --deadline-s S [--interval-s I]
       Poll PATH on a monotonic clock until S seconds (an integer from 1 to 86400) pass, every I seconds
       (from 0.05 to 60, default 1). A marker is accepted only when lstat shows a regular file of at
@@ -35,9 +37,14 @@ that the result must carry before it is accepted.
       (another id, a legacy bare status or malformed content) were seen, each named on stderr; 2
       cannot evaluate, at once (bad arguments, an oversized or unconvertible number included, a
       relative path, a missing result directory, a symlink, FIFO, directory or other non-regular
-      marker, a stat, open, read or permission error, an oversized marker). Marker content that was
-      read successfully and is at most MAX_MARKER_BYTES bytes is never alone a cause of exit 2,
-      whatever it holds; a file system error still exits 2 at once, whatever the marker's size.
+      marker, a stat, open, read or permission error, an oversized marker, any other operating-system
+      error, a failed write of a matched status to stdout included, such as a broken pipe). Marker
+      content that was read successfully and is at most MAX_MARKER_BYTES bytes is never alone a
+      cause of exit 2, whatever it holds; a file system error still exits 2 at once, whatever the
+      marker's size. The marker is opened without following a symlink and without blocking on a
+      FIFO, and its type and size are checked again on the open descriptor, so a marker replaced by a
+      symlink, FIFO or oversized file between the lstat and the open still exits 2; one removed in
+      that gap is still pending.
   orch_dispatch_marker.py --self-test [--execution-report ABS_PATH]
       Run the self-test (exit 0 pass, 1 a failed check, 2 a harness error).
 
@@ -192,9 +199,14 @@ def judge_marker(data, expect_id):
     return ("match", status)
 
 
+# The open system call, looked up at call time so the self-test can see the flags and change the marker
+# between the lstat and the open.
+_open_fd = os.open
+
+
 def _open_marker(path):
     """A read-only descriptor for the marker that never follows a symlink and never blocks on a FIFO."""
-    return os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    return _open_fd(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
 
 
 def probe(path, expect_id):
@@ -282,10 +294,11 @@ def claim_dir(path):
 
 
 # The publishing system calls, looked up at call time so the self-test can pause a partial write or fail
-# the fsync or the rename and observe the destination meanwhile.
+# the fsync or the rename and observe the destination meanwhile, and fix the temporary name's suffix.
 _write_fd = os.write
 _fsync_fd = os.fsync
 _replace_path = os.replace
+_temp_suffix_hex = secrets.token_hex
 
 
 def write_marker(path, dispatch_id, status):
@@ -306,10 +319,12 @@ def write_marker(path, dispatch_id, status):
         return EXIT_CANNOT_EVALUATE, "", ["cannot evaluate: marker {} cannot be stat'ed ({})".format(path, exc)]
     if target_st is not None and stat.S_ISDIR(target_st.st_mode):
         return EXIT_CANNOT_EVALUATE, "", ["cannot evaluate: marker path {} is a directory".format(path)]
-    temp = os.path.join(directory, ".{}.tmp-{}".format(os.path.basename(path), secrets.token_hex(8)))
+    temp = os.path.join(directory, ".{}.tmp-{}".format(os.path.basename(path), _temp_suffix_hex(8)))
     data = marker_line(dispatch_id, status).encode("ascii")
+    created = False
     try:
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        created = True
         try:
             view = memoryview(data)
             while view:
@@ -319,10 +334,13 @@ def write_marker(path, dispatch_id, status):
             os.close(fd)
         _replace_path(temp, path)
     except OSError as exc:
-        try:
-            os.unlink(temp)
-        except OSError:
-            pass
+        # Only a temporary file this process created is removed; an entry already at that name (another
+        # writer's) is left alone.
+        if created:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
         return EXIT_CANNOT_EVALUATE, "", ["cannot evaluate: cannot publish {} ({})".format(path, exc)]
     return EXIT_OK, "", []
 
@@ -521,6 +539,22 @@ def _self_test():
         code, out, err, _f = _wait(m, new_id)
         check("wait/match-old-mtime-0", code == EXIT_OK and out == "0\n", (code, out, err))
 
+        # The id comparison is exact: an id that differs from the expected one only in its last character
+        # (which a prefix comparison misses) or only in its first (which a suffix comparison misses) is
+        # refused, and the marker's own id is accepted.
+        for name, control_name, got_id, want_id in (
+                ("wait/near-id-last-char-4", "wait/near-id-last-char-control-0",
+                 "f" * (ID_LENGTH - 1) + "0", "f" * (ID_LENGTH - 1) + "1"),
+                ("wait/near-id-first-char-4", "wait/near-id-first-char-control-0",
+                 "0" + "f" * (ID_LENGTH - 1), "1" + "f" * (ID_LENGTH - 1))):
+            d, m = fresh()
+            _publish(m, got_id, 0)
+            code, out, err, _f = _wait(m, want_id)
+            check(name, code == EXIT_ONLY_UNBOUND and out == "" and any(got_id in line for line in err),
+                  (code, out, err))
+            code, out, err, _f = _wait(m, got_id)
+            check(control_name, code == EXIT_OK and out == "0\n", (code, out, err))
+
         d, m = fresh()
         _publish(m,old_id, 0)
         seen = []
@@ -554,6 +588,21 @@ def _self_test():
         elapsed = fake.now - 100.0
         check("wait/no-marker-3", code == EXIT_NEVER_SEEN and out == "" and 5 <= elapsed <= 5 + 1.0,
               (code, out, err, elapsed))
+
+        # The marker is looked at once more after the last sleep, at the deadline itself: one published
+        # during the last interval (a whole one, or one cut short by the deadline) is accepted.
+        for name, interval_s, last in (("wait/published-in-last-interval-0", 1.0, 5),
+                                       ("wait/published-in-short-last-interval-0", 2.0, 3)):
+            d, m = fresh()
+
+            def publish_in_last(n, m=m, last=last):
+                if n == last:
+                    _publish(m, new_id, 9)
+
+            code, out, err, fake = _wait(m, new_id, deadline_s=5, interval_s=interval_s,
+                                         on_sleep=publish_in_last)
+            check(name, code == EXIT_OK and out == "9\n" and fake.sleeps == last and fake.now == 105.0,
+                  (code, out, err, fake.sleeps, fake.now))
 
         d, m = fresh()
         temp = os.path.join(d, ".exit-status.tmp-0123456789abcdef")
@@ -604,6 +653,113 @@ def _self_test():
         code, out, err, _f = _wait(m, new_id)
         check("wait/permission-control-0", code == EXIT_OK and out == "0\n", (code, out, err))
 
+        # The open itself. The lstat before it is only a first look, so each case below changes the marker
+        # inside the open call, after the lstat saw a small regular file, and the defences on the open and
+        # on the open descriptor must hold alone.
+        real_open_fd = globals()["_open_fd"]
+
+        def wait_hooked(path, hook, on_sleep=None):
+            def hooked(p, flags, *args):
+                hook(p, flags)
+                return real_open_fd(p, flags, *args)
+
+            globals()["_open_fd"] = hooked
+            try:
+                return _wait(path, new_id, on_sleep=on_sleep)
+            finally:
+                globals()["_open_fd"] = real_open_fd
+
+        d, m = fresh()
+        _publish(m, new_id, 0)
+        flags_seen = []
+        code, out, err, _f = wait_hooked(m, lambda p, flags: flags_seen.append(flags))
+        check("wait/open-flags-no-follow-non-blocking", code == EXIT_OK and out == "0\n" and len(flags_seen) == 1
+              and bool(flags_seen[0] & os.O_NOFOLLOW) and bool(flags_seen[0] & os.O_NONBLOCK)
+              and flags_seen[0] & os.O_ACCMODE == os.O_RDONLY, (code, out, err, flags_seen))
+
+        d, m = fresh()
+        _publish(m, old_id, 0)
+        decoy = os.path.join(d, "decoy")
+        _put(decoy, marker_line(new_id, 0).encode("ascii"))
+
+        def to_symlink(p, flags):
+            if not os.path.islink(p):
+                os.unlink(p)
+                os.symlink(decoy, p)
+
+        code, out, err, fake = wait_hooked(m, to_symlink)
+        check("wait/open-swapped-to-symlink-2", code == EXIT_CANNOT_EVALUATE and out == "" and fake.sleeps == 0
+              and os.path.islink(m) and any("cannot be opened" in line for line in err), (code, out, err))
+
+        d, m = fresh()
+        _publish(m, old_id, 0)
+        swapped = []
+
+        def to_matching_regular(p, flags):
+            if not swapped:
+                swapped.append(p)
+                _publish(p, new_id, 0)
+
+        code, out, err, _f = wait_hooked(m, to_matching_regular)
+        check("wait/open-swapped-to-regular-control-0", code == EXIT_OK and out == "0\n" and swapped == [m],
+              (code, out, err, swapped))
+
+        # A FIFO opened for reading blocks until a writer opens it; a writer is held open here, so the open
+        # returns either way and only the check on the descriptor can refuse it.
+        d, m = fresh()
+        _publish(m, new_id, 0)
+        holders = []
+
+        def to_fifo(p, flags):
+            if not holders:
+                os.unlink(p)
+                os.mkfifo(p)
+                holders.append(os.open(p, os.O_RDWR | os.O_NONBLOCK))
+
+        try:
+            code, out, err, fake = wait_hooked(m, to_fifo)
+        finally:
+            for holder in holders:
+                os.close(holder)
+        check("wait/open-swapped-to-fifo-2", code == EXIT_CANNOT_EVALUATE and out == "" and fake.sleeps == 0
+              and len(holders) == 1 and any(line.endswith("is not a regular file") for line in err),
+              (code, out, err, len(holders)))
+
+        # A marker that grows past the bound after the lstat is refused on what was read; it is restored
+        # to a matching marker on the first sleep, so reading only a prefix and waiting on would end at 0.
+        d, m = fresh()
+        _publish(m, new_id, 0)
+        grown = []
+
+        def grow(p, flags):
+            if not grown:
+                grown.append(p)
+                with open(p, "ab") as handle:
+                    handle.write(b"x" * MAX_MARKER_BYTES)
+
+        code, out, err, fake = wait_hooked(m, grow, on_sleep=lambda n: _publish(m, new_id, 0))
+        check("wait/open-grown-oversize-2", code == EXIT_CANNOT_EVALUATE and out == "" and fake.sleeps == 0
+              and grown == [m] and any("larger than" in line for line in err), (code, out, err, fake.sleeps))
+
+        # A marker removed between the lstat and the open is still pending, and the matching marker
+        # renamed in on the first sleep is accepted.
+        d, m = fresh()
+        _publish(m, new_id, 0)
+        removed = []
+
+        def vanish(p, flags):
+            if not removed:
+                removed.append(p)
+                os.unlink(p)
+
+        def republish(n):
+            if n == 1:
+                _publish(m, new_id, 0)
+
+        code, out, err, fake = wait_hooked(m, vanish, on_sleep=republish)
+        check("wait/open-vanished-pending-then-match-0", code == EXIT_OK and out == "0\n" and fake.sleeps == 1
+              and removed == [m], (code, out, err, fake.sleeps))
+
         d, m = fresh()
         _put(m, b"x" * (MAX_MARKER_BYTES + 1))
         code, out, err, _f = _wait(m, new_id)
@@ -642,7 +798,15 @@ def _self_test():
                  ["wait", "--marker", m, "--expect-id", new_id, "--deadline-s", "5", "--interval-s",
                   "9" * 5000]),
                 ("wait/bad-args-2/missing-expect-id",
-                 ["wait", "--marker", m, "--deadline-s", "5"])):
+                 ["wait", "--marker", m, "--deadline-s", "5"]),
+                ("wait/bad-args-2/expect-id-31-hex",
+                 ["wait", "--marker", m, "--expect-id", new_id[:-1], "--deadline-s", "5"]),
+                ("wait/bad-args-2/expect-id-33-hex",
+                 ["wait", "--marker", m, "--expect-id", new_id + "b", "--deadline-s", "5"]),
+                ("wait/bad-args-2/duplicate-expect-id",
+                 ["wait", "--marker", m, "--expect-id", old_id, "--expect-id", new_id, "--deadline-s", "5"]),
+                ("wait/bad-args-2/duplicate-deadline",
+                 ["wait", "--marker", m, "--expect-id", new_id, "--deadline-s", "5", "--deadline-s", "6"])):
             fake = _FakeClock()
             code, out, err = _run_guarded(argv, fake.clock, fake.sleep)
             check(name, code == EXIT_CANNOT_EVALUATE and fake.sleeps == 0
@@ -873,6 +1037,129 @@ def _self_test():
               and any("is a directory" in line for line in err)
               and sorted(os.listdir(d)) == ["exit-status"], (code, out, err))
 
+        # Write arguments: a bad or wrong-length id, a relative marker path (one that resolves to a real
+        # result directory from the working directory, when that can be read) and a repeated option are
+        # refused before anything is written; the control with a valid form publishes. Each case has its
+        # own directory, so one wrongly accepted case cannot change another's result.
+        def relative(path):
+            try:
+                return os.path.relpath(path)
+            except OSError:
+                return os.path.join(os.path.basename(os.path.dirname(path)), os.path.basename(path))
+
+        for name, tail in (
+                ("write/bad-args-2/id-not-hex", ["--id", "g" * ID_LENGTH, "--status", "0"]),
+                ("write/bad-args-2/id-upper-hex", ["--id", new_id.upper(), "--status", "0"]),
+                ("write/bad-args-2/id-31-hex", ["--id", new_id[:-1], "--status", "0"]),
+                ("write/bad-args-2/id-33-hex", ["--id", new_id + "b", "--status", "0"]),
+                ("write/bad-args-2/relative-marker", ["--id", new_id, "--status", "0"]),
+                ("write/bad-args-2/duplicate-status", ["--id", new_id, "--status", "0", "--status", "1"]),
+                ("write/bad-args-2/duplicate-id", ["--id", old_id, "--id", new_id, "--status", "0"])):
+            d, m = fresh()
+            marker_arg = relative(m) if name.endswith("relative-marker") else m
+            code, out, err = _run_guarded(["write", "--marker", marker_arg] + tail)
+            check(name, code == EXIT_CANNOT_EVALUATE and out == "" and os.listdir(d) == []
+                  and any("write needs" in line or "usage:" in line for line in err),
+                  (code, out, err, os.listdir(d)))
+        d, m = fresh()
+        code, out, err = _run_guarded(["write", "--marker", m, "--id", new_id, "--status", "0"])
+        check("write/args-control-0", code == EXIT_OK and _read_or_none(m) == marker_line(new_id, 0).encode("ascii")
+              and os.listdir(d) == ["exit-status"], (code, out, err, os.listdir(d)))
+
+        # The temporary name: an entry already at it (another writer's) makes the exclusive create fail at
+        # exit 2 and is left as it was. The control fixes the same name with nothing there and fails the
+        # fsync instead, and the temporary file this process created is removed.
+        fixed_suffix = "0123456789abcdef"
+        real_suffix = globals()["_temp_suffix_hex"]
+        for name, foreign, fsync_fn in (("write/temp-name-taken-left-alone-2", True, real_fsync),
+                                        ("write/temp-name-own-removed-control-2", False, fail_fsync)):
+            d, m = fresh()
+            _publish(m, old_id, 0)
+            temp_name = ".exit-status.tmp-" + fixed_suffix
+            foreign_data = b"another writer's temporary file\n"
+            if foreign:
+                _put(os.path.join(d, temp_name), foreign_data)
+            globals()["_temp_suffix_hex"], globals()["_fsync_fd"] = (lambda nbytes: fixed_suffix), fsync_fn
+            try:
+                code, out, err = _run_guarded(["write", "--marker", m, "--id", new_id, "--status", "0"])
+            finally:
+                globals()["_temp_suffix_hex"], globals()["_fsync_fd"] = real_suffix, real_fsync
+            left = sorted(os.listdir(d))
+            check(name, code == EXIT_CANNOT_EVALUATE and _read_or_none(m) == previous
+                  and left == (sorted(["exit-status", temp_name]) if foreign else ["exit-status"])
+                  and (_read_or_none(os.path.join(d, temp_name)) == foreign_data if foreign else True)
+                  and any("cannot publish" in line for line in err), (code, err, left))
+
+        # --- output: a stdout write that fails is exit 2, never Python's own 120 or a silent loss ---
+        import io
+
+        class FailingStdout:
+            def __init__(self, exc):
+                self.exc = exc
+
+            def write(self, text):
+                raise self.exc
+
+            def flush(self):
+                pass
+
+        def main_to(argv, stdout):
+            stderr = io.StringIO()
+            try:
+                code = main(argv, stdout, stderr)
+            except Exception as exc:
+                return "raised", ["{}: {}".format(type(exc).__name__, exc)]
+            return code, stderr.getvalue().splitlines()
+
+        def main_to_closed_pipe(argv):
+            """main with stdout on a pipe whose reader is closed: a real BrokenPipeError on the flush."""
+            read_end, write_end = os.pipe()
+            os.close(read_end)
+            stream = open(write_end, "w", encoding="ascii")
+            code, lines = main_to(argv, stream)
+            try:
+                discarded = os.path.samestat(os.fstat(write_end), os.stat(os.devnull))
+            except OSError:
+                discarded = False
+            try:
+                stream.close()
+                closed_cleanly = True
+            except OSError:
+                closed_cleanly = False
+            return code, lines, discarded, closed_cleanly
+
+        def stdout_refused(lines, exc_name):
+            return any("could not be written to stdout" in line and exc_name in line for line in lines)
+
+        d, m = fresh()
+        _publish(m, new_id, 9)
+        wait_argv = ["wait", "--marker", m, "--expect-id", new_id, "--deadline-s", "5"]
+        claim_path = os.path.join(base, "output-claim-pipe")
+        code, lines, discarded, closed_cleanly = main_to_closed_pipe(["claim", claim_path])
+        check("output/claim-broken-pipe-2", code == EXIT_CANNOT_EVALUATE and os.path.isdir(claim_path)
+              and stdout_refused(lines, "BrokenPipeError") and discarded and closed_cleanly,
+              (code, lines, discarded, closed_cleanly))
+        code, lines, discarded, closed_cleanly = main_to_closed_pipe(wait_argv)
+        check("output/wait-broken-pipe-2", code == EXIT_CANNOT_EVALUATE
+              and stdout_refused(lines, "BrokenPipeError") and discarded and closed_cleanly,
+              (code, lines, discarded, closed_cleanly))
+        claim_path = os.path.join(base, "output-claim-eio")
+        code, lines = main_to(["claim", claim_path], FailingStdout(OSError(5, "stdout failure injected")))
+        check("output/claim-other-os-error-2", code == EXIT_CANNOT_EVALUATE and os.path.isdir(claim_path)
+              and stdout_refused(lines, "OSError"), (code, lines))
+        code, lines = main_to(wait_argv, FailingStdout(OSError(28, "stdout failure injected")))
+        check("output/wait-other-os-error-2", code == EXIT_CANNOT_EVALUATE and stdout_refused(lines, "OSError"),
+              (code, lines))
+        claim_path = os.path.join(base, "output-claim-control")
+        stdout = io.StringIO()
+        code, lines = main_to(["claim", claim_path], stdout)
+        check("output/claim-control-0", code == EXIT_OK and lines == [] and stdout.getvalue().endswith("\n")
+              and is_dispatch_id(stdout.getvalue()[:-1]), (code, lines, stdout.getvalue()))
+        stdout = io.StringIO()
+        code, lines = main_to(wait_argv, stdout)
+        check("output/wait-control-0", code == EXIT_OK and lines == [] and stdout.getvalue() == "9\n",
+              (code, lines, stdout.getvalue()))
+
         # --- revert: with the id comparison removed, the incident case would pass as a match ---
         d, m = fresh()
         _publish(m,old_id, 0)
@@ -893,19 +1180,22 @@ def _self_test():
         return 1
     print("SELF-TEST PASS: orch_dispatch_marker {} checks (a stale marker with an earlier id, a legacy bare "
           "status, malformed content, another marker version, a late write by the earlier dispatch and a "
-          "fresh mtime on a wrong id are never accepted, and malformed content waits to exit 4, not 2; a "
-          "matching id is accepted whatever its age and its worker status is printed, never used as the "
-          "exit; non-regular, unreadable and oversized markers and bad or out-of-range arguments, oversized "
-          "numbers included, cannot evaluate, and an oversized number never reaches int or float; a claim "
-          "never adopts an existing entry, one of two racing claims wins, and claims issue distinct ids, "
-          "one claim's marker refused under another's; a write "
-          "keeps the previous marker until the rename, fails cleanly on an fsync or rename error and "
-          "refuses a bad status; with the id comparison removed the incident case would pass)".format(
+          "fresh mtime on a wrong id are never accepted, nor is an id differing only in its first or last "
+          "character, and malformed content waits to exit 4, not 2; a matching id is accepted whatever its "
+          "age, also when published in the last interval, and its worker status is printed, never used as "
+          "the exit; non-regular, unreadable and oversized markers, also when swapped in after the lstat, "
+          "and bad, wrong-length, repeated or out-of-range arguments, oversized numbers included, cannot "
+          "evaluate, and an oversized number never reaches int or float; a marker removed before the open "
+          "is pending; a claim never adopts an existing entry, one of two racing claims wins, and claims "
+          "issue distinct ids, one claim's marker refused under another's; a write keeps the previous "
+          "marker until the rename, fails cleanly on an fsync or rename error, leaves a temporary name it "
+          "did not create alone and refuses a bad status; a failed stdout write is exit 2; with the id "
+          "comparison removed the incident case would pass)".format(
               len(EXECUTED)))
     return 0
 
 
-def main(argv):
+def main(argv, stdout=None, stderr=None):
     # The execution gate appends `--execution-report ABS_PATH` to the self-test launch; accepted only in
     # that trailing two-token form, with an absolute path, alone or after --self-test.
     report_path = None
@@ -920,11 +1210,44 @@ def main(argv):
             _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
         return _self_test()
     code, out, err = run_command(argv)
+    return _deliver(code, out, err, sys.stdout if stdout is None else stdout,
+                    sys.stderr if stderr is None else stderr)
+
+
+def _discard_unwritten(stream):
+    """Point a stream whose write failed at the null device, so the interpreter's final flush of the
+    data still buffered cannot fail again and replace this exit code with Python's own 120."""
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        return
+    try:
+        null = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        return
+    try:
+        os.dup2(null, fd)
+    except OSError:
+        pass
+    finally:
+        os.close(null)
+
+
+def _deliver(code, out, err, stdout, stderr):
+    """The exit code after writing out to stdout and err to stderr. A stdout write or flush that fails
+    (a broken pipe or any other operating-system error) is exit 2: the id or status never reached the
+    caller, so the command cannot be relied on, whatever its own exit would have been."""
     if out:
-        sys.stdout.write(out)
-        sys.stdout.flush()
+        try:
+            stdout.write(out)
+            stdout.flush()
+        except OSError as exc:
+            _discard_unwritten(stdout)
+            code = EXIT_CANNOT_EVALUATE
+            err = list(err) + ["cannot evaluate: the result could not be written to stdout ({}: {})".format(
+                type(exc).__name__, exc)]
     for line in err:
-        print(line, file=sys.stderr)
+        print(line, file=stderr)
     return code
 
 
