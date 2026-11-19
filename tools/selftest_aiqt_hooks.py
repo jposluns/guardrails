@@ -16509,32 +16509,30 @@ def _fixture_tmpdir(prefix):
 
 
 # This suite's own temporary root: its name prefix and the suite name its marker records. The stale-root
-# sweep at the start of a run removes only roots carrying both (tools/_selftest_tmproot.py), in the
-# parents _fixture_tmpdir allocates in.
+# sweep, run once this run's root is made, removes only roots carrying both (tools/_selftest_tmproot.py),
+# and only in the directory that root was made in.
 _TMPROOT_PREFIX = "aiqt-hooks-selftest-"
 _TMPROOT_SUITE = "selftest_aiqt_hooks"
 
 
-def _tmproot_parents():
-    return (tempfile.gettempdir(), "/var/tmp", "/tmp")
-
-
 # The child of (temp-failed-setup-cleans-root): it imports this suite from the tools directory in argv[1],
-# records the root _fixture_tmpdir makes, makes the emptyhome mkdir (the first fallible setup step after the
-# root is made) raise a sentinel, runs _main_isolated, and prints one tagged JSON line: the name of the
+# confines it to the base directory in argv[2] (the parent's own fresh temporary directory: the root is
+# made and recorded there, so the run's sweep, which looks only in the root's own directory, never looks
+# in the real temporary parents), makes the emptyhome mkdir (the first fallible setup step after the root
+# is made) raise a sentinel, runs _main_isolated, and prints one tagged JSON line: the name of the
 # exception that came out (None when none did), how many roots were made, and those still present.
 _TEMP_SETUP_TAG = "TEMP-SETUP-RESULT "
 _TEMP_SETUP_CHILD = (
-    "import json, os, pathlib, sys\n"
+    "import json, os, pathlib, sys, tempfile\n"
     "sys.path.insert(0, sys.argv[1])\n"
+    "base = sys.argv[2]\n"
     "import selftest_aiqt_hooks as suite\n"
     "made = []\n"
-    "real_tmpdir = suite._fixture_tmpdir\n"
-    "def recording_tmpdir(prefix):\n"
-    "    path = real_tmpdir(prefix)\n"
+    "def confined_tmpdir(prefix):\n"
+    "    path = pathlib.Path(tempfile.mkdtemp(prefix=prefix, dir=base))\n"
     "    made.append(str(path))\n"
     "    return path\n"
-    "suite._fixture_tmpdir = recording_tmpdir\n"
+    "suite._fixture_tmpdir = confined_tmpdir\n"
     "class InjectedSetupFailure(Exception):\n"
     "    pass\n"
     "real_mkdir = pathlib.Path.mkdir\n"
@@ -16556,15 +16554,27 @@ def _temp_failed_setup_failures():
     """(temp-failed-setup-cleans-root): a setup step that fails after this suite's root is made must
     remove the root, and the step's own failure must still come out of _main_isolated. Runs
     _TEMP_SETUP_CHILD and returns the failure lines (empty when both hold). A root the child leaves is
-    removed here afterwards, so a regression does not itself leave one behind."""
+    removed here afterwards (with the child's base directory, also after a timeout), so a regression
+    does not itself leave one behind."""
     label = "(temp-failed-setup-cleans-root)"
     try:
+        base = tempfile.mkdtemp(prefix="aiqt-hooks-temp-child-")
+    except OSError as exc:
+        return ["{} could not make the setup-failure child's base directory: {}".format(label, exc)]
+    proc = run_error = None
+    try:
         proc = subprocess.run([sys.executable, "-I", "-B", "-c", _TEMP_SETUP_CHILD,
-                               str(Path(__file__).resolve().parent)],
+                               str(Path(__file__).resolve().parent), base],
                               capture_output=True, text=True, timeout=300)
     except (OSError, subprocess.SubprocessError) as exc:
-        return ["{} could not run the setup-failure child: {}".format(label, exc)]
-    lines = [line for line in proc.stdout.splitlines() if line.startswith(_TEMP_SETUP_TAG)]
+        run_error = exc
+    finally:
+        _base_left = _selftest_tmproot.remove_root(base)
+    if run_error is not None or _base_left is not None:
+        return ([] if run_error is None else
+                ["{} could not run the setup-failure child: {}".format(label, run_error)]) + (
+               [] if _base_left is None else ["{} {}".format(label, _base_left)])
+    lines =[line for line in proc.stdout.splitlines() if line.startswith(_TEMP_SETUP_TAG)]
     if len(lines) != 1:
         return ["{} the setup-failure child printed no single result line (exit {}): {}".format(
             label, proc.returncode, proc.stderr[-2000:])]
@@ -17220,10 +17230,6 @@ def _main_isolated(monitor):
         if got != want:
             failures.append("{}: expected {}, got {}".format(label, want, got))
 
-    # Recover the roots of earlier runs that were killed before their finally ran: only this suite's own
-    # marked roots, older than a day, whose owner process is gone (tools/_selftest_tmproot.py).
-    for _sweep_problem in _selftest_tmproot.sweep_stale(_TMPROOT_SUITE, _TMPROOT_PREFIX, _tmproot_parents())[1]:
-        print("SELF-TEST NOTE: stale-root sweep: {}".format(_sweep_problem), file=sys.stderr)
     try:
         tmp = _fixture_tmpdir(_TMPROOT_PREFIX)
     except OSError as exc:
@@ -17234,6 +17240,13 @@ def _main_isolated(monitor):
     _tmp_left = None
     try:
         _selftest_tmproot.write_marker(tmp, _TMPROOT_SUITE)
+        # Recover the roots of earlier runs that were killed before their finally ran: only this suite's
+        # own marked roots, older than a day, whose owner process is gone (tools/_selftest_tmproot.py), and
+        # only in the directory this run's root was made in, so a run confined to one temporary directory
+        # never sweeps another. This run's own root has a live owner.
+        _swept = _selftest_tmproot.sweep_stale(_TMPROOT_SUITE, _TMPROOT_PREFIX, (str(tmp.parent),))
+        for _sweep_problem in _swept[1]:
+            print("SELF-TEST NOTE: stale-root sweep: {}".format(_sweep_problem), file=sys.stderr)
         # Redirect the recovery ledger into the throwaway tree so the recovery layer, which fires on every
         # dirty-tree in-scope case below, never writes to the real user's $XDG_STATE_HOME/~/.local/state.
         os.environ["XDG_STATE_HOME"] = str(tmp / "xdgstate")
