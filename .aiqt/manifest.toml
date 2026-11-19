@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "2031b5f77174750a8434e784d2b3ac034dae80c6f56fefe0ab2254e20b1ebf9e"
+tree-sha256 = "b1caed196c6546e5f38a3ec5b02156d39659510fd098a99c81af1930f20d3abd"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4297,8 +4297,8 @@ sha256 = "57fe0345d8e1959e9ff8a5f22ae5271577d3485ffd8a116e68d3f2e14c2de010"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 353521
-sha256 = "109e708f387e3ade8c37f52662889253f96f757593c4ee6f6df8c6f65cb3f13a"
+bytes = 357426
+sha256 = "a02af7039ba80ceb63c90f2636b75baa1508cb7f4ebbe762172c850c7a9cf886"
 
 [[sources]]
 path = "tools/check_leaks.py"

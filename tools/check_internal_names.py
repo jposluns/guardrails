@@ -114,29 +114,40 @@ underscore separates like a space, so one inside an identifier is a hit, and one
 is a loop count), a model
 identifier (a family or vendor prefix, a hyphen and a version digit) that does not open a quoted
 string, a family used as an attribution (before a colon or a slash, or a possessive followed within
-one word by review vocabulary, or directly by notes, points, flags or reports), a review finding or
+one word by review vocabulary, or directly or after one listed modifier such as "reported" or
+"detailed" by notes, points, flags or reports, where flags is not followed by a command option or
+by CLI wording such as "are passed"), a review finding or
 item (numbered or not, "peer" or not) followed by
 a parenthesised upper-case grade or a false-deny-style verdict, or preceded by an upper-case grade
 word that is not a SemVer class (BLOCKER, BLOCKING, CRITICAL, MEDIUM, MED, HIGH, LOW or NIT), by an
 upper-case id or MAJOR or MINOR and then "review" or "peer", or by a grade word in any case and the
-word "review", and a review-round-derived test_r
+word "review", a NUMBERED review finding or item directly preceded by any upper-case grade word, id,
+MAJOR or MINOR, and a review-round-derived test_r
 test name; the family and the review words match in any case, the grade words in upper case only
 except before "review".
 The narrowing keeps some ordinary prose and command data out of these rows: a family's reasoning
 effort written in lower case, a family's possessive before an ordinary noun (or before an ordinary
 noun and a verb such as notes, points, flags or reports, which are review vocabulary only directly
-after the possessive), a loop count, a quoted model setting, a process-search pattern token, and a
-one-letter rule id or a SemVer class (MAJOR, MINOR) directly before finding or item are not hits of
-this layer.
+after the possessive or after one listed modifier), a family's flags before a command option or
+before CLI wording such as "are passed", a loop count, a quoted model setting, a process-search
+pattern token, and a one-letter rule id or a SemVer class (MAJOR, MINOR) directly before an
+unnumbered finding or item are not hits of this layer.
 That is all the narrowing claims. The rows still flag other ordinary prose and command data under a
 swept path (an over-block, not a miss): a family before a colon or a slash in a URL, a path or a
 settings line, a round number in prose that is neither right after "retry" nor followed by "of", a
+round number followed by "of" with a hyphen or a double underscore before "of" (only whitespace or
+one underscore makes the loop-count exception), a
 QA token in a process-search argument with no slash after it, a model identifier unquoted or
 inside a longer quoted string, one of the upper-case grade words BLOCKER, BLOCKING, CRITICAL,
-MEDIUM, MED, HIGH, LOW or NIT used as ordinary prose directly before finding or item (a capitalised
+MEDIUM, MED, HIGH, LOW or NIT used as ordinary prose directly before finding or item (a capitalized
 heading word, say), a rule id or SemVer class followed by "review" or "peer" and then finding or
-item, a one-letter rule id in parentheses right after finding or item ("the numbered items (S3)"),
-and a family possessive directly before notes, points, flags or reports used as a verb. And a
+item, a rule id or SemVer class directly before a numbered finding or item in ordinary prose, a
+one-letter rule id in parentheses right after finding or item ("the numbered items (S3)"), a
+family possessive directly or after one listed modifier before notes, points, flags or reports
+used as a verb or as the first word of an ordinary compound noun or code construct ("<family>'s
+note constructor", "<family>'s report format"), and a family's flags as command-line documentation
+in wording other than a command option or "are passed" style CLI wording right after it ("<family>'s
+flags change the model"). And a
 swept file that is also a shipped source is read by the
 tracker-label ratchet above as well; a preview file has no baseline entry, so a lower-case effort
 word after a family and a loop count with the round word next to its digit are still ratchet hits
@@ -150,11 +161,14 @@ runs beside the preview-only _PREVIEW_LABELS patterns of scan_scope, which keep 
 line exemption; a swept-path hit has none, so a test_r name on an internal-allow line is still a
 finding here. DISCLOSED LIMITS: a label written outside these shapes (a family name alone, a bare
 grade word, a grade word in lower case after a family name, a grade word in lower case before
-finding or item with no "review" between, a one-letter id or MAJOR or MINOR before finding or item
-with no "review" or "peer" between, a family possessive before a word that is not review
-vocabulary (notes, points, flags or reports one word after it included), a round-derived helper
-or fixture name with no round word (a bare r or state number),
-a round number after "retry" or before "of", a model identifier opening a
+finding or item with no "review" between, a one-letter id or MAJOR or MINOR before an unnumbered
+finding or item with no "review" or "peer" between, a family possessive before a word that is not
+review vocabulary (notes, points, flags or reports after one word that is not a listed modifier
+included, and flags before a command option or "are passed" style CLI wording included), a
+round-derived helper or fixture name with no round word (a bare r or state number),
+a round number after "retry" or before "of" (whitespace and then "of" followed by an underscore
+and an identifier part included, which the exception also takes as a loop count), a model
+identifier opening a
 quoted string, a QA round number written as a path or pattern segment, a label split across more
 than one line break, inside a word or with other punctuation at the break, or encoded) is not
 matched, and SWEPT_PREFIXES is hand-grown, so an area is covered only once a sweep adds it.
@@ -507,9 +521,16 @@ _SWEPT_ROUND = r"rou" + r"nds?"
 # "... answer flags nothing", "... log reports the code") are left out, so that ordinary prose stays legal.
 _SWEPT_REVIEW_NOUN = (r"(?:find" + r"ings?|reviews?|repros?|reproductions?|verdicts?|mutants?|mutations?"
                       r"|objections?|catch(?:es)?)")
-# Nouns that attribute only DIRECTLY after the possessive ("<family>'s report says", "<family>'s notes:");
-# one word later they are usually verbs ("<family>'s reply notes the date") and stay legal there.
-_SWEPT_DIRECT_REVIEW_NOUN = r"(?:notes?|points?|flags?|reports?)"
+# Nouns that attribute only DIRECTLY after the possessive ("<family>'s report says", "<family>'s notes:")
+# or after one listed modifier ("<family>'s reported points", "<family>'s detailed notes"); one other
+# word later they are usually verbs ("<family>'s reply notes the date") and stay legal there. "flags"
+# followed by a command option ("<family>'s flags --print") or by CLI wording such as "are passed" is
+# command-line documentation, not review provenance.
+_SWEPT_DIRECT_MODIFIER = (r"(?:reported|detailed|earlier|latest|last|previous|prior|original|remaining"
+                          r"|open|outstanding|key|main|own|final)")
+_SWEPT_DIRECT_REVIEW_NOUN = (r"(?:notes?|points?|reports?|flags?\b(?![ \t]*:?[ \t]*[`'\"(]?--?[a-z])"
+                             r"(?![ \t]+(?:are|is|were|was)[ \t]+(?:passed|forwarded|parsed|accepted"
+                             r"|supported|honou?red|set)\b))")
 # A grade word in any case, used only where the word "review" must follow it.
 _SWEPT_GRADE_WORD_ANY_CASE = r"(?i:blocker|blocking|critical|major|medium|med|minor|high|low|nit)"
 # The upper-case grade words that may stand bare before finding or item: not a SemVer class (MAJOR,
@@ -553,9 +574,11 @@ SWEPT_LABELS = (
      "a model identifier"),
     # a reviewer family used as an attribution: directly before a colon or a slash, or a possessive
     # followed (at most one word later) by review vocabulary ("Claude's context window" is not one),
-    # or directly by a notes, points, flags or reports noun ("<family>'s report says")
+    # or directly or after one listed modifier by a notes, points, flags or reports noun ("<family>'s
+    # report says", "<family>'s reported points"; not flags before a command option or "are passed")
     (re.compile(r"(?<![\w.$])" + _SWEPT_FAM + r"(?::|/|'s\s+(?:(?:\w+\s+)?" + _SWEPT_REVIEW_NOUN
-                + r"|" + _SWEPT_DIRECT_REVIEW_NOUN + r")\b)", re.IGNORECASE),
+                + r"|(?:" + _SWEPT_DIRECT_MODIFIER + r"\s+)?" + _SWEPT_DIRECT_REVIEW_NOUN + r")\b)",
+                re.IGNORECASE),
      "a reviewer family used as an attribution"),
     # a numbered or unnumbered review finding or item followed by a parenthesised upper-case grade or
     # a verdict ("finding 3 (MED)", "item 1 (BLOCKING)", "peer finding (HIGH)", "item 3 (false deny)"),
@@ -563,12 +586,15 @@ SWEPT_LABELS = (
     # review or peer between ("MEDIUM finding", "HIGH review item"), an upper-case id or MAJOR or MINOR
     # only with review or peer between ("MAJOR peer item", "M3 review finding"; "a C3 finding" and
     # "never a MINOR finding" are ordinary prose), or a grade word in any case followed by the word
-    # review ("a blocking review finding")
+    # review ("a blocking review finding"); and any upper-case grade, id, MAJOR or MINOR directly
+    # before a NUMBERED finding or item ("<id> item 4", "<id> finding 5"), as rule-id and SemVer
+    # prose is never numbered
     (re.compile(r"(?i:\b(?:peer[ -])?(?:find" + r"ing|item)s?)(?:[ -]?[0-9]+[a-z]?)?\s*\(\s*(?:"
                 + _SWEPT_GRADE + r"(?![\w-])|(?i:false[ -](?:deny|allow|positive|negative|block)\b))"
                 r"|\b(?:" + _SWEPT_GRADE_STRONG + r"[ -](?:" + _SWEPT_REVIEW_WORD + r")?|" + _SWEPT_GRADE
                 + r"[ -]" + _SWEPT_REVIEW_WORD + r"|" + _SWEPT_GRADE_WORD_ANY_CASE
-                + r"[ -](?i:peer[ -])?(?i:review)[ -])(?i:find" + r"ing|item)s?\b"),
+                + r"[ -](?i:peer[ -])?(?i:review)[ -])(?i:find" + r"ing|item)s?\b"
+                r"|\b" + _SWEPT_GRADE + r"[ -](?i:find" + r"ing|item)s?[ -]?[0-9]+[a-z]?\b"),
      "a review finding or item with a grade"),
     # a review-round-derived test name, here with no internal-allow exemption
     (re.compile(r"\btest_r" + r"[0-9]+[a-z]?_"), "a review-round test name"),
@@ -4050,7 +4076,24 @@ def _self_test(caller_env=None):
             ("family-attribution", fam_x + "'s output points at the file", fam_x + "'s poi" + "nts 1 and 2 are fixed"),
             # a round number followed by "of" is a loop count with an underscore separator as with a
             # space, while one followed by another identifier part is still a hit
-            ("bare-round", "n = " + rnd_w + "_3_of_9", "n = " + rnd_w + "_3_offset"))
+            ("bare-round", "n = " + rnd_w + "_3_of_9", "n = " + rnd_w + "_3_offset"),
+            # a rule id or SemVer class before an UNNUMBERED finding or item is ordinary prose, while
+            # any upper-case grade, id, MAJOR or MINOR directly before a NUMBERED one is a label
+            ("review-item-grade", "C" + "3 fin" + "dings. By design", "R" + "11 it" + "em 4 is fixed"),
+            ("review-item-grade", "the WARN a T" + "1 fin" + "ding adds", "QA-R" + "1 fin" + "ding 5"),
+            ("review-item-grade", "never a MIN" + "OR fin" + "ding, exit 2", "MAJ" + "OR fin" + "ding 2"),
+            ("review-item-grade", "each P" + "5 fin" + "ding message", "R" + "11 it" + "ems 3-4"),
+            # one listed modifier may stand between the possessive and a notes, points, flags or
+            # reports noun, while a subject and a verb ("reply notes", "log reports") stay legal
+            ("family-attribution", fam_x + "'s log rep" + "orts the date", fam_x + "'s reported poi" + "nts."),
+            ("family-attribution", fam_c + "'s reply no" + "tes the date", fam_c + "'s detailed no" + "tes."),
+            # flags before a command option or "are passed" style CLI wording is command-line
+            # documentation, while flags followed by anything else is still an attribution
+            ("family-attribution", fam_x + "'s fl" + "ags are passed unchanged", fam_x + "'s fl" + "ags are fixed"),
+            ("family-attribution", fam_c + "'s fl" + "ags --print and --model",
+             fam_c + "'s fl" + "ags - two were real"),
+            ("family-attribution", fam_x + "'s own fl" + "ags --model and --sandbox are forwarded",
+             fam_x + "'s own fl" + "ags: a missing guard"))
         narrow_flagged = [c for _k, c, _t in swept_narrow
                           if any(_swept_hits("a {} b\n".format(c))[key] for key in SWEPT_ROW_KEYS)]
         check("swept/narrowed-controls-unflagged", not narrow_flagged, narrow_flagged)
