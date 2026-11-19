@@ -337,6 +337,45 @@ def _cursor_drift(root, corpus):
     return (PASS, "{} Cursor rule(s) match regeneration".format(len(desired)))
 
 
+def _not_utf8(data):
+    """True when data (the raw bytes of an installed chat-skill copy, or None when absent) is not valid UTF-8."""
+    if data is None:
+        return False
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return False
+
+
+def _undecodable_copy(rel):
+    """The MALFORMED verdict for an installed chat-skill copy that is not valid UTF-8. gen_skill decodes every
+    text target before comparing it, so it refuses such a copy (exit 2) and cannot regenerate over it: this is
+    MALFORMED (exit 2) as gen_skill judges it, never drift (FAIL, exit 1) that regenerating would fix."""
+    return (MALFORMED, "{0} is not valid UTF-8, so tools/gen_skill.py refuses it (exit 2) and cannot regenerate "
+                       "it; to fix, remove {0} or restore it from the release, then run tools/gen_skill.py".format(rel))
+
+
+def _skill_source_problem(root):
+    """The reason the chat-skill source itself cannot render (read, parsed and resolved against the corpus, the
+    steps gen_skill.build_outputs takes from it), or None when it renders. Lets a build failure be blamed on the
+    file at fault: only a failure of these steps is the source's to repair. A corpus that does not load is not
+    the source's fault (C1 names it), so it is None too."""
+    try:
+        corpus = gen_skill.load_corpus(root.joinpath(*gen_skill.CORPUS_PARTS))
+        root_fd = gen_skill._open_root(root)
+    except (ValueError, OSError):
+        return None
+    try:
+        gen_skill.resolve(gen_skill.parse_source_text(
+            gen_skill._read_input(root_fd, root, gen_skill.SKILL_SRC_PARTS)), corpus)
+    except (ValueError, OSError) as exc:
+        return exc
+    finally:
+        os.close(root_fd)
+    return None
+
+
 def _skill_drift(root, corpus):
     """Mirror gen_skill's reconciliation, re-rooted at root (never call run_gen, which WRITES). Compare
     the installed chat-skill surface (site/downloads/aiqt/ plus the standalone aiqt-instructions.txt)
@@ -361,10 +400,13 @@ def _skill_drift(root, corpus):
     try:
         # Every text output is compared on its raw bytes against the rendered string's UTF-8 bytes, as
         # gen_skill compares them (it decodes the raw bytes, never a newline-translating text read): a
-        # read_text would turn CRLF into LF and pass a CRLF copy that gen_skill --check names as drift.
+        # read_text would turn CRLF into LF and pass a CRLF copy that gen_skill --check names as drift. A
+        # differing copy that is not valid UTF-8 is MALFORMED (gen_skill refuses it, exit 2), never drift.
         for path, content in standalone:
             current = path.read_bytes() if path.exists() else None
             if current != content.encode("utf-8"):
+                if _not_utf8(current):
+                    return _undecodable_copy(path.relative_to(root).as_posix())
                 drift.append(path.relative_to(root).as_posix())
         for path, content in binary:
             current = path.read_bytes() if path.exists() else None
@@ -374,6 +416,8 @@ def _skill_drift(root, corpus):
             target = reserved_dir / name
             current = target.read_bytes() if target.exists() else None
             if current != content.encode("utf-8"):
+                if _not_utf8(current):
+                    return _undecodable_copy((reserved_dir / name).relative_to(root).as_posix())
                 drift.append((reserved_dir / name).relative_to(root).as_posix())
         # Orphan scan over the reserved subtree (100% generated); os.walk(onerror=raise), not rglob.
         for dirpath, _dirs, filenames in os.walk(reserved_dir, onerror=_walk_raise):
@@ -407,7 +451,12 @@ def _plugin_skill_drift(root, corpus):
     The copy is compared on raw bytes (never a newline-translating text read). A directory on the path that
     is a symlink resolving outside the root, dangling or not a directory, a copy that is a symlink or not a
     regular file, an unreadable tree, or a skill that cannot be rendered while a skills/ tree is installed,
-    is MALFORMED (fail closed).
+    is MALFORMED (fail closed). So is a copy that is not valid UTF-8: gen_skill refuses it (exit 2) and cannot
+    regenerate over it, so it is never drift. When the skill cannot be rendered, the remedy names the cause:
+    the skill source only when the source itself does not render, the cause the error names otherwise. A
+    skills/ or skills/aiqt/ that is not a directory is to be removed (the remedy names it) before gen_skill runs;
+    with no chat-skill source installed the remedy also says to install it (or to remove the plugin's skills/
+    entry, as below), and with a source that does not render it also says to repair the source.
 
     skills/ and skills/aiqt/ are refused (MALFORMED) when either is a symlink, even one to a directory inside
     the root: gen_skill alone writes that tree and opens both with O_NOFOLLOW, refusing such a link, so this
@@ -427,18 +476,47 @@ def _plugin_skill_drift(root, corpus):
         return (MALFORMED, err)
     if not present:
         return (NA, "hooks plugin not installed, so no plugin copy of the chat skill to check")
+    src = root.joinpath(*gen_skill.SKILL_SRC_PARTS)
+    src_rel = "/".join(gen_skill.SKILL_SRC_PARTS)
+    skills_rel = "/".join(gen_skill.PLUGIN_SKILLS_PARTS) + "/"
     for depth in (len(gen_skill.PLUGIN_SKILLS_PARTS), len(gen_skill.PLUGIN_SKILL_PARTS) - 1):
         comp = root.joinpath(*gen_skill.PLUGIN_SKILL_PARTS[:depth])
+        comp_rel = comp.relative_to(root).as_posix()
         try:
-            is_link = stat.S_ISLNK(os.lstat(comp).st_mode)
+            mode = os.lstat(comp).st_mode
         except FileNotFoundError:
             break
         except OSError as exc:
-            return (MALFORMED, "cannot read {}: {}".format(comp, exc))
-        if is_link:
+            return (MALFORMED, "cannot read {}: {}".format(comp_rel, exc))
+        if stat.S_ISLNK(mode):
             return (MALFORMED, "refusing {}: it is a symlink, which gen_skill refuses there (it alone writes the "
-                               "plugin skills/ tree); replace the link with a real directory".format(
-                                   comp.relative_to(root).as_posix()))
+                               "plugin skills/ tree); replace the link with a real directory".format(comp_rel))
+        if not stat.S_ISDIR(mode):
+            # skills/ (or skills/aiqt/) as a regular file or other non-directory: named here, relative to the root,
+            # before a deeper lstat could report ENOTDIR on the path below it. The plugin root above skills/ is a
+            # directory (_reachable) and each depth checks its own component, so ENOTDIR at the next depth needs a
+            # race; it then falls to the OSError refusal above (fail closed). gen_skill can regenerate the tree
+            # only from a chat-skill source that renders, so the remedy follows the source as the build branch
+            # below does: absent, install it; present but not rendering (a dangling symlink, an unparseable file,
+            # an unknown cited id: _skill_source_problem), repair it; otherwise just remove the entry. The entry to
+            # remove is named, and comes first, so no step can be read as removing the source.
+            entry_rel = "/".join(gen_skill.PLUGIN_SKILLS_PARTS)
+            if not os.path.lexists(src):
+                todo = ("remove the non-directory entry {}, install the chat-skill source {} (with the rules it "
+                        "cites), then run tools/gen_skill.py; or, if you do not use the chat skill, remove the "
+                        "plugin's skills/ entry {} instead".format(comp_rel, src_rel, entry_rel))
+            else:
+                problem = _skill_source_problem(root)
+                if problem is None:
+                    todo = "remove the non-directory entry {}, then run tools/gen_skill.py".format(comp_rel)
+                else:
+                    todo = ("the chat-skill source {} does not render ({}), so remove the non-directory entry {}, "
+                            "repair that source (and the rules it cites) so it renders, then run "
+                            "tools/gen_skill.py; or, if you do not use the chat skill, remove the plugin's skills/ "
+                            "entry {}, that source and the download surface {}/ if installed".format(
+                                src_rel, problem, comp_rel, entry_rel, "/".join(gen_skill.RESERVED_PARTS)))
+            return (MALFORMED, "refusing {}: it is not a directory, which gen_skill refuses there (it alone writes "
+                               "the plugin skills/ tree); {}".format(comp_rel, todo))
     skills_dir = root.joinpath(*gen_skill.PLUGIN_SKILLS_PARTS)
     skills_present, err = _reachable(skills_dir, root, dir_chain_or_absent)
     if err:
@@ -448,19 +526,25 @@ def _plugin_skill_drift(root, corpus):
                                         dir_chain_or_absent)
         if err:
             return (MALFORMED, err)
-    src = root.joinpath(*gen_skill.SKILL_SRC_PARTS)
     if not skills_present and not os.path.lexists(src):
         return (NA, "the hooks plugin carries no skills/ tree and no chat-skill source is installed to "
                     "render one")
     try:
         reserved_map, _standalone, _binary = gen_skill.build_outputs(root)
     except (ValueError, OSError) as exc:
-        src_rel = "/".join(gen_skill.SKILL_SRC_PARTS)
-        skills_rel = "/".join(gen_skill.PLUGIN_SKILLS_PARTS) + "/"
-        if os.path.lexists(src):
+        downloads_rel = "/".join(gen_skill.RESERVED_PARTS) + "/"
+        if os.path.lexists(src) and _skill_source_problem(root) is not None:
             todo = ("repair the chat-skill source {} (and the rules it cites) so it renders, then run "
-                    "tools/gen_skill.py; or, if you do not use the chat skill, remove that source and the plugin's "
-                    "skills/ folder {}".format(src_rel, skills_rel))
+                    "tools/gen_skill.py; or, if you do not use the chat skill, remove that source, the plugin's "
+                    "skills/ folder {} and the download surface {} if installed".format(
+                        src_rel, skills_rel, downloads_rel))
+        elif os.path.lexists(src):
+            # The source reads, parses and resolves, so the build failed on a later step: LICENSE, the identity
+            # manifest, the pack VERSION, or a check that compares the source's meta version with the versioned
+            # zip name (the error then says to bump ZIP_VERSIONED_PARTS and its GENSRC_OUTPUTS target) or with
+            # the pack version (the error then says to set the meta version in the source). The error names the
+            # cause and its fix, so the remedy defers to it and neither blames nor clears the source.
+            todo = "fix the cause named above, then run tools/gen_skill.py"
         else:
             todo = ("install the chat-skill source {} (with the rules it cites), then run tools/gen_skill.py; or, "
                     "if you do not use the chat skill, remove the plugin's skills/ folder {}".format(
@@ -481,8 +565,15 @@ def _plugin_skill_drift(root, corpus):
                 drift.append("missing " + disp)
                 continue
             if not stat.S_ISREG(st.st_mode):
-                return (MALFORMED, "refusing {}: it is a symlink or not a regular file".format(disp))
-            if target.read_bytes() != content.encode("utf-8"):
+                # The build above rendered, so the source is installed: gen_skill rewrites the copy once the
+                # refused entry is gone.
+                return (MALFORMED, "refusing {}: it is a symlink or not a regular file, which gen_skill refuses "
+                                   "there (it alone writes the plugin skills/ tree); remove it, then run "
+                                   "tools/gen_skill.py".format(disp))
+            current = target.read_bytes()
+            if current != content.encode("utf-8"):
+                if _not_utf8(current):
+                    return _undecodable_copy(disp)
                 drift.append(disp)
         # Orphan scan over the plugin skills/ tree (100% generated by gen_skill): every entry, a directory
         # included, that is not the copy or its parent directory is named. os.walk(onerror=raise), not rglob.
@@ -838,6 +929,14 @@ def main():
 #      plugin's copy of the chat skill is checked (C2 plugin-skill).
 #   16p-16r. CRLF in one download copy only fails C2 skill; a plugin copy with no skill source is MALFORMED with
 #      the remedy named; a skills/ or skills/aiqt/ symlink inside the root is refused as gen_skill refuses it.
+#   16s-16u. A non-UTF-8 download or plugin copy is MALFORMED as gen_skill refuses it; a build failure after the
+#      skill source renders defers to the cause the error names, never clearing the source; skills/ or skills/aiqt/
+#      as a regular file is refused naming it, relative to the root, with the remedy for a tree with or without the
+#      skill source.
+#   16v/16w. A mode-0 plugin root or skills/ is MALFORMED naming the unreadable component, relative to the root; a
+#      plugin copy that is a symlink or a directory is refused with the remedy.
+#   16x. skills/ or skills/aiqt/ as a regular file beside a skill source that is present but does not render (a
+#      dangling symlink, an unparseable file) gets the repair-the-source remedy, never a bare "run gen_skill".
 
 _APEX = """---
 corpus-id: apex01
@@ -1821,6 +1920,197 @@ def self_test_main():
                                 "MALFORMED naming it (gen_skill --check exit 2 too, got {}):\n{}\n{}".format(
                                     label, "/".join(parts), gcode, out, gbuf.getvalue()))
 
+        # 16s. A 0xff byte at the start of one installed copy (the download provenance.md, the standalone
+        #      aiqt-instructions.txt, or the plugin SKILL.md): gen_skill --check refuses it (exit 2) and a write run
+        #      cannot repair it, so conformance is exit 2, C2 MALFORMED with that surface MALFORMED naming the file
+        #      as not valid UTF-8, with the remedy. Red when the byte compare reads it as drift (exit 1, FAIL).
+        for label, parts, surface in (
+                ("provenance", gen_skill.RESERVED_PARTS + ("provenance.md",), "; skill: MALFORMED"),
+                ("instructions", gen_skill.INSTRUCTIONS_PARTS, "; skill: MALFORMED"),
+                ("plugin-copy", gen_skill.PLUGIN_SKILL_PARTS, "plugin-skill: MALFORMED")):
+            utree = _plugin_skill_tree("non-utf8-" + label)
+            ufile = utree.joinpath(*parts)
+            ufile.write_bytes(b"\xff" + ufile.read_bytes())
+            code, out = run_capture(utree)
+            gbuf = io.StringIO()
+            with redirect_stdout(gbuf), redirect_stderr(io.StringIO()):
+                gcode = gen_skill.run_gen(utree, True)
+            named = "/".join(parts)
+            if (code != 2 or status_of(out, "C2") != MALFORMED or surface not in out
+                    or "{} is not valid UTF-8".format(named) not in out
+                    or "remove {} or restore it from the release".format(named) not in out or gcode != 2):
+                failures.append("16s {}: a non-UTF-8 {} expected conformance exit 2, C2 MALFORMED with {} naming "
+                                "it and the remedy (gen_skill --check exit 2 too, got {}):\n{}\n{}".format(
+                                    label, named, surface, gcode, out, gbuf.getvalue()))
+
+        # 16t. The plugin copy cannot be rendered while the chat-skill source reads, parses and resolves (LICENSE
+        #      removed; the source's meta version bumped past the versioned zip name; or, in a tree carrying the
+        #      authoring marker, a pack VERSION the meta version differs from): the message names the cause, does
+        #      not tell the adopter to repair the source, and does not say the source is not at fault (the
+        #      pack-alignment error says to set the meta version in it). A source that does not parse still gets the source remedy, whose
+        #      remove option names the download surface too. Red when the source remedy is given for every build
+        #      failure, or when the remedy clears the source.
+        src_rel = "/".join(gen_skill.SKILL_SRC_PARTS)
+        zipver = gen_skill.zip_versioned_version()
+
+        def _bump_meta_version(t):
+            spath = t.joinpath(*gen_skill.SKILL_SRC_PARTS)
+            spath.write_bytes(spath.read_bytes().replace(
+                "\nversion: {}\n".format(zipver).encode("utf-8"), b"\nversion: 9.9.9\n", 1))
+
+        def _pack_version_ahead(t):
+            t.joinpath(*gen_skill.PACK_VERSION_PARTS).write_bytes(b"9.0.0\n")
+            (t / ".aiqt" / "authoring.toml").write_text(
+                'format-version = 1\nrole = "pack-authoring-repository"\n', encoding="utf-8")
+
+        for label, breaker, blames_source, named in (
+                ("license-missing", lambda t: (t / "LICENSE").unlink(), False, "LICENSE"),
+                ("zip-name", _bump_meta_version, False,
+                 "does not match the skill meta version '9.9.9'"),
+                ("pack-alignment", _pack_version_ahead, False,
+                 "skill version {!r} differs from the pack version '9.0.0' (VERSION)".format(zipver)),
+                ("source-unparsable", lambda t: t.joinpath(*gen_skill.SKILL_SRC_PARTS).write_bytes(
+                    b"not a section\n" + t.joinpath(*gen_skill.SKILL_SRC_PARTS).read_bytes()), True, src_rel)):
+            btree = _plugin_skill_tree("plugin-skill-build-" + label)
+            breaker(btree)
+            code, out = run_capture(btree)
+            blamed = "repair the chat-skill source " + src_rel in out
+            if blames_source:
+                remedy_ok = blamed and "the download surface {}/".format("/".join(gen_skill.RESERVED_PARTS)) in out
+            else:
+                remedy_ok = (not blamed and "; to fix, fix the cause named above, then run tools/gen_skill.py" in out
+                             and "not at fault" not in out)
+            if (code != 2 or status_of(out, "C2") != MALFORMED or "plugin-skill: MALFORMED" not in out
+                    or named not in out or not remedy_ok):
+                failures.append("16t {}: a plugin copy that cannot be rendered expected exit 2, plugin-skill MALFORMED "
+                                "naming {} and {} the skill source:\n{}".format(
+                                    label, named, "blaming" if blames_source else "not blaming", out))
+
+        # 16u. skills/ (or skills/aiqt/) in the plugin as a regular file: exit 2, plugin-skill MALFORMED naming that
+        #      path itself, relative to the root, as gen_skill names it, with the remedy: remove that non-directory
+        #      entry (named), then run gen_skill, while a chat-skill source that renders is installed; without the
+        #      source (gen_skill cannot run), remove the entry, install the source, then run gen_skill, or remove the
+        #      plugin's skills/ entry if the chat skill is not used. Red when the loop skips its not-a-directory
+        #      check (skills/: the next lstat's ENOTDIR on skills/aiqt below it, in absolute form; skills/aiqt/:
+        #      _reachable's refusal, in absolute form), when the refusal drops the remedy, when the remedy does not
+        #      name the entry to remove ("remove it", readable as the source), or when it says only to run gen_skill
+        #      in a tree without the source.
+        entry_rel = "/".join(gen_skill.PLUGIN_SKILLS_PARTS)
+        for label, parts, drop_src in (("skills", gen_skill.PLUGIN_SKILLS_PARTS, False),
+                                       ("skills-aiqt", gen_skill.PLUGIN_SKILL_PARTS[:-1], False),
+                                       ("skills-nosource", gen_skill.PLUGIN_SKILLS_PARTS, True),
+                                       ("skills-aiqt-nosource", gen_skill.PLUGIN_SKILL_PARTS[:-1], True)):
+            ftree = _plugin_skill_tree("plugin-skill-file-" + label)
+            fpath = ftree.joinpath(*parts)
+            shutil.rmtree(fpath)
+            fpath.write_text("not a directory\n", encoding="utf-8")
+            if drop_src:
+                ftree.joinpath(*gen_skill.SKILL_SRC_PARTS).unlink()
+                todo = ("remove the non-directory entry {}, install the chat-skill source {} (with the rules it "
+                        "cites), then run tools/gen_skill.py; or, if you do not use the chat skill, remove the "
+                        "plugin's skills/ entry {} instead".format("/".join(parts), src_rel, entry_rel))
+            else:
+                todo = "remove the non-directory entry {}, then run tools/gen_skill.py".format("/".join(parts))
+            code, out = run_capture(ftree)
+            gbuf = io.StringIO()
+            with redirect_stdout(gbuf), redirect_stderr(io.StringIO()):
+                gcode = gen_skill.run_gen(ftree, True)
+            want = ("refusing {}: it is not a directory, which gen_skill refuses there (it alone writes the plugin "
+                    "skills/ tree); {})".format("/".join(parts), todo))
+            if (code != 2 or status_of(out, "C2") != MALFORMED or "plugin-skill: MALFORMED (" + want not in out
+                    or str(ftree / "plugin") in out or gcode != 2):
+                failures.append("16u {}: {} as a regular file expected exit 2, plugin-skill MALFORMED with {!r} and no "
+                                "absolute path (gen_skill --check exit 2 too, got {}):\n{}\n{}".format(
+                                    label, "/".join(parts), want, gcode, out, gbuf.getvalue()))
+
+        # 16v. The plugin root (or skills/) at mode 0, so the lstat of the component below it is refused (EACCES):
+        #      exit 2, C2 MALFORMED with the plugin-skill detail "cannot read <that component>", relative to the
+        #      root. Red when the loop lets that OSError pass (a later read then reports it in absolute form).
+        #      Same root-vs-nonroot guard as cases 9-15; the mode is restored so cleanup can remove the tree.
+        for label, parts, named in (("plugin-root", gen_skill.PLUGIN_ROOT_PARTS, gen_skill.PLUGIN_SKILLS_PARTS),
+                                    ("skills", gen_skill.PLUGIN_SKILLS_PARTS, gen_skill.PLUGIN_SKILL_PARTS[:-1])):
+            rtree = _plugin_skill_tree("plugin-skill-unreadable-" + label)
+            rdir = rtree.joinpath(*parts)
+            os.chmod(rdir, 0)
+            try:
+                if _unreadable_or_skip(rdir, "16v " + label):
+                    code, out = run_capture(rtree)
+                    want = "plugin-skill: MALFORMED (cannot read {}: ".format("/".join(named))
+                    if code != 2 or status_of(out, "C2") != MALFORMED or want not in out:
+                        failures.append("16v {}: {} at mode 0 expected exit 2, C2 MALFORMED with {!r}:\n{}".format(
+                            label, "/".join(parts), want, out))
+            finally:
+                os.chmod(rdir, 0o755)
+
+        # 16w. The plugin copy skills/aiqt/SKILL.md as a symlink to a byte-identical copy inside the root, or as a
+        #      directory: gen_skill refuses either at that name, so conformance is exit 2, plugin-skill MALFORMED
+        #      naming it, with the remedy (remove it, then run gen_skill). Red when the refusal drops the remedy.
+        plug_md_rel = "/".join(gen_skill.PLUGIN_SKILL_PARTS)
+        for label in ("symlink", "directory"):
+            wtree = _plugin_skill_tree("plugin-skill-copy-" + label)
+            wpath = wtree.joinpath(*gen_skill.PLUGIN_SKILL_PARTS)
+            if label == "symlink":
+                twin = wtree / "shared" / "SKILL.md"
+                twin.parent.mkdir()
+                shutil.move(str(wpath), str(twin))
+                wpath.symlink_to(os.path.relpath(twin, wpath.parent))
+            else:
+                wpath.unlink()
+                wpath.mkdir()
+            code, out = run_capture(wtree)
+            want = ("plugin-skill: MALFORMED (refusing {}: it is a symlink or not a regular file, which gen_skill "
+                    "refuses there (it alone writes the plugin skills/ tree); remove it, then run "
+                    "tools/gen_skill.py)".format(plug_md_rel))
+            if code != 2 or status_of(out, "C2") != MALFORMED or want not in out:
+                failures.append("16w {}: the plugin copy {} as a {} expected exit 2, C2 MALFORMED with {!r}:\n{}".format(
+                    label, plug_md_rel, label, want, out))
+
+        # 16x. skills/ (or skills/aiqt/) in the plugin as a regular file while the chat-skill source is present but
+        #      does not render (a dangling symlink at its path, or a file that does not parse): gen_skill then fails
+        #      on the source, so the remedy names the source and its cause, says to remove the entry and repair the
+        #      source, and never gives the bare "remove the entry, then run gen_skill". Red when the remedy is
+        #      chosen by the source path's existence alone.
+        downloads_rel = "/".join(gen_skill.RESERVED_PARTS)
+
+        def _dangle_source(t):
+            spath = t.joinpath(*gen_skill.SKILL_SRC_PARTS)
+            spath.unlink()
+            spath.symlink_to("skill-source-missing.md")
+
+        def _garble_source(t):
+            spath = t.joinpath(*gen_skill.SKILL_SRC_PARTS)
+            spath.write_bytes(b"not a section\n" + spath.read_bytes())
+
+        for label, parts, breaker, cause in (
+                ("skills-dangling-source", gen_skill.PLUGIN_SKILLS_PARTS, _dangle_source, "symlink"),
+                ("skills-aiqt-dangling-source", gen_skill.PLUGIN_SKILL_PARTS[:-1], _dangle_source, "symlink"),
+                ("skills-unparsable-source", gen_skill.PLUGIN_SKILLS_PARTS, _garble_source, "=== section ===")):
+            xtree = _plugin_skill_tree("plugin-skill-file-" + label)
+            xpath = xtree.joinpath(*parts)
+            shutil.rmtree(xpath)
+            xpath.write_text("not a directory\n", encoding="utf-8")
+            breaker(xtree)
+            code, out = run_capture(xtree)
+            gbuf = io.StringIO()
+            with redirect_stdout(gbuf), redirect_stderr(io.StringIO()):
+                gcode = gen_skill.run_gen(xtree, True)
+            named = "/".join(parts)
+            head = ("plugin-skill: MALFORMED (refusing {}: it is not a directory, which gen_skill refuses there (it "
+                    "alone writes the plugin skills/ tree); the chat-skill source {} does not render (".format(
+                        named, src_rel))
+            tail = ("), so remove the non-directory entry {}, repair that source (and the rules it cites) so it "
+                    "renders, then run tools/gen_skill.py; or, if you do not use the chat skill, remove the plugin's "
+                    "skills/ entry {}, that source and the download surface {}/ if installed)".format(
+                        named, entry_rel, downloads_rel))
+            start = out.find(head)
+            middle = out[start + len(head):out.find(tail, start)] if start >= 0 else ""
+            if (code != 2 or status_of(out, "C2") != MALFORMED or start < 0 or tail not in out
+                    or cause not in middle or str(xtree / "plugin") in out or gcode != 2):
+                failures.append("16x {}: {} as a regular file beside a source that does not render expected exit 2, "
+                                "plugin-skill MALFORMED with the repair-the-source remedy naming {!r} (gen_skill "
+                                "--check exit 2 too, got {}):\n{}\n{}".format(
+                                    label, named, cause, gcode, out, gbuf.getvalue()))
+
         # 16g. A dangling symlink at .claude must fail closed via C2 and C3 MALFORMED (exit 2), as
         #      check_rule_placement refuses the same tree: it never reads as an absent surface (NOT
         #      APPLICABLE, a false clean). A live link to a directory inside the root is read (19i).
@@ -2217,7 +2507,7 @@ def self_test_main():
             print("  - " + f)
         return 1
     skip_note = ("" if not skipped_unreadable else
-                 " NOTE: {} unreadable-input-dir case(s) (9-15, 16f) were SKIPPED this run because the "
+                 " NOTE: {} unreadable-input-dir case(s) (9-15, 16f, 16v) were SKIPPED this run because the "
                  "runner could still read the chmod-0 dir (root/DAC-bypass): {}; run where POSIX read "
                  "bits are enforced to exercise them.".format(
                      len(skipped_unreadable), ", ".join(skipped_unreadable)))
@@ -2235,7 +2525,11 @@ def self_test_main():
           "and an installed plugin's skills/aiqt/SKILL.md must equal the rendered skill (a hand edit, CRLF "
           "line ends, a missing copy and a planted skills/rogue/SKILL.md fail C2); CRLF in one download copy "
           "only fails C2 skill; a plugin copy with no skill source, or a skills/ or skills/aiqt/ symlink inside "
-          "the root, is MALFORMED (the former naming the remedy); an adopter rule with CRLF "
+          "the root, is MALFORMED (the former naming the remedy); a non-UTF-8 download or plugin copy, a "
+          "skills/ or skills/aiqt/ that is a regular file (with the remedy for a tree with a skill source that "
+          "renders, with none, or with one that does not render), and a plugin copy that is a symlink or a directory, are MALFORMED naming the file, a "
+          "mode-0 plugin root or skills/ is MALFORMED naming the unreadable component, and a build failure "
+          "after the skill source renders defers to the cause the error names; an adopter rule with CRLF "
           "line endings or a "
           "frontmatter comment line passes C3; absent input (corpus, "
           ".claude/rules) degrades to NOT APPLICABLE; malformed manifests, unreadable input dirs "
