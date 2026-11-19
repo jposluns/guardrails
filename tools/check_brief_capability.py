@@ -8039,14 +8039,42 @@ def self_test(report_path=None):
             ("perf/p8-long-lead-linear", "print ", "WORKER_STATUS ", ""),
             ("perf/p8-deictic-below-linear", "write the block below ", "WORKER_STATUS ", ""),
             # D1: one sentence of many refusals and prohibited action clauses, and one of many wrapped lines, each
-            # read in one forward pass with no rescan of earlier refusals or clauses; and one long coordinated
-            # fronted list, whose list boundaries are found in one pass, not by reading the remaining items for each
-            # item (that rescan made the work quadratic in the items)
+            # read in one forward pass with no rescan of earlier refusals or clauses
             ("perf/d1-long-sentence-linear", "if denied, do not run it inline and ", "", ""),
-            ("perf/d1-wrapped-lines-linear", "if refused, run it\n", "", ""),
-            ("perf/d1-fronted-list-linear", D1_GROWTH_ITEM, D1_GROWTH_TEXT.split("{}")[0],
-             D1_GROWTH_TEXT.split("{}")[1])):
+            ("perf/d1-wrapped-lines-linear", "if refused, run it\n", "", "")):
         check(check_id, _linear(unit, prefix, suffix), True)
+    # D1: one long coordinated fronted list, whose list boundaries are found in one pass, not by reading the
+    # remaining items for each item (that rescan made the work quadratic in the items). The input repeats whole
+    # items, and whitespace before the closing or clause fills the bytes a whole item would not: the item's length
+    # divides the two sizes' difference, so one pad serves both. The row rebuilds both inputs as LINEAR_CHILD does
+    # and requires each to keep the closing or clause and to read every item as listed (a last item cut short and
+    # joined to the suffix leaves no coordinated list to time)
+    linear_lead, linear_sizes = "Input notes.\n\n", (1 << 13, 1 << 16)
+    linear_builder = ("lead = {!r}\n".format(linear_lead), "for size in (1 << 13, 1 << 16):\n",
+                      "    body = size - len(lead) - len(prefix) - len(suffix)\n",
+                      "    data = (lead + prefix + (unit * (body // len(unit) + 1))[:body] + suffix).encode('utf-8')\n")
+
+    def linear_texts(unit, prefix, suffix):
+        """The briefs LINEAR_CHILD times for `unit`, `prefix` and `suffix`, built as its loop builds them."""
+        return [linear_lead + prefix + (unit * (body // len(unit) + 1))[:body] + suffix for body in (
+            size - len(linear_lead) - len(prefix) - len(suffix) for size in linear_sizes)]
+
+    def d1_list_answers(text):
+        """The distinct (opener, words, listed) of the D1 clauses of `text`, in first-seen order."""
+        return list(dict.fromkeys((clause[1], tuple(word for word, _, _ in clause[2]), answer)
+                                  for paragraph in d1_paragraphs(text) for _, clauses in d1_sentences(paragraph)
+                                  for clause, answer in zip(clauses, d1_listed(clauses))))
+
+    d1_prefix, d1_tail = D1_GROWTH_TEXT.split("{}")
+    d1_pad = (linear_sizes[0] - len(linear_lead) - len(d1_prefix) - len(d1_tail)) % len(D1_GROWTH_ITEM)
+    d1_suffix = " " * d1_pad + d1_tail
+    d1_listed_answers = [(None, ("input", "notes"), False), (None, ("if", "denied"), True),
+                         (",", ("rather", "than", "retry"), True), (",", ("retry",), True),
+                         ("or", ("run", "it", "inline"), False), (",", ("report", "the", "refusal"), False)]
+    check("perf/d1-fronted-list-linear", (
+        all(line in LINEAR_CHILD for line in linear_builder),
+        [d1_list_answers(text) for text in linear_texts(D1_GROWTH_ITEM, d1_prefix, d1_suffix)],
+        _linear(D1_GROWTH_ITEM, d1_prefix, d1_suffix)), (True, [d1_listed_answers] * len(linear_sizes), True))
     # ---------- the advisory rules: printed, never refusing ----------
     check("r1/run-prose-advisory", _outcome(RUN_PROSE), (0, [("R1", "ADVISORY")]))
     check("r1/negated-ok", _outcome(NEGATED), (0, []))
