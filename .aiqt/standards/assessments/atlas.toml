@@ -1,0 +1,120 @@
+# Fit assessment records for MITRE ATLAS. Schema and definitions: RUBRIC.md in this folder.
+# Own words only; no technique text is reproduced.
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-seci-output-encoding.md"
+rule-slug = "output-encoding"
+rule-blob = "476ba2c8e39b7c280b0344dd55225747e8357f09"
+framework = "atlas"
+id = "AML.T0077"
+current-fit = "tight"
+edition = "2026.06"
+source = "ATLAS-2026.06--techniques.csv"
+source-sha256 = "ba5bd12107a5ebf95a701b2d0447e0a27eebd5d7fed0c1a4e248651eb19872d3"
+locator = "technique AML.T0077 LLM Response Rendering"
+text-location = "line 124 of the techniques file, the whole technique row, which has no part that adds no elements; and, in the release's YAML copy ATLAS-2026.06.yaml (SHA-256 b771de8b1489564b2838a709c7429849a9575dbd94073928817fe1a21661e70a), the technique at lines 3531 to 3556 and every relation whose target is AML.T0077: the five at lines 9317 to 9319, 10119 to 10121, 10615 to 10617, 13038 to 13040 and 13158 to 13160 are case studies that employ the technique, none is a mitigates relation, and the technique specializes no parent (its relations at lines 15538 to 15542 are an achieves relation only), so the release links no mitigations to it; the case studies are separate entries of the release, not part of the technique, and add no elements"
+edition-check = "match"
+boundary = "model output passed to a rendering sink such as HTML"
+core = "The adversary gets the model to emit content that the user's client renders automatically, such as an image whose address carries private data to a server the adversary controls; variants use HTML tags or markdown."
+covers = [
+  "output encoded for an HTML sink renders a tag as inert text, which stops the HTML tag variant",
+]
+omits = [
+  "the markdown image variant, where the client renders markdown it is meant to render",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "B"
+proposed = "broad"
+review-state = "assessed"
+conventions = [4]
+rationale = "The entry names HTML tags as a variant, and encoding for the HTML sink breaks that variant, so the rule interrupts the core mechanism for one main variant. The markdown variant is left out, which makes it broad under B on every reading of every open convention. The release links no mitigations to the technique, in its techniques file or through a mitigates relation in its YAML, and the technique has no parent whose mitigations it would take in, so omits holds only the variant the rule leaves out; mitigations an assessor might add from outside the entry, such as limiting where the client may fetch from, are not listed mitigations and are not counted."
+assumptions = [
+  "breaking one named variant at the sink counts as interrupting the core mechanism (test 5)",
+  "a rule at the producing side can be tight to a technique completed by the rendering client (convention 4); if it cannot, label-a is broad",
+  "convention 3 is not engaged, and question (a) of its ordered test is the one that answers: the technique's object is the LLM whose response carries the private data, a kind of software the assistant itself is, so the technique reaches the assistant's own output directly; the client application that renders the response is the user's, not the assistant, and the layer it acts at is the question of convention 4",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-seca-resource-bounds.md"
+rule-slug = "resource-bounds"
+rule-blob = "3f8e9e338135afe8eb97422619e92ef3191a55bf"
+framework = "atlas"
+id = "AML.T0029"
+current-fit = "tight"
+edition = "2026.06"
+source = "ATLAS-2026.06--techniques.csv"
+source-sha256 = "ba5bd12107a5ebf95a701b2d0447e0a27eebd5d7fed0c1a4e248651eb19872d3"
+locator = "technique AML.T0029 Denial of AI Service"
+text-location = "line 60 of the techniques file, the whole technique row, which has no part that adds no elements; and, in the release's YAML copy ATLAS-2026.06.yaml (SHA-256 b771de8b1489564b2838a709c7429849a9575dbd94073928817fe1a21661e70a), the technique at lines 1907 to 1927 and its three mitigates relations, from AML.M0004 at lines 13572 to 13576, AML.M0015 at lines 13963 to 13967 and AML.M0019 at lines 14101 to 14105, with those mitigations' own entries at lines 4859 to 4861, 5058 to 5065 and 5155 to 5161; the other relations whose target is AML.T0029 (lines 8885 to 8887, 10657 to 10659 and 10667 to 10669) are case studies that employ the technique and add no elements, and the technique specializes no parent (its relations at lines 15115 to 15119 are an achieves relation only)"
+edition-check = "match"
+boundary = "the assistant's own tool calls, recursion, token and cost budgets and request rate"
+core = "An adversary floods an AI service with requests, or with inputs that need heavy compute, to degrade or shut it down."
+covers = [
+  "bounds and fail safe behaviour on the assistant's own consumption",
+  "a circuit breaker that relieves a degraded dependency",
+]
+omits = [
+  "admission control or rate limits on requests coming into the AI service, including a limit on how many queries each user may make in a period (listed mitigation AML.M0004)",
+  "a check on the queries coming into the AI service: either assessing them before inference, to detect and block adversarial or atypical ones, or enforcing a timeout on queries that use too much compute (listed mitigation AML.M0015, whose relation to this technique offers the two acts as alternatives, so meeting either one meets it; read as binding only the assistant, the rule meets neither at the AI service)",
+  "access control on the model's API: users verify their identity before they reach the model, and its queries are monitored against usage policy (listed mitigation AML.M0019)",
+]
+label-a = "broad"
+label-b = "broad"
+adopted = "B"
+proposed = "broad"
+review-state = "assessed"
+conventions = [8]
+rationale = "Read as binding only the assistant's own consumption (convention 8), the rule does not act on requests coming into the AI service the technique floods, so it shares the theme but not the object and both labels are broad. Read as also binding the services of the product the assistant builds, it would limit inbound load, which makes label-a tight; but read over the whole control, the release links three mitigations to the technique, and on neither reading does the rule control access to the model's API (AML.M0019), so label-b is broad on every reading of every open convention and convention 8 decides only label-a."
+assumptions = [
+  "the rule binds only the assistant's own consumption, not the services of the product it builds (convention 8); the other reading gives label-a tight, and it is the reading the rule's tight mappings to SC-5, API4, CWE-400 and CWE-770, all about inbound limits, rely on",
+  "on the other reading of convention 8 label-b stays broad: the bound on request rate meets the limit on queries in a period (AML.M0004) at most in part, since it is not a limit on each user, and the limits, timeouts and budgets meet AML.M0015 through its timeout alternative, but nothing in the rule controls access to the model's API (AML.M0019); this is the assessor's reading of the rule applied to the product's services, not a reading the rule's text states",
+  "the listed mitigations are read from the whole technique as the pinned release presents it: its techniques file row carries none, and the release links them to the technique through the mitigates relations in its YAML copy of the same edition, so both copies are read and the control is not narrowed to the row",
+  "each listed mitigation is read as broadly as the text of the relation that links it to this technique: AML.M0015's own entry describes only detecting and blocking adversarial or atypical queries, but its relation here (lines 13966 to 13967) offers enforcing a timeout on queries that use too much as an alternative to assessing queries before inference, so either act meets it and the timeout alone is not counted as only part of it; AML.M0004's relation here (lines 13575 to 13576) asks for a limit on the queries users can make in an interval, as its entry does",
+  "convention 3 is not engaged, and question (b) of its ordered test is the one that answers: the technique's object, an AI service, is a class that takes in AI software of every kind, so question (a) does not answer; the technique acts on the inbound edge of the AI service it floods, and the rule's bounds sit on what the assistant sends out, so counting the assistant as part of the system would not put the rule on that edge",
+  "convention 4 is not what decides this row: under the recorded reading the rule and the technique act on different objects, not on the same object at different layers; under B the layer at which access control on the model's API sits would not change label-b either, since B reads every listed mitigation whatever its layer",
+]
+assessor = "first-pass review"
+date = "2026-11-18"
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-seca-resource-bounds.md"
+rule-slug = "resource-bounds"
+rule-blob = "3f8e9e338135afe8eb97422619e92ef3191a55bf"
+framework = "atlas"
+id = "AML.T0034.000"
+current-fit = "tight"
+edition = "2026.06"
+source = "ATLAS-2026.06--techniques.csv"
+source-sha256 = "ba5bd12107a5ebf95a701b2d0447e0a27eebd5d7fed0c1a4e248651eb19872d3"
+locator = "sub-technique AML.T0034.000 Excessive Queries"
+text-location = "line 63 of the techniques file, the whole sub-technique row, which has no part that adds no elements; and, in the release's YAML copy ATLAS-2026.06.yaml (SHA-256 b771de8b1489564b2838a709c7429849a9575dbd94073928817fe1a21661e70a), the sub-technique at lines 1985 to 2008, its specializes relation to the parent technique AML.T0034 at lines 15135 to 15138, the parent at lines 1946 to 1984, and the parent's two mitigates relations, from AML.M0004 at lines 13577 to 13581 and AML.M0019 at lines 14106 to 14109, with those mitigations' own entries, their created-date and modified-date lines included, at lines 4859 to 4864 and 5155 to 5164; no mitigates relation in the release targets AML.T0034.000 itself, and the parent's other sub-techniques at lines 2009 to 2071 are read for the core only"
+edition-check = "match"
+boundary = "the assistant's own tool calls, recursion, token and cost budgets and request rate"
+core = "An adversary sends a high volume of ordinary queries to an AI system to exhaust its capacity and raise its operating cost, exploiting rate limits, autoscaling and pay per use billing."
+covers = [
+  "bounds and fail safe behaviour on the assistant's own consumption and cost",
+]
+omits = [
+  "rate limits and quotas on queries coming into the AI system, including a limit on how many queries each user may make in a period (listed mitigation AML.M0004, which the release links to the parent technique; its relation there, at lines 13580 to 13581, gives hindering computationally expensive inputs as the purpose of the limit, which is the mechanism of the sibling sub-technique AML.T0034.001 Resource-Intensive Queries rather than of excessive queries; the record reads the mitigation by the act that relation names, a limit on the queries users can make in an interval, which bounds excessive queries as well, and does not narrow it to that purpose)",
+  "autoscaling and billing limits on the service side",
+  "access control on the model's API: users verify their identity before they reach the model, and its queries are monitored against usage policy (listed mitigation AML.M0019, which the release links to the parent technique)",
+]
+label-a = "broad"
+label-b = "broad"
+adopted = "B pending conventions 8 and 10"
+proposed = "pending-convention"
+review-state = "assessed"
+conventions = [8, 10]
+rationale = "Same reading of convention 8 as the Denial of AI Service row: the technique acts on the service's inbound edge and the rule, read as binding only the assistant, bounds the assistant's own outbound use, so both labels are broad. Read as also binding the product's services, it would be tight under A; on the recorded reading of convention 10 the sub-technique takes in the two mitigations the release links to its parent, and on neither reading of convention 8 does the rule control access to the model's API (AML.M0019), so label-b is broad. The release does not say which reading of convention 10 it intends; the assessor infers from its linking pattern evidence against the recorded reading, and from the creation dates of its entries evidence both for it and against it. If both conventions are read the other way label-b is tight, so the B label is pending conventions 8 and 10 together."
+assumptions = [
+  "the rule binds only the assistant's own consumption, not the services of the product it builds (convention 8); the other reading gives label-a tight, and it is the reading the rule's tight mappings to SC-5, API4, CWE-400 and CWE-770, all about inbound limits, rely on",
+  "on the other reading of convention 8, with convention 10 read as recorded, label-b stays broad: the bound on request rate meets the limit on queries in a period (AML.M0004) at most in part, since it is not a limit on each user, and the cost budget caps what autoscaling and billing can run up, but nothing in the rule controls access to the model's API (AML.M0019); this is the assessor's reading of the rule applied to the product's services, not a reading the rule's text states",
+  "the sub-technique takes in the mitigations the release links to its parent (convention 10, read as the rubric states it in this pass): the release records it as specializing AML.T0034 and links no mitigation to it directly; this reading is the assessor's proposal, the release does not say which reading it intends, and the assessor infers evidence both ways from it: against the reading, the release repeats some of a parent's links on each sub-technique and not others (AML.M0004 and AML.M0024 on AML.T0024 and all three of its sub-techniques, while AML.M0019 is linked to AML.T0024 and none of them; 15 of the 45 links from a mitigation to a parent that has sub-techniques are repeated on every sub-technique, 18 on some and 12 on none; of the 40 sub-techniques with no direct mitigation, the 13 whose parent has a linked mitigation bear on the question), so the missing links on AML.T0034.000 can be read as deliberate; for the reading, counted by each sub-technique's created-date, those created in 2021 repeat 48 of their parents' 92 links, those created in 2023 repeat 6 of 14, in 2024 0 of 3, in 2025 17 of 26 and in 2026 2 of 22, a mixed pattern rather than a steady fall with age (the 2026 figure includes the three AML.T0034 sub-techniques themselves, and without them it is 2 of 16), and those three were created on 2026-03-30, after the modified-date of 2025-12-23 that AML.M0004 and AML.M0019 both carry, so the missing links fit a gap in a new entry's links as well as a deliberate choice, though a modified-date says little about when an entry was last looked at, since 26 of the 35 mitigations carry 2025-12-23 and 170 of the 173 techniques carry 2026-05-27; against the reading on the same dates, AML.M0019 was created on 2024-01-12, after the 11 sub-techniques created in 2021 of the parents it is linked to, so if that date is when it entered the release its links to those parents were added while those sub-techniques existed, yet it is repeated on 1 of those 11 (and on 1 of the 17 sub-techniques of all its parents), while AML.M0004, created on 2023-04-12, is repeated on 6 of the same 11, so its absence from AML.T0034.000 fits the way AML.M0019 is linked across the release as well as it fits the sub-technique being new; the relations themselves carry no dates, so when any one link was added cannot be told; on the other reading of convention 10 the row has no listed mitigations, and label-b is still broad while convention 8 is read as recorded, since the rule then does not act on the service's inbound edge; label-b is tight only when both convention 8 and convention 10 are read the other way",
+  "convention 3 is not engaged, and question (b) of its ordered test is the one that answers: the technique's object, an AI system, is a class that takes in AI software of every kind, so question (a) does not answer; the technique acts on the inbound edge of the AI system it overwhelms, and the rule's bounds sit on what the assistant sends out, so counting the assistant as part of the system would not put the rule on that edge",
+  "convention 4 is not what decides this row: under the recorded reading the rule and the technique act on different objects, not on the same object at different layers",
+]
+assessor = "first-pass review"
+date = "2026-11-18"

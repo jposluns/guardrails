@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "01e69a32dfdaa7f660c82b069768e3fd71922e7417ae47b7325618e875224501"
+tree-sha256 = "0e352749b9c96e71d9dc9ba7d3c10321713f718168b4238299f5b1d353d29753"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -864,6 +864,61 @@ sha256 = "1415ef38ae851901a0dc97cc0a9d71a6c10a1e84dfbc2c0304a14d73381a2d1a"
 path = ".aiqt/standards/README.md"
 bytes = 11106
 sha256 = "ce143791554930f8e5c87adaecb7aa295afb1d17bddf9defaa3c7131f1a63f8a"
+
+[[sources]]
+path = ".aiqt/standards/assessments/RUBRIC.md"
+bytes = 34185
+sha256 = "bd0e33c3406c3849c352b16da513719168af9e236914e4ec47ea7011c838c747"
+
+[[sources]]
+path = ".aiqt/standards/assessments/atlas.toml"
+bytes = 16651
+sha256 = "5fe17f22b2e62ceb234fe57ec1ddc5739ce5095cb246c2d130990a379bc5de5d"
+
+[[sources]]
+path = ".aiqt/standards/assessments/csa-ccm.toml"
+bytes = 4769
+sha256 = "eaecf340c00dca66fd0e2d67dee04dbab3ee97f05c987079d4a0d616f61079c9"
+
+[[sources]]
+path = ".aiqt/standards/assessments/iso-23894.toml"
+bytes = 5327
+sha256 = "5935799f8f2b720a61458fc9a6c6ff446bc1ead3862734ac205d3db55fd037e3"
+
+[[sources]]
+path = ".aiqt/standards/assessments/iso-42001.toml"
+bytes = 8461
+sha256 = "ddb72a367837d9ad6f58b68159052450cba879dcb11b1d5f95cb78583d38726b"
+
+[[sources]]
+path = ".aiqt/standards/assessments/nist-80053.toml"
+bytes = 8933
+sha256 = "8ad69a489793490f9bc8c90fd7534c21a358b3b0ee00f121006edea8dca8fdb3"
+
+[[sources]]
+path = ".aiqt/standards/assessments/nist-airmf.toml"
+bytes = 17889
+sha256 = "ee0248bbad60874ea0a6d0a51b4c23a4bb6d28b12d72ee0f41ab73d6f8c467c3"
+
+[[sources]]
+path = ".aiqt/standards/assessments/owasp-asi.toml"
+bytes = 6660
+sha256 = "639b963878d7cd397b094f675023247a265f57c961f197703fdf005ea3ddbb57"
+
+[[sources]]
+path = ".aiqt/standards/assessments/owasp-llm.toml"
+bytes = 5853
+sha256 = "8d0d83671c7ab9e5d2826bcd3740322b67eb3339dc394545468becf55d9fb895"
+
+[[sources]]
+path = ".aiqt/standards/assessments/owasp-mcp.toml"
+bytes = 20456
+sha256 = "33d69ab8f4b4b5110b8f90b37c467438db7854566d6032d4d3f36e30a3ed4de7"
+
+[[sources]]
+path = ".aiqt/standards/assessments/owasp-proactive.toml"
+bytes = 5369
+sha256 = "c091f15de38cbc5d27f9ddfbcec62b96e58dd459a0c240efb673ee621df37a44"
 
 [[sources]]
 path = ".aiqt/standards/atlas.toml"
@@ -2317,8 +2372,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 54489
-sha256 = "ccf4a98f27811152fb9a6be5ed1ce858243d8ea39226285e22f626a486c1eab9"
+bytes = 55091
+sha256 = "f6e50b4c5a043305d9099a1ef8d8151c961634880d383398055ba86c78864a83"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2412,8 +2467,8 @@ sha256 = "6b902f90dc533d00fccc5d6ac91c93053d0b928df34592b1f89d12a06c133456"
 
 [[sources]]
 path = "INSTRUCTION-BUDGET.md"
-bytes = 5268
-sha256 = "a4583ccb4991766a71f8ba04dbc3cc300fe5d6f2c1de944b563133ef91859074"
+bytes = 6207
+sha256 = "6b0baa80ea3d516a4169ff81d2b738ffba3a5799434c2e356a015b564305cb7c"
 
 [[sources]]
 path = "LICENSE"
@@ -4297,8 +4352,8 @@ sha256 = "8dfc2f59805c973c295196b7bf618cb6c938da109e7a0fc3544449a8ab99fc49"
 
 [[sources]]
 path = "tools/check_instruction_budget.py"
-bytes = 308699
-sha256 = "198327dee3a532bd364c52749185add19edd4788be3ab521b573d5fc6e75439e"
+bytes = 311553
+sha256 = "48f6b50dc1fcd60a0309a45fd7e38f46ee237a482ce4e1db3002f00fc86c699c"
 
 [[sources]]
 path = "tools/check_internal_names.py"
@@ -4427,8 +4482,8 @@ sha256 = "1062f2cdf038f39b3a88bb1a124c4e9d6bc58d89e5aa3b4b8855dadf04d8c447"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 320505
-sha256 = "caefdd04ff9520247e3aa0ae51b7b365cb033eb58557763b1290a2b5f71dc449"
+bytes = 320719
+sha256 = "ceb7f743e2dd6ef3861b8eeb62337bbc1ee320d672892e3f5929c1ce5ca0c73b"
 
 [[sources]]
 path = "tools/check_release_delta.py"
@@ -4752,8 +4807,8 @@ sha256 = "94ae6b7299f044b0ff2e66f48d99a6ecddff46250b48ebfc8d58c69d8087e7e5"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 282871
-sha256 = "2432d5543cda2af5b59838cc4d10f37572455246033b82bef6bf9366d530d776"
+bytes = 282966
+sha256 = "50502bd051c1ace58d75e6cbc315c02db7667dcbec9a31bb588e35438f57db55"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

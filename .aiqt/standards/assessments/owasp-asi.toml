@@ -1,0 +1,61 @@
+# Fit assessment records for the OWASP Top 10 for Agentic Applications. Schema and definitions: RUBRIC.md
+# in this folder. Own words only; no entry text is reproduced.
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-seca-resource-bounds.md"
+rule-slug = "resource-bounds"
+rule-blob = "3f8e9e338135afe8eb97422619e92ef3191a55bf"
+framework = "owasp-asi"
+id = "ASI08"
+current-fit = "tight"
+edition = "2026"
+source = "OWASP-Top-10-for-Agentic-Applications-2026--full-text.md"
+source-sha256 = "024fd8cc24db4722da325f37a2c6a63b3d1f354250327a451ad1c40010bb30df"
+locator = "ASI08 Cascading Failures, description, common examples 1 to 7, example attack scenarios 1 to 8, and prevention and mitigation guidelines 1 to 10"
+text-location = "entry from its heading to its end at lines 1160 to 1276, with the references at lines 1273 to 1276 adding no elements; description at lines 1160 to 1189, with the observable symptoms in its prose at lines 1175 to 1178, which the entry itself presents as detection hooks (line 1178), so they are detection guidance; common examples at lines 1196 to 1212; attack scenarios at lines 1214 to 1243; guidelines at lines 1245 to 1271, with 6 and 7 at lines 1259 to 1261"
+edition-check = "match"
+boundary = "the assistant's own loops, tool calls, budgets and calls to dependencies"
+core = "A single fault spreads across agents, tools and workflows and grows into harm across the whole system; the entry is about the spread and amplification, not the first fault."
+covers = [
+  "budgets on tool call depth, recursion, tokens and cost, and limits and timeouts on loops, which are the quotas and progress caps of guideline 7",
+  "a cap on the assistant's own request rate and a fail safe stop when a bound is reached, which limit how fast a runaway loop can spread work (the throttling part of guideline 6, for the assistant's own output only)",
+  "a circuit breaker that stops calls to a failing downstream dependency, which keeps one degraded component from becoming a wider outage (part of the fault tolerance of guideline 1)",
+  "limits and timeouts on the assistant's own loops cap how far a loop that feeds on its own output can run (part of example 7)",
+  "budgets on tool calls cap how much repeated work a misused integration can drive through the assistant (part of example 4)",
+  "the breaker keeps the assistant from adding load to a dependency that has failed, such as one broken by a shared outage (part of attack scenario 7)",
+  "the breaker notices the assistant's own repeated failed calls to one dependency and stops them, which acts on one form of the retry sign among the detection hooks, for the assistant's own calls only",
+]
+omits = [
+  "a planner whose unsafe steps an executor carries out without validation (example 1)",
+  "corrupted persistent memory that keeps steering new plans and delegations (example 2)",
+  "one poisoned message that sets peer agents acting on false alerts or instructions (example 3)",
+  "downstream agents repeating unsafe actions or leaking inherited data after one agent misuses an integration or credential, beyond capping the volume of repeated calls (the rest of example 4)",
+  "a faulty or poisoned release spreading automatically to connected agents (example 5)",
+  "oversight that weakens after repeated success, letting configuration drift spread (example 6)",
+  "agents relying on each other's outputs so that errors reinforce one another, beyond capping the assistant's own loops (the rest of example 7)",
+  "the attack scenarios on trading, healthcare, cloud orchestration, security operations, manufacturing quality control, auto remediation and cyber defence (attack scenarios 1 to 6 and 8): the rule's bounds do not stop the poisoned or wrong decision from spreading in any of them",
+  "the cascade of agent failures across many organisations after a shared outage, beyond the assistant's own breaker (the rest of attack scenario 7)",
+  "design of the whole application to tolerate the loss of model, agent and external components, beyond the breaker on a failing dependency (the rest of guideline 1)",
+  "isolation and trust boundaries between agents (guideline 2)",
+  "short lived, task scoped access and independent policy enforcement (guidelines 3 and 4)",
+  "output validation and human gates before output moves downstream (guideline 5)",
+  "detection of commands that spread fast, and throttling or pausing on such anomalies (the rest of guideline 6)",
+  "circuit breakers placed between the planner and the executor (the rest of guideline 7); the rule's breaker sits on a failing dependency, not on that link",
+  "behaviour and governance drift detection (guideline 8)",
+  "replaying recorded agent actions in an isolated copy of production and gating policy changes on the result (guideline 9)",
+  "tamper evident logs of messages, decisions and outcomes bound to agent identity, with lineage for every propagated action (guideline 10)",
+  "watching for the signs the entry calls detection hooks: one faulty decision fanning out fast to many downstream agents or tasks, spread across domains or tenants beyond the first context, retries that swing back and forth and feedback loops between agents, beyond the assistant's own failed calls to one dependency, and downstream queue storms or the same intent repeated; the rule's budgets cap how much work the assistant can drive but do not watch for any of these signs",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "B"
+proposed = "broad"
+review-state = "assessed"
+conventions = []
+rationale = "Quotas and progress caps on the assistant's own loops directly stop a fault from amplifying, which is the core of the entry and part of guideline 7. Under B, read over the whole control, the rule meets guidelines 1, 6 and 7, examples 4 and 7, attack scenario 7 and the retry sign among the detection hooks only in part, and leaves out the other examples, the other attack scenarios, the other guidelines and the other detection hooks, so it is broad under B. No open convention decides the row, and the B label holds on every reading of every open convention."
+assumptions = [
+  "convention 3 is not engaged, and question (a) of its ordered test is the one that answers: the entry's object is agents and agentic workflows, and the assistant is itself an agent",
+  "the observable symptoms the description names at lines 1175 to 1178 sit in the description's prose, but the entry itself presents them as detection hooks, so under the rubric's term they are detection guidance and each sign is a listed mitigation; the detection in guidelines 6 and 8 is counted as well",
+]
+assessor = "first-pass review"
+date = "2026-11-18"

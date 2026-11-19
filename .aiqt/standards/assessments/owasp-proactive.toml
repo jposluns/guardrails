@@ -1,0 +1,49 @@
+# Fit assessment records for the OWASP Top 10 Proactive Controls. Schema and definitions: RUBRIC.md in
+# this folder. Own words only; no control text is reproduced.
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-seci-threat-model-boundaries.md"
+rule-slug = "threat-model-boundaries"
+rule-blob = "6ad7821be8263a82fc8168692f2e0af08a5dcaf4"
+framework = "owasp-proactive"
+id = "C4"
+current-fit = "tight"
+edition = "4.0.0"
+source = "OWASP-Top-10-Proactive-Controls-v4.0-2024--full-text.md"
+source-sha256 = "a42d2fdf67244256248bca903695df4794ff948094acd6948db045e2ec67bf3f"
+locator = "C4 Address Security from the Start, description, threats and implementation sections, including the section on trust relationships and the section on architecture patterns"
+text-location = "entry from its heading to its end at lines 475 to 575; description at lines 477 to 496, with the design principles at lines 481 to 487 and third party components at lines 489 to 496; threats at lines 498 to 503, each an instance of a design principle and handled with that principle in covers and omits; implementation at lines 505 to 555, with trust relationships at lines 525 to 529 and architecture patterns at lines 537 to 555; the vulnerabilities prevented, references and tools at lines 557 to 575 add no elements"
+edition-check = "match"
+boundary = "a new external interface, privileged operation, untrusted data flow or trust boundary in a change"
+core = "Build security into the architecture before implementation, following design principles such as simplicity, secure defaults, no reliance on obscurity, a small attack surface and defence in depth; state which part may be relied on for which action and enforce that; and draw on proven secure architecture patterns."
+covers = [
+  "security is addressed before implementation",
+  "abuse paths of new trust boundaries are identified, which the trust relationships section asks for with threat modelling",
+  "mitigations become acceptance criteria of the change",
+  "a new plugin that adds an external interface or a trust boundary has its abuse paths identified, and their mitigations carried into the change, before it is built (part of threat 3)",
+]
+omits = [
+  "keeping the design simple (design principle 1, and the implementation section on clarity), and with it threat 2, a developer who misconfigures a complex authorization scheme while extending a component",
+  "secure defaults (design principle 2, and the implementation section on making the right thing easy), and with it the rest of threat 3: a plugin that takes no security measures unless they are added by hand",
+  "security that does not depend on hiding how the application works (design principle 3), and with it threat 1, an application whose only protection is obscurity",
+  "identifying and minimising the attack surface (design principle 4, and its implementation section), and with it threat 4, a deployed tool nobody uses that leaves the whole database open to a newly found flaw",
+  "planning for the breach of any component and its blast radius, beyond the abuse paths of a new boundary (design principle 5)",
+  "choice and upkeep of third party components",
+  "enforcement of stated trust relationships by controls such as gateways, and validation at each step, beyond carrying mitigations into a change's acceptance criteria (the rest of the trust relationships section)",
+  "choosing and applying a known secure architecture pattern (the architecture patterns section)",
+  "addressing security across the whole architecture of the application, beyond the single change that brings a new external interface, privileged operation, untrusted data flow or trust boundary (the whole of the control's object, met for single changes only)",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "B"
+proposed = "broad"
+review-state = "assessed"
+conventions = []
+rationale = "Threat modelling a trust boundary before it is built is the core of addressing security from the start. Under B, read over the whole control, the design principles, the threats that illustrate them (met only in part for threat 3), the enforcement side of trust relationships and the architecture patterns the control lists are not part of the rule, and the rule acts on single changes, not the whole architecture, so it is broad under B. No open convention decides the row, and the B label holds on every reading of every open convention."
+assumptions = [
+  "the rule acts on each change while the control is framed at the level of the whole architecture; both act on the same application at the same layer, so this is a difference of scope, which Definition A treats as secondary, and convention 4 is not engaged",
+  "convention 3 is not engaged, and question (d) of its ordered test is the one that answers: the entry's object, an application, is a class that takes in software of every kind, so question (a) does not answer; question (b) does not answer; and the rule's boundary is a change to the application being built, not the assistant or its tools, so question (c) does not answer",
+  "the four threats are failures of the design principles, not elements of their own: each is recorded with the principle it illustrates, and the rule meets part of threat 3 only where the new plugin brings a new external interface or trust boundary",
+]
+assessor = "first-pass review"
+date = "2026-11-18"

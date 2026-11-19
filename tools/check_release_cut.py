@@ -171,9 +171,9 @@ def parse_changelog(raw, label):
         version(row.get("version"), where)
         require(isinstance(row.get("title"), str), where + ": missing string title")
         if "date" in row:
-            # datetime is a date subclass, but TOML timestamps are not local dates. A string or a
-            # TOML local date parses here and is then judged by the date rule, which refuses the
-            # local date (exit 1); any other value cannot be evaluated.
+            # datetime is a date subclass, but TOML timestamps are not local dates. Only a string
+            # or a TOML local date passes this parse check; any other value cannot be evaluated
+            # (exit 2). Whether the date is then judged is decided in evaluate_transition.
             require(isinstance(row["date"], str) or type(row["date"]) is datetime.date,
                     where + ": date must be a quoted YYYY-MM-DD string, not a TOML timestamp,"
                     " time or other value")
@@ -245,12 +245,13 @@ def parse_pending(raw, label="pending fixes"):
 
 
 def release_date_refusal(row):
-    """Return why one release entry's date breaks the shared date rule, else None.
+    """Return why one release entry's date breaks the release date rule, else None.
 
-    The rule is the one the site renderer applies (tools/gen_draft_site.py renders only a
-    non-empty string date), narrowed to a real calendar date written YYYY-MM-DD, so a TOML
-    local date is refused. A date after the run day is not refused, so the verdict never
-    depends on the clock."""
+    The date must be a quoted string holding a real calendar date written YYYY-MM-DD, so a
+    TOML local date is refused. The rule is stricter than both changelog renderers
+    (tools/gen_draft_site.py reads only the entry for VERSION and takes any non-empty string
+    date; tools/gen_changelog.py renders any date it finds, a TOML local date included). A
+    date after the run day is not refused, so the verdict never depends on the clock."""
     value = row.get("date")
     if isinstance(value, str) and RELEASE_DATE.fullmatch(value) is not None:
         try:
@@ -755,8 +756,8 @@ def test_cases():
     add("notes", 0, after=fixture_changelog(["1.0.0"], "curated note"))
     add("title-date", 0, after=base.replace(b'"Release"', b'"Published"')
         .replace(b'"2000-01-01"', b'"2000-02-02"'))
-    # A TOML local date parses, but the site renderer renders only a string date, so any
-    # changelog change that leaves one in place is refused; converting it to a string passes.
+    # A TOML local date parses, but the gate's date rule refuses it, so any changelog change
+    # that leaves one in place is refused; converting it to a string passes.
     native = base.replace(b'"2000-01-01"', b"2000-01-01")
     add("native-date-maintenance", 1, before=native,
         after=native.replace(b'items = ["note"]', b'items = ["curated note"]'))
@@ -973,7 +974,7 @@ def test_cases():
     add("cut-date-placeholder-push-two-cuts", 1, after=placeholder_cut, new=declaration,
         tweak="push-two-cuts")
     add("cut-date-valid", 0, after=cut_dated(b'date = "2024-02-29"\n'), new=declaration)
-    # The site renderer refuses a TOML local date, so the gate does too (one shared rule).
+    # The gate's own date rule refuses a TOML local date on the appended entry.
     add("cut-date-native", 1, after=cut_dated(b"date = 2026-11-15\n"), new=declaration)
     add("cut-date-future", 0, after=cut_dated(b'date = "2999-12-31"\n'), new=declaration)
     # Every entry's date is judged whenever the changelog changes, earlier entries included.
@@ -5124,7 +5125,8 @@ def _self_test_isolated(red_on_revert):
                 ("release-date-earlier", "map(release_date_refusal, rows)",
                  "map(release_date_refusal, rows[-1:])", "cut-date-earlier-rewrite", 0),
                 # An earlier draft read no date on a change that cut nothing (the check sat below
-                # the identities-unchanged early return); this moves it back below that return.
+                # the identities-unchanged early return); this replaces the no-cut refusal's
+                # condition with False, so that change is accepted again.
                 ("release-date-below-early-return",
                  'return 1, "declaration changed without a release transition"\n'
                  "        if date_refusal is not None:",

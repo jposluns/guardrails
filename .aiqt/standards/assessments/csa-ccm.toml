@@ -1,0 +1,47 @@
+# Fit assessment records for the CSA Cloud Controls Matrix. Schema and definitions: RUBRIC.md in this
+# folder. Own words only; no control text is reproduced.
+
+[[row]]
+rule-path = ".aiqt/core/rules/security-secc-no-cross-context-bleed.md"
+rule-slug = "no-cross-context-bleed"
+rule-blob = "7730281accb232117e34aef267e97b14ccf94068"
+framework = "csa-ccm"
+id = "I&S-06"
+current-fit = "tight"
+edition = "4.1.0"
+source = "CSA-CCM-v4.1.0-catalogue__CCM.csv"
+source-sha256 = "81f3035d039dd7f6f257d91f6d6cfd5e6cf4512e8454a0650c7a51fddaf9576f"
+locator = "Infrastructure Security domain, control I&S-06 Segmentation and Segregation"
+text-location = "lines 535 to 538"
+edition-check = "match"
+boundary = "context the assistant assembles for one task, user, tenant or trust boundary, across its own tasks, sessions and responses"
+core = "Applications and infrastructure are designed, built, deployed and configured so that each tenant's access is segmented and segregated, and is monitored and restricted."
+covers = [
+  "context for one tenant or authorization is never carried into another",
+  "each new task or session starts from a clean boundary",
+  "the segregated outcome the control's leading verbs aim at, for the context the assistant itself holds",
+]
+omits = [
+  "monitoring of tenant access",
+  "restriction of tenant access as an access control",
+  "segmentation at the infrastructure layer",
+  "segmenting and segregating tenant access in applications other than the assistant (the whole of the control's object, met for one application only): on the recorded reading of convention 8 that includes the product being built; on its other reading the rule also acts on tenant context inside the product's application, and every other application the organisation builds or runs is still left out",
+  "the design, development, deployment and configuration work the control's leading verbs ask for: the rule sets how the assistant treats context it holds, not how any application or infrastructure is designed, developed, deployed or configured",
+]
+label-a = "tight"
+label-b = "broad"
+adopted = "B"
+proposed = "broad"
+review-state = "assessed"
+conventions = [3]
+rationale = "Read as binding the assistant's own context, with the assistant counted as one of the applications the control is about (convention 3), keeping each tenant's context apart is tenant segregation inside an application, which carries out the core in the case the rule addresses, an assistant holding context for more than one tenant. Under B, read over the whole control, monitoring, restriction, infrastructure segmentation and the design, development, deployment and configuration work the control's verbs name are left out, so it is broad under B; the B label holds on every reading of every open convention."
+assumptions = [
+  "convention 3 is engaged, not set aside: the control's object, applications and infrastructures, is a class that takes in software of every kind, not a kind of software the assistant is by its nature, so the rubric's question (a) does not answer; the control does not act only where the assistant would not be, so question (b) does not answer; and question (c) does, because the rule's boundary is the context the assistant itself holds",
+  "the rule binds the assistant's own tasks, sessions and responses, not the services of the product it builds, which is the plain reading of its text and the reading the resource bounds rows take (convention 8); the other reading puts the rule on tenant context inside the product's application, which also gives label-a tight while convention 3 is read as recorded, so convention 8 does not decide this row and is not listed in conventions",
+  "the assistant is one of the applications whose tenant access the control asks to be segregated (convention 3); if the applications mean only the product being built, the rule, read as binding only the assistant, does not act on the control's object and both labels are broad",
+  "on the product reading of convention 3 the labels turn on convention 8: read as also binding the product's services, the rule acts on the product's tenant context and label-a stays tight",
+  "the row is assessed for the case the rule's own text addresses, an assistant holding context for more than one user, tenant or authorization (test 9); where the assistant serves only one tenant, keeping that tenant's tasks apart is not tenant segregation, and both labels are broad",
+  "convention 4 is not engaged: the control names applications as well as infrastructures, so a rule acting inside an application meets it at a layer the control itself names, and infrastructure segmentation is a difference of scope, which Definition A treats as secondary",
+]
+assessor = "first-pass review"
+date = "2026-11-18"

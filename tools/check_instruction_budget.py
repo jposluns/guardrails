@@ -252,9 +252,11 @@ refused) with no trailing space, then LF. An entry opens with a line reading
 19 digits is cannot-evaluate, exit 2); every appended line
 whose text opens with the word "raised", in any letter case, must be such an opening line. The first
 OLD is the base value, each later OLD is the NEW of the entry before it, and the last NEW is the
-candidate value. Each date is real, no earlier than the latest date written above the base's ceiling
-line or an earlier appended entry's date, and no later than the day after the checking day (UTC); this
-upper bound makes the result depend on the clock. A raise and a lowering in the same comparison, or a
+candidate value. Each date is real, no earlier than the latest entry date in the base or an earlier
+appended entry's date, and no later than the day after the checking day (UTC); this upper bound makes
+the result depend on the clock. An entry date in the base is the date of a history line, above its
+ceiling line, that opens `Raised OLD -> NEW on YYYY-MM-DD`; a date in a continuation line or any other
+line sets no bound. A raise and a lowering in the same comparison, or a
 history entry worded another way, is a finding that the declaration below does not waive: land such a
 change as a comparison of its own (its own pull request or push). Every other byte must match the base
 exactly; any other changed line is a finding (exit 1) naming the line. A lowering adds no entry and is
@@ -1416,9 +1418,12 @@ SHAPE_ENTRY_FIRST_RE = re.compile(
 # An appended line whose text opens with the word "raised" in any letter case starts an entry and must be
 # a well-formed first line, so a second entry cannot pass as a continuation line of the one before it.
 SHAPE_ENTRY_START_RE = re.compile(r"Raised(?![A-Za-z0-9_])", re.ASCII | re.IGNORECASE)
-# A date written in the base above the `#   ceiling` line; the latest real one is the earliest date an
-# appended entry may carry. An entry dated later than the checking day (UTC) plus this slack is a finding.
-SHAPE_DATE_RE = re.compile(r"(?<![0-9])([0-9]{4}-[0-9]{2}-[0-9]{2})(?![0-9])", re.ASCII)
+# The date of an entry: the one an opening line of the base's ratchet history above the `#   ceiling`
+# line carries after `Raised OLD -> NEW on`. The latest real one is the earliest date an appended entry may
+# carry; a date anywhere else (a continuation line, another comment) is not read. An entry dated later than
+# the checking day (UTC) plus this slack is a finding.
+SHAPE_OPENER_DATE_RE = re.compile(
+    "Raised " + SHAPE_NUMBER + " -> " + SHAPE_NUMBER + r" on ([0-9]{4}-[0-9]{2}-[0-9]{2})(?![0-9])", re.ASCII)
 SHAPE_DATE_SLACK_DAYS = 1
 # The bound exception: a reviewed declaration in the candidate that names the exact base and head bytes
 # of the budget source it excuses (a stale one, bound to other bytes, excuses nothing).
@@ -1474,16 +1479,22 @@ def _shape_declaration(raw):
 
 
 def _base_latest_date(lines):
-    """The latest real YYYY-MM-DD date written in `lines` (the base above its `#   ceiling` line), or None."""
+    """The latest real entry date in `lines` (the base above its `#   ceiling` line), or None: the date an
+    entry opening line of the ratchet history (_history_lines) carries when its text opens `Raised OLD ->
+    NEW on YYYY-MM-DD` (SHAPE_OPENER_DATE_RE). A date in a continuation line or any other line is not read,
+    so a mistyped or future date written there cannot become the floor for later raises. An opening line
+    can be added only as a new entry, whose date _entry_findings holds to the checking day."""
     latest = None
-    for line in lines:
-        for text in SHAPE_DATE_RE.findall(line):
-            try:
-                day = datetime.date.fromisoformat(text)
-            except ValueError:
-                continue
-            if latest is None or day > latest:
-                latest = day
+    for idx in _history_lines(lines):
+        match = SHAPE_OPENER_DATE_RE.match(lines[idx].lstrip().lstrip("#").strip())
+        if match is None:
+            continue
+        try:
+            day = datetime.date.fromisoformat(match.group(1))
+        except ValueError:
+            continue
+        if latest is None or day > latest:
+            latest = day
     return latest
 
 
@@ -1551,9 +1562,10 @@ def _entry_findings(block, first, old, new, floor, today):
     spaces and no trailing space. The first line, and every later line whose text opens with "raised" in
     any case, opens an entry and must read `Raised OLD -> NEW on YYYY-MM-DD` (SHAPE_ENTRY_FIRST_RE); entry
     by entry, OLD is `old` for the first and the previous entry's NEW after it, NEW exceeds OLD, and the
-    last NEW is `new`. Each date is real, no earlier than `floor` (the base's latest date, None for no
-    bound) or an earlier entry's date, and no later than `today` plus SHAPE_DATE_SLACK_DAYS. GateError
-    (cannot evaluate) when an opening line's number has more than SHAPE_NUMBER_MAX_DIGITS digits."""
+    last NEW is `new`. Each date is real, no earlier than `floor` (the base's latest entry date,
+    _base_latest_date, None for no bound) or an earlier entry's date, and no later than `today` plus
+    SHAPE_DATE_SLACK_DAYS. GateError (cannot evaluate) when an opening line's number has more than
+    SHAPE_NUMBER_MAX_DIGITS digits."""
     if new <= old:
         return ["line {}: a history entry was added, but the ratchet was not raised ({} -> {})".format(
             first, old, new)] if block else []
@@ -1598,8 +1610,8 @@ def _entry_findings(block, first, old, new, floor, today):
             findings.append("line {}: {} is not a real date".format(number, match.group(3)))
             continue
         if latest is not None and day < latest:
-            findings.append("line {}: {} is earlier than {}, the latest date in the base or an earlier "
-                            "entry".format(number, day, latest))
+            findings.append("line {}: {} is earlier than {}, the latest entry date in the base or an "
+                            "earlier entry".format(number, day, latest))
         if day > latest_day:
             findings.append("line {}: {} is later than the checking day {} (UTC)".format(number, day, today))
         if latest is None or day > latest:
@@ -1652,10 +1664,10 @@ def compare_shape(base_raw, head_raw, declaration_raw=None, today=None):
     exactly one `#   ceiling` line is compared whole and has no entry block. A candidate without exactly
     one `#   ceiling` line or exactly one `ratchet = N` line (SHAPE_RATCHET_RE) is a finding no declaration
     waives, so an accepted candidate stays evaluable as a later comparison's base. That is all it keeps:
-    not that a routine raise on it can pass. A declared change that writes a future date above the
-    `#   ceiling` line (`review due 2031-01-01`, say) is accepted, and then every later raise dated before
-    that day is a finding (the entry date floor), which no declaration waives, until a declared change
-    removes the date."""
+    not that a routine raise on it can pass. The entry date floor reads only the dates of the base's entry
+    opening lines (_base_latest_date), so a future date that a declared change writes in another comment
+    line (`review due 2031-01-01`, say), or that a raise writes in a continuation line, does not hold back
+    later raises."""
     if today is None:
         today = datetime.datetime.now(datetime.timezone.utc).date()
     base_text, base_data = _shape_text(base_raw, "the base " + BUDGET_REL)
@@ -3375,6 +3387,20 @@ def self_test(report_path=None):
               (shape(base_shape, raised(base_shape, opened("2026-11-18"))),
                shape(base_shape, raised(base_shape, opened("2999-12-31")))),
               ((1, ["5"]), (1, ["5"])))
+        # The date floor reads only the base's entry opening lines. A future date in a continuation line
+        # (base line 5) or in another comment line (base line 6) holds back no later raise, while an
+        # opener's date still does (line 7). A raise whose continuation line carries a mistyped future date
+        # passes, and so does the next raise on it, dated before that day (line 7).
+        noted_base = base_shape.replace(old_entry, old_entry + entry_line("written on 2027-06-01 for a fixture.")
+                                        + "#   review due 2031-01-01.\n")
+        mistyped = raised(base_shape, entry + entry_line("written on 2027-06-01, a mistyped date."))
+        after_mistyped = mistyped.replace(ceiling, entry_line("Raised 150 -> 200 on 2026-11-16 for b.") + ceiling)
+        after_mistyped = after_mistyped.replace("ratchet = 150\n", "ratchet = 200\n")
+        floor_rows = ((noted_base, raised(noted_base)), (mistyped, after_mistyped))
+        check("shape/entry-date-floor-openers-only-0",
+              ([shape(before, head) for before, head in floor_rows], shape(base_shape, mistyped),
+               shape(noted_base, raised(noted_base, opened("2026-09-30")))),
+              ([(0, [])] * 2, (0, []), (1, ["7"])))
         unraised = base_shape.replace(ceiling, entry + ceiling)
         lowered_entry = raised(base_shape, ratchet=90)
         check("shape/entry-without-raise-1", (shape(base_shape, unraised), shape(base_shape, lowered_entry)),
@@ -3704,6 +3730,15 @@ def self_test(report_path=None):
         check("revert/shape-entry-date-floor-red",
               shape(base_shape, raised(base_shape, opened("2026-09-30")), module=_mutant(
                   tmp, "        if latest is not None and day < latest:\n", "        if False:\n"))[0], 0)
+        # Reading a date from every base line above the ceiling line again, as before, turns both
+        # openers-only rows red: the future date becomes the floor.
+        any_date = _mutant(
+            tmp, '    for idx in _history_lines(lines):\n'
+                 '        match = SHAPE_OPENER_DATE_RE.match(lines[idx].lstrip().lstrip("#").strip())\n',
+            '    for idx in range(len(lines)):\n'
+            '        match = re.search(r"(?<![0-9])([0-9]{4}-[0-9]{2}-[0-9]{2})(?![0-9])", lines[idx])\n')
+        check("revert/shape-entry-date-floor-openers-only-red",
+              [shape(before, head, module=any_date)[0] for before, head in floor_rows], [1, 1])
         check("revert/shape-entry-date-ceiling-red",
               shape(base_shape, raised(base_shape, opened("2999-12-31")), module=_mutant(
                   tmp, "        if day > latest_day:\n", "        if False:\n"))[0], 0)
