@@ -104,13 +104,12 @@ generator alone cannot assert:
     never non-code), so the public sentence cannot read
     complete while the release ships code the declaration places under a non-code prefix or does
     not place at all, and a declared row cannot outlive the files it names;
-  - the public instruction-budget section: README.md and INSTRUCTION-BUDGET.md each state the
-    committed ratchet of .aiqt/core/instruction-budget.toml as the most PACK the budget gate allows;
-    the stated figure must equal that ratchet, and the ratchet must still exceed the 120,000 figure
-    the note says the pack may exceed. The other figures the section states are bound to one
-    authoritative value each, on each page: the 150,000 session target (_SESSION_TARGET), the
-    pinned Claude Code build (claude-code-version in the budget source), and the loader's
-    120,000-character check (_BUDGET_FLOOR).
+  - the public instruction-budget section: README.md and INSTRUCTION-BUDGET.md must each carry
+    the bound note (see the comment above _BUDGET_NOTE_RE in tools/check_reference_facts.py).
+    The other figures the section states are bound to one authoritative value each, on each
+    page: the 150,000 session target (_SESSION_TARGET), the pinned Claude Code build
+    (claude-code-version in the budget source), and the loader's 120,000-character check
+    (_BUDGET_FLOOR).
 
 BEST-EFFORT RESIDUAL (disclosed per the pack's own rule): this gate checks the specific fact copies
 enumerated above; it is not a semantic-equivalence prover for arbitrary prose, and `catalogue = "full"` is
@@ -129,11 +128,9 @@ an extensionless shebang file): executable content of another kind under
 a non-code prefix is not detected, the HTML leg deliberately over-detects (a comment-only
 "<script>" inside the page classifies it as code, a conservative reading, never an
 under-detection), and a row's plain-language label is a reviewed description this
-gate cannot semantically verify against the files under its prefix, all disclosed residuals. The
-instruction-budget
-note is pinned to the COMMITTED RATCHET, not to a fresh measurement, and the pages state only the
-ratchet, never a measured PACK: the budget gate holds PACK at or under the ratchet and prints a note
-whenever PACK falls below it, so a stale ratchet over a shrunken pack is surfaced there, not here.
+gate cannot semantically verify against the files under its prefix, all disclosed residuals. For
+what the bound-note leg does not read, see the comment above _BUDGET_NOTE_RE in
+tools/check_reference_facts.py.
 The 150,000 target and the 120,000-character loader check are bound to this gate's own constants,
 not to Claude Code itself: whether a Claude Code build applies that check is not verified here.
 
@@ -1013,21 +1010,46 @@ def check_release_code_declaration(root, findings, *, declaration=None, sources=
 # target for everything Claude Code loads at session start (and the ", not 150,000" aside).
 _BUDGET_FLOOR = 120000
 _SESSION_TARGET = 150000
-# The full public sentence, every part bound: the "budget to 120,000" antecedent (the figure the
-# note's "that figure" names; INSTRUCTION-BUDGET.md reads ", not 150,000" between them, the
-# aside built from _SESSION_TARGET), the "may exceed that figure" clause (so a page reworded
-# to "no longer exceeds" fails to match, a missing-note finding) and the committed ratchet with its
-# unit and the unit's explanatory suffix
-# (UTF-16 code units, the unit tools/check_instruction_budget.py counts and prints), bound through
-# the sentence terminator (the period, then whitespace or the end of the page), so changing the
-# unit, dropping it, rewording its suffix, extending the suffix ("counts in bytes"), or gluing
-# text after the period ("counts.in bytes") is a missing-note finding. The sentence states the
-# committed ratchet only, the most PACK the budget gate allows, never a measured PACK: this gate
-# reads the ratchet, not a measurement, so the page claims no more than the gate binds.
+# THE BOUND NOTE. This comment is the one description of what the bound-note leg of
+# check_budget_note (the _BUDGET_NOTE_RE search and the requirements below) binds and what it
+# does not read; the module docstring, the check_budget_note docstring and the reference-facts
+# gate residue refer here instead of restating it.
+# check_budget_note searches README.md and INSTRUCTION-BUDGET.md with _BUDGET_NOTE_RE (findall).
+# Each match is the bound note, a span in two parts:
+#   1. the tail of the caveat sentence: the literal "budget to ", a figure of digits and commas
+#      (captured as the antecedent that "that figure" names), an optional ", not 150,000" (built
+#      from _SESSION_TARGET; INSTRUCTION-BUDGET.md has it), then the period;
+#   2. after any whitespace, or none, the whole "Today the shipped pack may exceed that figure"
+#      sentence, word for word and single-spaced, through its period, which must be followed by
+#      whitespace or the end of the page. It names the committed ratchet, the most PACK the
+#      budget gate allows, by its setting and file (the `ratchet` setting in
+#      `.aiqt/core/instruction-budget.toml`) and its unit (UTF-16 code units, the unit
+#      tools/check_instruction_budget.py counts), never as a ratchet or PACK figure.
+# check_budget_note then requires:
+#   - at least one match on each page; a page with none is the missing-note finding. So any
+#     change to part 2 (rewording "may exceed that figure", the setting, the file, the unit or
+#     its suffix; a figure in place of or beside the setting; text glued after its period), and
+#     any aside other than ", not 150,000" in part 1, is that finding;
+#   - every captured antecedent to equal _BUDGET_FLOOR (120,000);
+#   - the committed ratchet to exceed _BUDGET_FLOOR, the figure the note says the pack may exceed.
+# Because the note names the setting, not a figure, a ratchet raise needs no page edit. This gate
+# reads the committed ratchet, not a measurement: the budget gate holds PACK at or under the
+# ratchet and prints a note when PACK falls below it, so a stale ratchet over a shrunken pack is
+# surfaced there, not here.
+# Inside each part the pattern joins words by single literal spaces, so the page lines that hold
+# the bound note stay unwrapped: a line break inside either part (between "budget" and "to", for
+# example) is the missing-note finding, while a line break between the two parts, or earlier in
+# the caveat sentence before "budget to", is accepted.
+# Not read by the bound-note leg: any text outside the bound note. A ratchet or PACK figure
+# anywhere else on either page is not refused by this leg, including one earlier in the caveat
+# sentence (before "budget to") and one in any other sentence. Other legs of check_budget_note
+# may still refuse such a figure: one in the position a _BUDGET_FIGURE_WORDINGS wording captures
+# is compared with that wording's authoritative value.
 _BUDGET_NOTE_RE = re.compile(
     r"budget to ([0-9][0-9,]*)(?:" + re.escape(", not " + format(_SESSION_TARGET, ",d")) + r")?\.\s*"
     r"Today the shipped pack may exceed that figure: the budget gate allows it a PACK of up to the "
-    r"committed ratchet, ([0-9][0-9,]*) UTF-16 code units, the unit the budget gate counts\.(?!\S)")
+    r"committed ratchet, the `ratchet` setting in `\.aiqt/core/instruction-budget\.toml`, counted "
+    r"in UTF-16 code units, the unit the budget gate counts\.(?!\S)")
 # The other figures the budget section states, one wording per figure per page, each captured as
 # the whole whitespace-free token (so a figure in another numeral form or with a suffix is read
 # and compared, never skipped) and compared with its one authoritative value: the session target
@@ -1051,22 +1073,14 @@ _BUDGET_FIGURE_WORDINGS = (
 
 
 def check_budget_note(root, findings):
-    """The public instruction-budget section against the values it states: README.md and
-    INSTRUCTION-BUDGET.md each carry the _BUDGET_NOTE_RE sentence (the 120,000 antecedent the
-    note's "that figure" names, the may-exceed-that-figure half,
-    the figure, and its UTF-16 code-unit label with its explanatory suffix all bound through the
-    sentence terminator, so rewording any of them away or extending the suffix is a
-    finding), the stated antecedent must equal _BUDGET_FLOOR, the figure must equal the ratchet of
-    .aiqt/core/instruction-budget.toml
-    (thousands-separated, as the pages print it), and the ratchet must still exceed the
-    _BUDGET_FLOOR figure the note says the shipped pack may exceed. Each page's
+    """The public instruction-budget section against the values it states. README.md and
+    INSTRUCTION-BUDGET.md must each carry the bound note; for what it binds and what is not read,
+    see the comment above _BUDGET_NOTE_RE in tools/check_reference_facts.py. Each page's
     _BUDGET_FIGURE_WORDINGS wording must be present, and every figure it captures must equal its
     one authoritative value: the session target _SESSION_TARGET and the loader's check
     _BUDGET_FLOOR (thousands-separated), and the build claude-code-version of the budget source.
-    Pinned to the COMMITTED ratchet, not a fresh measurement, and the pages state only the
-    ratchet (the budget gate holds PACK at or under the ratchet and prints a lower-the-ratchet
-    note when PACK falls below it); a missing or non-integer ratchet, a missing or non-string
-    claude-code-version, and a missing page, fail closed (exit 2)."""
+    A missing or non-integer ratchet, a missing or non-string claude-code-version, and a missing
+    page, fail closed (exit 2)."""
     budget = load_toml(root / ".aiqt" / "core" / "instruction-budget.toml")
     ratchet = budget.get("ratchet")
     if not isinstance(ratchet, int) or isinstance(ratchet, bool) or ratchet <= 0:
@@ -1097,19 +1111,18 @@ def check_budget_note(root, findings):
         if not hits:
             findings.append("{}: the instruction-budget note (budget to 120,000 ... the shipped "
                             "pack may exceed that figure: the budget gate allows it a PACK of up "
-                            "to the committed ratchet, N UTF-16 code units, the unit the budget "
-                            "gate counts.) was not found; if the "
-                            "page was reworded, update check_budget_note so the figure stays "
+                            "to the committed ratchet, the `ratchet` setting in "
+                            "`.aiqt/core/instruction-budget.toml`, counted in UTF-16 code units, "
+                            "the unit the budget gate counts.) was not found; name the ratchet by "
+                            "its setting and file, never as a figure; if the "
+                            "page was reworded, update check_budget_note so the note stays "
                             "checked".format(rel))
             continue
-        for ante, got in hits:
+        for ante in hits:
             if ante != floor_want:
                 findings.append("{}: the budget note names budget to {} as the antecedent of that "
                                 "figure; this gate binds the antecedent to {}".format(
                                     rel, ante, floor_want))
-            if got != want:
-                findings.append("{}: the budget note states PACK {}; the committed ratchet is "
-                                "{}".format(rel, got, want))
         if ratchet <= _BUDGET_FLOOR:
             findings.append("{}: the page says the shipped pack may exceed {}, but the committed "
                             "ratchet is {}; reword the note".format(rel, floor_want, want))
@@ -1324,10 +1337,12 @@ def main():
 #      without a byte-order mark, and a NUL inside UTF-8) -> exit 2 asserted by its diagnostic
 #      (cannot-evaluate, never non-code); a listed file missing or unreadable, for each branch
 #      that reads the file -> exit 2 (fail-closed),
-#  23. the instruction-budget note: a figure that disagrees with the committed ratchet, a missing
-#      note, a note whose exceeds half was reworded away, and a note kept after the ratchet no
-#      longer exceeds 120,000 -> finding; a missing budget source -> exit 2 (fail-closed),
-#  23b. the unit binding, on each public surface: the unit changed to "characters", the unit
+#  23. the instruction-budget note: a hand-written ratchet figure restored in place of the
+#      setting (on each page), a missing note, a note whose exceeds half was reworded away, and
+#      a note kept after the ratchet no longer exceeds 120,000 -> finding; a ratchet raised
+#      under unchanged pages -> clean; a missing budget source -> exit 2 (fail-closed),
+#  23b. the setting and unit binding, on each public surface: the setting or the file it names
+#      changed, the unit changed to "characters", the unit
 #      omitted, its explanatory suffix altered, the suffix extended past its sentence end
 #      ("counts in bytes.", "counts, in bytes."), or non-whitespace glued after the period
 #      ("counts.in bytes.") -> the missing-note finding (asserted by its diagnostic naming the
@@ -1478,8 +1493,8 @@ _ENFORCEMENT_MD = (
     "| Preview only, partial | 0 |\n| Pending | 0 |\n| No control | 2 |\n"
 )
 
-# The instruction-budget fixtures for the budget-note leg: the committed ratchet and the pinned
-# build, the public note stating the ratchet (the same sentence in the landing README and in
+# The instruction-budget fixtures for check_budget_note: the committed ratchet and the pinned
+# build, the public note naming the ratchet setting (the same sentence in the landing README and in
 # INSTRUCTION-BUDGET.md), and before it each page's session-target wording and the shared caveat
 # naming the build and the loader's check (wrapped across lines, as the real pages wrap them; the
 # landing page writes the build with a following comma, the budget page with a following space).
@@ -1487,8 +1502,14 @@ _BUDGET_TOML = 'ratchet = 132775\nclaude-code-version = "9.8.7"\n'
 _BUDGET_CAVEAT = ("The loader of the pinned Claude Code build the gate\nmodels (9.8.7{after}) "
                   "carries its own\n120,000-character check, so ")
 _BUDGET_NOTE = ("budget to 120,000. Today the shipped pack may exceed that figure: the budget gate "
-                "allows it a PACK of up to the committed ratchet, 132,775 UTF-16 code units, the "
+                "allows it a PACK of up to the committed ratchet, the `ratchet` setting in "
+                "`.aiqt/core/instruction-budget.toml`, counted in UTF-16 code units, the "
                 "unit the budget gate counts.\n")
+# The hand-written figure wording the pages carried before they named the setting; restoring it
+# is a missing-note finding (case 23).
+_BUDGET_SETTING = ("the `ratchet` setting in `.aiqt/core/instruction-budget.toml`, counted in "
+                   "UTF-16 code units")
+_BUDGET_FIGURE = "132,775 UTF-16 code units"
 _BUDGET_MD = ("# Fixture Budget\n\nTreat 150,000 characters as this project's target. "
               + _BUDGET_CAVEAT.format(after=" in the budget source") + _BUDGET_NOTE)
 
@@ -1528,7 +1549,7 @@ def _write_fixture(base, manifests=None, readme=None, page=None, disclosure=None
     `manifests` is a list of (stem, name, publisher, edition, kind, catalogue); `landing` overrides the
     README.md the counts leg reads; `release_manifest` overrides the .aiqt/manifest.toml the
     shipped-path declaration leg reads; `budget_toml` and `budget_md` override the instruction-budget
-    source and page the budget-note leg reads; `page` overrides the generated Mappings page."""
+    source and page check_budget_note reads; `page` overrides the generated Mappings page."""
     if manifests is None:
         manifests = [("full", "Fixture Full Framework", "OWASP Foundation", "1.0", "control", "full"),
                      ("subset", "Fixture Subset Framework", "ISO/IEC", "2023", "guidance", "subset")]
@@ -2827,14 +2848,29 @@ def self_test_main():
             os.chmod(unreadable_std, 0o644)
             unreadable_std = None
 
-        # 23. the instruction-budget note: a figure that disagrees with the committed ratchet, a
-        #     missing note, and a note kept after the ratchet no longer exceeds 120,000 -> finding; a
-        #     missing budget source -> exit 2 (fail-closed).
-        budgetdrift = tmp / "budgetdrift"
-        _write_fixture(budgetdrift, landing=_LANDING.replace("132,775 UTF-16 code units",
-                                                             "132,776 UTF-16 code units"))
-        if run_quiet(budgetdrift) != 1:
-            failures.append("a budget note stating a figure other than the ratchet expected exit 1")
+        # 23. the instruction-budget note: a hand-written ratchet figure restored in place of the
+        #     setting (even one equal to the committed ratchet), a missing note, and a note kept
+        #     after the ratchet no longer exceeds 120,000 -> finding; a ratchet raised under
+        #     unchanged pages -> clean (the bound note names the setting and its file, not a
+        #     ratchet figure); a missing budget source -> exit 2 (fail-closed).
+        for rel, kwarg, page in (("README.md", "landing", _LANDING),
+                                 ("INSTRUCTION-BUDGET.md", "budget_md", _BUDGET_MD)):
+            if page.count(_BUDGET_SETTING) != 1:
+                failures.append("figure-restore fixture: the setting wording must appear exactly "
+                                "once in the {} fixture".format(rel))
+                continue
+            figfix = tmp / ("figure-restored-" + rel.split(".")[0].lower())
+            _write_fixture(figfix, **{kwarg: page.replace(_BUDGET_SETTING, _BUDGET_FIGURE, 1)})
+            code, out = run_out(figfix)
+            if (code != 1 or "{}: the instruction-budget note".format(rel) not in out
+                    or "was not found" not in out):
+                failures.append("a budget note stating a hand-written ratchet figure on {} expected "
+                                "exit 1 with the missing-note diagnostic".format(rel))
+        budgetraised = tmp / "budgetraised"
+        _write_fixture(budgetraised, budget_toml=_BUDGET_TOML.replace("132775", "140000"))
+        if run_quiet(budgetraised) != 0:
+            failures.append("a ratchet raised under unchanged pages expected exit 0 (the bound "
+                            "note names the setting and its file, not a ratchet figure)")
         budgetmissing = tmp / "budgetmissing"
         _write_fixture(budgetmissing, budget_md="# Fixture Budget\n\nNo note here.\n")
         if run_quiet(budgetmissing) != 1:
@@ -2846,10 +2882,7 @@ def self_test_main():
             failures.append("a budget note rewritten to say the pack no longer exceeds the 120,000 "
                             "figure expected exit 1 (the exceeds half is bound)")
         budgetlow = tmp / "budgetlow"
-        _write_fixture(budgetlow,
-                       landing=_LANDING.replace("132,775 UTF-16 code units", "100,000 UTF-16 code units"),
-                       budget_md=_BUDGET_MD.replace("132,775 UTF-16 code units", "100,000 UTF-16 code units"),
-                       budget_toml=_BUDGET_TOML.replace("132775", "100000"))
+        _write_fixture(budgetlow, budget_toml=_BUDGET_TOML.replace("132775", "100000"))
         if run_quiet(budgetlow) != 1:
             failures.append("a budget note kept after the ratchet fell to 120,000 or below expected "
                             "exit 1")
@@ -2859,7 +2892,9 @@ def self_test_main():
         if run_quiet(nobudget) != 2:
             failures.append("a missing instruction-budget source expected exit 2 (fail-closed)")
 
-        # 23b. the unit binding on EACH public surface (README.md and INSTRUCTION-BUDGET.md): the
+        # 23b. the setting and unit binding on EACH public surface (README.md and
+        #      INSTRUCTION-BUDGET.md): the setting named as another setting, the file named as
+        #      another file, the
         #      unit changed to "characters", the unit omitted, the explanatory suffix altered, and
         #      the suffix extended past its sentence end ("counts in bytes.", "counts, in bytes.")
         #      and non-whitespace glued after the period ("counts.in bytes.", the vector that
@@ -2871,8 +2906,10 @@ def self_test_main():
         #      and the antecedent is bound: a page saying "budget to 140,000" before "that
         #      figure" is a finding by the antecedent diagnostic.
         unit_rewords = (
-            ("unit-characters", "132,775 UTF-16 code units", "132,775 characters"),
-            ("unit-omitted", "132,775 UTF-16 code units, the unit", "132,775, the unit"),
+            ("setting-name", "the `ratchet` setting", "the `ceiling` setting"),
+            ("setting-file", "`.aiqt/core/instruction-budget.toml`", "`.aiqt/core/budget.toml`"),
+            ("unit-characters", "counted in UTF-16 code units", "counted in characters"),
+            ("unit-omitted", ", counted in UTF-16 code units, the unit", ", the unit"),
             ("unit-suffix", "the unit the budget gate counts", "the unit the budget gate prints"),
             ("unit-suffix-extended", "the unit the budget gate counts.",
              "the unit the budget gate counts in bytes."),
@@ -2950,21 +2987,11 @@ def self_test_main():
         #      longer exceeds the antecedent -> finding; one unit above (120,001) still exceeds
         #      it -> clean (the at-boundary and just-outside values of the <= comparison).
         atfloor = tmp / "atfloor"
-        _write_fixture(atfloor,
-                       landing=_LANDING.replace("132,775 UTF-16 code units",
-                                                "120,000 UTF-16 code units"),
-                       budget_md=_BUDGET_MD.replace("132,775 UTF-16 code units",
-                                                    "120,000 UTF-16 code units"),
-                       budget_toml=_BUDGET_TOML.replace("132775", "120000"))
+        _write_fixture(atfloor, budget_toml=_BUDGET_TOML.replace("132775", "120000"))
         if run_quiet(atfloor) != 1:
             failures.append("a ratchet exactly at the 120,000 floor expected exit 1 (at-boundary)")
         overfloor = tmp / "overfloor"
-        _write_fixture(overfloor,
-                       landing=_LANDING.replace("132,775 UTF-16 code units",
-                                                "120,001 UTF-16 code units"),
-                       budget_md=_BUDGET_MD.replace("132,775 UTF-16 code units",
-                                                    "120,001 UTF-16 code units"),
-                       budget_toml=_BUDGET_TOML.replace("132775", "120001"))
+        _write_fixture(overfloor, budget_toml=_BUDGET_TOML.replace("132775", "120001"))
         if run_quiet(overfloor) != 0:
             failures.append("a ratchet one unit above the 120,000 floor expected exit 0 "
                             "(just-outside boundary)")
@@ -3039,8 +3066,9 @@ def self_test_main():
             if code != 2 or "claude-code-version must be a non-empty string" not in err:
                 failures.append("a budget source with a missing or non-string claude-code-version "
                                 "({}) expected exit 2 with its diagnostic".format(tag))
-        # The pages state the committed ratchet only: the earlier "measured PACK" claim, which
-        # this gate cannot bind, restored on either page -> the missing-note finding.
+        # The bound note names the committed ratchet by its setting and file, never a measured
+        # PACK: the earlier "measured PACK" claim, which this gate cannot bind, restored on either
+        # page -> the missing-note finding.
         for rel, kwarg, page in (("README.md", "landing", _LANDING),
                                  ("INSTRUCTION-BUDGET.md", "budget_md", _BUDGET_MD)):
             old = ("may exceed that figure: the budget gate allows it a PACK of up to the committed "
@@ -3098,8 +3126,9 @@ def self_test_main():
           "extensionless shebang file, each finding naming the path and the prefix), a declared "
           "prefix matching no release "
           "path or overshadowed by longer prefixes (each asserted by its own diagnostic), and a "
-          "budget note whose "
-          "figure disagrees with the committed ratchet, is absent, loses its exceeds half, its "
+          "budget note that "
+          "states a hand-written ratchet figure in place of the ratchet setting, names another "
+          "setting or file, is absent, loses its exceeds half, its "
           "UTF-16 unit, or the unit's explanatory suffix to a rewording, an extension past the "
           "sentence end, or text glued after the period (on each public surface), names an "
           "antecedent other than 120,000 before "
@@ -3122,7 +3151,7 @@ def self_test_main():
           "prefix, a budget note carrying the \", not 150,000\" aside, a budget note whose period "
           "ends the page or is followed by a space and another sentence (on each public "
           "surface), a ratchet one unit above "
-          "the 120,000 floor, "
+          "the 120,000 floor, a ratchet raised under unchanged pages, "
           "and the repository's real declaration against its real release manifest "
           "(the control), stay "
           "clean (exit 0); a missing page, a missing JSON export, an unreadable standards dir, an "

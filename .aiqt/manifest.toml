@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "04d4a925473b05d9bdb851b66023effddd28d81b7bf53d0b00cfe62433381719"
+tree-sha256 = "416cfa90f7785276a4a407036de17bf97394ce178372e2922b343c5386e31157"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 640473
-sha256 = "e596c1d3af706c871fb963d23176a1eb9e360366cee59c11b0963522e30d1bcd"
+bytes = 640673
+sha256 = "7f88d2431ffd94efe89bbcf9220c186fe7b924111237b14e095948b65b714f57"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2467,8 +2467,8 @@ sha256 = "ced8627ba28ddfd65a2057a07bbac9160e61fa43e4d029ffb036608bd68ac419"
 
 [[sources]]
 path = "INSTRUCTION-BUDGET.md"
-bytes = 6207
-sha256 = "d3b2eb63b85f9673b3af9dc3f0eca9fc1e250ebfc940d51cbd599680afb40b47"
+bytes = 6273
+sha256 = "ada95bb5f11fa906675525c556dcbaebba2c6292dd29e060d28ba73f3f70ab57"
 
 [[sources]]
 path = "LICENSE"
@@ -2482,8 +2482,8 @@ sha256 = "bae43dcfb3e30c428f59a243370f83e2835ef9706caa5692c83f9d7137964cb3"
 
 [[sources]]
 path = "README.md"
-bytes = 5543
-sha256 = "d46c725ff08fb25c20a3f25a8d6a02a1a3e7fd72472207d694394154aa07979f"
+bytes = 5609
+sha256 = "7e19b66565313275d94d995c018b24ecae1d7d393628bab8ad064138095076aa"
 
 [[sources]]
 path = "RELEASING.md"
@@ -4472,8 +4472,8 @@ sha256 = "ddd59f0b7cd9ab298f97c57a029ae45d860bfb838099a9d9e85028c7629604d3"
 
 [[sources]]
 path = "tools/check_reference_facts.py"
-bytes = 213139
-sha256 = "0defa1b803a9a3ea3f68f3ed07d262ec152ee6084de3344a7eca8cfe0816f073"
+bytes = 215342
+sha256 = "46be077d7371a931d5a77c4090cbc4e345b66f04a29e4e9cd7c88d4c45ecc35c"
 
 [[sources]]
 path = "tools/check_release_build.py"
