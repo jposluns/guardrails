@@ -635,9 +635,14 @@ configuration it inherits.
 
 A reader that splits a worker delivery into files at marker lines treats every line in its marker form as
 grammar, so a marker it does not recognize or cannot handle is refused, naming the line, before any file is
-written, never kept as content of the file before it. Where the delivery states a digest for each file, each
-extracted file is checked against it before use and a mismatch is refused the same way; such a digest detects
-a splitting or transport fault, not unfaithful content.
+written, never kept as content of the file before it; real content holding such a marker is refused too,
+never passed through. The delivery must state a digest for each file it carries, and every extracted file
+is checked against it before any file is written. A delivery with no digest list, a file without a
+digest, or a digest that does not match is refused, naming the file or the missing list, so no file of
+that delivery is written. The only exception to that refusal is an explicit opt-out from these digest
+requirements that the person running the extraction gives for that one delivery, and the reader then
+prints a warning naming what it does not check. Such a digest detects a splitting or transport fault, not
+unfaithful content.
 
 ## Use absolute paths, not relative
 

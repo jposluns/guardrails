@@ -279,7 +279,7 @@ reason = "Disclosed residual of wowo01.6; no obligation of its own."
 
 [[exempt]]
 corpus-id = "wowo01"
-text = "such a digest detects\na splitting or transport fault, not unfaithful content."
+text = "Such a digest detects a splitting or transport fault, not\nunfaithful content."
 reason = "Disclosed limit of wowo01.23; no obligation of its own."
 
 [[exempt]]

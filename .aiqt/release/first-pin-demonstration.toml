@@ -2,7 +2,7 @@
 # The first-pin demonstration read by tools/check_release_build.py: delivered-prefix-obligations
 # are the rule ids (corpus-id) whose full text lies inside the first 32768 bytes of AGENTS.md;
 # floor-profile-obligations are those plus the apex rule id.
-agents-sha256 = "05771820cda9649b29198ffa52e5293a19837c9da8e8720344c9021a605287c2"
+agents-sha256 = "a636f472676f293127d471903ae8911a832124cc7fbe90988638268028fd5243"
 delivered-prefix-obligations = [
   "prjint1",
   "citint",
