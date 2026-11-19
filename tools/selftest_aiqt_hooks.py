@@ -162,7 +162,7 @@ with nothing left for a later call; any other exception out of the window fails 
 and leaves a fail-open mode a warning; and each PreToolUse handler decides its worst measured input shapes
 at 64 KB, 256 KB and 1 MB within CPU-time bounds set from a measured run and the 8-second wall-clock gate
 (a case over that gate alone is re-timed once before it fails), under a 60-second hang guard. The timer and
-timing checks run in a child process.
+timing checks run in child processes, the timer checks in one and the shape timings split across others.
 
 It also covers the warn-only clock-stamp handler (future_stamp_write, tstamp), ported from the former
 standalone preview script (the fsw-* and clock-* rows, _test_clock_hooks): it warns on a future-dated literal
@@ -6625,8 +6625,9 @@ def _test_heredoc_terminator(failures):
 # main() runs every PreToolUse mode that is not fail-open inside one aiqt_hooks._DeadlineWindow of
 # PRETOOL_BUDGET_SECONDS and fails closed (exit 2) when its check has not decided by then, and the raw
 # 'git ... <verb>' scans are aiqt_hooks._RawSequence probes of linear cost. The checks that set timers or
-# SIGALRM dispositions, and the shape timings, run in a child process (_deadline_child), so that state
-# belongs to that process alone and a regression that hangs is cut by the child's timeout.
+# SIGALRM dispositions, and the shape timings, run in child processes (_deadline_child: the timer checks in
+# one, the shape timings split across _DEADLINE_SHAPE_CHILDREN more), so that state belongs to those processes
+# alone and a regression that hangs is cut by each child's timeout.
 
 # The single regexes the _RawSequence probes replaced: the reference the differential check holds each
 # probe equal to, over short texts where their super-linear cost does not matter.
@@ -9027,9 +9028,22 @@ _DEADLINE_OWN_WORK_BOUND = aiqt_hooks.PRETOOL_BUDGET_SECONDS
 # that would run on for minutes, so the run reports it instead of stalling. The own-work gate is
 # _DEADLINE_OWN_WORK_BOUND, well below it.
 _DEADLINE_HANG_SECONDS = 60.0
-# The deadline child's fixed wall-clock limit (_deadline_child_wait): a child still running after it is
+# Each deadline child's fixed wall-clock limit (_deadline_child_wait): a child still running after it is
 # killed, whatever the load, and nothing is divided by anything.
 _DEADLINE_CHILD_TIMEOUT = 900
+# The shape timings run split across this many deadline children (_deadline_shape_slice), each under
+# _DEADLINE_CHILD_TIMEOUT, beside child 0, which runs the timer and disposition checks. Before the split one
+# child ran all of it; it reached about 86 percent of its 900 s at moderate load and failed at 900.1 to
+# 900.2 s under load in the combined config lane (reported, not reproduced here). MEASURED (2026-11-19,
+# 96-CPU host, Python 3.14.4, base a979bf05): in-process at a 1-minute load of about 97 to 103, that one
+# child's checks took 650.4 s, 587.0 s of it the shape timings (2034 handler calls, 446.6 s of them at
+# 1 MB), whose calls spent 583.8 s on the calling thread's own CPU clock and 0.4 s queued for a CPU, so
+# the length is the handlers' own work, not queueing; launched as the self-test launches it, at a load
+# falling from about 52 to 20, the child took 570.4 s. The failing runs were thus at least 1.38 to 1.58
+# times these. The 226 roster pairs split round-robin into 3 slices whose measured case times sum to
+# 200.8, 191.4 and 194.7 s, and the timer checks took 63.4 s: the slowest slice leaves 900 s a margin of
+# about 4.5 times, and about 2.8 times after the 1.58 slowdown the failing runs showed.
+_DEADLINE_SHAPE_CHILDREN = 3
 
 
 def _deadline_fixtures(tmp):
@@ -9230,24 +9244,46 @@ def _deadline_run_text(run):
     return "{:.2f}s wall-clock, {:.2f}s of CPU time, {}, outcome {}".format(run[1], run[0], queued_text, run[2])
 
 
-def _deadline_shape_runs(tmp, sizes):
-    """Every (handler, shape, size) case _TIMED_RUNS times (_timed_runs over _deadline_shape_case):
-    [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome) for each run...)]."""
+def _deadline_shape_roster():
+    """Every timed (handler, shape, in_plain) pair of the shape timings, in run order: each _DEADLINE_CASES
+    handler's shapes and then every uncertain '#' shape (_DEADLINE_HASH_SHAPES), in_plain False, then the
+    _DEADLINE_PLAIN_CASES pairs, in_plain True."""
+    roster = [(name, shape, False) for name, shapes in sorted(_DEADLINE_CASES.items())
+              for shape in shapes + _DEADLINE_HASH_SHAPES]
+    return roster + [(name, shape, True) for name, shapes in sorted(_DEADLINE_PLAIN_CASES.items())
+                     for shape in shapes]
+
+
+def _deadline_shape_slice(part, parts):
+    """The roster pairs (_deadline_shape_roster) that shape child part of parts (1 <= part <= parts) times:
+    those at zero-based roster positions i with i mod parts == part - 1, in roster order, so the parts
+    together time every pair exactly once (dl-child-partition)."""
+    return [pair for i, pair in enumerate(_deadline_shape_roster()) if i % parts == part - 1]
+
+
+def _deadline_shape_runs(tmp, sizes, pairs=None):
+    """Every (handler, shape, size) case of pairs (the whole _deadline_shape_roster when None) _TIMED_RUNS
+    times (_timed_runs over _deadline_shape_case): [(handler, shape, size, cwd, (cpu_seconds, wall_seconds,
+    outcome) for each run...)]. The in_plain pairs run from the plain cwd under _no_registry_above, after
+    the others."""
+    pairs = _deadline_shape_roster() if pairs is None else pairs
     plain, orch, gensrc = _deadline_fixtures(tmp)
     runs = []
-    for name, shapes in sorted(_DEADLINE_CASES.items()):
+    for name, shape, in_plain in pairs:
+        if in_plain:
+            continue
         cwd = str(orch if name.startswith(("orch_", "review_")) else
                   gensrc if name == "gensrc_guard" else plain)
-        for shape in shapes + _DEADLINE_HASH_SHAPES:
-            for size in sorted(sizes):
-                runs.append((name, shape, size, cwd) + tuple(_timed_runs(
-                    lambda: _deadline_shape_case(name, shape, size, cwd))[1]))
+        for size in sorted(sizes):
+            runs.append((name, shape, size, cwd) + tuple(_timed_runs(
+                lambda: _deadline_shape_case(name, shape, size, cwd))[1]))
     with _no_registry_above(plain):
-        for name, shapes in sorted(_DEADLINE_PLAIN_CASES.items()):
-            for shape in shapes:
-                for size in sorted(sizes):
-                    runs.append((name, shape, size, str(plain)) + tuple(_timed_runs(
-                        lambda: _deadline_shape_case(name, shape, size, str(plain)))[1]))
+        for name, shape, in_plain in pairs:
+            if not in_plain:
+                continue
+            for size in sorted(sizes):
+                runs.append((name, shape, size, str(plain)) + tuple(_timed_runs(
+                    lambda: _deadline_shape_case(name, shape, size, str(plain)))[1]))
     return runs
 
 
@@ -9339,9 +9375,10 @@ def _deadline_shape_verdicts(runs, retime):
     return out
 
 
-def _deadline_shape_failures(tmp):
-    """(dl-shape) Every PreToolUse handler (the warn-only PreToolUse class, PRETOOL_WARN_ONLY, included) has
-    shapes here, and on each shape at 64 KB, 256 KB and 1 MB it reaches a decision within the hang guard,
+def _deadline_shape_failures(tmp, part=1, parts=1):
+    """(dl-shape) Over the roster pairs of shape child part of parts (_deadline_shape_slice; the default
+    times every pair, and dl-shape-coverage is checked in part 1 only): every PreToolUse handler (the
+    warn-only PreToolUse class, PRETOOL_WARN_ONLY, included) has shapes here, and on each shape at 64 KB, 256 KB and 1 MB it reaches a decision within the hang guard,
     that size's CPU-time bound and the production budget on its own work (below), denying where the case
     carries a hazard and reaching the pinned base commit's decision on each uncertain '#' shape
     (_DEADLINE_HASH_SHAPES, which every handler runs) (_deadline_shape_verdicts: a case whose median own
@@ -9368,9 +9405,10 @@ def _deadline_shape_failures(tmp):
     out = []
     missing = sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
                      if event in (aiqt_hooks.PRETOOL, aiqt_hooks.PRETOOL_WARN_ONLY) and name not in _DEADLINE_CASES)
-    if missing:
+    if missing and part == 1:
         out.append("(dl-shape-coverage) PreToolUse handlers with no timed shape: {}".format(", ".join(missing)))
-    return out + _deadline_shape_verdicts(_deadline_shape_runs(tmp, _DEADLINE_SIZES), _deadline_shape_case)
+    return out + _deadline_shape_verdicts(
+        _deadline_shape_runs(tmp, _DEADLINE_SIZES, _deadline_shape_slice(part, parts)), _deadline_shape_case)
 
 
 def _deadline_shape_rerun_failures():
@@ -12849,9 +12887,12 @@ def _deadline_entry_message_failures():
     return out
 
 
-def _deadline_child(tmp):
-    """The deadline checks that set timers and dispositions, plus the shape timings, in this (child)
-    process; returns their failures."""
+def _deadline_child(tmp, part=0):
+    """One deadline child's checks, in this (child) process; returns their failures. Part 0 runs the
+    deadline checks that set timers and dispositions; part k (1 <= k <= _DEADLINE_SHAPE_CHILDREN) runs the
+    k-th slice of the shape timings (_deadline_shape_slice), dl-shape-coverage with the first."""
+    if part:
+        return _deadline_shape_failures(Path(tmp), part, _DEADLINE_SHAPE_CHILDREN)
     return (_deadline_path_failures() + _deadline_restore_failures() + _deadline_race_failures()
             + _deadline_take_failures() + _deadline_defer_failures() + _deadline_defer_countdown_failures()
             + _deadline_defer_countdown_failures(1.0) + _deadline_defer_countdown_judging_failures()
@@ -12861,7 +12902,7 @@ def _deadline_child(tmp):
             + _deadline_outer_deadline_failures() + _deadline_restore_fault_failures()
             + _deadline_unknown_failures() + _deadline_fire_take_failures() + _deadline_window_error_failures()
             + _deadline_result_failures()
-            + _deadline_entry_message_failures() + _deadline_shape_failures(Path(tmp)))
+            + _deadline_entry_message_failures())
 
 
 def _deadline_relation_failures():
@@ -13016,25 +13057,36 @@ def _test_deadline_posture(failures, tmp):
     failures.extend(_lex_fork_failures())
     failures.extend(_errexit_runs_failures())
     failures.extend(_deadline_child_wait_failures(tmp))
-    child_tmp = tmp / "deadline"
-    child_tmp.mkdir()
+    roster = _deadline_shape_roster()
+    slices = [_deadline_shape_slice(part, _DEADLINE_SHAPE_CHILDREN)
+              for part in range(1, _DEADLINE_SHAPE_CHILDREN + 1)]
+    if (not all(slices) or len(set(roster)) != len(roster)
+            or sorted(pair for pairs in slices for pair in pairs) != sorted(roster)):
+        failures.append("(dl-child-partition) the {} shape children's slices must each be nonempty and together "
+                        "time every one of the {} roster pairs exactly once, got slice sizes {}".format(
+                            _DEADLINE_SHAPE_CHILDREN, len(roster), [len(pairs) for pairs in slices]))
     code = ("import json, sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "
-            "sys.stdout.write(json.dumps(m._deadline_child(sys.argv[2])))")
-    proc, waited = _deadline_child_wait(code, (str(Path(__file__).resolve().parent), str(child_tmp)),
-                                        _DEADLINE_CHILD_TIMEOUT)
-    if proc is None:
-        failures.append("(dl-child-timeout) the deadline child did not finish within its {}s wall-clock limit ({})"
-                        .format(_DEADLINE_CHILD_TIMEOUT, waited))
-        return
-    try:
-        found = json.loads(proc.stdout)
-    except ValueError:
-        found = None
-    if proc.returncode != 0 or not isinstance(found, list):
-        failures.append("(dl-child-failed) the deadline child failed (exit {}): {}".format(
-            proc.returncode, (proc.stdout + proc.stderr)[-2000:]))
-        return
-    failures.extend(found)
+            "sys.stdout.write(json.dumps(m._deadline_child(sys.argv[2], int(sys.argv[3]))))")
+    for part in range(_DEADLINE_SHAPE_CHILDREN + 1):
+        label = ("the timer and disposition checks" if not part else
+                 "shape slice {} of {}".format(part, _DEADLINE_SHAPE_CHILDREN))
+        child_tmp = tmp / "deadline-{}".format(part)
+        child_tmp.mkdir()
+        proc, waited = _deadline_child_wait(
+            code, (str(Path(__file__).resolve().parent), str(child_tmp), str(part)), _DEADLINE_CHILD_TIMEOUT)
+        if proc is None:
+            failures.append("(dl-child-timeout) deadline child {} ({}) did not finish within its {}s wall-clock "
+                            "limit ({})".format(part, label, _DEADLINE_CHILD_TIMEOUT, waited))
+            continue
+        try:
+            found = json.loads(proc.stdout)
+        except ValueError:
+            found = None
+        if proc.returncode != 0 or not isinstance(found, list):
+            failures.append("(dl-child-failed) deadline child {} ({}) failed (exit {}): {}".format(
+                part, label, proc.returncode, (proc.stdout + proc.stderr)[-2000:]))
+            continue
+        failures.extend(found)
 
 
 # --- clock hooks: future_stamp_write (the dispatcher handler ported from the former standalone preview
