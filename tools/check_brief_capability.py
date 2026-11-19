@@ -4809,6 +4809,7 @@ def d1_local_scopes(clauses, negated=False):
     miss, D1_FRONTED_COORDINATED); and a bare comma between the items of a coordinated list does not end it
     (d1_listed: "rather than retry, rerun, or run it inline, report the refusal")."""
     scopes, excluded, fronted, segment, previous = [], False, False, None, None
+    listed = d1_listed(clauses)
     for position, clause in enumerate(clauses):
         if clause[0] != segment:
             if segment is not None:
@@ -4821,7 +4822,7 @@ def d1_local_scopes(clauses, negated=False):
         if restarts and not (previous is not None and d1_introduces(previous[2])):
             negated = False
         if fresh or opener not in D1_CARRIERS or (
-                fronted and opener in D1_FRONTED_ENDS and not d1_listed(clauses, position)):
+                fronted and opener in D1_FRONTED_ENDS and not listed[position]):
             excluded = False
         negated = negated or any(word in D1_NEGATIONS for word, _, _ in words)
         scopes.append((clause, negated, excluded))
@@ -4831,17 +4832,23 @@ def d1_local_scopes(clauses, negated=False):
     return scopes
 
 
-def d1_listed(clauses, index):
-    """Whether the clause at clauses[index], opened by a bare comma inside a fronted exclusion, is an item of a
-    coordinated list: in its segment it and any clauses right after it opened by a bare comma lead to a clause
-    opened by and or or (D1_LIST_JOINS), and the clause right after that one is opened by a bare comma ("rather
-    than retry, rerun, or run it inline, report the refusal", with or without the comma before or). A list not
-    closed by a bare comma clause is not read as one ("instead of waiting, run it inline or retry it." warns)."""
-    segment, later = clauses[index][0], index + 1
-    while later < len(clauses) and clauses[later][0] == segment and clauses[later][1] in D1_FRONTED_ENDS:
-        later += 1
-    return (later + 1 < len(clauses) and clauses[later][0] == clauses[later + 1][0] == segment
-            and clauses[later][1] in D1_LIST_JOINS and clauses[later + 1][1] in D1_FRONTED_ENDS)
+def d1_listed(clauses):
+    """[listed], one per clause of a sentence, in order: whether the clause, when opened by a bare comma inside a
+    fronted exclusion, is an item of a coordinated list: in its segment it and any clauses right after it opened by
+    a bare comma lead to a clause opened by and or or (D1_LIST_JOINS), and the clause right after that one is opened
+    by a bare comma ("rather than retry, rerun, or run it inline, report the refusal", with or without the comma
+    before or). A list not closed by a bare comma clause is not read as one ("instead of waiting, run it inline or
+    retry it." warns). One backward pass reading each clause a bounded number of times: a clause followed in its
+    segment by a bare comma clause has that clause's answer, so a long list costs work linear in its items."""
+    listed = [False] * len(clauses)
+    for index in range(len(clauses) - 1, -1, -1):
+        segment, later = clauses[index][0], index + 1
+        if later < len(clauses) and clauses[later][0] == segment and clauses[later][1] in D1_FRONTED_ENDS:
+            listed[index] = listed[later]
+        else:
+            listed[index] = (later + 1 < len(clauses) and clauses[later][0] == clauses[later + 1][0] == segment
+                             and clauses[later][1] in D1_LIST_JOINS and clauses[later + 1][1] in D1_FRONTED_ENDS)
+    return listed
 
 
 def d1_unconditioned(clauses):
@@ -5734,6 +5741,14 @@ D1_FRONTED_LIST = ("If denied, rather than retry, rerun, or run it inline, repor
 # clause closes a coordinated list after it; each warns on line 1
 D1_FRONTED_LIST_KEPT = ("If denied, instead of waiting, run it inline or retry it.\n",
                         "If denied, instead of waiting, run it inline and report it.\n")
+# a long coordinated fronted list (D1_GROWTH_ITEM repeated in D1_GROWTH_TEXT), read at the two D1_GROWTH_SIZES item
+# counts: rule_d1 reads each clause a bounded number of times, so its clause reads (by index or by iteration) at the
+# larger size are at most D1_GROWTH_SLACK times the size ratio times those at the smaller; reading the remaining
+# items afresh for every item grows them by about the square of the size ratio
+D1_GROWTH_TEXT = "If denied, rather than retry, {}or run it inline, report the refusal.\n"
+D1_GROWTH_ITEM = "retry, "
+D1_GROWTH_SIZES = (100, 400)
+D1_GROWTH_SLACK = 2
 # a negation only in a lead's if or when condition makes no prohibition, so the item under it warns on the line
 # given in D1_CONDITION_LEAD_LINES; with the condition's words read (d1_unconditioned the identity) each was quiet
 D1_CONDITION_LEAD = ("If the tool is not available, do the following:\n- run the denied step another way.\n",
@@ -8024,9 +8039,13 @@ def self_test(report_path=None):
             ("perf/p8-long-lead-linear", "print ", "WORKER_STATUS ", ""),
             ("perf/p8-deictic-below-linear", "write the block below ", "WORKER_STATUS ", ""),
             # D1: one sentence of many refusals and prohibited action clauses, and one of many wrapped lines, each
-            # read in one forward pass with no rescan of earlier refusals or clauses
+            # read in one forward pass with no rescan of earlier refusals or clauses; and one long coordinated
+            # fronted list, whose list boundaries are found in one pass, not by reading the remaining items for each
+            # item (that rescan made the work quadratic in the items)
             ("perf/d1-long-sentence-linear", "if denied, do not run it inline and ", "", ""),
-            ("perf/d1-wrapped-lines-linear", "if refused, run it\n", "", "")):
+            ("perf/d1-wrapped-lines-linear", "if refused, run it\n", "", ""),
+            ("perf/d1-fronted-list-linear", D1_GROWTH_ITEM, D1_GROWTH_TEXT.split("{}")[0],
+             D1_GROWTH_TEXT.split("{}")[1])):
         check(check_id, _linear(unit, prefix, suffix), True)
     # ---------- the advisory rules: printed, never refusing ----------
     check("r1/run-prose-advisory", _outcome(RUN_PROSE), (0, [("R1", "ADVISORY")]))
@@ -8761,6 +8780,46 @@ def self_test(report_path=None):
     check("d1/coordinated-misses-quiet", [d1_lines(text) for text in D1_COORDINATED_MISSES],
           [[]] * len(D1_COORDINATED_MISSES))
     check("d1/false-warnings-warned", [d1_lines(text) for text in D1_FALSE_WARNED], list(D1_FALSE_WARNED_LINES))
+
+    class D1CountedClauses(list):
+        """A sentence's clauses that add one to tally[0] for each clause read, by index or by iteration."""
+
+        def __init__(self, clauses, tally):
+            list.__init__(self, clauses)
+            self.tally = tally
+
+        def __getitem__(self, key):
+            self.tally[0] += 1
+            return list.__getitem__(self, key)
+
+        def __iter__(self):
+            for clause in list.__iter__(self):
+                self.tally[0] += 1
+                yield clause
+
+    def d1_clause_reads(items):
+        """(clause reads, D1 lines) of rule_d1 on D1_GROWTH_TEXT with `items` list items."""
+        tally = [0]
+        with _patched(d1_sentences=lambda paragraph, real=d1_sentences: [
+                (text, D1CountedClauses(clauses, tally)) for text, clauses in real(paragraph)]):
+            lines = d1_lines(D1_GROWTH_TEXT.format(D1_GROWTH_ITEM * items))
+        return tally[0], lines
+
+    def d1_growth():
+        """"linear" when the clause reads at the larger D1_GROWTH_SIZES size are within D1_GROWTH_SLACK times the
+        size ratio of those at the smaller and both sizes are quiet, else "superlinear" (or "warned") with the
+        counts."""
+        (small, small_lines), (large, large_lines) = (d1_clause_reads(items) for items in D1_GROWTH_SIZES)
+        if small_lines or large_lines:
+            return "warned ({!r} at {} items, {!r} at {})".format(small_lines, D1_GROWTH_SIZES[0], large_lines,
+                                                                 D1_GROWTH_SIZES[1])
+        if large * D1_GROWTH_SIZES[0] <= D1_GROWTH_SLACK * D1_GROWTH_SIZES[1] * small:
+            return "linear"
+        return "superlinear ({} clause reads at {} items, {} at {})".format(small, D1_GROWTH_SIZES[0], large,
+                                                                            D1_GROWTH_SIZES[1])
+
+    # a long coordinated fronted list costs D1 work linear in its items, judged by counted clause reads
+    check("d1/fronted-list-growth-linear", d1_growth(), "linear")
 
     def d1_doc(pattern):
         """An outcome: the first group of `pattern` in the module docstring with whitespace runs as one space, or
@@ -11017,7 +11076,23 @@ def self_test(report_path=None):
     # warn again, and so does the pinned miss that rests on the list reading
     check("revert/d1-fronted-list-red", *flip(
         [reroutes(text) for text in D1_FRONTED_LIST + D1_READING_MISSES[:1]], [[1]] * (len(D1_FRONTED_LIST) + 1),
-        d1_listed=lambda clauses, index: False))
+        d1_listed=lambda clauses: [False] * len(clauses)))
+
+    def d1_listed_rescanned(clauses):
+        """d1_listed as it was: the remaining clauses of the segment read afresh for every clause."""
+        listed = []
+        for index in range(len(clauses)):
+            segment, later = clauses[index][0], index + 1
+            while later < len(clauses) and clauses[later][0] == segment and clauses[later][1] in D1_FRONTED_ENDS:
+                later += 1
+            listed.append(later + 1 < len(clauses) and clauses[later][0] == clauses[later + 1][0] == segment
+                          and clauses[later][1] in D1_LIST_JOINS and clauses[later + 1][1] in D1_FRONTED_ENDS)
+        return listed
+
+    # the per-clause rescan restored: the same outcomes, but the growth row reads superlinear work
+    check("revert/d1-listed-growth-red", *flip(
+        [lambda: d1_growth().split(" ")[0]] + [reroutes(text) for text in D1_FRONTED_LIST],
+        ["superlinear"] + [[]] * len(D1_FRONTED_LIST), d1_listed=d1_listed_rescanned))
     # the condition reading reverted (a condition's negation counts): each conditional lead is quiet again; widened
     # (every word of a lead read as a condition): the true prohibition control warns
     check("revert/d1-condition-lead-red", *flip([reroutes(text) for text in D1_CONDITION_LEAD],
@@ -11039,7 +11114,7 @@ def self_test(report_path=None):
     # the named lead misses rest on the lead carry: with no lead prohibition each warns
     check("revert/d1-reading-misses-lead-red", *flip([reroutes(D1_READING_MISSES[index]) for index in (1, 2)],
                                                      [[2], [6]], d1_prohibits=lambda clauses, carried=False: False))
-    check("revert/every-flip-ran", len(flipped), 330)
+    check("revert/every-flip-ran", len(flipped), 331)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -11134,7 +11209,7 @@ def self_test(report_path=None):
           "patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
-          "detects the previous revisions' and loses its canary with each guard patched out; 41 repeated shapes "
+          "detects the previous revisions' and loses its canary with each guard patched out; 42 repeated shapes "
           "each evaluate within the linear growth bound at 64 KiB, through the parsed-document reading "
           "with its size, whitespace-run and nesting bounds and its killed-at-the-deadline parse child, "
           "in a capped child that must exit 0; the parse child's process group is killed after a normal "
