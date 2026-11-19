@@ -31,20 +31,25 @@ tried for the next, and a source that keeps failing (or keeps timing out) is ask
 source moves on to the next source at once (no wait): a transient transport failure (below), any HTTP status (an
 HTTPError of any code, or a final status other than 200), a refused connection, a permanent DNS failure (EAI_NONAME
 or EAI_FAIL, and EAI_NODATA or EAI_ADDRFAMILY where the platform defines them), a certificate or other TLS failure,
-a malformed response head (a bad status line, an over-long header line, an unknown protocol or transfer encoding), a
-redirect that is not followed (below), a Content-Length that is not a byte count, a body over FETCH_LIMIT and a body
-longer than its Content-Length. An attempt whose every source failed so is retried only when at least one of those
-failures was transient, with waits of RETRY_DELAYS (2, 4 and 8 seconds) before the second, third and fourth
-attempt; when none was, the build stops after that attempt. A transient transport failure is a network or host that
-is unreachable, a connection reset (including a server that closes the connection before it answers), a timeout, a
-temporary DNS failure (EAI_AGAIN) or a response read cut short (IncompleteRead), each also when urllib wraps it in
-URLError, and a body that ends before the byte count its Content-Length header declares. Everything else stops the
+a malformed response head (a bad status line, an over-long header line, an unknown protocol or transfer encoding,
+and any other ValueError or http.client exception raised while the response is opened, such as a head of too many
+header lines or a redirect Location that does not parse), a redirect that is not followed (below), a Content-Length
+that is not a byte count, a body over FETCH_LIMIT and a body longer than its Content-Length. An attempt whose every
+source failed so is retried only when at least one of those failures was transient, with waits of RETRY_DELAYS (2,
+4 and 8 seconds) before the second, third and fourth attempt; when none was, the build stops after that attempt. A
+transient transport failure is a network or host that is unreachable, a connection reset (including a server that
+closes the connection before it answers), a broken pipe, an aborted connection, a timeout, a temporary DNS failure
+(EAI_AGAIN) or a response read cut short (IncompleteRead), each also when urllib wraps it in URLError, and a body
+that ends before the byte count its Content-Length header declares. Everything else stops the
 build at once, without asking another source or retrying: a URL that is not https, a deadline that has passed, a
 local file error (creating, writing, linking or removing a download file), any other network exception and a
 completed download that differs from its pin. A redirect is followed only to an https URL on the host and port of
-the URL it redirects from; any other is refused before it is opened, and the refusal names the URL it pointed to.
-Every download writes into a fresh temporary file in the
-downloads directory, created exclusively; a failed download's file is removed, and only that one. The first
+the URL it redirects from (a URL that names no port is on 443; one that names a port, 0 included, is on that port);
+any other is refused before it is opened, and the refusal names the hop that returned the redirect and the Location
+it gave. A redirect's own body is never read, a redirect that arrives once the deadline has passed is not followed
+(the build stops, as at any passed deadline), and the next hop opens with FETCH_TIMEOUT cut down to the time then
+left. A failure while opening a followed hop names that hop. Every download writes into a fresh temporary file in
+the downloads directory, created exclusively; a failed download's file is removed, and only that one. The first
 download of a file that completes, from whichever source, is linked to its pinned name, which must not exist yet,
 and is checked against its pin there before the next file is fetched: a size or sha256 mismatch is a refusal at
 once, never retried and never fetched again from another source. Every failure line of a download (each line
@@ -59,10 +64,10 @@ starts that would not end before it, and a download that finds it passed before 
 another source or retrying. Each download opens its connection with a socket timeout of FETCH_TIMEOUT cut down to
 the time left then, and before each body read the timeout is set again to FETCH_TIMEOUT cut down to the time
 left at that read. That bound is checked by this process between blocking operations, not enforced during them:
-while urllib connects, follows a redirect and reads the response head, each socket operation it makes (in every
-redirect hop) may wait up to the timeout the
-download began with, so the opening can overrun the deadline by that much per operation (name resolution is not covered by the
-socket timeout at all); a body read is one read1, one socket read for a body of declared length (a chunked body
+while urllib connects, sends the request and reads the response head, each socket operation it makes may wait up
+to the timeout that hop opened with (the download's own, or the time left when a redirect to it was followed), so
+the opening can overrun the deadline by that much per operation, in each hop (name resolution is not covered by
+the socket timeout at all); a body read is one read1, one socket read for a body of declared length (a chunked body
 also reads its chunk size lines, one socket read or more), and each of those may wait up to the time left when
 the read began. No separate process is terminated at the deadline. The patches are applied in PINS order
 with patch -p0 --force, which asks nothing and does not reverse a patch that looks reversed, so a patch that does
@@ -207,8 +212,9 @@ class NotCompleted(Exception):
 
 class SourceFailed(NotCompleted):
     """A failure of one download tied to the source that served it (an HTTP status, a refused connection, a
-    permanent DNS failure, a TLS failure, a malformed response head, a redirect not followed, a Content-Length that is
-    not a byte count, a body over FETCH_LIMIT or longer than its Content-Length): the next source is tried at once;
+    permanent DNS failure, a TLS failure, a malformed response head, a ValueError or another http.client exception
+    raised while opening, a redirect not followed, a Content-Length that is not a byte count, a body over FETCH_LIMIT
+    or longer than its Content-Length): the next source is tried at once;
     exit 2 when no source completes."""
 
 
@@ -219,7 +225,8 @@ class Transient(SourceFailed):
 
 def is_transient(exc):
     """Whether a network exception is a transient transport failure worth another attempt: a network or host that
-    cannot be reached, a connection reset, a timeout, a temporary DNS failure or a response read cut short, also
+    cannot be reached, a connection reset, a broken pipe, an aborted connection, a timeout, a temporary DNS failure
+    or a response read cut short, also
     as the reason of a URLError. An HTTPError (any status), a TLS failure (a certificate one included), a permanent
     DNS failure and every other exception are not."""
     if isinstance(exc, urllib.error.HTTPError):
@@ -230,7 +237,8 @@ def is_transient(exc):
         return False
     if isinstance(exc, socket.gaierror):
         return exc.errno == socket.EAI_AGAIN
-    if isinstance(exc, (TimeoutError, ConnectionResetError, http.client.IncompleteRead)):
+    if isinstance(exc, (TimeoutError, ConnectionResetError, BrokenPipeError, ConnectionAbortedError,
+                        http.client.IncompleteRead)):
         return True
     return isinstance(exc, OSError) and exc.errno in TRANSIENT_ERRNOS
 
@@ -273,33 +281,74 @@ def fetch_error(url, exc, final=None):
     return kind("{}: fetch failed ({}: {})".format(_where(url, final or url), type(exc).__name__, exc))
 
 
+def _https_port(parts):
+    """The port of a parsed https URL: the one it names, explicit 0 included, or 443 when it names none."""
+    return 443 if parts.port is None else parts.port
+
+
 def _same_host_https(url, other):
-    """Whether other is an https URL on the host and port of url, itself an https URL."""
+    """Whether other is an https URL on the host and port of url, itself an https URL. A URL that names no port is on
+    port 443; one that names a port, 0 included, is on that port."""
     try:
         old, new = urllib.parse.urlsplit(url), urllib.parse.urlsplit(other)
         return (old.scheme == "https" and new.scheme == "https" and new.hostname is not None
-                and new.hostname == old.hostname and (new.port or 443) == (old.port or 443))
+                and new.hostname == old.hostname and _https_port(new) == _https_port(old))
     except ValueError:
         return False
 
 
 class _RedirectRefused(Exception):
-    """A redirect to a URL that is not https on the host and port it redirects from: never opened."""
+    """A redirect, returned by the hop source (the URL whose response carried it), that is not followed: one to a URL
+    that is not https on the host and port of source, or one whose Location does not parse, is never opened; with
+    deadline set, the download deadline had passed when it arrived."""
 
-    def __init__(self, code, target):
-        super().__init__(code, target)
-        self.code, self.target = code, target
+    def __init__(self, code, target, source, deadline=False):
+        super().__init__(code, target, source)
+        self.code, self.target, self.source, self.deadline = code, target, source, deadline
 
 
 class _SameHostHttpsRedirect(urllib.request.HTTPRedirectHandler):
     """urllib's own redirect handling, following a redirect only to an https URL on the host and port of the URL it
-    redirects from; any other closes the redirect response and raises _RedirectRefused, so it is never opened."""
+    redirects from. Before urllib parses the Location, it is resolved against that URL and checked here: one that
+    does not parse, or leads elsewhere, closes the redirect response unread and raises _RedirectRefused, so it is
+    never opened; urllib's own resolution is checked again in redirect_request. A request that carries the
+    download's remaining() (fetch_attempt sets it) is not followed once the deadline has passed, and the next hop
+    gets FETCH_TIMEOUT cut down to the time then left. A followed redirect's body is never read: its response is
+    closed before urllib reads it. Each followed URL is appended to the hops list the request carries."""
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        target = headers.get("location", headers.get("uri"))
+        if target is None:
+            return super().http_error_302(req, fp, code, msg, headers)
+        try:
+            allowed = _same_host_https(req.full_url, urllib.parse.urljoin(req.full_url, target))
+        except ValueError:
+            allowed = False
+        if not allowed:
+            fp.close()
+            raise _RedirectRefused(code, target, req.full_url)
+        remaining = getattr(req, "remaining", None)
+        if remaining is not None:
+            left = remaining()
+            if left <= 0:
+                fp.close()
+                raise _RedirectRefused(code, target, req.full_url, deadline=True)
+            req.timeout = min(FETCH_TIMEOUT, left)
+        fp.close()
+        return super().http_error_302(req, fp, code, msg, headers)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if not _same_host_https(req.full_url, newurl):
             fp.close()
-            raise _RedirectRefused(code, newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+            raise _RedirectRefused(code, newurl, req.full_url)
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        hops = getattr(req, "hops", None)
+        if new is not None and hops is not None:
+            new.hops, new.remaining = hops, getattr(req, "remaining", None)
+            hops.append(newurl)
+        return new
 
 
 def _opener(*handlers):
@@ -346,25 +395,41 @@ def fetch_attempt(url, out, remaining, opener=None):
     download deadline leaves. opener (_opener() when None) gets FETCH_TIMEOUT or that, whichever is less, for each
     socket operation it makes, and follows a redirect only to https on the same host and port; before each body read
     the socket timeout is set again to FETCH_TIMEOUT or the time then left, whichever is less, and each read is one
-    read1, so for a body of declared length it makes at most one socket read. A URL that is not https and a deadline
-    that has passed (before the attempt or before a read) raise NotCompleted, as does a response whose socket cannot
-    be reached (_set_read_timeout); a redirect not followed, a response served from a URL that is not https on the
-    host and port of url, a status other than 200, a Content-Length that is not a byte count, a body over FETCH_LIMIT
-    bytes and one longer than its Content-Length raise SourceFailed; a body that ends before its Content-Length
-    raises Transient, as a read cut short; a network error raises what fetch_error gives for it. A local write error
-    propagates as the OSError it is."""
+    read1, so for a body of declared length it makes at most one socket read. The request carries remaining() and
+    the list of the URLs it opened (url, then each followed redirect hop), so a redirect arriving after the deadline
+    is not followed, the next hop's timeout is cut to the time then left, and a failure names the hop it came from.
+    A URL that is not https and a deadline that has passed (before the attempt, at a redirect or before a read) raise
+    NotCompleted, as does a response whose socket cannot be reached (_set_read_timeout); a redirect not followed
+    (naming the hop that returned it and the Location it gave), a ValueError or another http.client exception raised
+    while opening (a Location urllib cannot parse, a response head http.client refuses, such as one of too many
+    header lines), a response served from a URL that is not https on the host and port of url, a status other than
+    200, a Content-Length that is not a byte count, a body over FETCH_LIMIT bytes and one longer than its
+    Content-Length raise SourceFailed; a body that ends before its Content-Length raises Transient, as a read cut
+    short; any other network error raises what fetch_error gives for it. A local write error propagates as the
+    OSError it is."""
     if not url.startswith("https://"):
         raise NotCompleted("{}: not an https URL".format(url))
     timeout = min(FETCH_TIMEOUT, remaining())
     if timeout <= 0:
         raise NotCompleted("{}: the {} s download deadline has passed".format(url, DOWNLOAD_DEADLINE))
+    request = urllib.request.Request(url)
+    request.hops, request.remaining = [url], remaining
     try:
-        response = (_opener() if opener is None else opener).open(url, timeout=timeout)
+        response = (_opener() if opener is None else opener).open(request, timeout=timeout)
     except _RedirectRefused as exc:
+        where = _where(url, exc.source)
+        if exc.deadline:
+            raise NotCompleted("{}: the {} s download deadline passed before its redirect ({}) to {} was "
+                               "followed".format(where, DOWNLOAD_DEADLINE, exc.code, exc.target)) from None
         raise SourceFailed("{}: redirect ({}) to {} refused, as only a redirect to https on the same host is "
-                           "followed".format(url, exc.code, exc.target)) from None
+                           "followed".format(where, exc.code, exc.target)) from None
     except (OSError, http.client.HTTPException, ValueError) as exc:
-        raise fetch_error(url, exc) from None
+        failure = fetch_error(url, exc, request.hops[-1])
+        if type(failure) is NotCompleted and not isinstance(exc, OSError):
+            # a ValueError or an http.client exception raised while opening (a response head urllib or
+            # http.client cannot take) is tied to the server that sent it
+            failure = SourceFailed(str(failure))
+        raise failure from None
     with response:
         final = getattr(response, "url", None)
         if not isinstance(final, str):
@@ -1016,7 +1081,11 @@ def self_test(report_path=None):
                          urllib.error.URLError(ConnectionResetError(errno.ECONNRESET, "reset")),
                          urllib.error.URLError(TimeoutError("timed out")),
                          urllib.error.URLError(OSError(errno.ENETUNREACH, "network unreachable")),
-                         urllib.error.URLError(socket.gaierror(socket.EAI_AGAIN, "temporary failure"))]
+                         urllib.error.URLError(socket.gaierror(socket.EAI_AGAIN, "temporary failure")),
+                         BrokenPipeError(errno.EPIPE, "broken pipe"),
+                         ConnectionAbortedError(errno.ECONNABORTED, "connection aborted"),
+                         urllib.error.URLError(BrokenPipeError(errno.EPIPE, "broken pipe")),
+                         urllib.error.URLError(ConnectionAbortedError(errno.ECONNABORTED, "connection aborted"))]
             got = [(repr(exc), kind(exc)) for exc in transient]
             check("fetch/transient-errors-classified", all(name == "Transient" for _exc, name in got), got)
             tied = [urllib.error.HTTPError("https://fixture.invalid/f", code, "status", None, None)
@@ -1106,7 +1175,7 @@ def self_test(report_path=None):
                     self.open_url = open_url
 
                 def open(self, url, timeout=None):
-                    return self.open_url(url, timeout)
+                    return self.open_url(getattr(url, "full_url", url), timeout)
 
             def through(open_url):
                 """A download through fetch_attempt with a FakeOpener over open_url."""
@@ -1243,36 +1312,49 @@ def self_test(report_path=None):
             # HTTPResponse (and any other URL with the right bytes, so a redirect followed where it must not be is
             # seen); urllib's http handler is the self-test's refusing one
             class OfflineHttps(urllib.request.HTTPSHandler):
-                def __init__(self, routes, default):
+                """Answers each URL from routes (a head and body, or an exception raised as the open's own), moving
+                clock by cost(url) seconds first; records each URL opened, its timeout and its response."""
+
+                def __init__(self, routes, default, clock=None, cost=None):
                     super().__init__()
-                    self.routes, self.default, self.opened = routes, default, []
+                    self.routes, self.default, self.clock, self.cost = routes, default, clock, cost
+                    self.opened, self.timeouts, self.responses = [], [], []
 
                 def https_open(self, req):
                     self.opened.append(req.full_url)
-                    response = http_response(*self.routes.get(req.full_url, self.default), req.timeout)[0]
+                    self.timeouts.append(req.timeout)
+                    if self.cost is not None:
+                        self.clock.advance(self.cost(req.full_url))
+                    route = self.routes.get(req.full_url, self.default)
+                    if isinstance(route, BaseException):
+                        raise route
+                    response = http_response(*route, req.timeout)[0]
                     response.url, response.msg = req.full_url, response.reason  # as urllib's do_open sets them
+                    self.responses.append((req.full_url, response))
                     return response
 
             whole = (head, body)
             redirect_sources = ("https://first.invalid/gnu/", "https://second.invalid/gnu/")
             first_url, second_url = (source + "bash53-001" for source in redirect_sources)
 
-            def redirected(name, routes, pins_digest=digest):
-                https = OfflineHttps(routes, whole)
+            def redirected(name, routes, pins_digest=digest, cost=None, keep=None):
+                clock = _FakeClock()
+                https = OfflineHttps(routes, whole, clock, cost)
                 opener = _opener(urllib.request.ProxyHandler({}), https)
                 directory = base / name
                 os.makedirs(directory)
                 logged = []
-                clock = _FakeClock()
                 got = _outcome(lambda: download((("bash53-001", "bash53-001", None, pins_digest),), redirect_sources,
                                                 directory, lambda url, out, remaining: fetch_attempt(
                                                     url, out, remaining, opener), clock.sleep, clock.now,
                                                 log=logged.append))
+                if keep is not None:
+                    keep.append(https)
                 return got, https.opened, logged, clock.sleeps
 
-            def location(code, target):
-                return ("HTTP/1.1 {} Moved\r\nLocation: {}\r\nContent-Length: 0".format(code, target).encode("ascii"),
-                        b"")
+            def location(code, target, moved_body=b""):
+                return ("HTTP/1.1 {} Moved\r\nLocation: {}\r\nContent-Length: {}".format(
+                    code, target, len(moved_body)).encode("ascii"), moved_body)
 
             # a redirect to http (on the same host) and one to https on another host are refused before they are
             # opened, naming where they pointed; the next source serves the file and the fetched line names it
@@ -1300,6 +1382,125 @@ def self_test(report_path=None):
                 ("ok", redirect_sources[:1]), [first_url, moved], ["fetched bash53-001 from {}".format(moved)], [])
                 and wrong[0][0] == "refused" and "(fetched from {}; refused at once".format(moved) in wrong[0][1]
                 and wrong[1] == [first_url, moved] and not reached, (followed, wrong, reached))
+
+            # the lines of a download that fails from the first source and completes from the second
+            def moved_on(failure):
+                return ["attempt 1 of 4 from {0} failed ({1}) (not tried: {2}); trying {2}".format(
+                    first_url, failure, second_url), "fetched bash53-001 from {}".format(second_url)]
+
+            refusal = "redirect ({}) to {} refused, as only a redirect to https on the same host is followed"
+
+            # the port: a URL that names no port is on 443 and one that names a port, 0 included, is on that port.
+            # A redirect to the same host on explicit port 0 or on another port is refused before it is opened; one
+            # to explicit port 443 from a URL that names none is followed.
+            table = [(old, new, _same_host_https(old, new), want) for old, new, want in (
+                (first_url, "https://first.invalid/m/f", True), (first_url, "https://first.invalid:443/m/f", True),
+                ("https://first.invalid:443/gnu/f", "https://first.invalid/m/f", True),
+                (first_url, "https://first.invalid:0/m/f", False), (first_url, "https://first.invalid:8443/m/f", False),
+                ("https://first.invalid:0/gnu/f", "https://first.invalid/m/f", False),
+                ("https://first.invalid:8443/gnu/f", "https://first.invalid:8443/m/f", True))]
+            ports = []
+            for index, target in enumerate(("https://first.invalid:0/gnu/bash53-001",
+                                            "https://first.invalid:8443/gnu/bash53-001")):
+                ports.append((target, redirected("redirect-port-{}".format(index), {first_url: location(302, target)})))
+            explicit = "https://first.invalid:443/mirror/bash53-001"
+            port_443 = redirected("redirect-port-443", {first_url: location(302, explicit), explicit: whole})
+            check("sources/redirect-port-compared", all(got == want for _old, _new, got, want in table) and all(
+                got == ("ok", redirect_sources[1:]) and opened == [first_url, second_url] and sleeps == []
+                and logged == moved_on("{}: {}".format(first_url, refusal.format(302, target)))
+                for target, (got, opened, logged, sleeps) in ports)
+                and port_443 == (("ok", redirect_sources[:1]), [first_url, explicit],
+                                 ["fetched bash53-001 from {}".format(explicit)], [])
+                and not reached, (table, ports, port_443, reached))
+
+            # a Location that does not parse (urllib's own parse would raise ValueError on it) is a refused redirect
+            # naming that Location: the next source serves the file, with no wait
+            unparsable = "https://[first.invalid/gnu/bash53-001"
+            got = redirected("redirect-unparsable", {first_url: location(302, unparsable)})
+            check("sources/redirect-location-unparsable-moves-on", got == (
+                ("ok", redirect_sources[1:]), [first_url, second_url],
+                moved_on("{}: {}".format(first_url, refusal.format(302, unparsable))), []) and not reached, got)
+
+            # any other ValueError raised while opening moves on to the next source too, naming the URL opened
+            got = redirected("open-value-error", {first_url: ValueError("a value the opening cannot take")})
+            check("sources/open-value-error-moves-on", got == (
+                ("ok", redirect_sources[1:]), [first_url, second_url],
+                moved_on("{}: fetch failed (ValueError: a value the opening cannot take)".format(first_url)), [])
+                and not reached, got)
+
+            # an http.client exception from the response head that is none of the named malformed heads (a head of
+            # more header lines than http.client takes) moves on to the next source, naming the URL opened
+            crowded = b"HTTP/1.1 200 OK\r\n" + b"\r\n".join(b"X-Filler-%d: x" % index for index in range(120))
+            got = redirected("head-too-many-headers", {first_url: (crowded, b"")})
+            check("sources/head-http-exception-moves-on", got == (
+                ("ok", redirect_sources[1:]), [first_url, second_url],
+                moved_on("{}: fetch failed (HTTPException: got more than 100 headers)".format(first_url)), [])
+                and not reached, got)
+
+            # the final URL is checked again after the opening: a response served from another host (as an opener
+            # whose redirect handler did not refuse would return it) is refused, its bytes never published, and the
+            # next source serves the file
+            elsewhere = "https://elsewhere.invalid/gnu/bash53-001"
+
+            def served_elsewhere(url, timeout):
+                response = http_response(*whole, timeout)[0]
+                response.url = elsewhere if url == first_url else url
+                return response
+
+            recheck = base / "final-url-recheck"
+            os.makedirs(recheck)
+            logged = []
+            clock = _FakeClock()
+            got = _outcome(lambda: download((("bash53-001", "bash53-001", None, digest),), redirect_sources, recheck,
+                                            through(served_elsewhere), clock.sleep, clock.now, log=logged.append))
+            check("sources/final-url-rechecked", got == ("ok", redirect_sources[1:]) and clock.sleeps == []
+                  and logged == moved_on("{} (redirected to {}): served from a URL that is not https on the same "
+                                         "host; refused".format(first_url, elsewhere))
+                  and os.listdir(recheck) == ["bash53-001"], (got, logged, clock.sleeps))
+
+            # a failure line names the hop that returned the redirect or the error, and never a refused target as
+            # one redirected to: a cross-host 302 from the second hop of a same-host 301, a redirect to file:, and a
+            # connection reset while the followed hop opens
+            hop = "https://first.invalid/m1/bash53-001"
+            two_hop = redirected("redirect-hop-names", {first_url: location(301, "/m1/bash53-001"),
+                                                        hop: location(302, elsewhere)})
+            file_target = "file:///etc/passwd"
+            file_scheme = redirected("redirect-file-scheme", {first_url: location(302, file_target)})
+            hop_reset = redirected("redirect-hop-reset", {first_url: location(301, hop), hop: urllib.error.URLError(
+                ConnectionResetError(errno.ECONNRESET, "reset"))})
+            check("sources/redirect-failure-names-hop", two_hop == (
+                ("ok", redirect_sources[1:]), [first_url, hop, second_url],
+                moved_on("{} (redirected to {}): {}".format(first_url, hop, refusal.format(302, elsewhere))), [])
+                and file_scheme == (("ok", redirect_sources[1:]), [first_url, second_url],
+                                    moved_on("{}: {}".format(first_url, refusal.format(302, file_target))), [])
+                and hop_reset == (("ok", redirect_sources[1:]), [first_url, hop, second_url], moved_on(
+                    "{} (redirected to {}): fetch failed (URLError: <urlopen error [Errno 104] reset>)".format(
+                        first_url, hop)), [])
+                and not reached, (two_hop, file_scheme, hop_reset, reached))
+
+            # a followed redirect's own body is never read: its response is closed with the 7 bytes it declares
+            # still unread, and the hop it leads to serves the file
+            kept = []
+            got = redirected("redirect-body-unread", {first_url: location(301, hop, b"x" * 7), hop: whole}, keep=kept)
+            moved_responses = [response for url, response in kept[0].responses if url == first_url]
+            check("sources/redirect-body-never-read", got == (
+                ("ok", redirect_sources[:1]), [first_url, hop], ["fetched bash53-001 from {}".format(hop)], [])
+                and len(moved_responses) == 1 and moved_responses[0].isclosed() and moved_responses[0].length == 7,
+                (got, [(response.isclosed(), response.length) for response in moved_responses]))
+
+            # a redirect that arrives once the deadline has passed is not followed and stops the build, its hop never
+            # opened; one that arrives with 10 s left opens its hop with a 10 s timeout, not the attempt's 60 s
+            late = redirected("redirect-after-deadline", {first_url: location(301, hop)},
+                              cost=lambda url: DOWNLOAD_DEADLINE if url == first_url else 0)
+            kept = []
+            cut = redirected("redirect-hop-timeout", {first_url: location(301, hop), hop: whole},
+                             cost=lambda url: DOWNLOAD_DEADLINE - 10 if url == first_url else 0, keep=kept)
+            check("sources/redirect-deadline-cuts-next-hop", late[0][0] == "not-completed"
+                  and late[0][1] == "{}: the {} s download deadline passed before its redirect (301) to {} was "
+                                    "followed (not tried: {})".format(first_url, DOWNLOAD_DEADLINE, hop, second_url)
+                  and late[1] == [first_url] and late[3] == []
+                  and cut[:2] == (("ok", redirect_sources[:1]), [first_url, hop])
+                  and kept[0].timeouts == [FETCH_TIMEOUT, 10], (late, cut, kept[0].timeouts))
             for sock in pairs:
                 sock.close()
 
@@ -1623,6 +1824,41 @@ def self_test(report_path=None):
                                       "[Errno 104] reset))".format(fixture_url(pins[2])))
                   and len(calls) == 4 and clock.sleeps == [2] and untouched, (got, calls, clock.sleeps))
 
+            # a wait that would end exactly at the deadline is not taken either: the one source fails transiently
+            # with as many seconds left as the first wait lasts, so the build stops at once, with no wait and no
+            # second attempt
+            one = _fixture_pins(fixtures)[1:2]
+            one_url = fixture_url(one[0])
+            reset_one = fetch_error(one_url, ConnectionResetError(errno.ECONNRESET, "reset"))
+            exact = base / "deadline-exact"
+            os.makedirs(exact)
+            clock = _FakeClock()
+            fetcher, calls = _scripted_fetcher({one_url: [reset_one]}, exact, clock,
+                                               DOWNLOAD_DEADLINE - RETRY_DELAYS[0])
+            got = _outcome(lambda: download(one, fixture_sources, exact, fetcher, clock.sleep, clock.now,
+                                            log=lambda line: None))
+            check("deadline/no-wait-at-deadline", got == (
+                "not-completed", "bash53-001: attempt 1 failed from every source ({}); not retried: a {} s wait would "
+                                 "not end before the {} s download deadline".format(reset_one, RETRY_DELAYS[0],
+                                                                                   DOWNLOAD_DEADLINE))
+                  and len(calls) == 1 and clock.sleeps == [], (got, calls, clock.sleeps))
+
+            # the stop line of an attempt that is not retried names the previous attempt's failures: the one source
+            # resets the connection (retried after 2 s), then answers 404, so the build stops after the second
+            # attempt
+            missing_one = fetch_error(one_url, urllib.error.HTTPError(one_url, 404, "Not Found", None, None))
+            previous_dir = base / "not-retried-previous"
+            os.makedirs(previous_dir)
+            clock = _FakeClock()
+            fetcher, calls = _scripted_fetcher({one_url: [reset_one, missing_one]}, previous_dir)
+            got = _outcome(lambda: download(one, fixture_sources, previous_dir, fetcher, clock.sleep, clock.now,
+                                            log=lambda line: None))
+            check("retry/not-retried-names-previous-attempt", got == (
+                "not-completed", "bash53-001: every source failed in attempt 2 of 4 and none of the failures is "
+                                 "transient, so it is not retried ({}) (previous attempt: {})".format(missing_one,
+                                                                                                    reset_one))
+                  and len(calls) == 2 and clock.sleeps == [2], (got, calls, clock.sleeps))
+
             # the CI entry: an unusable RUNNER_TEMP or GITHUB_PATH stops it before any fetch
             fetched = []
 
@@ -1742,7 +1978,12 @@ def self_test(report_path=None):
           "the rest of the run, an attempt is retried only when a source in it failed transiently, every source "
           "failing exits 2 naming each, a source serving wrong bytes is refused at once with no further source "
           "asked, no source is asked or announced once the deadline has passed, a redirect is followed only to "
-          "https on the same host and the fetched line names where it led; a sha256 or size mismatch "
+          "https on the same host and port (explicit port 0 or another port refused) and the fetched line names "
+          "where it led, a redirect's body is never read, one after the deadline is not followed and its next hop's "
+          "timeout is cut to the time left, a failure line names the hop that returned it, an unparsable Location, "
+          "a ValueError while opening and an over-long head move on, a response served from another host is "
+          "refused after the opening, no wait ending exactly at the deadline is taken and a stop line that is not "
+          "retried names the previous attempt; a sha256 or size mismatch "
           "and a missing file "
           "refuse; a non-https URL is refused before any fetch; only BASH_VERSINFO 5 3 9 passes; over fixture "
           "files, a full build installs and appends to GITHUB_PATH, and a mismatch, a failed download, patches out "

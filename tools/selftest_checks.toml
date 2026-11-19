@@ -4992,6 +4992,8 @@ expected-check-ids = [
   "retry/existing-destination-preserved",
   "deadline/no-attempt-after-deadline",
   "deadline/no-wait-past-deadline",
+  "deadline/no-wait-at-deadline",
+  "retry/not-retried-names-previous-attempt",
   # ---------- fallback sources: ftp.gnu.org, then the GNU mirrors ----------
   "sources/first-unreachable-second-completes",
   "sources/all-unreachable-names-each",
@@ -5003,6 +5005,14 @@ expected-check-ids = [
   "sources/failed-source-moved-back",
   "sources/redirect-not-https-same-host-refused",
   "sources/redirect-same-host-https-followed",
+  "sources/redirect-port-compared",
+  "sources/redirect-location-unparsable-moves-on",
+  "sources/open-value-error-moves-on",
+  "sources/head-http-exception-moves-on",
+  "sources/final-url-rechecked",
+  "sources/redirect-failure-names-hop",
+  "sources/redirect-body-never-read",
+  "sources/redirect-deadline-cuts-next-hop",
   # ---------- the CI entry ----------
   "env/missing-runner-temp-exits-2",
   "env/relative-github-path-exits-2",
