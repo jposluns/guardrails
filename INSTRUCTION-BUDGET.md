@@ -28,11 +28,11 @@ entry's date is the one its opening line carries directly after `Raised OLD -> N
 reads it only from an opening line written exactly that way (a capital R, canonical numbers with no
 leading zero, single spaces) and only when it is a real day, which a new entry's date must be. It may
 be no earlier than the latest such date of an entry already in the history or of an earlier entry in
-the same change, and no later than the day after the checking day (UTC). Any other date, such as a
-later one on an opening line, one on an older opening line worded another way, or one in a held or
-late record, sets no bound for later entries. The held and late records written on 2026-11-18 above
-the `Raised 136499 -> 137546` line predate this rule and stay as they are; do not copy that layout.
-`tools/check_instruction_budget.py` states the full entry grammar.
+the same change, and no later than the day after the checking day (UTC). Any other date, such as
+another date further along an opening line, one on an older opening line worded another way, or one in
+a held or late record, sets no bound for later entries. The held and late records written on 2026-11-18
+above the `Raised 136499 -> 137546` line predate this rule and stay as they are; do not copy that
+layout. `tools/check_instruction_budget.py` states the full entry grammar.
 
 Treat 150,000 characters as this project's target for everything Claude Code loads at the start of a
 session. One caveat: the loader of the pinned Claude Code build the gate models (2.1.287 in

@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "85452e313049fc87363e9da1224a01ad1937b046955ed0928fc2ac4182c7e44f"
+tree-sha256 = "3066dff3422e11032c56e03151cdf438efe0f0aea49638cac4c6f7814ca1549c"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -2412,8 +2412,8 @@ sha256 = "6b902f90dc533d00fccc5d6ac91c93053d0b928df34592b1f89d12a06c133456"
 
 [[sources]]
 path = "INSTRUCTION-BUDGET.md"
-bytes = 6195
-sha256 = "e64c6e85368cc7bdc0d52d8e6153d14aa9a92a81e709db524ff3af7500ef8a7f"
+bytes = 6207
+sha256 = "6b0baa80ea3d516a4169ff81d2b738ffba3a5799434c2e356a015b564305cb7c"
 
 [[sources]]
 path = "LICENSE"
