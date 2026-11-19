@@ -186,11 +186,15 @@ underscore ("MAJOR ITEMS #4", "MEDIUM_FINDINGS") is missed; the CLI-wording verb
 exemption include "accepted" and "set", so "<family>'s flags were accepted" or "... were set aside",
 which usually reports review results, is not a hit on one line or wrapped, and nor is wrapped wording
 such as "flags are" then "honored by the fix" or "flags" then "-x was a false alarm" (a one-letter
-option after flags); command-line documentation of a family's flags is still an over-flag when other
-wording comes between flags and the option ("flags, for example --print") or the option sits more
-than two line breaks after the line where the attribution starts (the breaks are counted from the
-family name's line, not from flags, so "<family>'s", then "flags", then a blank line, then "--print"
-is still a hit although the option is only two breaks after flags); and a line whose own read and
+option after flags), and the same one-letter or dash-led lookalike on one line, after an opening
+parenthesis with or without spaces or tabs, or in quotes ("<family>'s flags ( -x was a false alarm)",
+"<family>'s flags ( '-x' was wrong", "<family>'s flags ( --Mostly noise"), is not a hit either, since
+the flags exemption accepts any dash-led word there as a command option;
+command-line documentation of a family's flags is still an over-flag when other wording comes
+between flags and the option ("flags, for example --print") or the option sits more than two line
+breaks after the line where the attribution starts (the breaks are counted from the family name's
+line, not from flags, so "<family>'s", then "flags", then a blank line, then "--print" is still a
+hit although the option is only two breaks after flags); and a line whose own read and
 joined read both match, such as a family's flags with "findings" on the next line, is counted twice
 in that line's row hits, which inflates no finding (findings name each line once).
 
