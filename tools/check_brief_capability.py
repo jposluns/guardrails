@@ -639,9 +639,13 @@ DENIAL REROUTE (beside the preflight, for every family, before the execution rul
                        isn't, aren't, wasn't, weren't, hasn't, haven't, hadn't) from the start of its segment to the
                        end of its clause, across colons as across commas and coordinators, except that a clause after
                        a colon opening with instead or otherwise starts afresh as an independent alternative unless
-                       the clause the colon closes ends with following or below, which makes the colon introduce the
-                       prohibited action or list ("If denied, do not do the following: instead, run it inline." is
-                       quiet); NOT EXCLUDED: no earlier clause of its
+                       the clause the colon closes introduces the prohibited action itself: it ends with a negated
+                       verb phrase whose object is the introducer, a negation word, one action verb, any of the,
+                       any, all, of, as, anything and everything, then following or below as its last word ("If
+                       denied, do not do the following: instead, run it inline." and "If denied, never do as below:
+                       otherwise run it inline." are quiet); a following or below after any other word, such as a
+                       noun it modifies, introduces nothing ("If denied, do not wait for the instructions below:
+                       instead, run it inline." warns); NOT EXCLUDED: no earlier clause of its
                        segment holds instead of or rather than with every clause from there to it opened by a comma, a
                        colon, and or or and none opening with instead or otherwise; and MARKED, its clause holding
                        instead, another way, inline, otherwise or by other means before any instead of or rather than,
@@ -666,7 +670,10 @@ DENIAL REROUTE (beside the preflight, for every family, before the execution rul
                        so a prohibition earlier in the segment silences a later real request ("If denied, do not stop
                        early and run inline." and "If denied, do not stop: run it inline." are quiet), and so does an
                        instead of or rather than before it ("If denied, stop rather than wait, and run it inline." is
-                       quiet). FALSE WARNINGS: a quoted or fenced example, a question, a past report, an
+                       quiet). The introduction is read by those words alone, so one worded otherwise ("If denied,
+                       do not ever do the following: instead, run it inline.", "If denied, do not attempt the
+                       following: instead, run it inline.") is not recognized and warns. FALSE WARNINGS: a quoted
+                       or fenced example, a question, a past report, an
                        unrelated action, blocked in a sense that is not a permission, a legitimate alternative and
                        another leg's text can warn, and D1 cannot tell whether the refusal and the action concern the
                        same step. It reviews wording only: it never authorizes an alternative and does not observe what
@@ -4490,7 +4497,7 @@ D1_MODALS = frozenset(("must", "should", "can", "may"))
 # a negation before a refusal in its clause makes the refusal ineligible; one anywhere from the start of an action's
 # segment to the end of the action's clause rejects the action (do not and must not are covered by not), across a
 # colon too, unless the clause after the colon opens with a D1_SCOPE_OPENERS word and the clause before the colon
-# does not end with a D1_INTRODUCERS word
+# does not introduce the prohibited action itself (d1_introduces)
 D1_NEGATIONS = frozenset(("not", "never", "no", "nor", "neither", "without", "don't", "mustn't", "shouldn't", "won't",
                           "cannot", "can't", "isn't", "aren't", "wasn't", "weren't", "hasn't", "haven't", "hadn't"))
 # the whole words that close a clause and open the next
@@ -4505,12 +4512,17 @@ D1_CUTOFFS = (("instead", "of"), ("rather", "than"))
 D1_CARRIERS = frozenset((",", ":", "and", "or"))
 # a clause that opens with one of these words names the alternative asked for: an exclusion does not carry into it,
 # and neither does a negation carried across a colon (do not wait: instead, run it inline), unless the clause the
-# colon closes ends with a D1_INTRODUCERS word
+# colon closes introduces the prohibited action itself (d1_introduces)
 D1_SCOPE_OPENERS = frozenset(("instead", "otherwise"))
-# a clause closed by a colon that ends with one of these words introduces what follows the colon, so a clause after
-# that colon continues the list the clause introduces and keeps its negation even when it opens with instead or
-# otherwise (do not do the following: instead, run it inline)
+# a clause closed by a colon introduces the prohibited action itself only when it ends with a negated verb phrase
+# whose object is one of these words: a D1_NEGATIONS word, one D1_ACTIONS verb, any run of D1_INTRODUCER_FILLERS
+# words, then the introducer as the clause's last word (do not do the following, do not try any of the following,
+# never do as below); a clause after that colon continues what the clause introduces and keeps its negation even
+# when it opens with instead or otherwise (do not do the following: instead, run it inline). An introducer after a
+# noun modifies the noun and introduces nothing (do not wait for the instructions below: instead, run it inline, and
+# do not run the steps following: instead, run it inline, both warn)
 D1_INTRODUCERS = frozenset(("following", "below"))
+D1_INTRODUCER_FILLERS = frozenset(("the", "any", "all", "of", "as", "anything", "everything"))
 # a list item line (at any indentation) and a heading each open a paragraph, a heading standing alone; a column-zero
 # upper-case label opens one too; the matched marker is not read
 D1_LIST_RE = re.compile(r"[ \t]*+(?:[-+*]|[0-9]{1,9}[.)])[ \t]++")
@@ -4662,15 +4674,33 @@ def d1_refused(clauses):
     return False
 
 
+def d1_introduces(words):
+    """Whether a clause closed by a colon introduces the prohibited action itself: it ends with a negated verb phrase
+    whose object is the introducer, read backwards from its last word: a D1_INTRODUCERS word (following, below), then
+    any run of D1_INTRODUCER_FILLERS words (the, any, all, of, as, anything, everything), then one D1_ACTIONS verb,
+    then a D1_NEGATIONS word ("do not do the following", "do not try any of the following", "never do as below",
+    "never do anything below"). An introducer after any other word, such as a noun it modifies ("do not wait for the
+    instructions below", "do not run the steps following"), or with any other word between the negation and the verb
+    ("do not ever do the following") introduces nothing."""
+    if not words or words[-1][0] not in D1_INTRODUCERS:
+        return False
+    index = len(words) - 2
+    while index >= 0 and words[index][0] in D1_INTRODUCER_FILLERS:
+        index -= 1
+    return index >= 1 and words[index][0] in D1_ACTIONS and words[index - 1][0] in D1_NEGATIONS
+
+
 def d1_hit(clauses):
     """The source line of the first affirmative action a sentence asks to do another way, or None: the sentence holds
     an eligible refusal (d1_refused, before or after the action), and a clause is headed by an action verb
     (d1_action), holds no D1_NEGATIONS word from the start of its segment to its own end (a prohibition carries
     across commas, coordinators and colons: "do not run it and execute it inline" and "do not do the following: run
     it inline" are quiet; a clause after a colon that opens with instead or otherwise starts afresh, as an
-    independent alternative, unless the clause the colon closes ends with following or below (D1_INTRODUCERS): that
-    colon introduces the prohibited action or list, so "do not wait: instead, run it inline" warns and "do not do the
-    following: instead, run it inline" is quiet; a new sentence or a semicolon starts afresh either way), is not
+    independent alternative, unless the clause the colon closes introduces the prohibited action itself
+    (d1_introduces: a negation, one action verb, any of the, any, all, of, as, anything and everything, then
+    following or below as its last word), so "do not wait: instead, run it inline" and "do not wait for the
+    instructions below: instead, run it inline" warn and "do not do the following: instead, run it inline" is quiet;
+    a new sentence or a semicolon starts afresh either way), is not
     EXCLUDED (an earlier clause of its segment holds instead of or rather than, and every clause from there to this
     one is opened by a comma, a colon, and or or, and none opens with instead or otherwise: "stop rather than retry
     or run it inline" is quiet), and is marked: it holds an alternative (d1_marked), or the clause before it is only
@@ -4683,7 +4713,7 @@ def d1_hit(clauses):
             negated, excluded, segment = False, False, clause[0]
         opener, words = clause[1], clause[2]
         fresh = words[0][0] in D1_SCOPE_OPENERS
-        if fresh and opener == ":" and not (previous is not None and previous[2][-1][0] in D1_INTRODUCERS):
+        if fresh and opener == ":" and not (previous is not None and d1_introduces(previous[2])):
             negated = False
         if fresh or opener not in D1_CARRIERS:
             excluded = False
@@ -5431,15 +5461,28 @@ D1_SCOPE_KEPT = ("If denied, do not wait; run it inline.\n", "If denied, stop ra
                  "If denied, do not wait: otherwise run it inline.\n",
                  "If denied, do the following: run it inline.\n")
 D1_SCOPE_KEPT_LINES = ([1], [1], [2], [1], [1], [1], [1], [1], [1], [1])
-# beside the kept warnings after do not wait: a colon closing a clause that ends with following or below introduces
-# the prohibited action or list, so a clause after it that opens with instead or otherwise keeps the negation; with
-# the reset at every such colon (the previous reading) each warned on the line given in D1_INTRODUCED_LIST_WAS
+# beside the kept warnings after do not wait: a colon closing a negated verb phrase whose object is following or
+# below (d1_introduces) introduces the prohibited action itself, so a clause after it that opens with instead or
+# otherwise keeps the negation; with the reset at every such colon (an earlier reading) each warned on the line
+# given in D1_INTRODUCED_LIST_WAS
 D1_INTRODUCED_LIST = ("If denied, do not do the following: instead, run it inline.\n",
                       "If denied, do not do the\nfollowing:\ninstead, run it inline.\n",
                       "If denied, do not do the following: otherwise run it inline.\n",
                       "If denied, do not do the\nfollowing: otherwise run\nit inline.\n",
-                      "If denied, never do anything below: instead, run it inline.\n")
-D1_INTRODUCED_LIST_WAS = ([1], [3], [1], [2], [1])
+                      "If denied, never do anything below: instead, run it inline.\n",
+                      "If denied, do not try any of the following: instead, run it inline.\n",
+                      "If denied, never do as below: otherwise run it inline.\n")
+D1_INTRODUCED_LIST_WAS = ([1], [3], [1], [2], [1], [1], [1])
+# a following or below that modifies a noun introduces nothing, so a clause after the colon that opens with instead
+# or otherwise still starts afresh and warns, on the line given in D1_MODIFIER_KEPT_LINES; with the negation kept
+# after every colon closing a clause that ends with following or below (the previous reading) each was quiet
+D1_MODIFIER_KEPT = ("If denied, do not wait for the instructions below: instead, run it inline.\n",
+                    "If denied, do not wait for the\ninstructions below:\ninstead, run it inline.\n",
+                    "If denied, do not wait for the instructions below: otherwise run it inline.\n",
+                    "If denied, do not wait for the\ninstructions below: otherwise run\nit inline.\n",
+                    "If denied, do not run the steps following: instead, run it inline.\n",
+                    "If denied, do not run the steps\nfollowing: otherwise run\nit inline.\n")
+D1_MODIFIER_KEPT_LINES = ([1], [3], [1], [2], [1], [2])
 W1_PROHIBITED = ("Do not run `git push`.\n", "Never run git commit -a.\n")
 W1_PROHIBITED_VOIDED = "Do not run `git push`. Run it anyway.\n"
 # the same prohibitions alone in a fence, read as in prose; and a fence whose other sentence asks
@@ -8350,6 +8393,8 @@ def self_test(report_path=None):
     check("d1/scope-boundaries-warned", [d1_lines(text) for text in D1_SCOPE_KEPT], list(D1_SCOPE_KEPT_LINES))
     check("d1/introduced-list-keeps-prohibition-quiet", [d1_lines(text) for text in D1_INTRODUCED_LIST],
           [[]] * len(D1_INTRODUCED_LIST))
+    check("d1/modified-introducer-warned", [d1_lines(text) for text in D1_MODIFIER_KEPT],
+          list(D1_MODIFIER_KEPT_LINES))
     # a wrapped sentence is read whole and named by the line of its first matching action verb; a semicolon keeps
     # the sentence, so the refusal before it pairs with the action after it
     check("d1/wrapped-line-warned",
@@ -10480,7 +10525,12 @@ def self_test(report_path=None):
     # the introducer fix reverted: with no introducer word, instead or otherwise after every colon resets the negation
     check("revert/d1-introducer-red", *flip([reroutes(text) for text in D1_INTRODUCED_LIST],
                                             list(D1_INTRODUCED_LIST_WAS), D1_INTRODUCERS=frozenset()))
-    check("revert/every-flip-ran", len(flipped), 303)
+    # the narrowing reverted: a clause ending with following or below keeps the negation whatever precedes the word,
+    # so the warnings past a noun the word modifies go quiet
+    check("revert/d1-introducer-object-red", *flip([reroutes(text) for text in D1_MODIFIER_KEPT],
+                                                   [[]] * len(D1_MODIFIER_KEPT),
+                                                   d1_introduces=lambda words: words[-1][0] in D1_INTRODUCERS))
+    check("revert/every-flip-ran", len(flipped), 304)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -10561,7 +10611,8 @@ def self_test(report_path=None):
           "blank line, list item, heading or label, is quiet on prohibitions (carried across a colon) and negated "
           "refusals and on actions an instead of or rather than excludes (carried across clauses opened by a comma, "
           "a colon, and or or), still warns past a semicolon, but, then, instead or otherwise (a prohibition "
-          "kept past instead or otherwise after a colon that closes a clause ending with following or below), "
+          "kept past instead or otherwise after a colon that closes a negated verb phrase whose object is following "
+          "or below, never one where the word modifies a noun), "
           "and each part "
           "patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
