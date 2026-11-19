@@ -199,13 +199,23 @@ the writer runs at most K+2 evaluations of C' for the K of its first evaluation 
 cap rather than a proof that every layout settles, since a substitution can add a key or drop one. A
 pass, the passes or the evaluations of C' still changing at their bound is cannot-evaluate naming that
 bound; for the evaluations of C' (a layout whose proposals can swap between two sets of entries for
-good) the message names the way out: remove the candidate baseline's stale entries, or commit an empty
-baseline first, and run the writer on that commit. The settled proposal is then judged by the gate's own predicate (baseline_verdict, the function
+good) the message names only the way out that applies, then to run the writer on that commit: removing
+the stale entries the gate reports in the candidate's baseline, when there are any, and committing an
+empty baseline first, when that baseline holds an entry; for an empty candidate baseline it names none.
+The settled proposal is then judged by the gate's own predicate (baseline_verdict, the function
 the gate calls) with its entries as the candidate baseline, on the B..C' diff it settled on, where the
 proposal's render is the baseline file: its lines are judged with the move credit C' leaves (not at all
 when the configuration excludes that file, as the gate then judges none of them), and a charged finding
-or a stale entry is cannot-evaluate, naming R8 and the entry when the charged line is the baseline
-file's own. C' is the tree of a commit of the printed bytes on top of C with nothing else changed, so a
+or a stale entry is cannot-evaluate. When the charged line is the baseline file's own (R8), the
+writer first evaluates from an empty starting proposal as well, as a writer run on a commit of an empty
+baseline would (the first evaluation reads B..C' with the empty render substituted and carries
+nothing, then the evaluations of C' as above), and proposes that start's settled proposal when the
+gate's predicate accepts it, so a layout where a moved line's move credit alternates between the
+proposal's own line and the file's copy is not refused while an empty baseline passes; else the
+refusal names R8, the entry, why the empty start does not pass, and the way out that applies (for a
+charged path line, renaming that file to a path no shape matches; for any line of an entry, removing
+the finding lines the entry counts; for a header line, none). C' is the tree of a commit of the
+printed bytes on top of C with nothing else changed, so a
 proposal is printed only when, committed so, it leaves the gate's predicate only the growth it lists,
 and a writer run on that commit proposes the same entries in its first evaluation, which reads that same
 tree (R16). A ROUND TRIP line on stderr says so, with the most passes and rounds an evaluation ran, the
@@ -234,7 +244,8 @@ change; (R7) a working-tree baseline with CRLF line ends is non-canonical, so ca
 baseline file is judged like any other, so an entry whose path matches a shape is charged there, unless
 a line the change deletes credits that line as a move, and such a file cannot be grandfathered;
 --write-baseline judges its proposal's render as the baseline file on B..C' and refuses such a proposal
-(exit 2, nothing printed); (R9) digests are not secret: a known label line can be hashed and matched;
+(exit 2, nothing printed) unless the settled proposal of an empty starting proposal passes, which it
+then proposes; (R9) digests are not secret: a known label line can be hashed and matched;
 (R10) editing a shape's regex can make entries stale, forcing a baseline shrink in the same
 change; (R11) the gate's trust in origin/main carries over to the merge-base baseline; (R12) a malformed
 baseline on main is cannot-evaluate for every branch based on it; (R13) the cost of the extra diff is
@@ -260,8 +271,11 @@ review-label-writer-* directory in the temporary directory, outside the reposito
 delete; no later run reads it; (R18) the store's containment check compares real paths
 (os.path.realpath) only: a temporary directory that reaches the repository through a bind mount has
 another real path and is accepted, a path component swapped between the check and the store's
-creation is not detected, and when the writer runs in a submodule the superproject's worktree is not
-checked.
+creation is not detected, when the writer runs in a submodule the superproject's worktree is not
+checked, and on a case-insensitive filesystem (the macOS default) a TMPDIR inside the repository
+spelled with other letter case is not detected, as os.path.realpath does not fold case there (inferred
+from the code, not run); a temporary directory whose real path cannot be compared with the
+repository's (on Windows, another drive) is cannot-evaluate.
 """
 import sys
 
@@ -1357,11 +1371,21 @@ def _store_directory(areas):
     would serve, so a temporary directory the caller named inside the repository is refused, not
     passed over. Writability is tested by creating the store's directory itself (no probe file, unlike
     tempfile.gettempdir); a candidate where that fails is passed over, and none left is
-    CannotEvaluate."""
+    CannotEvaluate. A candidate whose real path cannot be compared with an area (os.path.commonpath
+    raises ValueError, as on Windows for paths on different drives) is CannotEvaluate too, naming both
+    paths, rather than a traceback."""
     for source, candidate in _temporary_candidates():
         parent = os.path.realpath(candidate)
         for area in areas:
-            if os.path.commonpath([parent, area]) == area:
+            try:
+                common = os.path.commonpath([parent, area])
+            except ValueError as exc:
+                raise CannotEvaluate("the temporary directory {} ({}) cannot be compared with the repository's "
+                                     "{} ({}; on Windows, paths on different drives), so whether it lies "
+                                     "inside the repository is unknown and no baseline is proposed; set TMPDIR "
+                                     "to a directory outside the repository on the drive the repository is "
+                                     "on".format(parent, source, area, exc)) from None
+            if common == area:
                 raise CannotEvaluate("the temporary directory {} ({}) lies inside the repository ({}); the "
                                      "writer builds its object store outside the repository's worktrees and "
                                      "its git directory only, so no baseline is proposed; set TMPDIR to a "
@@ -1525,9 +1549,9 @@ def _settled_deleted(deleted):
     return deleted
 
 
-def _owning_entry(data, number):
-    """The [[entry]] table of the rendered baseline `data` that holds its line `number` (one-based), as
-    its lines joined by "; ", or "the header" for a line before the first table."""
+def _owning_rows(data, number):
+    """The lines of the [[entry]] table of the rendered baseline `data` that holds its line `number`
+    (one-based), or None for a line before the first table (the header)."""
     rows = data.decode("utf-8", "replace").split("\n")
     start = None
     for index in range(min(number, len(rows)) - 1, -1, -1):
@@ -1535,34 +1559,118 @@ def _owning_entry(data, number):
             start = index
             break
     if start is None:
-        return "the header"
+        return None
     body = []
     for row in rows[start + 1:]:
         if not row or row == "[[entry]]":
             break
         body.append(row)
-    return "the entry " + "; ".join(body)
+    return body
 
 
-def _require_settled_verdict(verdict, data):
-    """CannotEvaluate when the gate's own predicate (baseline_verdict), judging the B..C' diff with the
-    proposal as the candidate baseline, charges a finding or finds a stale entry. A charged line of the
-    baseline file itself is named as R8 with the entry of `data` (the proposal's render) it sits in: an
-    entry whose path matches a shape writes a label line into the baseline file, which no entry can
-    grandfather, unless a line the diff deletes credits it as a move."""
+def _owning_entry(data, number):
+    """The [[entry]] table of the rendered baseline `data` that holds its line `number` (one-based), as
+    its lines joined by "; ", or "the header" for a line before the first table."""
+    body = _owning_rows(data, number)
+    return "the header" if body is None else "the entry " + "; ".join(body)
+
+
+def _r8_way_out(data, number):
+    """The way out of an R8 refusal that applies to the charged line `number` of the proposal's render
+    `data`, once an empty starting proposal does not pass either: for a line of an entry, removing from
+    the file it names the finding lines it counts (no entry is then needed), and, when the line is the
+    entry's path line, renaming that file to a path no shape matches; for a header line, none."""
+    body = _owning_rows(data, number)
+    if body is None:
+        return ("the charged line is in the header every proposal holds, so no baseline the writer can "
+                "propose avoids it; no way out is named")
+    path = next((row[len('path = "'):-1] for row in body if row.startswith('path = "') and row.endswith('"')),
+                None)
+    if path is None:
+        return "no way out is named"
+    rows = data.decode("utf-8", "replace").split("\n")
+    rename = ("rename {} to a path no shape matches, or ".format(path)
+              if 0 < number <= len(rows) and rows[number - 1] == 'path = "{}"'.format(path) else "")
+    return ("the way out is a candidate that needs no entry for that file: {}remove from {} the finding "
+            "lines the entry counts, and run the writer on that commit".format(rename, path))
+
+
+def _settled_refusal(verdict, data):
+    """None when the gate's own predicate (baseline_verdict), judging the B..C' diff with the proposal as
+    the candidate baseline, charges no finding and finds no stale entry; else (own, message), `own` the
+    first charged line of the baseline file itself or None. Such a line is named as R8 with the entry of
+    `data` (the proposal's render) it sits in: an entry whose path matches a shape writes a label line
+    into the baseline file, which no entry can grandfather, unless a line the diff deletes credits it as a
+    move."""
     own = [item for item in verdict.charged if item.path == BASELINE_RELPATH]
     if own:
         item = own[0]
-        raise CannotEvaluate(
+        return item, (
             "R8: committed on top of the candidate, the proposal's own line {}:{} would be charged as {} "
             "({}): {}, in {}; the baseline file is judged like any other and cannot grandfather its own "
             "lines ({} charged finding(s) on its lines); no baseline is proposed".format(
                 BASELINE_RELPATH, item.number, item.shape, item.description, item.text,
                 _owning_entry(data, item.number), len(own)))
     if verdict.charged or verdict.stale:
-        raise CannotEvaluate("committed on top of the candidate, the proposal would leave the gate {} "
-                             "charged finding(s) and {} stale entr(ies); no baseline is proposed".format(
-                                 len(verdict.charged), len(verdict.stale)))
+        return None, ("committed on top of the candidate, the proposal would leave the gate {} charged "
+                      "finding(s) and {} stale entr(ies); no baseline is proposed".format(
+                          len(verdict.charged), len(verdict.stale)))
+    return None
+
+
+def _unsettled_way_out(old, stale):
+    """The way out of evaluations of C' still changing at their bound, naming only what applies to the
+    candidate's baseline `old` and its keys `stale` the gate reports stale: removing those stale entries
+    (when there are any), committing an empty baseline first (when `old` holds an entry), or, for an
+    empty candidate baseline, no way out."""
+    ways = []
+    if stale:
+        ways.append("remove the {} stale entr(ies) the gate reports from the candidate's baseline".format(
+            len(stale)))
+    if old:
+        ways.append("commit an empty baseline first")
+    if not ways:
+        return "the candidate's baseline holds no entry, so no way out is named"
+    return "to get out, {}, and run the writer on that commit".format(", or ".join(ways))
+
+
+Settled = namedtuple("Settled", ("proposal", "run", "runs", "evaluations", "bound"))
+
+
+def _settle(root, config, revision, store, head_sha, base, before, run):
+    """A Settled: from the evaluation `run`, each proposal substituted for the candidate's baseline (C')
+    and evaluated on B..C' carrying it, until an evaluation of C' proposes the entries substituted in it
+    (`proposal` and `evaluations` set) or writer_settle_bound(run.keys) evaluations have run without that
+    (both None)."""
+    runs, limit = [run], writer_settle_bound(run.keys)
+    for settled in range(1, limit + 1):
+        proposal = run.proposal
+        tree = _substituted_tree(root, store, head_sha, render_baseline(head_sha, proposal))
+        run = _writer_run(root, config, revision, _store_diff(root, store, base, tree), proposal, before)
+        runs.append(run)
+        if run.proposal == proposal:
+            return Settled(proposal, run, runs, settled, limit)
+    return Settled(None, run, runs, None, limit)
+
+
+def _empty_start(root, config, revision, store, head_sha, base, before):
+    """(Settled or None, refusal text or None, verdict or None): the writer's evaluations from an empty
+    starting proposal, as a writer run on the candidate with an empty baseline committed would make them:
+    the first reads B..C' with the empty render substituted and carries nothing, then _settle. The
+    refusal text says why that start does not pass (an evaluation that cannot evaluate, evaluations of C'
+    still changing at their bound, or _settled_refusal's verdict); None when it passes."""
+    try:
+        tree = _substituted_tree(root, store, head_sha, render_baseline(head_sha, {}))
+        run = _writer_run(root, config, revision, _store_diff(root, store, base, tree), {}, before)
+        settled = _settle(root, config, revision, store, head_sha, base, before, run)
+    except CannotEvaluate as exc:
+        return None, str(exc), None
+    if settled.proposal is None:
+        return None, "it still proposed other entries after {} evaluation(s)".format(settled.bound), None
+    verdict = baseline_verdict(settled.run.judged, _settled_deleted(settled.run.deleted), config,
+                               settled.proposal, before, settled.run.counts)
+    refusal = _settled_refusal(verdict, render_baseline(head_sha, settled.proposal))
+    return settled, None if refusal is None else refusal[1], verdict
 
 
 def propose_baseline(root, protected=None, head=None, environ=None):
@@ -1576,11 +1684,16 @@ def propose_baseline(root, protected=None, head=None, environ=None):
     (_substituted_tree), carrying that proposal, as a writer run on that proposal committed would, until
     an evaluation of C' proposes the entries substituted in it. The gate's own predicate
     (baseline_verdict) then judges that B..C' diff, its deleted and added baseline lines included, with
-    the proposal as the candidate baseline (_require_settled_verdict). A pass still changing after
-    writer_round_bound rounds, passes still changing after writer_pass_bound passes, a proposal still
-    changing after writer_settle_bound evaluations of C', a proposal that predicate charges a finding for
-    or finds an entry of stale on B..C' (R8 when the charged line is the baseline file's own), or one whose
-    render is larger than MAX_BASELINE_BYTES, is CannotEvaluate (nothing is printed)."""
+    the proposal as the candidate baseline (_settled_refusal). When it charges a line of the baseline
+    file itself (R8), the writer evaluates from an empty starting proposal as well (_empty_start, as a
+    writer run on a commit of an empty baseline would) and proposes that start's settled proposal when
+    the same predicate accepts it. A pass still changing after writer_round_bound rounds, passes still
+    changing after writer_pass_bound passes, a proposal still changing after writer_settle_bound
+    evaluations of C' (the message naming only the way out that applies, _unsettled_way_out), a proposal
+    that predicate charges a finding for or finds an entry of stale on B..C' (R8 when the charged line is
+    the baseline file's own and the empty start does not pass either, the message naming the way out
+    that applies, _r8_way_out), or one whose render is larger than MAX_BASELINE_BYTES, is CannotEvaluate
+    (nothing is printed)."""
     environ = os.environ if environ is None else environ
     config = load_config(Path(root) / CONFIG_RELPATH)
     require_excluded_files(root, config.excluded)
@@ -1595,25 +1708,34 @@ def propose_baseline(root, protected=None, head=None, environ=None):
     old = {} if current is None else current.entries
     before = {} if prior is None else prior.entries
     run = _writer_run(root, config, revision, read_diff(root, base, revision), old, before)
-    runs, limit = [run], writer_settle_bound(run.keys)
+    first, start = run, ""
     with _scratch_store(root) as store:
-        for settled in range(1, limit + 1):
-            proposal = run.proposal
-            tree = _substituted_tree(root, store, head_sha, render_baseline(head_sha, proposal))
-            run = _writer_run(root, config, revision, _store_diff(root, store, base, tree), proposal, before)
-            runs.append(run)
-            if run.proposal == proposal:
-                break
-        else:
+        settled = _settle(root, config, revision, store, head_sha, base, before, run)
+        if settled.proposal is None:
             raise CannotEvaluate("with each proposal substituted for the candidate's baseline, the writer "
                                  "still proposed other entries after {} evaluation(s) of that candidate; no "
-                                 "baseline is proposed; to get out, remove the stale entries from the "
-                                 "candidate's baseline, or commit an empty baseline first, and run the "
-                                 "writer on that commit".format(limit))
-    data = render_baseline(head_sha, proposal)
-    verdict = baseline_verdict(run.judged, _settled_deleted(run.deleted), config, proposal, before,
-                               run.counts)
-    _require_settled_verdict(verdict, data)
+                                 "baseline is proposed; {}".format(
+                                     settled.bound, _unsettled_way_out(old, stale_entries(old, first.counts,
+                                                                                          None))))
+        proposal, run, runs = settled.proposal, settled.run, settled.runs
+        data = render_baseline(head_sha, proposal)
+        verdict = baseline_verdict(run.judged, _settled_deleted(run.deleted), config, proposal, before,
+                                   run.counts)
+        refusal = _settled_refusal(verdict, data)
+        if refusal is not None and refusal[0] is not None:
+            empty, why, empty_verdict = _empty_start(root, config, revision, store, head_sha, base, before)
+            if why is not None:
+                raise CannotEvaluate("{}; the writer also evaluated an empty starting proposal, as on a commit "
+                                     "of an empty baseline, and it does not pass either ({}), so committing an "
+                                     "empty baseline first is no way out; {}".format(
+                                         refusal[1], why, _r8_way_out(data, refusal[0].number)))
+            settled, verdict, refusal = empty, empty_verdict, None
+            proposal, run, runs = settled.proposal, settled.run, runs + settled.runs
+            data = render_baseline(head_sha, proposal)
+            start = (", from an empty starting proposal (the start from the candidate's baseline settled on a "
+                     "proposal refused as R8)")
+        if refusal is not None:
+            raise CannotEvaluate(refusal[1])
     if len(data) > MAX_BASELINE_BYTES:
         raise CannotEvaluate("the proposed baseline is {} bytes ({} entr(ies)), larger than the {} bytes the "
                              "gate reads; it is not printed".format(len(data), len(proposal),
@@ -1626,11 +1748,12 @@ def propose_baseline(root, protected=None, head=None, environ=None):
     keys = max(item.keys for item in runs)
     checked = ("ROUND TRIP: settled in {} pass(es) (bound {}), the longest {} round(s) (bound {}), for {} "
                "candidate key(s), and stable with it substituted for the candidate's baseline after {} "
-               "evaluation(s) of that candidate (bound {}); committed with nothing else changed, the "
+               "evaluation(s) of that candidate (bound {}){}; committed with nothing else changed, the "
                "gate's own predicate charges no finding and finds no stale entry, and a writer run on that "
                "commit proposes the same entries in its first evaluation (R16)".format(
                    max(item.passes for item in runs), writer_pass_bound(keys),
-                   max(item.rounds for item in runs), writer_round_bound(keys), keys, settled, limit))
+                   max(item.rounds for item in runs), writer_round_bound(keys), keys, settled.evaluations,
+                   settled.bound, start))
     return data, _review_lines(ledger) + [checked], growth
 
 
@@ -3128,8 +3251,10 @@ def _baseline_writer_roundtrip_rows(tmp, labels):
         code, out, err = _write_exit(repo)
         own = "{}:8 would be charged as backlog-id".format(BASELINE_RELPATH)
         check(check_id, code == 2 and out == "" and "R8: " in err and own in err
-              and 'the entry path = "{}"'.format(path) in err and "ROUND TRIP" not in err,
-              (code, out, err))
+              and 'the entry path = "{}"'.format(path) in err and "ROUND TRIP" not in err
+              and "an empty starting proposal" in err and "does not pass either" in err
+              and "rename {} to a path no shape matches, or remove from {} the finding lines".format(
+                  path, path) in err and "commit an empty baseline first" not in err, (code, out, err))
         with _patched(_substituted_tree=_unsubstituted_tree):
             code_f, out_f, err_f, entries_f, gate_code, gate_out, code2, out2 = _writer_roundtrip(
                 repo, config)
@@ -3197,7 +3322,8 @@ def _baseline_writer_substitution_rows(tmp, labels):
     with _patched(writer_settle_bound=lambda keys: 2):
         code_2, out_2, _err_2 = _write_exit(repo, head=freed_head)
     check("fail-closed/write-settle-bound", code_1 == 2 and out_1 == "" and "after 1 evaluation(s)" in err_1
-          and "commit an empty baseline first" in err_1 and code_2 == 0
+          and "commit an empty baseline first" in err_1
+          and "remove the 1 stale entr(ies) the gate reports" in err_1 and code_2 == 0
           and _entries_text(out_2) == _entries_text(out), (code_1, out_1, err_1, code_2, out_2))
 
     # Main holds x.toml with the path lines of the document and of a note; the branch deletes both, adds
@@ -3223,8 +3349,43 @@ def _baseline_writer_substitution_rows(tmp, labels):
     code_e, out_e, err_e = _write_exit(repo)
     check("fail-closed/write-unsettled-swap-names-way-out", code == 2 and out == ""
           and "still proposed other entries after" in err and "commit an empty baseline first" in err
-          and "remove the stale entries" in err and code_e == 0 and _proposed_entries(out_e, config) == {},
-          (code, out, err, code_e, out_e, err_e))
+          and "remove the" not in err and "stale entr" not in err and code_e == 0
+          and _proposed_entries(out_e, config) == {}, (code, out, err, code_e, out_e, err_e))
+
+    # Main holds the document with its own path line first, then three lines; the branch moves that line
+    # to the end of the file and its baseline holds one entry for it. From the candidate's baseline the
+    # proposal's own path line (the baseline file comes first in the diff) and the document's copy trade
+    # the document's deletion credit, and the start settles on that entry, refused as R8; an empty
+    # starting proposal settles on no entry, which the gate's predicate accepts, so the writer proposes
+    # it: committed, the gate passes with the move credited, and a second run proposes none. Without the
+    # empty start the writer refuses with R8.
+    repo, base = _baseline_repo(tmp, "baseline-writer-r8-empty-start")
+    _write(repo, doc, path_line + "\na = 1\nb = 2\nc = 3\n")
+    _commit_all(repo, "the document with its own path line first, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, doc, "a = 1\nb = 2\nc = 3\n" + path_line + "\n")
+    _put_baseline(repo, base, {(doc, path_line.encode("utf-8"), "backlog-id"): 1})
+    empty_head = _commit_all(repo, "the path line moved to the end, one baseline entry for it")
+    with _patched(_empty_start=lambda *args: (None, "flip: no empty start", None)):
+        code_f, out_f, err_f = _write_exit(repo, head=empty_head)
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/r8-empty-start-proposed", code == 0 and entries == {}
+          and "from an empty starting proposal" in err and gate_code == 0
+          and "1 moved line(s) not charged" in gate_out and code2 == 0 and _proposed_entries(out2, config) == {},
+          (code, err, entries, gate_code, gate_out, code2, out2))
+    check("flip/write-r8-without-empty-start", code_f == 2 and out_f == "" and "R8: " in err_f
+          and "flip: no empty start" in err_f, (code_f, out_f, err_f))
+
+    # The way out an unsettled refusal names is only what applies: removing the stale entries when the
+    # candidate's baseline holds some, committing an empty baseline when it holds an entry, else none.
+    one = {(doc, _sha(path_line.encode("utf-8")), "backlog-id"): 1}
+    stale_way, entry_way, empty_way = (_unsettled_way_out(one, sorted(one)), _unsettled_way_out(one, []),
+                                       _unsettled_way_out({}, []))
+    check("fail-closed/write-unsettled-way-out-applies",
+          "remove the 1 stale entr(ies)" in stale_way and "commit an empty baseline first" in stale_way
+          and "stale" not in entry_way and "commit an empty baseline first" in entry_way
+          and "stale" not in empty_way and "empty baseline" not in empty_way and "no way out" in empty_way,
+          (stale_way, entry_way, empty_way))
 
     # Main holds x.toml with the path line; the branch moves it to notes/a.toml and its baseline holds a
     # stale entry for the document. On B..C the stale path line comes first in diff order and takes the
@@ -3467,6 +3628,27 @@ def _baseline_writer_store_rows(tmp, labels):
         code_f, out_f, err_f = _write_exit(repo)
     check("flip/write-checkout-path-colon-raw", code_f == 2 and out_f == "" and "alternate" in err_f
           and "GIT_ALTERNATE_OBJECT_DIRECTORIES on" not in err_f, (code_f, out_f, err_f))
+
+    # Windows paths (ntpath) with TMPDIR on another drive than the repository: os.path.commonpath raises
+    # ValueError there, which _store_directory turns into cannot-evaluate naming both paths, before
+    # anything is created; a TMPDIR inside the repository on its own drive is still refused as inside.
+    import ntpath
+    import types
+    outcomes = []
+    for tmpdir in ("D:\\tmp", "C:\\repo\\tmp"):
+        with _patched(os=types.SimpleNamespace(path=ntpath),
+                      _temporary_candidates=lambda tmpdir=tmpdir: [("TMPDIR", tmpdir)]):
+            try:
+                _store_directory(["C:\\repo"])
+                outcomes.append("accepted")
+            except CannotEvaluate as exc:
+                outcomes.append(str(exc))
+            except Exception as exc:
+                outcomes.append("error {}: {}".format(type(exc).__name__, exc))
+    check("fail-closed/write-tmpdir-other-drive", len(outcomes) == 2
+          and "the temporary directory D:\\tmp (TMPDIR) cannot be compared with the repository's C:\\repo"
+          in outcomes[0] and "different drives" in outcomes[0]
+          and "(TMPDIR) lies inside the repository" in outcomes[1], outcomes)
     _baseline_writer_store_isolation_rows(tmp, la, added, config)
 
 

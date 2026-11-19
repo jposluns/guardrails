@@ -6838,6 +6838,11 @@ expected-check-ids = [
   "fail-closed/write-settle-bound",
   # a layout whose proposals swap between two sets of entries is refused, naming the way out
   "fail-closed/write-unsettled-swap-names-way-out",
+  # a start from the candidate's baseline refused as R8 while an empty start passes proposes the latter
+  "write/r8-empty-start-proposed",
+  "flip/write-r8-without-empty-start",
+  # an unsettled refusal names only the way out that applies
+  "fail-closed/write-unsettled-way-out-applies",
   "write/roundtrip-stale-baseline-line-frees-credit",
   "flip/write-stale-line-judged-on-candidate",
   "write/own-line-judged-with-substituted-credit",
@@ -6858,6 +6863,8 @@ expected-check-ids = [
   "flip/write-non-utf8-checkout-escaped",
   "fail-closed/write-checkout-path-colon",
   "flip/write-checkout-path-colon-raw",
+  # a temporary directory on another drive (Windows paths) is cannot-evaluate, not a traceback
+  "fail-closed/write-tmpdir-other-drive",
   # the store leaves the repository's object files, refs and index as they were and is removed
   "write/store-leaves-repository-unchanged",
   "flip/write-store-objects-in-repository",
