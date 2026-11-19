@@ -9,7 +9,8 @@ REL is a repo-relative path declared as a surface in .aiqt/pending-pr-claims.tom
 ONCE; those bytes are judged by tools/check_pending_pr_claims.py (live pull request state) and those
 same bytes are written. The destination's preimage (its SHA-256, or its absence) is taken before the
 judgement and taken again just before the write: a changed preimage withholds the write and asks for a
-re-evaluation. The destination's parent directory is opened component by component from the root
+re-evaluation. A destination that is not a regular file (a FIFO, device or directory) is refused
+(exit 2) without waiting on it or reading it, and a read error is exit 2. The destination's parent directory is opened component by component from the root
 without following symlinks (a symlinked or missing parent is refused, exit 2) and that descriptor is
 held: every read and the write are relative to it, and a parent that no longer resolves to the held
 directory just before the write withholds it. The write goes to a temporary file in that directory,
@@ -87,16 +88,27 @@ def _same_directory(fd, root, target):
     try:
         held, now = os.fstat(fd), os.fstat(again)
         return (held.st_dev, held.st_ino) == (now.st_dev, now.st_ino)
+    except OSError:
+        return False
     finally:
         os.close(again)
+
+
+def _read_descriptor(fd, limit):
+    """At most limit bytes read from the open descriptor fd, which stays open. A module-level seam: the
+    self-test replaces it to inject a read error."""
+    with os.fdopen(fd, "rb", closefd=False) as source:
+        return source.read(limit)
 
 
 def _preimage(dir_fd, name, label):
     """(SHA-256 hex, permission bits) of the destination, or (None, None) when it is absent;
     InputError when it is not a regular file or cannot be read. Read relative to dir_fd, never
-    following a symlink."""
+    following a symlink. The open does not block (O_NONBLOCK: a FIFO with no writer would wait in a
+    blocking open) and the type is checked on the opened descriptor before any read."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
     try:
-        handle = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=dir_fd)
+        handle = os.open(name, flags, dir_fd=dir_fd)
     except FileNotFoundError:
         return None, None
     except OSError as exc:
@@ -104,9 +116,11 @@ def _preimage(dir_fd, name, label):
     try:
         st = os.fstat(handle)
         if not stat.S_ISREG(st.st_mode):
-            raise claims.InputError("{}: is not a regular file".format(label))
-        with os.fdopen(handle, "rb", closefd=False) as source:
-            data = source.read(claims.MAX_BYTES + 1)
+            raise claims.InputError("{}: is not a regular file (a FIFO, device or directory is refused)".format(
+                label))
+        data = _read_descriptor(handle, claims.MAX_BYTES + 1)
+    except OSError as exc:
+        raise claims.InputError("{}: cannot be read ({})".format(label, exc.strerror or type(exc).__name__))
     finally:
         os.close(handle)
     if len(data) > claims.MAX_BYTES:

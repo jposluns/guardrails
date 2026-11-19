@@ -373,13 +373,26 @@ INSTRUCTION_WORDS = {"leave", "leaves", "left", "keep", "keeps", "kept", "to", "
 # negated or past: "not waiting for #17 to merge", "were waiting for #17 to merge".
 NEGATORS = {"not", "never", "longer", "t", "isnt", "arent", "wasnt", "werent", "hasnt", "havent",
             "hadnt", "dont", "doesnt", "didnt"}
-PAST_AUXILIARIES = {"was", "were", "had", "been"}
+PAST_AUXILIARIES = {"was", "were", "had"}
+# Before "been", only these make it past ("had been waiting", "we'd been waiting"); "have been
+# waiting" and "it's been waiting" are present perfect, a current claim.
+PAST_PERFECT = {"had", "d"}
 ADVERBS = {"still", "also", "then", "currently", "yet", "just", "only", "now", "already"}
+# A focus adverb directly after a negator adds to the claim rather than negating it: "not only
+# waiting for #17 to merge", "isn't just waiting on #17".
+FOCUS_ADVERBS = {"only", "just"}
+# Lead phrases a negator directly before does not negate: "Not until #17 merges can we ship" and "not
+# after #17 lands" still say #17 has not merged.
+NEGATION_KEEPS_CLAIM = {"until-merge", "once-merge"}
+# An issue number, bare or qualified by its repository (acme/widgets#17).
+_ISSUE_NUMBER = r"(?:" + _O + r"/" + _R + r")?#[0-9]{1,9}"
 ISSUE_LIST_RE = re.compile(
-    r"\bissues?\s*(?P<l>#[0-9]{1,9}(?:\s*(?:,|/|&|\band\b|\bor\b)\s*(?:and\s+|or\s+)?#[0-9]{1,9})*)", re.I)
+    r"\bissues?\s*(?P<l>" + _ISSUE_NUMBER + r"(?:\s*(?:,|/|&|\band\b|\bor\b)\s*(?:and\s+|or\s+)?"
+    + _ISSUE_NUMBER + r")*)", re.I)
 PULL_URL_RE = re.compile(r"https://github\.com/" + _O + r"/" + _R + r"/pull/[0-9]{1,9}"
-                         r"(?:/(?:files|commits|checks))?/?(?:#[\w-]*)?")
-ISSUE_URL_RE = re.compile(r"https://github\.com/" + _O + r"/" + _R + r"/issues/(?P<n>[0-9]{1,9})/?(?:#[\w-]*)?")
+                         r"(?:/(?:files|commits|checks))?/?(?:#[\w-]*)?", re.ASCII)
+ISSUE_URL_RE = re.compile(r"https://github\.com/" + _O + r"/" + _R + r"/issues/(?P<n>[0-9]{1,9})/?(?:#[\w-]*)?",
+                          re.ASCII)
 
 
 def _link(match):
@@ -513,13 +526,28 @@ def _imperative_open(clause, start):
     return before == "" or before.endswith(",")
 
 
-def _negated_or_past_before(clause, start):
+def _negated_or_past_before(clause, start, rule=None):
     """True when the words directly before a lead phrase (adverbs such as still skipped) negate it or
-    put it in the past: not waiting, no longer waiting, isn't waiting, were waiting, had been waiting."""
+    put it in the past: not waiting, no longer waiting, isn't waiting, were waiting, had been waiting,
+    haven't been waiting. Not exempt: present perfect (have been waiting), a focus adverb after a
+    negator (not only waiting) and a negator before a rule in NEGATION_KEEPS_CLAIM (Not until #17
+    merges)."""
     words = _words_before(clause, start)
+    skipped = []
     while words and words[-1] in ADVERBS:
+        skipped.append(words.pop())
+    if not words:
+        return False
+    if words[-1] == "been":
         words.pop()
-    return bool(words) and (words[-1] in NEGATORS or words[-1] in PAST_AUXILIARIES)
+        while words and words[-1] in ADVERBS:
+            words.pop()
+        return bool(words) and (words[-1] in PAST_PERFECT or words[-1] in NEGATORS)
+    if words[-1] in PAST_AUXILIARIES:
+        return True
+    if words[-1] in NEGATORS:
+        return rule not in NEGATION_KEEPS_CLAIM and not (skipped and skipped[-1] in FOCUS_ADVERBS)
+    return False
 
 
 def find_candidates(prose, context):
@@ -536,7 +564,7 @@ def find_candidates(prose, context):
             lead = not regex.pattern.startswith("(?P<l>")
             for match in regex.finditer(clause):
                 hit_kind, hit_phrase = kind, phrase
-                if lead and _negated_or_past_before(clause, match.start()):
+                if lead and _negated_or_past_before(clause, match.start(), rule):
                     continue
                 if rule == "open-lead":
                     if _instruction_before(clause, match.start()):
@@ -881,7 +909,7 @@ def _without_negation(fn):
     """Run fn() with the negated or past lead-in exemption disabled (the red-when-reverted leg)."""
     global _negated_or_past_before
     saved = _negated_or_past_before
-    _negated_or_past_before = lambda _clause, _start: False  # noqa: E731
+    _negated_or_past_before = lambda _clause, _start, _rule=None: False  # noqa: E731
     try:
         return fn()
     finally:
@@ -1020,6 +1048,24 @@ def _fix_rows(m, o):
             ("negation/contracted-not-waiting", "It isn't waiting on #17.\n", m, 0, []),
             ("negation/still-waiting-binds", "We are still waiting for #17 to merge.\n", m, 1, [(REPO, 17)]),
             ("negation/do-not-merge-until-binds", "Do not merge until #17 merges.\n", m, 1, [(REPO, 17)]),
+            ("negation/present-perfect-binds", "We have been waiting for #17 to merge.\n", m, 1, [(REPO, 17)]),
+            ("negation/past-perfect-waiting", "We had been waiting for #17 to merge.\n", m, 0, []),
+            ("negation/not-been-waiting", "We haven't been waiting for #17 to merge.\n", m, 0, []),
+            ("negation/not-only-binds", "We are not only waiting for #17 to merge.\n", m, 1, [(REPO, 17)]),
+            ("negation/past-only-waiting", "We were only waiting for #17 to merge.\n", m, 0, []),
+            ("negation/not-until-binds", "Not until #17 merges can we ship.\n", m, 1, [(REPO, 17)]),
+            ("negation/not-waiting-to-merge", "Not waiting for #17 to merge.\n", m, 0, []),
+            ("ref/qualified-issue-not-a-pull-request", "Issue acme/widgets#17 remains open.\n", {}, 0, []),
+            ("ref/mixed-issue-list-not-pull-requests", "Issues #18 and acme/widgets#17 remain open.\n", {}, 0,
+             []),
+            ("ref/pull-request-beside-qualified-issue",
+             "Issue acme/widgets#18 is fixed; acme/widgets#17 remains open.\n", m, 1, [(REPO, 17)]),
+            ("ref/markdown-link-ascii-fragment",
+             "[#17](https://github.com/peer/repo/pull/17#issuecomment-1) is pending.\n",
+             {("peer/repo", 17): "merged"}, 1, [("peer/repo", 17)]),
+            ("ref/markdown-link-non-ascii-fragment-is-text",
+             "[#17](https://github.com/peer/repo/pull/17#" + chr(0x661) + ") is pending.\n",
+             {(REPO, 17): "open", ("peer/repo", 17): "merged"}, 0, [(REPO, 17)]),
             ("format/currently-pending", "PR #17 is currently pending.\n", m, 1, [(REPO, 17)]),
             ("format/now-open", "PR #17 is now open.\n", m, 1, [(REPO, 17)]),
             ("format/currently-merged-no-claim", "PR #17 is currently merged.\n", m, 0, [])):
@@ -1363,6 +1409,8 @@ def _self_test():
 
 
 def _self_test_adapters(tempfile, contextlib, io):
+    import errno
+    import signal
     import apply_record_draft
     with tempfile.TemporaryDirectory(prefix="pending-pr-claims-stage-") as tmp:
         root = Path(tmp)
@@ -1415,6 +1463,66 @@ def _self_test_adapters(tempfile, contextlib, io):
         with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
             got = apply_record_draft.apply(root, str(draft), "OTHER.md", FakeTransport({}), _origin_ok)
         check("apply/undeclared-target-withheld", got == 2 and not (root / "OTHER.md").exists(), got)
+
+        # A FIFO target with no writer is refused at once, never waited on: an alarm turns a blocked
+        # open into a failed row, so the row is bounded. A regular target is written (the twin).
+        class _Blocked(Exception):
+            pass
+
+        def _alarm(_signum, _frame):
+            raise _Blocked()
+        os.unlink(target)
+        os.mkfifo(target)
+        previous = signal.signal(signal.SIGALRM, _alarm)
+        signal.setitimer(signal.ITIMER_REAL, 5)
+        try:
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                got = apply_record_draft.apply(root, str(draft), "NOTES.md", FakeTransport({(REPO, 17): "open"}),
+                                               _origin_ok)
+        except _Blocked:
+            got = "still blocked in open() after 5 seconds"
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
+        check("apply/fifo-target-refused", got == 2 and stat.S_ISFIFO(os.lstat(target).st_mode), got)
+        os.unlink(target)
+        target.write_bytes(b"old\n")
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            got = apply_record_draft.apply(root, str(draft), "NOTES.md", FakeTransport({(REPO, 17): "open"}),
+                                           _origin_ok)
+        check("apply/regular-target-written", got == 0 and target.read_bytes() == b"PR #17 remains pending.\n",
+              got)
+
+        # A read error after the target is opened is cannot-evaluate at the first preimage read and at
+        # the second (after the judgement), and the target is left as it was; with reads restored the
+        # draft is written (the twin).
+        real_read = apply_record_draft._read_descriptor
+
+        def failing_read(_fd, _limit):
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+        def fail_reads():
+            apply_record_draft._read_descriptor = failing_read
+        for name, early in (("apply/read-error-first-preimage-cannot-evaluate", True),
+                            ("apply/read-error-second-preimage-cannot-evaluate", False)):
+            target.write_bytes(b"old\n")
+            if early:
+                fail_reads()
+            try:
+                with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                    got = apply_record_draft.apply(root, str(draft), "NOTES.md",
+                                                   FakeTransport({(REPO, 17): "open"}), _origin_ok,
+                                                   after_judge=None if early else fail_reads)
+            except OSError as exc:
+                got = "escaped {}".format(type(exc).__name__)
+            finally:
+                apply_record_draft._read_descriptor = real_read
+            check(name, got == 2 and target.read_bytes() == b"old\n", got)
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            got = apply_record_draft.apply(root, str(draft), "NOTES.md", FakeTransport({(REPO, 17): "open"}),
+                                           _origin_ok)
+        check("apply/reads-restored-written", got == 0 and target.read_bytes() == b"PR #17 remains pending.\n",
+              got)
 
         # The target's permission bits survive the replace (0644 and 0640 both kept).
         for name, mode in (("apply/mode-kept-0644", 0o644), ("apply/mode-kept-0640", 0o640)):

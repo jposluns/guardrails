@@ -46,8 +46,10 @@ accepted as a prose-only alias), `owner/repo#17` or a GitHub pull request URL (o
 `/files`, `/commits` or `/checks`). A Markdown link or autolink to a pull request URL counts as that URL
 (`[#17](https://github.com/OWNER/REPO/pull/17)` binds OWNER/REPO#17); a link to any other URL counts as
 its text. A bare number (`PR 17`) is not a reference. Coordinated lists (`#17, #18 and #19`, `#17/#18`)
-bind every member. An issue reference (`issue #17`, `issues #17 and #18`, or a link to an
-`/issues/N` URL) is not a pull request reference: it is never read from the pulls API and never binds.
+bind every member. An issue reference (`issue #17`, `issue owner/repo#17`, `issues #17 and
+owner/repo#18`, or a link to an `/issues/N` URL) is not a pull request reference: it is never read from
+the pulls API and never binds. A link URL is matched with ASCII classes, so a pull request URL whose
+fragment holds a non-ASCII letter or digit is not a pull request URL and the link counts as its text.
 
 Units are complete: a Markdown paragraph or list item is joined across wrapped lines, and a TOML string
 is decoded before it is read. Inside a unit, a claim binds within one clause; a clause ends at `.`
@@ -76,8 +78,11 @@ Below, "is" stands for `is`, `are`, `remains`, `stays` or `still`, optionally fo
 `open #N` after an instruction word (`leave open #N`, `keep open #N`) is not a claim. A lead phrase
 (`waiting for`, `awaiting`, `until`, `once`, `blocked on`, `stacked on`, `pending`, `open`) directly
 after a negation or a past auxiliary (`not waiting for #N to merge`, `no longer waiting on #N`, `isn't
-waiting`, `were waiting for #N to merge`, `was stacked on #N`; adverbs such as `still` are skipped) is
-not a current claim. A phrase such as `the pending PR` with no named pull request is an ambiguous
+waiting`, `were waiting for #N to merge`, `was stacked on #N`, `had been waiting`, `haven't been
+waiting`; adverbs such as `still` are skipped) is not a current claim. Still current claims: present
+perfect (`have been waiting for #N to merge`), a negator followed by `only` or `just` (`not only waiting
+for #N to merge`), and a negator before `until`, `once` or `after` (`Not until #N merges can we ship`).
+A phrase such as `the pending PR` with no named pull request is an ambiguous
 binding: cannot-evaluate, even when a named claim binds in the same clause.
 
 A Markdown table is read from its header and delimiter rows, with or without outer pipes.
@@ -126,7 +131,7 @@ or the origin URL.
 | `check_pending_pr_claims.py --all --live` | every declared surface, live state |
 | `check_pending_pr_claims.py --draft PATH --target REL` | the complete proposed content PATH judged as declared surface REL, live state |
 | `check_pending_pr_claims.py --staged --live` | the staged blob of every declared surface the index changes, live state |
-| `apply_record_draft.py --draft PATH --target REL` | judges the draft bytes read once and writes those same bytes only on exit 0, keeping the target's permission bits; a changed destination preimage, a symlinked parent directory or a parent that changed after it was opened withholds the write |
+| `apply_record_draft.py --draft PATH --target REL` | judges the draft bytes read once and writes those same bytes only on exit 0, keeping the target's permission bits; a changed destination preimage, a symlinked parent directory or a parent that changed after it was opened withholds the write; a target that is not a regular file (a FIFO is refused without waiting on it) or cannot be read is exit 2 |
 | `check_pending_pr_commit.sh` | runs `--staged --live`, prints the result, and always lets the commit continue; an incomplete evaluation is reported as not passed |
 
 Exit 0: every bound claim was evaluated and none is contradicted (advisory warnings may remain). Exit 1:
