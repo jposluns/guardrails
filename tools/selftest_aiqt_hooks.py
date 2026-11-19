@@ -8021,8 +8021,15 @@ def _gw_counted(hooks, name, *args):
 def _gw_work_failures(hooks=None):
     """(gw-cnt-split-cache, gw-cnt-walked, gw-cnt-git-skip, gw-cnt-runtime-skip, gw-cnt-piece-skip,
     gw-cnt-masked-reuse, gw-cnt-assembly-skip, gw-cnt-heredoc-skip, gw-cnt-span-dedup, gw-cnt-walk-first,
-    gw-cnt-verb-search) The work count of one call on an input where a cache, a reuse, a skip or a start past the
-    first word of a counted scan applies, against the passes the call makes there. Losing one of these costs a
+    gw-cnt-verb-search, gw-cnt-dq-git-pass, gw-cnt-dq-git-hit, gw-cnt-sub-skip, gw-cnt-sub-unresolved,
+    gw-cnt-assembled-first, gw-cnt-doubt-first, gw-cnt-span-first, gw-cnt-scan-first) The work count of one call
+    on an input where a cache, a reuse, a skip, a start past the first word or an early stop of a counted scan
+    applies, against the passes the call makes there. The rows from gw-cnt-dq-git-pass on pin walks that stop
+    early or skip words: the dequoted scan's git-word pass reads only the words before the last one the spelling
+    test can read, and stops at its first bypass; the grammar's subcommand walk skips each separated option value
+    and copies only the words after the subcommand; the assembled-git walk stops at its first hit; the split's
+    doubt test stops at its first doubting piece; and the git-word regex passes over a quoted span's interior and
+    over a command stop at their first hit and first deny. Losing one of these costs a
     fixed multiple of the input, not a growth the gw-lin rows can see, so each row pins the count itself: the
     reading split once for the three bash-model readings that share one plain text, one walk for the four readings
     with the same words, the translate alone where no reading can name git, the run-time test alone where no walk
@@ -8057,6 +8064,29 @@ def _gw_work_failures(hooks=None):
             want += count("_gate_assembled_reading", words if assembled_same else ())
         return want
 
+    def doubt(text):
+        # what the split's doubt test over the pieces of text adds (_gate_split_doubt_start)
+        split = hooks._raw_push_segments(text)
+        return count("_gate_split_doubt_start", split, hooks._gate_piece_spans(split))
+
+    dq_words = ["git", "push", "-n"] + ["x"] * 40  # the git-word pass reads the two words before the -n
+    dq_hit = ["git", "commit", "-n"] + ["x"] * 40  # the pass stops at the git word, whose walk finds the -n
+    sub_skip = ["git", "-C", "-q", "status"] + ["x"] * 20  # -q is -C's value: walked past, never read
+    sub_open = ["git"] + ["-C", "dir"] * 20  # no subcommand: the walk reads the 20 options, not their values
+    assembled = ["git", "commit", "$O"] * 20  # every git word hits; the walk stops at the first
+    doubting = "case x; " + "echo x; " * 20  # the first piece holds a case word; the doubt test stops there
+    span_hit = "git commit " + "x " * 40  # the regex pass stops at the first git word, a roster git
+    denies = "git commit -n; " * 20  # the scan stops at the first git word, a bypass
+    # The results of the rows whose call gives one: each row's input keeps the result a full walk gives.
+    results = {
+        "gw-cnt-dq-git-hit": ("commit", hooks._no_verify_spelling("commit", ["-n"])),
+        "gw-cnt-sub-skip": ("status", ["x"] * 20, True),
+        "gw-cnt-sub-unresolved": (None, [], False),
+        "gw-cnt-assembled-first": ("git", "commit", "the word '$O', built at run time, which may expand to a "
+                                   "hook-skip spelling for it"),
+        "gw-cnt-span-first": True,
+        "gw-cnt-scan-first": ("bypass", "commit", hooks._no_verify_spelling("commit", ["-n"])),
+    }
     spans = sorted(set(hooks._gate_split_spans(heredoc)[1]))
     out = []
     for label, name, text, want in (
@@ -8068,17 +8098,38 @@ def _gw_work_failures(hooks=None):
             ("gw-cnt-piece-skip", "_gate_runtime_piece_hit", no_git, len(no_git)),
             ("gw-cnt-masked-reuse", "_gate_runtime_piece_hit", quoted, piece_want(quoted, True)),
             ("gw-cnt-assembly-skip", "_gate_runtime_piece_hit", bare, piece_want(bare, False)),
-            ("gw-cnt-heredoc-skip", "_gate_split_spans", pieces, 3 * len(pieces)),
+            ("gw-cnt-heredoc-skip", "_gate_split_spans", pieces, 2 * len(pieces) + doubt(pieces)),
             ("gw-cnt-span-dedup", "_gate_unread_bypass", heredoc,
-             5 * len(heredoc) + 2 * sum(end - start for start, end in spans)),
+             count("_gate_split_spans", heredoc) + 2 * sum(end - start for start, end in spans)),
             ("gw-cnt-walk-first", "_gate_any_word_bypass", (plain_words, 20), 19),
-            ("gw-cnt-verb-search", "_gate_runtime_hit", (plain_words, 20), 2 * 19)):
+            ("gw-cnt-verb-search", "_gate_runtime_hit", (plain_words, 20), 2 * 19),
+            # the table fill, the two words the git-word pass reads, and one walk over the -n (_gw_walk_count)
+            ("gw-cnt-dq-git-pass", "_gate_novrf_dequoted_bypass", (dq_words,), len(dq_words) + 2 + _gw_walk_count(1)),
+            # the table fill, the one word the pass reads before its walk returns the bypass, and that walk
+            ("gw-cnt-dq-git-hit", "_gate_novrf_dequoted_bypass", (dq_hit,), len(dq_hit) + 1 + _gw_walk_count(1)),
+            # -C and status walked, the 20 words after status copied
+            ("gw-cnt-sub-skip", "_gate_grammar_sub", (sub_skip,), 2 + 20),
+            ("gw-cnt-sub-unresolved", "_gate_grammar_sub", (sub_open,), 20),
+            # the pass finding the git words, the table fill, and the first git word the walk reads
+            ("gw-cnt-assembled-first", "_gate_assembled_reading", (assembled,), 2 * len(assembled) + 1),
+            # the split and the body mask, then the first piece and its separator
+            ("gw-cnt-doubt-first", "_gate_split_spans", doubting, 2 * len(doubting) + len("case x") + 1),
+            # the tokenizing pass and the table fill, then 'git' read and the one token walked past it
+            ("gw-cnt-span-first", "_gate_span_hides_roster_git", span_hit,
+             len(span_hit) + len(span_hit.split()) + len("git") + 1),
+            # the regex pass to the first git word, the lex of its segment (to the ';') and its subcommand walk (one
+            # word walked, one copied)
+            ("gw-cnt-scan-first", "_gate_closed_grammar_scan", denies, len("git") + len("git commit -n") + 2)):
         args = text if isinstance(text, tuple) else (text,)
         got, result = _gw_counted(hooks, name, *args)
         if got != want:
             out.append("({}) {} on an input of length {} counted {}, want {}".format(
                 label, name, len(args[0]), got, want))
-        if name not in ("_gate_split_spans", "_gate_bash_readings") and result is not None:
+        if label in results:
+            if result != results[label]:
+                out.append("({}) {} on {!r} gave {!r}, want {!r}".format(
+                    label, name, args[0][:40], result, results[label]))
+        elif name not in ("_gate_split_spans", "_gate_bash_readings") and result is not None:
             out.append("({}) {} on {!r} gave {!r}, want None".format(label, name, args[0][:40], result))
     return out
 
@@ -8113,6 +8164,25 @@ _GW_MUTANTS = (
      "gw-cnt-walk-first"),
     ("verb-search-start", "    verb = _gate_scan_first(range(k + 1, len(words))", None,
      "    verb = _gate_scan_first(range(1, len(words))", "gw-cnt-verb-search"),
+    # The git-word pass of the dequoted scan reads every word, not only those before the last spelling word.
+    ("dq-git-pass", "    for idx in range(max(last, 0)):\n", None, "    for idx in range(n):\n", "gw-cnt-dq-git-pass"),
+    # The grammar's subcommand walk reads a separated option's value as a word of its own.
+    ("sub-value-skip", "                i += 2  # a separated arg-consuming global option: skip its value word\n",
+     None, "                i += 1\n", "gw-cnt-sub-skip"),
+    # The assembled-git walk passes over every hit but the last, so it reads every git word.
+    ("assembled-first-hit", "        if s < n and words[s] in _NOVERIFY_VERBS and runtime_at[s + 1] < n:\n", None,
+     "        if g == gits[-1] and s < n and words[s] in _NOVERIFY_VERBS and runtime_at[s + 1] < n:\n",
+     "gw-cnt-assembled-first"),
+    # The split's doubt test keeps its first doubting piece but tests every piece.
+    ("doubt-first", "def _gate_split_doubt_start(",
+     "            start = spans[k][0]\n            break  # the first piece that holds such a construct ends the search\n",
+     "            start = spans[k][0] if start is None else start\n", "gw-cnt-doubt-first"),
+    # The git-word regex pass over a quoted span's interior keeps its hit but reads on to the end.
+    ("span-first", "def _gate_span_hides_roster_git(", "            break  # the first hit ends the pass\n",
+     "            continue\n", "gw-cnt-span-first"),
+    # The closed grammar scan returns a bypass only at the last git word, so it lexes every segment.
+    ("scan-first-deny", "def _gate_closed_grammar_scan(", "        if spelling is not None:\n",
+     "        if spelling is not None and _GATE_GIT_WORD_RE.search(command, end) is None:\n", "gw-cnt-scan-first"),
 )
 
 
@@ -8158,7 +8228,8 @@ def _gw_mutant_failures(cases):
             caught = any(text.startswith("({}) doubling the input grew".format(row)) for text in got)
         else:
             got = _gw_work_failures(hooks)
-            caught = any(text.startswith("({}) ".format(row)) for text in got)
+            # a count failure, not only a result failure, so the count itself shows the lost work
+            caught = any(text.startswith("({}) ".format(row)) and " counted " in text for text in got)
         if not caught:
             out.append("({}) a copy of the hook with {!r} made {!r} passed {}, so its count does not show the lost "
                        "work: {!r}".format(name, line.strip(), mutated.strip(), row, got))
@@ -30145,10 +30216,12 @@ def _main_isolated(monitor):
         # The seam counts the passes it instruments: a new loop added to a scan outside every counted pass is
         # not counted, so the rows catch a re-walk or a suffix copy made through a counted pass or helper. A
         # counted walk adds the steps it takes, never how far a cached pointer moved, and a reading reused from a
-        # cache or passed over by a skip adds nothing, so losing the cache or the skip shows as added work:
-        # gw-lin-mut-* run each such site's one-line mutation (_GW_MUTANTS) on a copy of the hook and require the
-        # row it names to fail there, a gw-lin growth row for a loss that makes a scan quadratic and a gw-cnt row
-        # (_gw_work_failures, which pins the count of one call) for a loss that costs a fixed multiple.
+        # cache or passed over by a skip adds nothing, and a walk or regex pass that can stop early adds only what
+        # it read before it stopped, never its bound, so losing the cache, the skip or the stop shows as added
+        # work: gw-lin-mut-* run each such site's one-line mutation (_GW_MUTANTS) on a copy of the hook and require
+        # the row it names to fail there, a gw-lin growth row for a loss that makes a scan quadratic and a gw-cnt
+        # row (_gw_work_failures, which pins the count of one call) for a loss that costs a fixed multiple; a
+        # gw-cnt row must fail on its count, not only on its result.
         # gw-lin-slice-count, -pinned, -slack and -boundary pin the slack's derivation for the dequoted-word walk's
         # slices, its truncated last slice included, at the sizes the rows use and at a boundary size.
         # A ROSTER-verb-dense line is still super-linear by design and relies on the deadline's fail-closed,

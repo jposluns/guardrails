@@ -18031,19 +18031,27 @@ def _gate_span_hides_roster_git(interior):
             hides[k] = hides[k + (2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1)]
         else:
             hides[k] = w.lower() in _NOVERIFY_VERBS
-    # The work count: the interior's two regex passes and the table fill, then each step the pointer walk takes.
-    _gate_scan_count(2 * len(interior) + len(toks))
+    # The work count: the tokenizing regex pass and the table fill, then, for the git-word regex pass, the stretch
+    # of the interior it read to reach each match and each step the pointer walk takes, and the rest of the
+    # interior only when the pass runs to the end (a hit stops it).
+    _gate_scan_count(len(interior) + len(toks))
     base = 0
+    scanned = 0  # how far the git-word regex pass has read the interior
+    found = False
     for gm in _GATE_GIT_WORD_RE.finditer(interior):
         gend = gm.end()
         visited = 0
         while base < len(toks) and toks[base][0] < gend:
             visited += 1
             base += 1
-        _gate_scan_count(visited)
+        _gate_scan_count(gend - scanned + visited)
+        scanned = gend
         if hides[base]:
-            return True
-    return False
+            found = True
+            break  # the first hit ends the pass
+    else:
+        _gate_scan_count(len(interior) - scanned)  # the work count: the pass read to the end of the interior
+    return found
 
 
 # The one here-document shape the closed literal grammar accepts (_gate_heredoc_message): from the opening
@@ -18288,7 +18296,9 @@ def _gate_grammar_sub(words):
     fails closed on the latter, since the verb bash will run cannot be known)."""
     i = 1
     n = len(words)
+    visited = 0  # the work count: the words this walk reads, never an option value it skips
     while i < n:
+        visited += 1
         w = words[i]
         if w.startswith("-") and w != "-":
             if "=" in w:
@@ -18298,9 +18308,9 @@ def _gate_grammar_sub(words):
             else:
                 i += 1
             continue
-        _gate_scan_count(n)  # the work count: the words walked to the subcommand and the copy of those after it
+        _gate_scan_count(visited + n - i - 1)  # the work count: the words walked and the copy of those after it
         return w, words[i + 1:], True
-    _gate_scan_count(n)  # the work count: every word walked
+    _gate_scan_count(visited)  # the work count: the words walked
     return None, [], False
 
 
@@ -18340,8 +18350,10 @@ def _gate_closed_grammar_scan(command, heredoc_message=False):
     (_gate_heredoc_message, read by _gate_grammar_lex). The parse-error fallback and the doubt path keep
     False, so on a command the lexer cannot parse that form still denies."""
     consumed = 0
-    _gate_scan_count(len(command))  # the work count: the one regex pass over the command
+    scanned = 0  # how far the one regex pass over the command has read it
     for m in _GATE_GIT_WORD_RE.finditer(command):
+        _gate_scan_count(m.end() - scanned)  # the work count: the regex pass read to this git word
+        scanned = m.end()
         p = m.start()
         if p < consumed:
             continue
@@ -18361,6 +18373,7 @@ def _gate_closed_grammar_scan(command, heredoc_message=False):
         if bad is not None:
             return ("grammar",) + bad
         consumed = data_end
+    _gate_scan_count(len(command) - scanned)  # the work count: the regex pass read to the end of the command
     return None
 
 
@@ -19250,9 +19263,10 @@ def _gate_novrf_dequoted_bypass(words):
             subs[p] = subs[p + (2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1)]
         else:
             subs[p] = p
-    _gate_scan_count(n + max(last, 0))  # the work count: the table fill and the git-word pass below
+    _gate_scan_count(n)  # the work count: the table fill
     read_to = {}  # verb -> the end of the stretch a walk for that verb read without finding a bypass
     for idx in range(max(last, 0)):
+        _gate_scan_count(1)  # the work count: each word the git-word pass reads, to its return or its end
         if _gate_word(words[idx]) != "git":
             continue
         s = subs[idx + assigns[idx] + 1]  # skip the leading assignments and the command word itself
@@ -19833,7 +19847,7 @@ def _gate_assembled_reading(words):
     if not gits:
         return None
     n = len(words)
-    _gate_scan_count(n + len(gits))  # the work count: the table fill from the end and the walk over the git words
+    _gate_scan_count(n)  # the work count: the table fill from the end
     # From each index: the first word that is not a leading env assignment (_command_word_index), the subcommand
     # the option skip of _git_sub_and_args reaches, and the first word built at run time (a tilde word anywhere,
     # as after a roster verb); n where there is none.
@@ -19849,6 +19863,7 @@ def _gate_assembled_reading(words):
             sub_at[i] = i
         runtime_at[i] = i if _gate_runtime_word(w) or _gate_tilde_word(w) else runtime_at[i + 1]
     for g in gits:
+        _gate_scan_count(1)  # the work count: each git word the walk reads, to its first hit or its end
         s = sub_at[min(command_at[g] + 1, n)]
         if s < n and words[s] in _NOVERIFY_VERBS and runtime_at[s + 1] < n:
             return (words[g], words[s], "the word {!r}, built at run time, which may expand to a hook-skip spelling "
@@ -19933,8 +19948,15 @@ def _gate_piece_spans(pieces):
 
 def _gate_split_doubt_start(pieces, spans):
     """The start of the first of pieces, before the last, that holds a construct the split may cut inside
-    (_gate_split_doubt), spans being their (start, end) spans; None when none does."""
-    return next((start for (start, _end), piece in zip(spans, pieces[:-1]) if _gate_split_doubt(piece)), None)
+    (_gate_split_doubt), spans being their (start, end) spans; None when none does. The search stops at the first
+    such piece, and the work count adds each piece it tests with its separator, none after that one."""
+    start = None
+    for k in range(len(pieces) - 1):
+        _gate_scan_count(len(pieces[k]) + 1)  # the work count: the piece the doubt test reads and its separator
+        if _gate_split_doubt(pieces[k]):
+            start = spans[k][0]
+            break  # the first piece that holds such a construct ends the search
+    return start
 
 
 def _gate_split_spans(text):
@@ -19946,13 +19968,13 @@ def _gate_split_spans(text):
     case word (_gate_split_doubt), since either split may cut inside those, and a body quote that re-pairs the
     first split can carry such a construct across its pieces (Don't, then $G -c $'x.y=a;\\';b' commit -nv).
     Linear in the length of text."""
-    _gate_scan_count(3 * len(text))  # the work count: the split, the doubt test of its pieces and the body mask
+    _gate_scan_count(2 * len(text))  # the work count: the split and the body mask (the doubt test counts its own)
     pieces = _raw_push_segments(text)
     spans = _gate_piece_spans(pieces)
     starts = [_gate_split_doubt_start(pieces, spans)]
     masked = _gate_heredoc_masked(text)
     if masked != text:
-        _gate_scan_count(2 * len(text))  # the work count: the split of the masked text and its doubt test
+        _gate_scan_count(len(text))  # the work count: the split of the masked text (the doubt test counts its own)
         masked_pieces = _raw_push_segments(masked)
         masked_spans = _gate_piece_spans(masked_pieces)
         seen = set(spans)
