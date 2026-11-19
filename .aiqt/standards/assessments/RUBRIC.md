@@ -276,9 +276,10 @@ proposal, not a decision. A record names every convention that decides one of it
     taken, on the same dates: AML.M0019 was created on 2024-01-12 (line 5163), after the 11
     sub-techniques created in 2021 of the parents it is linked to (AML.T0005, AML.T0024 and AML.T0043),
     so if that date is when it entered the release, its links to those parents were added while those
-    sub-techniques existed. It is repeated on 1 of those 11, and on 1 of the 17 sub-techniques of all the
-    parents it is linked to (1 of 14 without the three AML.T0034 sub-techniques), while AML.M0004,
-    created on 2023-04-12 (line 4863), is repeated on 6 of the same 11. AML.M0019's absence from
+    sub-techniques existed. It is repeated on 1 of those 11, and on 1 of the 17 sub-techniques of the
+    five parents with sub-techniques that it is linked to (AML.T0005, AML.T0024, AML.T0034, AML.T0043
+    and AML.T0051; 1 of 14 without the three AML.T0034 sub-techniques), while AML.M0004, created on
+    2023-04-12 (line 4863), is repeated on 6 of the same 11. AML.M0019's absence from
     AML.T0034.000 then fits the way AML.M0019 is linked across the release as well as it fits the
     sub-technique being new. The relations themselves carry no dates, so when any one link was added
     cannot be told. This convention is engaged when a row maps to a sub-technique whose parent has a
