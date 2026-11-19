@@ -44569,9 +44569,11 @@ def _read_hook_input(stream):
 
     A real standard input is read once, as bytes, from its binary buffer and decoded as UTF-8 with
     surrogateescape, so the text the handlers see does not depend on the locale the hook runs under. The
-    locale-encoded text stream this replaces made it depend on that: under a UTF-8 locale a byte that is
-    not valid UTF-8 raised UnicodeDecodeError, so the whole payload read as unreadable, while under the C
-    locale the ASCII codec judged the same payload and turned every byte above 0x7f, valid UTF-8 included,
+    text stream this replaces decoded by the locale and the interpreter's UTF-8 mode: under the shipped
+    command line the C and POSIX locales turn UTF-8 mode on and C.UTF-8 decodes with surrogateescape, so
+    those already decoded as here, while a strict UTF-8 locale such as en_US.UTF-8 raised
+    UnicodeDecodeError on a byte that is not valid UTF-8, so the whole payload read as unreadable; only
+    with UTF-8 mode off did the C locale's ASCII codec turn every byte above 0x7f, valid UTF-8 included,
     into a lone surrogate. Here valid UTF-8 decodes to its characters and each byte that is not valid UTF-8
     becomes one lone surrogate (U+DC80 to U+DCFF), which json.loads keeps inside a string, so it reaches the
     handler's own validation; malformed JSON, a non-object payload and a failed read still reach main()'s
