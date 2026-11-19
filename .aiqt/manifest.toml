@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "9682b4196dd6263389740abc664beb4060ef6c01db47d84ca80d365a38b96769"
+tree-sha256 = "6696cca723588e96e8dd7d17e2b38ef4efe93f37e12548d921537dbc068f0e31"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4772,8 +4772,8 @@ sha256 = "517dbe7bf147d55d9f2c1b5fd53dec890ee5cea23d9021c085566c8917b54443"
 
 [[sources]]
 path = "tools/orch_dispatch_marker.py"
-bytes = 42780
-sha256 = "46849d9676c2a28cb3785357d6767a40eb26965f0eda5db40fe6cd6d025490d3"
+bytes = 47079
+sha256 = "df17deb4da14cae7092fbacafcc9b2fe61c9504243c8a22ea1ec23366f925a23"
 
 [[sources]]
 path = "tools/orch_doctor.py"
@@ -4817,8 +4817,8 @@ sha256 = "f020224b8fcec06196b11729da9a87046c471d120bd674bf5fe6b967a5860021"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 287042
-sha256 = "af3bd6be0144aa4009b333eb742cd85caf6ba258626bfc0d33167f58344e3809"
+bytes = 287754
+sha256 = "e0f85d3b2c6cfcff567b08c20341f0dfcf6f4d7b53709a4ef72d66fca3216b50"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

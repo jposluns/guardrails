@@ -7048,6 +7048,14 @@ expected-check-ids = [
   "wait/cli-valid-args-0",
   "wait/deadline-ceiling-control-86400-0",
   "wait/interval-bound-control-60-0",
+  # wait: an oversized numeric argument is refused before any conversion; controls at the bound convert
+  "wait/deadline-bound-before-int-2/6-digits",
+  "wait/deadline-bound-before-int-2/5000-digits",
+  "wait/interval-bound-before-float-2/17-chars-leading-zeros",
+  "wait/interval-bound-before-float-2/5001-chars-leading-zeros",
+  "wait/interval-bound-before-float-2/5000-digits",
+  "wait/deadline-bound-control-int-86400-0",
+  "wait/interval-bound-control-float-16-chars-0",
   # claim: an exclusive directory per dispatch, never an adopted one
   "claim/fresh-0",
   "claim/existing-empty-dir-5",
@@ -7072,6 +7080,10 @@ expected-check-ids = [
   "write/bad-status-2/leading-zero",
   "write/bad-status-2/5000-digits",
   "write/status-255-0",
+  # write: an oversized status is refused before any conversion; the control at the bound converts
+  "write/status-bound-before-int-2/4-digits",
+  "write/status-bound-before-int-2/5000-digits",
+  "write/status-bound-control-int-255-0",
   "write/missing-dir-2",
   "write/target-is-directory-2",
   # revert: the incident case turns red when the id comparison is removed

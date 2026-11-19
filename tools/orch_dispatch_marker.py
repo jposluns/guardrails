@@ -35,8 +35,9 @@ that the result must carry before it is accepted.
       (another id, a legacy bare status or malformed content) were seen, each named on stderr; 2
       cannot evaluate, at once (bad arguments, an oversized or unconvertible number included, a
       relative path, a missing result directory, a symlink, FIFO, directory or other non-regular
-      marker, a read or permission error, an oversized marker); a regular marker of at most
-      MAX_MARKER_BYTES bytes is never a cause of exit 2, whatever its content.
+      marker, a stat, open, read or permission error, an oversized marker). Marker content that was
+      read successfully and is at most MAX_MARKER_BYTES bytes is never alone a cause of exit 2,
+      whatever it holds; a file system error still exits 2 at once, whatever the marker's size.
   orch_dispatch_marker.py --self-test [--execution-report ABS_PATH]
       Run the self-test (exit 0 pass, 1 a failed check, 2 a harness error).
 
@@ -95,6 +96,11 @@ STATUS_TEXT_MAX = len(str(STATUS_MAX))
 DEADLINE_TEXT_MAX = len(str(DEADLINE_MAX_S))
 INTERVAL_TEXT_MAX = 16
 
+# The numeric conversions, looked up at call time so the self-test can observe that an oversized
+# argument is refused before it reaches them.
+_to_int = int
+_to_float = float
+
 EXIT_OK = 0
 EXIT_CANNOT_EVALUATE = 2
 EXIT_NEVER_SEEN = 3
@@ -118,7 +124,7 @@ def parse_status(text):
     if len(text) > 1 and text[0] == "0":
         return None
     try:
-        value = int(text)
+        value = _to_int(text)
     except (ValueError, OverflowError):
         return None
     return value if value <= STATUS_MAX else None
@@ -130,7 +136,7 @@ def parse_deadline(text):
             or text[0] == "0":
         return None
     try:
-        value = int(text)
+        value = _to_int(text)
     except (ValueError, OverflowError):
         return None
     return value if value <= DEADLINE_MAX_S else None
@@ -144,7 +150,7 @@ def parse_interval(text):
     if not text.replace(".", ""):
         return None
     try:
-        value = float(text)
+        value = _to_float(text)
     except (ValueError, OverflowError):
         return None
     return value if INTERVAL_MIN_S <= value <= INTERVAL_MAX_S else None
@@ -649,6 +655,56 @@ def _self_test():
                                           fake.clock, fake.sleep)
             check(name, code == EXIT_OK and out == "3\n", (code, out, err))
 
+        # The length bound is applied before any conversion. The conversions are swapped for recording
+        # ones: an oversized argument passes only when its text never reaches int or float, and each
+        # control at the bound shows that a valid text does reach it. A leading-zero interval longer than
+        # the bound would convert to an in-range 1.0, so only the bound refuses it.
+        real_int, real_float = globals()["_to_int"], globals()["_to_float"]
+        converted = []
+
+        def recording_int(text):
+            converted.append(("int", text))
+            return real_int(text)
+
+        def recording_float(text):
+            converted.append(("float", text))
+            return real_float(text)
+
+        def run_recorded(argv):
+            del converted[:]
+            fake = _FakeClock()
+            globals()["_to_int"], globals()["_to_float"] = recording_int, recording_float
+            try:
+                code, out, err = _run_guarded(argv, fake.clock, fake.sleep)
+            finally:
+                globals()["_to_int"], globals()["_to_float"] = real_int, real_float
+            return code, out, err, list(converted)
+
+        def lengths(seen):
+            return [(kind, len(text)) for kind, text in seen]
+
+        for name, option, kind, text in (
+                ("wait/deadline-bound-before-int-2/6-digits", "--deadline-s", "int",
+                 "9" * (DEADLINE_TEXT_MAX + 1)),
+                ("wait/deadline-bound-before-int-2/5000-digits", "--deadline-s", "int", "9" * 5000),
+                ("wait/interval-bound-before-float-2/17-chars-leading-zeros", "--interval-s", "float",
+                 "0" * INTERVAL_TEXT_MAX + "1"),
+                ("wait/interval-bound-before-float-2/5001-chars-leading-zeros", "--interval-s", "float",
+                 "0" * 5000 + "1"),
+                ("wait/interval-bound-before-float-2/5000-digits", "--interval-s", "float", "9" * 5000)):
+            extra = [option, text] if option == "--deadline-s" else ["--deadline-s", "5", option, text]
+            code, out, err, seen = run_recorded(["wait", "--marker", m, "--expect-id", new_id] + extra)
+            check(name, code == EXIT_CANNOT_EVALUATE and out == "" and (kind, text) not in seen
+                  and any("wait needs" in line for line in err), (code, out, err[:1], lengths(seen)))
+        for name, option, kind, text in (
+                ("wait/deadline-bound-control-int-86400-0", "--deadline-s", "int", str(DEADLINE_MAX_S)),
+                ("wait/interval-bound-control-float-16-chars-0", "--interval-s", "float",
+                 "0" * (INTERVAL_TEXT_MAX - 1) + "1")):
+            extra = [option, text] if option == "--deadline-s" else ["--deadline-s", "5", option, text]
+            code, out, err, seen = run_recorded(["wait", "--marker", m, "--expect-id", new_id] + extra)
+            check(name, code == EXIT_OK and out == "3\n" and (kind, text) in seen,
+                  (code, out, err, lengths(seen)))
+
         # --- claim ---
         fresh_path = os.path.join(base, "claim-fresh")
         code, out, err = run_command(["claim", fresh_path])
@@ -793,6 +849,18 @@ def _self_test():
         check("write/status-255-0", code == EXIT_OK and code2 == EXIT_OK and out2 == "255\n",
               (code, err, code2, out2))
 
+        # An oversized status never reaches int; the control at the bound does and is published.
+        d, m = fresh()
+        for name, status in (("write/status-bound-before-int-2/4-digits", "9" * (STATUS_TEXT_MAX + 1)),
+                             ("write/status-bound-before-int-2/5000-digits", "9" * 5000)):
+            code, out, err, seen = run_recorded(["write", "--marker", m, "--id", new_id, "--status", status])
+            check(name, code == EXIT_CANNOT_EVALUATE and not os.path.lexists(m)
+                  and ("int", status) not in seen and any("write needs" in line for line in err),
+                  (code, err, lengths(seen)))
+        code, out, err, seen = run_recorded(["write", "--marker", m, "--id", new_id, "--status", "255"])
+        check("write/status-bound-control-int-255-0", code == EXIT_OK and ("int", "255") in seen
+              and _read_or_none(m) == marker_line(new_id, 255).encode("ascii"), (code, err, lengths(seen)))
+
         m = os.path.join(base, "absent-write-dir", "exit-status")
         code, out, err = run_command(["write", "--marker", m, "--id", new_id, "--status", "0"])
         check("write/missing-dir-2", code == EXIT_CANNOT_EVALUATE and not os.path.lexists(m)
@@ -828,8 +896,9 @@ def _self_test():
           "fresh mtime on a wrong id are never accepted, and malformed content waits to exit 4, not 2; a "
           "matching id is accepted whatever its age and its worker status is printed, never used as the "
           "exit; non-regular, unreadable and oversized markers and bad or out-of-range arguments, oversized "
-          "numbers included, cannot evaluate; a claim never adopts an existing entry, one of two racing "
-          "claims wins, and claims issue distinct ids, one claim's marker refused under another's; a write "
+          "numbers included, cannot evaluate, and an oversized number never reaches int or float; a claim "
+          "never adopts an existing entry, one of two racing claims wins, and claims issue distinct ids, "
+          "one claim's marker refused under another's; a write "
           "keeps the previous marker until the rename, fails cleanly on an fsync or rename error and "
           "refuses a bad status; with the id comparison removed the incident case would pass)".format(
               len(EXECUTED)))
