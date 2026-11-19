@@ -354,6 +354,27 @@ def _content_column(text, match):
     return len(text[:match.start(1)].expandtabs(4))
 
 
+# The scanning work of the block classifier, in characters read for backtick runs plus lines stepped
+# over by the paragraph and comment scans (_backtick_runs, _paragraph_ends, _interrupts_paragraph). The
+# self-test reads it to show that classifying a document is linear in its size.
+SCAN_WORK = [0]
+
+
+def _backtick_runs(text):
+    """[(start, end)] for the maximal backtick runs of text: the one place text is read for them."""
+    SCAN_WORK[0] += len(text) + 1
+    return [(match.start(), match.end()) for match in BACKTICK_RUN_RE.finditer(text)]
+
+
+def _next_same(lengths):
+    """For each run length in lengths, the index of the next run of the same length, or -1."""
+    following, seen = [-1] * len(lengths), {}
+    for index in range(len(lengths) - 1, -1, -1):
+        following[index] = seen.get(lengths[index], -1)
+        seen[lengths[index]] = index
+    return following
+
+
 def code_spans(text):
     """[(start, end, inner_start, inner_end)] for the inline code spans of text, read as CommonMark reads
     them: a backtick run opens a span that the next run of exactly the same length closes; a run with no
@@ -361,7 +382,7 @@ def code_spans(text):
     its backticks, inner_start and inner_end its content. This is the one code-span reading: every
     exemption recognizer (comments, strikethrough, historical spans, issue references, links) uses it,
     so a delimiter inside a code span never opens or closes anything. Backslash escapes are not read."""
-    runs = [(match.start(), match.end()) for match in BACKTICK_RUN_RE.finditer(text)]
+    runs = _backtick_runs(text)
     by_length = {}
     for index, (start, end) in enumerate(runs):
         by_length.setdefault(end - start, []).append(index)
@@ -404,6 +425,7 @@ PARAGRAPH_CODE_SPANS = True
 def _paragraph_ends(line):
     """True for a line that ends the paragraph read for code spans: a blank line, a line that starts a
     fence, heading, blockquote or list item, or a line that opens an HTML comment block."""
+    SCAN_WORK[0] += 1
     return _blank(line) or _interrupts_paragraph(line) or line.lstrip(MD_SPACE).startswith("<!--")
 
 
@@ -416,20 +438,190 @@ def _single_line_block(text, lines, index, table):
             or text.lstrip().startswith("|") or ("|" in text and (table or _delimiter_row(following))))
 
 
-def _paragraph_comment_start(prefix, lines, index, text):
+def _paragraph_comment_start(scan, first, index, text):
     """_comment_start for text, the prose of line index (the line or the part of it after a `-->`), with
-    code spans read across the paragraph: prefix is the text the paragraph's earlier lines keep (what
-    the record unit joins), and the paragraph's later lines are read raw up to its end (_paragraph_ends).
-    A `<!--` inside a code span that opens on an earlier line or closes on a later one is inert."""
+    code spans read across the paragraph: its earlier lines are the text the lines of block_context's
+    kinds from index first keep (what the record unit joins; none when first is None), and its later
+    lines are read raw up to its end (_paragraph_ends). A `<!--` inside a code span that opens on an
+    earlier line or closes on a later one is inert. scan is the document's _ParagraphScan."""
     if not PARAGRAPH_CODE_SPANS:
         return _comment_start(text)
+    return scan.comment_start(first, index, text)
+
+
+def _rescanning_comment_start(scan, first, index, text):
+    """_paragraph_comment_start as it was read before _ParagraphScan: the whole paragraph rebuilt and
+    read for code spans again at each opener, quadratic in a paragraph's comment lines (a red leg, and
+    the reference the self-test compares the classification with)."""
+    if not PARAGRAPH_CODE_SPANS:
+        return _comment_start(text)
+    lines = scan.lines
+    prefix = [] if first is None else [line for kind, line in scan.kinds[first:index] if kind in (PARA, ITEM)]
     end = index + 1
     while end < len(lines) and not _paragraph_ends(lines[end]):
         end += 1
-    head = "\n".join(list(prefix) + [text])
+    head = "\n".join(prefix + [text])
     window = "\n".join([head] + lines[index + 1:end])
     base = len(head) - len(text)
     return _open_comment(_blank_code_spans(window, code_spans(window))[base:base + len(text)])
+
+
+class _ParagraphScan:
+    """The paragraph-wide readings block_context makes, each built in one pass, so a line that holds an
+    inline comment opener costs work in proportion to that line, not to its paragraph: a paragraph of n
+    such lines is read in O(n), never O(n^2).
+
+    closer(index): the line whose `-->` closes an inline comment opened on line index (the first later
+    line holding one before a blank line or a line that starts a fence, heading, blockquote or list
+    item), or -1.
+
+    comment_start(first, index, text): the code-span reading of one window, prefix + text + later,
+    where prefix is the text the paragraph's earlier lines keep and later is its raw lines after index
+    up to _paragraph_ends, without rebuilding the window. CommonMark matching reads left to right: a
+    run opens a span when a run of its length follows anywhere later, and the first such run closes it.
+    The prefix is read once, line by line as its lines are kept, and only its literal runs (those with
+    no run of their length later in the prefix) are remembered, in reading order; each has a distinct
+    length. A span runs from the prefix into text exactly when one of those literal runs has a run of
+    its length in text or later, and the first such literal in reading order is the one that opens it
+    (everything after it in the prefix is inside its span). A kept line that holds a run of a literal's
+    length turns that literal into a span closed in the line, so the literals after it are dropped. The
+    later lines are summarized once per raw run of lines between paragraph ends, as the last line
+    holding a backtick run of each length."""
+
+    def __init__(self, lines, kinds):
+        self.lines, self.kinds = lines, kinds
+        self._segment = None    # per line: the first line of its raw run, or -1 for a _paragraph_ends line
+        self._last = None       # per raw run (by first line): {backtick run length: the last line with one}
+        self._closer = None     # per line: closer(line)
+        self._first = None      # the kinds index of the paragraph the prefix reading follows
+        self._upto = 0          # the kinds entries read into the prefix so far
+        self._literal = []      # the lengths of the prefix's literal runs, in reading order
+        self._where = {}        # length -> its index in _literal
+        self._alive = 0         # no literal before this index has a run of its length in the later lines
+        self._alive_run = None  # the raw run _alive was found for
+
+    def _prepare(self):
+        if self._segment is not None:
+            return
+        lines, count = self.lines, len(self.lines)
+        self._segment, self._last, start = [-1] * count, {}, -1
+        for index, line in enumerate(lines):
+            if _paragraph_ends(line):
+                start = -1
+                continue
+            if start < 0:
+                start, self._last[index] = index, {}
+            self._segment[index] = start
+            for run_start, run_end in _backtick_runs(line):
+                self._last[start][run_end - run_start] = index
+        self._closer, after = [-1] * count, -1
+        for index in range(count - 1, -1, -1):
+            self._closer[index] = after
+            line = lines[index]
+            if _blank(line) or _interrupts_paragraph(line):
+                after = -1
+            elif "-->" in line:
+                after = index
+
+    def closer(self, index):
+        self._prepare()
+        return self._closer[index]
+
+    def _later_has(self, length, index):
+        """True when the raw lines after index, up to the paragraph's end, hold a run of length."""
+        start = index + 1
+        if start >= len(self.lines) or self._segment[start] < 0:
+            return False
+        return self._last[self._segment[start]].get(length, -1) >= start
+
+    def _follow(self, first, index):
+        """Bring the prefix reading up to the kept text of kinds[first:index]."""
+        if first != self._first:
+            self._first, self._upto, self._literal, self._where = first, first, [], {}
+            self._alive, self._alive_run = 0, None
+        for kind, text in self.kinds[self._upto:index]:
+            if kind in (PARA, ITEM):
+                self._keep(text)
+        self._upto = max(self._upto, index)
+
+    def _keep(self, text):
+        """Read one more kept line into the prefix."""
+        runs = _backtick_runs(text)
+        if not runs:
+            return
+        lengths = [end - start for start, end in runs]
+        at = 0
+        hits = [self._where[length] for length in set(lengths) if length in self._where]
+        if hits:
+            opened = min(hits)
+            length = self._literal[opened]
+            for dropped in self._literal[opened:]:
+                del self._where[dropped]
+            del self._literal[opened:]
+            self._alive = min(self._alive, opened)
+            at = lengths.index(length) + 1
+        following = _next_same(lengths)
+        while at < len(lengths):
+            if following[at] >= 0:
+                at = following[at] + 1
+            else:
+                self._where[lengths[at]] = len(self._literal)
+                self._literal.append(lengths[at])
+                at += 1
+
+    def _first_alive(self, index):
+        """The index of the first literal with a run of its length in the later lines, or None."""
+        start = index + 1
+        if start >= len(self.lines) or self._segment[start] < 0:
+            return None
+        run = self._segment[start]
+        last = self._last[run]
+        if run != self._alive_run:
+            self._alive_run = run
+            if len(self._literal) <= len(last):
+                self._alive = 0
+            else:
+                self._alive = min((self._where[length] for length, line in last.items()
+                                   if line >= start and length in self._where), default=len(self._literal))
+        while self._alive < len(self._literal) and last.get(self._literal[self._alive], -1) < start:
+            self._alive += 1
+        return self._alive if self._alive < len(self._literal) else None
+
+    def comment_start(self, first, index, text):
+        self._prepare()
+        opener = None   # the length of a span the prefix opens that runs into text
+        if first is not None:
+            self._follow(first, index)
+        runs = _backtick_runs(text)
+        lengths = [end - start for start, end in runs]
+        if first is not None and self._literal:
+            best = self._first_alive(index)
+            for length in set(lengths):
+                found = self._where.get(length)
+                if found is not None and (best is None or found < best):
+                    best = found
+            if best is not None:
+                opener = self._literal[best]
+        if opener is None and not runs:
+            return _open_comment(text)
+        spans, at = [], 0
+        if opener is not None:
+            if opener not in lengths:
+                return None   # the span covers all of text
+            at = lengths.index(opener)
+            spans.append((0, runs[at][1], 0, 0))
+            at += 1
+        following = _next_same(lengths)
+        while at < len(runs):
+            if following[at] >= 0:
+                spans.append((runs[at][0], runs[following[at]][1], 0, 0))
+                at = following[at] + 1
+            elif self._later_has(lengths[at], index):
+                spans.append((runs[at][0], len(text), 0, 0))
+                break
+            else:
+                at += 1
+        return _open_comment(_blank_code_spans(text, spans))
 
 
 def _open_comment(masked):
@@ -453,6 +645,7 @@ def _delimiter_row(line):
 def _interrupts_paragraph(line):
     """True for a line that starts a block and so ends a paragraph: an inline HTML comment does not run
     past it."""
+    SCAN_WORK[0] += 1
     body = line.lstrip(MD_SPACE)
     return (FENCE_OPEN_RE.match(body) is not None or HEADING_RE.match(body) is not None
             or QUOTE_RE.match(body) is not None or ITEM_RE.match(body) is not None)
@@ -489,29 +682,25 @@ COMMENT_TAIL_SCANNED = True
 HEADER_CELLS_READ = True
 
 
-def _inline_comment(lines, index, text, prefix=()):
+def _inline_comment(scan, first, index, text):
     """(start, end) when text, the prose of line index, opens an inline comment at index start of text
     whose `-->` is on line end, the first later line holding one before the paragraph ends (a blank line
     or a line that starts a fence, heading, blockquote or list item); None otherwise (with no such line,
-    `<!--` is text). prefix is the text the paragraph's earlier lines keep (_paragraph_comment_start)."""
-    start = _paragraph_comment_start(prefix, lines, index, text)
+    `<!--` is text). first gives the paragraph's earlier lines (_paragraph_comment_start)."""
+    start = _paragraph_comment_start(scan, first, index, text)
     if start is None:
         return None
-    for later in range(index + 1, len(lines)):
-        if _blank(lines[later]) or _interrupts_paragraph(lines[later]):
-            return None
-        if "-->" in lines[later]:
-            return start, later
-    return None
+    later = scan.closer(index)
+    return None if later < 0 else (start, later)
 
 
-def _comment_tail(lines, index, text, prefix=()):
+def _comment_tail(scan, first, index, text):
     """(text, hidden_until) for the paragraph text after the `-->` that closes a comment on line index:
     text cut where a new inline comment it opens starts, and the index of the line that ends that
-    comment (-1 when it opens none), so `--> <!-- second` hides the lines up to the next `-->`. prefix
-    is the text the paragraph's earlier lines keep."""
+    comment (-1 when it opens none), so `--> <!-- second` hides the lines up to the next `-->`. first
+    gives the paragraph's earlier lines (_paragraph_comment_start)."""
     if COMMENT_TAIL_SCANNED:
-        opened = _inline_comment(lines, index, text, prefix)
+        opened = _inline_comment(scan, first, index, text)
         if opened is not None:
             return text[:opened[0]], opened[1]
     return text, -1
@@ -542,10 +731,10 @@ def block_context(lines):
     hidden_until = -1     # the index of the line that ends the open inline comment
     para = quote = table = False
     para_first = 0        # the index of the open paragraph's first line
-
-    def kept(index):
-        """The text the open paragraph's lines before index keep (what its record unit joins)."""
-        return [line for kind, line in kinds[para_first:index] if kind in (PARA, ITEM)] if para else []
+    # The paragraph-wide readings, each made once (_ParagraphScan). The open paragraph's earlier lines,
+    # whose kept text (what its record unit joins) precedes a line read for code spans, are the PARA and
+    # ITEM entries of kinds from para_first; with no open paragraph there are none (first None).
+    scan = _ParagraphScan(lines, kinds)
 
     for index, text in enumerate(lines):
         if index < hidden_until:
@@ -558,11 +747,11 @@ def block_context(lines):
                 kinds.append((INLINE_COMMENT, ""))
                 continue
             if COMMENT_TAIL_IS_PARAGRAPH:
+                first = para_first if para else None
                 if not para:
                     para_first = index
-                prefix = kept(index)
                 para, quote, table = True, False, False
-                text, hidden_until = _comment_tail(lines, index, text, prefix)
+                text, hidden_until = _comment_tail(scan, first, index, text)
                 kinds.append((INLINE_COMMENT, "") if _blank(text) else (PARA, text))
                 continue
         indent = _indent(text)
@@ -586,7 +775,7 @@ def block_context(lines):
                     continue
                 if COMMENT_TAIL_IS_PARAGRAPH:
                     para, quote, table, para_first = True, False, False, index
-                    text, hidden_until = _comment_tail(lines, index, text)
+                    text, hidden_until = _comment_tail(scan, None, index, text)
                     kinds.append((COMMENT, "") if _blank(text) else (PARA, text))
                     continue
                 indent = _indent(text)
@@ -625,14 +814,10 @@ def block_context(lines):
         if not html_block and "<!--" in text and not _single_line_block(text, lines, index, table):
             # A paragraph or list item line: its code spans are read across the paragraph (a list item
             # line starts a new one), so a code span that wraps around `<!--` keeps it inert.
-            start = _paragraph_comment_start([] if ITEM_RE.match(text) else kept(index), lines, index, text)
+            first = None if ITEM_RE.match(text) or not para else para_first
+            start = _paragraph_comment_start(scan, first, index, text)
         if start is not None and not html_block:
-            for later in range(index + 1, len(lines)):
-                if _blank(lines[later]) or _interrupts_paragraph(lines[later]):
-                    break
-                if "-->" in lines[later]:
-                    hidden_until = later
-                    break
+            hidden_until = scan.closer(index)
             if hidden_until > index:
                 text = text[:start]
                 if _blank(text):
@@ -2148,6 +2333,7 @@ def _code_span_rows(m):
         ok = code == 0 and t.calls == [] and not res.hard and (warned if not replacements else not res.warnings)
         check(name, ok, (code, t.calls, res.hard, res.warnings))
     _code_span_binding_rows(m)
+    _linear_scan_rows(m)
 
 
 def _autolink_steps_before_formatting():
@@ -2243,6 +2429,66 @@ def _code_span_binding_rows(m):
         check(name, ok, detail)
         ok, detail = _judged_as(_code_span_leg({}, text, closed, MD_SURFACE), *want)
         check(closed_name, ok, detail)
+
+
+# The repeat counts of each paragraph shape _linear_scan_rows classifies.
+SCAN_LINES = (100, 400)
+# The most SCAN_WORK may grow from the smaller input to the larger (four times the size): linear
+# classification grows about fourfold, the rescanning reading about sixteenfold.
+SCAN_GROWTH_LIMIT = 6
+# Classification inputs read both ways: deterministic mixes of these pieces, plus the self-test's own
+# wrapped-opener rows.
+SCAN_PIECES = ("`", "``", "```", "<!--", "-->", "a ", "\n", "\n", "\n    > ", "\n<!-- x --> a", "x <!-- y",
+               "--> z", "`a", "b`", "``c", " <!-- q --> ", "\n| a |", "\n- ", "\n\n", "PR #17 is pending")
+
+
+def _scan_work(text):
+    """The SCAN_WORK block_context spends classifying text."""
+    SCAN_WORK[0] = 0
+    block_context(text.split("\n"))
+    return SCAN_WORK[0]
+
+
+def _classified(text):
+    try:
+        return block_context(text.split("\n"))
+    except InputError as exc:
+        return str(exc)
+
+
+def _linear_scan_rows(m):
+    """Classifying a paragraph of n inline comment lines is linear in n: SCAN_WORK (characters read for
+    backtick runs and lines stepped over) grows at most SCAN_GROWTH_LIMIT times when the input grows
+    four times, for each shape; with the rescanning reading put back it grows about sixteen times (the
+    red leg). The classification equals the rescanning reading's on a fixed set of inputs, and the
+    input of the quadratic report still gives its one finding."""
+    import random
+    # Each shape is repeated SCAN_LINES times before one claim: comments closed on their own line,
+    # openers never closed, code spans beside the comments, and comments that cut lines (so the kept
+    # text differs from the raw lines).
+    for name, red_name, line in (
+            ("scale/closed-comments-linear", "scale/closed-comments-linear/red-when-reverted",
+             "text <!-- ordinary comment -->\n"),
+            ("scale/unclosed-openers-linear", "scale/unclosed-openers-linear/red-when-reverted",
+             "text <!-- unclosed\n"),
+            ("scale/code-spans-beside-linear", "scale/code-spans-beside-linear/red-when-reverted",
+             "`a` text `` <!-- c --> ``b\n"),
+            ("scale/cut-lines-linear", "scale/cut-lines-linear/red-when-reverted", "a ` b <!-- x\n--> c ``\n")):
+        work = [_scan_work(line * count + "PR #17 is pending\n") for count in SCAN_LINES]
+        check(name, work[1] <= SCAN_GROWTH_LIMIT * work[0], work)
+        work = _with_globals({"_paragraph_comment_start": _rescanning_comment_start},
+                             lambda: [_scan_work(line * count + "PR #17 is pending\n") for count in SCAN_LINES])
+        check(red_name, work[1] > SCAN_GROWTH_LIMIT * work[0], work)
+    pick = random.Random(17)
+    texts = ["`<!--\nPR #17 is pending\n-->`\n", "`a\nb <!-- PR #17 is pending\n-->`\n",
+             "- `<!--\n  PR #17 is pending\n  -->`\n", "a ` b <!-- PR #17 is pending\n--> c\n"]
+    texts += ["".join(pick.choice(SCAN_PIECES) for _ in range(pick.randint(1, 60))) for _ in range(400)]
+    differ = [text for text in texts if _classified(text) != _with_globals(
+        {"_paragraph_comment_start": _rescanning_comment_start}, lambda: _classified(text))]
+    check("scale/classification-matches-rescanning-reading", not differ, differ[:3])
+    code, res, t = _judge("text <!-- ordinary comment -->\n" * 4000 + "PR #17 is pending\n", m)
+    check("scale/report-input-still-finds", code == 1 and t.calls == [(REPO, 17)] and len(res.hard) == 1
+          and not res.warnings, (code, t.calls, res.hard, res.warnings))
 
 
 def _no_unevaluated_references(_label, _lines, _blocks, _units, _exempt=(), _definitions=None):
