@@ -13,7 +13,8 @@ that the result must carry before it is accepted.
       Exit 0 created; 5 something already exists at DIR (a directory, a file or a symlink, even an
       empty one); 2 cannot evaluate (bad arguments, a relative path, a missing or non-directory
       parent, any other operating-system error, a failed write of the id to stdout included, such as
-      a broken pipe, after which DIR exists but no id was delivered, so DIR is never used).
+      a broken pipe or a closed descriptor 1, after which DIR exists but no id was delivered, so DIR
+      is never used).
   orch_dispatch_marker.py write --marker PATH --id HEX --status N
       Write the line `aiqt-dispatch-marker v1 <id> <status>` to a temporary file in PATH's directory,
       fsync it, then rename it onto PATH, so PATH keeps its previous complete content until the
@@ -38,7 +39,8 @@ that the result must carry before it is accepted.
       cannot evaluate, at once (bad arguments, an oversized or unconvertible number included, a
       relative path, a missing result directory, a symlink, FIFO, directory or other non-regular
       marker, a stat, open, read or permission error, an oversized marker, any other operating-system
-      error, a failed write of a matched status to stdout included, such as a broken pipe). Marker
+      error, a failed write of a matched status to stdout included, such as a broken pipe or a
+      closed descriptor 1). Marker
       content that was read successfully and is at most MAX_MARKER_BYTES bytes is never alone a
       cause of exit 2, whatever it holds; a file system error still exits 2 at once, whatever the
       marker's size. The marker is opened without following a symlink and without blocking on a
@@ -55,7 +57,8 @@ leaves payload files from an earlier dispatch beside the marker. Timestamps play
 an earlier result first is not a binding.
 
 Launch it as `python3 -I -B tools/orch_dispatch_marker.py`. It uses the standard library only and
-starts no process. An interpreter older than Python 3.14 that can start this file is refused at exit 2
+starts no process, except that the self-test runs copies of this file under the same interpreter to
+observe real process exits. An interpreter older than Python 3.14 that can start this file is refused at exit 2
 before anything runs. One that cannot start it fails with Python's own error first, and that exit is
 Python's: 1 for a compile failure, or 2 for an interpreter predating -I when run with it.
 
@@ -1160,6 +1163,61 @@ def _self_test():
         check("output/wait-control-0", code == EXIT_OK and lines == [] and stdout.getvalue() == "9\n",
               (code, lines, stdout.getvalue()))
 
+        # --- output, as real processes: descriptor 1 closed before Python starts (sys.stdout is None) or
+        # after it starts (the null device's open reuses descriptor 1) is still exit 2, measured as the
+        # process's own exit status, so the interpreter's shutdown flush is included. Each control runs
+        # the same launcher with descriptor 1 left open. ---
+        import subprocess
+        script = os.path.abspath(__file__)
+        launchers = {
+            "at-start": ("import os, sys\n"
+                         "if sys.argv[1] == 'close':\n"
+                         "    os.close(1)\n"
+                         "os.execv(sys.executable, [sys.executable, '-I', '-B'] + sys.argv[2:])\n"),
+            "after-start": ("import os, runpy, sys\n"
+                            "if sys.argv[1] == 'close':\n"
+                            "    os.close(1)\n"
+                            "sys.argv = sys.argv[2:]\n"
+                            "runpy.run_path(sys.argv[0], run_name='__main__')\n"),
+        }
+
+        def run_process(when, close, argv):
+            try:
+                proc = subprocess.run([sys.executable, "-I", "-B", "-c", launchers[when],
+                                       "close" if close else "keep", script] + argv,
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, cwd=base, timeout=120)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return "raised", "", "{}: {}".format(type(exc).__name__, exc)
+            return (proc.returncode, proc.stdout.decode("ascii", "replace"),
+                    proc.stderr.decode("utf-8", "replace"))
+
+        def refused_cleanly(code, out, err):
+            return code == EXIT_CANNOT_EVALUATE and out == "" and "Traceback" not in err \
+                and "could not be written to stdout" in err
+
+        for when, claim_closed, wait_closed, claim_open, wait_open in (
+                ("at-start", "output/process-claim-stdout-closed-at-start-2",
+                 "output/process-wait-stdout-closed-at-start-2",
+                 "output/process-claim-stdout-open-at-start-control-0",
+                 "output/process-wait-stdout-open-at-start-control-0"),
+                ("after-start", "output/process-claim-stdout-closed-after-start-2",
+                 "output/process-wait-stdout-closed-after-start-2",
+                 "output/process-claim-stdout-open-after-start-control-0",
+                 "output/process-wait-stdout-open-after-start-control-0")):
+            claim_path = os.path.join(base, "output-claim-closed-" + when)
+            code, out, err = run_process(when, True, ["claim", claim_path])
+            check(claim_closed, refused_cleanly(code, out, err) and os.path.isdir(claim_path),
+                  (code, out, err[-400:]))
+            code, out, err = run_process(when, True, wait_argv)
+            check(wait_closed, refused_cleanly(code, out, err), (code, out, err[-400:]))
+            claim_path = os.path.join(base, "output-claim-open-" + when)
+            code, out, err = run_process(when, False, ["claim", claim_path])
+            check(claim_open, code == EXIT_OK and err == "" and out.endswith("\n") and is_dispatch_id(out[:-1])
+                  and os.path.isdir(claim_path), (code, out, err[-400:]))
+            code, out, err = run_process(when, False, wait_argv)
+            check(wait_open, code == EXIT_OK and err == "" and out == "9\n", (code, out, err[-400:]))
+
         # --- revert: with the id comparison removed, the incident case would pass as a match ---
         d, m = fresh()
         _publish(m,old_id, 0)
@@ -1189,7 +1247,8 @@ def _self_test():
           "is pending; a claim never adopts an existing entry, one of two racing claims wins, and claims "
           "issue distinct ids, one claim's marker refused under another's; a write keeps the previous "
           "marker until the rename, fails cleanly on an fsync or rename error, leaves a temporary name it "
-          "did not create alone and refuses a bad status; a failed stdout write is exit 2; with the id "
+          "did not create alone and refuses a bad status; a failed stdout write is exit 2, as is a "
+          "descriptor 1 closed before or after Python starts, measured as the process's exit; with the id "
           "comparison removed the incident case would pass)".format(
               len(EXECUTED)))
     return 0
@@ -1216,7 +1275,9 @@ def main(argv, stdout=None, stderr=None):
 
 def _discard_unwritten(stream):
     """Point a stream whose write failed at the null device, so the interpreter's final flush of the
-    data still buffered cannot fail again and replace this exit code with Python's own 120."""
+    data still buffered cannot fail again and replace this exit code with Python's own 120. When the
+    stream's descriptor was closed, the open reuses that very number; it is then the stream's new
+    target and is kept open, since closing it would leave the final flush to fail after all."""
     try:
         fd = stream.fileno()
     except (AttributeError, OSError, ValueError):
@@ -1226,18 +1287,25 @@ def _discard_unwritten(stream):
     except OSError:
         return
     try:
-        os.dup2(null, fd)
+        if null != fd:
+            os.dup2(null, fd)
     except OSError:
         pass
     finally:
-        os.close(null)
+        if null != fd:
+            os.close(null)
 
 
 def _deliver(code, out, err, stdout, stderr):
     """The exit code after writing out to stdout and err to stderr. A stdout write or flush that fails
     (a broken pipe or any other operating-system error) is exit 2: the id or status never reached the
-    caller, so the command cannot be relied on, whatever its own exit would have been."""
-    if out:
+    caller, so the command cannot be relied on, whatever its own exit would have been. So is a stdout
+    that is unavailable (None, as Python leaves sys.stdout when descriptor 1 is closed at start)."""
+    if out and stdout is None:
+        code = EXIT_CANNOT_EVALUATE
+        err = list(err) + ["cannot evaluate: the result could not be written to stdout (stdout is "
+                           "unavailable, as when descriptor 1 is closed before Python starts)"]
+    elif out:
         try:
             stdout.write(out)
             stdout.flush()

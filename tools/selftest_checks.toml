@@ -7124,6 +7124,15 @@ expected-check-ids = [
   "output/wait-other-os-error-2",
   "output/claim-control-0",
   "output/wait-control-0",
+  # output, as real processes: descriptor 1 closed before or after Python starts is exit 2
+  "output/process-claim-stdout-closed-at-start-2",
+  "output/process-wait-stdout-closed-at-start-2",
+  "output/process-claim-stdout-open-at-start-control-0",
+  "output/process-wait-stdout-open-at-start-control-0",
+  "output/process-claim-stdout-closed-after-start-2",
+  "output/process-wait-stdout-closed-after-start-2",
+  "output/process-claim-stdout-open-after-start-control-0",
+  "output/process-wait-stdout-open-after-start-control-0",
   # revert: the incident case turns red when the id comparison is removed
   "revert/id-check-removed",
 ]
