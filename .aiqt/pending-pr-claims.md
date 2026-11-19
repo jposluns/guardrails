@@ -28,7 +28,7 @@ cannot-evaluate (exit 2), never a pass.
 | `TODO.md` | `markdown`, with `Status` as the status column | generated view of the maintainer's private backlog; a correction belongs in that source |
 
 A declared surface that is missing, not a regular file, larger than 4 MiB, not UTF-8 or malformed (TOML
-that does not parse, a fenced block never closed) is cannot-evaluate. Each file (a declared surface or
+that does not parse, a fenced block or HTML comment block never closed) is cannot-evaluate. Each file (a declared surface or
 a draft) is opened once without following a symlink and without waiting on a FIFO, and its type is
 checked on that open descriptor. In `--staged`, a declared surface whose index entry is not a regular
 file (mode `100644` or `100755`; a symlink `120000` or a gitlink is refused), is unmerged or is absent
@@ -50,7 +50,8 @@ accepted as a prose-only alias), `owner/repo#17` or a GitHub pull request URL (`
 optionally ending in `/files`, `/commits` or `/checks`, and optionally in `/`). These link forms to a
 pull request URL count as that URL (`[#17](https://github.com/OWNER/REPO/pull/17)` binds
 OWNER/REPO#17): an inline Markdown link, a reference link (`[#17][pr17]`, `[#17][]` or `[#17]`) whose
-definition (`[pr17]: URL`) is in the same Markdown document, an autolink (`<URL>`), and an HTML anchor
+definition (`[pr17]: URL`) is a prose line of the same Markdown document (a definition inside a fenced
+block, indented code or an HTML comment is never collected, so it cannot shadow the real one), an autolink (`<URL>`), and an HTML anchor
 (`<a href="URL">#17</a>`) inside one unit. A link to any other URL counts as its text, and brackets
 that form no link are dropped (`[#17] is pending` with no definition binds `#17`). A link reference
 definition is not read as record text. A bare number (`PR 17`) is not a reference. Coordinated lists
@@ -65,9 +66,10 @@ Units are complete: a Markdown paragraph or list item is joined across wrapped l
 is decoded before it is read. Inside a unit, a claim binds within one clause; a clause ends at `.`
 followed by a space, `;`, `:`, `!`, `?` or a spaced dash.
 
-Below, "is" stands for `is`, `are`, `remains`, `stays`, `has been`, `have been` or `still`, optionally
-followed by up to two of `still`, `currently`, `now`, `also` and `both` (`#N is currently pending`, `#N
-has been open`, `#A and #B are both still open`).
+Below, "is" stands for `is`, `are`, `remains`, `stays`, `has been`, `have been`, `still` or
+`currently`, each optionally followed by up to two of `still`, `currently`, `now`, `also` and `both`
+(`#N is currently pending`, `#N has been open`, `#A and #B are both still open`, `#N still currently
+open`).
 
 | Phrase | Result when the bound pull request is merged or closed |
 | --- | --- |
@@ -110,10 +112,22 @@ A Markdown table is read from its header and delimiter rows, with or without out
 cell wrapped in emphasis or a code span (`**Status**`) names that column, and a leading byte order mark
 is dropped.
 
-Not read as current claims: fenced code blocks, including a fence indented inside a list item (a line
-such as ```` ```x``` ```` is inline code, not a fence); indented code blocks (four columns of indent
-past the left margin outside a list, or past a list item's content column inside one); HTML comments
-within one unit (`<!-- ... -->`); struck-through text (`~~PR #17 is pending~~`, or GFM
+Markdown block context is decided once, line by line, before any line's text is read; every reader
+(record units, link definitions, Status cells and the references they resolve) reads only the lines
+it marks as prose. A fence opens or closes only at most three columns past its container's content
+column (the left margin, or the innermost list item's content column, taken as the column the item's
+text starts at); a backtick or tilde line four or more columns past it is indented code outside a
+paragraph and paragraph text inside one. A line indented less than a list item's content column (a
+lazy paragraph continuation aside) ends that item, and any fenced block or HTML comment block opened
+inside it.
+
+Not read as current claims: fenced code blocks, in a list item as outside one (a line such as
+```` ```x``` ```` is inline code, not a fence); indented code blocks (four columns of indent past the
+container's content column, outside a paragraph); HTML comments: one within a line (`<!-- ... -->`),
+an HTML comment block opened by a line starting `<!--` and running to the line holding `-->` (across
+blank lines; text after `-->` on that line is read), and an inline comment opened later in a line that
+ends on a later line of the same paragraph (an unclosed comment block is cannot-evaluate; an inline
+`<!--` with no `-->` before the paragraph ends is text); struck-through text (`~~PR #17 is pending~~`, or GFM
 `~PR #17 is pending~` with flanking tildes, so `~5 min ... ~10 min` is not struck); a blockquote
 introduced by `Earlier note:` or `Previously recorded:` (in the paragraph before it or its own first
 words); a quoted span (curly or straight quotes, or backticks) directly after a historical lead-in such
@@ -199,7 +213,17 @@ claim was found.
   an issue, the pulls API answers 404 and the run is cannot-evaluate.
 - An imperative `Open #N` at the start of a clause warns rather than finds, so `Open PR #17 needs
   review` written as a claim is a warning only.
-- An HTML comment that spans a blank line is not removed, so its text is read as record text.
+- The block model is a subset of CommonMark. A line indented four or more columns past its container
+  outside a paragraph is indented code and is not read, including after a list item it is not inside
+  (one whose content column it does not reach): text laid out that way is not read, as CommonMark
+  renders it as code. A line with deeper indentation after a list item's marker (`1.      text`) keeps
+  the column its text starts at, not CommonMark's marker column plus one, so text wrapped under it is
+  read. Blockquote containers are not modelled: a fence marker after `>` is quote text. An
+  inline comment ends at the first later line holding `-->` before a blank line or a line that starts
+  a fence, heading, blockquote or list item, so a `-->` inside a code span there ends it early. A
+  table header is recognised from the raw text of the line after it, even when that line is itself
+  indented code. A paragraph that an inline comment interrupts across lines is joined around it; a
+  comment block between two lines ends the paragraph.
 - A named backlog item is not resolved to a pull request: only explicit references bind.
 - State can change after it is read (a closed pull request can be reopened); the API read and the file
   write are not one transaction.

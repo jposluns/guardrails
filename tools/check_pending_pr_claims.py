@@ -214,9 +214,14 @@ def toml_units(text, label):
     return units
 
 
-FENCE_RE = re.compile(r" {0,3}(`{3,}|~{3,})")
-# Inside a list item a fence may be indented to the item's content column (CommonMark).
-LIST_FENCE_RE = re.compile(r"[ \t]*(`{3,}|~{3,})")
+# A fence run, matched after a line's indentation; whether it opens a fence is block_context's call.
+FENCE_OPEN_RE = re.compile(r"(`{3,}|~{3,})")
+# The deepest indentation, in columns past the containing block's content column (the left margin, or a
+# list item's content column), at which a fence opens or closes (CommonMark); a deeper line is
+# indented code, or paragraph text when a paragraph is open.
+FENCE_MAX_RELATIVE_INDENT = 3
+# An inline code span (CommonMark: a backtick run closed by a run of the same length).
+CODE_SPAN_RE = re.compile(r"(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)")
 # A link reference definition ([label]: URL "title"); it is not record prose.
 LINK_DEFINITION_RE = re.compile(
     r" {0,3}\[([^\]]{1,999})\]:\s*<?([^\s<>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\s*$")
@@ -258,30 +263,207 @@ def _resolve_reference_links(prose, definitions):
     return REFERENCE_LINK_RE.sub(replace, prose) if definitions else prose
 
 
+# The kinds block_context gives a Markdown line. The first five are never read: a blank line, a line
+# of a fenced block, an indented code line, a line of an HTML comment block, and a line wholly inside
+# an inline HTML comment (which, unlike the others, does not end the paragraph around it). The rest
+# are the prose kinds, the only lines any reader (record units, link definitions, Status cells and so
+# the references they resolve) consumes.
+BLANK, FENCE, CODE, COMMENT, INLINE_COMMENT = "blank", "fence", "code", "comment", "inline-comment"
+DEFINITION, QUOTE_LINE, TABLE_HEADER, TABLE_DELIMITER, TABLE_ROW, HEADING, ITEM, PARA = (
+    "definition", "quote", "table-header", "table-delimiter", "table-row", "heading", "item", "para")
+PROSE_KINDS = (DEFINITION, QUOTE_LINE, TABLE_HEADER, TABLE_DELIMITER, TABLE_ROW, HEADING, ITEM, PARA)
+
+
+def _indent(text):
+    """The columns of leading whitespace (a tab advances to the next multiple of four)."""
+    expanded = text.expandtabs(4)
+    return len(expanded) - len(expanded.lstrip(" "))
+
+
+def _content_column(text, match):
+    """A list item line's content column: the column its text starts at (after the marker, the spaces and
+    any task box). CommonMark puts it at the marker's end plus one when five or more spaces follow the
+    marker, which would make text wrapped under the item's first word indented code; the later column
+    is kept because it reads more (a deeper code threshold, and a fence left of it is outside the item)."""
+    return len(text[:match.start(1)].expandtabs(4))
+
+
+def _comment_start(text):
+    """The index in text of the first `<!--` outside a code span whose `-->` is not on the same line, or
+    None (a comment that ends on its own line is left to the html-comment normalization)."""
+    masked = CODE_SPAN_RE.sub(lambda match: " " * len(match.group(0)), text)
+    position = 0
+    while True:
+        start = masked.find("<!--", position)
+        if start < 0:
+            return None
+        end = masked.find("-->", start + 4)
+        if end < 0:
+            return start
+        position = end + 3
+
+
+def _delimiter_row(line):
+    return "|" in line and all(SEPARATOR_CELL_RE.fullmatch(cell) for cell in _cells(line))
+
+
+def _interrupts_paragraph(line):
+    """True for a line that starts a block and so ends a paragraph: an inline HTML comment does not run
+    past it."""
+    body = line.lstrip()
+    return (FENCE_OPEN_RE.match(body) is not None or HEADING_RE.match(body) is not None
+            or QUOTE_RE.match(body) is not None or ITEM_RE.match(body) is not None)
+
+
+def block_context(lines):
+    """[(kind, text)], one per line of a Markdown document: the one place its block context is decided,
+    before any line's text is read. A fence opens or closes only at most FENCE_MAX_RELATIVE_INDENT
+    columns past its container's content column (the left margin, or the innermost list item's content
+    column); four or more columns past it, outside a paragraph, is indented code. A line indented less
+    than a list item's content column ends that item (a paragraph line aside: it may be a lazy
+    continuation), and with it any fenced block or HTML comment block opened inside it. An HTML comment
+    block starts at a line opening `<!--` (after at most three columns past the container) and runs to
+    the line holding `-->`, across blank lines; an inline comment that `<!--` opens later in a line runs
+    to the first later line holding `-->` before the paragraph ends (with none, `<!--` is text). text is
+    the line for a prose kind, cut at an inline comment's start or after a comment's end; "" otherwise.
+    InputError for a fenced block or HTML comment block that is never closed."""
+    kinds = []
+    items = []            # the content columns of the open list items, innermost last
+    block = None          # (FENCE, fence run, container column) or (COMMENT, None, container column)
+    hidden_until = -1     # the index of the line that ends the open inline comment
+    para = quote = table = False
+    for index, text in enumerate(lines):
+        if index < hidden_until:
+            kinds.append((INLINE_COMMENT, ""))
+            continue
+        if index == hidden_until:
+            hidden_until = -1
+            text = text[text.find("-->") + 3:]
+            if not text.strip():
+                kinds.append((INLINE_COMMENT, ""))
+                continue
+        indent = _indent(text)
+        if block is not None:
+            name, run, column = block
+            if not text.strip() or indent >= column:
+                if name == FENCE:
+                    body = text.strip()
+                    if (indent - column <= FENCE_MAX_RELATIVE_INDENT and body.startswith(run)
+                            and set(body) == {run[0]}):
+                        block = None
+                    kinds.append((FENCE, ""))
+                    continue
+                end = text.find("-->")
+                if end < 0:
+                    kinds.append((COMMENT, ""))
+                    continue
+                block, text = None, text[end + 3:]
+                if not text.strip():
+                    kinds.append((COMMENT, ""))
+                    continue
+                indent = _indent(text)
+            else:
+                block = None  # the list item holding the block has ended, and the block with it
+        if not text.strip():
+            para = quote = table = False
+            kinds.append((BLANK, ""))
+            continue
+        lead = len(text) - len(text.lstrip())
+        nested = [column for column in items if column <= indent]
+        column = nested[-1] if nested else 0
+        if not para:
+            items = nested
+        opener = FENCE_OPEN_RE.match(text, lead)
+        if opener and indent - column <= FENCE_MAX_RELATIVE_INDENT and not (
+                opener.group(1)[0] == "`" and "`" in text[opener.end():]):
+            # (A backtick fence's info string cannot hold a backtick: ```x``` is inline code.)
+            items, block = nested, (FENCE, opener.group(1), column)
+            para = quote = table = False
+            kinds.append((FENCE, ""))
+            continue
+        if not para and not quote and indent - column >= 4:
+            kinds.append((CODE, ""))
+            continue
+        start = _comment_start(text)
+        html_block = text.startswith("<!--", lead) and indent - column <= 3
+        if html_block and start == lead:
+            items, block = nested, (COMMENT, None, column)
+            para = quote = table = False
+            kinds.append((COMMENT, ""))
+            continue
+        if start is not None and not html_block:
+            for later in range(index + 1, len(lines)):
+                if not lines[later].strip() or _interrupts_paragraph(lines[later]):
+                    break
+                if "-->" in lines[later]:
+                    hidden_until = later
+                    break
+            if hidden_until > index:
+                text = text[:start]
+                if not text.strip():
+                    kinds.append((INLINE_COMMENT, ""))
+                    continue
+        following = lines[index + 1] if index + 1 < len(lines) and hidden_until <= index else ""
+        if not para and LINK_DEFINITION_RE.match(text):
+            items, quote, table = nested, False, False
+            kinds.append((DEFINITION, text))
+            continue
+        if QUOTE_RE.match(text):
+            items, para, quote = nested, False, True
+            kinds.append((QUOTE_LINE, text))
+            continue
+        quote = False
+        # A table row: a line with a leading pipe, a row of the current table, or a header whose next
+        # line is a delimiter row; the outer pipes are optional (GFM).
+        if text.lstrip().startswith("|") or ("|" in text and (table or _delimiter_row(following))):
+            items, para = nested, False
+            if _delimiter_row(text):
+                kinds.append((TABLE_DELIMITER, text))
+            elif not table and _delimiter_row(following):
+                table = True
+                kinds.append((TABLE_HEADER, text))
+            else:
+                kinds.append((TABLE_ROW, text))
+            continue
+        table = False
+        if HEADING_RE.match(text):
+            items, para = nested, False
+            kinds.append((HEADING, text))
+            continue
+        match = ITEM_RE.match(text)
+        if match:
+            items, para = nested + [_content_column(text, match)], True
+            kinds.append((ITEM, text))
+            continue
+        para = True
+        kinds.append((PARA, text))
+    if block is not None:
+        raise InputError("a fenced block opened is never closed" if block[0] == FENCE
+                         else "an HTML comment opened is never closed")
+    return kinds
+
+
 def markdown_units(text, label, status_column=None):
-    """[(location, prose, context)] for a Markdown document. Fenced blocks (also inside a list item)
-    and indented code blocks are skipped; a blockquote whose lead-in (the paragraph just before it,
-    or its own first words) is `Earlier note:` or `Previously recorded:` is historical and skipped;
-    any other blockquote is context "quote"; a cell of the declared status column is context
-    "status"; everything else is "prose". Wrapped lines of one paragraph or list item are joined into
-    one unit. A link reference definition is not a unit; a reference link to it reads as an inline
-    link. A leading byte order mark is dropped."""
+    """[(location, prose, context)] for a Markdown document, read only from the lines block_context
+    gives a prose kind (fenced blocks, indented code and HTML comments are never read, in a list item
+    as outside one); a blockquote whose lead-in (the paragraph just before it, or its own first words)
+    is `Earlier note:` or `Previously recorded:` is historical and skipped; any other blockquote is
+    context "quote"; a cell of the declared status column is context "status"; everything else is
+    "prose". Wrapped lines of one paragraph or list item are joined into one unit. A link reference
+    definition (a definition line, so never one inside code or a comment) is not a unit; a reference
+    link to it reads as an inline link. A leading byte order mark is dropped."""
     units = []
     if text.startswith("\ufeff"):
         text = text[1:]
-    lines = text.split("\n")
+    try:
+        blocks = block_context(text.split("\n"))
+    except InputError as exc:
+        raise InputError("{}: {}".format(label, exc))
     definitions = {}
-    for line in lines:
-        match = LINK_DEFINITION_RE.match(line)
-        if match:
-            definitions.setdefault(" ".join(match.group(1).split()).casefold(), match.group(2))
-    fence = None
     para, para_line = [], 0
     quote, quote_line = [], 0
     last_prose = ""
     header = None
-    in_list = False
-    item_column = 0
 
     def flush_para():
         nonlocal para, last_prose
@@ -302,57 +484,43 @@ def markdown_units(text, label, status_column=None):
             last_prose = ""
         quote = []
 
-    for number, line in enumerate(lines, 1):
-        if fence is not None:
-            stripped = line.strip()
-            if stripped.startswith(fence) and set(stripped) == {fence[0]}:
-                fence = None
+    for number, (kind, line) in enumerate(blocks, 1):
+        if kind == INLINE_COMMENT:
             continue
-        match = FENCE_RE.match(line) or (LIST_FENCE_RE.match(line) if in_list else None)
-        # A backtick fence's info string cannot hold a backtick (CommonMark): ```x``` is inline code.
-        if match and not (match.group(1)[0] == "`" and "`" in line[match.end():]):
-            flush_para()
-            flush_quote()
-            fence = match.group(1)
-            header = None
-            last_prose = ""
-            continue
-        if not line.strip():
+        if kind == BLANK:
             flush_para()
             flush_quote()
             header = None
             continue
-        # An indented code block: four columns of indent outside a paragraph, measured from the left
-        # margin outside a list and from the item's content column inside one.
-        indent = len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip(" "))
-        if not para and not quote and indent >= (item_column + 4 if in_list else 4):
+        if kind == CODE:
             last_prose = ""
             continue
-        if not para and LINK_DEFINITION_RE.match(line):
+        if kind not in PROSE_KINDS:  # a fence or HTML comment block line
+            flush_para()
             flush_quote()
             header = None
+            last_prose = ""
             continue
-        match = QUOTE_RE.match(line)
-        if match:
+        if kind == DEFINITION:
+            flush_quote()
+            header = None
+            match = LINK_DEFINITION_RE.match(line)
+            definitions.setdefault(" ".join(match.group(1).split()).casefold(), match.group(2))
+            continue
+        if kind == QUOTE_LINE:
             flush_para()
             if not quote:
                 quote_line = number
-            quote.append(match.group(1).strip())
+            quote.append(QUOTE_RE.match(line).group(1).strip())
             continue
         flush_quote()
-        following = lines[number] if number < len(lines) else ""
-        # A table row: a line with a leading pipe, a row of the current table, or a header whose next
-        # line is a delimiter row; the outer pipes are optional (GFM).
-        if line.lstrip().startswith("|") or ("|" in line and (header is not None or (
-                "|" in following and all(SEPARATOR_CELL_RE.fullmatch(cell) for cell in _cells(following))))):
+        if kind in (TABLE_HEADER, TABLE_DELIMITER, TABLE_ROW):
             flush_para()
             last_prose = ""
-            in_list = False
             cells = _cells(line)
-            if all(SEPARATOR_CELL_RE.fullmatch(cell) for cell in cells):
+            if kind == TABLE_DELIMITER:
                 continue
-            if header is None and "|" in following and all(
-                    SEPARATOR_CELL_RE.fullmatch(cell) for cell in _cells(following)):
+            if kind == TABLE_HEADER:
                 header = [_header_name(cell) for cell in cells]
                 continue
             for column, cell in enumerate(cells):
@@ -362,27 +530,19 @@ def markdown_units(text, label, status_column=None):
                     column + 1)), cell, context))
             continue
         header = None
-        match = HEADING_RE.match(line)
-        if match:
+        if kind == HEADING:
             flush_para()
-            in_list = False
-            units.append(("{}:{}".format(label, number), (match.group(1) or "").strip(), "prose"))
+            units.append(("{}:{}".format(label, number), (HEADING_RE.match(line).group(1) or "").strip(),
+                          "prose"))
             last_prose = units[-1][1]
             continue
-        match = ITEM_RE.match(line)
-        if match:
+        if kind == ITEM:
             flush_para()
-            in_list = True
-            item_column = match.start(1)
-            para, para_line = [match.group(1).strip()], number
+            para, para_line = [ITEM_RE.match(line).group(1).strip()], number
             continue
-        if not line.startswith(" ") and not line.startswith("\t") and not para:
-            in_list = False
         if not para:
             para_line = number
         para.append(line.strip())
-    if fence is not None:
-        raise InputError("{}: a fenced block opened is never closed".format(label))
     flush_para()
     flush_quote()
     return [(where, _resolve_reference_links(prose, definitions), context)
@@ -416,8 +576,9 @@ REF_RE = re.compile(
 REF_MARK = "\ue000[0-9]+\ue001"
 REF_MARK_RE = re.compile("\ue000([0-9]+)\ue001")
 LIST = r"(?P<l>{0}(?:\s*,\s*(?:and\s+|or\s+)?{0}|\s+(?:and|or|&)\s+{0})*)".format(REF_MARK)
-VERB = (r"(?:(?:is|are|remains?|stays?|(?:has|have)\s+been)(?:\s+(?:still|currently|now|also|both)){0,2}"
-        r"|still|currently)")
+# A verb, or `still` or `currently` standing for one, then up to two modifiers (#17 still currently open).
+VERB = (r"(?:(?:is|are|remains?|stays?|(?:has|have)\s+been|still|currently)"
+        r"(?:\s+(?:still|currently|now|also|both)){0,2})")
 # A historical lead-in followed by a quoted span: only that span is exempt. A straight single-quoted
 # span ends at a quote that no letter follows, so an apostrophe inside it (isn't) does not end it.
 STRAIGHT_SPAN = r"'(?:[^']|'(?=\w))*'(?!\w)"
@@ -1122,6 +1283,54 @@ def _rule_rows(m, o):
           sorted(set(kinds) ^ {row[0] for row in seen}))
 
 
+# A definition inside a fenced block or an HTML comment, met first, must not shadow the live one after
+# the claim; backtick lines six columns deep in a list item (four past its content column) are indented
+# code, not a fence, so the list prose between them is read.
+FENCED_DEFINITION = ("```md\n[pr17]: https://github.com/acme/widgets/issues/17\n```\n\n[#17][pr17] is pending.\n\n"
+                     "[pr17]: https://github.com/acme/widgets/pull/17\n")
+COMMENT_DEFINITION = ("<!--\n\n[pr17]: https://github.com/acme/widgets/issues/17\n\n-->\n\n[#17][pr17] is pending.\n\n"
+                      "[pr17]: https://github.com/acme/widgets/pull/17\n")
+OVERINDENTED_BACKTICKS = "- Item\n\n      ```\n\n  PR #17 is pending.\n\n      ```\n"
+# The verb alternation before the modifier suffix applied to `still` and `currently` (a red leg).
+VERB_BEFORE_STILL_MODIFIERS = (r"(?:(?:is|are|remains?|stays?|(?:has|have)\s+been)"
+                               r"(?:\s+(?:still|currently|now|also|both)){0,2}|still|currently)")
+
+
+def _no_block_context(lines):
+    """block_context as it was before it existed for definitions: every non-blank line is read, and one
+    shaped like a definition is collected wherever it stands (a red-when-reverted leg)."""
+    return [(BLANK, "") if not line.strip() else (DEFINITION if LINK_DEFINITION_RE.match(line) else PARA, line)
+            for line in lines]
+
+
+def _block_context_rows(m):
+    """The red-when-reverted legs of the block context rows and the verb modifier row, and an HTML
+    comment that is never closed (cannot-evaluate)."""
+    for name, replacements, text in (
+            ("markdown/fenced-definition-not-collected/red-when-reverted", {"block_context": _no_block_context},
+             FENCED_DEFINITION),
+            ("markdown/comment-definition-not-collected/red-when-reverted",
+             {"_comment_start": lambda _text: None}, COMMENT_DEFINITION),
+            ("markdown/overindented-backticks-in-list-not-a-fence/red-when-reverted",
+             {"FENCE_MAX_RELATIVE_INDENT": 99}, OVERINDENTED_BACKTICKS),
+            ("verb/still-currently-open/red-when-reverted",
+             {"PATTERNS": tuple((rule, kind, phrase, re.compile(regex.pattern.replace(
+                 VERB, VERB_BEFORE_STILL_MODIFIERS), regex.flags), contexts)
+                 for rule, kind, phrase, regex, contexts in PATTERNS)}, "#17 still currently open.\n")):
+        try:
+            code, res, t = _with_globals(replacements, lambda: _judge(text, m))
+            ok, detail = code == 0 and t.calls == [] and not res.hard, (code, t.calls, res.hard)
+        except InputError as exc:
+            ok, detail = False, str(exc)
+        check(name, ok, detail)
+    try:
+        _judge("Intro.\n\n<!-- PR #17 is pending\n\nnever closed\n", m)
+        got = None
+    except InputError as exc:
+        got = str(exc)
+    check("markdown/unclosed-comment-cannot-evaluate", got is not None and "never closed" in got, got)
+
+
 def _fix_rows(m, o):
     """Reference spellings, Markdown structure, negation and binding fixes, each with a twin on the
     other side and, where a step or function carries the fix, its red-when-reverted leg."""
@@ -1222,6 +1431,23 @@ def _fix_rows(m, o):
             ("ref/markdown-link-non-ascii-fragment-is-text",
              "[#17](https://github.com/peer/repo/pull/17#" + chr(0x661) + ") is pending.\n",
              {(REPO, 17): "open", ("peer/repo", 17): "merged"}, 0, [(REPO, 17)]),
+            ("markdown/fenced-definition-not-collected", FENCED_DEFINITION, m, 1, [(REPO, 17)]),
+            ("markdown/fenced-definition-not-collected-closed", FENCED_DEFINITION, {(REPO, 17): "closed"}, 1,
+             [(REPO, 17)]),
+            ("markdown/comment-definition-not-collected", COMMENT_DEFINITION, m, 1, [(REPO, 17)]),
+            ("markdown/overindented-backticks-in-list-not-a-fence", OVERINDENTED_BACKTICKS, m, 1, [(REPO, 17)]),
+            ("markdown/overindented-backticks-in-list-not-a-fence-closed", OVERINDENTED_BACKTICKS,
+             {(REPO, 17): "closed"}, 1, [(REPO, 17)]),
+            ("markdown/fence-three-past-item-column-skipped", "- Item\n\n     ```\n     PR #17 is pending\n     ```\n",
+             m, 0, []),
+            ("markdown/comment-spanning-blank-line-not-read", "<!--\nPR #17 is pending.\n\nPR #17 is open.\n-->\n", m,
+             0, []),
+            ("markdown/inline-comment-across-lines-read", "PR #17 <!-- a note\nthat wraps --> is pending.\n", m, 1,
+             [(REPO, 17)]),
+            ("markdown/unclosed-inline-comment-is-text", "PR #17 is pending <!-- no end\n\nNext.\n", m, 1,
+             [(REPO, 17)]),
+            ("verb/still-currently-open", "#17 still currently open.\n", m, 1, [(REPO, 17)]),
+            ("verb/still-currently-merged-no-claim", "#17 still currently merged.\n", m, 0, []),
             ("format/currently-pending", "PR #17 is currently pending.\n", m, 1, [(REPO, 17)]),
             ("format/now-open", "PR #17 is now open.\n", m, 1, [(REPO, 17)]),
             ("format/currently-merged-no-claim", "PR #17 is currently merged.\n", m, 0, [])):
@@ -1292,6 +1518,7 @@ def _fix_rows(m, o):
                                                  "[pr17]: https://github.com/peer/repo/pull/17\n",
                                                  {("peer/repo", 17): "merged"}))
     check("ref/reference-style-link/red-when-reverted", code == 0 and t.calls == [], (code, t.calls))
+    _block_context_rows(m)
 
 
 def _cue_rows(m):
