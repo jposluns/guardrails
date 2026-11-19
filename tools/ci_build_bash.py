@@ -23,17 +23,23 @@ sha256, and the archive's byte count too) before anything is extracted. Each fil
 attempts, with waits of RETRY_DELAYS (2, 4 and 8 seconds) between them, but only after a transient transport
 failure: a network or host that is unreachable, a connection reset (including a server that closes the connection
 before it answers), a timeout, a temporary DNS failure (EAI_AGAIN) or a response read cut short (IncompleteRead),
-each also when urllib wraps it in URLError. Nothing else is retried: no HTTP status (an HTTPError of any code), no
-certificate or other TLS failure, no permanent DNS failure, no URL that is not https, no body over FETCH_LIMIT, no
-local file error and no other exception. Every attempt writes into a fresh temporary file in the downloads
+each also when urllib wraps it in URLError, and a body that ends before the byte count its Content-Length header
+declares. Nothing else is retried: no HTTP status (an HTTPError of any code), no certificate or other TLS failure,
+no permanent DNS failure, no URL that is not https, no Content-Length that is not a byte count, no body over
+FETCH_LIMIT, no local file error and no other exception. Every attempt writes into a fresh temporary file in the downloads
 directory, created exclusively; a failed attempt's file is removed, and only that one. A completed attempt's file
 is linked to its pinned name, which must not exist yet, and is checked against its pin there, outside the retry,
 before the next file is fetched: a size or sha256 mismatch is a refusal at once and is never retried. All ten files,
 their retries and their waits share one DOWNLOAD_DEADLINE (300 seconds) on a monotonic clock: no attempt starts once
-it has passed, no wait starts that would end after it, each attempt's per-operation socket timeout is FETCH_TIMEOUT
-cut down to the time left, and an attempt that finds it passed between two reads stops without a retry. That bound
-is checked by this process between blocking operations, so one blocked operation can overrun it by up to its own
-socket timeout; no separate process is terminated at the deadline. The patches are applied in PINS order
+it has passed, no wait starts that would end after it, and an attempt that finds it passed before a body read stops
+without a retry. Each attempt opens its connection with a socket timeout of FETCH_TIMEOUT cut down to the time left
+then, and before each body read the timeout is set again to FETCH_TIMEOUT cut down to the time left at that read.
+That bound is checked by this process between blocking operations, not enforced during them: while urlopen
+connects and reads the response head, each socket operation it makes may wait up to the timeout the attempt began
+with, so the opening can overrun the deadline by that much per operation (name resolution is not covered by the
+socket timeout at all); a body read is one read1, one socket read for a body of declared length (a chunked body
+also reads its chunk size lines, one socket read or more), and each of those may wait up to the time left when
+the read began. No separate process is terminated at the deadline. The patches are applied in PINS order
 with patch -p0 --force, which asks nothing and does not reverse a patch that looks reversed, so a patch that does
 not apply stops the build. The built bash must report BASH_VERSINFO 5, 3 and 9 (major, minor, patch level), in
 the build tree before make install and again as installed, so the patch level the applied patches left is read
@@ -131,7 +137,7 @@ SOURCE_DIR = "bash-5.3"  # the archive's top directory
 WANT_VERSINFO = "5 3 9"
 VERSION_SCRIPT = 'printf "%s %s %s\\n" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" "${BASH_VERSINFO[2]}"'
 INSTALL_NAME = "bash-5.3.9"  # the install directory under RUNNER_TEMP; the work directory adds -build
-FETCH_TIMEOUT = 60  # seconds for each blocking network operation, cut down to the time the deadline leaves
+FETCH_TIMEOUT = 60  # seconds for each socket operation, cut down to the time the deadline leaves at open and per read
 FETCH_LIMIT = 64 << 20  # bytes per file; every pinned file is far smaller
 FETCH_ATTEMPTS = 4  # attempts per file, the first included
 RETRY_DELAYS = (2, 4, 8)  # seconds waited before the second, third and fourth attempt
@@ -183,12 +189,44 @@ def fetch_error(url, exc):
     return kind("{}: fetch failed ({}: {})".format(url, type(exc).__name__, exc))
 
 
+def _declared_length(url, response):
+    """The body length that the Content-Length header of response declares, or None when it sends none or a chunked
+    body (whose own framing http.client checks, raising IncompleteRead when it is cut short). A Content-Length that
+    is not one decimal byte count raises NotCompleted."""
+    encoding = response.getheader("Transfer-Encoding")
+    if encoding is not None and encoding.lower() == "chunked":
+        return None
+    value = response.getheader("Content-Length")
+    if value is None:
+        return None
+    value = value.strip()
+    if not (value.isascii() and value.isdigit()):
+        raise NotCompleted("{}: Content-Length {!r} is not a byte count".format(url, value))
+    return int(value)
+
+
+def _set_read_timeout(url, response, seconds):
+    """Give the next body read of response, an http.client.HTTPResponse as urlopen returns it, a socket timeout of
+    seconds. A response whose body is all read (http.client drops its file then) reads no socket again and is left
+    as it is; one whose socket cannot be reached raises NotCompleted, so no read runs on an unbounded timeout."""
+    stream = getattr(response, "fp", None)
+    if stream is None:
+        return
+    sock = getattr(getattr(stream, "raw", None), "_sock", None)
+    if not isinstance(sock, socket.socket):
+        raise NotCompleted("{}: the response's socket cannot be reached to bound its read timeout".format(url))
+    sock.settimeout(seconds)
+
+
 def fetch_attempt(url, out, remaining):
     """One download attempt: write the body of url into out, an open binary file. remaining() gives the seconds
-    the shared download deadline leaves; each blocking operation gets FETCH_TIMEOUT or that, whichever is less. A
-    URL that is not https, a status other than 200, a body over FETCH_LIMIT bytes and a deadline that has passed
-    (before the attempt or between two reads) raise NotCompleted; a network error raises what fetch_error gives
-    for it. A local write error propagates as the OSError it is."""
+    the shared download deadline leaves. urlopen gets FETCH_TIMEOUT or that, whichever is less, for each socket
+    operation it makes; before each body read the socket timeout is set again to FETCH_TIMEOUT or the time then
+    left, whichever is less, and each read is one read1, so for a body of declared length it makes at most one
+    socket read. A URL that is not https, a status other than 200, a Content-Length that is not a byte count, a
+    body over FETCH_LIMIT bytes and a deadline that has passed (before the attempt or before a read) raise
+    NotCompleted; a body that ends before its Content-Length raises Transient, as a read cut short; a network
+    error raises what fetch_error gives for it. A local write error propagates as the OSError it is."""
     if not url.startswith("https://"):
         raise NotCompleted("{}: not an https URL".format(url))
     timeout = min(FETCH_TIMEOUT, remaining())
@@ -201,21 +239,28 @@ def fetch_attempt(url, out, remaining):
     with response:
         if response.status != 200:
             raise NotCompleted("{}: HTTP status {}".format(url, response.status))
+        declared = _declared_length(url, response)
         total = 0
         while True:
-            if remaining() <= 0:
+            left = remaining()
+            if left <= 0:
                 raise NotCompleted("{}: the {} s download deadline passed during the download".format(
                     url, DOWNLOAD_DEADLINE))
+            _set_read_timeout(url, response, min(FETCH_TIMEOUT, left))
             try:
-                chunk = response.read(READ_CHUNK)
+                chunk = response.read1(READ_CHUNK)
             except (OSError, http.client.HTTPException, ValueError) as exc:
                 raise fetch_error(url, exc) from None
             if not chunk:
-                return
+                break
             total += len(chunk)
             if total > FETCH_LIMIT:
                 raise NotCompleted("{}: more than {} bytes".format(url, FETCH_LIMIT))
             out.write(chunk)
+    if declared is not None and total != declared:
+        kind = Transient if total < declared else NotCompleted
+        raise kind("{}: fetch failed (the body has {} bytes; its Content-Length declares {})".format(
+            url, total, declared))
 
 
 def _fetch_with_retries(name, url, downloads, fetcher, sleep, remaining, log):
@@ -716,9 +761,12 @@ def self_test(report_path=None):
             got = [(repr(exc), kind(exc)) for exc in permanent]
             check("fetch/other-errors-not-retried", all(name == "NotCompleted" for _exc, name in got), got)
 
-            # one attempt: each blocking operation gets FETCH_TIMEOUT cut down to the time left, and a deadline
-            # found passed between two reads stops the attempt with NotCompleted, never Transient (so it is not
-            # retried); a read cut short is Transient. urlopen is replaced by an offline fake for these two calls.
+            # one attempt: urlopen gets FETCH_TIMEOUT cut down to the time left, and a deadline found passed before
+            # a read stops the attempt with NotCompleted, never Transient (so it is not retried); a read cut short
+            # is Transient. urlopen is replaced by an offline fake for these calls, which sets the timeout it is
+            # given on the response's socket as urlopen does. The fake responses read through a real socket pair's
+            # socket, reached as http.client's own responses are (fp.raw._sock), so each read records the socket
+            # timeout in force when it began.
             def raised(call):
                 try:
                     call()
@@ -726,11 +774,24 @@ def self_test(report_path=None):
                     return exc
                 return None
 
+            pairs = []
+
+            def socket_pair():
+                pair = socket.socketpair()
+                pairs.extend(pair)
+                return pair
+
+            class FakeFile:
+                def __init__(self, sock):
+                    self.raw, self._sock = self, sock
+
             class FakeResponse:
                 status = 200
 
                 def __init__(self, steps, clock, cost):
                     self.steps, self.clock, self.cost = list(steps), clock, cost
+                    self.fp = FakeFile(socket_pair()[0])
+                    self.timeouts = []
 
                 def __enter__(self):
                     return self
@@ -738,22 +799,39 @@ def self_test(report_path=None):
                 def __exit__(self, *exc_info):
                     return False
 
-                def read(self, size):
+                def getheader(self, name, default=None):
+                    return default
+
+                def read1(self, size):
+                    self.timeouts.append(self.fp.raw._sock.gettimeout())
                     self.clock.advance(self.cost)
                     step = self.steps.pop(0) if self.steps else b""
                     if isinstance(step, BaseException):
                         raise step
                     return step
 
+            def http_response(head, body, timeout):
+                """A real http.client.HTTPResponse, its head already parsed, over one end of a socket pair whose
+                other end sent head, a blank line and body, then closed; returns it and its socket."""
+                near, far = socket_pair()
+                far.sendall(head + b"\r\n\r\n" + body)
+                far.close()
+                near.settimeout(timeout)
+                response = http.client.HTTPResponse(near, method="GET", url="/")
+                response.begin()
+                return response, near
+
             opened = []
             fake = _FakeClock()
             ends = fake.now() + 45
-            responses = [FakeResponse([b"a" * 10, b"b" * 10, b"c" * 10], fake, 30),
-                         FakeResponse([b"x", http.client.IncompleteRead(b"", 5)], fake, 0)]
+            slow_response = FakeResponse([b"a" * 10, b"b" * 10, b"c" * 10], fake, 30)
+            responses = [slow_response, FakeResponse([b"x", http.client.IncompleteRead(b"", 5)], fake, 0)]
 
             def fake_urlopen(url, timeout=None):
                 opened.append((url, timeout))
-                return responses.pop(0)
+                response = responses.pop(0)
+                response.fp.raw._sock.settimeout(timeout)
+                return response
 
             urllib.request.urlopen = fake_urlopen
             try:
@@ -766,6 +844,66 @@ def self_test(report_path=None):
                   type(slow_exc) is NotCompleted and "passed during the download" in str(slow_exc)
                   and slow.getvalue() == b"a" * 10 + b"b" * 10 and type(cut_exc) is Transient
                   and opened == [(PINS[1][1], 45), (PINS[2][1], FETCH_TIMEOUT)], (slow_exc, cut_exc, opened))
+
+            # each body read gets FETCH_TIMEOUT cut down to the time left when it begins, not the timeout the
+            # attempt opened with: the slow attempt above opened with 45 s left and read again with 15 s left. Over
+            # a real chunked HTTPResponse whose time left drops 10 s before each step (45 s at the open, then 35,
+            # 25 and 15 s before its three reads), the socket's timeout as each step begins and after the last read
+            # is 45, 35, 25 and 15 s.
+            lefts = [45, 35, 25, 15]
+            real, seen = [], []
+
+            def ticking():
+                if real:
+                    seen.append(real[0].gettimeout())
+                return lefts.pop(0)
+
+            def real_urlopen_chunked(url, timeout=None):
+                response, sock = http_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked",
+                                               b"3\r\nabc\r\n4\r\ndefg\r\n0\r\n\r\n", timeout)
+                real.append(sock)
+                return response
+
+            urllib.request.urlopen = real_urlopen_chunked
+            try:
+                chunked = io.BytesIO()
+                chunked_exc = raised(lambda: fetch_attempt(PINS[3][1], chunked, ticking))
+            finally:
+                urllib.request.urlopen = no_network
+            if real:
+                seen.append(real[0].gettimeout())
+            check("fetch/read-timeout-cut-to-time-left", slow_response.timeouts == [45, 15] and chunked_exc is None
+                  and chunked.getvalue() == b"abcdefg" and seen == [45, 35, 25, 15] and not lefts,
+                  (slow_response.timeouts, chunked_exc, chunked.getvalue(), seen, lefts))
+
+            # a body that ends before its Content-Length, with no IncompleteRead from http.client, is a read cut
+            # short: Transient, so it is retried. Over real HTTPResponses declaring the patch's byte count, the
+            # first attempt's peer sends five bytes and closes; after one 2 s wait the second sends it whole, and
+            # the file is published under its pinned name and passes its pin.
+            body = sample.read_bytes()
+            head = "HTTP/1.1 200 OK\r\nContent-Length: {}".format(len(body)).encode("ascii")
+            bodies = [body[:5], body]
+            short_url = "https://fixture.invalid/bash53-001"
+
+            def short_then_whole(url, timeout=None):
+                return http_response(head, bodies.pop(0), timeout)[0]
+
+            short_dir = base / "short-body"
+            os.makedirs(short_dir)
+            logged = []
+            clock = _FakeClock()
+            urllib.request.urlopen = short_then_whole
+            try:
+                got = _outcome(lambda: download((("bash53-001", short_url, None, digest),), short_dir, fetch_attempt,
+                                                clock.sleep, clock.now, log=logged.append))
+            finally:
+                urllib.request.urlopen = no_network
+            check("fetch/short-body-retried", got == ("ok", None) and not bodies and clock.sleeps == [2]
+                  and len(logged) == 2 and "the body has 5 bytes; its Content-Length declares {}".format(len(body))
+                  in logged[0] and os.listdir(short_dir) == ["bash53-001"]
+                  and (short_dir / "bash53-001").read_bytes() == body, (got, bodies, clock.sleeps, logged))
+            for sock in pairs:
+                sock.close()
 
             # the retry: a transient failure, then success. The archive's first attempt leaves partial bytes and
             # fails with a connection reset; one 2 s wait, then a second attempt into a new empty file completes and
@@ -791,7 +929,7 @@ def self_test(report_path=None):
                   (got, calls, clock.sleeps))
 
             # the CI entry over the real pin table with a scripted fetcher (nothing reaches the network): a
-            # persistent transient failure, a digest mismatch and failures that are not transient
+            # persistent transient failure, a size mismatch, a digest mismatch and failures that are not transient
             def entry_run(name, script, cost=0):
                 temp = base / name
                 os.makedirs(temp)
@@ -800,21 +938,33 @@ def self_test(report_path=None):
                 work = temp / (INSTALL_NAME + "-build")
                 fetcher, calls = _scripted_fetcher(script, work / "downloads")
                 clock = _FakeClock()
-                got = _outcome(lambda: build({"RUNNER_TEMP": str(temp), "GITHUB_PATH": str(listed_here)}, fetcher,
-                                             log=lambda line: None, sleep=clock.sleep, clock=clock.now))
+                err = io.StringIO()
+
+                def call():
+                    with contextlib.redirect_stderr(err):
+                        return build({"RUNNER_TEMP": str(temp), "GITHUB_PATH": str(listed_here)}, fetcher,
+                                     log=lambda line: None, sleep=clock.sleep, clock=clock.now)
+                got = _outcome(call)
                 untouched = (listed_here.read_text(encoding="utf-8") == "/already/listed\n"
                              and not os.path.lexists(temp / INSTALL_NAME) and not (work / SOURCE_DIR).exists()
                              and not [n for n in os.listdir(work / "downloads") if ".attempt-" in n])
-                return got, calls, clock.sleeps, untouched
+                return got, calls, clock.sleeps, untouched, err.getvalue()
 
             url0 = PINS[0][1]
-            got, calls, sleeps, untouched = entry_run(
+            got, calls, sleeps, untouched, _err = entry_run(
                 "retry-exhausted", {url0: [fetch_error(url0, TimeoutError("timed out"))]})
             check("retry/persistent-transient-exits-2", got == ("ok", 2) and [call[0] for call in calls] == [url0] * 4
                   and sleeps == [2, 4, 8] and untouched, (got, calls, sleeps))
-            got, calls, sleeps, untouched = entry_run("retry-mismatch", {url0: [b"not the pinned archive"]})
+            # a completed archive of another byte count is refused by its size pin; one of the pinned byte count with
+            # another sha256 gets past the size pin and is refused by its digest. Neither is retried, and both exit 1.
+            got, calls, sleeps, untouched, err = entry_run("retry-size-mismatch", {url0: [b"not the pinned archive"]})
+            check("retry/size-mismatch-not-retried", got == ("ok", 1) and [call[0] for call in calls] == [url0]
+                  and sleeps == [] and untouched and "bash-5.3.tar.gz: 22 bytes, pinned {}".format(PINS[0][2]) in err,
+                  (got, calls, sleeps, err))
+            got, calls, sleeps, untouched, err = entry_run("retry-digest-mismatch", {url0: [bytes(PINS[0][2])]})
             check("retry/digest-mismatch-not-retried", got == ("ok", 1) and [call[0] for call in calls] == [url0]
-                  and sleeps == [] and untouched, (got, calls, sleeps))
+                  and sleeps == [] and untouched and "bash-5.3.tar.gz: sha256 {}, pinned {}".format(
+                      hashlib.sha256(bytes(PINS[0][2])).hexdigest(), PINS[0][3]) in err, (got, calls, sleeps, err))
             outcomes = []
             for index, exc in enumerate([ssl.SSLCertVerificationError(1, "certificate verify failed"),
                                          urllib.error.HTTPError(url0, 503, "unavailable", None, None),
@@ -822,7 +972,7 @@ def self_test(report_path=None):
                 outcomes.append(entry_run("retry-permanent-{}".format(index), {url0: [fetch_error(url0, exc)]}))
             check("retry/non-transient-not-retried", all(
                 got == ("ok", 2) and [call[0] for call in calls] == [url0] and sleeps == [] and untouched
-                for got, calls, sleeps, untouched in outcomes), outcomes)
+                for got, calls, sleeps, untouched, _err in outcomes), outcomes)
 
             # a file already at a pinned name in the downloads directory is never replaced, even after a failed
             # attempt was cleaned up: the completed download is refused and the file keeps its bytes
@@ -969,8 +1119,9 @@ def self_test(report_path=None):
           "files, a full build installs and appends to GITHUB_PATH, and a mismatch, a failed download, patches out "
           "of order, a wrong built or installed version, an existing install and an unexpected OSError each leave "
           "nothing installed; only the named transient transport failures are retried, four attempts with 2, 4 "
-          "and 8 s waits into fresh files, exit 2 once exhausted, a digest mismatch exits 1 without a retry, an "
-          "existing download is never replaced, and no attempt or wait passes the shared 300 s deadline; a bare run is the self-test even with RUNNER_TEMP and GITHUB_PATH set, only --build "
+          "and 8 s waits into fresh files, exit 2 once exhausted, a body cut short of its Content-Length is "
+          "retried, each body read's socket timeout is cut to the time left, a size or digest mismatch exits 1 "
+          "without a retry, an existing download is never replaced, and no attempt or wait passes the shared 300 s deadline; a bare run is the self-test even with RUNNER_TEMP and GITHUB_PATH set, only --build "
           "reaches the build, which exits 2 without them, and any other argument exits 2; no fetch reached the "
           "network)".format(len(results)))
     return 0
