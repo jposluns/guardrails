@@ -21723,7 +21723,10 @@ def heredoc_terminator(data):
     heredoc opener (<<TOKEN, <<'TOKEN', <<"TOKEN", <<-TOKEN) has no later line exactly equal to its delimiter
     (after the line's leading tabs for <<-) before the end of the command, naming the opener and the nearest
     near-miss line. Hooks never ask; a command with every opener terminated allows silently. A << whose
-    delimiter word cannot be read, and a payload with no readable command string, deny fail-safe.
+    delimiter word cannot be read denies fail-safe. The command is read by the reader every Bash hook shares
+    (_bash_command), so a tool_input that is missing or not an object, a command that is missing or not a
+    string, or a command string holding a NUL (bash runs only the text before it) denies under the shared
+    fail-closed contract (_deny_unreadable_command), with a reason naming the malformed field.
     A command that holds any backslash-newline pair and still holds a << once every such pair is removed
     (removed regardless of quoting, which removes at least every pair bash removes) is DENIED as
     unverifiable without being scanned: bash removes each unquoted pair before it splits the text into
@@ -21742,15 +21745,13 @@ def heredoc_terminator(data):
         return _deny_missing_tool_name("sectvl")
     if tool_name != "Bash":
         return _allow()  # a present-but-different tool is out of scope (defensive; the matcher governs)
-    tool_input = data.get("tool_input")
-    command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str):
-        return _deny(
-            "AIQT rule sectvl (tool-argument-validation): the Bash payload carried no readable command "
-            "string, so the heredoc terminator check could not run; it is denied fail-safe. Re-issue a "
-            "well-formed Bash command.",
-            "AIQT guardrail: denied a Bash call with no readable command; re-issue a well-formed command "
-            "(rule sectvl, fail-safe).")
+    command, unread = _bash_command(data)
+    if unread is not None:
+        # A tool_input that is missing or not an object, a command that is missing or not a string, or a
+        # command string holding a NUL (bash runs only the text before it): an unterminated heredoc may sit
+        # in what was not read, so the shared reader's detail is the deny reason.
+        return _deny_unreadable_command("sectvl (tool-argument-validation)",
+                                        "heredoc terminator check", unread)
     if "\\\n" in command:
         # bash removes each unquoted backslash-newline pair before it splits operators and words, so a pair
         # can split or move a << operator, a delimiter word or a body line; the scan below does not model
