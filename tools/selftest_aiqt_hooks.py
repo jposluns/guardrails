@@ -1814,6 +1814,320 @@ def _test_stream_failure_exits(failures):
           err_needle="could not be written to stdout")
 
 
+# (stdin-loc-*) The locales the hook input decoding is proved under: the two required ones, and C.UTF-8,
+# covered where the host has it.
+_STDIN_REQUIRED_LOCALES = ("C", "en_US.UTF-8")
+_STDIN_OPTIONAL_LOCALES = ("C.UTF-8",)
+# One child per locale names what that locale gives the interpreter: whether the C library accepts it,
+# its codeset, and the standard input's encoding and error handler, so a missing locale (which the C
+# library replaces with C without a word) is never read as evaluated coverage.
+_STDIN_LOCALE_PROBE = (
+    "import locale, sys\n"
+    "try:\n"
+    "    locale.setlocale(locale.LC_ALL, '')\n"
+    "except locale.Error as exc:\n"
+    "    print('unavailable', exc)\n"
+    "    raise SystemExit(0)\n"
+    "print('available', locale.nl_langinfo(locale.CODESET), sys.stdin.encoding, sys.stdin.errors,\n"
+    "      sys.flags.utf8_mode)\n"
+)
+# The marker a fixture carries where its raw bytes go: the raw form puts the bytes there, the escaped
+# form the ASCII JSON escapes of the text those bytes decode to.
+_STDIN_MARK = "QAMARK"
+
+
+def _stdin_fixture(obj, raw, escaped):
+    """(raw bytes, ASCII bytes) of one JSON fixture: obj's json.dumps with _STDIN_MARK replaced by raw in
+    the first and by the JSON escape text escaped in the second."""
+    text = json.dumps(obj).encode("ascii")
+    if _STDIN_MARK.encode("ascii") not in text:
+        raise ValueError("a stdin fixture carries no " + _STDIN_MARK)
+    return (text.replace(_STDIN_MARK.encode("ascii"), raw),
+            text.replace(_STDIN_MARK.encode("ascii"), escaped.encode("ascii")))
+
+
+def _stdin_mode_fixture(mode, cwd):
+    """A controlled payload for one registered mode, shaped by its event, with _STDIN_MARK in a field no
+    handler reads; the tool is a plain Bash true, so no fixture reaches a probe or a state write that the
+    stripped environment and the plain cwd do not keep inert."""
+    event = aiqt_hooks.HANDLER_EVENT[mode]
+    obj = dict(hook_event_name=event, session_id="qa-stdin-locale", cwd=cwd, aiqt_qa_ignored=_STDIN_MARK)
+    if event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+        obj.update(tool_name="Bash", tool_input=dict(command="true"))
+        if event == "PostToolUse":
+            obj["tool_response"] = dict(stdout="", stderr="", interrupted=False)
+        elif event == "PostToolUseFailure":
+            obj["error"] = "exit 1"
+    elif event in ("Stop", "SubagentStop"):
+        obj.update(last_assistant_message="Done.", stop_hook_active=False)
+    elif event == "UserPromptSubmit":
+        obj["prompt"] = "hello"
+    elif event == "SessionStart":
+        obj["source"] = "startup"
+    return obj
+
+
+def _stdin_outcome(proc):
+    """The decision category of one hook child, never its clock-dependent text: the exit status, the
+    stdout object's keys with its permission decision (or a marker for no stdout or an unparsed one), and
+    the diagnostic category (an unreadable payload, a fail-closed note, other text, or none)."""
+    out = (proc.stdout or b"").decode("utf-8", "replace")
+    err = (proc.stderr or b"").decode("utf-8", "replace")
+    if not out.strip():
+        shape = ("no-stdout",)
+    else:
+        try:
+            obj = json.loads(out)
+        except ValueError:
+            shape = ("unparsed-stdout",)
+        else:
+            if isinstance(obj, dict):
+                specific = obj.get("hookSpecificOutput")
+                decision = specific.get("permissionDecision") if isinstance(specific, dict) else None
+                shape = tuple(sorted(obj)) + ("decision=" + str(decision),)
+            else:
+                shape = ("non-object-stdout",)
+    if "unreadable payload" in out or "unreadable hook payload" in err:
+        diagnostic = "unreadable-payload"
+    elif "failing closed" in err:
+        diagnostic = "failing-closed"
+    elif err.strip():
+        diagnostic = "other-stderr"
+    else:
+        diagnostic = "no-stderr"
+    return (proc.returncode, shape, diagnostic)
+
+
+def _test_stdin_locale_decoding(failures, tmp):
+    """(stdin-loc-*) Real-subprocess vectors: the dispatcher decodes the hook payload the same way under
+    every locale. Each child runs the LIVE hook file under [sys.executable, "-I", "-B", "-X", "utf8=0"]
+    (isolated, and with UTF-8 mode off, so the interpreter's own UTF-8 mode cannot mask a locale-encoded
+    read) with LC_ALL set to C, to en_US.UTF-8 and, where the host has it, to C.UTF-8, sends real bytes on
+    its standard input and asserts the exit status, the parsed decision and the diagnostic category.
+
+    A raw 0xff inside an otherwise valid JSON string, first in a field no handler reads and then in the
+    consumed path, command or message, must give the same decision as an ASCII fixture carrying the
+    equivalent \\udcff escape, on a benign allow, a structured deny, an allow-note and a Stop warning;
+    valid non-ASCII UTF-8 and truncated and overlong sequences must match their escaped equivalents too;
+    an invalid byte outside a string, empty input, malformed JSON and non-object JSON keep each mode's
+    error posture (fail-closed exit 2, fail-open warn on exit 0); CRLF and lone-CR line ends between JSON
+    tokens read as LF does. Every registered mode is then run on a controlled fixture holding a raw 0xff
+    in an ignored field, which must decide as its escaped twin does and never as an unreadable payload.
+
+    These vectors fail on the locale-encoded reader (sys.stdin.read()): under en_US.UTF-8 a raw 0xff
+    raised UnicodeDecodeError, so a fail-closed mode exited 2 on an unreadable payload and a fail-open one
+    warned, where the C locale judged the same payload; and under C the ASCII codec turned valid UTF-8
+    into surrogates, so the deny reason echoing a non-ASCII path differed from its escaped twin. A
+    required locale the host lacks is reported as unevaluated coverage, a failure; a missing C.UTF-8 is
+    reported as unevaluated and skipped."""
+    hook = os.path.abspath(aiqt_hooks.__file__)
+    home = tmp / "stdin-locale-home"
+    cwd = tmp / "stdin-locale-cwd"
+    for path in (home, cwd, home / "state", home / "config", home / "cache"):
+        path.mkdir(parents=True, exist_ok=True)
+    base_env = dict((k, v) for k, v in os.environ.items()
+                    if not k.startswith(("AIQT_", "ORCH_", "CLAUDE_", "LC_", "PYTHON", "GIT_"))
+                    and k not in ("LANG", "LANGUAGE"))
+    base_env.update(HOME=str(home), XDG_STATE_HOME=str(home / "state"),
+                    XDG_CONFIG_HOME=str(home / "config"), XDG_CACHE_HOME=str(home / "cache"))
+
+    def run(label, argv, payload, env):
+        try:
+            return subprocess.run(argv, input=payload, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  env=env, cwd=str(cwd), timeout=60)
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append("(" + label + ") could not run the child: " + repr(exc))
+            return None
+
+    locales = []
+    for name in _STDIN_REQUIRED_LOCALES + _STDIN_OPTIONAL_LOCALES:
+        env = dict(base_env, LC_ALL=name)
+        label = "stdin-loc-probe-" + name
+        proc = run(label, [sys.executable, "-I", "-B", "-X", "utf8=0", "-c", _STDIN_LOCALE_PROBE], b"", env)
+        if proc is None:
+            continue
+        words = proc.stdout.decode("utf-8", "replace").split()
+        utf8_name = "utf-8" in name.lower()
+        reason = None
+        if proc.returncode != 0 or not words:
+            reason = "the probe exited {} with {!r}".format(proc.returncode, proc.stdout + proc.stderr)
+        elif words[0] != "available":
+            reason = "the C library refused it ({})".format(" ".join(words[1:]))
+        elif len(words) != 5 or words[4] != "0":
+            reason = "the probe reported {!r}, not UTF-8 mode 0".format(" ".join(words))
+        elif utf8_name and words[1].upper().replace("-", "") != "UTF8":
+            reason = "its codeset is {}, not UTF-8".format(words[1])
+        if reason is not None:
+            note = ("(stdin-loc-unevaluated-{}) LC_ALL={} is not usable on this host ({}), so the stdin "
+                    "decoding rows under it are unevaluated".format(name, name, reason))
+            if name in _STDIN_REQUIRED_LOCALES:
+                failures.append(note)
+            else:
+                print(note)
+            continue
+        locales.append((name, env, "codeset {}, stdin {}/{}".format(words[1], words[2], words[3])))
+
+    deny_obj = dict(hook_event_name="PreToolUse", tool_name="Write", tool_input=dict(file_path="relative.txt"))
+    allow_obj = dict(hook_event_name="PreToolUse", tool_name="Read", tool_input=dict(file_path="/abs/x.txt"))
+    note_obj = dict(hook_event_name="PreToolUse", tool_name="Bash", tool_input=dict(command="cd sub"))
+    wall = "Here is the change:\ndiff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+    stop_obj = dict(hook_event_name="Stop", last_assistant_message=wall)
+
+    def with_ignored(obj):
+        return dict(obj, aiqt_qa_ignored="x" + _STDIN_MARK + "y")
+
+    def consumed(obj, key, value):
+        copy = json.loads(json.dumps(obj))
+        if key == "last_assistant_message":
+            copy[key] = value
+        else:
+            copy["tool_input"][key] = value
+        return copy
+
+    # (label, mode, fixture object, raw bytes, escaped text, the decision both must give: shape_ok's kind)
+    paired = [
+        ("allow-ignored", "absolute_paths", with_ignored(allow_obj), b"\xff", "\\udcff", "allow"),
+        ("allow-consumed", "absolute_paths", consumed(allow_obj, "file_path", "/abs/" + _STDIN_MARK + ".txt"),
+         b"\xff", "\\udcff", "allow"),
+        ("deny-ignored", "absolute_paths", with_ignored(deny_obj), b"\xff", "\\udcff", "deny"),
+        ("deny-consumed", "absolute_paths", consumed(deny_obj, "file_path", "rel" + _STDIN_MARK + ".txt"),
+         b"\xff", "\\udcff", "deny"),
+        ("note-ignored", "bash_absolute_paths", with_ignored(note_obj), b"\xff", "\\udcff", "note"),
+        ("note-consumed", "bash_absolute_paths", consumed(note_obj, "command", "cd sub" + _STDIN_MARK),
+         b"\xff", "\\udcff", "note"),
+        ("stopwarn-ignored", "diff_wall_stop", with_ignored(stop_obj), b"\xff", "\\udcff", "warn"),
+        ("stopwarn-consumed", "diff_wall_stop",
+         consumed(stop_obj, "last_assistant_message", wall.replace("+b", "+b" + _STDIN_MARK)),
+         b"\xff", "\\udcff", "warn"),
+        ("deny-utf8", "absolute_paths", consumed(deny_obj, "file_path", "rel" + _STDIN_MARK + ".txt"),
+         "é→\U0001f600".encode("utf-8"), "\\u00e9\\u2192\\ud83d\\ude00", "deny"),
+        ("deny-truncated", "absolute_paths", consumed(deny_obj, "file_path", "rel" + _STDIN_MARK),
+         b"\xe2\x86", "\\udce2\\udc86", "deny"),
+        ("deny-truncated-mid", "absolute_paths", consumed(deny_obj, "file_path", "rel" + _STDIN_MARK + ".txt"),
+         b"\xc3", "\\udcc3", "deny"),
+        ("deny-overlong", "absolute_paths", consumed(deny_obj, "file_path", "rel" + _STDIN_MARK + ".txt"),
+         b"\xc0\xaf", "\\udcc0\\udcaf", "deny"),
+        ("note-utf8", "bash_absolute_paths", consumed(note_obj, "command", "cd sub" + _STDIN_MARK),
+         "é".encode("utf-8"), "\\u00e9", "note"),
+        # The heredoc-terminator residue names these: a here-document body or delimiter holding a byte that
+        # is not valid UTF-8 is judged on its termination, as its escaped twin is.
+        ("heredoc-body-closed", "heredoc_terminator",
+         consumed(note_obj, "command", "cat <<EOF\nab " + _STDIN_MARK + " cd\nEOF\n"), b"\xff", "\\udcff", "allow"),
+        ("heredoc-delim-closed", "heredoc_terminator",
+         consumed(note_obj, "command", "cat <<E" + _STDIN_MARK + "\nbody\nE" + _STDIN_MARK + "\n"),
+         b"\xff", "\\udcff", "allow"),
+        ("heredoc-delim-mistyped", "heredoc_terminator",
+         consumed(note_obj, "command", "cat <<E" + _STDIN_MARK + "\nbody\nEOF\n"), b"\xff", "\\udcff", "deny"),
+        ("heredoc-body-unclosed", "heredoc_terminator",
+         consumed(note_obj, "command", "cat <<EOF\nab " + _STDIN_MARK + "\nEOFX\n"), b"\xff", "\\udcff", "deny"),
+    ]
+
+    def shape_ok(kind, proc):
+        out = proc.stdout.decode("utf-8", "replace")
+        if kind == "allow":
+            return proc.returncode == 0 and not out.strip() and not proc.stderr
+        try:
+            obj = json.loads(out)
+        except ValueError:
+            return False
+        if proc.returncode != 0 or not isinstance(obj, dict) or proc.stderr:
+            return False
+        specific = obj.get("hookSpecificOutput")
+        if kind == "deny":
+            return isinstance(specific, dict) and specific.get("permissionDecision") == "deny"
+        if kind == "note":
+            return specific is None and isinstance(obj.get("systemMessage"), str)
+        return specific is None and "WARNING" in str(obj.get("systemMessage"))
+
+    deny_text = json.dumps(deny_obj, indent=1).encode("ascii")
+    stop_text = json.dumps(stop_obj).encode("ascii")
+    # (label, mode, payload, expected exit, stderr needle or None, fail-open stdout needle or None)
+    postured = [
+        ("fc-outside-string", "absolute_paths", b"{\xff" + json.dumps(deny_obj).encode("ascii")[1:], 2,
+         "JSONDecodeError", None),
+        ("fc-empty", "absolute_paths", b"", 2, "unreadable hook payload", None),
+        ("fc-malformed", "absolute_paths", b"not json", 2, "unreadable hook payload", None),
+        ("fc-nonobject", "absolute_paths", b"[\"\xff\"]", 2, "payload is not a JSON object", None),
+        ("fc-cr-in-string", "absolute_paths", deny_text.replace(b"relative.txt", b"rel\r.txt"), 2,
+         "unreadable hook payload", None),
+        ("fo-outside-string", "diff_wall_stop", b"{\xff" + stop_text[1:], 0, None, "JSONDecodeError"),
+        ("fo-empty", "diff_wall_stop", b"", 0, None, "unreadable payload"),
+        ("fo-malformed", "diff_wall_stop", b"not json", 0, None, "unreadable payload"),
+        ("fo-nonobject", "diff_wall_stop", b"[\"\xff\"]", 0, None, "payload is not a JSON object"),
+    ]
+    line_ends = [
+        ("deny-crlf", "absolute_paths", deny_text.replace(b"\n", b"\r\n")),
+        ("deny-lone-cr", "absolute_paths", deny_text.replace(b"\n", b"\r")),
+    ]
+    modes = sorted(aiqt_hooks.HANDLERS)
+
+    for name, env, effective in locales:
+        argv_head = [sys.executable, "-I", "-B", "-X", "utf8=0", hook]
+        where = " under LC_ALL={} ({})".format(name, effective)
+        for label, mode, obj, raw, escaped, kind in paired:
+            row = "stdin-loc-" + name + "-" + label
+            raw_payload, escaped_payload = _stdin_fixture(obj, raw, escaped)
+            got = run(row, argv_head + [mode], raw_payload, env)
+            want = run(row + "-escaped", argv_head + [mode], escaped_payload, env)
+            if got is None or want is None:
+                continue
+            if not shape_ok(kind, want):
+                failures.append("({}-escaped) the ASCII \\u-escaped control did not give the expected {}{}: "
+                                "exit {}, stdout {!r}, stderr {!r}".format(row, kind, where, want.returncode,
+                                                                           want.stdout, want.stderr))
+            if not shape_ok(kind, got):
+                failures.append("({}) the raw-byte fixture did not give the expected {}{}: exit {}, stdout "
+                                "{!r}, stderr {!r}".format(row, kind, where, got.returncode, got.stdout,
+                                                           got.stderr))
+            elif (got.returncode, got.stdout, got.stderr) != (want.returncode, want.stdout, want.stderr):
+                failures.append("({}) the raw-byte fixture decided differently from its \\u-escaped twin{}: "
+                                "{!r} against {!r}".format(row, where, got.stdout, want.stdout))
+        for label, mode, payload, want_rc, err_needle, out_needle in postured:
+            row = "stdin-loc-" + name + "-" + label
+            got = run(row, argv_head + [mode], payload, env)
+            if got is None:
+                continue
+            out = got.stdout.decode("utf-8", "replace")
+            err = got.stderr.decode("utf-8", "replace")
+            if got.returncode != want_rc:
+                failures.append("({}) expected exit {}{}, got {} (stdout {!r}, stderr {!r})".format(
+                    row, want_rc, where, got.returncode, out, err))
+            if want_rc == 2 and out:
+                failures.append("({}) a fail-closed payload error wrote to stdout, the decision "
+                                "channel{}: {!r}".format(row, where, out))
+            if err_needle is not None and err_needle not in err:
+                failures.append("({}) stderr does not name {!r}{}: {!r}".format(row, err_needle, where, err))
+            if out_needle is not None and (out_needle not in out or "systemMessage" not in out):
+                failures.append("({}) the fail-open warning does not name {!r}{}: {!r}".format(
+                    row, out_needle, where, out))
+        lf = run("stdin-loc-" + name + "-deny-lf", argv_head + ["absolute_paths"], deny_text, env)
+        for label, mode, payload in line_ends:
+            row = "stdin-loc-" + name + "-" + label
+            got = run(row, argv_head + [mode], payload, env)
+            if got is None or lf is None:
+                continue
+            if not shape_ok("deny", got) or got.stdout != lf.stdout:
+                failures.append("({}) a payload with {} line ends did not decide as its LF twin{}: {!r} "
+                                "against {!r}".format(row, label.split("-", 1)[1], where, got.stdout, lf.stdout))
+        for mode in modes:
+            row = "stdin-loc-" + name + "-mode-" + mode
+            raw_payload, escaped_payload = _stdin_fixture(_stdin_mode_fixture(mode, str(cwd)), b"\xff",
+                                                          "\\udcff")
+            got = run(row, argv_head + [mode], raw_payload, env)
+            want = run(row + "-escaped", argv_head + [mode], escaped_payload, env)
+            if got is None or want is None:
+                continue
+            got_outcome, want_outcome = _stdin_outcome(got), _stdin_outcome(want)
+            if want_outcome[2] == "unreadable-payload":
+                failures.append("({}-escaped) the ASCII control fixture read as an unreadable payload{}: "
+                                "{!r}".format(row, where, want_outcome))
+            if got_outcome[2] == "unreadable-payload" or got_outcome != want_outcome:
+                failures.append("({}) a raw 0xff in an ignored field decided {!r}, its \\u-escaped twin "
+                                "{!r}{}".format(row, got_outcome, want_outcome, where))
+    print("(stdin-loc) hook stdin decoding evaluated under: " + (
+        "; ".join("LC_ALL={} ({})".format(name, effective) for name, _env, effective in locales) or "none"))
+
+
 def _test_note_shape_pins(failures, tmp):
     """(ns-pin-*) Negative controls for _note_constructor_shape_failures: each mutant of the live hook
     source must be refused under the named tag (a literal note in a non-leaf declared constructor, a deny
@@ -38365,6 +38679,7 @@ def _main_isolated(monitor):
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
         _test_stream_failure_exits(failures)
+        _test_stdin_locale_decoding(failures, tmp)
         _test_stop_field_claim_check(failures, tmp)
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
