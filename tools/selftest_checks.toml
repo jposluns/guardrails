@@ -6836,6 +6836,8 @@ expected-check-ids = [
   "write/roundtrip-freed-baseline-line-credits-copy",
   "flip/write-freed-line-judged-on-candidate",
   "fail-closed/write-settle-bound",
+  # a layout whose proposals swap between two sets of entries is refused, naming the way out
+  "fail-closed/write-unsettled-swap-names-way-out",
   "write/roundtrip-stale-baseline-line-frees-credit",
   "flip/write-stale-line-judged-on-candidate",
   "write/own-line-judged-with-substituted-credit",
@@ -6856,6 +6858,16 @@ expected-check-ids = [
   "flip/write-non-utf8-checkout-escaped",
   "fail-closed/write-checkout-path-colon",
   "flip/write-checkout-path-colon-raw",
+  # the store leaves the repository's object files, refs and index as they were and is removed
+  "write/store-leaves-repository-unchanged",
+  "flip/write-store-objects-in-repository",
+  "flip/write-store-not-removed",
+  # an object the repository already holds is not written, so no object file's time is refreshed
+  "write/store-keeps-object-times",
+  "flip/write-store-refreshes-object-times",
+  # a temporary directory inside another worktree of the same repository is refused
+  "fail-closed/write-tmpdir-in-other-worktree",
+  "flip/write-tmpdir-other-worktree-unchecked",
   # a cannot-evaluate message is escaped like a listing line
   "review/cannot-evaluate-message-escaped",
   "flip/cannot-evaluate-message-raw",

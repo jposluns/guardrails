@@ -180,13 +180,17 @@ proposal of the pass before it, and the passes stop when one proposes the same e
 before it. The first evaluation reads B..C. Committing a proposal replaces the baseline file, which
 changes the lines the diff deletes and adds there and so the move credits left, so each later
 evaluation reads B..C', the diff from the merge base to C' (C's tree with the last proposal's canonical
-render as its baseline file, built in a temporary object store outside the repository that the run
-removes; a checkout whose object directory path holds ':', which git splits alternates on, is
-cannot-evaluate before anything is created; the store's parent is the first of TMPDIR, TEMP, TMP, the
-platform defaults and the current directory, in tempfile's order, that is a writable directory, tested
-by creating the store in it, never by tempfile's probe file; each candidate's real path is checked
-against the worktree and the git directory, whose paths git prints read as the filesystem's bytes,
-before anything is created under it, and one inside them is cannot-evaluate), carrying that proposal as
+render as its baseline file, built in a temporary object store outside the repository's worktrees and
+git directories, removed when the writer returns or raises (a killed process leaves it, R17); each
+object's id is computed without writing and the object is written into the store only when neither the
+store nor the repository holds it, so no object file of the repository is written or has its
+modification time refreshed; a checkout whose object directory path holds ':', which git splits
+alternates on, is cannot-evaluate before anything is created; the store's parent is the first of
+TMPDIR, TEMP, TMP, the platform defaults and the current directory, in tempfile's order, that is a
+writable directory, tested by creating the store in it, never by tempfile's probe file; each
+candidate's real path is checked against every worktree of the repository (git worktree list) and the
+git directory, whose paths git prints read as the filesystem's bytes, before anything is created under
+it, and one inside them is cannot-evaluate; real paths only, R18), carrying that proposal as
 a writer run on it committed would; the writer stops when an evaluation of C' proposes the entries
 substituted in it. For K candidate keys of an evaluation (the keys
 of the findings on the lines its diff adds and of its candidate baseline) a pass runs at most 2K+1 rounds
@@ -194,7 +198,9 @@ and an evaluation at most K+2 passes (writer_round_bound and writer_pass_bound g
 the writer runs at most K+2 evaluations of C' for the K of its first evaluation (writer_settle_bound), a
 cap rather than a proof that every layout settles, since a substitution can add a key or drop one. A
 pass, the passes or the evaluations of C' still changing at their bound is cannot-evaluate naming that
-bound. The settled proposal is then judged by the gate's own predicate (baseline_verdict, the function
+bound; for the evaluations of C' (a layout whose proposals can swap between two sets of entries for
+good) the message names the way out: remove the candidate baseline's stale entries, or commit an empty
+baseline first, and run the writer on that commit. The settled proposal is then judged by the gate's own predicate (baseline_verdict, the function
 the gate calls) with its entries as the candidate baseline, on the B..C' diff it settled on, where the
 proposal's render is the baseline file: its lines are judged with the move credit C' leaves (not at all
 when the configuration excludes that file, as the gate then judges none of them), and a charged finding
@@ -247,7 +253,15 @@ other, so a configured shape matching it under one id and not the other, or git'
 pairing a baseline file new since the merge base with a file the change deletes across a similarity
 threshold the id change moves, could make that run propose other entries or refuse. No shipped shape
 matches a source-commit line (its id is lower-case hex), and a move credit for it would need the merge
-base to hold a line naming a commit that descends from the merge base.
+base to hold a line naming a commit that descends from the merge base; (R17) --write-baseline removes
+its temporary object store when it returns or raises, but a process killed while the store exists
+(SIGKILL, or a signal such as SIGTERM that Python does not turn into an exception) leaves that
+review-label-writer-* directory in the temporary directory, outside the repository, for the caller to
+delete; no later run reads it; (R18) the store's containment check compares real paths
+(os.path.realpath) only: a temporary directory that reaches the repository through a bind mount has
+another real path and is accepted, a path component swapped between the check and the store's
+creation is not detected, and when the writer runs in a submodule the superproject's worktree is not
+checked.
 """
 import sys
 
@@ -1278,13 +1292,14 @@ WriterRun = namedtuple("WriterRun", ("proposal", "judged", "deleted", "found", "
                                      "rounds"))
 
 
-def _repository_areas(root):
+def _current_worktree_areas(root):
     """(object directory, areas): the repository's object directory as git rev-parse prints it, and the
-    real paths of its worktree, its git directory, its common git directory and that object directory
-    (each resolved by git rev-parse, then os.path.realpath, so a symbolic link is followed). git prints
-    the paths as the filesystem's bytes, one per line; they are read as bytes and decoded with
-    os.fsdecode, so a path holding a byte that is not UTF-8 names the same directory it names on disk
-    (decoded as text with escapes, it would name another path and pass the containment check)."""
+    real paths of the worktree `root` lies in, its git directory, its common git directory and that
+    object directory (each resolved by git rev-parse, then os.path.realpath, so a symbolic link is
+    followed). git prints the paths as the filesystem's bytes, one per line; they are read as bytes and
+    decoded with os.fsdecode, so a path holding a byte that is not UTF-8 names the same directory it
+    names on disk (decoded as text with escapes, it would name another path and pass the containment
+    check)."""
     proc = _git(root, "rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir",
                 "--git-common-dir", "--git-path", "objects")
     if proc.returncode != 0:
@@ -1296,6 +1311,23 @@ def _repository_areas(root):
                              "git directory and the object directory".format(proc.stdout))
     paths = [os.fsdecode(line) for line in lines[:4]]
     return paths[3], [os.path.realpath(path) for path in paths]
+
+
+def _repository_areas(root):
+    """(object directory, areas): _current_worktree_areas, with the real path of every worktree of the
+    repository (the main worktree and each linked one, as git worktree list --porcelain -z prints them,
+    read as the filesystem's bytes and decoded with os.fsdecode) added, so a temporary directory inside
+    another worktree of the same repository is refused like one inside the worktree `root` lies in."""
+    objects, areas = _current_worktree_areas(root)
+    proc = _git(root, "worktree", "list", "--porcelain", "-z")
+    if proc.returncode != 0:
+        raise CannotEvaluate("the repository's worktrees cannot be listed: git exited {} ({})".format(
+            proc.returncode, _stderr(proc)))
+    prefix = b"worktree "
+    worktrees = [field[len(prefix):] for field in proc.stdout.split(b"\0") if field.startswith(prefix)]
+    if not worktrees or not all(worktrees):
+        raise CannotEvaluate("git worktree list printed {!r}, naming no worktree".format(proc.stdout[:200]))
+    return objects, areas + [os.path.realpath(os.fsdecode(path)) for path in worktrees]
 
 
 def _temporary_candidates():
@@ -1331,8 +1363,9 @@ def _store_directory(areas):
         for area in areas:
             if os.path.commonpath([parent, area]) == area:
                 raise CannotEvaluate("the temporary directory {} ({}) lies inside the repository ({}); the "
-                                     "writer builds its object store outside the worktree and the git "
-                                     "directory only, so no baseline is proposed; set TMPDIR to a directory "
+                                     "writer builds its object store outside the repository's worktrees and "
+                                     "its git directory only, so no baseline is proposed; set TMPDIR to a "
+                                     "directory "
                                      "outside the repository".format(parent, source, area))
         try:
             return tempfile.TemporaryDirectory(prefix="review-label-writer-", dir=parent)
@@ -1357,13 +1390,16 @@ def _alternate_entry(objects):
 
 @contextlib.contextmanager
 def _scratch_store(root):
-    """A Store: an empty temporary object directory outside the repository, which the repository's own
-    object directory backs as an alternate, removed when the block ends. The writer builds C' there, so
-    it writes nothing into the repository. Before anything is created, the object directory is checked
-    against the alternates separator (_alternate_entry), and each temporary directory candidate's real
-    path against the real paths of the worktree, the git directory, the common git directory and the
-    object directory before anything is created under it (_store_directory); either refusal is
-    CannotEvaluate."""
+    """A Store: an empty temporary object directory outside the repository's worktrees and git
+    directories, which the repository's own object directory backs as an alternate, removed when the
+    block ends (returning or raising; a process killed while the block runs leaves it in place, R17).
+    The writer builds C' there and writes an object only when neither the store nor the repository
+    holds it (_store_object), so it writes no object file of the repository and refreshes the
+    modification time of none. Before anything is created, the object directory is checked against the
+    alternates separator (_alternate_entry), and each temporary directory candidate's real path against
+    the real paths of every worktree of the repository, the git directory, the common git directory and
+    the object directory before anything is created under it (_store_directory; real paths only, R18);
+    either refusal is CannotEvaluate."""
     objects, areas = _repository_areas(root)
     alternates = _alternate_entry(objects)
     with _store_directory(areas) as tmp:
@@ -1372,15 +1408,61 @@ def _scratch_store(root):
         yield Store(store, alternates)
 
 
-def _store_git(root, store, data, *args):
-    """git under the gate's environment (_git_env) with `store` as its object directory, the
-    repository's objects read through it as an alternate."""
+def _store_env(store):
+    """The gate's environment (_git_env) with `store` as git's object directory, the repository's objects
+    read through it as an alternate."""
     env = _git_env()
     env.update(GIT_OBJECT_DIRECTORY=store.objects, GIT_ALTERNATE_OBJECT_DIRECTORIES=store.alternates)
-    proc = _run_git(root, env, data, *args)
+    return env
+
+
+def _store_git(root, store, data, *args):
+    """git under the store's environment (_store_env)."""
+    proc = _run_git(root, _store_env(store), data, *args)
     if proc.returncode != 0:
         raise CannotEvaluate("git {} exited {} ({})".format(args[0], proc.returncode, _stderr(proc)))
     return proc.stdout
+
+
+def _store_has(root, store, oid):
+    """Whether the object `oid` is readable under the store's environment: in the store or, through the
+    alternate, in the repository. git cat-file -e only reads; it writes no object and refreshes the
+    modification time of none."""
+    proc = _run_git(root, _store_env(store), None, "cat-file", "-e", oid)
+    if proc.returncode not in (0, 1):
+        raise CannotEvaluate("git cat-file -e exited {} ({})".format(proc.returncode, _stderr(proc)))
+    return proc.returncode == 0
+
+
+def _store_object(root, store, kind, content, what, write):
+    """The id of the `kind` object holding `content`, written into `store` only when it is in neither the
+    store nor the repository. The id is computed first, without writing (git hash-object -t `kind`
+    without -w, which also checks a tree's format); git cat-file -e (_store_has) then looks for it, and
+    only an object found nowhere is written, by git with the arguments write[1:] and write[0] on its
+    standard input, whose printed id must be the computed one. Asked to write an object the repository
+    already holds, git writes nothing into the store but refreshes the modification time of the
+    repository's loose object file or pack, which this order never asks it to do."""
+    oid = _store_id(_store_git(root, store, content, "hash-object", "-t", kind, "--no-filters", "--stdin"),
+                    what)
+    if not _store_has(root, store, oid):
+        written = _store_id(_store_git(root, store, write[0], *write[1:]), what)
+        if written != oid:
+            raise CannotEvaluate("git wrote {} for {}, whose id was computed as {}".format(written, what, oid))
+    return oid
+
+
+def _tree_object(records):
+    """The content of the tree object git mktree -z builds from `records` (git ls-tree -z records: mode,
+    type and id separated by spaces, a tab, the name): each entry is its mode without leading zeros, a
+    space, its name, a NUL and its raw id, in git's tree order (bytewise, a tree's name compared as if it
+    ended in '/')."""
+    entries = []
+    for record in records:
+        meta, _tab, name = record.partition(b"\t")
+        mode, kind, oid = meta.split(b" ")
+        entries.append((name + b"/" if kind == b"tree" else name,
+                        mode.lstrip(b"0") + b" " + name + b"\0" + bytes.fromhex(oid.decode("ascii"))))
+    return b"".join(entry for _key, entry in sorted(entries, key=lambda item: item[0]))
 
 
 def _store_id(output, what):
@@ -1393,7 +1475,8 @@ def _store_id(output, what):
 def _tree_with_blob(root, store, treeish, parts, blob):
     """The id of the tree `treeish` (None for an empty tree) with the blob `blob` at the path `parts`
     (in the mode of the regular file it replaces, else 100644), every other entry kept as it is: built
-    with git ls-tree and git mktree in `store`."""
+    with git ls-tree and, for a tree neither the store nor the repository holds, git mktree in `store`
+    (_store_object)."""
     entries, name, sub, mode = [], parts[0].encode("ascii"), None, b"100644"
     if treeish is not None:
         listing = _store_git(root, store, None, "ls-tree", "-z", "--end-of-options", treeish)
@@ -1417,16 +1500,17 @@ def _tree_with_blob(root, store, treeish, parts, blob):
                        + b"\t" + name)
     else:
         entries.append(mode + b" blob " + blob.encode("ascii") + b"\t" + name)
-    return _store_id(_store_git(root, store, b"".join(record + b"\0" for record in entries), "mktree", "-z"),
-                     "a tree of the substituted candidate")
+    return _store_object(root, store, "tree", _tree_object(entries), "a tree of the substituted candidate",
+                         (b"".join(record + b"\0" for record in entries), "mktree", "-z"))
 
 
 def _substituted_tree(root, store, head_sha, data):
     """C': the id of the candidate commit's tree with the baseline file's blob replaced by `data` (added
     when C has none), every other path as it is in C, built in `store`. A commit of `data` on top of C
-    with nothing else changed has this tree."""
-    blob = _store_id(_store_git(root, store, data, "hash-object", "-w", "--no-filters", "--stdin"),
-                     "the proposed baseline's blob")
+    with nothing else changed has this tree. An object the repository already holds is not written
+    (_store_object)."""
+    blob = _store_object(root, store, "blob", data, "the proposed baseline's blob",
+                         (data, "hash-object", "-w", "--no-filters", "--stdin"))
     return _tree_with_blob(root, store, head_sha, BASELINE_RELPATH.split("/"), blob)
 
 
@@ -1523,7 +1607,9 @@ def propose_baseline(root, protected=None, head=None, environ=None):
         else:
             raise CannotEvaluate("with each proposal substituted for the candidate's baseline, the writer "
                                  "still proposed other entries after {} evaluation(s) of that candidate; no "
-                                 "baseline is proposed".format(limit))
+                                 "baseline is proposed; to get out, remove the stale entries from the "
+                                 "candidate's baseline, or commit an empty baseline first, and run the "
+                                 "writer on that commit".format(limit))
     data = render_baseline(head_sha, proposal)
     verdict = baseline_verdict(run.judged, _settled_deleted(run.deleted), config, proposal, before,
                                run.counts)
@@ -3111,8 +3197,34 @@ def _baseline_writer_substitution_rows(tmp, labels):
     with _patched(writer_settle_bound=lambda keys: 2):
         code_2, out_2, _err_2 = _write_exit(repo, head=freed_head)
     check("fail-closed/write-settle-bound", code_1 == 2 and out_1 == "" and "after 1 evaluation(s)" in err_1
-          and code_2 == 0 and _entries_text(out_2) == _entries_text(out),
-          (code_1, out_1, err_1, code_2, out_2))
+          and "commit an empty baseline first" in err_1 and code_2 == 0
+          and _entries_text(out_2) == _entries_text(out), (code_1, out_1, err_1, code_2, out_2))
+
+    # Main holds x.toml with the path lines of the document and of a note; the branch deletes both, adds
+    # the document holding the note's path line and the note holding the document's, and its baseline
+    # holds one entry for the document. Each proposal's own path line takes the move credit the other
+    # file's copy needs, so the evaluations of C' swap between two proposals to their bound: the writer
+    # refuses with nothing printed, and the message names the way out; with an empty baseline committed
+    # first, the writer settles on no entry.
+    note = "notes/" + fx + "8.toml"
+    note_line = 'path = "{}"'.format(note)
+    repo, base = _baseline_repo(tmp, "baseline-writer-swap")
+    _write(repo, "x.toml", path_line + "\n" + note_line + "\n")
+    _commit_all(repo, "two path lines on main, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "x.toml", "")
+    _write(repo, doc, note_line + "\n")
+    _write(repo, note, path_line + "\n")
+    _put_baseline(repo, base, {(doc, note_line.encode("utf-8"), "backlog-id"): 1})
+    _commit_all(repo, "each path line in the file the other names, one baseline entry")
+    code, out, err = _write_exit(repo)
+    _put_baseline(repo, base, {})
+    _commit_all(repo, "an empty baseline")
+    code_e, out_e, err_e = _write_exit(repo)
+    check("fail-closed/write-unsettled-swap-names-way-out", code == 2 and out == ""
+          and "still proposed other entries after" in err and "commit an empty baseline first" in err
+          and "remove the stale entries" in err and code_e == 0 and _proposed_entries(out_e, config) == {},
+          (code, out, err, code_e, out_e, err_e))
 
     # Main holds x.toml with the path line; the branch moves it to notes/a.toml and its baseline holds a
     # stale entry for the document. On B..C the stale path line comes first in diff order and takes the
@@ -3355,6 +3467,122 @@ def _baseline_writer_store_rows(tmp, labels):
         code_f, out_f, err_f = _write_exit(repo)
     check("flip/write-checkout-path-colon-raw", code_f == 2 and out_f == "" and "alternate" in err_f
           and "GIT_ALTERNATE_OBJECT_DIRECTORIES on" not in err_f, (code_f, out_f, err_f))
+    _baseline_writer_store_isolation_rows(tmp, la, added, config)
+
+
+@contextlib.contextmanager
+def _kept_store_directory(areas):
+    """A flip of _store_directory: the store created under TMPDIR's real path and never removed."""
+    yield tempfile.mkdtemp(prefix="review-label-writer-", dir=os.path.realpath(os.environ["TMPDIR"]))
+
+
+def _object_files(repo):
+    """{path below the fixture's .git/objects: modification time in nanoseconds} for every file there."""
+    objects = Path(repo) / ".git" / "objects"
+    return {os.path.relpath(os.path.join(top, name), objects): os.stat(os.path.join(top, name)).st_mtime_ns
+            for top, _dirs, files in os.walk(objects) for name in files}
+
+
+def _aged_objects(repo):
+    """Every object file of the fixture (loose objects, packs and their indexes) set to the modification
+    time 1000000000 (2001), and the times read back."""
+    objects = Path(repo) / ".git" / "objects"
+    for path in _object_files(repo):
+        os.utime(objects / path, (1000000000, 1000000000))
+    return _object_files(repo)
+
+
+def _repository_state(repo):
+    """(object file paths, refs, index bytes) of a fixture: what a writer run leaves as it is."""
+    return (sorted(_object_files(repo)), _fx_git(repo, "for-each-ref", "--format=%(refname) %(objectname)"),
+            (Path(repo) / ".git" / "index").read_bytes())
+
+
+def _baseline_writer_store_isolation_rows(tmp, la, added, config):
+    """The writer's temporary object store stays out of the repository and is removed: a writer run that
+    builds C' leaves the fixture's object files, refs and index as they were and no review-label-writer-*
+    directory in TMPDIR; it refreshes the modification time of no object file the repository already
+    holds, loose or packed; and a temporary directory inside another worktree of the same repository is
+    refused."""
+    # The branch adds one label line; TMPDIR is an empty directory outside the repository. The writer
+    # proposes its entry, and the object files, refs, index and TMPDIR are as they were. With the store's
+    # environment dropped, C''s blob and trees are written into the repository; with the store never
+    # removed, its directory stays in TMPDIR.
+    repo, _base = _baseline_repo(tmp, "baseline-writer-store-isolation")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "aa/A.py", la + "\n")
+    _commit_all(repo, "a label line")
+    parent = Path(tmp) / "baseline-writer-store-isolation-tmpdir"
+    os.mkdir(parent)
+    before = _repository_state(repo)
+    with _ambient_tmpdir(parent):
+        code, out, err = _write_exit(repo)
+    after, left = _repository_state(repo), os.listdir(parent)
+    check("write/store-leaves-repository-unchanged", code == 1 and _proposed_entries(out, config) == added
+          and after == before and left == [], (code, err, after[0], before[0], left))
+    with _ambient_tmpdir(parent), _patched(_store_env=lambda store: _git_env()):
+        code_f, out_f, err_f = _write_exit(repo)
+    created = sorted(set(_repository_state(repo)[0]) - set(before[0]))
+    check("flip/write-store-objects-in-repository", code_f == 1 and out_f == out and len(created) >= 3
+          and os.listdir(parent) == [], (code_f, err_f, created))
+    with _ambient_tmpdir(parent), _patched(_store_directory=_kept_store_directory):
+        code_f, out_f, err_f = _write_exit(repo)
+    kept = os.listdir(parent)
+    check("flip/write-store-not-removed", code_f == 1 and out_f == out and len(kept) == 1
+          and kept[0].startswith("review-label-writer-"), (code_f, err_f, kept))
+
+    # The writer's output committed on top of C, every object file set to an old time, a writer run on C
+    # again prints the same bytes and changes no object file's time, with the objects loose and again
+    # after git repack packs them; with each object written without first looking for it, git refreshes
+    # the time of the loose object files and of the pack instead of writing into the store.
+    repo, _base = _baseline_repo(tmp, "baseline-writer-store-times")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "aa/A.py", la + "\n")
+    head = _commit_all(repo, "a label line")
+    with _ambient_tmpdir(parent):
+        code, out, err = _write_exit(repo)
+        _write_bytes(repo, BASELINE_RELPATH, out.encode("ascii"))
+        _commit_all(repo, "the writer's baseline")
+        results, flipped = [], []
+        for packed in (False, True):
+            if packed:
+                _fx_git(repo, "repack", "-a", "-d", "-q")
+            aged = _aged_objects(repo)
+            code_r, out_r, _err_r = _write_exit(repo, head=head)
+            results.append((packed, code_r, out_r == out, _object_files(repo) == aged,
+                            any(name.endswith(".pack") for name in aged)))
+            aged = _aged_objects(repo)
+            with _patched(_store_has=lambda root, store, oid: False):
+                code_f, out_f, _err_f = _write_exit(repo, head=head)
+            flipped.append((packed, code_f, out_f == out,
+                            sorted(name for name, when in _object_files(repo).items() if when != aged[name])))
+    check("write/store-keeps-object-times", code == 1 and _proposed_entries(out, config) == added
+          and results == [(False, 1, True, True, False), (True, 1, True, True, True)], (code, err, results))
+    check("flip/write-store-refreshes-object-times", len(flipped) == 2
+          and all(code_f == 1 and same and changed for _packed, code_f, same, changed in flipped)
+          and any(name.endswith(".pack") for name in flipped[1][3]), flipped)
+
+    # A linked worktree of the same repository: the writer run there with TMPDIR inside the main worktree,
+    # and run in the main worktree with TMPDIR inside the linked one, is refused with nothing printed
+    # and no store created; with the worktree it runs in checked alone, the store is created inside the
+    # main worktree.
+    linked = Path(tmp) / "baseline-writer-store-linked"
+    _fx_git(repo, "worktree", "add", "-q", "-b", "linked", str(linked), head)
+    refused = []
+    for root, inside in ((linked, repo / "aa"), (repo, linked / "aa")):
+        seen = set()
+        with _ambient_tmpdir(inside), _patched(_store_git=_recorded_store_git(seen)):
+            refused.append(_write_exit(root, head=head) + (sorted(seen),))
+    check("fail-closed/write-tmpdir-in-other-worktree", all(
+        code_r == 2 and out_r == "" and "(TMPDIR) lies inside the repository" in err_r and not seen_r
+        for code_r, out_r, err_r, seen_r in refused), refused)
+    seen = set()
+    with _ambient_tmpdir(repo / "aa"), _patched(_repository_areas=_current_worktree_areas,
+                                                 _store_git=_recorded_store_git(seen)):
+        code_f, out_f, err_f = _write_exit(linked, head=head)
+    inside = os.path.realpath(repo / "aa") + os.sep
+    check("flip/write-tmpdir-other-worktree-unchecked", code_f == 1 and bool(seen)
+          and all(os.path.realpath(path).startswith(inside) for path in seen), (code_f, err_f, seen))
 
 
 def _baseline_writer_non_utf8_rows(tmp, la, added, config):
