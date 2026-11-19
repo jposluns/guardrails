@@ -4973,6 +4973,17 @@ expected-check-ids = [
   "provision/built-version-installs-nothing",
   "provision/installed-version-removes-install",
   "provision/existing-install-refuses",
+  # ---------- download retries and the shared download deadline ----------
+  "fetch/transient-errors-classified",
+  "fetch/other-errors-not-retried",
+  "fetch/deadline-stops-attempt-between-reads",
+  "retry/transient-then-success",
+  "retry/persistent-transient-exits-2",
+  "retry/digest-mismatch-not-retried",
+  "retry/non-transient-not-retried",
+  "retry/existing-destination-preserved",
+  "deadline/no-attempt-after-deadline",
+  "deadline/no-wait-past-deadline",
   # ---------- the CI entry ----------
   "env/missing-runner-temp-exits-2",
   "env/relative-github-path-exits-2",
