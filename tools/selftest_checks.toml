@@ -6842,6 +6842,12 @@ expected-check-ids = [
   "flip/write-own-line-judged-without-credit",
   "write/excluded-baseline-own-lines-not-judged",
   "flip/write-excluded-baseline-lines-judged",
+  # the writer's temporary object store: a temporary directory inside the repository and a checkout path
+  # holding ':' are refused
+  "fail-closed/write-tmpdir-inside-repository",
+  "flip/write-tmpdir-unchecked",
+  "fail-closed/write-checkout-path-colon",
+  "flip/write-checkout-path-colon-raw",
   # a cannot-evaluate message is escaped like a listing line
   "review/cannot-evaluate-message-escaped",
   "flip/cannot-evaluate-message-raw",

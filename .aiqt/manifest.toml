@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "e594aa69033153b82a1e3239d65fdb9d0fc01f7169ea40fe00e2d56dfd2232a2"
+tree-sha256 = "9fbda4fe7f0bc5d5353b93bcd7f08050c7ecd7bfe46cc2050bd4a99ef063f284"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4437,8 +4437,8 @@ sha256 = "62cba7c3a3a459fbd31a27c52bc7ab11a792bd52189db8ba826e27c0327fd55b"
 
 [[sources]]
 path = "tools/check_review_labels.py"
-bytes = 242824
-sha256 = "f635e03d329d833ab5b5082f500d6759c6a2d696b28141039bc459c52aefe22c"
+bytes = 249575
+sha256 = "7e320f855dd812e5ea8ea70f57f6c57aeca37a12b3e53b19a51fea089c765bf8"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
@@ -4747,8 +4747,8 @@ sha256 = "94ae6b7299f044b0ff2e66f48d99a6ecddff46250b48ebfc8d58c69d8087e7e5"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 286009
-sha256 = "31d331db72070fce57a1d489c412ca0b608fd16daee2d76693de7e0830acf63b"
+bytes = 286306
+sha256 = "eff47d0609d3e2d3a8814dc68929a72db600a9b2a11036a9bba31ab8ffca6716"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
