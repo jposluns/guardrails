@@ -1825,7 +1825,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 20
 end-line = 21
 canonical-text = "Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and\nintegrates them, and workers apply nothing themselves."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1835,7 +1835,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 20
 end-line = 21
 canonical-text = "Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and\nintegrates them, and workers apply nothing themselves."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1845,7 +1845,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 20
 end-line = 21
 canonical-text = "Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and\nintegrates them, and workers apply nothing themselves."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1855,7 +1855,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 20
 end-line = 21
 canonical-text = "Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and\nintegrates them, and workers apply nothing themselves."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1865,7 +1865,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 20
 end-line = 21
 canonical-text = "Workers produce research and candidate diffs as inert data; one orchestrator re-reads, verifies, and\nintegrates them, and workers apply nothing themselves."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1875,7 +1875,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 25
 end-line = 29
 canonical-text = "The\nsnapshot's OWN git operations change no working state (the ref is not a branch, HEAD, the index, or the\nworking tree, and is invisible to plain `git status`, `git branch`, and `git log`, though reachable via `git\nlog --all`, `git for-each-ref refs/aiqt-recovery`, and `git show-ref` as the real ref it is), so it keeps\nthe inert posture."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1885,7 +1885,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 29
 end-line = 35
 canonical-text = "To hold that posture the snapshot takes an allowlist stance, scrubbing every ambient\n`GIT_`-prefixed variable before each real-state call rather than enumerating a family, so an inherited\nenvironment cannot redirect the call to a decoy repository, inject configuration into it, redirect its\nattribute lookup, or (through an absolute `GIT_TRACE` path that git appends trace output to) make a\nread-only call write a trace file; the call re-applies only the few variables it sets itself after the\nscrub, and any it genuinely needed but scrubbed fails safe to a snapshot failure rather than a silent\nallow."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1895,7 +1895,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 29
 end-line = 35
 canonical-text = "To hold that posture the snapshot takes an allowlist stance, scrubbing every ambient\n`GIT_`-prefixed variable before each real-state call rather than enumerating a family, so an inherited\nenvironment cannot redirect the call to a decoy repository, inject configuration into it, redirect its\nattribute lookup, or (through an absolute `GIT_TRACE` path that git appends trace output to) make a\nread-only call write a trace file; the call re-applies only the few variables it sets itself after the\nscrub, and any it genuinely needed but scrubbed fails safe to a snapshot failure rather than a silent\nallow."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1905,7 +1905,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 29
 end-line = 35
 canonical-text = "To hold that posture the snapshot takes an allowlist stance, scrubbing every ambient\n`GIT_`-prefixed variable before each real-state call rather than enumerating a family, so an inherited\nenvironment cannot redirect the call to a decoy repository, inject configuration into it, redirect its\nattribute lookup, or (through an absolute `GIT_TRACE` path that git appends trace output to) make a\nread-only call write a trace file; the call re-applies only the few variables it sets itself after the\nscrub, and any it genuinely needed but scrubbed fails safe to a snapshot failure rather than a silent\nallow."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1915,7 +1915,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 42
 end-line = 44
 canonical-text = "The\nexception is limited to recovery snapshots written for the actor's own protection; it is not a general\nlicence to mutate repository metadata."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1925,7 +1925,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 46
 end-line = 46
 canonical-text = "Running code a worker returns is an apply step, not an inspection;"
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1935,7 +1935,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 46
 end-line = 48
 canonical-text = "this governs the orchestrator running a\ndeliverable it receives, not a worker running a candidate in its own scratch, which needs the same\nisolation as a disposable copy."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1945,7 +1945,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 48
 end-line = 50
 canonical-text = "A label, a claimed print-only purpose, or a check the deliverable carries\ndoes not show that its code changes nothing, so the orchestrator extracts, decodes, and prints a\ndeliverable with a reader it wrote or reviewed, never with code the deliverable supplies."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1955,7 +1955,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 50
 end-line = 51
 canonical-text = "That code runs,\nto evaluate it or to produce a candidate, only after a full reading and only in a disposable copy."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1965,7 +1965,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 51
 end-line = 53
 canonical-text = "A\ndisposable copy is an exported tree or a clone sharing no object storage (no hard links or alternates),\noutside every live checkout and never a linked worktree of the live repository;"
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1975,7 +1975,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 53
 end-line = 54
 canonical-text = "it shares nothing writable\nwith a live checkout, git metadata included, and has no remote it can push to."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1985,7 +1985,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 54
 end-line = 56
 canonical-text = "The code's working directory\nand every target it names are inside the copy, and no argument, path, or environment value it is given\nnames a live checkout;"
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -1995,7 +1995,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 56
 end-line = 56
 canonical-text = "a changed working directory alone is not that isolation."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -2005,7 +2005,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 56
 end-line = 57
 canonical-text = "That code's changes reach a\nlive checkout only through the orchestrator's own verified apply."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -2015,7 +2015,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 57
 end-line = 59
 canonical-text = "This is a rule on what the orchestrator\nruns and where, not OS containment: only the full reading checks a path the code builds at run time or\nconfiguration it inherits."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -2025,7 +2025,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 24
 end-line = 25
 canonical-text = "Narrow recovery-snapshot exception: a guard or hook that snapshots uncommitted work so a discard can be\nundone may write a private recovery ref under `refs/aiqt-recovery/` (and the objects it points to)."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -2035,7 +2035,7 @@ source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 61
 end-line = 64
 canonical-text = "A reader that splits a worker delivery into files at marker lines treats every line in its marker form as\ngrammar, so a marker it does not recognize or cannot handle is refused, naming the line, before any file is\nwritten, never kept as content of the file before it; real content holding such a marker is refused too,\nnever passed through."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
@@ -2043,29 +2043,29 @@ clause-id = "wowo01.23"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
 start-line = 64
-end-line = 65
-canonical-text = "The delivery must state a digest for each file it carries, and every extracted file\nis checked against it before any file is written."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+end-line = 66
+canonical-text = "A reader splitting a worker delivery requires it to state a digest for each file it\ncarries and checks every extracted file against its digest before any file is written, unless a digest\nopt-out is given for that delivery."
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
 clause-id = "wowo01.24"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 65
-end-line = 67
-canonical-text = "A delivery with no digest list, a file without a\ndigest, or a digest that does not match is refused, naming the file or the missing list, so no file of\nthat delivery is written."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+start-line = 66
+end-line = 69
+canonical-text = "Without a digest opt-out, a reader splitting a worker delivery refuses\nthe delivery if its digest list is missing, a file has no digest, a digest does not match, or the list\nnames a file the delivery does not carry, naming the file or the missing list, so no file of that delivery\nis written."
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]
 clause-id = "wowo01.25"
 corpus-id = "wowo01"
 source-path = ".aiqt/core/rules/integ-workers-produce-inert-data.md"
-start-line = 67
-end-line = 69
-canonical-text = "The only exception to that refusal is an explicit opt-out from these digest\nrequirements that the person running the extraction gives for that one delivery, and the reader then\nprints a warning naming what it does not check."
-source-digest = "e3780e14be8447e2df4fdbb256e79d7d3e80e233b75d5754f81f007c33f51f86"
+start-line = 69
+end-line = 71
+canonical-text = "A digest opt-out, given explicitly by the person running the extraction for one delivery, is\nthe only exception to a splitting reader's digest requirements and waives them as a whole; the reader then\nprints a warning naming what it does not check."
+source-digest = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 layer = "core"
 
 [[clause]]

@@ -636,13 +636,15 @@ configuration it inherits.
 A reader that splits a worker delivery into files at marker lines treats every line in its marker form as
 grammar, so a marker it does not recognize or cannot handle is refused, naming the line, before any file is
 written, never kept as content of the file before it; real content holding such a marker is refused too,
-never passed through. The delivery must state a digest for each file it carries, and every extracted file
-is checked against it before any file is written. A delivery with no digest list, a file without a
-digest, or a digest that does not match is refused, naming the file or the missing list, so no file of
-that delivery is written. The only exception to that refusal is an explicit opt-out from these digest
-requirements that the person running the extraction gives for that one delivery, and the reader then
-prints a warning naming what it does not check. Such a digest detects a splitting or transport fault, not
-unfaithful content.
+never passed through. A reader splitting a worker delivery requires it to state a digest for each file it
+carries and checks every extracted file against its digest before any file is written, unless a digest
+opt-out is given for that delivery. Without a digest opt-out, a reader splitting a worker delivery refuses
+the delivery if its digest list is missing, a file has no digest, a digest does not match, or the list
+names a file the delivery does not carry, naming the file or the missing list, so no file of that delivery
+is written. A digest opt-out, given explicitly by the person running the extraction for one delivery, is
+the only exception to a splitting reader's digest requirements and waives them as a whole; the reader then
+prints a warning naming what it does not check. A per-file digest detects a splitting or transport fault,
+not unfaithful content.
 
 ## Use absolute paths, not relative
 
