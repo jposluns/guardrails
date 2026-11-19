@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "e74bbf229c772f86c6ffb30f88d4fc3fac4194bae97a557e6f306b82c87ab9a3"
+tree-sha256 = "0e352749b9c96e71d9dc9ba7d3c10321713f718168b4238299f5b1d353d29753"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4482,8 +4482,8 @@ sha256 = "1062f2cdf038f39b3a88bb1a124c4e9d6bc58d89e5aa3b4b8855dadf04d8c447"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 320505
-sha256 = "caefdd04ff9520247e3aa0ae51b7b365cb033eb58557763b1290a2b5f71dc449"
+bytes = 320719
+sha256 = "ceb7f743e2dd6ef3861b8eeb62337bbc1ee320d672892e3f5929c1ce5ca0c73b"
 
 [[sources]]
 path = "tools/check_release_delta.py"
