@@ -31622,8 +31622,11 @@ def _citechk_as_written(command, cwd, parse, reason):
         return []
     unread = [("expanded <<{} here-document".format(_citechk_short(delim)), reason)
               for delim in _citechk_expanded_heredocs(command)]
+    # No lexing of the command is bash's here, so no cd in it is followed: where its text shows one (or a
+    # command that can run one) where a command can begin, the directory is not established (_CITECHK_RAW_DIR).
     return [{"cmd": kind, "parse": parse, "texts": [("command text", command)], "unread": unread,
-             "repo": cwd, "base": None}]
+             "repo": cwd, "base": None, "nodir": _CITECHK_RAW_DIR_WHY if _CITECHK_RAW_DIR.search(command) else None,
+             "where": None}]
 
 
 def _citechk_too_long(command, cwd):
@@ -31648,8 +31651,11 @@ def _citechk_commands(command, cwd, deadline):
     """The git commit and gh pr create or edit commands of a Bash command, each a dict: cmd (git-commit,
     gh-pr-create or gh-pr-edit), parse ("lexed"; "raw" where the command does not lex and its whole text is
     scanned as body text; or "both"), texts [(label, text)] in the order the command's options name them,
-    unread [(label, reason)], repo (the directory the command runs in, after a git -C; None without an
-    absolute session cwd), base (a gh --base value) and, where parse is "both", why (what the walk met, or
+    unread [(label, reason)], repo (the directory the command runs in, after the cd and pushd before it that
+    _citechk_dirs follows and a git -C; None without an absolute session cwd, or where that directory is not
+    established), nodir (why the directory is not established, else None: for a command scanned as written,
+    a cd or similar word in its text, _CITECHK_RAW_DIR), where (what moved it: a git -C or a cd), base (a gh
+    --base value) and, where parse is "both", why (what the walk met, or
     _CITECHK_LEXINGS_DIFFER). The command is lexed twice: as the walk reads a double-quoted string, which
     ends at its next unescaped double quote (nested=False), and as bash reads a command substitution or
     backquote in one, whose own quotes nest (nested=True); a command with no double quote is lexed once,
@@ -31827,6 +31833,156 @@ def _citechk_shape(segments, heredocs):
                for red in seg.redirects]) for seg in segments], heredocs)
 
 
+# The directory walk of the citation check (_citechk_dirs). A directory the walk cannot establish:
+_CITECHK_DIR_UNKNOWN = object()
+_CITECHK_CD_WORDS = frozenset(("cd", "pushd", "popd"))
+# Command words that can move the shell where the walk does not follow: eval, source and '.' run text it does
+# not lex, and builtin or command can run cd, pushd or popd.
+_CITECHK_DIR_OPAQUE = frozenset(("eval", "source", ".", "builtin", "command"))
+_CITECHK_LOOP_WORDS = frozenset(("for", "while", "until", "select"))
+_CITECHK_DIRS_MAX = 8  # the most directories a segment may run in that the walk keeps; past it, unknown
+_CITECHK_DIR_SPLIT = ("a cd or pushd before it may fail, or be skipped, with this command still run, so it may run "
+                      "in more than one directory")
+_CITECHK_DIR_LOOP = ("this command holds a loop or a function definition and a command that can change the "
+                     "directory, which this check does not follow across iterations or calls")
+# A command the check does not lex, or reads both ways, is scanned as written; where its text holds one of
+# these words where a command can begin, the directory its commit or pr command runs in is not established.
+# Only blanks and tabs are skipped after a mark: a newline is a mark itself, so a run of newlines is read in
+# linear time (with \s there, each newline of a run rescanned the rest of it, which grew with its square).
+_CITECHK_RAW_DIR = re.compile(r"(?:^|[;&|(){}\n`])[ \t]*(?:(?:if|then|else|elif|do|while|until|time|!)[ \t]+)*"
+                              r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()]*[ \t]+)*\\?"
+                              r"(?:cd|pushd|popd|eval|source|builtin|command|\.)"
+                              r"(?=[\s;&|)]|$)")
+_CITECHK_RAW_DIR_WHY = ("the command is scanned as written, and its text holds a cd, pushd, popd, eval, source, '.', "
+                        "builtin or command word where a command can begin")
+
+
+def _citechk_dir_step(seg, words, pipeline, run, context):
+    """What one segment does to the shell's working directory, for _citechk_dirs: (None, None) where it
+    leaves it, ("to", dirs) for a cd or pushd whose destination from each directory of run the walk
+    establishes (_gensrc_cd, where that change is certain), or ("unknown", reason) where it may change it
+    in a way the walk cannot follow. words is seg.argv; pipeline says the segment is a pipeline element or
+    ends in '&', which bash runs in a subshell, so a cd there moves nothing."""
+    k = 0
+    while k < len(words) and words[k] in _CITECHK_LEADING:
+        k += 1
+    pi = k + _command_word_index(words[k:])
+    if pi >= len(words):
+        return None, None
+    if seg.argv_opaque[pi]:
+        return (None, None) if pipeline else (
+            "unknown", "a command word this check cannot read (an expansion or a substitution) may change the "
+                       "directory")
+    name = words[pi]
+    if name in _CITECHK_DIR_OPAQUE:
+        if pipeline or (name in ("builtin", "command") and not _CITECHK_CD_WORDS.intersection(words[pi + 1:])):
+            return None, None
+        return "unknown", "{} may run a cd, pushd or popd this check does not read".format(name)
+    if name not in _CITECHK_CD_WORDS or pipeline:
+        return None, None  # a cd spelled with a path (/usr/bin/cd) runs as a program and moves no shell
+    if k:
+        return "unknown", "a {} inside a compound command (after {}) may or may not run".format(name, words[0])
+    if name == "popd":
+        return "unknown", "popd returns to a directory this check does not track"
+    dirs = []
+    for base in run:
+        if base is _CITECHK_DIR_UNKNOWN:
+            return "unknown", None
+        reach = _gensrc_cd(name, words[pi:], seg.argv_opaque[pi:], seg.argv_leading_tilde[pi:], base, context,
+                           [] if base is None else [base])
+        if len(reach) != 1 or reach[0] is None:
+            return "unknown", ("a {} whose destination this check cannot establish (no operand or more than one, "
+                               "'-', an expansion, a relative path with no absolute session cwd, CDPATH, a pushd "
+                               "option, -P or a '..' across a link)".format(name))
+        dirs.append(reach[0])
+    return "to", frozenset(dirs)
+
+
+def _citechk_dirs(segments, cwd):
+    """The directory each segment of one lexing runs in, as a generator, one (directory, reason) per segment
+    in order: directory cwd, or the one the cd and pushd segments before it establish (None with reason None
+    where that is cwd and cwd is None), or (None, reason) where the walk cannot establish one directory.
+    Bash's and-or lists are followed: after 'cd D &&' the next command runs in D, and a command reached
+    past a cd through ';', a newline, '||' or a later '||' or '&&' that a failed or skipped cd can reach may
+    run in either directory, so it is not established (_CITECHK_DIR_SPLIT). A cd in a pipeline element or
+    a command ending in '&' moves nothing; a subshell '(...)' or command substitution '$(...)' keeps its
+    changes inside; a list ending in '&' leaves the next one in the directory it began in. Not established
+    (each reason named): a cd or pushd whose destination _gensrc_cd does not find certain, popd, a cd after
+    a reserved word ({, if, then, while, ...), an opaque command word, eval, source, '.', builtin or command
+    running a cd, an unmatched ')', more than _CITECHK_DIRS_MAX possible directories, and every segment from
+    the first loop or function definition on, in a command that also holds a command that can change the
+    directory (_CITECHK_DIR_LOOP), since a later iteration or call can run such a segment elsewhere. An alias, a
+    function defined in an earlier call, or a cd in a sourced file is not seen."""
+    unknown = _CITECHK_DIR_UNKNOWN
+    def opens(argv):
+        # a loop (its keyword, or a do, among the reserved words that begin the segment) or a function definition
+        for word in argv:
+            if word in _CITECHK_LOOP_WORDS or word in ("do", "function"):
+                return True
+            if word not in _CITECHK_LEADING:
+                return False
+        return False
+    # A loop or function definition can run a segment again, or later, only from its own opener on, so the
+    # whole command is searched for a command that can change the directory once, at the first opener the
+    # walk reaches; a walk that stops before any opener (the generator is advanced only as far as a git or
+    # gh segment) searches nothing past it.
+    looped = None
+    run = list_start = frozenset((cwd,))
+    pass_s = pass_f = frozenset()  # directories a success or a failure carries past the next command
+    frames, why, prev, context = [], None, "", None
+    for seg in segments:
+        if looped is None and seg.argv and (opens(seg.argv) or (
+                len(seg.argv) == 1 and seg.sep_after == "(" and not seg.argv_opaque[0])):
+            looped = any(other.argv and (any(other.argv_opaque) or _CITECHK_CD_WORDS.intersection(other.argv)
+                                         or _CITECHK_DIR_OPAQUE.intersection(other.argv)) for other in segments)
+        if looped:
+            yield None, _CITECHK_DIR_LOOP
+            continue
+        if unknown in run:
+            yield None, why
+        elif len(run) > 1:
+            yield None, _CITECHK_DIR_SPLIT
+        else:
+            yield next(iter(run)), None
+        sep = seg.sep_after
+        pipeline = prev in ("|", "|&") or sep in ("|", "|&", "&")
+        if context is None and seg.argv and _CITECHK_CD_WORDS.intersection(seg.argv):
+            context = _gensrc_cd_context(segments)
+        kind, value = _citechk_dir_step(seg, seg.argv, pipeline, run, context) if seg.argv else (None, None)
+        if kind == "to":
+            done_s, done_f = value, run
+        elif kind == "unknown":
+            why = value or why
+            done_s = done_f = frozenset((unknown,))
+        else:
+            done_s = done_f = run
+        if sep == "&&":
+            run, pass_f, pass_s = done_s | pass_s, pass_f | done_f, frozenset()
+        elif sep == "||":
+            run, pass_s, pass_f = done_f | pass_f, pass_s | done_s, frozenset()
+        elif sep in ("|", "|&"):
+            pass
+        elif sep == "(":
+            frames.append((run, pass_s, pass_f, list_start))
+            pass_s = pass_f = frozenset()
+            list_start = run
+        elif sep == ")":
+            if not frames:
+                why = "an unmatched ')'"
+                run = list_start = frozenset((unknown,))
+            else:
+                run, pass_s, pass_f, list_start = frames.pop()
+        elif sep == "&":
+            run, pass_s, pass_f = list_start, frozenset(), frozenset()
+        else:  # ';', a newline or the end: the list is done, however it went
+            run = list_start = done_s | done_f | pass_s | pass_f
+            pass_s = pass_f = frozenset()
+        if len(run) > _CITECHK_DIRS_MAX:
+            why = "more than {} directories are possible".format(_CITECHK_DIRS_MAX)
+            run = frozenset((unknown,))
+        prev = sep
+
+
 def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True, scanned=True):
     """The git commit and gh pr create or edit commands of one lexing of a Bash command (segments and the
     heredocs _lex_command gave with them), each a dict as _citechk_commands describes, with parse, and with
@@ -31843,6 +31999,7 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True, scan
     for index, before, body in heredocs:
         stdin[index] = before, body
     out = []
+    walk, dirs = None, []  # the directory walk (_citechk_dirs), advanced only as far as a git or gh segment
     for index, seg in enumerate(segments):
         argv = seg.argv
         # A first word that is no reserved word and no assignment (it holds no '=') is the command word, so
@@ -31859,7 +32016,17 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True, scan
                 skip = 2 if argv[0] == "coproc" and len(argv) > 2 and argv[2] in _CITECHK_COMPOUND else 1
             argv = argv[skip:]
         at = _command_word_index(argv)
-        word, repo = _command_word(argv), cwd
+        word = _command_word(argv)
+        if word not in ("git", "gh"):
+            continue
+        # The directory the command runs in: the session cwd, or where the cd and pushd before it moved
+        # the shell; where the walk cannot establish one, repo is None and nodir says why.
+        if walk is None:
+            walk = _citechk_dirs(segments, cwd)
+        while len(dirs) <= index:
+            dirs.append(next(walk))
+        repo, nodir = dirs[index]
+        where = "the directory a cd before the command moves to"
         if word == "git":
             sub, args = _git_sub_and_args(argv)
             if sub != "commit":
@@ -31869,7 +32036,11 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True, scan
             while i < len(argv) and argv[i].startswith("-"):
                 if argv[i] == "-C" and i + 1 < len(argv):
                     target = argv[i + 1]
-                    repo = target if os.path.isabs(target) else (os.path.join(repo, target) if repo else None)
+                    where = "the git -C directory"
+                    if os.path.isabs(target):
+                        repo, nodir = target, None  # an absolute -C names the directory, wherever the shell is
+                    else:
+                        repo = os.path.join(repo, target) if repo else None
                 i += 2 if "=" not in argv[i] and argv[i] in _GIT_ARG_OPTS else 1
             options = _citechk_options(args, _CITECHK_GIT_SHORT, _CITECHK_GIT_OPTIONAL, _CITECHK_GIT_LONG)
         elif word == "gh":
@@ -31882,7 +32053,8 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True, scan
         else:
             continue
         inline_names, file_names = _CITECHK_SOURCES[kind]
-        item = {"cmd": kind, "parse": parse, "texts": [], "unread": [], "repo": repo, "base": None}
+        item = {"cmd": kind, "parse": parse, "texts": [], "unread": [], "repo": repo, "base": None,
+                "nodir": nodir, "where": where}
         here = stdin.get(index)
         if here is not None and any(red.src_fd == 0 and not _citechk_keeps_stdin(red)
                                     for red in seg.redirects[here[0]:]):
@@ -31923,7 +32095,9 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True, scan
                 label = "{} {}".format(name, _citechk_short(value))
                 if not os.path.isabs(value) and repo is None:
                     item["unread"].append((label, "it is relative and the session has no absolute cwd to "
-                                           "resolve it against"))
+                                           "resolve it against" if nodir is None else
+                                           "it is relative and the directory the command runs in is not "
+                                           "established ({})".format(nodir)))
                     continue
                 text, reason = _citechk_read_body(os.path.join(repo or "/", value), deadline)
                 if text is None:
@@ -32501,12 +32675,17 @@ def _citechk_run(data):
     for item in commands:
         item["results"], item["dropped"], item["diff"] = [], 0, "not-needed"
         item["root"], item["unresolved"] = root, []
-        if item["repo"] is not None and item["repo"] != cwd:
-            # A git -C directory and the session cwd are compared resolved (_citechk_real); where either is
-            # refused, for a bound or the deadline, each range of the command is named as not judged, with
-            # the reason for each one refused (both, where both are).
+        if item.get("nodir"):
+            # The directory the command runs in is not established (_citechk_dirs, _CITECHK_RAW_DIR): no
+            # repository top is known to resolve its citations against, so each range is named as not judged.
+            item["unresolved"].append("the directory this command runs in is not established ({})"
+                                      .format(item["nodir"]))
+        elif item["repo"] is not None and item["repo"] != cwd:
+            # A git -C directory, or one a cd before the command moved to, and the session cwd are compared
+            # resolved (_citechk_real); where either is refused, for a bound or the deadline, each range of
+            # the command is named as not judged, with the reason for each one refused (both, where both are).
             here, why_here = _citechk_real(cwd, "the session cwd", deadline)
-            there, why_there = _citechk_real(item["repo"], "the git -C directory", deadline)
+            there, why_there = _citechk_real(item["repo"], item.get("where") or "the git -C directory", deadline)
             for why in (why_here, why_there):
                 if why is not None and why not in item["unresolved"]:
                     item["unresolved"].append(why)
@@ -32576,6 +32755,10 @@ def _citechk_run(data):
                      "session at their current content:\n{}".format(len(flagged), considered, labels,
                                                                      "\n".join(lines)))
     for item in commands:
+        if item.get("nodir"):
+            parts.append("The {} was not judged: the directory its command runs in is not established ({}), so "
+                         "no citation in it was matched to a read and no message or body file it names by a "
+                         "relative path was read.".format(_CITECHK_LABELS[item["cmd"]], item["nodir"]))
         for label, reason in item["unread"]:
             parts.append("The {} {} was not read: {}.".format(_CITECHK_LABELS[item["cmd"]], label, reason))
     both = next((item["why"] for item in commands if item.get("why")), None)  # one Bash command, one reason
@@ -32625,7 +32808,8 @@ def _citechk_run(data):
     transcript = data.get("transcript_path")
     failure = ""
     for item in commands:
-        warn = bool(item["unread"]) or any(r["class"] in _CITECHK_FLAGGED for r in item["results"]) \
+        warn = bool(item["unread"]) or bool(item.get("nodir")) \
+            or any(r["class"] in _CITECHK_FLAGGED for r in item["results"]) \
             or (ledger_faulty and any(r["class"] != "exempt-verifier" for r in item["results"])) \
             or item["over_cap"] > 0
         detail = {"v": 1, "control": "citation-read-check", "cmd": item["cmd"], "parse": item["parse"],
@@ -32638,6 +32822,7 @@ def _citechk_run(data):
                   "masked": item["counts"],
                   "sources": [label for label, _text in item["texts"]],
                   "sources_unread": ["{}: {}".format(label, reason) for label, reason in item["unread"]],
+                  "directory_unknown": item.get("nodir"),
                   "diff": item["diff"], "transcript": transcript if isinstance(transcript, str) else None}
         if warn:
             failure = _orch_event_warn(root, "citint", "warn", detail) or failure
@@ -32685,10 +32870,16 @@ def citation_read_check(data):
     would resolve that is longer than _CITE_MAX_PATH characters, or whose resolution would follow more than
     _CITE_MAX_LINKS symlinks or meets a symlink loop) are each named in the note, never a silent clean. Any
     fault inside the check is caught and named in a note, so during the bake no path of this handler
-    blocks; the dispatcher's own PreToolUse error paths (an unreadable payload, a bad invocation, an
-    interpreter below the floor, a handler result that is not an exit code of 0 or 2 with a str or None
-    stderr text, a check that has not decided within PRETOOL_BUDGET_SECONDS, and a decision that cannot be
-    written to stdout) still exit 2 as for every PreToolUse mode. _CITECHK_BUDGET is below
+    blocks; HANDLER_EVENT classes it PRETOOL, not PRETOOL_WARN_ONLY and not in NOTE_ONLY_PRETOOL_MODES, so
+    main()'s own PreToolUse error paths still exit 2, as for every PreToolUse mode outside those two
+    fail-open classes: child exit status unobservable (_child_status_refusal: SIGCHLD inherited as
+    ignored or not at its default disposition, or a probe child that cannot be forked or read back),
+    checked before the payload read, a bad invocation, an unreadable payload, an interpreter below the
+    floor, a handler result that is not an exit code of 0 or 2 with a str or None stderr text, a check
+    that has not decided within PRETOOL_BUDGET_SECONDS, any other error out of the deadline window (an
+    ItimerError, or a caller's alarm handler raising), and a decision that cannot be written to stdout. A
+    command whose directory the walk cannot establish (_citechk_dirs) is named as not judged.
+    _CITECHK_BUDGET is below
     PRETOOL_BUDGET_SECONDS, so the check's own budget, counted from the handler's start, ends before the
     dispatcher's deadline unless the payload read and parse take the difference or more (a step already
     under way when the budget ends still finishes first)."""

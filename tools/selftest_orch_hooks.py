@@ -8659,6 +8659,85 @@ def _citecheck_suffix_cases(tmp):
           ("allow", [("sub/z.py:1", "covered")], True))
 
 
+def _citecheck_cd_cases(tmp):
+    """A cd or pushd before a git commit or gh pr command moves the directory its message and body files are
+    read from: the check follows each change it can establish (_citechk_dirs) and, where it cannot establish
+    one directory, names the command as not judged in the note and in a warn row, and never reads the file
+    of that name in the session cwd instead. Repository r holds tools/a.py, a msg.txt that cites nothing
+    and a sub/msg.txt that cites tools/a.py:1, and the reverse pair, a msg2.txt citing tools/a.py:2 and a
+    sub/msg2.txt citing nothing; nothing is read this session. git -C sub is the control: it reads sub's
+    file, as cd sub &&, pushd sub &&, a cd to sub's absolute path, a cd inside a subshell for the command in
+    it and gh pr create after cd sub && do, while the root's files are read with no cd and after a
+    subshell's cd. A cd that a ';' or a '||' can skip, a destination it cannot establish (an expansion), a
+    cd in a loop and a command scanned as written whose text holds a cd are each named as not judged, a
+    citation in a -m value then unjudged; an absolute git -C names the directory whatever cd came before."""
+    repo = _CiteRepo(tmp / "citecheck-cd", {"tools/a.py": b"a1\na2\n", "msg.txt": b"plain message\n",
+                                            "sub/msg.txt": b"see tools/a.py:1\n", "msg2.txt": b"see tools/a.py:2\n",
+                                            "sub/msg2.txt": b"plain message\n"})
+    sub = str(repo.root / "sub")
+
+    def seen(command):
+        """The verdict, each citation's class, each row's sources and directory_unknown, and whether the note
+        names the command as not judged for its directory."""
+        verdict, note, rows = _citecheck_run(repo.root, command, "cd")
+        return (verdict, [(c["cite"], c["class"]) for r in rows for c in r["detail"]["citations"]],
+                [r["detail"]["sources"] for r in rows], [r["detail"].get("directory_unknown") for r in rows],
+                "was not judged: the directory its command runs in is not established" in note)
+    unread_sub = ("warn", [("tools/a.py:1", "unread")], [["-F msg.txt"]], [None], False)
+    check("citeledger/cd-moves-message-file",
+          {command: seen(command) for command in (
+              "git -C sub commit --allow-empty -F msg.txt", "cd sub && git commit --allow-empty -F msg.txt",
+              "pushd sub && git commit -F msg.txt", "cd {} && git commit -F msg.txt".format(sub),
+              "(cd sub && git commit -F msg.txt)", "cd sub && gh pr create --title t --body-file msg.txt")},
+          {"git -C sub commit --allow-empty -F msg.txt": unread_sub,
+           "cd sub && git commit --allow-empty -F msg.txt": unread_sub,
+           "pushd sub && git commit -F msg.txt": unread_sub,
+           "cd {} && git commit -F msg.txt".format(sub): unread_sub,
+           "(cd sub && git commit -F msg.txt)": unread_sub,
+           "cd sub && gh pr create --title t --body-file msg.txt":
+               ("warn", [("tools/a.py:1", "unread")], [["--body-file msg.txt"]], [None], False)})
+    check("citeledger/cd-root-file-control",
+          {command: seen(command) for command in (
+              "git commit -F msg.txt", "(cd sub); git commit -F msg.txt", "git commit -F msg2.txt",
+              "cd sub && git commit -F msg2.txt")},
+          {"git commit -F msg.txt": ("allow", [], [["-F msg.txt"]], [None], False),
+           "(cd sub); git commit -F msg.txt": ("allow", [], [["-F msg.txt"]], [None], False),
+           "git commit -F msg2.txt": ("warn", [("tools/a.py:2", "unread")], [["-F msg2.txt"]], [None], False),
+           "cd sub && git commit -F msg2.txt": ("allow", [], [["-F msg2.txt"]], [None], False)})
+    split = getattr(aiqt_hooks, "_CITECHK_DIR_SPLIT", "absent")
+    loop = getattr(aiqt_hooks, "_CITECHK_DIR_LOOP", "absent")
+    raw = getattr(aiqt_hooks, "_CITECHK_RAW_DIR_WHY", "absent")
+    opaque = ("a cd whose destination this check cannot establish (no operand or more than one, '-', an "
+              "expansion, a relative path with no absolute session cwd, CDPATH, a pushd option, -P or a '..' "
+              "across a link)")
+    split_cmd = "git commit -F msg.txt <<E\\\nOF\nx\nEOF\n"
+    check("citeledger/cd-not-established",
+          {command: seen(command) for command in (
+              "cd sub; git commit -F msg.txt", "true || cd sub && git commit -F msg.txt",
+              "cd sub; git commit -m 'see tools/a.py:1'", "cd \"$D\" && git commit -F msg.txt",
+              "for x in 1; do git commit -F msg.txt; cd sub; done", "cd sub && " + split_cmd,
+              "cd \"$D\" && git -C {} commit -F msg.txt".format(sub))},
+          {"cd sub; git commit -F msg.txt": ("warn", [], [[]], [split], True),
+           "true || cd sub && git commit -F msg.txt": ("warn", [], [[]], [split], True),
+           "cd sub; git commit -m 'see tools/a.py:1'":
+               ("warn", [("tools/a.py:1", "unjudged")], [["-m value"]], [split], True),
+           "cd \"$D\" && git commit -F msg.txt": ("warn", [], [[]], [opaque], True),
+           "for x in 1; do git commit -F msg.txt; cd sub; done": ("warn", [], [[]], [loop], True),
+           "cd sub && " + split_cmd: ("warn", [], [["command text"]], [raw], True),
+           "cd \"$D\" && git -C {} commit -F msg.txt".format(sub): unread_sub})
+    # The search for a cd word in a command scanned as written reads a run of newlines in linear time: with
+    # \s after each mark, a run of 16,000 newlines took tens of seconds (each newline rescanned the rest of
+    # the run); the search, given 16,000 newlines and then 1 MiB of them, must take under a second each.
+    pattern = getattr(aiqt_hooks, "_CITECHK_RAW_DIR", None)
+    taken = []
+    for count in (16000, 1 << 20):
+        text = "git commit -m x <<E\\\nOF\n" + "\n" * count
+        began = time.perf_counter()
+        found = None if pattern is None else pattern.search(text)
+        taken.append((pattern is not None, found is None, time.perf_counter() - began < 1.0))
+    check("citeledger/cd-raw-scan-linear", taken, [(True, True, True), (True, True, True)])
+
+
 class _CiteCutPattern:
     """Stands in for a compiled pattern of aiqt_hooks: match() is the pattern's own, and its cut-th call moves
     the stand-in clock set as clock on, so a scan that matches the pattern once per line reaches the
@@ -24356,6 +24435,7 @@ def _main_isolated(report_path=None):
             _citecheck_path_cases(tmp)
             _citecheck_cross_cases(tmp)
             _citecheck_suffix_cases(tmp)
+            _citecheck_cd_cases(tmp)
             _citeledger_walk_cases(tmp)
             _citecheck_step_cases(tmp)
             _citecheck_split_oracle_cases(tmp)
