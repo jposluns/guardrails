@@ -44577,18 +44577,24 @@ def _read_hook_input(stream):
     into a lone surrogate. Here valid UTF-8 decodes to its characters and each byte that is not valid UTF-8
     becomes one lone surrogate (U+DC80 to U+DCFF), which json.loads keeps inside a string, so it reaches the
     handler's own validation; malformed JSON, a non-object payload and a failed read still reach main()'s
-    unreadable-payload path and its mode's posture. Line ends are translated as the text stream translated
-    them (a CRLF or a lone CR reads as LF). A stream with no binary buffer (an already-decoded stream, such
-    as the io.StringIO and fault-injecting readers the self-tests install) is read with its own read(). The
+    unreadable-payload path and its mode's posture. Line ends are not translated: a CRLF or a lone CR
+    reaches json.loads unchanged, as it did through the text stream this replaces, which on POSIX does
+    not translate line ends either. A stream with no binary buffer (an already-decoded stream, such as the
+    io.StringIO and fault-injecting readers the self-tests install) is read with its own read(). The
     payload is read once: a failed binary read propagates, never falling back to a second read through the
-    text layer, which would see a drained or half-read stream. This is the stdin decoding only: the strict
-    UTF-8 readers of files, registries and records elsewhere in this module are unchanged, and a later
-    filesystem, child-process or output encoding can still depend on the locale."""
+    text layer, which would see a drained or half-read stream. A binary read that returns None (a
+    non-blocking standard input with no data ready) is a failed read too and raises BlockingIOError naming
+    it. This is the stdin decoding only: the strict UTF-8 readers of files, registries and records
+    elsewhere in this module are unchanged, and a later filesystem, child-process or output encoding can
+    still depend on the locale."""
     buffer = getattr(stream, "buffer", None)
     if buffer is None:
         return stream.read()
-    text = buffer.read().decode("utf-8", "surrogateescape")
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    data = buffer.read()
+    if data is None:
+        raise BlockingIOError("standard input is non-blocking and had no data ready (its read "
+                              "returned None), so no hook payload was read")
+    return data.decode("utf-8", "surrogateescape")
 
 
 def main(argv):

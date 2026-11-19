@@ -1819,6 +1819,9 @@ def _test_stream_failure_exits(failures):
 # covered where the host has it.
 _STDIN_REQUIRED_LOCALES = ("C", "en_US.UTF-8")
 _STDIN_OPTIONAL_LOCALES = ("C.UTF-8",)
+# The locales the same rows also run under with the shipped command line (python3 -I, no -X option), where
+# the interpreter turns UTF-8 mode on; both are required.
+_STDIN_SHIPPED_LOCALES = ("C", "POSIX")
 # One child per locale names what that locale gives the interpreter: whether the C library accepts it,
 # its codeset, and the standard input's encoding and error handler, so a missing locale (which the C
 # library replaces with C without a word) is never read as evaluated coverage.
@@ -1904,7 +1907,12 @@ def _test_stdin_locale_decoding(failures, tmp):
     every locale. Each child runs the LIVE hook file under [sys.executable, "-I", "-B", "-X", "utf8=0"]
     (isolated, and with UTF-8 mode off, so the interpreter's own UTF-8 mode cannot mask a locale-encoded
     read) with LC_ALL set to C, to en_US.UTF-8 and, where the host has it, to C.UTF-8, sends real bytes on
-    its standard input and asserts the exit status, the parsed decision and the diagnostic category.
+    its standard input and asserts the exit status, the parsed decision and the diagnostic category. The
+    same rows run again under the shipped command line, [sys.executable, "-I", "-B"] with no -X option
+    (the hooks.json command is python3 -I; -B only stops bytecode writes), with LC_ALL set to C and to
+    POSIX, where the interpreter turns UTF-8 mode on; their labels start stdin-loc-shipped-, and their
+    probe must report UTF-8 mode 1 and a utf-8/surrogateescape standard input, or the rows under that
+    locale are reported as unevaluated coverage, a failure.
 
     A raw 0xff inside an otherwise valid JSON string, first in a field no handler reads and then in the
     consumed path, command or message, must give the same decision as an ASCII fixture carrying the
@@ -1912,17 +1920,21 @@ def _test_stdin_locale_decoding(failures, tmp):
     valid non-ASCII UTF-8 and truncated and overlong sequences must match their escaped equivalents too;
     an invalid byte outside a string, empty input, malformed JSON, non-object JSON and a payload that
     starts with a UTF-8 byte order mark keep each mode's error posture (fail-closed exit 2, fail-open warn
-    on exit 0); CRLF and lone-CR line ends between JSON tokens decide as LF does (the CR translation does
-    not change that decision; _test_stdin_read_once pins the translation). Every registered mode is then run on a controlled fixture holding a raw 0xff
-    in an ignored field, which must decide as its escaped twin does and never as an unreadable payload.
+    on exit 0); CRLF and lone-CR line ends between JSON tokens decide as LF does (no line end is
+    translated, and translating one would not change that decision; _test_stdin_read_once pins that line
+    ends come through unchanged). Every registered mode is then run on a controlled fixture holding a raw
+    0xff in an ignored field, which must decide as its escaped twin does and never as an unreadable
+    payload.
 
     These vectors fail on the locale-encoded reader (sys.stdin.read()): under en_US.UTF-8 a raw 0xff
     raised UnicodeDecodeError, so a fail-closed mode exited 2 on an unreadable payload and a fail-open one
-    warned, where the C locale judged the same payload; and under C with UTF-8 mode off, as these
-    children run (the shipped command line leaves it on under C), the ASCII codec turned valid UTF-8
-    into surrogates, so the deny reason echoing a non-ASCII path differed from its escaped twin. A
-    required locale the host lacks is reported as unevaluated coverage, a failure; a missing C.UTF-8 is
-    reported as unevaluated and skipped."""
+    warned, where the C locale judged the same payload; and under C with UTF-8 mode off, as the utf8=0
+    children run, the ASCII codec turned valid UTF-8 into surrogates, so the deny reason echoing a
+    non-ASCII path differed from its escaped twin. The stdin-loc-shipped- rows pass on that reader: under
+    the shipped command line the C and POSIX locales read standard input as utf-8 with surrogateescape,
+    as this reader does. They pin that the shipped configuration decides as the utf8=0 rows do, and fail
+    on a reader whose decoding depends on UTF-8 mode. A required locale the host lacks is reported as
+    unevaluated coverage, a failure; a missing C.UTF-8 is reported as unevaluated and skipped."""
     hook = os.path.abspath(aiqt_hooks.__file__)
     home = tmp / "stdin-locale-home"
     cwd = tmp / "stdin-locale-cwd"
@@ -1942,11 +1954,15 @@ def _test_stdin_locale_decoding(failures, tmp):
             failures.append("(" + label + ") could not run the child: " + repr(exc))
             return None
 
+    # (tag, LC_ALL, interpreter options before the hook, UTF-8 mode the probe must report, required)
+    configs = [(name, name, ["-X", "utf8=0"], "0", name in _STDIN_REQUIRED_LOCALES)
+               for name in _STDIN_REQUIRED_LOCALES + _STDIN_OPTIONAL_LOCALES]
+    configs += [("shipped-" + name, name, [], "1", True) for name in _STDIN_SHIPPED_LOCALES]
     locales = []
-    for name in _STDIN_REQUIRED_LOCALES + _STDIN_OPTIONAL_LOCALES:
+    for tag, name, flags, want_mode, required in configs:
         env = dict(base_env, LC_ALL=name)
-        label = "stdin-loc-probe-" + name
-        proc = run(label, [sys.executable, "-I", "-B", "-X", "utf8=0", "-c", _STDIN_LOCALE_PROBE], b"", env)
+        label = "stdin-loc-probe-" + tag
+        proc = run(label, [sys.executable, "-I", "-B"] + flags + ["-c", _STDIN_LOCALE_PROBE], b"", env)
         if proc is None:
             continue
         words = proc.stdout.decode("utf-8", "replace").split()
@@ -1956,19 +1972,24 @@ def _test_stdin_locale_decoding(failures, tmp):
             reason = "the probe exited {} with {!r}".format(proc.returncode, proc.stdout + proc.stderr)
         elif words[0] != "available":
             reason = "the C library refused it ({})".format(" ".join(words[1:]))
-        elif len(words) != 5 or words[4] != "0":
-            reason = "the probe reported {!r}, not UTF-8 mode 0".format(" ".join(words))
+        elif len(words) != 5 or words[4] != want_mode:
+            reason = "the probe reported {!r}, not UTF-8 mode {}".format(" ".join(words), want_mode)
         elif utf8_name and words[1].upper().replace("-", "") != "UTF8":
             reason = "its codeset is {}, not UTF-8".format(words[1])
+        elif want_mode == "1" and (words[2].lower().replace("-", "") != "utf8"
+                                   or words[3] != "surrogateescape"):
+            reason = "its standard input is {}/{}, not utf-8/surrogateescape".format(words[2], words[3])
         if reason is not None:
-            note = ("(stdin-loc-unevaluated-{}) LC_ALL={} is not usable on this host ({}), so the stdin "
-                    "decoding rows under it are unevaluated".format(name, name, reason))
-            if name in _STDIN_REQUIRED_LOCALES:
+            note = ("(stdin-loc-unevaluated-{}) LC_ALL={} under {} is not usable on this host ({}), so the "
+                    "stdin decoding rows under it are unevaluated".format(
+                        tag, name, " ".join(["python3", "-I"] + flags), reason))
+            if required:
                 failures.append(note)
             else:
                 print(note)
             continue
-        locales.append((name, env, "codeset {}, stdin {}/{}".format(words[1], words[2], words[3])))
+        locales.append((tag, name, flags, env, "{}, codeset {}, stdin {}/{}, UTF-8 mode {}".format(
+            " ".join(["-I"] + flags), words[1], words[2], words[3], words[4])))
 
     deny_obj = dict(hook_event_name="PreToolUse", tool_name="Write", tool_input=dict(file_path="relative.txt"))
     allow_obj = dict(hook_event_name="PreToolUse", tool_name="Read", tool_input=dict(file_path="/abs/x.txt"))
@@ -2067,18 +2088,19 @@ def _test_stdin_locale_decoding(failures, tmp):
         ("fo-nonobject", "diff_wall_stop", b"[\"\xff\"]", 0, None, "payload is not a JSON object"),
     ]
     # These rows pin that CRLF and lone-CR line ends between JSON tokens still parse and decide as LF does.
-    # They do not pin the CR translation itself: strict json.loads reads a CR between tokens as whitespace
-    # and refuses a raw CR or LF inside a string alike, so the translation does not change any decision,
-    # and these rows pass with it or without it. The stdin-once-line-ends row pins the translation.
+    # They cannot pin whether a line end is translated: strict json.loads reads a CR between tokens as
+    # whitespace and refuses a raw CR or LF inside a string alike, so translating would change no decision,
+    # and these rows pass either way. The stdin-once-line-ends row pins that line ends come through
+    # unchanged.
     line_ends = [
         ("deny-crlf", "absolute_paths", deny_text.replace(b"\n", b"\r\n")),
         ("deny-lone-cr", "absolute_paths", deny_text.replace(b"\n", b"\r")),
     ]
     modes = sorted(aiqt_hooks.HANDLERS)
 
-    for name, env, effective in locales:
-        argv_head = [sys.executable, "-I", "-B", "-X", "utf8=0", hook]
-        where = " under LC_ALL={} ({})".format(name, effective)
+    for name, lc_all, flags, env, effective in locales:
+        argv_head = [sys.executable, "-I", "-B"] + flags + [hook]
+        where = " under LC_ALL={} ({})".format(lc_all, effective)
         for label, mode, obj, raw, escaped, kind in paired:
             row = "stdin-loc-" + name + "-" + label
             raw_payload, escaped_payload = _stdin_fixture(obj, raw, escaped)
@@ -2140,7 +2162,8 @@ def _test_stdin_locale_decoding(failures, tmp):
                 failures.append("({}) a raw 0xff in an ignored field decided {!r}, its \\u-escaped twin "
                                 "{!r}{}".format(row, got_outcome, want_outcome, where))
     print("(stdin-loc) hook stdin decoding evaluated under: " + (
-        "; ".join("LC_ALL={} ({})".format(name, effective) for name, _env, effective in locales) or "none"))
+        "; ".join("LC_ALL={} ({})".format(lc_all, effective)
+                  for _tag, lc_all, _flags, _env, effective in locales) or "none"))
 
 
 # (stdin-once-*) The payload a stand-in stdin's own text read() returns: allow-shaped, so a reader that
@@ -2179,14 +2202,22 @@ def _test_stdin_read_once(failures):
     status, the diagnostic and that the only read was one buffer.read: a buffer.read that raises EIO fails
     a fail-closed mode with exit 2 and warns on exit 0 for a fail-open one; a buffer.read that returns a
     0xff the decoder must surrogate-escape, outside a JSON string, fails as unreadable JSON, and inside a
-    string reaches the handler, which denies the relative path. Every row fails on a reader that falls
-    back to the stream's own read() (a fallback after a raising binary read, or after a strict decode that
-    refuses the 0xff): that read is a second call, and its allow-shaped payload is allowed.
+    string reaches the handler, which denies the relative path; a buffer.read that returns None (a
+    non-blocking standard input with no data ready) is a read failure named as BlockingIOError, exit 2
+    for a fail-closed mode and a warning on exit 0 for a fail-open one.
 
-    The stdin-once-line-ends row calls _read_hook_input directly and pins the CR translation: CRLF and a
-    lone CR read as LF, as the text stream read them. The translation does not change any decision (strict
-    json.loads reads a CR between tokens as whitespace and refuses a raw CR or LF inside a string alike),
-    so no decision row can pin it; this row fails on a reader that drops it."""
+    Each fallback shape fails its own rows, not every row: that fallback read is a second call, and its
+    allow-shaped payload is allowed. A reader that falls back to the stream's own read() after a raising
+    binary read fails the two raise-* rows only. A reader that falls back after a strict decode that
+    refuses the 0xff fails the two escape-* rows and the line-ends row only. The two none-* rows fail on a
+    reader that lets the None reach the decoder (its note names AttributeError instead), and on one that
+    falls back on a None read.
+
+    The stdin-once-line-ends row calls _read_hook_input directly and pins that line ends are not
+    translated: a CRLF and a lone CR come through unchanged, as the text stream this replaced gave them on
+    POSIX. No decision row can pin that (strict json.loads reads a CR between tokens as whitespace and
+    refuses a raw CR or LF inside a string alike, so translating would change no decision); this row
+    fails on a reader that translates a CRLF or a lone CR to LF."""
     deny_bytes = json.dumps(dict(hook_event_name="PreToolUse", tool_name="Write",
                                  tool_input=dict(file_path="relative.txt"))).encode("ascii")
     eio = OSError(errno.EIO, "injected EIO")
@@ -2198,6 +2229,10 @@ def _test_stdin_read_once(failures):
          "unreadable hook payload (JSONDecodeError", None),
         ("escape-in-string", "absolute_paths", deny_bytes.replace(b"relative", b"rel\xffative"), 0, None,
          '"permissionDecision": "deny"'),
+        ("none-fail-closed", "absolute_paths", None, 2,
+         "unreadable hook payload (BlockingIOError: standard input is non-blocking", None),
+        ("none-fail-open", "diff_wall_stop", None, 0, None,
+         "unreadable payload: BlockingIOError: standard input is non-blocking"),
     ]
     for label, mode, result, want_rc, err_needle, out_needle in rows:
         row = "stdin-once-" + label
@@ -2226,9 +2261,9 @@ def _test_stdin_read_once(failures):
     except Exception as exc:
         failures.append("(stdin-once-line-ends-raised) _read_hook_input raised {!r}".format(exc))
     else:
-        if text != "a\nb\nc\nd\udcff\n\n" or stream.calls != ["buffer.read"]:
-            failures.append("(stdin-once-line-ends) expected 'a\\nb\\nc\\nd\\udcff\\n\\n' from one "
-                            "buffer.read, got {!r} from {!r}".format(text, stream.calls))
+        if text != "a\r\nb\rc\nd\udcff\r\r\n" or stream.calls != ["buffer.read"]:
+            failures.append("(stdin-once-line-ends) expected 'a\\r\\nb\\rc\\nd\\udcff\\r\\r\\n', line ends "
+                            "unchanged, from one buffer.read, got {!r} from {!r}".format(text, stream.calls))
 
 
 def _test_note_shape_pins(failures, tmp):
