@@ -8065,16 +8065,66 @@ def self_test(report_path=None):
                                   for paragraph in d1_paragraphs(text) for _, clauses in d1_sentences(paragraph)
                                   for clause, answer in zip(clauses, d1_listed(clauses))))
 
+    class D1ReadsExceeded(Exception):
+        """Raised by D1CountedClauses once the clause reads pass the tally's limit."""
+
+    class D1CountedClauses(list):
+        """A sentence's clauses that add one to tally[0] for each clause read, by index or by iteration, and raise
+        D1ReadsExceeded once tally[0] passes tally[1]."""
+
+        def __init__(self, clauses, tally):
+            list.__init__(self, clauses)
+            self.tally = tally
+
+        def tally_read(self):
+            self.tally[0] += 1
+            if self.tally[0] > self.tally[1]:
+                raise D1ReadsExceeded(self.tally[1])
+
+        def __getitem__(self, key):
+            self.tally_read()
+            return list.__getitem__(self, key)
+
+        def __iter__(self):
+            for clause in list.__iter__(self):
+                self.tally_read()
+                yield clause
+
+    def d1_text_reads(text, limit=float("inf")):
+        """(clause reads, D1 lines) of rule_d1 on `text`; D1ReadsExceeded once the reads pass `limit`."""
+        tally = [0, limit]
+        with _patched(d1_sentences=lambda paragraph, real=d1_sentences: [
+                (sentence, D1CountedClauses(clauses, tally)) for sentence, clauses in real(paragraph)]):
+            lines = [line for _, _, line, _, _ in rule_d1(text)]
+        return tally[0], lines
+
+    def d1_timed_reads(texts):
+        """"linear" when rule_d1's clause reads on the larger of the two timed `texts` are within D1_GROWTH_SLACK
+        times the size ratio of those on the smaller and both are quiet, else "superlinear" (or "warned") with the
+        counts. Counting stops at that bound, so a rescan fails here in bounded time whatever the host's load."""
+        small, small_lines = d1_text_reads(texts[0])
+        bound = D1_GROWTH_SLACK * small * linear_sizes[1] // linear_sizes[0]
+        try:
+            large, large_lines = d1_text_reads(texts[1], bound)
+        except D1ReadsExceeded:
+            return "superlinear ({} clause reads at 8 KiB, over {} at 64 KiB)".format(small, bound)
+        if small_lines or large_lines:
+            return "warned ({!r} at 8 KiB, {!r} at 64 KiB)".format(small_lines, large_lines)
+        return "linear"
+
     d1_prefix, d1_tail = D1_GROWTH_TEXT.split("{}")
     d1_pad = (linear_sizes[0] - len(linear_lead) - len(d1_prefix) - len(d1_tail)) % len(D1_GROWTH_ITEM)
     d1_suffix = " " * d1_pad + d1_tail
+    d1_timed_texts = linear_texts(D1_GROWTH_ITEM, d1_prefix, d1_suffix)
     d1_listed_answers = [(None, ("input", "notes"), False), (None, ("if", "denied"), True),
                          (",", ("rather", "than", "retry"), True), (",", ("retry",), True),
                          ("or", ("run", "it", "inline"), False), (",", ("report", "the", "refusal"), False)]
+    # the counted reads on the timed briefs discriminate deterministically; the timing beside them is the end-to-end
+    # bound every perf row shares (with the rescan restored it measured near its 16x bound, so it can pass alone)
     check("perf/d1-fronted-list-linear", (
         all(line in LINEAR_CHILD for line in linear_builder),
-        [d1_list_answers(text) for text in linear_texts(D1_GROWTH_ITEM, d1_prefix, d1_suffix)],
-        _linear(D1_GROWTH_ITEM, d1_prefix, d1_suffix)), (True, [d1_listed_answers] * len(linear_sizes), True))
+        [d1_list_answers(text) for text in d1_timed_texts], d1_timed_reads(d1_timed_texts),
+        _linear(D1_GROWTH_ITEM, d1_prefix, d1_suffix)), (True, [d1_listed_answers] * len(linear_sizes), "linear", True))
     # ---------- the advisory rules: printed, never refusing ----------
     check("r1/run-prose-advisory", _outcome(RUN_PROSE), (0, [("R1", "ADVISORY")]))
     check("r1/negated-ok", _outcome(NEGATED), (0, []))
@@ -8809,29 +8859,9 @@ def self_test(report_path=None):
           [[]] * len(D1_COORDINATED_MISSES))
     check("d1/false-warnings-warned", [d1_lines(text) for text in D1_FALSE_WARNED], list(D1_FALSE_WARNED_LINES))
 
-    class D1CountedClauses(list):
-        """A sentence's clauses that add one to tally[0] for each clause read, by index or by iteration."""
-
-        def __init__(self, clauses, tally):
-            list.__init__(self, clauses)
-            self.tally = tally
-
-        def __getitem__(self, key):
-            self.tally[0] += 1
-            return list.__getitem__(self, key)
-
-        def __iter__(self):
-            for clause in list.__iter__(self):
-                self.tally[0] += 1
-                yield clause
-
     def d1_clause_reads(items):
         """(clause reads, D1 lines) of rule_d1 on D1_GROWTH_TEXT with `items` list items."""
-        tally = [0]
-        with _patched(d1_sentences=lambda paragraph, real=d1_sentences: [
-                (text, D1CountedClauses(clauses, tally)) for text, clauses in real(paragraph)]):
-            lines = d1_lines(D1_GROWTH_TEXT.format(D1_GROWTH_ITEM * items))
-        return tally[0], lines
+        return d1_text_reads(D1_GROWTH_TEXT.format(D1_GROWTH_ITEM * items))
 
     def d1_growth():
         """"linear" when the clause reads at the larger D1_GROWTH_SIZES size are within D1_GROWTH_SLACK times the

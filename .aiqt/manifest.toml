@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "ec7016ea754efa27f6dccd01f15c6c12469d12849df87ca4c113f63523228172"
+tree-sha256 = "f193987452026ffd07905276cbc0ecb9109c22c7daed3bf9da2bca2938e03ecf"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4207,8 +4207,8 @@ sha256 = "9ec3224a7e8f517b357ab6738f82a4ce41a9bca6fcba66c3194b3a9157ff9ce0"
 
 [[sources]]
 path = "tools/check_brief_capability.py"
-bytes = 789156
-sha256 = "68a49a6f75c9dd068ee85ce32e90654e52a845456a4297d1f12ca65a966ff0d0"
+bytes = 790921
+sha256 = "661c0d80ee1f5dfa954bcc6c6577a7fcd0da43c0f9a76a4e40f5408988365037"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
