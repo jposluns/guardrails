@@ -791,17 +791,20 @@ def _export(git, root, oid, dest, upstream):
 RUNNER_ENV_DROPPED = frozenset(("BASH_ENV", "ENV"))
 
 
-def _runner_env():
-    """The caller's environment without any GIT_* variable, BASH_ENV, ENV or exported bash function."""
-    return {key: value for key, value in os.environ.items()
+def _runner_env(source=None):
+    """The caller's environment (source; os.environ when None, the self-test passes a hermetic one)
+    without any GIT_* variable, BASH_ENV, ENV or exported bash function."""
+    source = os.environ if source is None else source
+    return {key: value for key, value in source.items()
             if not key.startswith(("GIT_", "BASH_FUNC_")) and key not in RUNNER_ENV_DROPPED}
 
 
 class _RunnerChild:
     """The real runner: bash tools/run_all_checks.sh in root (the export), stdout and stderr merged,
-    read to EOF, in _runner_env()."""
+    read to EOF, in env (_runner_env() when None; the self-test's real-git rows pass one built from
+    their hermetic git environment)."""
 
-    def __init__(self, root):
+    def __init__(self, root, env=None):
         runner = root / RUNNER_REL
         try:
             info = os.lstat(runner)
@@ -812,7 +815,7 @@ class _RunnerChild:
         try:
             self.proc = subprocess.Popen(["bash", RUNNER_REL], cwd=str(root), stdin=subprocess.DEVNULL,
                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                         env=_runner_env())
+                                         env=_runner_env() if env is None else env)
         except OSError as exc:
             raise CannotEvaluate("the runner cannot be launched: {}".format(exc))
 
@@ -1044,8 +1047,9 @@ def main(argv):
 # rows inject a fake git and a fake runner through supervise()'s parameters (never through the command
 # line); the child/ rows run the real runner child, and the realgit/ rows and the hook shim row run
 # real git in repositories made with git init, under a hermetic git environment (_hermetic_git_env;
-# the supervisor's git calls get the production _git_env() built from it, and two realgit/ rows build
-# it from a deliberately poisoned home instead), so the git-fixture-env config lanes' poisoned caller
+# the supervisor's git calls get the production _git_env() and the runner child the production
+# _runner_env() built from it, and two realgit/ rows build them from a deliberately poisoned home
+# instead), so the git-fixture-env config lanes' poisoned caller
 # configuration never reaches them. Each case asserts through the check() choke point; the executed id set is reconciled
 # against tools/selftest_checks.toml (suite push-gate-record-selftest) by tools/check_selftest_execution.py.
 # A revert/ case switches one RULES entry off (_reverted) and requires the same fixture to flip: to
@@ -1295,10 +1299,13 @@ def _real_repo(base, name, files, env, upstream=True):
 def _real_supervise(repo, env):
     """supervise() with real git and the real runner child; (exit, stdout bytes, err text). git runs in
     the production _git_env() built from env (the hermetic one, or a poisoned home's) instead of
-    os.environ, and the caller's line-ending settings are read from env's configuration files."""
+    os.environ, the caller's line-ending settings are read from env's configuration files, and the
+    runner child (whose gates may launch git themselves) runs in the production _runner_env() built
+    from env, so the caller's HOME and XDG_CONFIG_HOME reach no git the runner starts either."""
     out, err = io.BytesIO(), io.StringIO()
     code = supervise(repo, out, err,
                      git=lambda where, args, data=None: _git_query(where, args, env=_git_env(env), data=data),
+                     start_runner=lambda where: _RunnerChild(where, env=_runner_env(env)),
                      caller_eol=lambda where: _caller_eol(where, source=env))
     return code, out.getvalue(), err.getvalue()
 
