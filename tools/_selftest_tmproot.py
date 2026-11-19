@@ -16,16 +16,40 @@ tool) and one whose owner still runs are left alone; a process identifier the sy
 reads as a live owner, so reuse keeps a root rather than removing one. There is deliberately no
 broad aiqt-* pattern here: each suite sweeps only its own prefix and suite name.
 
+When identity is pinned. A suite's own root is pinned when the run makes it: each suite calls
+pin_root on the path _fixture_tmpdir returned, as the first step after that call and before the marker
+is written, and keeps the RootPin it returns (the directory's device and inode, and an O_DIRECTORY and
+O_NOFOLLOW descriptor of it held open, so that inode number cannot be given to another directory while
+the run lasts) until its finally passes the pin to remove_root. remove_root then judges the root by
+that pin alone, never by what occupies the path at cleanup time: when the path names an entry of
+another identity (the root moved away and another directory, or a symbolic link, put in its place),
+that entry is not touched and the run's root is reported as surviving; when the path names nothing,
+the root is reported as surviving unless the pinned directory itself no longer exists. A stale root
+of the sweep, and a directory given to remove_root without a pin (the self-test rows' own fixtures),
+are pinned when their removal starts: the no-follow stat of the name then (lstat for remove_root, a
+stat in the parent for the sweep) is the identity from there on. The one window left for a suite's own
+root is between the mkdtemp inside _fixture_tmpdir and pin_root.
+
 Every removal works on pinned directory descriptors, never by re-resolving a path. The root's parent
-is opened once; the root is checked (lstat for remove_root, a no-follow stat in the parent for the
-sweep), then opened once in that parent with O_DIRECTORY and O_NOFOLLOW, and its device and inode
-must match the check, or nothing is touched and the root is reported. The sweep reads and judges the
-marker through that descriptor. Listing, permission repair, unlinking and removal of every entry go
-through descriptors opened the same way, each matched against the no-follow stat of its name. Before
-the marker is deleted, and again before the root itself is removed, the root's name in the pinned
-parent must still name the pinned directory; a root replaced (by a symbolic link or another
-directory) after it was checked is reported as replaced, keeps its marker and is never followed, so
-nothing outside the checked tree is listed, repaired or deleted.
+is opened once; with a pin, the root's name must name the pinned directory and the pin's descriptor is
+used; otherwise the root is opened once in that parent with O_DIRECTORY and O_NOFOLLOW, and its device
+and inode must match the check, or nothing is touched and the root is reported. The sweep reads and
+judges the marker through that descriptor. Listing, permission repair, unlinking and removal of every
+entry go through descriptors opened the same way, each matched against the no-follow stat of its name.
+Both walks (emptying and permission repair) are iterative, on an explicit stack that holds descriptors
+only for the 64 directories nearest the root (_HELD_DEPTH) and the one being worked on (a deeper
+directory is reopened as ".." of the one below it and matched against the stat taken on the way
+down), so a tree of any depth is handled without recursion and with a bounded number of descriptors; any failure while
+judging or removing one root, of whatever kind, is returned as that root's problem (by the sweep, which
+goes on to the next root, and by remove_root), never raised. Before the marker is deleted, and again
+before the root itself is removed, the root's name in the pinned parent must still name the pinned
+directory; a root replaced (by a symbolic link or another directory) after it was checked is reported
+as replaced, keeps its marker and is never followed, so nothing outside the checked tree is listed,
+repaired or deleted. When the name has gone instead, the removal asks the pinned descriptor whether the
+directory itself is gone (no link left, or a listing that reports it deleted): only then is the root
+removed. A directory that still exists under another name is reported as not removed, and, when its
+marker had already been deleted, gets its marker back through the descriptor (as below), so a later
+sweep of the directory it was moved into still recognises it.
 
 Removal deletes the marker last. Everything else in the root goes first; the marker is deleted only
 once nothing else is left. Before it is deleted, a full copy of it (its bytes and its modification
@@ -183,65 +207,163 @@ def _open_dir_at(dir_fd, name, expect, repair=False):
     return fd
 
 
+class _Level:
+    """One directory on the explicit stack of an iterative walk (_clear, _grant_owner_access): its name
+    in the directory above, its stat result, its descriptor (None while it is not held: see
+    _HELD_DEPTH), the names of it still to be worked on, and whether anything in it could not go."""
+
+    __slots__ = ("name", "st", "fd", "names", "failed")
+
+    def __init__(self, name, st, fd, names):
+        self.name, self.st, self.fd, self.names, self.failed = name, st, fd, iter(names), False
+
+
+# How many levels of a walk, counted from its top, keep their descriptors while a directory below them is
+# worked on. Deeper than this, a directory's descriptor is closed while one below it is worked on and
+# reopened afterwards as ".." of that one, matched against the stat result taken when the walk entered
+# it, so a tree of any depth needs about this many descriptors at most.
+_HELD_DEPTH = 64
+
+
+def _push(stack, name, st, fd, names):
+    """Enter the directory fd (name, st) below the top of stack, closing the top's descriptor when the
+    stack is deeper than _HELD_DEPTH. The bottom of the stack (the caller's descriptor) is never closed."""
+    if len(stack) > _HELD_DEPTH:
+        top = stack[-1]
+        os.close(top.fd)
+        top.fd = None
+    stack.append(_Level(name, st, fd, names))
+
+
+def _climb(stack):
+    """Leave the directory on top of stack (closing its descriptor) and return it and the level below,
+    whose descriptor is reopened as ".." of the one left when it is not held. Raises _Replaced when that
+    ".." is not the directory the walk entered (the tree was moved while it was walked)."""
+    done = stack.pop()
+    below = stack[-1]
+    try:
+        if below.fd is None:
+            try:
+                below.fd = _open_dir_at(done.fd, "..", below.st)
+            except _Replaced:
+                raise _Replaced("a directory of the tree was moved while it was walked, so the walk "
+                                "stopped") from None
+    finally:
+        os.close(done.fd)
+        done.fd = None
+    return done, below
+
+
+def _close_levels(stack):
+    """Close every descriptor the walk opened (all but the bottom level's, which is the caller's)."""
+    for level in stack[1:]:
+        if level.fd is not None:
+            os.close(level.fd)
+            level.fd = None
+
+
 def _clear(fd, keep_marker):
     """Remove every entry of the pinned directory fd (except its marker when keep_marker), each through
-    a descriptor, never by path. Returns the first error, or None when nothing (but the marker) is
-    left."""
+    a descriptor, never by path. Iterative (an explicit stack holding a bounded number of descriptors:
+    _HELD_DEPTH), so a tree of any depth is walked without recursion. Returns the first error, or None when nothing (but
+    the marker) is left."""
     try:
-        names = _list(fd)
+        stack = [_Level(None, os.fstat(fd), fd, _list(fd))]
     except OSError as exc:
         return exc
     error = None
-    for name in names:
-        if keep_marker and name == MARKER:
-            continue
-        try:
-            st = os.stat(name, dir_fd=fd, follow_symlinks=False)
-            if not stat.S_ISDIR(st.st_mode):
-                os.unlink(name, dir_fd=fd)
+    try:
+        while True:
+            level = stack[-1]
+            name = next(level.names, None)
+            if name is not None:
+                if keep_marker and len(stack) == 1 and name == MARKER:
+                    continue
+                try:
+                    st = os.stat(name, dir_fd=level.fd, follow_symlinks=False)
+                    if not stat.S_ISDIR(st.st_mode):
+                        os.unlink(name, dir_fd=level.fd)
+                        continue
+                    sub = _open_dir_at(level.fd, name, st)
+                    try:
+                        sub_names = _list(sub)
+                    except BaseException:
+                        os.close(sub)
+                        raise
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    error = exc if error is None else error
+                    level.failed = True
+                    continue
+                _push(stack, name, st, sub, sub_names)
                 continue
-            sub = _open_dir_at(fd, name, st)
+            if len(stack) == 1:
+                return error
             try:
-                sub_error = _clear(sub, False)
-            finally:
-                os.close(sub)
-            if sub_error is not None:
-                raise sub_error
-            _check_name(fd, name, st)
-            os.rmdir(name, dir_fd=fd)
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            if error is None:
-                error = exc
-    return error
+                done, below = _climb(stack)
+            except OSError as exc:
+                return exc if error is None else error
+            if done.failed:
+                below.failed = True
+                continue
+            try:
+                _check_name(below.fd, done.name, done.st)
+                os.rmdir(done.name, dir_fd=below.fd)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                error = exc if error is None else error
+                below.failed = True
+    finally:
+        _close_levels(stack)
 
 
 def _grant_owner_access(fd):
     """Add owner read, write and search permission to the pinned directory fd and every real directory
     under it that this user owns, so a directory left at mode 0000 can be entered and emptied. Every
-    directory is reached through a descriptor matched against the no-follow stat of its name. Errors
-    are ignored: the removal that follows judges by what is left."""
+    directory is reached through a descriptor matched against the no-follow stat of its name. Iterative,
+    like _clear. Errors are ignored: the removal that follows judges by what is left."""
     uid = os.getuid()
-    try:
-        st = os.fstat(fd)
+
+    def grant(dir_fd):
+        st = os.fstat(dir_fd)
         if st.st_uid == uid:
-            os.chmod(fd, stat.S_IMODE(st.st_mode) | stat.S_IRWXU)
-        names = _list(fd)
+            os.chmod(dir_fd, stat.S_IMODE(st.st_mode) | stat.S_IRWXU)
+        return st, _list(dir_fd)
+
+    try:
+        st, names = grant(fd)
     except OSError:
         return
-    for name in names:
-        try:
-            st = os.stat(name, dir_fd=fd, follow_symlinks=False)
-            if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+    stack = [_Level(None, st, fd, names)]
+    try:
+        while True:
+            level = stack[-1]
+            name = next(level.names, None)
+            if name is not None:
+                try:
+                    st = os.stat(name, dir_fd=level.fd, follow_symlinks=False)
+                    if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+                        continue
+                    sub = _open_dir_at(level.fd, name, st, repair=True)
+                except OSError:
+                    continue
+                try:
+                    sub_names = grant(sub)[1]
+                except OSError:
+                    os.close(sub)
+                    continue
+                _push(stack, name, st, sub, sub_names)
                 continue
-            sub = _open_dir_at(fd, name, st, repair=True)
-        except OSError:
-            continue
-        try:
-            _grant_owner_access(sub)
-        finally:
-            os.close(sub)
+            if len(stack) == 1:
+                return
+            try:
+                _climb(stack)
+            except OSError:
+                return
+    finally:
+        _close_levels(stack)
 
 
 def _read_marker_bytes(dir_fd):
@@ -370,47 +492,136 @@ def _remove_attempt(parent_fd, name, fd, expect):
     try:
         try:
             _check_name(parent_fd, name, expect)
+        except FileNotFoundError:
+            # The name went before the marker was touched: the marker is still in the pinned directory,
+            # which is gone or survives (marked) under another name.
+            return _survivor(fd, name), False
+        except _Replaced as exc:
+            return exc, False
+        try:
             os.unlink(MARKER, dir_fd=fd)
         except FileNotFoundError:
             pass
-        except _Replaced as exc:
-            return exc, False
         except OSError as exc:
             return exc, True
         try:
             _check_name(parent_fd, name, expect)
             os.rmdir(name, dir_fd=parent_fd)
         except FileNotFoundError:
+            # The name went after the marker was deleted. Only a pinned directory that no longer exists
+            # is removed; one renamed meanwhile survives, and gets its marker back like any survivor.
+            exc = _survivor(fd, name)
+            if exc is None:
+                return None, False
+        except OSError as caught:
+            exc = caught
+        else:
             return None, False
-        except OSError as exc:
-            if saved is None:
-                return exc, False
-            failed = _restore_marker(fd, saved, copy)
-            if failed is None:
-                return exc, False
-            return "{}; its marker could not be written back ({})".format(exc, failed), False
-        return None, False
+        if saved is None:
+            return exc, False
+        failed = _restore_marker(fd, saved, copy)
+        if failed is None:
+            return exc, False
+        return "{}; its marker could not be written back ({})".format(exc, failed), False
     finally:
         if copy is not None:
             os.close(copy)
+
+
+class _Moved(OSError):
+    """A pinned directory that still exists no longer has its name (it was moved away)."""
+
+
+def _pinned_gone(fd):
+    """Whether the pinned directory fd has been removed: it has no link left, or (where a file system
+    keeps a removed directory's link count) listing it reports it deleted. Anything else, including an
+    error, reads as a directory that still exists."""
+    try:
+        if os.fstat(fd).st_nlink == 0:
+            return True
+        _list(fd)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _survivor(fd, name):
+    """None when the pinned directory fd, whose name name has gone, has been removed; else the error
+    that says it survives under another name."""
+    if _pinned_gone(fd):
+        return None
+    return _Moved("{} no longer names the pinned directory, which still exists under another name; it "
+                  "was not removed".format(name))
 
 
 def _problem(root, error):
     return "could not remove the temporary root {} ({})".format(root, error)
 
 
-def remove_root(root):
+class RootPin:
+    """A temporary root's identity, recorded by pin_root when the run makes the root: its path, the
+    stat result (device and inode) of the directory there, and a descriptor of that directory, held open
+    until remove_root is given the pin, so the inode cannot be freed and its number given to another
+    directory meanwhile."""
+
+    def __init__(self, root):
+        self.root = str(root)
+        fd = os.open(self.root, _DIR_FLAGS)
+        try:
+            self.stat = os.fstat(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        self.fd = fd
+
+    def close(self):
+        """Close the held descriptor (once; remove_root closes the pin it is given)."""
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
+def pin_root(root):
+    """Pin the directory root (just made by this run): open it with O_DIRECTORY and O_NOFOLLOW and
+    return a RootPin, which remove_root(root, pin) then holds the root's removal to."""
+    return RootPin(root)
+
+
+def remove_root(root, pin=None):
     """Remove the directory tree root, its marker last, through pinned descriptors (the module
-    docstring). Returns None when root is gone afterwards, else a one-line description naming root and
-    the error that stopped the removal (a root replaced after it was checked, a marker that could not be
-    written back), so the caller can report the root that survived."""
+    docstring). With pin (a RootPin from pin_root), only the directory pinned when the run made it is
+    removed: a directory of another identity now at root is refused untouched, and the pinned one is
+    reported as surviving; the pin is closed. Without pin, the directory at root when this is called is
+    the one removed. Returns None when the root is gone afterwards, else a one-line description naming
+    root and what stopped the removal (a root replaced or moved away, a marker that could not be written
+    back, a failure walking the tree), so the caller can report the root that survived. Never raises an
+    Exception."""
     root = str(root)
+    try:
+        return _remove_root(root, pin)
+    except Exception as exc:  # noqa: BLE001  any failure is this root's report, never the caller's exception
+        return _problem(root, "{}: {}".format(type(exc).__name__, exc))
+    finally:
+        if pin is not None:
+            pin.close()
+
+
+def _remove_root(root, pin):
+    """remove_root's work (the same arguments and result; it may raise)."""
     try:
         st = os.lstat(root)
     except FileNotFoundError:
-        return None
+        if pin is None or _pinned_gone(pin.fd):
+            return None
+        return _problem(root, "it was moved away before cleanup: the directory this run made still exists "
+                              "under another name and was not removed")
     except OSError as exc:
         return _problem(root, exc)
+    if pin is not None and not (stat.S_ISDIR(st.st_mode) and _same(st, pin.stat)):
+        return _problem(root, "it was replaced before cleanup: its name now holds another entry, which "
+                              "was not touched, and the directory this run made was not removed")
     if not stat.S_ISDIR(st.st_mode):
         return _problem(root, "it is not a directory")
     parent, name = os.path.split(os.path.abspath(root))
@@ -421,16 +632,19 @@ def remove_root(root):
     except OSError as exc:
         return _problem(root, exc)
     try:
-        try:
-            fd = _open_dir_at(parent_fd, name, st, repair=True)
-        except FileNotFoundError:
-            return None
-        except OSError as exc:
-            return _problem(root, exc)
-        try:
-            error = _remove_pinned(parent_fd, name, fd, st)
-        finally:
-            os.close(fd)
+        if pin is not None:
+            error = _remove_pinned(parent_fd, name, pin.fd, pin.stat)
+        else:
+            try:
+                fd = _open_dir_at(parent_fd, name, st, repair=True)
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                return _problem(root, exc)
+            try:
+                error = _remove_pinned(parent_fd, name, fd, st)
+            finally:
+                os.close(fd)
     finally:
         os.close(parent_fd)
     return None if error is None else _problem(root, error)
@@ -529,7 +743,8 @@ def _sweep_entry(parent_fd, name, suite, host, now):
 
 def sweep_stale(suite, prefix, parents, now=None):
     """Remove suite's stale marked roots named prefix* directly in each directory of parents.
-    Returns (removed, problems): the paths removed and a description of each one that could not be."""
+    Returns (removed, problems): the paths removed and a description of each one that could not be.
+    A failure judging or removing one root (any Exception) is that root's problem; the sweep goes on."""
     removed, problems = [], []
     host = socket.gethostname()
     now = time.time() if now is None else now
@@ -552,7 +767,10 @@ def sweep_stale(suite, prefix, parents, now=None):
                 if not name.startswith(prefix):
                     continue
                 path = os.path.join(real, name)
-                stale, error = _sweep_entry(parent_fd, name, suite, host, now)
+                try:
+                    stale, error = _sweep_entry(parent_fd, name, suite, host, now)
+                except Exception as exc:  # noqa: BLE001  a failure is this root's problem, never the sweep's
+                    stale, error = True, "{}: {}".format(type(exc).__name__, exc)
                 if not stale:
                     continue
                 if error is None:

@@ -16524,12 +16524,16 @@ _TMPROOT_SUITE = "selftest_aiqt_hooks"
 # os.unlink fail on every file named argv[4] (an undeletable stale root), makes the emptyhome mkdir (the
 # first fallible setup step after the root is made and swept beside) raise a sentinel, runs
 # _main_isolated, and prints one tagged JSON line: the name of the exception that came out (None when none
-# did), the roots made, those still present, and the base directory's entries.
+# did), the roots made, those still present, and the base directory's entries. With argv[5] "replace", the
+# failing mkdir first moves the run's root aside (its name plus "-moved") and puts a directory holding
+# keep.txt in its place (temp-replaced-root-untouched), and the line also gives keep.txt's text and the
+# moved root's entries.
 _TEMP_SETUP_TAG = "TEMP-SETUP-RESULT "
 _TEMP_SETUP_CHILD = (
     "import errno, json, os, pathlib, sys, tempfile\n"
     "sys.path.insert(0, sys.argv[1])\n"
     "base, tempfile.tempdir, stuck = sys.argv[2:5]\n"
+    "replace = sys.argv[5:] == ['replace']\n"
     "import selftest_aiqt_hooks as suite\n"
     "made = []\n"
     "def confined_tmpdir(prefix):\n"
@@ -16548,6 +16552,10 @@ _TEMP_SETUP_CHILD = (
     "real_mkdir = pathlib.Path.mkdir\n"
     "def failing_mkdir(self, *args, **kwargs):\n"
     "    if self.name == 'emptyhome':\n"
+    "        if replace:\n"
+    "            os.rename(made[0], made[0] + '-moved')\n"
+    "            os.mkdir(made[0])\n"
+    "            pathlib.Path(made[0], 'keep.txt').write_text('unrelated data', encoding='utf-8')\n"
     "        raise InjectedSetupFailure('injected emptyhome mkdir failure')\n"
     "    return real_mkdir(self, *args, **kwargs)\n"
     "pathlib.Path.mkdir = failing_mkdir\n"
@@ -16556,8 +16564,16 @@ _TEMP_SETUP_CHILD = (
     "    suite._main_isolated(None)\n"
     "except BaseException as exc:\n"
     "    raised = type(exc).__name__\n"
-    "print('" + _TEMP_SETUP_TAG + "' + json.dumps({'raised': raised, 'made': made,\n"
-    "      'left': [p for p in made if os.path.lexists(p)], 'base_entries': sorted(os.listdir(base))}))\n")
+    "result = {'raised': raised, 'made': made,\n"
+    "      'left': [p for p in made if os.path.lexists(p)], 'base_entries': sorted(os.listdir(base))}\n"
+    "if replace and made:\n"
+    "    try:\n"
+    "        result['replacement_kept'] = pathlib.Path(made[0], 'keep.txt').read_text(encoding='utf-8')\n"
+    "    except OSError:\n"
+    "        result['replacement_kept'] = None\n"
+    "    moved = made[0] + '-moved'\n"
+    "    result['moved_entries'] = sorted(os.listdir(moved)) if os.path.isdir(moved) else None\n"
+    "print('" + _TEMP_SETUP_TAG + "' + json.dumps(result))\n")
 # A process identifier no process can have (Linux caps identifiers below 2**22): the stale roots the
 # setup child finds beside its own root name it as their gone owner.
 _TEMP_GONE_PID = 2 ** 22 + 7
@@ -16655,6 +16671,57 @@ def _temp_failed_setup_failures(tmp):
     if got.get("left"):
         out.append("{} a setup failure after the root was made left it behind: {!r}".format(
             label, got.get("left")))
+    return out
+
+
+def _temp_replaced_root_failures(tmp):
+    """(temp-replaced-root-untouched) failure lines (empty when it holds), from one run of _TEMP_SETUP_CHILD
+    in mode "replace" in a base directory inside this run's own root tmp: during setup the child's root
+    is moved aside and another directory takes its name before cleanup. The child's finally must judge
+    its root by the identity pinned when the root was made: the replacement and its file stay untouched,
+    the moved root keeps its marker, the injected setup failure still comes out, and the root is named
+    on stderr as replaced. A removal that takes the root's identity from whatever is at its path at
+    cleanup time deletes the replacement and reports nothing. The base directory is removed here
+    afterwards."""
+    label = "(temp-replaced-root-untouched)"
+    base, elsewhere = tmp / "temp-replaced-child", tmp / "temp-replaced-elsewhere"
+    try:
+        base.mkdir()
+        elsewhere.mkdir()
+    except OSError as exc:
+        return ["{} could not prepare the child's directories: {}".format(label, exc)]
+    proc = run_error = None
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-B", "-c", _TEMP_SETUP_CHILD,
+                               str(Path(__file__).resolve().parent), str(base), str(elsewhere),
+                               _TEMP_STUCK_NAME, "replace"],
+                              capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.SubprocessError) as exc:
+        run_error = exc
+    finally:
+        left_lines = ["{} {}".format(label, problem) for problem in (
+            _selftest_tmproot.remove_root(base), _selftest_tmproot.remove_root(elsewhere))
+            if problem is not None]
+    if run_error is not None:
+        return ["{} could not run the child: {}".format(label, run_error)] + left_lines
+    lines = [line for line in proc.stdout.splitlines() if line.startswith(_TEMP_SETUP_TAG)]
+    try:
+        got = json.loads(lines[0][len(_TEMP_SETUP_TAG):]) if len(lines) == 1 else None
+    except ValueError:
+        got = None
+    if got is None:
+        return ["{} the child printed no single readable result line (exit {}): {}".format(
+            label, proc.returncode, proc.stderr[-2000:])] + left_lines
+    made = got.get("made") if isinstance(got.get("made"), list) else []
+    want = {"raised": "InjectedSetupFailure", "made": made, "left": made,
+            "replacement_kept": "unrelated data", "moved_entries": [_selftest_tmproot.MARKER]}
+    have = {key: got.get(key) for key in want}
+    replaced = (len(made) == 1 and "SELF-TEST ERROR: could not remove the temporary root {} (it was "
+                "replaced before cleanup".format(made[0]) in proc.stderr)
+    out = list(left_lines)
+    if len(made) != 1 or have != want or not replaced:
+        out.append("{} the replacement must stay untouched and the run's root be reported as surviving; got "
+                   "{!r}, stderr {!r}".format(label, have, proc.stderr[-2000:]))
     return out
 
 
@@ -17298,8 +17365,11 @@ def _main_isolated(monitor):
         return 2
     # The root is owned from here: every setup step below runs inside the try whose finally removes it,
     # so a failed setup step (the emptyhome mkdir, an environment change) no longer leaves it behind.
-    _tmp_left = None
+    # Its identity is pinned first (tools/_selftest_tmproot.py), so the finally removes the directory made
+    # here and nothing that takes its name later (temp-replaced-root-untouched).
+    _tmp_left = _tmp_pin = None
     try:
+        _tmp_pin = _selftest_tmproot.pin_root(tmp)
         _selftest_tmproot.write_marker(tmp, _TMPROOT_SUITE)
         # Recover the roots of earlier runs that were killed before their finally ran: only this suite's
         # own marked roots, older than a day, whose owner process is gone (tools/_selftest_tmproot.py), and
@@ -38532,6 +38602,9 @@ def _main_isolated(monitor):
         # child with the emptyhome mkdir failing (_TEMP_SETUP_CHILD), in a base directory inside this
         # run's own marked root, so a kill while the child runs leaves nothing outside that root.
         failures.extend(_temp_failed_setup_failures(tmp))
+        # A root moved aside and replaced before cleanup: the replacement is left untouched and the run's
+        # root reported as surviving (_temp_replaced_root_failures).
+        failures.extend(_temp_replaced_root_failures(tmp))
         # Read the limits at the END of the battery, inside the try: the finally below re-assigns the
         # production values, so a read taken after it could never fail. This read makes a lost restore or
         # a later case that widened the limits again a failure in the check below.
@@ -38542,7 +38615,7 @@ def _main_isolated(monitor):
         finally:
             # A root that survives removal is reported on every path (here, so a run that raises reports
             # it too) and fails a run that reaches the check below; it is never silenced.
-            _tmp_left = _selftest_tmproot.remove_root(tmp)
+            _tmp_left = _selftest_tmproot.remove_root(tmp, _tmp_pin)
             if _tmp_left is not None:
                 print("SELF-TEST ERROR: {}".format(_tmp_left), file=sys.stderr)
     if _tmp_left is not None:
