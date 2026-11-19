@@ -181,10 +181,14 @@ writer run on the proposal committed proposes the same entries by construction. 
 and the writer at most K+2 passes (writer_round_bound and writer_pass_bound give the reasoning); a pass
 or the passes still changing at their bound is cannot-evaluate. The settled proposal is then judged by
 the gate's own predicate (baseline_verdict, the function the gate calls) with its entries as the
-candidate baseline, on the same B..C diff: a charged finding or a stale entry is cannot-evaluate, so a
-proposal is printed only when, committed on top of C, it leaves the gate only the growth it lists (R8
-aside: the check reads the baseline file's own lines as they are at C). A ROUND TRIP line on stderr
-says so, with the passes and rounds run against their bounds. The proposal is not guaranteed minimal: a
+candidate baseline, twice. First on the same B..C diff, which holds the baseline file's lines as they
+are at C: a charged finding or a stale entry is cannot-evaluate. Then on the proposal's own canonical
+render, every line of it read as a line added to the baseline file, with no move credit (none when the
+configuration excludes that file): a charged finding there is cannot-evaluate naming R8 and the entry
+whose line it is. A commit of the proposal on top of C adds at most those lines to the baseline file,
+and a credit only spares a line, so a proposal is printed only when, committed on top of C, it leaves
+the gate only the growth it lists. A ROUND TRIP line on stderr says so, with the passes and rounds run
+against their bounds. The proposal is not guaranteed minimal: a
 key a round adds stays even when the final pins no longer need it, so a smaller baseline that passes
 can exist and the GROWTH listing then asks for more than the change needs (R15). Its canonical render
 with source-commit = C goes to stdout only when it is at most MAX_BASELINE_BYTES (the gate's own read
@@ -206,7 +210,8 @@ file that does not grow passes; (R5) growth authorization depends on an override
 repository, which this gate does not name or check; (R6) exclude-paths can still be widened inside a
 change; (R7) a working-tree baseline with CRLF line ends is non-canonical, so cannot-evaluate; (R8) the
 baseline file is judged like any other, so an entry whose path matches a shape is charged there and such
-a file cannot be grandfathered; (R9) digests are not secret: a known label line can be hashed and
+a file cannot be grandfathered; --write-baseline refuses such a proposal (exit 2, nothing printed), and
+since it judges every line of its render, also one whose line the merge base's copy already holds; (R9) digests are not secret: a known label line can be hashed and
 matched; (R10) editing a shape's regex can make entries stale, forcing a baseline shrink in the same
 change; (R11) the gate's trust in origin/main carries over to the merge-base baseline; (R12) a malformed
 baseline on main is cannot-evaluate for every branch based on it; (R13) the cost of the extra diff is
@@ -1190,6 +1195,57 @@ def _writer_pass(judged, deleted, config, by_line, counts, carried, limit):
                          "baseline is proposed".format(limit))
 
 
+def _own_lines(data, config):
+    """The lines of the rendered baseline `data` as added lines of BASELINE_RELPATH, every line in order
+    (none when the configuration excludes that path, as the gate then judges none of them). A commit of
+    `data` on top of the candidate adds at most these lines there: a line the merge base's copy already
+    holds is not added, so judging it too can only refuse more."""
+    if _excluded(BASELINE_RELPATH, config.excluded):
+        return []
+    rows = data.split(b"\n")
+    if rows and rows[-1] == b"":
+        rows.pop()
+    return [Added(BASELINE_RELPATH, number, raw.decode("utf-8", "replace"), "+", raw)
+            for number, raw in enumerate(rows, 1)]
+
+
+def _owning_entry(data, number):
+    """The [[entry]] table of the rendered baseline `data` that holds its line `number` (one-based), as
+    its lines joined by "; ", or "the header" for a line before the first table."""
+    rows = data.decode("utf-8", "replace").split("\n")
+    start = None
+    for index in range(min(number, len(rows)) - 1, -1, -1):
+        if rows[index] == "[[entry]]":
+            start = index
+            break
+    if start is None:
+        return "the header"
+    body = []
+    for row in rows[start + 1:]:
+        if not row or row == "[[entry]]":
+            break
+        body.append(row)
+    return "the entry " + "; ".join(body)
+
+
+def _require_own_lines_uncharged(data, config, proposal, before, counts):
+    """CannotEvaluate (R8) when the gate's own predicate (baseline_verdict), with `proposal` as the
+    candidate baseline, charges a finding on a line of the rendered proposal `data` read as a line added
+    to BASELINE_RELPATH with no move credit. The B..C diff the proposal is otherwise checked on holds the
+    candidate's own baseline lines, not these, and an entry whose path matches a shape writes a label
+    line into the baseline file, which no entry can grandfather (a baseline entry never names the
+    baseline itself), so committed it would be charged and a second writer run would refuse it."""
+    verdict = baseline_verdict(_own_lines(data, config), Counter(), config, proposal, before, counts)
+    if verdict.charged:
+        item = verdict.charged[0]
+        raise CannotEvaluate(
+            "R8: committed on top of the candidate, the proposal's own line {}:{} would be charged as {} "
+            "({}): {}, in {}; the baseline file is judged like any other and cannot grandfather its own "
+            "lines ({} charged finding(s) on its lines); no baseline is proposed".format(
+                BASELINE_RELPATH, item.number, item.shape, item.description, item.text,
+                _owning_entry(data, item.number), len(verdict.charged)))
+
+
 def propose_baseline(root, protected=None, head=None, environ=None):
     """(canonical bytes, review lines, growth keys) of the baseline --write-baseline proposes for the
     candidate commit C, the fixed point the docstring describes. A pass (_writer_pass) starts from no
@@ -1198,9 +1254,11 @@ def propose_baseline(root, protected=None, head=None, environ=None):
     carries C's baseline, each later one the proposal of the pass before it, as a further writer run with
     that proposal committed would, and the passes stop when one proposes what the pass before it did.
     The proposal is then judged by the gate's own predicate (baseline_verdict) with its entries as the
-    candidate baseline. A pass still changing after writer_round_bound rounds, passes still changing
-    after writer_pass_bound passes, a proposal that predicate charges a finding for or finds an entry of
-    stale, or one whose render is larger than MAX_BASELINE_BYTES, is CannotEvaluate (nothing is printed)."""
+    candidate baseline, on the B..C diff and on its own rendered lines read as lines added to the
+    baseline file (_require_own_lines_uncharged). A pass still changing after writer_round_bound rounds,
+    passes still changing after writer_pass_bound passes, a proposal that predicate charges a finding for
+    or finds an entry of stale on the B..C diff, one with a line of its own render that predicate charges
+    (R8), or one whose render is larger than MAX_BASELINE_BYTES, is CannotEvaluate (nothing is printed)."""
     environ = os.environ if environ is None else environ
     config = load_config(Path(root) / CONFIG_RELPATH)
     require_excluded_files(root, config.excluded)
@@ -1239,6 +1297,7 @@ def propose_baseline(root, protected=None, head=None, environ=None):
                              "charged finding(s) and {} stale entr(ies); no baseline is proposed".format(
                                  len(verdict.charged), len(verdict.stale)))
     data = render_baseline(head_sha, proposal)
+    _require_own_lines_uncharged(data, config, proposal, before, counts)
     if len(data) > MAX_BASELINE_BYTES:
         raise CannotEvaluate("the proposed baseline is {} bytes ({} entr(ies)), larger than the {} bytes the "
                              "gate reads; it is not printed".format(len(data), len(proposal),
@@ -1257,7 +1316,8 @@ def propose_baseline(root, protected=None, head=None, environ=None):
 def write_baseline(root, protected=None, head=None, environ=None):
     """--write-baseline: the proposal on stdout (no file is written), its review listing and its ROUND
     TRIP line on stderr; exit 1 when it grows against the merge base's baseline, 0 otherwise, 2 when it
-    cannot evaluate (an oversized, unsettled or unchecked proposal included, with nothing on stdout)."""
+    cannot evaluate (an oversized or unsettled proposal, and one the gate's predicate would charge a
+    finding on, its own lines included, with nothing on stdout)."""
     try:
         data, review, growth = propose_baseline(root, protected, head, environ)
     except CannotEvaluate as exc:
@@ -2721,6 +2781,34 @@ def _baseline_writer_roundtrip_rows(tmp, labels):
           (code, out, code_c, out_c, err_c))
     check("flip/write-proposal-unchecked", code_f == 1 and _proposed_entries(out_f, config) == {
         key("zz/F.py"): 1}, (code_f, out_f))
+
+    # R8 by construction: a branch adds a file whose path matches a shape and whose line is a finding (a
+    # Markdown file and a Python file, the path and the line assembled at run time). The B..C diff holds
+    # no baseline line, so only the proposal's own rendered lines show that its path line would be
+    # charged in the baseline file: the writer exits 2 with nothing printed, naming R8 and the entry.
+    # With that check removed it prints the proposal and a ROUND TRIP line, yet committed the gate
+    # charges the baseline file's own line 8 and a second writer run exits 2.
+    fx = "FI" + "X-"
+    for check_id, flip_id, name, path, line in (
+            ("fail-closed/write-own-line-r8-markdown", "flip/write-own-line-unchecked-markdown",
+             "baseline-writer-r8-markdown", "docs/" + fx + "7.md", "see " + fx + "7"),
+            ("fail-closed/write-own-line-r8-python", "flip/write-own-line-unchecked-python",
+             "baseline-writer-r8-python", fx + "12.py", la)):
+        repo, base = _baseline_repo(tmp, name)
+        _fx_git(repo, "checkout", "-q", "-b", "work")
+        _write(repo, path, line + "\n")
+        _commit_all(repo, "a file whose path matches a shape, holding a finding line")
+        code, out, err = _write_exit(repo)
+        own = "{}:8 would be charged as backlog-id".format(BASELINE_RELPATH)
+        check(check_id, code == 2 and out == "" and "R8: " in err and own in err
+              and 'the entry path = "{}"'.format(path) in err and "ROUND TRIP" not in err,
+              (code, out, err))
+        with _patched(_require_own_lines_uncharged=lambda *args: None):
+            code_f, out_f, err_f, entries_f, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+        check(flip_id, code_f == 1 and entries_f == {(path, _sha(line.encode("utf-8")), "backlog-id"): 1}
+              and "ROUND TRIP: " in err_f and gate_code == 1 and charged_text in gate_out
+              and "  {}:8: backlog-id".format(BASELINE_RELPATH) in gate_out and code2 == 2 and out2 == "",
+              (code_f, err_f, entries_f, gate_code, gate_out, code2, out2))
 
 
 def _cannot_evaluate_outputs(repo):

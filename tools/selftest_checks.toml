@@ -6828,6 +6828,10 @@ expected-check-ids = [
   "write/roundtrip-pin-chain-31",
   "fail-closed/write-proposal-checked-by-gate",
   "flip/write-proposal-unchecked",
+  "fail-closed/write-own-line-r8-markdown",
+  "flip/write-own-line-unchecked-markdown",
+  "fail-closed/write-own-line-r8-python",
+  "flip/write-own-line-unchecked-python",
   # a cannot-evaluate message is escaped like a listing line
   "review/cannot-evaluate-message-escaped",
   "flip/cannot-evaluate-message-raw",
