@@ -617,9 +617,10 @@ CHECK REMOVAL (beside the preflight, for every family, before the execution rule
 
 DENIAL REROUTE (beside the preflight, for every family, before the execution rules' early return):
 
-  D1 denial reroute    ADVISORY (a WARN; it never refuses and never changes the exit code). A refused or denied step
-                       is reported, not routed around, so a brief should not tell the worker to achieve it another
-                       way. D1 reads the whole brief (scope and --unscoped do not change it; fences and quotations are
+  D1 denial reroute    ADVISORY (a WARN; its findings never refuse and take no part in the refusal or exit selection,
+                       though printing one can fail on an output encoding and end the run with exit 1: see below). A
+                       refused or denied step is reported, not routed around, so a brief should not tell the worker to
+                       achieve it another way. D1 reads the whole brief (scope and --unscoped do not change it; fences and quotations are
                        read like prose) in PARAGRAPHS: a blank line (empty, or only spaces and tabs) ends one; a list
                        item line (-, + or *, or one to nine digits then . or ), then a space or tab, at any
                        indentation), a heading (at most three spaces, one to six #) and a column-zero upper-case label
@@ -652,12 +653,18 @@ DENIAL REROUTE (beside the preflight, for every family, before the execution rul
                        ends with a colon and whose last clause is negated by these rules ("Never do any of the
                        following:"), carries its negation into the first segment of each list item after it, up to
                        a paragraph that is not a list item (under a lead that is itself a list item, only into items
-                       indented deeper than it), so "- run a denied step another way." under it is quiet, and a lead
-                       that is not negated carries nothing; NOT EXCLUDED: no earlier clause of its
-                       segment holds instead of or rather than with every clause from there to it opened by a comma, a
-                       colon, and or or and none opening with instead or otherwise, where the exclusion from a clause
-                       that opens with instead of or rather than ends at the next clause opened by a comma ("If
-                       denied, instead of waiting, run it inline." warns); and MARKED, its clause holding
+                       indented deeper than it), so "- run a denied step another way." under it is quiet; that
+                       negation is held apart from the item's own, so no restart inside the item ends it ("- If
+                       denied, instead run it inline." and "- If denied: instead, run it inline." under it are quiet
+                       too, and warn under "Do the following:"), and a lead that is not negated carries nothing; NOT
+                       EXCLUDED: no earlier clause of its segment holds instead of or rather than with every clause
+                       from there to it opened by a comma, a colon, and or or and none opening with instead or
+                       otherwise, where the exclusion from a clause that opens with instead of or rather than ends at
+                       the next clause whose opener is a bare comma, not at every comma: a comma followed by and or or
+                       opens its clause with that word, which carries the exclusion ("If denied, instead of waiting,
+                       run it inline." warns; "If denied, rather than retry, or run it inline, report the refusal."
+                       is quiet, and so is "If denied, instead of waiting, and run it inline.", a named miss); and
+                       MARKED, its clause holding
                        instead, another way, inline, otherwise or by other means before any instead of or rather than,
                        or the clause before it being only instead or otherwise, closed by a comma or colon. The
                        refusal may stand before or after the action. The
@@ -689,8 +696,9 @@ DENIAL REROUTE (beside the preflight, for every family, before the execution rul
                        ("If denied, never do anything below: instead, run it inline." and "If denied, do not retry
                        anything below: instead, run it inline." are quiet). The excerpt keeps printable characters
                        that are not ASCII, so on a standard output that cannot encode them the run ends in an
-                       encoding error and exit 1; every rule's excerpt shares this, so it is not D1's alone and is
-                       left as it is. FALSE WARNINGS: a quoted or fenced example, a question, a past report, an
+                       encoding error and exit 1, so a D1 finding can end the run outside the refusal and exit
+                       selection; every rule's excerpt shares this, so it is not D1's alone and is left as it
+                       is. FALSE WARNINGS: a quoted or fenced example, a question, a past report, an
                        unrelated action, blocked in a sense that is not a permission, a legitimate alternative and
                        another leg's text can warn; so can a consequence after a prohibition ("If denied, do not
                        retry: otherwise you may run it twice.": the colon and otherwise restart, and otherwise marks
@@ -4503,7 +4511,7 @@ def rule_t1(text):
     return sorted(findings, key=lambda finding: finding[2])
 
 
-# ---------- D1: denial reroute (ADVISORY: a WARN carried in the summary line, never the exit code) ----------
+# ---------- D1: denial reroute (ADVISORY: a WARN in the summary line, never in the exit selection) ----------
 
 # the refusal words, read as whole words only (refuses, denial, undenied and refusedness are not read)
 D1_REFUSALS = frozenset(("denied", "refused", "blocked", "rejected"))
@@ -4519,7 +4527,7 @@ D1_MODALS = frozenset(("must", "should", "can", "may"))
 # segment to the end of the action's clause rejects the action (do not and must not are covered by not), across
 # commas, coordinators and colons, unless a clause between restarts it (D1_COMMA_RESTARTS, D1_RESTART_OPENERS, and a
 # D1_SCOPE_OPENERS word after a colon) and the clause before that one does not introduce the prohibited action
-# itself (d1_introduces)
+# itself (d1_introduces); a negated list lead's negation is held apart and no restart ends it (d1_scopes)
 D1_NEGATIONS = frozenset(("not", "never", "no", "nor", "neither", "without", "don't", "mustn't", "shouldn't", "won't",
                           "cannot", "can't", "isn't", "aren't", "wasn't", "weren't", "hasn't", "haven't", "hadn't"))
 # the whole words that close a clause and open the next
@@ -4533,7 +4541,9 @@ D1_CUTOFFS = (("instead", "of"), ("rather", "than"))
 # retry or run it inline: both verbs are what is not to be done), and so is each later clause opened the same way
 D1_CARRIERS = frozenset((",", ":", "and", "or"))
 # an exclusion from a clause that opens with a D1_CUTOFFS phrase ends at a clause opened by one of these boundaries:
-# in "instead of waiting, run it inline" the clause after the comma is the alternative asked for
+# in "instead of waiting, run it inline" the clause after the comma is the alternative asked for; the opener is
+# compared, not the comma character, so a comma followed by and or or (whose clause opens with that word) does not
+# end it (D1_FRONTED_COORDINATED)
 D1_FRONTED_ENDS = frozenset((",",))
 # a clause that opens with one of these words names the alternative asked for: an exclusion does not carry into it,
 # and neither does a negation carried across a colon (do not wait: instead, run it inline), unless the clause the
@@ -4730,10 +4740,22 @@ def d1_introduces(words):
 
 
 def d1_scopes(clauses, carried=False):
-    """[(clause, negated, excluded)], one per clause of a sentence, in order. NEGATED: a D1_NEGATIONS word stands
-    from the start of the clause's segment to the clause's own end, or `carried` (a negated list lead, rule_d1)
-    reaches the sentence's first segment, with no RESTART between. A prohibition carries across commas,
-    coordinators and colons ("do not run it and execute it inline" and "do not do the following: run it inline"
+    """[(clause, negated, excluded)], one per clause of a sentence, in order: d1_local_scopes, with every clause of
+    the sentence's first segment also negated when `carried` (a negated list lead, rule_d1). The lead's negation is
+    held apart from the clause's own, so a restart inside the item clears only the item's own negation and the
+    lead's holds for the whole first segment ("Never do any of the following:" then "- If denied, instead run it
+    inline." or "- If denied: instead, run it inline." is quiet); a later segment starts afresh."""
+    first = clauses[0][0] if clauses else None
+    return [(clause, negated or (carried and clause[0] == first), excluded)
+            for clause, negated, excluded in d1_local_scopes(clauses)]
+
+
+def d1_local_scopes(clauses, negated=False):
+    """[(clause, negated, excluded)], one per clause of a sentence, in order, read from the sentence alone (d1_scopes
+    adds a lead's negation; `negated` true reads the first segment as negated from its start, a negation any restart
+    clears, which is how a lead's negation was read before it was held apart). NEGATED: a D1_NEGATIONS word stands
+    from the start of the clause's segment to the clause's own end, with no RESTART between. A prohibition carries
+    across commas, coordinators and colons ("do not run it and execute it inline" and "do not do the following: run it inline"
     are negated throughout); a clause restarts it when it opens with instead or otherwise after a colon ("do not
     wait: instead, run it inline"), with instead after a comma ("do not wait, instead run it inline", "do not wait,
     instead of waiting, run it inline") or with then right after a comma ("do not wait, then run it inline"), unless
@@ -4741,9 +4763,13 @@ def d1_scopes(clauses, carried=False):
     run it inline" stays negated); a new segment starts afresh. EXCLUDED: an earlier clause of its segment holds
     instead of or rather than, every clause from there to this one is opened by a comma, a colon, and or or, and
     none opens with instead or otherwise ("stop rather than retry or run it inline"), except that an exclusion from
-    a clause that opens with instead of or rather than ends at the next clause opened by a comma ("instead of
-    waiting or retrying, run it inline": the clause after the comma is the alternative asked for)."""
-    scopes, negated, excluded, fronted, segment, previous = [], carried, False, False, None, None
+    a clause that opens with instead of or rather than ends at the next clause whose opener is a bare comma
+    ("instead of waiting or retrying, run it inline": the clause after the comma is the alternative asked for). The
+    boundary is the clause opener, not the comma character: a comma followed by and or or gives its clause that
+    word as opener, which carries the exclusion, so a fronted list of excluded actions stays excluded ("rather than
+    retry, or run it inline, report the refusal") and so does "instead of waiting, and run it inline" (a named
+    miss, D1_FRONTED_COORDINATED)."""
+    scopes, excluded, fronted, segment, previous = [], False, False, None, None
     for clause in clauses:
         if clause[0] != segment:
             if segment is not None:
@@ -4814,12 +4840,15 @@ def d1_excerpt(sentence):
 def rule_d1(text):
     """D1 (ADVISORY, every family): one WARN per sentence that seems to tell the worker to achieve a refused or
     denied step another way (d1_hit), naming the line of its first matching action verb, with the sentence as its
-    excerpt. A WARN never sets the exit code: run() carries each in the summary line the other rules select.
-    Nothing is carried from one paragraph to the next but a LEAD's prohibition: a paragraph whose last line ends
-    with a colon is a lead, negated when its last sentence's last clause is (d1_prohibits); each list item paragraph
-    after it, before any paragraph that is not a list item, that d1_nested places under it reads its first segment
-    as negated ("Never do any of the following:" then "- run a denied step another way." is quiet), and a lead that
-    is not negated carries nothing ("Do the following:" then that item warns)."""
+    excerpt. A WARN takes no part in the refusal or exit selection: run() carries each in the summary line the other
+    rules select (printing that line can still fail on an output encoding that cannot hold the excerpt, which ends
+    the run with exit 1, as for every rule's excerpt). Nothing is carried from one paragraph to the next but a
+    LEAD's prohibition: a paragraph whose last line ends with a colon is a lead, negated when its last sentence's
+    last clause is (d1_prohibits); each list item paragraph after it, before any paragraph that is not a list item,
+    that d1_nested places under it reads its whole first segment as negated, whatever restarts inside it
+    (d1_scopes: "Never do any of the following:" then "- run a denied step another way." or "- If denied, instead
+    run it inline." is quiet), and a lead that is not negated carries nothing ("Do the following:" then either item
+    warns)."""
     findings, lines, leads = [], text.split("\n"), []
     for paragraph in d1_paragraphs(text):
         item = D1_LIST_RE.match(lines[paragraph[0][0] - 1])
@@ -5596,6 +5625,42 @@ D1_LEAD_KEPT = ("Do the following:\n- run a denied step another way.\n",
                 "- Never do any of the following:\n- run a denied step another way.\n",
                 "Never do any of the following:\n- wait.\n\nThen continue.\n- run a denied step another way.\n")
 D1_LEAD_KEPT_LINES = ([2], [2], [5])
+# a negated lead's negation is held apart from the item's own, so a comma or colon restart inside the item's first
+# segment does not end it: each is quiet, and with the lead's negation read as the item's own, cleared by a restart
+# (the previous reading), each warned on the line given in D1_LEAD_RESTART_CARRIED_WAS
+D1_LEAD_RESTART_CARRIED = ("Never do any of the following:\n- If denied, instead run it inline.\n",
+                           "Never do any of the following:\n- If denied, then run it inline.\n",
+                           "Never do any of the following:\n- If denied: instead, run it inline.\n",
+                           "Never do any of the following:\n- If denied: otherwise run it inline.\n",
+                           "Never do any of the following:\n- If denied, do not wait, instead run it inline.\n",
+                           "- Never do any of the following:\n  - If denied, instead run it inline.\n")
+D1_LEAD_RESTART_CARRIED_WAS = ([2], [2], [2], [2], [2], [2])
+# controls: the same restarts under a lead that is not negated, an item's own negation still cleared by its own
+# restart, and a restart in a later segment of an item under a negated lead (the lead's negation reaches only the
+# first segment) each warn on the line given in D1_LEAD_RESTART_KEPT_LINES
+D1_LEAD_RESTART_KEPT = ("Do the following:\n- If denied, instead run it inline.\n",
+                        "Do the following:\n- If denied, then run it inline.\n",
+                        "Do the following:\n- If denied: instead, run it inline.\n",
+                        "Do the following:\n- If denied: otherwise run it inline.\n",
+                        "Do the following:\n- If denied, do not wait, instead run it inline.\n",
+                        "Never do any of the following:\n- wait; if denied, instead run it inline.\n")
+D1_LEAD_RESTART_KEPT_LINES = ([2], [2], [2], [2], [2], [2])
+# the boundary of an exclusion from a clause that opens with instead of or rather than is the next clause whose
+# opener is a bare comma: a comma followed by and or or opens its clause with that word, which carries the
+# exclusion, so each is quiet (a fronted list of excluded actions, and a named miss); with and and or ending it as
+# a bare comma does (the reading that ends it at every comma) each warns on line 1
+D1_FRONTED_COORDINATED = ("If denied, rather than retry, or run it inline, report the refusal.\n",
+                          "If denied, instead of waiting, and run it inline.\n")
+# the module docstring's D1 exit guarantee and fronted-exclusion boundary (whitespace runs read as one space), each
+# beside the earlier wording that overstated it (D1_DOC_*_WAS)
+D1_DOC_EXIT = r"D1 denial reroute ADVISORY \(([^)]*)\)"
+D1_DOC_EXIT_TEXT = ("a WARN; its findings never refuse and take no part in the refusal or exit selection, though "
+                    "printing one can fail on an output encoding and end the run with exit 1: see below")
+D1_DOC_EXIT_WAS = "a WARN; it never refuses and never changes the exit code"
+D1_DOC_FRONTED = r"that opens with instead of or rather than ends at ([^(]*?) \("
+D1_DOC_FRONTED_TEXT = ("the next clause whose opener is a bare comma, not at every comma: a comma followed by and "
+                       "or or opens its clause with that word, which carries the exclusion")
+D1_DOC_FRONTED_WAS = "the next clause opened by a comma"
 # a following or below that modifies a noun introduces nothing, so a clause after the colon that opens with instead
 # or otherwise still starts afresh and warns, on the line given in D1_MODIFIER_KEPT_LINES; with the negation kept
 # after every colon closing a clause that ends with following or below (the previous reading) each was quiet
@@ -8524,6 +8589,25 @@ def self_test(report_path=None):
     check("d1/comma-restart-warned", [d1_lines(text) for text in D1_RESTARTED], list(D1_RESTARTED_LINES))
     check("d1/negated-lead-carries-quiet", [d1_lines(text) for text in D1_LEAD_CARRIED], [[]] * len(D1_LEAD_CARRIED))
     check("d1/lead-scope-warned", [d1_lines(text) for text in D1_LEAD_KEPT], list(D1_LEAD_KEPT_LINES))
+    check("d1/negated-lead-restart-quiet", [d1_lines(text) for text in D1_LEAD_RESTART_CARRIED],
+          [[]] * len(D1_LEAD_RESTART_CARRIED))
+    check("d1/lead-restart-scope-warned", [d1_lines(text) for text in D1_LEAD_RESTART_KEPT],
+          list(D1_LEAD_RESTART_KEPT_LINES))
+    check("d1/fronted-coordinated-quiet", [d1_lines(text) for text in D1_FRONTED_COORDINATED],
+          [[]] * len(D1_FRONTED_COORDINATED))
+
+    def d1_doc(pattern):
+        """An outcome: the first group of `pattern` in the module docstring with whitespace runs as one space, or
+        None."""
+        def outcome():
+            found = re.search(pattern, " ".join(__doc__.split()))
+            return found.group(1) if found else None
+        return outcome
+
+    # the D1 entry states its exit guarantee with the encoding failure it discloses below, and the boundary of a
+    # fronted exclusion as the clause opener the code compares
+    check("d1/doc-exit-guarantee", d1_doc(D1_DOC_EXIT)(), D1_DOC_EXIT_TEXT)
+    check("d1/doc-fronted-boundary", d1_doc(D1_DOC_FRONTED)(), D1_DOC_FRONTED_TEXT)
     # a wrapped sentence is read whole and named by the line of its first matching action verb; a semicolon keeps
     # the sentence, so the refusal before it pairs with the action after it
     check("d1/wrapped-line-warned",
@@ -10698,7 +10782,30 @@ def self_test(report_path=None):
                                                    d1_prohibits=lambda clauses, carried=False: True))
     check("revert/d1-lead-nesting-red", *flip([reroutes(D1_LEAD_KEPT[index]) for index in (1, 2)], [[], []],
                                               d1_nested=lambda lead_depth, depth: True))
-    check("revert/every-flip-ran", len(flipped), 314)
+    # the lead's negation held apart reverted: read as the item's own negation, a restart in the item clears it and
+    # each restarted item warns again; widened past the first segment, the later-segment control goes quiet; and
+    # with every lead read as negated, the controls under an unnegated lead go quiet
+    check("revert/d1-lead-restart-red", *flip(
+        [reroutes(text) for text in D1_LEAD_RESTART_CARRIED], list(D1_LEAD_RESTART_CARRIED_WAS),
+        d1_scopes=lambda clauses, carried=False: d1_local_scopes(clauses, carried)))
+    check("revert/d1-lead-restart-segment-red", *flip(
+        [reroutes(D1_LEAD_RESTART_KEPT[5])], [[]],
+        d1_scopes=lambda clauses, carried=False: [(clause, negated or carried, excluded)
+                                                  for clause, negated, excluded in d1_local_scopes(clauses)]))
+    check("revert/d1-lead-restart-negated-only-red", *flip(
+        [reroutes(D1_LEAD_RESTART_KEPT[index]) for index in range(5)], [[]] * 5,
+        d1_prohibits=lambda clauses, carried=False: True))
+    # and or or after a comma ending a fronted exclusion as a bare comma does: each pinned case warns
+    check("revert/d1-fronted-coordinated-red", *flip([reroutes(text) for text in D1_FRONTED_COORDINATED], [[1], [1]],
+                                                     D1_FRONTED_ENDS=frozenset((",", "and", "or"))))
+    # the earlier docstring wording restored: each documentation check reads it back
+    d1_doc_was = " ".join(__doc__.split())
+    check("revert/d1-doc-exit-guarantee-red", *flip(
+        [d1_doc(D1_DOC_EXIT)], [D1_DOC_EXIT_WAS], __doc__=d1_doc_was.replace(D1_DOC_EXIT_TEXT, D1_DOC_EXIT_WAS)))
+    check("revert/d1-doc-fronted-boundary-red", *flip(
+        [d1_doc(D1_DOC_FRONTED)], [D1_DOC_FRONTED_WAS],
+        __doc__=d1_doc_was.replace(D1_DOC_FRONTED_TEXT, D1_DOC_FRONTED_WAS)))
+    check("revert/every-flip-ran", len(flipped), 320)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -10778,10 +10885,12 @@ def self_test(report_path=None):
           "clause marked as another way, across wrapped lines and semicolons but never across a sentence stop, "
           "blank line, list item, heading or label, is quiet on negated refusals, on prohibitions (carried across "
           "commas, and, or, but, then and colons up to a semicolon, and from a lead ending in a colon whose last "
-          "clause is negated into the first segment of each list item under it) and on actions an instead of or "
+          "clause is negated into the whole first segment of each list item under it, past any restart there) and "
+          "on actions an instead of or "
           "rather than excludes (carried across clauses opened by a comma, a colon, and or or, up to a semicolon, "
           "but, then or a clause opening with instead or otherwise, and from a clause that opens with instead of or "
-          "rather than only up to the next comma), warns again where a clause restarts a prohibition (one opening "
+          "rather than only up to the next clause whose opener is a bare comma, so a comma followed by and or or "
+          "keeps it), warns again where a clause restarts the sentence's own prohibition, never a lead's (one opening "
           "with instead or otherwise after a colon, with instead after a comma, or with then right after a comma, "
           "unless the clause before it is a negated verb phrase whose object is following or below, never one "
           "where the word modifies a noun), "
