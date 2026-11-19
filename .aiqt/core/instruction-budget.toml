@@ -149,12 +149,60 @@
 #                        119876 -> 120923; managed block 360 and file headers 16263 unchanged. The ratchet
 #                        rises by the measured delta, 136499 + 1047 = 137546, within the maintainer's
 #                        authorization of 2026-11-08 for raises up to 148000.
+#                        Raised 137546 -> 138171 on 2026-11-18 under the maintainer's recorded decision of
+#                        2026-10-31 to raise the ratchet by exactly the measured delta, when
+#                        workers-produce-inert-data gained its paragraph that a reader splitting a worker
+#                        delivery into files at marker lines treats every marker-form line as grammar and
+#                        refuses one it does not recognize or cannot handle, real content holding one
+#                        included, before any file is written, and checks each extracted file against a
+#                        digest the delivery states, refusing a mismatch by file name so that no file of
+#                        that delivery is written (wowo01.22, wowo01.23): measured PACK 137546 at the base
+#                        387ab765 (also 137546 at 782e2310) -> 138171 (+625 units); rule files 120923 ->
+#                        121548; managed block 360 and file headers 16263 unchanged. The ratchet rises by
+#                        the measured delta, 137546 + 625 = 138171, within the maintainer's authorization
+#                        of 2026-11-08 for raises up to 148000.
+#                        Raised 138171 -> 138478 on 2026-11-19 under the maintainer's recorded decision of
+#                        2026-10-31 to raise the ratchet by exactly the measured delta, when
+#                        workers-produce-inert-data made the per-file digest list required, under the
+#                        maintainer's decision of 2026-11-18: the delivery must state a digest for each file
+#                        it carries; a delivery with no digest list, a file without a digest, or a digest that
+#                        does not match is refused so that no file of that delivery is written; and the only
+#                        exception is an explicit opt-out the person running the extraction gives for that one
+#                        delivery, with a warning naming what is not checked (wowo01.23 reworded, wowo01.24
+#                        and wowo01.25 added): measured PACK 138171 at the merge base 387ab765 with the change
+#                        the entry above records -> 138478 (+307 units); rule files 121548 -> 121855; managed
+#                        block 360 and file headers 16263 unchanged. The ratchet rises by the measured delta,
+#                        138171 + 307 = 138478, within the maintainer's authorization of 2026-11-08 for
+#                        raises up to 148000.
+#                        Raised 138478 -> 138503 on 2026-11-19 under the maintainer's recorded decision of
+#                        2026-10-31 to raise the ratchet by exactly the measured delta, when
+#                        workers-produce-inert-data reworded its digest paragraph, keeping the maintainer's
+#                        decision of 2026-11-18: the only exception now follows the refusal sentence and names
+#                        that refusal, the opt-out is from these digest requirements so it covers a delivery
+#                        with no digest list, a file without a digest, and a digest that does not match, and
+#                        the sentence on what a digest detects follows the exception (wowo01.24 and wowo01.25
+#                        reworded): measured PACK 138478 at the merge base 387ab765 with the changes the two
+#                        entries above record -> 138503 (+25 units); rule files 121855 -> 121880; managed
+#                        block 360 and file headers 16263 unchanged. The ratchet rises by the measured delta,
+#                        138478 + 25 = 138503, within the maintainer's authorization of 2026-11-08 for raises
+#                        up to 148000.
+#                        Raised 138503 -> 138734 on 2026-11-19 under the maintainer's recorded decision of
+#                        2026-10-31 to raise the ratchet by exactly the measured delta, when
+#                        workers-produce-inert-data reworded its digest paragraph, keeping the maintainer's
+#                        decision of 2026-11-18: a delivery whose digest list names a file it does not carry
+#                        is refused too, each digest sentence names the reader it binds and states the opt-out
+#                        condition itself, and the opt-out still waives the digest requirements as a whole
+#                        (wowo01.23 to wowo01.25 reworded): measured PACK 138503 at the merge base 387ab765
+#                        with the changes the three entries above record -> 138734 (+231 units); rule files
+#                        121880 -> 122111; managed block 360 and file headers 16263 unchanged. The ratchet
+#                        rises by the measured delta, 138503 + 231 = 138734, within the maintainer's
+#                        authorization of 2026-11-08 for raises up to 148000.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 137546
+ratchet = 138734
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"

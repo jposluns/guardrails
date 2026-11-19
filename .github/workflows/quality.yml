@@ -1281,6 +1281,21 @@ jobs:
         shell: bash
         run: python3 -I -B tools/gen_hooks.py --check
 
+      # The hooks behaviour self-test parses its heredoc cases with the bash on PATH and fails below bash 5.3,
+      # which the runner image need not ship. This job builds GNU bash 5.3 with patches 001 to 009 from pinned
+      # digests and adds its bin directory to GITHUB_PATH, which GitHub documents as putting it first on PATH for
+      # every later step of this job. Its self-test runs first, offline; a refused or failed build fails the job.
+      # The build runs only on the explicit --build; run with no argument the script runs its offline self-test.
+      # The three git-fixture-env config lanes rerun the hooks behaviour self-test as a roster member, so each
+      # of their host-patch shard jobs runs this same build step before its shard of the lane; no other job
+      # builds bash.
+      - name: Pinned bash 5.3 build self-test
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --self-test
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Hooks behaviour self-test
         shell: bash
         run: python3 -I -B tools/selftest_aiqt_hooks.py
@@ -1355,6 +1370,10 @@ jobs:
       - name: Brief-capability self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite brief-capability-selftest
+
+      - name: Pinned bash build self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite ci-build-bash-selftest
 
       - name: Hook-latency harness self-test (execution-reconciled)
         shell: bash
@@ -1447,6 +1466,10 @@ jobs:
   # gate's: tools/check_child_status_coverage.py accepts the host pin step between the Python setup step
   # and the probe in these 45 jobs of this workflow only, and requires the probe step, named for that
   # placement, right after it.
+  # Each of the 43 config shard jobs also runs the pinned bash 5.3 build (tools/ci_build_bash.py --build)
+  # after the probe and before its shard: the config lanes rerun the hooks behaviour self-test as a roster
+  # member, and it fails below bash 5.3. The host-pin gate's bash-build rule holds that step once, before
+  # the shard's suite step, in each shard job; the opf and core jobs build no bash.
   # All 45 are required through Quality gates. They are heavy jobs, so they run on a push and on a
   # merge-train-* pull request of this repository, and in no other pull request run; an edit to a pull
   # request's title or body starts no Quality run.
@@ -1534,6 +1557,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env combined config-injection lane, shard 1 of 12 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 1/12
@@ -1561,6 +1588,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env combined config-injection lane, shard 2 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1590,6 +1621,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env combined config-injection lane, shard 3 of 12 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 3/12
@@ -1617,6 +1652,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env combined config-injection lane, shard 4 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1646,6 +1685,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env combined config-injection lane, shard 5 of 12 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 5/12
@@ -1673,6 +1716,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env combined config-injection lane, shard 6 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1702,6 +1749,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env combined config-injection lane, shard 7 of 12 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 7/12
@@ -1729,6 +1780,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env combined config-injection lane, shard 8 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1758,6 +1813,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env combined config-injection lane, shard 9 of 12 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 9/12
@@ -1785,6 +1844,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env combined config-injection lane, shard 10 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1814,6 +1877,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env combined config-injection lane, shard 11 of 12 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined --shard 11/12
@@ -1841,6 +1908,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env combined config-injection lane, shard 12 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1870,6 +1941,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env malformed-config lane, shard 1 of 12 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 1/12
@@ -1897,6 +1972,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env malformed-config lane, shard 2 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1926,6 +2005,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env malformed-config lane, shard 3 of 12 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 3/12
@@ -1953,6 +2036,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env malformed-config lane, shard 4 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -1982,6 +2069,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env malformed-config lane, shard 5 of 12 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 5/12
@@ -2009,6 +2100,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env malformed-config lane, shard 6 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -2038,6 +2133,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env malformed-config lane, shard 7 of 12 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 7/12
@@ -2065,6 +2164,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env malformed-config lane, shard 8 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -2094,6 +2197,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env malformed-config lane, shard 9 of 12 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 9/12
@@ -2121,6 +2228,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env malformed-config lane, shard 10 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -2150,6 +2261,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env malformed-config lane, shard 11 of 12 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed --shard 11/12
@@ -2177,6 +2292,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env malformed-config lane, shard 12 of 12 (execution-reconciled, host patch)
         shell: bash
@@ -2206,6 +2325,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env system-config lane, shard 1 of 19 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 1/19
@@ -2233,6 +2356,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env system-config lane, shard 2 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2262,6 +2389,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env system-config lane, shard 3 of 19 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 3/19
@@ -2289,6 +2420,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env system-config lane, shard 4 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2318,6 +2453,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env system-config lane, shard 5 of 19 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 5/19
@@ -2345,6 +2484,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env system-config lane, shard 6 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2374,6 +2517,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env system-config lane, shard 7 of 19 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 7/19
@@ -2401,6 +2548,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env system-config lane, shard 8 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2430,6 +2581,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env system-config lane, shard 9 of 19 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 9/19
@@ -2457,6 +2612,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env system-config lane, shard 10 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2486,6 +2645,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env system-config lane, shard 11 of 19 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 11/19
@@ -2513,6 +2676,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env system-config lane, shard 12 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2542,6 +2709,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env system-config lane, shard 13 of 19 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 13/19
@@ -2569,6 +2740,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env system-config lane, shard 14 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2598,6 +2773,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env system-config lane, shard 15 of 19 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 15/19
@@ -2625,6 +2804,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env system-config lane, shard 16 of 19 (execution-reconciled, host patch)
         shell: bash
@@ -2654,6 +2837,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env system-config lane, shard 17 of 19 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 17/19
@@ -2682,6 +2869,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
+
       - name: Git-fixture-env system-config lane, shard 18 of 19 (execution-reconciled, host patch)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-system --shard 18/19
@@ -2709,6 +2900,10 @@ jobs:
       - name: Child exit status observable (after the host pin gate)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Pinned bash 5.3 build (CI only)
+        shell: bash
+        run: python3 -I -B tools/ci_build_bash.py --build
 
       - name: Git-fixture-env system-config lane, shard 19 of 19 (execution-reconciled, host patch)
         shell: bash
