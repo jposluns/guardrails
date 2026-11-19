@@ -2024,6 +2024,12 @@ expected-check-ids = [
   "temp/replaced-root-untouched",
   "temp/deep-stale-root-recovered",
   "temp/rename-after-marker-unlink",
+  # Removal fails closed: a root whose pin failed is left behind and reported, nothing at its path removed;
+  # an rmdir that removed a swapped-in replacement is reported (not success) with the root's marker put
+  # back; and a marker that exists but cannot be read is kept and reported, never deleted.
+  "temp/pin-failure-left-unremoved",
+  "temp/rmdir-swap-reported",
+  "temp/unreadable-marker-kept",
   "temp/own-root-removed",
   # ---------- the self-test entry point hands the caller's environment back ----------
   "harness/entry-restores-caller-env",

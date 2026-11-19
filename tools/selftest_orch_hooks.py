@@ -5805,7 +5805,11 @@ _GONE_PID = 2 ** 22 + 7
 # fail on every file named _SWEEP_STUCK_NAME (a stale root the sweep cannot remove), "replace" makes the
 # setup step move the run's root aside (its name plus "-moved") and put a directory holding keep.txt in
 # its place before it raises (temp/replaced-root-untouched; the result then also gives keep.txt's text,
-# the moved root's entries and whether its marker is intact), and "hang" makes the
+# the moved root's entries and whether its marker is intact), "pinfail" makes the confined
+# _fixture_tmpdir move the root it made aside (its name plus "-moved") and put a mode 0000 directory
+# holding keep.txt in its place before returning, so pin_root fails (temp/pin-failure-left-unremoved;
+# the result gives the same extra fields, read after the replacement is given back mode 0700), and
+# "hang" makes the
 # setup step print one _TEMP_KILL_TAG line (this process's identifier and the roots made) and then sleep,
 # so the parent can kill the run for real (temp/killed-run-recovered). The child records each
 # marker's bytes and modification time as written, and prints one tagged JSON line: the name of the
@@ -5826,6 +5830,11 @@ _TEMP_SETUP_CHILD = (
     "def confined_tmpdir(prefix):\n"
     "    path = Path(tempfile.mkdtemp(prefix=prefix, dir=base))\n"
     "    made.append(str(path))\n"
+    "    if 'pinfail' in modes:\n"
+    "        os.rename(str(path), str(path) + '-moved')\n"
+    "        os.mkdir(str(path))\n"
+    "        Path(path, 'keep.txt').write_text('unrelated data', encoding='utf-8')\n"
+    "        os.chmod(str(path), 0)\n"
     "    return path\n"
     "suite._fixture_tmpdir = confined_tmpdir\n"
     "tmproot = suite._selftest_tmproot\n"
@@ -5889,13 +5898,15 @@ _TEMP_SETUP_CHILD = (
     "    suite._main_isolated(None)\n"
     "except BaseException as exc:\n"
     "    raised = type(exc).__name__\n"
+    "if 'pinfail' in modes and made and os.path.isdir(made[0]):\n"
+    "    os.chmod(made[0], 0o700)\n"
     "result = {'raised': raised, 'made': len(made),\n"
     "      'left': [p for p in made if os.path.lexists(p)],\n"
     "      'marked': [p for p in made if os.path.lexists(os.path.join(p, suite._selftest_tmproot.MARKER))],\n"
     "      'marker_intact': [p for p in made if marker_intact(p)],\n"
     "      'base_entries': sorted(os.listdir(base)),\n"
     "      'own_root_failures': [f for f in suite.FAILURES if f.startswith('temp/own-root-removed')]}\n"
-    "if 'replace' in modes and made:\n"
+    "if ('replace' in modes or 'pinfail' in modes) and made:\n"
     "    def read_or_none(path):\n"
     "        try:\n"
     "            return Path(path).read_text(encoding='utf-8')\n"
@@ -6079,6 +6090,22 @@ def _temp_root_cases(tmp):
            "before cleanup".format(left[0]) in stderr,
            len(left) == 1 and len(own) == 1 and left[0] in own[0]),
           ("InjectedSetupFailure", 1, 1, "unrelated data", [_selftest_tmproot.MARKER], True, True, True))
+
+    # temp/pin-failure-left-unremoved: between the root's mkdtemp and pin_root, the root is moved aside and
+    # a mode 0000 directory holding keep.txt takes its name, so pin_root fails. With no pin, the finally
+    # must remove nothing: the replacement and its file stay, and the root is named on stderr as left
+    # behind (never pinned) and recorded as the run's temp/own-root-removed failure. A cleanup that falls
+    # back to removing whatever is at the path repairs the replacement's mode and deletes keep.txt.
+    got, stderr, _stdout = _temp_setup_child(tmp, "temp-pin-failure", "pinfail")
+    left = got.get("left") or []
+    own = got.get("own_root_failures") or []
+    check("temp/pin-failure-left-unremoved",
+          (got.get("raised"), got.get("made"), len(left), got.get("replacement_kept"),
+           got.get("moved_entries"),
+           len(left) == 1 and "SELF-TEST ERROR: could not remove the temporary root {} (its identity was "
+           "never pinned".format(left[0]) in stderr,
+           len(left) == 1 and len(own) == 1 and left[0] in own[0]),
+          ("PermissionError", 1, 1, "unrelated data", [], True, True))
 
     # temp/probe-restore-failure-removes-root: restoring the registry probe raises in the finally. The
     # nested finally must still remove the root, and the restore failure must come out.
@@ -6270,7 +6297,7 @@ def _temp_root_cases(tmp):
         shutil.rmtree(str(path / "fixture"))
         os.chmod(str(path), 0o500)
     removed, problems = _selftest_tmproot.sweep_stale(_TMPROOT_SUITE, _TMPROOT_PREFIX, (str(parent),))
-    own_result = _selftest_tmproot.remove_root(own_root)
+    own_result = _selftest_tmproot.remove_root(own_root, _selftest_tmproot.pin_root(own_root))
     for path in (swept_root, own_root):
         if os.path.isdir(str(path)):
             os.chmod(str(path), 0o700)
@@ -6415,6 +6442,7 @@ def _temp_root_restore_case(tmp, case):
     def failing_rename(*args, **kwargs):
         raise OSError(errno.ENOSPC, "injected rename failure")
 
+    pin = _selftest_tmproot.pin_root(root)
     os.rmdir = failing_rmdir
     if case == "enospc":
         os.write = full_write
@@ -6426,11 +6454,12 @@ def _temp_root_restore_case(tmp, case):
         os.rename = failing_rename
     try:
         try:
-            result = ("returned", _selftest_tmproot.remove_root(root))
+            result = ("returned", _selftest_tmproot.remove_root(root, pin))
         except Exception as exc:  # noqa: BLE001  an escaping failure is this row's failure
             result = ("raised", type(exc).__name__)
     finally:
         os.rmdir, os.write, os.link, os.rename = real
+        pin.close()
     try:
         after = (marker.read_bytes(), os.stat(marker).st_mtime_ns)
     except OSError:
@@ -6480,6 +6509,91 @@ def _temp_root_rename_case(tmp):
             [os.path.basename(path) for path in removed], problems, sorted(os.listdir(parent)))
 
 
+def _temp_root_rmdir_swap_case(tmp):
+    """Pin a stale marked root as a run pins its own, then remove it with remove_root and that pin while,
+    at the final rmdir of the root's name (after its name was last checked), the root is renamed (its
+    name plus "-renamed", in the same parent) and an empty directory put at its name, which that rmdir
+    then removes; then sweep the parent. Returns (how remove_root ended, whether its result names the
+    root as surviving under another name, whether the renamed root's marker has exactly its old bytes
+    and modification time, the names the sweep removed, the sweep's problems, the parent's entries)."""
+    parent = tmp / "rmdir-swap"
+    parent.mkdir()
+    root = parent / (_TMPROOT_PREFIX + "rmdirswap")
+    _make_marked_root(root)
+    marker = root / _selftest_tmproot.MARKER
+    before = (marker.read_bytes(), os.stat(marker).st_mtime_ns)
+    renamed = parent / (root.name + "-renamed")
+    pin = _selftest_tmproot.pin_root(root)
+    real_rmdir = os.rmdir
+
+    def swapping_rmdir(path, *args, **kwargs):
+        if os.fsdecode(path) == root.name and not os.path.lexists(renamed):
+            os.rename(root, renamed)
+            os.mkdir(root)
+        return real_rmdir(path, *args, **kwargs)
+
+    os.rmdir = swapping_rmdir
+    try:
+        try:
+            result = ("returned", _selftest_tmproot.remove_root(root, pin))
+        except Exception as exc:  # noqa: BLE001  an escaping failure is this row's failure
+            result = ("raised", type(exc).__name__)
+    finally:
+        os.rmdir = real_rmdir
+        pin.close()
+    try:
+        after = ((renamed / _selftest_tmproot.MARKER).read_bytes(),
+                 os.stat(renamed / _selftest_tmproot.MARKER).st_mtime_ns)
+    except OSError:
+        after = None
+    removed, problems = _selftest_tmproot.sweep_stale(_TMPROOT_SUITE, _TMPROOT_PREFIX, (str(parent),))
+    return (result[0], isinstance(result[1], str) and str(root) in result[1]
+            and "under another name" in result[1], after == before,
+            [os.path.basename(path) for path in removed], problems, sorted(os.listdir(parent)))
+
+
+def _temp_root_unreadable_marker_case(tmp):
+    """Pin a stale marked root whose marker is at mode 0000 (it exists but cannot be read), then remove it
+    with remove_root and that pin while the root's final rmdir fails (injected, matched by the root's
+    name); then give the marker mode 0600 back and sweep the parent. Returns (how remove_root ended,
+    whether its result names the root and says its marker could not be read, whether the marker has
+    exactly its old bytes and modification time, the names the sweep removed, the sweep's problems, the
+    parent's entries afterwards)."""
+    parent = tmp / "unreadable-marker"
+    parent.mkdir()
+    root = parent / (_TMPROOT_PREFIX + "unreadable")
+    _make_marked_root(root)
+    marker = root / _selftest_tmproot.MARKER
+    before = (marker.read_bytes(), os.stat(marker).st_mtime_ns)
+    os.chmod(marker, 0)
+    pin = _selftest_tmproot.pin_root(root)
+    real_rmdir = os.rmdir
+
+    def failing_rmdir(path, *args, **kwargs):
+        if os.path.basename(os.fsdecode(path)) == root.name:
+            raise OSError(errno.EBUSY, "injected busy root", os.fsdecode(path))
+        return real_rmdir(path, *args, **kwargs)
+
+    os.rmdir = failing_rmdir
+    try:
+        try:
+            result = ("returned", _selftest_tmproot.remove_root(root, pin))
+        except Exception as exc:  # noqa: BLE001  an escaping failure is this row's failure
+            result = ("raised", type(exc).__name__)
+    finally:
+        os.rmdir = real_rmdir
+        pin.close()
+    try:
+        os.chmod(marker, 0o600)
+        after = (marker.read_bytes(), os.stat(marker).st_mtime_ns)
+    except OSError:
+        after = None
+    removed, problems = _selftest_tmproot.sweep_stale(_TMPROOT_SUITE, _TMPROOT_PREFIX, (str(parent),))
+    return (result[0], isinstance(result[1], str) and str(root) in result[1]
+            and "marker exists but could not be read" in result[1], after == before,
+            [os.path.basename(path) for path in removed], problems, sorted(os.listdir(parent)))
+
+
 def _temp_root_pinning_cases(tmp):
     """The rows for removal through pinned descriptors and for writing a marker back (the module
     docstring of tools/_selftest_tmproot.py)."""
@@ -6526,6 +6640,23 @@ def _temp_root_pinning_cases(tmp):
     # sweep skips.
     check("temp/rename-after-marker-unlink", _temp_root_rename_case(tmp),
           ("returned", True, True, [_TMPROOT_PREFIX + "rename-renamed"], [], []))
+
+    # temp/rmdir-swap-reported: at the root's final rmdir (after its name was last checked) the pinned root
+    # is renamed and an empty directory put at its name, so that rmdir succeeds on the replacement.
+    # remove_root must still ask the pinned descriptor, find the root alive, report it (naming it,
+    # surviving under another name), never success, and put its marker back with its old bytes and
+    # modification time, so a later sweep removes the renamed root. A removal that trusts rmdir's success
+    # reports success and leaves an unmarked survivor that every sweep skips.
+    check("temp/rmdir-swap-reported", _temp_root_rmdir_swap_case(tmp),
+          ("returned", True, True, [_TMPROOT_PREFIX + "rmdirswap-renamed"], [], []))
+
+    # temp/unreadable-marker-kept: a root whose marker exists but cannot be read (mode 0000) and whose
+    # final rmdir would fail. remove_root must keep the marker (never delete a marker it could not save)
+    # and report the root, saying the marker could not be read; once the marker is readable again, a
+    # sweep removes the root. A removal that reads an unreadable marker as absent deletes it, and the
+    # failed rmdir then leaves an unmarked survivor with no marker loss reported.
+    check("temp/unreadable-marker-kept", _temp_root_unreadable_marker_case(tmp),
+          ("returned", True, True, [_TMPROOT_PREFIX + "unreadable"], [], []))
 
 
 def _make_marked_root(path, suite=_TMPROOT_SUITE, pid=_GONE_PID, host=None, created=None,

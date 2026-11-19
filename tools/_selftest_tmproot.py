@@ -16,24 +16,36 @@ tool) and one whose owner still runs are left alone; a process identifier the sy
 reads as a live owner, so reuse keeps a root rather than removing one. There is deliberately no
 broad aiqt-* pattern here: each suite sweeps only its own prefix and suite name.
 
-When identity is pinned. A suite's own root is pinned when the run makes it: each suite calls
-pin_root on the path _fixture_tmpdir returned, as the first step after that call and before the marker
-is written, and keeps the RootPin it returns (the directory's device and inode, and an O_DIRECTORY and
-O_NOFOLLOW descriptor of it held open, so that inode number cannot be given to another directory while
-the run lasts) until its finally passes the pin to remove_root. remove_root then judges the root by
-that pin alone, never by what occupies the path at cleanup time: when the path names an entry of
-another identity (the root moved away and another directory, or a symbolic link, put in its place),
-that entry is not touched and the run's root is reported as surviving; when the path names nothing,
-the root is reported as surviving unless the pinned directory itself no longer exists. A stale root
-of the sweep, and a directory given to remove_root without a pin (the self-test rows' own fixtures),
-are pinned when their removal starts: the no-follow stat of the name then (lstat for remove_root, a
-stat in the parent for the sweep) is the identity from there on. The one window left for a suite's own
-root is between the mkdtemp inside _fixture_tmpdir and pin_root.
+Removal fails closed. Nothing is removed that is not proven to be the pinned directory, and success
+is reported only when the pinned directory is confirmed gone; a root that is left behind is always
+reported, and a reported leftover is the accepted cost of every doubt. Exactly:
+- remove_root removes only the directory its RootPin holds. A suite's own root is pinned when the run
+  makes it: each suite calls pin_root on the path _fixture_tmpdir returned, as the first step after
+  that call and before the marker is written, and keeps the RootPin it returns (the directory's device
+  and inode, and an O_DIRECTORY and O_NOFOLLOW descriptor of it held open, so that inode number cannot
+  be given to another directory while the run lasts) until its finally passes the pin to remove_root.
+  When pin_root failed or was never reached, the finally passes None, and remove_root removes nothing
+  at all and reports the root as left behind (there is no unpinned removal to fall back on). A
+  self-test row that removes a fixture of its own pins it first with pin_root.
+- remove_root judges the root by the pin alone, never by what occupies the path at cleanup time: when
+  the path names an entry of another identity (the root moved away and another directory, or a
+  symbolic link, put in its place), that entry is not touched and the run's root is reported as
+  surviving; when the path names nothing, the root is reported as surviving unless the pinned directory
+  itself no longer exists. A stale root of the sweep is pinned when the sweep judges it: the stat of its
+  name in the opened parent, matched by the descriptor the marker is then read through, is its identity
+  from there on.
+- After the final rmdir, whatever it returned, the pinned descriptor is asked whether the directory is
+  gone (no link left, or a listing that reports it deleted). Only then is the root reported removed.
+  Otherwise (the rmdir failed, or it succeeded on another directory put at the root's name after the
+  last check) the pinned directory gets its marker back through the descriptor (as below) and the root
+  is reported as not removed, so a later sweep of wherever it now is still recognises it.
+- A marker is never deleted unless its full content was read first: an entry with the marker's name
+  that cannot be opened, is not a regular file, is too long or cannot be read is kept and its root is
+  reported (an absent marker is the only case in which the removal goes on without one).
 
 Every removal works on pinned directory descriptors, never by re-resolving a path. The root's parent
-is opened once; with a pin, the root's name must name the pinned directory and the pin's descriptor is
-used; otherwise the root is opened once in that parent with O_DIRECTORY and O_NOFOLLOW, and its device
-and inode must match the check, or nothing is touched and the root is reported. The sweep reads and
+is opened once; the root's name must name the pinned directory, and the pinned descriptor is used, or
+nothing is touched and the root is reported. The sweep reads and
 judges the marker through that descriptor. Listing, permission repair, unlinking and removal of every
 entry go through descriptors opened the same way, each matched against the no-follow stat of its name.
 Both walks (emptying and permission repair) are iterative, on an explicit stack that holds descriptors
@@ -45,11 +57,8 @@ goes on to the next root, and by remove_root), never raised. Before the marker i
 before the root itself is removed, the root's name in the pinned parent must still name the pinned
 directory; a root replaced (by a symbolic link or another directory) after it was checked is reported
 as replaced, keeps its marker and is never followed, so nothing outside the checked tree is listed,
-repaired or deleted. When the name has gone instead, the removal asks the pinned descriptor whether the
-directory itself is gone (no link left, or a listing that reports it deleted): only then is the root
-removed. A directory that still exists under another name is reported as not removed, and, when its
-marker had already been deleted, gets its marker back through the descriptor (as below), so a later
-sweep of the directory it was moved into still recognises it.
+repaired or deleted. When the name has gone instead, the root counts as removed only when the pinned
+descriptor shows the directory gone (as above).
 
 Removal deletes the marker last. Everything else in the root goes first; the marker is deleted only
 once nothing else is left. Before it is deleted, a full copy of it (its bytes and its modification
@@ -63,7 +72,7 @@ not available, or the link fails, the marker is written back instead to a tempor
 place, so a partly written marker never takes the marker's name. A marker that cannot be written back
 either way is an explicit failure in remove_root's result, never an exception, and such a root (left
 unmarked) is skipped by later sweeps and must be removed by hand. When removal stops before the marker
-is deleted (emptying the root, copying the marker or deleting it fails), it adds owner read, write and
+is deleted (emptying the root, or reading, copying or deleting the marker fails), it adds owner read, write and
 search permission to the directories of the tree that this user owns, the root included (a run killed
 while a fixture directory sat at mode 0000 leaves one that cannot be entered, and a root that has lost
 owner write cannot lose even its marker), and tries once more. A root whose final rmdir fails is not
@@ -82,10 +91,19 @@ Residuals (known and not handled here):
   once it is a day old while that run still works in it. Recording the process start time or the PID
   namespace identity would close this.
 - The ownership test is the directory's user id; workers that share one user id are not told apart.
-- A directory is removed with rmdir by name in its pinned parent, just after that name was checked to
-  still name the pinned (by then empty) directory. A process of this user that swaps the name for
-  another empty directory between the check and the rmdir gets that empty directory removed; rmdir
-  never follows a symbolic link and never removes a directory holding anything.
+- Concurrent mutation of a parent directory (the root's, or a directory's inside the tree) by another
+  process of this user is outside what a test helper can exclude. A directory is removed with rmdir by
+  name in its pinned parent, just after that name was checked to still name the pinned (by then empty)
+  directory; a process that swaps the name for another empty directory between the check and the rmdir
+  gets that empty directory removed. For the root, the descriptor check that follows then reports the
+  root as not removed and puts its marker back, so the swap is never reported as success; for a
+  directory inside the tree no such check is made, and the moved directory survives wherever it was
+  moved to (reported only when it keeps the root from being removed). rmdir never follows a symbolic
+  link and never removes a directory holding anything.
+- The one window before a suite's root is pinned is between the mkdtemp inside _fixture_tmpdir and
+  pin_root. A directory put at the root's name in that window that pin_root can open is pinned in the
+  root's place, and is the one the finally removes; one it cannot open (a mode 0000 directory) makes
+  pin_root fail, and then nothing is removed and the root is reported as left behind.
 - The parent given to remove_root (the root path's directory) and each sweep parent are resolved by
   name once, when they are opened.
 - Permission repair of a directory this user cannot read or search uses an O_PATH descriptor and
@@ -368,24 +386,24 @@ def _grant_owner_access(fd):
 
 def _read_marker_bytes(dir_fd):
     """The raw bytes (at most _MARKER_LIMIT) and stat result of the marker in the pinned directory
-    dir_fd, or None when it is absent, not a regular file or unreadable. Opened with O_NONBLOCK and
-    O_NOFOLLOW and checked with fstat before any read, so a FIFO is rejected without blocking."""
+    dir_fd, or None when no entry has the marker's name. An entry of that name that is not a regular
+    file, cannot be opened or read, or is longer than _MARKER_LIMIT raises an OSError: it exists but
+    cannot be saved, which is never the same as absent. Opened with O_NONBLOCK and O_NOFOLLOW and
+    checked with fstat before any read, so a FIFO is rejected without blocking."""
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | _O_NOFOLLOW | _O_CLOEXEC
     try:
         fd = os.open(MARKER, flags, dir_fd=dir_fd)
-    except OSError:
+    except FileNotFoundError:
         return None
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
-            return None
+            raise OSError(errno.EINVAL, "the marker is not a regular file")
         data = os.read(fd, _MARKER_LIMIT + 1)
-    except OSError:
-        return None
     finally:
         os.close(fd)
     if len(data) > _MARKER_LIMIT:
-        return None
+        raise OSError(errno.EFBIG, "the marker is longer than {} bytes".format(_MARKER_LIMIT))
     return data, st
 
 
@@ -482,7 +500,11 @@ def _remove_attempt(parent_fd, name, fd, expect):
     error = _clear(fd, True)
     if error is not None:
         return error, True
-    saved = _read_marker_bytes(fd)
+    try:
+        saved = _read_marker_bytes(fd)
+    except OSError as exc:
+        # It exists but cannot be saved: deleting it could leave an unmarked survivor, so it is kept.
+        return "its marker exists but could not be read ({}), so the marker was kept".format(exc), True
     copy = None
     if saved is not None:
         try:
@@ -498,25 +520,26 @@ def _remove_attempt(parent_fd, name, fd, expect):
             return _survivor(fd, name), False
         except _Replaced as exc:
             return exc, False
-        try:
-            os.unlink(MARKER, dir_fd=fd)
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            return exc, True
+        if saved is not None:
+            try:
+                os.unlink(MARKER, dir_fd=fd)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                return exc, True
         try:
             _check_name(parent_fd, name, expect)
             os.rmdir(name, dir_fd=parent_fd)
-        except FileNotFoundError:
-            # The name went after the marker was deleted. Only a pinned directory that no longer exists
-            # is removed; one renamed meanwhile survives, and gets its marker back like any survivor.
-            exc = _survivor(fd, name)
-            if exc is None:
-                return None, False
         except OSError as caught:
             exc = caught
         else:
+            exc = None
+        # Whatever rmdir said, only the held descriptor tells whether the pinned directory is gone: an
+        # rmdir that succeeded may have removed another directory put at its name after the check.
+        if _pinned_gone(fd):
             return None, False
+        if exc is None or isinstance(exc, FileNotFoundError):
+            exc = _moved(name)
         if saved is None:
             return exc, False
         failed = _restore_marker(fd, saved, copy)
@@ -552,6 +575,10 @@ def _survivor(fd, name):
     that says it survives under another name."""
     if _pinned_gone(fd):
         return None
+    return _moved(name)
+
+
+def _moved(name):
     return _Moved("{} no longer names the pinned directory, which still exists under another name; it "
                   "was not removed".format(name))
 
@@ -589,41 +616,41 @@ def pin_root(root):
     return RootPin(root)
 
 
-def remove_root(root, pin=None):
+def remove_root(root, pin):
     """Remove the directory tree root, its marker last, through pinned descriptors (the module
-    docstring). With pin (a RootPin from pin_root), only the directory pinned when the run made it is
-    removed: a directory of another identity now at root is refused untouched, and the pinned one is
-    reported as surviving; the pin is closed. Without pin, the directory at root when this is called is
-    the one removed. Returns None when the root is gone afterwards, else a one-line description naming
-    root and what stopped the removal (a root replaced or moved away, a marker that could not be written
-    back, a failure walking the tree), so the caller can report the root that survived. Never raises an
-    Exception."""
+    docstring). Only the directory pin (a RootPin from pin_root) holds is ever removed: a directory of
+    another identity now at root is refused untouched, and the pinned one is reported as surviving; the
+    pin is closed. With pin None (pin_root failed or was never reached) nothing is removed and root is
+    reported as left behind. Returns None only when the pinned directory is confirmed gone through the
+    pin's descriptor, else a one-line description naming root and what stopped the removal (no pin, a
+    root replaced or moved away, a marker that could not be read or written back, a failure walking the
+    tree), so the caller can report the root that survived. Never raises an Exception."""
     root = str(root)
+    if pin is None:
+        return _problem(root, "its identity was never pinned, so nothing at its path was removed and "
+                              "whatever is there was left behind")
     try:
         return _remove_root(root, pin)
     except Exception as exc:  # noqa: BLE001  any failure is this root's report, never the caller's exception
         return _problem(root, "{}: {}".format(type(exc).__name__, exc))
     finally:
-        if pin is not None:
-            pin.close()
+        pin.close()
 
 
 def _remove_root(root, pin):
-    """remove_root's work (the same arguments and result; it may raise)."""
+    """remove_root's work with a pin (the same arguments and result; it may raise)."""
     try:
         st = os.lstat(root)
     except FileNotFoundError:
-        if pin is None or _pinned_gone(pin.fd):
+        if _pinned_gone(pin.fd):
             return None
         return _problem(root, "it was moved away before cleanup: the directory this run made still exists "
                               "under another name and was not removed")
     except OSError as exc:
         return _problem(root, exc)
-    if pin is not None and not (stat.S_ISDIR(st.st_mode) and _same(st, pin.stat)):
+    if not (stat.S_ISDIR(st.st_mode) and _same(st, pin.stat)):
         return _problem(root, "it was replaced before cleanup: its name now holds another entry, which "
                               "was not touched, and the directory this run made was not removed")
-    if not stat.S_ISDIR(st.st_mode):
-        return _problem(root, "it is not a directory")
     parent, name = os.path.split(os.path.abspath(root))
     if name in ("", ".", ".."):
         return _problem(root, "it has no name in a parent directory")
@@ -632,19 +659,7 @@ def _remove_root(root, pin):
     except OSError as exc:
         return _problem(root, exc)
     try:
-        if pin is not None:
-            error = _remove_pinned(parent_fd, name, pin.fd, pin.stat)
-        else:
-            try:
-                fd = _open_dir_at(parent_fd, name, st, repair=True)
-            except FileNotFoundError:
-                return None
-            except OSError as exc:
-                return _problem(root, exc)
-            try:
-                error = _remove_pinned(parent_fd, name, fd, st)
-            finally:
-                os.close(fd)
+        error = _remove_pinned(parent_fd, name, pin.fd, pin.stat)
     finally:
         os.close(parent_fd)
     return None if error is None else _problem(root, error)
@@ -678,7 +693,10 @@ def _reject_constant(name):
 def _read_marker(dir_fd):
     """The marker record of the pinned directory dir_fd and the marker's modification time, or None
     when the marker is absent, not a regular file, unreadable, not standard JSON or not a JSON object."""
-    read = _read_marker_bytes(dir_fd)
+    try:
+        read = _read_marker_bytes(dir_fd)
+    except OSError:
+        return None
     if read is None:
         return None
     data, st = read

@@ -16527,18 +16527,27 @@ _TMPROOT_SUITE = "selftest_aiqt_hooks"
 # did), the roots made, those still present, and the base directory's entries. With argv[5] "replace", the
 # failing mkdir first moves the run's root aside (its name plus "-moved") and puts a directory holding
 # keep.txt in its place (temp-replaced-root-untouched), and the line also gives keep.txt's text and the
-# moved root's entries.
+# moved root's entries. With argv[5] "pinfail", the confined _fixture_tmpdir moves the root it made aside
+# (its name plus "-moved") and puts a mode 0000 directory holding keep.txt in its place before returning,
+# so pin_root fails (temp-pin-failure-left-unremoved); the line gives the same extra fields, read after
+# the replacement is given back mode 0700.
 _TEMP_SETUP_TAG = "TEMP-SETUP-RESULT "
 _TEMP_SETUP_CHILD = (
     "import errno, json, os, pathlib, sys, tempfile\n"
     "sys.path.insert(0, sys.argv[1])\n"
     "base, tempfile.tempdir, stuck = sys.argv[2:5]\n"
     "replace = sys.argv[5:] == ['replace']\n"
+    "pinfail = sys.argv[5:] == ['pinfail']\n"
     "import selftest_aiqt_hooks as suite\n"
     "made = []\n"
     "def confined_tmpdir(prefix):\n"
     "    path = pathlib.Path(tempfile.mkdtemp(prefix=prefix, dir=base))\n"
     "    made.append(str(path))\n"
+    "    if pinfail:\n"
+    "        os.rename(str(path), str(path) + '-moved')\n"
+    "        os.mkdir(str(path))\n"
+    "        pathlib.Path(path, 'keep.txt').write_text('unrelated data', encoding='utf-8')\n"
+    "        os.chmod(str(path), 0)\n"
     "    return path\n"
     "suite._fixture_tmpdir = confined_tmpdir\n"
     "real_unlink = os.unlink\n"
@@ -16564,9 +16573,11 @@ _TEMP_SETUP_CHILD = (
     "    suite._main_isolated(None)\n"
     "except BaseException as exc:\n"
     "    raised = type(exc).__name__\n"
+    "if pinfail and made and os.path.isdir(made[0]):\n"
+    "    os.chmod(made[0], 0o700)\n"
     "result = {'raised': raised, 'made': made,\n"
     "      'left': [p for p in made if os.path.lexists(p)], 'base_entries': sorted(os.listdir(base))}\n"
-    "if replace and made:\n"
+    "if (replace or pinfail) and made:\n"
     "    try:\n"
     "        result['replacement_kept'] = pathlib.Path(made[0], 'keep.txt').read_text(encoding='utf-8')\n"
     "    except OSError:\n"
@@ -16592,6 +16603,17 @@ def _temp_stale_root(path, stuck=False):
     marker.write_text(json.dumps({"suite": _TMPROOT_SUITE, "pid": _TEMP_GONE_PID,
                                   "host": socket.gethostname(), "created": old}), encoding="utf-8")
     os.utime(str(marker), (old, old))
+
+
+def _temp_remove_fixture(path):
+    """Remove a fixture directory of these rows the way a run removes its own root: pinned first with
+    pin_root, then removed by remove_root through that pin. Returns remove_root's result, or a
+    description naming path when it cannot be pinned (then nothing is removed)."""
+    try:
+        pin = _selftest_tmproot.pin_root(path)
+    except OSError as exc:
+        return "could not pin the fixture directory {} for removal ({}); nothing was removed".format(path, exc)
+    return _selftest_tmproot.remove_root(path, pin)
 
 
 def _temp_failed_setup_failures(tmp):
@@ -16628,8 +16650,8 @@ def _temp_failed_setup_failures(tmp):
         run_error = exc
     finally:
         elsewhere_entries = sorted(os.listdir(str(elsewhere)))
-        _base_left = _selftest_tmproot.remove_root(base)
-        _elsewhere_left = _selftest_tmproot.remove_root(elsewhere)
+        _base_left = _temp_remove_fixture(base)
+        _elsewhere_left = _temp_remove_fixture(elsewhere)
     left_lines = ["{} {}".format(label, problem) for problem in (_base_left, _elsewhere_left)
                   if problem is not None]
     if run_error is not None or left_lines:
@@ -16700,7 +16722,7 @@ def _temp_replaced_root_failures(tmp):
         run_error = exc
     finally:
         left_lines = ["{} {}".format(label, problem) for problem in (
-            _selftest_tmproot.remove_root(base), _selftest_tmproot.remove_root(elsewhere))
+            _temp_remove_fixture(base), _temp_remove_fixture(elsewhere))
             if problem is not None]
     if run_error is not None:
         return ["{} could not run the child: {}".format(label, run_error)] + left_lines
@@ -16721,6 +16743,56 @@ def _temp_replaced_root_failures(tmp):
     out = list(left_lines)
     if len(made) != 1 or have != want or not replaced:
         out.append("{} the replacement must stay untouched and the run's root be reported as surviving; got "
+                   "{!r}, stderr {!r}".format(label, have, proc.stderr[-2000:]))
+    return out
+
+
+def _temp_pin_failure_failures(tmp):
+    """(temp-pin-failure-left-unremoved) failure lines (empty when it holds), from one run of
+    _TEMP_SETUP_CHILD in mode "pinfail" in a base directory inside this run's own root tmp: between the
+    child's mkdtemp and pin_root its root is moved aside and a mode 0000 directory holding keep.txt takes
+    its name, so pin_root fails. With no pin the child's finally must remove nothing: the replacement and
+    its file stay, the pin failure comes out, and the root is named on stderr as left behind (never
+    pinned). A cleanup that falls back to removing whatever is at the path repairs the replacement's mode
+    and deletes keep.txt. The base directory is removed here afterwards."""
+    label = "(temp-pin-failure-left-unremoved)"
+    base, elsewhere = tmp / "temp-pinfail-child", tmp / "temp-pinfail-elsewhere"
+    try:
+        base.mkdir()
+        elsewhere.mkdir()
+    except OSError as exc:
+        return ["{} could not prepare the child's directories: {}".format(label, exc)]
+    proc = run_error = None
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-B", "-c", _TEMP_SETUP_CHILD,
+                               str(Path(__file__).resolve().parent), str(base), str(elsewhere),
+                               _TEMP_STUCK_NAME, "pinfail"],
+                              capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.SubprocessError) as exc:
+        run_error = exc
+    finally:
+        left_lines = ["{} {}".format(label, problem) for problem in (
+            _temp_remove_fixture(base), _temp_remove_fixture(elsewhere))
+            if problem is not None]
+    if run_error is not None:
+        return ["{} could not run the child: {}".format(label, run_error)] + left_lines
+    lines = [line for line in proc.stdout.splitlines() if line.startswith(_TEMP_SETUP_TAG)]
+    try:
+        got = json.loads(lines[0][len(_TEMP_SETUP_TAG):]) if len(lines) == 1 else None
+    except ValueError:
+        got = None
+    if got is None:
+        return ["{} the child printed no single readable result line (exit {}): {}".format(
+            label, proc.returncode, proc.stderr[-2000:])] + left_lines
+    made = got.get("made") if isinstance(got.get("made"), list) else []
+    want = {"raised": "PermissionError", "made": made, "left": made,
+            "replacement_kept": "unrelated data", "moved_entries": []}
+    have = {key: got.get(key) for key in want}
+    reported = (len(made) == 1 and "SELF-TEST ERROR: could not remove the temporary root {} (its identity "
+                "was never pinned".format(made[0]) in proc.stderr)
+    out = list(left_lines)
+    if len(made) != 1 or have != want or not reported:
+        out.append("{} with no pin nothing may be removed and the root must be reported as left behind; got "
                    "{!r}, stderr {!r}".format(label, have, proc.stderr[-2000:]))
     return out
 
@@ -38605,6 +38677,9 @@ def _main_isolated(monitor):
         # A root moved aside and replaced before cleanup: the replacement is left untouched and the run's
         # root reported as surviving (_temp_replaced_root_failures).
         failures.extend(_temp_replaced_root_failures(tmp))
+        # A root whose pin failed (a mode 0000 directory put at its name first): nothing is removed and
+        # the root is reported as left behind (_temp_pin_failure_failures).
+        failures.extend(_temp_pin_failure_failures(tmp))
         # Read the limits at the END of the battery, inside the try: the finally below re-assigns the
         # production values, so a read taken after it could never fail. This read makes a lost restore or
         # a later case that widened the limits again a failure in the check below.
