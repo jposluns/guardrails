@@ -4338,7 +4338,13 @@ def _test_console_prefix(failures, tmp):
                         "got {!r}".format(size, unbounded))
     # (cp-oversized-cost) the handler's own CPU time on the oversized transcript stays far inside the budget.
     # Judged by the shared judge (_timed_case): the median of three runs, a fresh-process replay for a lone
-    # excursion; a run that raises fails, as outcome() reports such a run as 'error'.
+    # excursion; a run that raises fails, as outcome() reports such a run as 'error'. Disclosed blind spot
+    # (cold work before measurement, see THE SHARED TIMING JUDGE): the cp-* rows above call
+    # console_prefix_pretool untimed in this process, the oversized transcript itself included
+    # (cp-oversized-bound, cp-oversized-unbounded), so work the handler does only on its first call in a
+    # process (a lazily compiled pattern, a first-use cache) is spent before the first timed run; a slowdown
+    # confined to that first call shows on no timed run, triggers no replay, and passes this row. No
+    # unconditional cold measurement is taken.
     cost = _timed_case({"id": "cp-oversized-cost", "handler": "console_prefix_pretool",
                         "payload": payload(oversized), "console_prefix": [_CP_PATTERN, None, str(config)]},
                        1.0, True, lambda sample: None if sample.get("error") is None else "raised " + sample["error"])
@@ -9063,31 +9069,71 @@ def _deadline_fixtures(tmp):
 
 
 # THE SHARED TIMING JUDGE. Every row that holds a measured time to a fixed absolute bound is judged here
-# (_timing_judge): the in-process handler rows (_timed_case: cp-oversized-cost, psm-t1 to psm-t3,
-# ci-wr-rebase-cpu, ci-wr172, ci-wr173, ci-idc-cpu1 to ci-idc-cpu8, ci-wr135 to ci-wr139, ci-wr-c47,
-# ci-wr-c50, ci-wr-c51, ci-wr160 to ci-wr163, ci-wr165 to ci-wr171, ci-idc15, ci-idc16, ci-idc-c8, ap-c95e,
-# ap-c95f), the lex-cost pairs (_timed_case on time.process_time), the dl-shape cases' CPU time and own work
-# (_deadline_shape_verdicts) and the dl-defer-twice-outer-deadline wall-clock time
-# (_deadline_outer_deadline_failures). The rule, the same for every one of them:
-# (1) the row is measured _TIMED_RUNS (3) times, every run made whatever an earlier one gave, and every
-#     run's result is checked, so a wrong result on any run fails the row whatever its timing;
-# (2) the median time over the bound (at or over it for a row whose failure test is >=) fails the row, so
-#     a time over the bound on two or three of the runs fails, and nothing clears that failure;
-# (3) a time over the bound on exactly one run (a lone excursion) is replayed once in a fresh interpreter
-#     (_timing_replay: sys.executable -I -B importing this module, under a fixed wall-clock limit), which runs
-#     the same measurement function over the same inputs (_timing_replay_child): the row passes only when
-#     the replay finishes, reports a well-formed time within the bound and its result passes the row's
-#     check; a replay that crashes, times out, reports a malformed reply or is over the bound fails the row,
-#     and a row with no replay available fails the excursion;
+# (_timing_judge), under one of the explicit shared policies below (_TimingPolicy): the in-process handler
+# rows (_timed_case: cp-oversized-cost, psm-t1 to psm-t3, ci-wr-rebase-cpu, ci-wr172, ci-wr173, ci-idc-cpu1 to
+# ci-idc-cpu8, ci-wr135 to ci-wr139, ci-wr-c47, ci-wr-c50, ci-wr-c51, ci-wr160 to ci-wr163, ci-wr165 to
+# ci-wr171, ci-idc15, ci-idc16, ci-idc-c8, ap-c95e, ap-c95f) and the lex-cost pairs (_timed_case on
+# time.process_time) under _TIMING_MEDIAN or _TIMING_MEDIAN_AT; the dl-shape cases' CPU time and own work
+# (_deadline_shape_verdicts) under _TIMING_MEDIAN; the deadline-path rows' tail spans and whole-run times
+# (_deadline_tail_problems, _deadline_total_problems) under _TIMING_UPPER_MIDDLE and _TIMING_UPPER_MIDDLE_AT;
+# and every per-invocation hard limit and watchdog (dl-defer-twice-outer-deadline,
+# _deadline_outer_deadline_failures; the deadline child's and the replay child's wall-clock limits,
+# _deadline_child_within; the dl-child-wait-* stop bounds, _deadline_child_wait_failures; the clock-hook
+# unit suite's test_hang_guard_interrupts) under _TIMING_HARD or _TIMING_HARD_AT. The rule of a median
+# policy, the same for every row under one:
+# (1) the row is measured _TIMED_RUNS (3) times (a deadline-path row 3 to 6), every run made whatever an
+#     earlier one gave, and every run's result is checked, so a wrong result on any run fails the row
+#     whatever its timing;
+# (2) the judged time (the median of an odd count; for an even count the lower middle under _TIMING_MEDIAN,
+#     the UPPER middle under _TIMING_UPPER_MIDDLE*, so there a time over the bound on half of the runs
+#     fails) over the bound (at or over it for an inclusive policy) fails the row, and nothing clears that
+#     failure;
+# (3) a time over the bound on fewer runs than that (a lone excursion) is replayed once: in a fresh
+#     interpreter (_timing_replay: sys.executable -I -B importing this module, under a fixed wall-clock
+#     limit) for the handler, lex-cost and dl-shape rows, which runs the same measurement function over the
+#     same inputs (_timing_replay_child); as one more fresh run of the row, in this process, for a
+#     deadline-path row, whose every run already builds a new stub and a new window around main(). The row
+#     passes only when the replay finishes and is within EVERY bound and check of the row TOGETHER: its
+#     result passes the row's check, and every metric the row judges (a dl-shape case's CPU time, own work
+#     with its run-queue delay read, and outcome; a deadline-path run's cut, tail span and whole-run time) is
+#     within its own bound, so a replay that clears one metric's excursion while over another bound, with a
+#     metric it could not read, or with a wrong outcome fails the row. A replay that crashes, times out,
+#     reports a malformed reply or is over a bound fails the row, and a row with no replay available fails
+#     the excursion;
 # (4) diagnostics (every run's time, wall-clock time and run-queue delay, the load averages) are printed on
 #     standard error as a 'timing-note:' line whenever a run is over its bound, and never decide: the judge
 #     takes only the times, the bound and the replay.
+# A hard policy has no median and no replay: every invocation's time is judged alone, and one invocation over
+# its limit (at or over it under _TIMING_HARD_AT), or one with no well-formed time (a child that was stopped),
+# fails the row, whatever any other invocation took.
 # Against the least-of-up-to-three rule the in-process rows used before, this never passes a row that rule
 # failed: a least time over the bound puts the median over it. Against the median-of-three rule the
-# lex-cost and dl-shape rows used before, it adds the replay, which can only add a failure. Residual,
-# exactly: a slowdown that shows on one run in three only because of state earlier rows left in this
-# process, and on neither the other two runs nor the fresh replay, passes; times alone cannot tell it from
-# host noise.
+# lex-cost and dl-shape rows used before, and the upper-middle rule the deadline-path rows used before, it
+# adds the replay, which can only add a failure. The hard limits keep the single-invocation failure they had.
+# Residual, exactly (two blind spots, both a slowdown that times alone cannot tell from host noise or never
+# see): (a) a slowdown that shows on one run in three only because of state earlier rows left in this
+# process, and on neither the other two runs nor the replay, passes (for a deadline-path row the replay runs
+# in this same process, so state those runs share escapes it too); (b) COLD WORK BEFORE MEASUREMENT: work a
+# handler does only on its first call in a process (a lazily compiled pattern, a first-use cache fill, an
+# import), when an untimed call of the same handler ran earlier in this process, is spent before the first
+# timed run, so no run measures it and no excursion triggers the replay that would measure it cold. A
+# cold-only slowdown is caught only where the first timed run is also the handler's first call in the
+# process (then run 1 is the excursion and the fresh-process replay, cold again, fails it); cp-oversized-cost
+# is the demonstrated row where it is not (its handler is called untimed by the cp-* rows before it, see that
+# row), and no row adds an unconditional cold measurement.
+_TimingPolicy = collections.namedtuple("_TimingPolicy", ("name", "rule", "inclusive"))
+# rule "median": _judged, the lower middle of an even count; "upper-middle": _judged_half_fails; "hard": every
+# invocation alone, no median, no replay. inclusive: the row fails at the bound, not only over it.
+_TIMING_MEDIAN = _TimingPolicy("the median of the runs, a lone excursion replayed, failing over the bound",
+                               "median", False)
+_TIMING_MEDIAN_AT = _TimingPolicy("the median of the runs, a lone excursion replayed, failing at the bound",
+                                  "median", True)
+_TIMING_UPPER_MIDDLE = _TimingPolicy("the median of the runs (the upper middle of an even count), a lone "
+                                     "excursion replayed, failing over the bound", "upper-middle", False)
+_TIMING_UPPER_MIDDLE_AT = _TimingPolicy("the median of the runs (the upper middle of an even count), a lone "
+                                        "excursion replayed, failing at the bound", "upper-middle", True)
+_TIMING_HARD = _TimingPolicy("a hard limit on every invocation, failing over the limit", "hard", False)
+_TIMING_HARD_AT = _TimingPolicy("a hard limit on every invocation, failing at the limit", "hard", True)
 _TIMING_REPLAY_SECONDS = 300.0
 # The handlers a timed case may name (_timing_case_run resolves the name on aiqt_hooks, in this process and
 # in the replay child alike); a case naming any other is refused, so a replay never runs supplied code.
@@ -9109,36 +9155,69 @@ def _timing_valid(seconds):
             and seconds >= 0)
 
 
-def _timing_judge(samples, bound, inclusive, replay):
+def _timing_judged(samples, policy):
+    """The time a median policy judges among samples (well-formed times): _judged for rule median,
+    _judged_half_fails for rule upper-middle. A hard policy judges no median, so asking for one is refused."""
+    if policy.rule == "median":
+        return _judged(samples)
+    if policy.rule == "upper-middle":
+        return _judged_half_fails(samples)
+    raise ValueError("the policy {!r} judges no median".format(policy.name))
+
+
+def _timing_hard_failed(policy, seconds, limit):
+    """Whether one invocation's seconds fails a hard policy's limit (_TIMING_HARD, _TIMING_HARD_AT): over the
+    limit (at or over it under _TIMING_HARD_AT), or not a well-formed time (an invocation that was stopped,
+    None, never passes). Never a median and never a replay: each invocation is judged alone."""
+    if policy.rule != "hard":
+        raise ValueError("the policy {!r} is not a hard limit".format(policy.name))
+    return not _timing_valid(seconds) or _timing_over(seconds, limit, policy.inclusive)
+
+
+def _timing_judge(samples, bound, policy, replay):
     """(failed, text): the shared timing judge (see THE SHARED TIMING JUDGE above) over samples, the seconds
-    of each run, against bound (inclusive: the row fails at the bound). replay is None (no replay can be
-    built) or a function returning (seconds, None) for a fresh-process replay that reached a result passing
-    the row's check, or (None, the reason it failed). It is called only for a lone excursion: the median
-    within the bound and at least one run over it. Malformed samples fail."""
+    of each run, against bound under policy (a _TimingPolicy; inclusive: the row fails at the bound). Under a
+    hard policy every run is judged alone (_timing_hard_failed) and replay is never called. Under a median
+    policy replay is None (no replay can be built) or a function returning (seconds, None) for a replay that
+    reached a result passing every check and every other bound of the row, or (None, the reason it failed);
+    it is called only for a lone excursion: the judged time (_timing_judged) within the bound and at least
+    one run over it. Malformed samples fail."""
+    if not isinstance(policy, _TimingPolicy):
+        raise ValueError("{!r} is not a shared timing policy".format(policy))
     if not samples or not all(_timing_valid(seconds) for seconds in samples):
         return True, "malformed times {!r} (want finite, nonnegative seconds)".format(samples)
-    median = _judged(samples)
+    inclusive = policy.inclusive
     over = [index for index, seconds in enumerate(samples, 1) if _timing_over(seconds, bound, inclusive)]
-    text = "times {} s, median {:.3f} s, failing {} {:g} s".format(
-        ", ".join("{:.3f}".format(seconds) for seconds in samples), median, ">=" if inclusive else ">", bound)
+    if policy.rule == "hard":
+        text = "times {} s, a hard limit failing {} {:g} s on any one invocation".format(
+            ", ".join("{:.3f}".format(seconds) for seconds in samples), ">=" if inclusive else ">", bound)
+        if over:
+            return True, text + " (run {} over the hard limit, which no median or replay clears)".format(
+                " and ".join(str(index) for index in over))
+        return False, text
+    median = _timing_judged(samples, policy)
+    text = "times {} s, {} {:.3f} s, failing {} {:g} s".format(
+        ", ".join("{:.3f}".format(seconds) for seconds in samples),
+        "judged (upper middle)" if policy.rule == "upper-middle" else "median", median,
+        ">=" if inclusive else ">", bound)
     if _timing_over(median, bound, inclusive):
         return True, text + " (median over the bound)"
     if not over:
         return False, text
     text += " (run {} over the bound, the median within it)".format(" and ".join(str(index) for index in over))
     if replay is None:
-        return True, text + "; no fresh-process replay can be built, so the excursion fails"
+        return True, text + "; no replay can be built, so the excursion fails"
     try:
         seconds, problem = replay()
     except Exception as exc:
         seconds, problem = None, "it raised {}: {}".format(type(exc).__name__, exc)
     if problem is not None:
-        return True, text + "; the fresh-process replay failed: " + problem
+        return True, text + "; the replay failed: " + problem
     if not _timing_valid(seconds):
-        return True, text + "; the fresh-process replay gave a malformed time {!r}".format(seconds)
+        return True, text + "; the replay gave a malformed time {!r}".format(seconds)
     if _timing_over(seconds, bound, inclusive):
-        return True, text + "; the fresh-process replay took {:.3f} s, over the bound as well".format(seconds)
-    return False, text + "; cleared by a fresh-process replay that took {:.3f} s".format(seconds)
+        return True, text + "; the replay took {:.3f} s, over the bound as well".format(seconds)
+    return False, text + "; cleared by a replay that took {:.3f} s".format(seconds)
 
 
 def _timing_diagnostics(samples):
@@ -9290,8 +9369,8 @@ def _timing_replay(spec):
 def _timing_replay_child(path):
     """The replay child's work (_timing_replay): the case in the JSON file at path, run once in this fresh
     process. kind "handler" (the default) is _timing_case_run; "dl-shape" is one _deadline_shape_case run
-    (_deadline_shape_replay_run), its run in "run"; "dl-outer" is one dl-defer-twice-outer-deadline scenario
-    (_deadline_outer_deadline_run), its problem in "problem". Any other kind is refused."""
+    (_deadline_shape_replay_run), its run in "run". Any other kind is refused (dl-defer-twice-outer-deadline
+    is judged under a hard limit, _TIMING_HARD_AT, which no replay clears)."""
     with open(path, encoding="utf-8") as handle:
         spec = json.load(handle)
     kind = spec.get("kind", "handler")
@@ -9300,9 +9379,6 @@ def _timing_replay_child(path):
     elif kind == "dl-shape":
         run = _deadline_shape_replay_run(spec["name"], spec["shape"], spec["size"], spec["cwd"])
         sample = {"seconds": run[0], "run": list(run)}
-    elif kind == "dl-outer":
-        used, problem = _deadline_outer_deadline_run()
-        sample = {"seconds": used, "problem": problem}
     else:
         raise ValueError("unknown replay kind {!r}".format(kind))
     sample["id"] = spec.get("id")
@@ -9312,12 +9388,14 @@ def _timing_replay_child(path):
 def _timed_case(spec, bound, inclusive, check, replay=None, run=None):
     """The shared judge over one in-process handler case: spec run _TIMED_RUNS times by _timing_case_run,
     every run's sample given to check (a phrase naming what is wrong with it, or None), the times judged by
-    _timing_judge against bound (inclusive: the row fails at the bound), a lone excursion replayed by replay
-    (default _timing_replay) and its reply checked by check as well. Returns a namespace: failed (a timing or
-    check failure), timing_failed, problems (each run's check failures), text (the judge's account, and any
-    check failures), median (the median seconds), samples, decisions (each run's _timing_reduced). Prints a
-    'timing-note:' line when any run is over the bound. run (default _timing_case_run) measures one run; the
-    vectors (_timing_judge_failures) give recorded runs instead."""
+    _timing_judge against bound under the shared policy _TIMING_MEDIAN_AT (inclusive: the row fails at the
+    bound) or _TIMING_MEDIAN, a lone excursion replayed by replay (default _timing_replay) and its reply
+    checked by check as well. Returns a namespace: failed (a timing or check failure), timing_failed,
+    problems (each run's check failures), text (the judge's account, and any check failures), median (the
+    median seconds), samples, decisions (each run's _timing_reduced). Prints a 'timing-note:' line when any
+    run is over the bound. run (default _timing_case_run) measures one run; the vectors
+    (_timing_judge_failures) give recorded runs instead."""
+    policy = _TIMING_MEDIAN_AT if inclusive else _TIMING_MEDIAN
     replay = _timing_replay if replay is None else replay
     run = _timing_case_run if run is None else run
     samples = [run(spec) for _ in range(_TIMED_RUNS)]
@@ -9336,12 +9414,13 @@ def _timed_case(spec, bound, inclusive, check, replay=None, run=None):
             return None, "its result failed the row's check: {}".format(problem)
         return reply.get("seconds"), None
     times = [sample.get("seconds") for sample in samples]
-    timing_failed, text = _timing_judge(times, bound, inclusive, replayed)
+    timing_failed, text = _timing_judge(times, bound, policy, replayed)
     if any(_timing_valid(seconds) and _timing_over(seconds, bound, inclusive) for seconds in times):
         _timing_note(spec.get("id"), text, _timing_diagnostics(samples))
     return types.SimpleNamespace(
         failed=timing_failed or bool(problems), timing_failed=timing_failed, problems=problems,
-        text="; ".join([text] + problems), median=_judged(times) if all(map(_timing_valid, times)) else None,
+        text="; ".join([text] + problems),
+        median=_timing_judged(times, policy) if times and all(map(_timing_valid, times)) else None,
         samples=samples, decisions=[_timing_reduced(sample) for sample in samples])
 
 
@@ -9356,6 +9435,18 @@ def _timing_decision_check(want):
 def _timing_judge_failures():
     """(timing-judge-*) The shared timing judge (_timing_judge, _timed_case, _timing_case_run, _timing_replay)
     on recorded times and runs, except the rows marked real. B is a 1 s bound, L 0.9 s and H 1.1 s.
+    timing-judge-policy-upper-middle: under _TIMING_UPPER_MIDDLE and _TIMING_UPPER_MIDDLE_AT, H on half of
+    an even count of runs or more (L, L, H, H; H, L, H, L; L, L, L, H, H, H) fails with no replay, while
+    (timing-judge-policy-upper-middle-cleared) fewer (L, L, L, H; L, L, L, L, H, H; H, L, L) pass only after
+    one replay at L and (timing-judge-policy-upper-middle-replay-over) fail with a replay at H;
+    timing-judge-policy-lower-middle: under _TIMING_MEDIAN (the lower middle) L, L, H, H reaches the replay
+    instead.
+    timing-judge-policy-hard: under _TIMING_HARD and _TIMING_HARD_AT one H among any runs fails with no
+    replay asked for; (timing-judge-policy-hard-quiet) L, L, L passes; (timing-judge-policy-hard-edge) a time
+    exactly at B fails only _TIMING_HARD_AT; and (timing-judge-policy-hard-one) _timing_hard_failed fails a
+    stopped (None), NaN or negative invocation.
+    timing-judge-policy-refused: a bool in place of a policy, a median policy given to _timing_hard_failed
+    and a hard policy asked for a median are refused.
     timing-judge-quiet: L, L, L passes with no replay.
     timing-judge-two: every order of H, H, L fails, and no replay is asked for; H, H, H fails.
     timing-judge-lone-cleared: every order of H, L, L passes after one replay that takes L.
@@ -9386,9 +9477,55 @@ def _timing_judge_failures():
             return seconds, problem
         return replay
 
-    def judged(samples, replay, inclusive=False):
+    def judged(samples, replay, inclusive=False, policy=None):
         asked.clear()
-        return _timing_judge(list(samples), bound, inclusive, replay)[0]
+        if policy is None:
+            policy = _TIMING_MEDIAN_AT if inclusive else _TIMING_MEDIAN
+        return _timing_judge(list(samples), bound, policy, replay)[0]
+    # timing-judge-policy-*: the shared policies themselves.
+    for policy in (_TIMING_UPPER_MIDDLE, _TIMING_UPPER_MIDDLE_AT):
+        for samples, want in (((low, low, high, high), True), ((high, low, high, low), True),
+                              ((low, low, low, high), None), ((low, low, low, low, high, high), None),
+                              ((low, low, low, high, high, high), True), ((high, low, low), None)):
+            failed = judged(samples, replay_at(low), policy=policy)
+            if want is True and (not failed or asked):
+                out.append("(timing-judge-policy-upper-middle) {!r} under {} must fail with no replay, got failed "
+                           "{} after replays {!r}".format(samples, policy.name, failed, asked))
+            elif want is None and (failed or asked != [low]):
+                out.append("(timing-judge-policy-upper-middle-cleared) {!r} under {} must pass after one replay at "
+                           "L, got failed {} after replays {!r}".format(samples, policy.name, failed, asked))
+            if want is None and not judged(samples, replay_at(high), policy=policy):
+                out.append("(timing-judge-policy-upper-middle-replay-over) {!r} under {} must fail with a replay at "
+                           "H".format(samples, policy.name))
+    if not judged((low, low, high, high), replay_at(low), policy=_TIMING_UPPER_MIDDLE) or \
+            judged((low, low, high, high), replay_at(low), policy=_TIMING_MEDIAN):
+        out.append("(timing-judge-policy-lower-middle) half of four runs over the bound must fail under the upper "
+                   "middle and reach the replay under the lower middle")
+    for policy in (_TIMING_HARD, _TIMING_HARD_AT):
+        for samples in ((high, low, low), (low, low, high), (high, high, high), (high,)):
+            if not judged(samples, replay_at(low), policy=policy) or asked:
+                out.append("(timing-judge-policy-hard) {!r} under {} must fail, with no replay asked for, replays "
+                           "{!r}".format(samples, policy.name, asked))
+        if judged((low, low, low), replay_at(high), policy=policy) or asked:
+            out.append("(timing-judge-policy-hard-quiet) L, L, L under {} must pass with no replay".format(
+                policy.name))
+        if judged((bound,), None, policy=policy) is not policy.inclusive:
+            out.append("(timing-judge-policy-hard-edge) a time exactly at the limit must {} under {}".format(
+                "fail" if policy.inclusive else "pass", policy.name))
+        for seconds, want in ((low, False), (high, True), (None, True), (float("nan"), True), (-0.1, True),
+                              (bound, policy.inclusive)):
+            if _timing_hard_failed(policy, seconds, bound) is not want:
+                out.append("(timing-judge-policy-hard-one) _timing_hard_failed({}, {!r}, {:g}) must be {}".format(
+                    policy.name, seconds, bound, want))
+    for bad_policy, call in ((True, lambda: _timing_judge([low], bound, True, None)),
+                             (_TIMING_MEDIAN, lambda: _timing_hard_failed(_TIMING_MEDIAN, low, bound)),
+                             (_TIMING_HARD, lambda: _timing_judged([low], _TIMING_HARD))):
+        try:
+            call()
+            out.append("(timing-judge-policy-refused) {!r} must be refused where it does not apply".format(
+                bad_policy))
+        except ValueError:
+            pass
     if judged((low, low, low), replay_at(low)) or asked:
         out.append("(timing-judge-quiet) L, L, L must pass with no replay, replays {!r}".format(asked))
     for order in sorted(set(itertools.permutations((high, high, low)))) + [(high, high, high)]:
@@ -9690,9 +9827,13 @@ def _deadline_shape_excursions(name, shape, size, cwd, timed, owns, replay):
     """The dl-shape problems of a case's lone excursions (_deadline_shape_verdicts): the shared judge
     (_timing_judge) over the runs' CPU times against the size's CPU bound and, where every run's own work was
     evaluated, over their own work against the production budget, each only where its median is within its
-    bound (a median over it is _deadline_shape_problems' line). One replay (replay(handler, shape, size, cwd)
-    -> (run, None) or (None, reason)) serves both; its outcome must pass the case's outcome checks and its
-    own work must be evaluated. A 'timing-note:' line is printed for every run over a bound."""
+    bound (a median over it is _deadline_shape_problems' line), under _TIMING_MEDIAN. One replay
+    (replay(handler, shape, size, cwd) -> (run, None) or (None, reason)) serves both, and it clears an
+    excursion on either bound only when it is within EVERY bound and check together
+    (_deadline_shape_replay_problems: its CPU time within the size's bound, its run-queue delay read and its
+    own work within the budget, and its outcome right), so a replay within the CPU bound with its own work
+    over the budget or unread, or within the budget with its CPU time over the bound, or with a wrong outcome,
+    fails the case. A 'timing-note:' line is printed for every run over a bound."""
     replayed = []
 
     def replay_run():
@@ -9703,7 +9844,7 @@ def _deadline_shape_excursions(name, shape, size, cwd, timed, owns, replay):
                 replayed.append((None, "it raised {}: {}".format(type(exc).__name__, exc)))
         run, problem = replayed[0]
         if problem is None:
-            wrong = _deadline_shape_problems(name, shape, size, 0.0, 0.0, run[2])
+            wrong = _deadline_shape_replay_problems(name, shape, size, run)
             if wrong:
                 return None, "its run {} ({})".format("; ".join(wrong), _deadline_run_text(run))
         return run, problem
@@ -9714,26 +9855,29 @@ def _deadline_shape_excursions(name, shape, size, cwd, timed, owns, replay):
 
     def own_replay():
         run, problem = replay_run()
-        if problem is not None:
-            return None, problem
-        own = _deadline_run_own(run)
-        if own is None:
-            return None, "its run-queue delay could not be read, so its own work was not evaluated"
-        return own, None
+        return (None, problem) if problem is not None else (_deadline_run_own(run), None)
     problems = []
     for label, times, bound, judged_replay in (
             ("CPU time:", [run[0] for run in timed], _DEADLINE_BOUNDS[size], cpu_replay),
             ("own work:", owns, _DEADLINE_OWN_WORK_BOUND, own_replay)):
-        if None in times or _timing_over(_judged(times), bound, False):
+        if None in times or _timing_over(_timing_judged(times, _TIMING_MEDIAN), bound, False):
             continue
         if not any(_timing_over(seconds, bound, False) for seconds in times):
             continue
-        failed, text = _timing_judge(times, bound, False, None if replay is None else judged_replay)
+        failed, text = _timing_judge(times, bound, _TIMING_MEDIAN, None if replay is None else judged_replay)
         _timing_note("dl-shape-{}-{}-{} {}".format(name, shape, size, label), text,
                      "; ".join("run: " + _deadline_run_text(run) for run in timed))
         if failed:
             problems.append("{} {}".format(label, text))
     return problems
+
+
+def _deadline_shape_replay_problems(name, shape, size, run):
+    """What a dl-shape replay run (cpu_seconds, wall_seconds, outcome, queued_seconds) got wrong, as a list
+    of phrases ([] for none): every bound and check of the case at once (_deadline_shape_problems over the
+    run's OWN CPU time, its own work, None when its run-queue delay could not be read, and its outcome), so
+    the replay clears an excursion on one bound only while it is within the other as well."""
+    return _deadline_shape_problems(name, shape, size, run[0], _deadline_run_own(run), run[2])
 
 
 def _deadline_shape_replay(name, shape, size, cwd):
@@ -9867,7 +10011,12 @@ def _deadline_shape_rerun_failures():
     line after one replay within the budget, and one line when the replay is over the budget, failed, or
     could not read its run-queue delay, or when no replay is given; on CPU time at 256 KB, one line when the
     replay is a microsecond over the bound and none when it is exactly at it; excursions on both bounds take
-    one replay; a deny case whose replay allows gives one line.
+    one replay; a deny case whose replay allows gives one line. Cross-metric (the replay must be within every
+    bound and check together): a CPU-time excursion whose replay is within the CPU bound but has its own work
+    over the budget, or its run-queue delay unread, gives one line, and none when the replay is within every
+    bound; an own-work excursion whose replay is within the budget but over the CPU bound, or reaches a wrong
+    outcome, gives one line, and none when the replay is right and within every bound; excursions on both
+    bounds whose one replay is within only one of them give one line.
     dl-shape-rerun-outcomes: every run's outcome is checked. A deny case whose three runs are within every
     bound and decide deny, allow and deny gives one line naming the allow, and none when all three deny.
     timed-runs-count and timed-runs-median: _timed_runs calls its timed function three times, whatever an
@@ -9964,7 +10113,32 @@ def _deadline_shape_rerun_failures():
             ("both bounds, one replay", plain_256k + (
                 (cpu_bound_256k + 1, 9.0, "allow"), (0.5, 0.15, "allow"), (0.5, 0.15, "allow")), cleared, 0, 1),
             ("a deny case replayed allowing", deny + (
-                (2.0, 0.15, "deny"), (0.5, 0.15, "deny"), (0.5, 0.15, "deny")), replay_of((0.02, 0.15, "allow")), 1, 1)):
+                (2.0, 0.15, "deny"), (0.5, 0.15, "deny"), (0.5, 0.15, "deny")), replay_of((0.02, 0.15, "allow")), 1, 1),
+            # cross-metric: the replay clears one bound's excursion only while within every other bound too.
+            ("CPU time replayed within its bound with its own work over the budget", plain_256k + (
+                (cpu_bound_256k + 1, 0.15, "allow"), (0.5, 0.15, "allow"), (0.5, 0.15, "allow")),
+             replay_of((0.5, 9.0, "allow", 0.0)), 1, 1),
+            ("CPU time replayed within its bound with its run-queue delay unread", plain_256k + (
+                (cpu_bound_256k + 1, 0.15, "allow"), (0.5, 0.15, "allow"), (0.5, 0.15, "allow")),
+             replay_of((0.5, 0.6, "allow", None)), 1, 1),
+            ("CPU time replayed within every bound", plain_256k + (
+                (cpu_bound_256k + 1, 0.15, "allow"), (0.5, 0.15, "allow"), (0.5, 0.15, "allow")),
+             replay_of((0.5, 0.6, "allow", 0.0)), 0, 1),
+            ("own work replayed within the budget with its CPU time over the bound", plain + (
+                (0.03, 9.0, "allow"), (0.03, 5.0, "allow"), (0.03, 5.0, "allow")),
+             replay_of((_DEADLINE_BOUNDS[65536] + 0.5, 2.1, "allow", 0.0)), 1, 1),
+            ("own work replayed within the budget with a wrong outcome", deny + (
+                (0.03, 9.0, "deny"), (0.03, 5.0, "deny"), (0.03, 5.0, "deny")),
+             replay_of((0.02, 0.15, "allow", 0.0)), 1, 1),
+            ("own work replayed within every bound with the right outcome", deny + (
+                (0.03, 9.0, "deny"), (0.03, 5.0, "deny"), (0.03, 5.0, "deny")),
+             replay_of((0.02, 0.15, "deny", 0.0)), 0, 1),
+            ("excursions on both bounds replayed within the CPU bound only", plain_256k + (
+                (cpu_bound_256k + 1, 9.0, "allow"), (0.5, 0.15, "allow"), (0.5, 0.15, "allow")),
+             replay_of((0.5, 9.0, "allow", 0.0)), 1, 1),
+            ("excursions on both bounds replayed within the budget only", plain_256k + (
+                (cpu_bound_256k + 1, 9.0, "allow"), (0.5, 0.15, "allow"), (0.5, 0.15, "allow")),
+             replay_of((cpu_bound_256k + 1, 3.5, "allow", 0.0)), 1, 1)):
         retimed.clear()
         replays.clear()
         lines = _deadline_shape_verdicts([run], recorded((0.02, 0.15, "allow")), replay)
@@ -10429,7 +10603,9 @@ _DEADLINE_STUB_SECONDS = 0.8
 # (_judged_half_fails, here always over exactly _DEADLINE_TAIL_RUNS spans, where that rule and _judged
 # agree) of the spans, each from a fresh run of the row (_deadline_row_problems, _deadline_tail_problems).
 # A stall on two of the three runs, whichever two, or on all three fails the row; a stall on one run in
-# three passes it, as does contention that inflates one span. A run that never logged its window's arming
+# three, or contention that inflates one span, passes it only when one more fresh run of the row is within
+# every bound and check of the row together (the shared judge under _TIMING_UPPER_MIDDLE, its replay
+# _deadline_row_problems' extra run), and fails it otherwise. A run that never logged its window's arming
 # gives no span and is no evidence either way: it is replaced by a fresh run, up to
 # _DEADLINE_TAIL_MAX_RUNS runs in all, and a row left with fewer than _DEADLINE_TAIL_RUNS spans fails, its
 # tail unmeasured.
@@ -10446,7 +10622,9 @@ _DEADLINE_TAIL_MAX_RUNS = 2 * _DEADLINE_TAIL_RUNS
 # covers the whole run, so a stall anywhere in it counts. Each run of these rows had this same 0.8-second
 # single-run bound before they were judged over fresh re-runs; it is kept as it was and judged over EVERY
 # fresh run the row took (3 to 6 of them), on the median of an odd count of times and the upper middle of
-# an even count (_judged_half_fails), so a stall on half of the runs or more fails the row: a
+# an even count (_judged_half_fails), so a stall on half of the runs or more fails the row, and a stall on
+# fewer passes only when one more fresh run is within every bound and check of the row together (the
+# shared judge under _TIMING_UPPER_MIDDLE_AT, _deadline_row_problems): a
 # run that never logged its window's arming gives no tail span and is replaced for the tail judgement, but
 # its wall-clock time still counts here, so a stall in such a run is not discarded
 # (_deadline_total_problems). Honest whole runs measured with the spans above (2026-11-07) took 0.108 to
@@ -10552,44 +10730,62 @@ def _deadline_tail_span(reads, returned):
     return None
 
 
-def _deadline_tail_problems(label, spans, runs):
+def _deadline_tail_problems(label, spans, runs, replay=None, notes=True):
     """What a row's tail got wrong, as a list of phrases ([] for none), judged over spans, the
     _deadline_tail_span of each of its runs that logged its window's arming, in run order, out of runs
     runs in all. A row with fewer than _DEADLINE_TAIL_RUNS spans fails, its tail unmeasured: a run that
-    logged no arming never counts as a pass. Otherwise the row fails when the judged span
-    (_judged_half_fails: the median, always of exactly _DEADLINE_TAIL_RUNS spans here) is over
-    _DEADLINE_TAIL_SECONDS, that is when two of the three spans or all three are over it, the rule the
-    timed rows use for CPU time (see the bound's comment for the measurements)."""
+    logged no arming never counts as a pass. Otherwise the spans are judged by the shared judge
+    (_timing_judge) under _TIMING_UPPER_MIDDLE against _DEADLINE_TAIL_SECONDS: the row fails when the
+    judged span (_judged_half_fails: the median, always of exactly _DEADLINE_TAIL_RUNS spans here) is over
+    the bound, that is when two of the three spans or all three are over it, the rule the timed rows use for
+    CPU time (see the bound's comment for the measurements); a span over it on one run in three is a lone
+    excursion, cleared only by replay (one more fresh run of the row, _deadline_row_problems, a function
+    returning (its span, None) when that run is within every bound and check of the row, or (None, the
+    reason)), and failed when replay is None. With notes (false for recorded vectors) a 'timing-note:' line
+    is printed when any span is over the bound."""
     if len(spans) < _DEADLINE_TAIL_RUNS:
         return ["({}) logged its window's arming on {} of {} fresh runs, short of the {} spans the {:g}s "
                 "tail bound judges, so its tail was not measured".format(
                     label, len(spans), runs, _DEADLINE_TAIL_RUNS, _DEADLINE_TAIL_SECONDS)]
-    if _judged_half_fails(spans) <= _DEADLINE_TAIL_SECONDS:
+    failed, text = _timing_judge(spans, _DEADLINE_TAIL_SECONDS, _TIMING_UPPER_MIDDLE, replay)
+    if notes and any(_timing_valid(span) and _timing_over(span, _DEADLINE_TAIL_SECONDS, False) for span in spans):
+        _timing_note(label + " tail", text, "tail spans only")
+    if not failed:
         return []
     # Spans are printed in full (repr), so a span just over the bound never reads as equal to it.
-    return ["({}) took {} seconds from its window's arming to main()'s return over {} fresh runs, "
-            "the median span over the {:g}s tail bound".format(
-                label, ", ".join(repr(span) for span in spans), len(spans),
-                _DEADLINE_TAIL_SECONDS)]
+    over = _timing_over(_timing_judged(spans, _TIMING_UPPER_MIDDLE), _DEADLINE_TAIL_SECONDS, False)
+    return ["({}) took {} seconds from its window's arming to main()'s return over {} fresh runs, {} ({})".format(
+        label, ", ".join(repr(span) for span in spans), len(spans),
+        "the median span over the {:g}s tail bound".format(_DEADLINE_TAIL_SECONDS) if over else
+        "a lone span over the {:g}s tail bound not cleared by a replay".format(_DEADLINE_TAIL_SECONDS), text)]
 
 
-def _deadline_total_problems(label, walls):
+def _deadline_total_problems(label, walls, replay=None, notes=True):
     """What a row's whole-run time got wrong, as a list of phrases ([] for none), judged over walls, the
     wall-clock seconds of EVERY fresh run the row took, runs that never logged their window's arming
-    included, 3 to 6 of them: the row fails when the judged time (_judged_half_fails: the median of an odd
-    count, the upper
-    middle of an even count, so a stall on half of the runs or more fails) is not under
-    _DEADLINE_TOTAL_SECONDS, the same bound each single run had before the rows were judged over fresh
-    re-runs (a run at exactly the bound is not under it)."""
-    if _judged_half_fails(walls) < _DEADLINE_TOTAL_SECONDS:
+    included, 3 to 6 of them, by the shared judge (_timing_judge) under _TIMING_UPPER_MIDDLE_AT: the row
+    fails when the judged time (_judged_half_fails: the median of an odd count, the upper middle of an even
+    count, so a stall on half of the runs or more fails) is not under _DEADLINE_TOTAL_SECONDS, the same bound
+    each single run had before the rows were judged over fresh re-runs (a run at exactly the bound is not
+    under it); a time not under it on fewer runs is a lone excursion, cleared only by replay (as for
+    _deadline_tail_problems: (its whole-run time, None) for one more fresh run within every bound and check
+    of the row, or (None, the reason)), and failed when replay is None. notes as for _deadline_tail_problems."""
+    failed, text = _timing_judge(walls, _DEADLINE_TOTAL_SECONDS, _TIMING_UPPER_MIDDLE_AT, replay)
+    if notes and any(_timing_valid(wall) and _timing_over(wall, _DEADLINE_TOTAL_SECONDS, True) for wall in walls):
+        _timing_note(label + " whole-run", text, "whole-run wall-clock times only")
+    if not failed:
         return []
     # Times are printed in full (repr), so a time just over the bound never reads as equal to it.
-    return ["({}) took {} seconds of wall-clock time over {} fresh runs, the judged time not under the "
-            "{:g}s whole-run bound".format(
-                label, ", ".join(repr(wall) for wall in walls), len(walls), _DEADLINE_TOTAL_SECONDS)]
+    over = (all(_timing_valid(wall) for wall in walls) and walls
+            and _timing_over(_timing_judged(walls, _TIMING_UPPER_MIDDLE_AT), _DEADLINE_TOTAL_SECONDS, True))
+    return ["({}) took {} seconds of wall-clock time over {} fresh runs, {} ({})".format(
+        label, ", ".join(repr(wall) for wall in walls), len(walls),
+        "the judged time not under the {:g}s whole-run bound".format(_DEADLINE_TOTAL_SECONDS) if over else
+        "a lone time not under the {:g}s whole-run bound not cleared by a replay".format(_DEADLINE_TOTAL_SECONDS),
+        text)]
 
 
-def _deadline_row_problems(label, what, want, run_once, cut=_deadline_cut_problems):
+def _deadline_row_problems(label, what, want, run_once, cut=_deadline_cut_problems, notes=True):
     """Problems for one deadline-firing row ([] for none), run_once one fresh run of it (a new stub with
     new clock reads) returning (code, err, seconds, reads, returned). The cut judgement is behavioural and
     single-run: cut(label, what, code, err, want, seconds, reads) judges each run (a note-only row passes
@@ -10605,7 +10801,13 @@ def _deadline_row_problems(label, what, want, run_once, cut=_deadline_cut_proble
     unarmed runs' included, count toward the whole-run judgement, whose judged time (_judged_half_fails:
     a stall on half of the runs or more fails) must stay under _DEADLINE_TOTAL_SECONDS
     (_deadline_total_problems), so a stall before the deadline window is armed, or in a run the tail
-    judgement replaced, still fails the row."""
+    judgement replaced, still fails the row.
+    Both wall-clock judgements go through the shared judge (_TIMING_UPPER_MIDDLE, _TIMING_UPPER_MIDDLE_AT): a
+    lone excursion on either is replayed by ONE more fresh run of the row (run_once again, in this process),
+    which serves both and clears an excursion only when it is within every bound and check TOGETHER: its cut
+    passes, it logged its window's arming, its span is within _DEADLINE_TAIL_SECONDS and its whole-run time
+    is under _DEADLINE_TOTAL_SECONDS. The replay's times are not added to the judged spans or times. notes
+    (false for recorded vectors) prints 'timing-note:' lines for runs over a bound."""
     spans = []
     walls = []
     runs = 0
@@ -10619,7 +10821,32 @@ def _deadline_row_problems(label, what, want, run_once, cut=_deadline_cut_proble
         span = _deadline_tail_span(reads, returned)
         if span is not None:
             spans.append(span)
-    return _deadline_tail_problems(label, spans, runs) + _deadline_total_problems(label, walls)
+    replayed = []
+
+    def replay_run():
+        if not replayed:
+            code, err, seconds, reads, returned = run_once()
+            span = _deadline_tail_span(reads, returned)
+            wrong = cut(label, what, code, err, want, seconds, reads)
+            if span is None:
+                wrong.append("it never logged its window's arming, so its tail span was not measured")
+            elif _timing_over(span, _DEADLINE_TAIL_SECONDS, False):
+                wrong.append("its tail span {!r} s is over the {:g}s tail bound".format(span, _DEADLINE_TAIL_SECONDS))
+            if not _timing_valid(seconds) or _timing_over(seconds, _DEADLINE_TOTAL_SECONDS, True):
+                wrong.append("its whole-run time {!r} s is not under the {:g}s whole-run bound".format(
+                    seconds, _DEADLINE_TOTAL_SECONDS))
+            replayed.append((span, seconds, "; ".join(wrong) if wrong else None))
+        return replayed[0]
+
+    def tail_replay():
+        span, _seconds, problem = replay_run()
+        return (None, "one more fresh run: " + problem) if problem else (span, None)
+
+    def total_replay():
+        _span, seconds, problem = replay_run()
+        return (None, "one more fresh run: " + problem) if problem else (seconds, None)
+    return (_deadline_tail_problems(label, spans, runs, tail_replay, notes)
+            + _deadline_total_problems(label, walls, total_replay, notes))
 
 
 def _deadline_path_failures():
@@ -10634,7 +10861,8 @@ def _deadline_path_failures():
     and behavioural, by the time from the window's arming (_armed_window) to main()'s return, judged as
     the median of _DEADLINE_TAIL_RUNS spans, each from a fresh run of the row (_deadline_row_problems),
     and by each run's whole wall-clock time, judged over every fresh run the row took under a rule that
-    fails a stall on half of the runs or more (_deadline_total_problems, _judged_half_fails);
+    fails a stall on half of the runs or more (_deadline_total_problems, _judged_half_fails), both through
+    the shared judge, whose replay of a lone excursion is one more fresh run of the row;
     (dl-cut-judged) recorded runs pin the cut judgement at the sleep's end, (dl-note-only-cut-judged)
     recorded runs pin the note-only cut judgement at the sleep's end and on its exit and streams,
     (dl-tail-span) recorded reads pin the span's measurement from the arming, however late or absent the
@@ -10645,7 +10873,9 @@ def _deadline_path_failures():
     never a pass, (dl-total-median) recorded times pin the whole-run judgement at its bound's ends, and
     (dl-total-rerun) recorded rows pin that a stall before the window, a stall after the cut past both
     bounds, a stall counted only through replaced unarmed runs, and a stall on half of an even count of
-    runs each fail, while one slow run in three, or stalls on two runs of five, pass."""
+    runs each fail, while one slow run in three, or stalls on two runs of five, pass only after one more
+    fresh run (the shared judge's replay) that is within every bound and check together, and fail when that
+    run is over either wall-clock bound, never logs its window's arming, or fails its cut."""
     out = []
     size = len(_DEADLINE_PAYLOAD.encode("utf-8"))
     for mode, event in sorted(aiqt_hooks.HANDLER_EVENT.items()):
@@ -10743,19 +10973,39 @@ def _deadline_path_failures():
         if not ok:
             out.append("(dl-tail-span) the span measured {} must be {!r}, got {!r}".format(
                 edge, want_span, span))
-    for edge, spans, want_lines, want_text in (
-            ("every span just over the bound", [tail + 1e-6] * _DEADLINE_TAIL_RUNS, 1, "median span"),
-            ("its median just over the bound", [tail + 1e-6, tail - 1e-6, tail + 1e-6], 1, "median span"),
-            ("its median exactly at the bound", [tail + 1e-6, tail, tail - 1e-6], 0, ""),
-            ("its median just inside the bound", [tail + 1e-6, tail - 1e-6, tail - 1e-6], 0, ""),
+    tail_replays = []
+
+    def tail_replay_at(span, problem=None):
+        def replay():
+            tail_replays.append(span)
+            return span, problem
+        return replay
+    for edge, spans, replay, want_lines, want_text, want_replays in (
+            ("every span just over the bound", [tail + 1e-6] * _DEADLINE_TAIL_RUNS, tail_replay_at(0.11), 1,
+             "median span", 0),
+            ("its median just over the bound", [tail + 1e-6, tail - 1e-6, tail + 1e-6], tail_replay_at(0.11), 1,
+             "median span", 0),
+            ("its median exactly at the bound, one span over it cleared by a replay inside it",
+             [tail + 1e-6, tail, tail - 1e-6], tail_replay_at(0.11), 0, "", 1),
+            ("its median just inside the bound, one span over it cleared by a replay inside it",
+             [tail + 1e-6, tail - 1e-6, tail - 1e-6], tail_replay_at(0.11), 0, "", 1),
+            ("one span over the bound and a replay over it as well", [tail + 1e-6, tail - 1e-6, tail - 1e-6],
+             tail_replay_at(tail + 1e-6), 1, "lone span", 1),
+            ("one span over the bound and a replay that failed", [tail - 1e-6, tail - 1e-6, tail + 1e-6],
+             tail_replay_at(None, "its whole-run time is not under the bound"), 1, "lone span", 1),
+            ("one span over the bound and no replay", [tail - 1e-6, tail + 1e-6, tail - 1e-6], None, 1,
+             "lone span", 0),
+            ("every span inside the bound", [tail - 1e-6] * _DEADLINE_TAIL_RUNS, tail_replay_at(tail + 1), 0, "", 0),
             ("one span short of the full count, every span over the bound",
-             [tail + 1e-6] * (_DEADLINE_TAIL_RUNS - 1), 1, "not measured"),
+             [tail + 1e-6] * (_DEADLINE_TAIL_RUNS - 1), tail_replay_at(0.11), 1, "not measured", 0),
             ("one span short of the full count, every span inside the bound",
-             [tail - 1e-6] * (_DEADLINE_TAIL_RUNS - 1), 1, "not measured")):
-        lines = _deadline_tail_problems("recorded", spans, _DEADLINE_TAIL_MAX_RUNS)
-        if len(lines) != want_lines or (want_lines and want_text not in lines[0]):
-            out.append("(dl-tail-median) a row with {} must give {} line(s) holding {!r}, got {!r}".format(
-                edge, want_lines, want_text, lines))
+             [tail - 1e-6] * (_DEADLINE_TAIL_RUNS - 1), tail_replay_at(0.11), 1, "not measured", 0)):
+        tail_replays.clear()
+        lines = _deadline_tail_problems("recorded", spans, _DEADLINE_TAIL_MAX_RUNS, replay, notes=False)
+        if (len(lines) != want_lines or (want_lines and want_text not in lines[0])
+                or len(tail_replays) != want_replays):
+            out.append("(dl-tail-median) a row with {} must give {} line(s) holding {!r} after {} replay(s), got "
+                       "{!r} after {!r}".format(edge, want_lines, want_text, want_replays, lines, tail_replays))
 
     total = _DEADLINE_TOTAL_SECONDS
     for edge, walls, want_lines in (
@@ -10776,10 +11026,22 @@ def _deadline_path_failures():
              [0.15, 0.15, 0.15, total, total + 5.0, total + 5.0], 1),
             ("the upper middle of six just inside the bound",
              [0.15, 0.15, 0.15, total - 1e-6, total + 5.0, total + 5.0], 0)):
-        lines = _deadline_total_problems("recorded", walls)
-        if len(lines) != want_lines or (want_lines and "whole-run bound" not in lines[0]):
-            out.append("(dl-total-median) a row whose whole-run times have {} must give {} line(s) holding "
-                       "'whole-run bound', got {!r}".format(edge, want_lines, lines))
+        # A lone excursion (a time not under the bound, the judged time under it) is replayed once; a replay
+        # inside the bound clears it, and one over it, one exactly at it, one that failed, or none fails it.
+        lone = any(wall >= total for wall in walls) and want_lines == 0
+        for replay_wall, replay_problem, lone_lines in ((0.15, None, 0), (total, None, 1), (total + 1e-6, None, 1),
+                                                       (None, "its cut failed", 1), ("none", None, 1)):
+            if not lone and replay_wall != 0.15:
+                continue
+            tail_replays.clear()
+            replay = None if replay_wall == "none" else tail_replay_at(replay_wall, replay_problem)
+            lines = _deadline_total_problems("recorded", walls, replay, notes=False)
+            want = lone_lines if lone else want_lines
+            if (len(lines) != want or (want and "whole-run bound" not in lines[0])
+                    or len(tail_replays) != (1 if lone and replay is not None else 0)):
+                out.append("(dl-total-median) a row whose whole-run times have {}, a lone excursion replayed at "
+                           "{!r} ({}), must give {} line(s) holding 'whole-run bound', got {!r} after replays "
+                           "{!r}".format(edge, replay_wall, replay_problem, want, lines, tail_replays))
 
     ran = []
 
@@ -10810,10 +11072,19 @@ def _deadline_path_failures():
             ("a stall on runs 1 and 2 only", [over, over, inside], full, 1, "median span"),
             ("a stall on runs 1 and 3 only", [over, inside, over], full, 1, "median span"),
             ("a stall on runs 2 and 3 only", [inside, over, over], full, 1, "median span"),
-            ("a stall on run 1 only", [over, inside, inside], full, 0, ""),
-            ("a stall on run 3 only", [inside, inside, over], full, 0, ""),
-            ("a stall on run 1 only, the others exactly at the bound", [over, at_bound, at_bound], full, 0,
-             ""),
+            ("a stall on run 1 only, cleared by one more clean run", [over, inside, inside], full + 1, 0, ""),
+            ("a stall on run 3 only, cleared by one more clean run", [inside, inside, over], full + 1, 0, ""),
+            ("a stall on run 1 only, the others exactly at the bound, cleared by one more clean run",
+             [over, at_bound, at_bound], full + 1, 0, ""),
+            ("a stall on run 1 only, its replay stalled too", [over, inside, inside, over], full + 1, 1,
+             "lone span"),
+            ("a stall on run 2 only, its replay inside the tail bound but stalled before the window",
+             [inside, over, inside, (2, refusal, 1.1, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.05)],
+             full + 1, 1, "whole-run"),
+            ("a stall on run 3 only, its replay never arming its window", [inside, inside, over, unarmed],
+             full + 1, 1, "never logged"),
+            ("a stall on run 1 only, its replay's sleep run to its end", [over, inside, inside, ran_out],
+             full + 1, 1, "run to its end"),
             ("a stall on every run", [over] * full, full, 1, "median span"),
             ("a stall on every run, each with a delay before the stub's first loop read",
              [late_read_over] * full, full, 1, "median span"),
@@ -10828,12 +11099,12 @@ def _deadline_path_failures():
             ("a run over the bound, one that never armed its window, one over the bound and one inside it",
              [over, unarmed, over, inside], full + 1, 1, "median span"),
             ("a run over the bound then one that never armed its window, then clean runs",
-             [over, unarmed, inside, inside], full + 1, 0, ""),
+             [over, unarmed, inside, inside], full + 2, 0, ""),
             ("no run that armed its window", [unarmed] * most, most, 1, "not measured"),
             ("two clean runs among runs that never armed their window",
              [inside, unarmed, unarmed, inside, unarmed, unarmed], most, 1, "not measured")):
         ran.clear()
-        lines = _deadline_row_problems("recorded", "the refusal", "recorded refusal", scripted(runs))
+        lines = _deadline_row_problems("recorded", "the refusal", "recorded refusal", scripted(runs), notes=False)
         bad = len(ran) != want_runs or len(lines) != want_lines
         if not bad and want_lines and want_text not in lines[0]:
             bad = True
@@ -10854,20 +11125,28 @@ def _deadline_path_failures():
              "whole-run bound", [after_cut_only] * full, full, ("median span",)),
             ("a 1-second stall before the deadline window is armed on every run", [stalled_before] * full,
              full, ("whole-run bound",)),
-            ("a stall before the window on one run of three", [stalled_before, inside, inside], full, ()),
+            ("a stall before the window on one run of three, cleared by one more clean run",
+             [stalled_before, inside, inside], full + 1, ()),
+            ("a stall before the window on one run of three, its replay stalled before the window too",
+             [stalled_before, inside, inside, stalled_before], full + 1, ("whole-run bound",)),
+            ("a stall before the window on one run of three, its replay inside the whole-run bound but over the "
+             "tail bound", [stalled_before, inside, inside, over], full + 1, ("whole-run bound",)),
             ("a whole-run median pushed over the bound only by two replaced unarmed runs' times",
              [slow_unarmed, slow_unarmed, inside, inside, slowish], full + 2, ("whole-run bound",)),
             ("a stall in a replaced unarmed run and one before the window, on two of four runs",
              [slow_unarmed, stalled_before, inside, inside], full + 1, ("whole-run bound",)),
-            ("a stall in a replaced unarmed run and one after the deadline's cut, on two of four runs",
-             [slow_unarmed, stalled_after, inside, inside], full + 1, ("whole-run bound",)),
+            ("a stall in a replaced unarmed run and one after the deadline's cut, on two of four runs (the lone "
+             "tail excursion cleared by one more clean run)",
+             [slow_unarmed, stalled_after, inside, inside], full + 2, ("whole-run bound",)),
             ("stalls counted only through replaced unarmed runs on three of six runs",
              [slow_unarmed, slow_unarmed, slow_unarmed, inside, inside, inside], most,
              ("whole-run bound",)),
-            ("stalls counted only through replaced unarmed runs on two of five runs",
-             [slow_unarmed, slow_unarmed, inside, inside, inside], full + 2, ())):
+            ("stalls counted only through replaced unarmed runs on two of five runs, cleared by one more clean "
+             "run", [slow_unarmed, slow_unarmed, inside, inside, inside], full + 3, ()),
+            ("stalls counted only through replaced unarmed runs on two of five runs, the replay stalled too",
+             [slow_unarmed, slow_unarmed, inside, inside, inside, stalled_before], full + 3, ("whole-run bound",))):
         ran.clear()
-        lines = _deadline_row_problems("recorded", "the refusal", "recorded refusal", scripted(runs))
+        lines = _deadline_row_problems("recorded", "the refusal", "recorded refusal", scripted(runs), notes=False)
         bad = len(ran) != want_runs or len(lines) != len(want_texts)
         if not bad and any(text not in line for text, line in zip(want_texts, lines)):
             bad = True
@@ -12709,29 +12988,50 @@ def _deadline_outer_deadline_failures():
     _close call and again at the entry of its second, and the outer body then sleeps 1.5 s. The outer
     deadline must reach its owner within 1.0 s, with neither window armed, both handlers run, and SIGALRM
     back to SIG_DFL with the timer inactive. The scenario runs _TIMED_RUNS (3) times, each with its own
-    windows, injector and handler (_deadline_outer_deadline_run); every run must meet every check but the
-    time, and the wall-clock times are judged by the shared judge (_timing_judge, failing at 1.0 s), a lone
-    excursion replayed once in a fresh interpreter (_timing_replay, kind dl-outer), whose run must meet every
-    check as well."""
-    out = []
-    runs = [_deadline_outer_deadline_run() for _ in range(_TIMED_RUNS)]
-    problems = ["run {}: {}".format(index, problem) for index, (_used, problem) in enumerate(runs, 1) if problem]
+    windows, injector and handler (_deadline_outer_deadline_run), and every run must meet every check,
+    the time included: the 1.0 s is a per-scenario hard limit (the shared policy _TIMING_HARD_AT,
+    _deadline_outer_deadline_verdict), so one scenario that takes 1.0 s or more fails the row whatever the
+    others took, as the single scenario of earlier versions did; no median and no replay clears it."""
+    return _deadline_outer_deadline_verdict([_deadline_outer_deadline_run() for _ in range(_TIMED_RUNS)])
 
-    def replayed():
-        reply, problem = _timing_replay({"kind": "dl-outer", "id": "dl-defer-twice-outer-deadline"})
-        if problem is not None:
-            return None, problem
-        if reply.get("problem") is not None:
-            return None, "its run {}".format(reply.get("problem"))
-        return reply.get("seconds"), None
+
+def _deadline_outer_deadline_verdict(runs):
+    """The dl-defer-twice-outer-deadline failures ([] or one line) for runs [(seconds, problem)]
+    (_deadline_outer_deadline_run): every run's problem, and its time judged alone under the hard policy
+    _TIMING_HARD_AT against 1.0 s (_timing_judge, which asks no replay of a hard policy)."""
+    problems = ["run {}: {}".format(index, problem) for index, (_used, problem) in enumerate(runs, 1) if problem]
     times = [used for used, _problem in runs]
-    failed, text = _timing_judge(times, 1.0, True, replayed)
+    failed, text = _timing_judge(times, 1.0, _TIMING_HARD_AT, None)
     if any(_timing_valid(used) and used >= 1.0 for used in times):
         _timing_note("dl-defer-twice-outer-deadline", text, "wall-clock times only")
     if failed or problems:
-        out.append("(dl-defer-twice-outer-deadline) two raising handlers at an inner window's first two close "
-                   "attempts must leave the outer deadline to fire within 1.0 s: {}".format(
-                       "; ".join([text] + problems)))
+        return ["(dl-defer-twice-outer-deadline) two raising handlers at an inner window's first two close "
+                "attempts must leave the outer deadline to fire within 1.0 s on every scenario: {}".format(
+                    "; ".join([text] + problems))]
+    return []
+
+
+def _deadline_outer_deadline_verdict_failures():
+    """(dl-outer-verdict) _deadline_outer_deadline_verdict on recorded scenarios: a real 1.2 s stall on the
+    first scenario fails even when the later two take 0.3 s; so does a stall on the second or the third alone,
+    a stall at exactly 1.0 s, and a scenario with no well-formed time; three scenarios at 0.3 s pass, as do
+    three a microsecond under 1.0 s; a scenario at 0.3 s that failed another check fails."""
+    out = []
+    fast, under = (0.3, None), (1.0 - 1e-6, None)
+    with _timing_notes_quiet():
+        for edge, runs, want in (
+                ("a 1.2 s stall then two 0.3 s scenarios", [(1.2, None), fast, fast], 1),
+                ("a 1.2 s stall on the second scenario only", [fast, (1.2, None), fast], 1),
+                ("a 1.2 s stall on the third scenario only", [fast, fast, (1.2, None)], 1),
+                ("a scenario at exactly 1.0 s", [fast, (1.0, None), fast], 1),
+                ("a scenario with no well-formed time", [fast, (float("nan"), None), fast], 1),
+                ("three 0.3 s scenarios", [fast, fast, fast], 0),
+                ("three scenarios a microsecond under 1.0 s", [under, under, under], 0),
+                ("a 0.3 s scenario whose deadline reached the wrong owner",
+                 [fast, (0.3, "got another deadline"), fast], 1)):
+            lines = _deadline_outer_deadline_verdict(runs)
+            if len(lines) != want:
+                out.append("(dl-outer-verdict) {} must give {} line(s), got {!r}".format(edge, want, lines))
     return out
 
 
@@ -13428,8 +13728,10 @@ _DEADLINE_CHILD_REAP_SECONDS = 10.0
 
 
 def _deadline_child_within(waited, limit):
-    """Whether a child's wall-clock seconds (_deadline_child_wait) are within its limit, the limit included."""
-    return waited <= limit
+    """Whether a child's wall-clock seconds (_deadline_child_wait) are within its limit, the limit included:
+    a per-invocation hard limit under the shared policy _TIMING_HARD (_timing_hard_failed), never a median
+    and never replayed."""
+    return not _timing_hard_failed(_TIMING_HARD, waited, limit)
 
 
 def _deadline_child_wait(code, args, limit):
@@ -13477,7 +13779,9 @@ def _deadline_child_wait_failures(tmp):
     wait.
     dl-child-wait-grandchild: a child that starts a grandchild sleeping 30 s on the same output pipes and
     then sleeps 600 s, under a 1-second limit, is stopped within 15 s, not when the grandchild lets go of
-    the pipes; the grandchild, found by its pid and the marker path in its arguments, is then killed."""
+    the pipes; the grandchild, found by its pid and the marker path in its arguments, is then killed.
+    Every upper bound here is a per-invocation hard limit under a shared policy (_TIMING_HARD in
+    _deadline_child_within, _TIMING_HARD_AT for the stop bounds of busy-child and grandchild), never a median."""
     out = []
     began = time.monotonic()
     proc, waited = _deadline_child_wait("import time; time.sleep(600)", (), 1.0)
@@ -13503,7 +13807,7 @@ def _deadline_child_wait_failures(tmp):
     began = time.monotonic()
     proc, waited = _deadline_child_wait(code, (), 4.0)
     spent = time.monotonic() - began
-    if proc is not None or spent >= 4.0 + _DEADLINE_CHILD_REAP_SECONDS:
+    if proc is not None or _timing_hard_failed(_TIMING_HARD_AT, spent, 4.0 + _DEADLINE_CHILD_REAP_SECONDS):
         out.append("(dl-child-wait-busy-child) a child sleeping 6.2 s beside its own 6-second hashing thread must "
                    "be stopped under a 4-second limit, got {!r} after {:.1f}s ({})".format(proc, spent, waited))
     marker = Path(tmp) / "dl-child-wait-grandchild.pid"
@@ -13516,7 +13820,7 @@ def _deadline_child_wait_failures(tmp):
         spent = time.monotonic() - began
     finally:
         _deadline_kill_marked(marker)
-    if proc is not None or spent >= 15.0:
+    if proc is not None or _timing_hard_failed(_TIMING_HARD_AT, spent, 15.0):
         out.append("(dl-child-wait-grandchild) a child whose grandchild holds its pipes must be stopped within "
                    "15 s under a 1-second limit, got {!r} after {:.1f}s ({})".format(proc, spent, waited))
     return out
@@ -13542,6 +13846,7 @@ def _test_deadline_posture(failures, tmp):
     with _timing_notes_quiet():
         failures.extend(_deadline_shape_rerun_failures())
         failures.extend(_timing_judge_failures())
+        failures.extend(_deadline_outer_deadline_verdict_failures())
     failures.extend(_deadline_load_judgement_failures(Path(tmp)))
     failures.extend(_deadline_note_only_deny_failures())
     failures.extend(_raw_sequence_failures())
@@ -13751,8 +14056,8 @@ def _wall_clock_asserts(source, exempt=()):
     the host's speed. A time figure is a clock reading (time.time, perf_counter, monotonic, process_time,
     thread_time, clock_gettime, or an _ns variant; datetime.now, utcnow, or today), a result of a timing
     harness (run_timed, growth_in_child), a name assigned from one (a for target or unpacking included), or
-    arithmetic, a comparison, a subscript, an attribute, min, max, abs, sum, int, float, round, or a method
-    call on one; a quotient of two time figures is a dimensionless ratio and may be bounded. A tuple or list
+    arithmetic, a comparison, a subscript, an attribute, min, max, abs, sum, int, float, round, a shared
+    timing judge (_timing_hard_failed, _timing_judge, called by that name), or a method call on one; a quotient of two time figures is a dimensionless ratio and may be bounded. A tuple or list
     literal assigned to a tuple or list target is matched element by element, so only the names that receive
     a time figure are tainted, and a shape it cannot match (a starred element, a length mismatch) taints
     nothing, the not-flagging direction. A clock read through an alias
@@ -13777,6 +14082,8 @@ def _wall_clock_asserts(source, exempt=()):
                  "process_time", "process_time_ns", "thread_time", "thread_time_ns", "clock_gettime",
                  "clock_gettime_ns"}
     dtclocks = ("now", "utcnow", "today")
+    # the shared timing judges: a call of one on a time figure is a verdict on that figure
+    verdicts = ("_timing_hard_failed", "_timing_judge")
     single = {"assertTrue", "assertFalse", "assertIsNone", "assertIsNotNone"}
 
     def dtclass(node, al):  # a reference to the datetime class: a class alias, or <datetime module>.datetime
@@ -13791,7 +14098,7 @@ def _wall_clock_asserts(source, exempt=()):
             if isinstance(f, ast.Name):
                 if f.id in clocks or f.id in al["clock"]:
                     return True
-                return f.id in ("min", "max", "abs", "sum", "int", "float", "round") and any(
+                return f.id in ("min", "max", "abs", "sum", "int", "float", "round") + verdicts and any(
                     timed(a, names, al) for a in node.args)
             if isinstance(f, ast.Attribute):
                 if f.attr in ("time", "time_ns"):
@@ -15762,10 +16069,12 @@ def _fsw_unit_suite():
         def test_hang_guard_interrupts(self):
             # a growth test's ceiling asserted only after every run returns could
             # not interrupt a hang; timed runs now go through run_timed, which kills the child at its timeout
+            # the 30-second ceiling is a per-invocation hard limit under the shared policy _TIMING_HARD_AT, never
+            # a median
             t0 = time.monotonic()
             with self.assertRaises(subprocess.TimeoutExpired):
                 run_timed("import time\ntime.sleep(60)\n", 1)
-            self.assertLess(time.monotonic() - t0, 30.0)
+            self.assertFalse(_timing_hard_failed(_TIMING_HARD_AT, time.monotonic() - t0, 30.0))
             for test in (T.test_scan_is_linear, T.test_unreadable_edit_literal_index_is_linear):
                 src = inspect.getsource(test)
                 self.assertIn("run_timed(code, HANG_TIMEOUT)", src)
@@ -16795,14 +17104,18 @@ def _fsw_unit_suite():
                    "def test_d(self):\n    for name, (s, big) in run_timed(c, 9).items():\n"
                    "        self.assertTrue(big < 3, name)\n"
                    "def test_e(self):\n    t = time.time()\n    self.assertLessEqual(time.time() - t, 1)\n"
-                   "def test_f(self):\n    def inner():\n        self.assertLess(growth_in_child(src, 9)[1], 1)\n")
+                   "def test_f(self):\n    def inner():\n        self.assertLess(growth_in_child(src, 9)[1], 1)\n"
+                   "def test_i(self):\n    t0 = time.monotonic()\n"
+                   "    self.assertFalse(_timing_hard_failed(_TIMING_HARD_AT, time.monotonic() - t0, 30.0))\n")
             self.assertEqual([name for name, _line in _wall_clock_asserts(bad)],
-                             ["test_a", "test_b", "test_c", "test_d", "test_e", "test_f"])
-            # a ratio of two time figures, a time figure in the message only, and an exempt hang guard pass
+                             ["test_a", "test_b", "test_c", "test_d", "test_e", "test_f", "test_i"])
+            # a ratio of two time figures, a time figure in the message only, an exempt hang guard, and a shared
+            # hard-limit judge over a count pass
             good = ("def test_g(self):\n    small, large = run_timed(code, HANG_TIMEOUT)\n"
                     "    self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))\n"
                     "    self.assertTrue(large / small < 2, (small, large))\n"
-                    "def test_h(self):\n    t0 = time.monotonic()\n    self.assertLess(time.monotonic() - t0, 30.0)\n")
+                    "def test_h(self):\n    t0 = time.monotonic()\n    self.assertLess(time.monotonic() - t0, 30.0)\n"
+                    "def test_j(self):\n    self.assertFalse(_timing_hard_failed(_TIMING_HARD_AT, len(rows), 3))\n")
             self.assertEqual(_wall_clock_asserts(good, ("test_h",)), [])
             self.assertEqual(_wall_clock_asserts(good), [("test_h", 7)])
             # a clock read through an alias (import-as, from-import, an assigned name) or a keyword operand is
