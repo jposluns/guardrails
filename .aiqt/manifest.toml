@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "d5298fdff36065444adb2909b17af231deef99191cc4120d70bc1c49248b7721"
+tree-sha256 = "ff1d962f71da0ff18003dc3febee28c37e05ab5d7262e99db7352c11d8d9671c"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 640473
-sha256 = "e596c1d3af706c871fb963d23176a1eb9e360366cee59c11b0963522e30d1bcd"
+bytes = 651178
+sha256 = "733704077a2f4ef530dc82a57da691e965ffec3e0aca41bad2670cc10432f295"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -4267,8 +4267,8 @@ sha256 = "9ec3224a7e8f517b357ab6738f82a4ce41a9bca6fcba66c3194b3a9157ff9ce0"
 
 [[sources]]
 path = "tools/check_brief_capability.py"
-bytes = 694216
-sha256 = "784230c5598ecbd560221901f9f4f443f7649b096b7f723d38e5b9b1207bc0df"
+bytes = 792342
+sha256 = "92153b428dcfcb12b60262e46bf382e87dcf7ccd60fdcff8b8e5333de0b229eb"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
@@ -4817,8 +4817,8 @@ sha256 = "f020224b8fcec06196b11729da9a87046c471d120bd674bf5fe6b967a5860021"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 293515
-sha256 = "34429c2a2e125f97612ff70848f7a37bb38fba1b33d11eb2f7b1d9d9bd59dfda"
+bytes = 296598
+sha256 = "bccd5217388cf3fff597989f803d66f05624c92a6e7b1fe17ed1ba8762988df4"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
