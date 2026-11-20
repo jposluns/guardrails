@@ -5825,7 +5825,7 @@ def d1_gate_residue():
     try:
         with open(ROOT / MANIFEST_RELS["gate"], "rb") as handle:
             gates = tomllib.loads(handle.read().decode("utf-8")).get("gate", [])
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError):
         return None
     residue = next((gate.get("residue") for gate in gates if isinstance(gate, dict)
                     and gate.get("id") == "brief-capability"), None)
@@ -8916,6 +8916,31 @@ def self_test(report_path=None):
         return doc_entry is not None and doc_entry == manifest_entry
 
     check("d1/manifest-entry-matches-doc", d1_same_entry(), True)
+
+    def d1_residue_on(body):
+        """d1_gate_residue on a tree whose gates manifest holds `body`, or the class of a parse failure that escaped
+        its handler."""
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-d1-residue-"))
+        try:
+            os.makedirs(tmp / Path(MANIFEST_RELS["gate"]).parent)
+            with open(tmp / MANIFEST_RELS["gate"], "w", encoding="utf-8") as handle:
+                handle.write(body)
+            with _patched(ROOT=tmp):
+                return d1_gate_residue()
+        except (ValueError, RecursionError, MemoryError) as exc:
+            return "escaped " + type(exc).__name__
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # the residue reader gives None, never a traceback, on a gates manifest that fails to parse outside
+    # TOMLDecodeError (deep nesting recurses; an over-long integer exceeds the int conversion limit; memory
+    # exhaustion is injected at the parse call), and still reads a residue that parses
+    with _injected_memory_exhaustion():
+        check("d1/manifest-parse-failure-none",
+              [d1_residue_on(body) for body in (
+                  "x = " + "[" * 8000 + "]" * 8000, "x = " + "1" * 5000, "x = 1  # " + INJECTED_EXHAUSTION_MARK + "\n",
+                  "[[gate]]\nid = \"brief-capability\"\nresidue = \"a  b\"\n")],
+              [None, None, None, "a b"])
     # a wrapped sentence is read whole and named by the line of its first matching action verb; a semicolon keeps
     # the sentence, so the refusal before it pairs with the action after it
     check("d1/wrapped-line-warned",
