@@ -44564,6 +44564,39 @@ def _exception_text(exc):
         return "<an exception whose type and message could not be read>"
 
 
+def _read_hook_input(stream):
+    """The hook payload text read from stream (sys.stdin), decoded the same way under every locale.
+
+    A real standard input is read once, as bytes, from its binary buffer and decoded as UTF-8 with
+    surrogateescape, so the text the handlers see does not depend on the locale the hook runs under. The
+    text stream this replaces decoded by the locale and the interpreter's UTF-8 mode: under the shipped
+    command line the C and POSIX locales turn UTF-8 mode on and C.UTF-8 decodes with surrogateescape, so
+    those already decoded as here, while a strict UTF-8 locale such as en_US.UTF-8 raised
+    UnicodeDecodeError on a byte that is not valid UTF-8, so the whole payload read as unreadable; only
+    with UTF-8 mode off did the C locale's ASCII codec turn every byte above 0x7f, valid UTF-8 included,
+    into a lone surrogate. Here valid UTF-8 decodes to its characters and each byte that is not valid UTF-8
+    becomes one lone surrogate (U+DC80 to U+DCFF), which json.loads keeps inside a string, so it reaches the
+    handler's own validation; malformed JSON, a non-object payload and a failed read still reach main()'s
+    unreadable-payload path and its mode's posture. Line ends are not translated: a CRLF or a lone CR
+    reaches json.loads unchanged, as it did through the text stream this replaces, which on POSIX does
+    not translate line ends either. A stream with no binary buffer (an already-decoded stream, such as the
+    io.StringIO and fault-injecting readers the self-tests install) is read with its own read(). The
+    payload is read once: a failed binary read propagates, never falling back to a second read through the
+    text layer, which would see a drained or half-read stream. A binary read that returns None (a
+    non-blocking standard input with no data ready) is a failed read too and raises BlockingIOError naming
+    it. This is the stdin decoding only: the strict UTF-8 readers of files, registries and records
+    elsewhere in this module are unchanged, and a later filesystem, child-process or output encoding can
+    still depend on the locale."""
+    buffer = getattr(stream, "buffer", None)
+    if buffer is None:
+        return stream.read()
+    data = buffer.read()
+    if data is None:
+        raise BlockingIOError("standard input is non-blocking and had no data ready (its read "
+                              "returned None), so no hook payload was read")
+    return data.decode("utf-8", "surrogateescape")
+
+
 def main(argv):
     # The MODE (argv[0]) alone decides the error posture, never the payload (which may be unreadable).
     # A genuinely unknown mode is not identifiable as Stop and is a broken install, so it fails closed
@@ -44632,12 +44665,14 @@ def main(argv):
     try:
         with window:
             try:
-                payload = sys.stdin.read()
+                payload = _read_hook_input(sys.stdin)
                 data = json.loads(payload)
                 if not isinstance(data, dict):
                     raise ValueError("payload is not a JSON object")
             except Exception as exc:  # any failure to read the payload is an unreadable payload
-                # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload, and
+                # Unreadable/malformed stdin (the read is decoded as UTF-8 with surrogateescape under every
+                # locale, so a byte that is not valid UTF-8 no longer fails it), JSON parse error, a
+                # UnicodeDecodeError from a test stream's own read, or a non-dict payload, and
                 # ALSO a RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those
                 # escape as a traceback with exit 1, which the platform treats as non-blocking. Every exception
                 # is named.
