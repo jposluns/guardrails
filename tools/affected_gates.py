@@ -1011,8 +1011,12 @@ def uncovered_observations(manifest, name, reads, listed, unobserved, probed=Non
         if not any(rx.fullmatch(rel) for rx in patterns):
             findings.append("reads {}".format(rel))
     for rel in sorted(absent or ()):
-        # An entry outside every reviewed domain selects the full roster (select), so it is covered.
-        if not all(any(rx.fullmatch(path) for rx in patterns) or not in_domain(path, manifest.domains)
+        # An entry outside every reviewed domain selects the full roster (select), so it is covered,
+        # but only when no domain lies beneath rel: a stand-in name says nothing about rel/sub/ when a
+        # domain holds that, and a change there would select only the gates whose inputs match it.
+        nested = any(d.startswith(rel + "/") for d in manifest.domains)
+        if not all(any(rx.fullmatch(path) for rx in patterns)
+                   or not (nested or in_domain(path, manifest.domains))
                    for path in beneath_entries(rel)):
             findings.append("reads missing {} (an entry created beneath it is not covered)".format(rel))
     for rel, under in sorted((probed or {}).items()):
@@ -1751,17 +1755,19 @@ def _self_test_observation(work):
           (sorted(absent), sorted(reads)))
     probe_gate = Gate(gate, 1, "run_gate", (("python3", "gate.py"),), None)
     verdicts = []
-    # The last row's domains do not hold the path, so a change beneath it selects the full roster.
+    # The fourth row's domains do not hold the path, so a change beneath it selects the full roster;
+    # the fifth holds a domain beneath it, where a change selects only the gates whose inputs match.
     for globs, domains in (((missing,), ("data/",)), ((missing, missing + "/*"), ("data/",)),
-                           ((missing, missing + "/**"), ("data/",)), ((missing,), ("other/",))):
+                           ((missing, missing + "/**"), ("data/",)), ((missing,), ("other/",)),
+                           ((missing,), ("other/", missing + "/sub/"))):
         decl = Declaration(tuple((p, glob_regex(p)) for p in globs), False, False, "fixture")
         held = Manifest(manifest_full, domains, {gate: decl})
         accepted = not uncovered_observations(held, gate, {missing}, set(), [], {}, absent & {missing})
         chosen = [bool(select([probe_gate], held, [Change(path, ("untracked",), False)])[0])
-                  for path in (missing + "/x", missing + "/x/y")]
+                  for path in (missing + "/x", missing + "/x/y", missing + "/sub/x")]
         verdicts.append((globs, domains, accepted, chosen))
     check("observe/absent-probe-child-selects-gate",
-          [accepted for _g, _d, accepted, _c in verdicts] == [False, False, True, True]
+          [accepted for _g, _d, accepted, _c in verdicts] == [False, False, True, True, False]
           and all(all(chosen) for _g, _d, accepted, chosen in verdicts if accepted), verdicts)
     findings = uncovered_observations(manifest_of(short), gate, reads, listed, [], probed)
     check("observe/metadata-only-dependency-reported",

@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "558725a8461e7dc590d3a488c4d553712738476abf32540d3be6a3d02e0a9aa3"
+tree-sha256 = "cf9bcec6c46de033dd6c5fba178437f7090bd3a21d7318ecf33bf9d15522c02b"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4237,8 +4237,8 @@ sha256 = "7d280b167418e3c7e47161ba7f670dac8cc65fab277a4f966d0afa3d0496f2da"
 
 [[sources]]
 path = "tools/affected_gates.py"
-bytes = 114101
-sha256 = "ca5e20bc1e3317238744e23920f492ce3ce25a65d90d85ed27418af4f5d67d30"
+bytes = 114608
+sha256 = "db0a931abe18b2113068a4ac0607a6b2e26f86363b792ae12b64f127d20dc066"
 
 [[sources]]
 path = "tools/affected_gates.toml"
