@@ -2062,13 +2062,13 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                         gqa.write_text(gqa_body, encoding="utf-8")
                         gqa_sha = hashlib.sha256(gqa_body.encode("utf-8")).hexdigest()
                         # no --first-pin, no evidence: the genesis auto-require makes it exit 1 (REQUIRED),
-                        # where the pre-round-4 gate returned exit 0. The REQUIRED finding must be the ONLY
+                        # never exit 0 without that evidence. The REQUIRED finding must be the ONLY
                         # finding, so no other rule failing the candidate can stand in for it.
                         rc, gout, gerr = _run_pre_tag_captured(gcand, gsha, str(gqa), gqa_sha, False, None)
                         if (rc != 1 or "first-pin: --evidence is REQUIRED" not in gout
                                 or "FAIL: 1 release-build finding(s) [pre-tag]" not in gout):
                             failures.append("genesis run_pre_tag without --first-pin must AUTO-REQUIRE "
-                                            "evidence and fail exit 1 (finding 5) with that as its only "
+                                            "evidence and fail exit 1 with that as its only "
                                             "finding, on a cut candidate at {}; got {} (stdout: {!r}; "
                                             "stderr: {!r})".format(gver.strip(), rc, gout.strip()[-600:],
                                                                    gerr.strip()[-300:]))
@@ -2093,7 +2093,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                                                   "add", "-A"],
                                                  ["-c", "user.name=t", "-c", "user.email=t@e.invalid",
                                                   "commit", "-q", "-m", "development", "--no-verify"])):
-                                errors.append("(finding 2) the genesis development candidate could not be "
+                                errors.append("the genesis development candidate could not be "
                                               "committed; the archive-backed development case cannot be "
                                               "verified, so the self-test is cannot-evaluate (exit 2)")
                             else:
@@ -3094,9 +3094,9 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
               "completeness on a real 3-tag repo (round-2 finding 7), the first-pin evidence bound to the "
               "candidate's AGENTS.md with a recomputed prefix-superset (round-3 finding 5), a strict-manifest "
               "check on every tagged/candidate manifest (round-4 finding 3), _show_bytes absent-vs-git-error "
-              "(round-4 finding 7), a genesis run_pre_tag on a cut candidate auto-requiring first-pin evidence "
-              "as its only finding (round-4 finding 5) and refusing the same tree reopened for development "
-              "exit 2, and a first-pin cannot-evaluate raising exit 2 (round-4 finding 4), all over "
+              "(None vs GateError), a genesis run_pre_tag on a cut candidate auto-requiring first-pin evidence "
+              "as its only finding and refusing the same tree reopened for development "
+              "exit 2, and a first-pin cannot-evaluate raising exit 2, all over "
               "RAW-materialized (no-worktree) candidate trees (round-4 finding 1); and the round-5 cases "
               "(dormancy needs zero tags AND zero rows with a lightweight/unrecorded tag flagged (finding "
               "2), a raw invalid-UTF-8 release tag exit 2 plus a _git_out decode boundary (finding 3), a "
