@@ -7103,6 +7103,8 @@ expected-check-ids = [
   "live/import-closure-covered",
   "live/tracked-paths-in-domains",
   "cli/invalid-invocation-exit-2",
+  # the default observation jobs are bounded by the host and overridable from the environment
+  "observe/default-jobs-bounded-by-host",
   # the observation check's audit hook and comparison over a fixture tree
   "observe/hook-records-gate-and-children",
   "observe/write-only-open-not-a-read",
@@ -7113,6 +7115,8 @@ expected-check-ids = [
   "observe/uncovered-read-reported",
   "observe/metadata-probes-recorded",
   "observe/git-component-probe-not-an-input",
+  "observe/absent-path-recorded",
+  "observe/absent-probe-child-selects-gate",
   "observe/metadata-only-dependency-reported",
   "observe/probed-directory-covered-by-file-under-it",
   "observe/unobserved-launch-needs-whole-tree",
@@ -7146,6 +7150,12 @@ expected-check-ids = [
   "git/shallow-history-exit-2",
   "git/git-failure-exit-2",
   "git/non-utf8-path-exit-2",
-  # the observation copy is built from the index exactly
+  # the observation copy is built from the index exactly, and a NOTE names the working-tree paths it skips
   "observe/copy-is-the-index-exactly",
+  "observe/unstaged-inputs-noted",
+  # settings that hide working-tree changes are refused without --head
+  "git/assume-unchanged-refused",
+  "git/skip-worktree-refused",
+  "git/filemode-false-refused",
+  "git/visible-settings-accepted",
 ]

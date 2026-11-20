@@ -7,6 +7,7 @@ chosen by hand.
   affected_gates.py --self-test
   affected_gates.py [--self-test] --execution-report ABS_PATH   (the registered suite launch)
   affected_gates.py --observe-inputs [--gate NAME]... [--jobs N]
+      (default jobs: AFFECTED_GATES_OBSERVE_JOBS when set, otherwise min(4, the usable CPU count))
 
 The selector lists gates; it runs none of them and certifies nothing. The full runner stays the
 authority for a merge: rerun the selection after a rebase or any input change, and keep the train's
@@ -45,6 +46,9 @@ changes are all changed paths; a submodule (gitlink) change, and an untracked em
 (which git lists as one "dir/" entry, never its files), select the whole roster. A missing or
 ambiguous revision, a shallow repository, no or several merge bases, an unmerged index entry, a
 failed git call, an unreadable declaration and a path that is not strict UTF-8 are cannot-evaluate.
+Without --head, so is a repository whose settings hide working-tree changes from git diff:
+core.fileMode false (an executable-bit change goes unreported) or any index entry marked
+assume-unchanged or skip-worktree (its edits go unreported); clear them, or judge a commit with --head.
 NOT MEASURED: ignored files and the external environment are not part of the change set, so a
 selection is no evidence that those inputs are clean.
 
@@ -67,7 +71,9 @@ OBSERVATION. The declarations are held against what the gates really read. --obs
 every gate whose declaration narrows its inputs (neither whole-tree nor always; those two are selected
 by any change, so no read of theirs can go uncovered) once, in a disposable clone of this tree built
 from its index exactly (a staged deletion stays deleted, a staged rename moves; unstaged changes and
-untracked files are not observed, so stage them first), under a Python audit hook
+untracked files are not observed, so stage them first: a NOTE names every such path that is the
+declarations file, a full-roster path or an input of an observed gate, and any setting that hides
+such changes), under a Python audit hook
 (sys.addaudithook) that records open, os.listdir, os.scandir and every process launch
 (subprocess.Popen, os.exec, os.posix_spawn, os.spawn, os.system). Metadata reads raise no audit
 event, so the same startup hook wraps os.stat, os.lstat, os.access and os.readlink (and through
@@ -93,8 +99,10 @@ no directory in the audit event and are judged only when their first component e
 bytecode caches (__pycache__) and a path with a .git component (.git internals, or a probe for a
 work-tree marker such as tools/.git; git tracks no such path) are not inputs. A metadata read the
 wrapped functions do not carry (os.DirEntry.stat after a recorded listing, os.fstat of a recorded
-open, a C extension's own stat) is not seen; a probed path that is missing is held as a file, so a
-directory later created at that path is not covered by a file glob. The hook keeps only paths inside the copy and writes
+open, a C extension's own stat) is not seen. A read or probed path the copy does not hold can later
+be created as a file or as a directory, so the declaration must match the path itself and every
+depth beneath it (p and p/**), unless what lies beneath it is outside every reviewed domain (such a
+change selects the full roster): a change creating p/x then selects the gate that probed p. The hook keeps only paths inside the copy and writes
 each distinct record once per process. A gate that runs past OBSERVE_GATE_TIMEOUT is stopped
 through its process group and reported; a descendant that started a session of its own is not
 stopped by the check.
@@ -543,6 +551,29 @@ def parse_raw_diff(blob, source):
     return changes
 
 
+def hidden_change_settings(root, env):
+    """The repository settings that hide working-tree changes from git diff, as reasons (empty when
+    none): core.fileMode false (an executable-bit change is not reported) and any index entry marked
+    assume-unchanged or skip-worktree (its edits are not reported). git ls-files -v tags an ordinary
+    entry H; a lowercase tag is assume-unchanged and S or s is skip-worktree, so any other tag is one."""
+    reasons = []
+    out, _err = _git(root, ["config", "--type=bool", "--default", "true", "--get", "core.fileMode"], env)
+    if out.strip() != b"true":
+        reasons.append("core.fileMode is {} (mode changes are not reported)".format(
+            out.decode("utf-8", "replace").strip() or "unset"))
+    out, _err = _git(root, ["ls-files", "-z", "-v"], env)
+    marked = []
+    for record in [r for r in out.split(b"\0") if r]:
+        tag, space, raw_path = record.partition(b" ")
+        if not space or tag != b"H":
+            marked.append((tag.decode("ascii", "replace"), raw_path.decode("utf-8", "replace")))
+    if marked:
+        reasons.append("{} index entr{} marked assume-unchanged or skip-worktree (their edits are not "
+                       "reported), first {} {}".format(len(marked), "y" if len(marked) == 1 else "ies",
+                                                       marked[0][0], marked[0][1]))
+    return reasons
+
+
 def collect_changes(root, base, head_rev=None, env=None):
     """(info dict, [Change]) for the comparison in the module docstring, or CannotEvaluate."""
     env = git_env() if env is None else env
@@ -563,6 +594,10 @@ def collect_changes(root, base, head_rev=None, env=None):
         out, _err = _git(root, ["ls-files", "-z", "--unmerged"], env)
         if out:
             raise CannotEvaluate("the index holds unmerged entries")
+        hidden = hidden_change_settings(root, env)
+        if hidden:
+            raise CannotEvaluate("the working tree cannot be judged, its changes may be hidden: {} (clear "
+                                 "them, or judge a commit with --head)".format("; ".join(hidden)))
         changes += parse_raw_diff(_git(root, diff + ["--cached", head_id, "--"], env)[0], "staged")
         changes += parse_raw_diff(_git(root, diff + ["--"], env)[0], "unstaged")
         out, _err = _git(root, ["ls-files", "-z", "--others", "--exclude-standard"], env)
@@ -744,10 +779,29 @@ del _install
 '''
 OBSERVE_PROBE_ENTRY = "observed-new-entry"
 OBSERVE_GATE_TIMEOUT = 1800
-OBSERVE_DEFAULT_JOBS = 8
+# The default number of gates observed at once is bounded by the host, so the runner line and the CI
+# step stay one identical command: at most OBSERVE_MAX_DEFAULT_JOBS, never more than the CPUs this
+# process may use. OBSERVE_JOBS_ENV overrides it with a positive integer; --jobs overrides both.
+OBSERVE_MAX_DEFAULT_JOBS = 4
+OBSERVE_JOBS_ENV = "AFFECTED_GATES_OBSERVE_JOBS"
 # Interpreter options that skip site (so the startup hook): a Python child launched with one of them
 # is unobserved, like a non-Python child.
 OBSERVE_NO_SITE_FLAGS = frozenset("S")
+
+
+def observe_default_jobs(environ=None, cpus=None):
+    """The default observation job count: OBSERVE_JOBS_ENV when set (a positive integer, or
+    CannotEvaluate), otherwise min(OBSERVE_MAX_DEFAULT_JOBS, the CPUs this process may use)."""
+    environ = os.environ if environ is None else environ
+    value = environ.get(OBSERVE_JOBS_ENV)
+    if value is not None:
+        if not (value.isascii() and value.isdigit()) or int(value) < 1:
+            raise CannotEvaluate("{} must be a positive integer (got {!r})".format(OBSERVE_JOBS_ENV, value))
+        return int(value)
+    if cpus is None:
+        counter = getattr(os, "process_cpu_count", None) or os.cpu_count
+        cpus = counter()
+    return max(1, min(OBSERVE_MAX_DEFAULT_JOBS, cpus or 1))
 
 
 def observed_gates(gates, manifest):
@@ -833,18 +887,20 @@ def _python_options(argv):
 
 
 def observed_requirements(root, bindir, records):
-    """(reads, listed directories, unobserved launches, {probed directory: files under it}) of one
-    gate's records, repository-relative.
+    """(reads, listed directories, unobserved launches, {probed directory: files under it}, absent
+    reads) of one gate's records, repository-relative.
 
     A read is an open for reading or a metadata probe of a file (whether or not the path exists, since
     a gate that probes for a file depends on its absence too) or a repository path named on a launched
     command line; a metadata probe of a directory is kept apart with the files under it; directory opens
-    carry no content and the import system's own directory listings are not the gate's. A launch is
+    carry no content and the import system's own directory listings are not the gate's. A read or probe
+    of a path the copy does not hold is also kept in absent: a change can create that path as a file or
+    as a directory with entries beneath it, and either changes what the gate sees. A launch is
     unobserved when its program is not a Python of the observation environment (or skips site), and it
     is recorded only when it runs in or names a path of the repository: its reads are invisible."""
     root = os.path.realpath(str(root))
     bindir = str(bindir)
-    reads, listed, unobserved, probed = set(), set(), [], set()
+    reads, listed, unobserved, probed, absent = set(), set(), [], set(), set()
 
     def kept(rel, path):
         # git never tracks a path with a .git component, so no change can name one: a probe for a
@@ -870,6 +926,8 @@ def observed_requirements(root, bindir, records):
             rel = _repo_rel(root, cwd, path)
             if reading and kept(rel, path) and not os.path.isdir(os.path.join(root, rel)):
                 reads.add(rel)
+                if not os.path.lexists(os.path.join(root, rel)):
+                    absent.add(rel)
         elif kind == "probe" and len(record) == 5:
             _k, _pid, cwd, path, _function = record
             rel = _repo_rel(root, cwd, path)
@@ -879,6 +937,8 @@ def observed_requirements(root, bindir, records):
                     probed.add(rel)
                 else:
                     reads.add(rel)
+                    if not os.path.lexists(where):
+                        absent.add(rel)
         elif kind == "list" and len(record) == 5:
             _k, _pid, cwd, path, importing = record
             rel = _repo_rel(root, cwd, path)
@@ -925,14 +985,23 @@ def observed_requirements(root, bindir, records):
             here = _repo_rel(root, None, dirpath)
             under.extend(here + "/" + f for f in filenames)
         directories[rel] = tuple(sorted(under))
-    return reads, listed, unobserved, directories
+    return reads, listed, unobserved, directories, absent
 
 
-def uncovered_observations(manifest, name, reads, listed, unobserved, probed=None):
+def beneath_entries(rel):
+    """The stand-in paths of anything a change could create beneath rel: one entry directly in it and
+    one a level deeper, so a declaration covers them only by matching every depth (rel/**)."""
+    return (rel + "/" + OBSERVE_PROBE_ENTRY, rel + "/" + OBSERVE_PROBE_ENTRY + "/" + OBSERVE_PROBE_ENTRY)
+
+
+def uncovered_observations(manifest, name, reads, listed, unobserved, probed=None, absent=None):
     """The findings of one gate: every observed read, metadata probe or listing its declaration does
     not cover. probed maps each metadata-probed directory to the files under it: the directory's
     existence and type change only through a change under it, so it is covered when a declared input
-    matches a file under it or a new entry in it."""
+    matches a file under it or a new entry in it. absent holds the read or probed paths the copy did
+    not hold: a change creating anything beneath one (p/x for a probed p) changes what the gate sees
+    without naming p, so the declaration must also match every depth beneath it, unless that lies
+    outside every reviewed domain, where any change selects the full roster."""
     decl = manifest.gates[name]
     if decl.whole_tree or decl.always:
         return []
@@ -941,6 +1010,11 @@ def uncovered_observations(manifest, name, reads, listed, unobserved, probed=Non
     for rel in sorted(reads):
         if not any(rx.fullmatch(rel) for rx in patterns):
             findings.append("reads {}".format(rel))
+    for rel in sorted(absent or ()):
+        # An entry outside every reviewed domain selects the full roster (select), so it is covered.
+        if not all(any(rx.fullmatch(path) for rx in patterns) or not in_domain(path, manifest.domains)
+                   for path in beneath_entries(rel)):
+            findings.append("reads missing {} (an entry created beneath it is not covered)".format(rel))
     for rel, under in sorted((probed or {}).items()):
         if not any(rx.fullmatch(path) for rx in patterns
                    for path in under + (rel + "/" + OBSERVE_PROBE_ENTRY,)):
@@ -1025,6 +1099,32 @@ def _observe_one(gate, copy, python, bindir, current, work, index):
     return code, records, tail
 
 
+def observation_notes(root, manifest, targets, env=None):
+    """NOTE lines naming every path where root's working tree differs from its index (an unstaged
+    change, an untracked file, or a setting that hides such changes) and the observation, which copies
+    the index, therefore does not see the working tree: the declarations file, a full-roster path, or
+    a path a declaration of an observed gate matches. Empty when the two agree on all of them."""
+    env = git_env() if env is None else env
+    diff = ["diff", "--raw", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", "--abbrev=40",
+            "--ignore-submodules=none", "--"]
+    paths = {c.path for c in parse_raw_diff(_git(root, diff, env)[0], "unstaged")}
+    out, _err = _git(root, ["ls-files", "-z", "--others", "--exclude-standard"], env)
+    paths.update(_decode_path(p) for p in out.split(b"\0") if p)
+    patterns = [rx for _p, rx in manifest.full_roster]
+    for gate in targets:
+        patterns.extend(rx for _p, rx in manifest.gates[gate.name].inputs)
+    differ = sorted(p for p in paths
+                    if p == MANIFEST_REL or any(rx.fullmatch(p) for rx in patterns))
+    notes = []
+    if differ:
+        notes.append("NOTE: the working tree differs from the index on {} path(s) the observation reads; it "
+                     "observed the index (stage them to observe them): {}".format(
+                         len(differ), ", ".join(differ[:20]) + (" ..." if len(differ) > 20 else "")))
+    for reason in hidden_change_settings(root, env):
+        notes.append("NOTE: working-tree differences from the index may be hidden: {}".format(reason))
+    return notes
+
+
 def observe_inputs(root, names, jobs, out):
     """Run each narrowed gate (or the named ones) once in a disposable copy under the audit hook and
     report every read, listing or launch its declaration does not cover. 0 when none, 1 otherwise."""
@@ -1037,6 +1137,9 @@ def observe_inputs(root, names, jobs, out):
         if unknown:
             raise CannotEvaluate("no such gate {}".format(unknown))
         targets = [g for g in gates if g.name in names]
+    for note in observation_notes(root, manifest, targets):
+        out.write(note + "\n")
+    out.flush()
     # A hex-only name: a gate may refuse a temporary root holding a character Markdown renders (an
     # underscore, which tempfile.mkdtemp's random part can carry).
     import secrets
@@ -1057,9 +1160,9 @@ def observe_inputs(root, names, jobs, out):
             try:
                 copy, python, bindir, current = slot
                 code, records, tail = _observe_one(gate, copy, python, bindir, current, work, index)
-                reads, listed, unobserved, probed = observed_requirements(copy, bindir, records)
+                reads, listed, unobserved, probed, absent = observed_requirements(copy, bindir, records)
                 return gate, code, uncovered_observations(manifest, gate.name, reads, listed, unobserved,
-                                                          probed), len(records), tail
+                                                          probed, absent), len(records), tail
             finally:
                 slots.put(slot)
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
@@ -1135,7 +1238,7 @@ def _parse_cli(argv):
     if argv and argv[0] == "--self-test" and len(argv) == 1:
         return "self-test", None
     if argv and argv[0] == "--observe-inputs":
-        observe = {"gates": [], "jobs": OBSERVE_DEFAULT_JOBS}
+        observe = {"gates": [], "jobs": None}
         rest, seen_jobs = argv[1:], False
         while rest:
             if rest[0] == "--gate" and len(rest) > 1 and rest[1] and rest[1] not in observe["gates"]:
@@ -1187,7 +1290,8 @@ def main(argv=None):
     mode, options = parsed
     if mode == "observe":
         try:
-            return observe_inputs(ROOT, options["gates"], options["jobs"], sys.stdout)
+            jobs = options["jobs"] if options["jobs"] is not None else observe_default_jobs()
+            return observe_inputs(ROOT, options["gates"], jobs, sys.stdout)
         except CannotEvaluate as exc:
             print("CANNOT EVALUATE: {}".format(exc), file=sys.stderr)
             return 2
@@ -1579,6 +1683,7 @@ os.path.getsize("data/sized.txt")
 os.access("data/access.txt", os.R_OK)
 os.path.isdir("data/sub")
 os.path.exists("data/.git")
+os.path.exists("data/absent/flag")
 '''
 
 
@@ -1607,7 +1712,7 @@ def _self_test_observation(work):
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, check=False)
     current.write_text("", encoding="utf-8")
     records = read_observations(log_dir)
-    reads, listed, unobserved, probed = observed_requirements(fixture, bindir, records)
+    reads, listed, unobserved, probed, absent = observed_requirements(fixture, bindir, records)
     check("observe/hook-records-gate-and-children", done.returncode == 0
           and {"gate.py", "data/read.txt", "data/missing.toml", "data/child.txt", "child_script.py",
                "data/script-read.txt"} <= reads, (done.returncode, sorted(reads), done.stderr[-300:]))
@@ -1638,6 +1743,26 @@ def _self_test_observation(work):
           {"data/required.txt", "data/sized.txt", "data/access.txt"} <= reads
           and probed.get("data/sub") == ("data/sub/inner.txt",), (sorted(reads), probed))
     check("observe/git-component-probe-not-an-input", "data/.git" not in reads, sorted(reads))
+    # A path probed while missing can be created later as a directory: a declaration the observation
+    # accepts must then select the gate for a change creating anything beneath it (p/x, p/x/y).
+    missing = "data/absent/flag"
+    check("observe/absent-path-recorded",
+          {missing, "data/missing.toml"} <= absent and missing in reads and "data/read.txt" not in absent,
+          (sorted(absent), sorted(reads)))
+    probe_gate = Gate(gate, 1, "run_gate", (("python3", "gate.py"),), None)
+    verdicts = []
+    # The last row's domains do not hold the path, so a change beneath it selects the full roster.
+    for globs, domains in (((missing,), ("data/",)), ((missing, missing + "/*"), ("data/",)),
+                           ((missing, missing + "/**"), ("data/",)), ((missing,), ("other/",))):
+        decl = Declaration(tuple((p, glob_regex(p)) for p in globs), False, False, "fixture")
+        held = Manifest(manifest_full, domains, {gate: decl})
+        accepted = not uncovered_observations(held, gate, {missing}, set(), [], {}, absent & {missing})
+        chosen = [bool(select([probe_gate], held, [Change(path, ("untracked",), False)])[0])
+                  for path in (missing + "/x", missing + "/x/y")]
+        verdicts.append((globs, domains, accepted, chosen))
+    check("observe/absent-probe-child-selects-gate",
+          [accepted for _g, _d, accepted, _c in verdicts] == [False, False, True, True]
+          and all(all(chosen) for _g, _d, accepted, chosen in verdicts if accepted), verdicts)
     findings = uncovered_observations(manifest_of(short), gate, reads, listed, [], probed)
     check("observe/metadata-only-dependency-reported",
           {"reads data/required.txt", "reads data/sized.txt", "reads data/access.txt",
@@ -1858,6 +1983,52 @@ def _self_test_git(work):
           present == ["edit.txt", "new.txt", "same.txt"] and edit == "staged\n",
           (present, edit, problem))
 
+    # The observation copies the index, so a NOTE names every unstaged or untracked path it reads (the
+    # declarations, a full-roster path, an observed gate's input) and none it does not read.
+    repo9 = work / "r9"
+    for rel in (MANIFEST_REL, RUNNER_REL, "data/in.txt", "other/out.txt"):
+        _write(repo9 / rel, rel + "\n")
+    _fixture_git(repo9, ["init", "-q"], env)
+    _fixture_git(repo9, ["add", "-A"], env)
+    _fixture_git(repo9, ["commit", "-q", "-m", "base"], env)
+    held = Manifest(((RUNNER_REL, glob_regex(RUNNER_REL)),), ("data/", "other/", "tools/"),
+                    {"narrow": Declaration((("data/*", glob_regex("data/*")),), False, False, "fixture")})
+    targets = [Gate("narrow", 1, "run_gate", (("python3", "x.py"),), None)]
+    clean = observation_notes(repo9, held, targets, env)
+    for rel in (MANIFEST_REL, RUNNER_REL, "data/in.txt", "other/out.txt", "data/new.txt", "other/new.txt"):
+        _write(repo9 / rel, "changed\n")
+    dirty = observation_notes(repo9, held, targets, env)
+    _fixture_git(repo9, ["add", "-A"], env)
+    staged = observation_notes(repo9, held, targets, env)
+    named = dirty[0] if len(dirty) == 1 else ""
+    check("observe/unstaged-inputs-noted",
+          clean == [] and staged == [] and named.startswith("NOTE: ")
+          and all(p in named for p in (MANIFEST_REL, RUNNER_REL, "data/in.txt", "data/new.txt"))
+          and "other/" not in named, (clean, dirty, staged))
+
+    # Settings that hide working-tree changes from git diff are refused in working-tree mode, never
+    # judged as clean; a committed comparison (--head) is unaffected.
+    repo10, base10 = _fixture_repo(work, "r10", env)
+    _write(repo10 / "docs/evidence.md", "# Evidence\n\nCommitted.\n")
+    _fixture_git(repo10, ["commit", "-q", "-am", "evidence"], env)
+    for check_id, setup, undo, word in (
+            ("git/assume-unchanged-refused", ["update-index", "--assume-unchanged", "docs/evidence.md"],
+             ["update-index", "--no-assume-unchanged", "docs/evidence.md"], "assume-unchanged"),
+            ("git/skip-worktree-refused", ["update-index", "--skip-worktree", "docs/evidence.md"],
+             ["update-index", "--no-skip-worktree", "docs/evidence.md"], "skip-worktree"),
+            ("git/filemode-false-refused", ["config", "core.fileMode", "false"],
+             ["config", "core.fileMode", "true"], "core.fileMode")):
+        _fixture_git(repo10, setup, env)
+        _write(repo10 / "docs/evidence.md", "# Evidence\n\nHidden edit.\n")
+        code, out, err = _launch(repo10, ["--base", base10], env)
+        code_head, out_head, _err = _launch(repo10, ["--base", base10, "--head", "HEAD"], env)
+        _fixture_git(repo10, undo, env)
+        _write(repo10 / "docs/evidence.md", "# Evidence\n\nCommitted.\n")
+        check(check_id, code == 2 and out == "" and word in err and code_head == 0
+              and "links" in out_head.split("\n"), (code, err[:300], code_head))
+    code, out, err = _launch(repo10, ["--base", base10], env)
+    check("git/visible-settings-accepted", code == 0 and "links" in out.split("\n"), (code, err[:300]))
+
 
 def _self_test_cli():
     got = []
@@ -1868,6 +2039,24 @@ def _self_test_cli():
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             got.append(main(argv))
     check("cli/invalid-invocation-exit-2", got == [2] * len(got), got)
+    # The default observation jobs are bounded by the host (the runner line and the CI step name no
+    # --jobs), an environment setting overrides them, and a bad setting is refused.
+    refused = []
+    for value in ("0", "x", "", "-1", "\uff12"):
+        try:
+            observe_default_jobs({OBSERVE_JOBS_ENV: value})
+            refused.append(False)
+        except CannotEvaluate:
+            refused.append(True)
+    counter = getattr(os, "process_cpu_count", None) or os.cpu_count
+    live = observe_default_jobs({})
+    got = (observe_default_jobs({}, cpus=96), observe_default_jobs({}, cpus=2), observe_default_jobs({}, cpus=None),
+           observe_default_jobs({OBSERVE_JOBS_ENV: "6"}, cpus=2), _parse_cli(["--observe-inputs"]),
+           _parse_cli(["--observe-inputs", "--jobs", "3"]))
+    check("observe/default-jobs-bounded-by-host",
+          got[:4] == (4, 2, live, 6) and 1 <= live <= min(4, counter() or 1)
+          and got[4] == ("observe", {"gates": [], "jobs": None})
+          and got[5] == ("observe", {"gates": [], "jobs": 3}) and all(refused), (got, live, refused))
 
 
 def self_test():
@@ -1898,8 +2087,10 @@ def self_test():
           "named misses (git-fixture-env-core for a hooks self-test change among them) are selected and each "
           "is missed once its mapping is narrowed; a path no declaration covers and an untracked embedded "
           "repository select the full roster; bad revisions, shallow history, unmerged entries, git "
-          "failures and non-UTF-8 paths exit 2 with no selection; the observation copy is the index exactly "
-          "and metadata-only reads are held by the declarations)".format(len(EXECUTED)))
+          "failures, non-UTF-8 paths and settings that hide working-tree changes exit 2 with no selection; "
+          "the observation copy is the index exactly, a NOTE names the working-tree paths it skips, its "
+          "default jobs are bounded by the host, metadata-only reads are held by the declarations and a "
+          "path probed while missing needs every depth beneath it declared)".format(len(EXECUTED)))
     return 0
 
 
