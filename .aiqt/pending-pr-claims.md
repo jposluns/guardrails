@@ -255,7 +255,7 @@ bounds (State source).
    bounded: a document whose reference links would copy more than eight characters of URL per byte of
    the document (its UTF-8 bytes, not its characters), plus 65,536, is cannot-evaluate (exit 2). Two growth rows reach that bound on each copy
    path, and their red legs (the bound removed) grow more.
-2. Hard bounds on input and report. A declared surface, draft or staged blob larger than 64 KiB is
+2. Hard bounds on input, collection and report. A declared surface, draft or staged blob larger than 64 KiB is
    cannot-evaluate (exit 2), a defence in depth for a superlinear path no row has found. The bound was
    set from the real records the check reads: the largest declared surface at any commit of this
    repository was 24,834 bytes (`TODO.md`; `changelog.toml` at most 2,728 bytes), and 64 KiB is 2.6
@@ -269,9 +269,28 @@ bounds (State source).
    bytes a character) the document is cannot-evaluate (exit 2), with a line naming the bound, and its
    later lines are not built. Self-test rows reach that bound through the draft entry point (a
    reference link to a long pull URL used 3,000 times in one claim, 15,145 bytes) and on hidden
-   references, and the red leg (the bound removed) builds past it. On the worst shapes known at
-   64 KiB a whole run peaked at about 32 MiB resident on the host it was measured on (2026-11-20);
-   before the report bound the same shapes needed more than 2 GiB. A path not yet found can need more.
+   references, and the red leg (the bound removed) builds past it. On the worst report shapes then
+   known at 64 KiB a whole run peaked at about 32 MiB resident on the host it was measured on
+   (2026-11-20); before the report bound the same shapes needed more than 2 GiB. The report bound runs only after
+   the candidates are collected, so collection is bounded too: every entry found on one line shares one
+   copy of that line's quoted text and location, built once, and each record unit and entry is
+   charged 32 characters for itself plus each string it holds that the entry charged just before it
+   does not hold (the same object). Past 4 Mi characters (`COLLECT_MAX_CHARS`) the document is
+   cannot-evaluate (exit 2), naming the bound, before the entry that would pass it is kept. A string
+   built anew for each unit is charged each time: a long header cell over many table rows (each cell's
+   location names its header) or a long TOML key path over many string values reaches the bound, and
+   such a document is now cannot-evaluate where it was evaluated before. Self-test rows show one shared
+   copy for 1,000 references on a line with leading white space and non-BMP text (the red leg, a copy
+   per reference, holds 1,000), the bound reached when the copies are put back and on both long-location
+   shapes (the red legs, unbounded, collect them), and, in a child process limited to 512 MiB of address
+   space, the 52,907-byte draft of 9,000 such references on one fenced line ending with the report
+   bound named. Measured on 2026-11-20 on the host it was run on, through the draft entry point with the
+   report written to memory: that draft peaked at about 52 MiB resident (before the shared quotes, a
+   1 GiB limit ended it with an uncaught MemoryError at 1,036,340 KiB resident), the same line in a TOML
+   string at about 49 MiB (before, the same MemoryError), a long non-BMP TOML key path over 4,000
+   hidden references at about 48 MiB (before, about 258 MiB), and a long non-BMP TOML key path over
+   3,600 string values and a long non-BMP header cell over 8,900 rows, both now refused, at about 30
+   and 31 MiB (before, evaluated, about 125 and 255 MiB). A path not yet found can need more.
 
 ## Residuals
 

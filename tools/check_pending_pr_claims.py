@@ -89,10 +89,17 @@ references, or n uses of one reference link) would give n * L characters; the li
 document are bounded instead: past REPORT_MAX_CHARS (4 Mi characters; 16 MiB at four bytes a
 character) the document is cannot-evaluate (exit 2), with a line naming the bound, and its later lines
 are not built (a line is built only when the clause it quotes fits in what is left).
-On the worst shapes known at 64 KiB (n uses of a long pull URL reference link, joined claims, hidden
-references on one line) a whole run peaked at about 32 MiB resident on the host it was measured on
-(2026-11-20; before the report bound, more than 2 GiB, and a 1 GiB limit ended the run with an
-uncaught MemoryError); a path no one has found can need more. Reading pull request state
+On the worst report shapes then known at 64 KiB (n uses of a long pull URL reference link, joined
+claims, hidden references on one line) a whole run peaked at about 32 MiB resident on the host it was
+measured on (2026-11-20; before the report bound, more than 2 GiB, and a 1 GiB limit ended the run with
+an uncaught MemoryError). The report bound runs after collection, so collection is bounded too: the
+entries found on one line share one copy of its quoted text and location, and what collecting one
+document holds is charged against COLLECT_MAX_CHARS (4 Mi characters), past which the document is
+cannot-evaluate (exit 2), naming the bound, before more is kept; a location built anew for each unit (a
+long header cell over many rows, a long TOML key path over many values) is charged each time. With
+the quotes shared, 9,000 hidden references on one line with leading white space and non-BMP text (52,907
+bytes) peaked at about 52 MiB (2026-11-20; before, a 1 GiB limit ended the run with an uncaught
+MemoryError); a path no one has found can need more. Reading pull request state
 (tools/_pr_state.py), whose reasons can quote the response, is outside these bounds.
 """
 import sys
@@ -259,8 +266,10 @@ def _read_text(path, label):
 # ---------------------------------------------------------------------------------------------------
 # Record units: complete paragraphs, list items, table cells and decoded TOML strings, with locations.
 
-def toml_units(text, label):
-    """[(location, prose, context)] for every decoded string value of a TOML document."""
+def toml_units(text, label, budget=None):
+    """[(location, prose, context)] for every decoded string value of a TOML document. Each unit is
+    charged to budget (a _CollectBudget, or None) before it is kept: its location names its whole key
+    path, so a long key path over many string values is counted once per value."""
     data, why = _parse_toml(text, label)
     if why is not None:
         raise InputError(why)
@@ -268,7 +277,10 @@ def toml_units(text, label):
 
     def walk(value, where):
         if isinstance(value, str):
-            units.append(("{}: {}".format(label, where), value, "prose"))
+            location = "{}: {}".format(label, where)
+            if budget is not None:
+                budget.charge(location)
+            units.append((location, value, "prose"))
         elif isinstance(value, dict):
             for key, item in value.items():
                 walk(item, "{}.{}".format(where, key) if where else key)
@@ -1061,7 +1073,7 @@ def block_context(lines):
     return kinds
 
 
-def markdown_units(text, label, status_column=None, hidden=None):
+def markdown_units(text, label, status_column=None, hidden=None, budget=None):
     """[(location, prose, context)] for a Markdown document, read only from the lines block_context
     gives a prose kind (fenced blocks, indented code and HTML comments are never read, in a list item
     as outside one); a blockquote whose lead-in (the paragraph just before it, or its own first words)
@@ -1071,8 +1083,15 @@ def markdown_units(text, label, status_column=None, hidden=None):
     definition (a definition line, so never one inside code or a comment) is not a unit; a reference
     link to it reads as an inline link. A leading byte order mark is dropped, and a line's trailing
     carriage return is a line ending, not text. When hidden is a list, the unevaluated_references
-    entries of the document are appended to it."""
+    entries of the document are appended to it. Each unit and entry is charged to budget (a
+    _CollectBudget, or None) before it is kept: a table cell's location names its header cell, so a long
+    header over many rows is counted once per row."""
     units = []
+
+    def unit(location, prose, context):
+        if budget is not None:
+            budget.charge(location)
+        units.append((location, prose, context))
     size = len(text.encode("utf-8"))   # the document's bytes, as the copy bound counts them
     if text.startswith("\ufeff"):
         text = text[1:]
@@ -1093,7 +1112,7 @@ def markdown_units(text, label, status_column=None, hidden=None):
         nonlocal para, last_prose
         if para:
             joined = " ".join(para)
-            units.append(("{}:{}".format(label, para_line), joined, "prose"))
+            unit("{}:{}".format(label, para_line), joined, "prose")
             last_prose = joined
         para = []
 
@@ -1104,7 +1123,7 @@ def markdown_units(text, label, status_column=None, hidden=None):
             historical = (HISTORY_INTRO_RE.search(last_prose) is not None
                           or HISTORY_LEAD_RE.match(joined) is not None)
             if not historical:
-                units.append(("{}:{} (blockquote)".format(label, quote_line), joined, "quote"))
+                unit("{}:{} (blockquote)".format(label, quote_line), joined, "quote")
             else:
                 exempt.update(quote_numbers)
             last_prose = ""
@@ -1152,20 +1171,19 @@ def markdown_units(text, label, status_column=None, hidden=None):
                 header = [_header_name(cell) for cell in cells]
                 if HEADER_CELLS_READ:
                     # A header cell names its column and is also read as prose (never as a Status cell).
-                    units.extend(("{}:{} (header cell {})".format(label, number, column + 1), cell, "prose")
-                                 for column, cell in enumerate(cells))
+                    for column, cell in enumerate(cells):
+                        unit("{}:{} (header cell {})".format(label, number, column + 1), cell, "prose")
                 continue
             for column, cell in enumerate(cells):
                 name = header[column] if header is not None and column < len(header) else None
                 context = "status" if status_column is not None and name == status_column else "prose"
-                units.append(("{}:{} ({} cell)".format(label, number, name or "column {}".format(
-                    column + 1)), cell, context))
+                unit("{}:{} ({} cell)".format(label, number, name or "column {}".format(column + 1)), cell,
+                     context)
             continue
         header = None
         if kind == HEADING:
             flush_para()
-            units.append(("{}:{}".format(label, number), (HEADING_RE.match(line).group(1) or "").strip(),
-                          "prose"))
+            unit("{}:{}".format(label, number), (HEADING_RE.match(line).group(1) or "").strip(), "prose")
             last_prose = units[-1][1]
             continue
         if kind == ITEM:
@@ -1179,7 +1197,7 @@ def markdown_units(text, label, status_column=None, hidden=None):
     flush_quote()
     units = [(where, _resolve_reference_links(prose, definitions), context) for where, prose, context in units]
     if hidden is not None:
-        hidden.extend(unevaluated_references(label, lines, blocks, units, exempt, definitions))
+        hidden.extend(unevaluated_references(label, lines, blocks, units, exempt, definitions, budget))
     return units
 
 
@@ -1226,7 +1244,7 @@ def evaluated_keys(units):
     return keys
 
 
-def unevaluated_references(label, lines, blocks, units, exempt=(), definitions=None):
+def unevaluated_references(label, lines, blocks, units, exempt=(), definitions=None, budget=None):
     """[(location, reason, ref, line)] for every pull request reference of a Markdown document that
     reached no evaluated record unit: the set difference of the references of the whole document and
     evaluated_keys(units), whatever dropped them. A line read in full is scanned as record text is read
@@ -1238,7 +1256,8 @@ def unevaluated_references(label, lines, blocks, units, exempt=(), definitions=N
     is keyed by repository (or the surface default) and number, by design: one evaluated mention of a
     pull request suppresses the entry for its other dropped occurrences in the same document. Each entry
     is reported as a warning, without reading pull request state. Exemption delimiters inside code spans
-    are inert in the scan as in the matcher (one shared reading, code_spans)."""
+    are inert in the scan as in the matcher (one shared reading, code_spans). The entries of one line
+    share its location and quoted text, and each is charged to budget (_line_entries)."""
     evaluated = evaluated_keys(units)
     found = []
     for number, (raw, (kind, text)) in enumerate(zip(lines, blocks), 1):
@@ -1252,42 +1271,53 @@ def unevaluated_references(label, lines, blocks, units, exempt=(), definitions=N
             # A hidden line; a prose line a comment cut is named for the part the comment cut away.
             name = "HTML comment" if kind in PROSE_KINDS and kind != DEFINITION else HIDDEN_KIND_NAMES[kind]
             refs = _references(raw)
-        seen = set()
-        for key, ref in refs:
-            if key not in evaluated and key not in seen:
-                seen.add(key)
-                found.append(("{}:{} ({})".format(label, number, name), name, ref, raw.strip()))
+        _line_entries(found, refs, evaluated, ("{}:{} ({})", (label, number, name)), name, raw, budget)
     return found
 
 
-def toml_unevaluated_references(units):
+def _line_entries(found, refs, evaluated, location, name, line, budget):
+    """Append to found one (location, name, ref, quoted line) entry for each reference of refs, first per
+    key, whose key is not in evaluated. The location (location: a format and its arguments) and the
+    quoted line (line stripped) are built once, at the line's first entry, and shared by all its entries
+    (SHARED_QUOTES), so n references on one line hold one copy of the line, not n; each entry is charged
+    to budget (a _CollectBudget, or None) before it is kept."""
+    seen, where, quoted = set(), None, None
+    for key, ref in refs:
+        if key in evaluated or key in seen:
+            continue
+        seen.add(key)
+        if where is None or not SHARED_QUOTES:
+            where, quoted = location[0].format(*location[1]), line.strip()
+        if budget is not None:
+            budget.charge(where, quoted)
+        found.append((where, name, ref, quoted))
+
+
+def toml_unevaluated_references(units, budget=None):
     """The unevaluated_references entries of a toml-strings document: each line of each decoded string
     is scanned as record text is read, against the references of all its units (comments are not read
-    or scanned)."""
+    or scanned). The entries of one line share its location and quoted text (_line_entries)."""
     evaluated = evaluated_keys(units)
     found = []
     for where, prose, _context in units:
         for offset, line in enumerate(prose.split("\n"), 1):
-            seen = set()
-            for key, ref in _references(line, ()):
-                if key not in evaluated and key not in seen:
-                    seen.add(key)
-                    found.append(("{} (string line {}, {})".format(where, offset, NOT_EVALUATED), NOT_EVALUATED,
-                                  ref, line.strip()))
+            _line_entries(found, _references(line, ()), evaluated,
+                          ("{} (string line {}, {})", (where, offset, NOT_EVALUATED)), NOT_EVALUATED, line, budget)
     return found
 
 
-def surface_units(surface, data, hidden=None):
+def surface_units(surface, data, hidden=None, budget=None):
     """The record units of one declared surface given its complete bytes; InputError when malformed.
-    When hidden is a list, the unevaluated-reference entries of the surface are appended to it."""
+    When hidden is a list, the unevaluated-reference entries of the surface are appended to it. Each
+    unit and entry is charged to budget (a _CollectBudget, or None) before it is kept."""
     label = surface["path"]
     text = _decode(data, label)
     if surface["format"] == "toml-strings":
-        units = toml_units(text, label)
+        units = toml_units(text, label, budget)
         if hidden is not None and SCAN_READ_LINES:
-            hidden.extend(toml_unevaluated_references(units))
+            hidden.extend(toml_unevaluated_references(units, budget))
         return units
-    return markdown_units(text, label, surface.get("status-column"), hidden)
+    return markdown_units(text, label, surface.get("status-column"), hidden, budget)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -1929,11 +1959,13 @@ def _list_run_matches(regex, clause):
         position = found.end()
 
 
-def find_candidates(prose, context):
+def find_candidates(prose, context, budget=None):
     """[(kind, phrase, ref, clause text)] for one unit. A quote context reports any claim as QUOTE (it
     needs a historical lead-in or a move out of the quote); an ambiguous phrase is AMBIGUOUS, whether
     or not a named claim also binds in the same clause, unless every match of it follows a cue
-    (CUED_AMBIGUOUS, a warning). A claim after a cue binds as a warning naming the cue."""
+    (CUED_AMBIGUOUS, a warning). A claim after a cue binds as a warning naming the cue. Every entry of
+    one clause shares its clause text, built once; each entry is charged to budget (a _CollectBudget, or
+    None) before it is kept."""
     clauses, refs = tokenize(prose, context)
     found = []
     for clause in clauses:
@@ -1960,8 +1992,12 @@ def find_candidates(prose, context):
             kind, phrase = bound[index]
             if context == "quote":
                 kind = QUOTE
+            if budget is not None:
+                budget.charge(shown, phrase)
             found.append((kind, phrase, refs[index], shown))
         cues = [_cue_before(clause, match.start()) for regex in AMBIGUOUS_RES for match in regex.finditer(clause)]
+        if cues and budget is not None:
+            budget.charge(shown)
         if None in cues:
             found.append((AMBIGUOUS, "pending or open", None, shown))
         elif cues:
@@ -2025,15 +2061,58 @@ class _ReportBudget:
                 path, REPORT_MAX_CHARS))
 
 
+# The collection bound: what collecting one document's candidates holds (its record units, candidate
+# entries and unevaluated-reference entries, and the locations, phrases, clauses and lines they quote)
+# counts at most COLLECT_MAX_CHARS characters; past it the document is cannot-evaluate (exit 2), naming
+# the bound, before the entry that would pass it is kept. Each entry is charged COLLECT_ENTRY_CHARS for
+# itself, plus the length of each string it holds that the entry charged just before it does not hold
+# (the same object): a clause or line is built once and shared by every entry that quotes it, so it is
+# counted once, while a string built anew for each entry (a table cell's location naming a long header
+# cell, a TOML string's location naming a long key path) is counted each time. The report bound
+# (REPORT_MAX_CHARS) runs after collection and only on the lines it builds; this bound keeps collection
+# itself from growing past it first. The real records never come near it.
+COLLECT_MAX_CHARS = REPORT_MAX_CHARS
+COLLECT_ENTRY_CHARS = 32
+# The collection bound is enforced (True). The self-test sets it False, collecting without a bound, for a
+# red leg.
+COLLECT_BOUNDED = True
+# Every entry found on one line shares that line's quoted text and location, each built once (True). The
+# self-test sets it False, building them again for each entry as before, for a red leg.
+SHARED_QUOTES = True
+
+
+class _CollectBudget:
+    """The characters one document's candidate collection may still hold (COLLECT_MAX_CHARS)."""
+
+    def __init__(self, label):
+        self.label, self.left, self.held = label, COLLECT_MAX_CHARS, ()
+
+    def charge(self, *held):
+        """Charge one entry holding the strings held; InputError (cannot evaluate) once the bound is
+        passed. A string the entry charged just before also held (the same object) is not counted again."""
+        if not COLLECT_BOUNDED:
+            return
+        cost = COLLECT_ENTRY_CHARS
+        for text in held:
+            if text is not None and not any(text is earlier for earlier in self.held):
+                cost += len(text)
+        self.held = held
+        self.left -= cost
+        if self.left < 0:
+            raise InputError("{}: collecting its candidates would hold more than {} characters "
+                             "(COLLECT_MAX_CHARS), a bound on memory".format(self.label, COLLECT_MAX_CHARS))
+
+
 def collect(surfaces_with_bytes):
     """[(surface, location, kind, phrase, ref, clause)] over (surface, bytes) pairs, with a HIDDEN entry
     (phrase: the block kind or not evaluated; clause: the line) for each unevaluated-reference entry; InputError
-    propagates."""
+    propagates, including a document past the collection bound (COLLECT_MAX_CHARS)."""
     out = []
     for surface, data in surfaces_with_bytes:
         hidden = []
-        for location, prose, context in surface_units(surface, data, hidden):
-            for kind, phrase, ref, clause in find_candidates(prose, context):
+        budget = _CollectBudget(surface["path"])
+        for location, prose, context in surface_units(surface, data, hidden, budget):
+            for kind, phrase, ref, clause in find_candidates(prose, context, budget):
                 out.append((surface, location, kind, phrase, ref, clause))
         for location, name, ref, line in hidden:
             out.append((surface, location, HIDDEN, name, ref, line))
@@ -2434,6 +2513,14 @@ def _with_globals(replacements, fn):
         return fn()
     finally:
         names.update(saved)
+
+
+def _limit_address_space():
+    """Limit the calling process (a self-test child, before it runs the checker) to 512 MiB of address
+    space, so collection that would grow past it ends in a MemoryError instead of exhausting the host."""
+    import resource
+    limit = 512 * 1024 * 1024
+    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
 
 
 def _status_table(cell):
@@ -3249,7 +3336,7 @@ def _closer_search_rows():
         check(red_name, kinds[1][0] != want, kinds)
 
 
-def _no_unevaluated_references(_label, _lines, _blocks, _units, _exempt=(), _definitions=None):
+def _no_unevaluated_references(_label, _lines, _blocks, _units, _exempt=(), _definitions=None, _budget=None):
     """unevaluated_references as it was before the scan existed: nothing is reported (a red leg)."""
     return []
 
@@ -3760,6 +3847,77 @@ def _self_test():
           and any(bound_named in line for line in res.unknown)
           and sum(len(line) for line in res.warnings + res.unknown) <= REPORT_MAX_CHARS + 4096,
           (code, len(res.warnings), res.unknown[-1:]))
+
+    # The collection bound (COLLECT_MAX_CHARS) and the shared quotes. The entries of one line share one
+    # quoted copy of it, even when stripping leading white space makes a new string: n references on a
+    # line with leading white space and non-BMP text hold one copy, not n (with each copy built again,
+    # the red leg, they hold n). A copy built for each entry is counted against the bound, so collection
+    # fails closed, naming the bound, before it holds more (the red leg, unbounded, collects every copy).
+    collect_named = "{} characters (COLLECT_MAX_CHARS)".format(COLLECT_MAX_CHARS)
+
+    def spaced(n):
+        return " " + " ".join("#{}".format(i) for i in range(1, n + 1)) + " \U0001f600"
+
+    def collected(surface, text):
+        try:
+            return collect([(surface, text.encode("utf-8"))])
+        except InputError as exc:
+            return str(exc)
+
+    markdown_spaced = (MD_SURFACE, "```\n" + spaced(1000) + "\n```\n")
+    toml_spaced = (TOML_SURFACE, 'a = """<!--\n' + spaced(1000) + '\n-->"""\n')
+    unshared = {"SHARED_QUOTES": False, "COLLECT_BOUNDED": False}
+    for name, (surface, text), replacements, want in (
+            ("collect/markdown-line-quoted-once", markdown_spaced, {}, 1),
+            ("collect/markdown-line-quoted-once/red-when-reverted", markdown_spaced, unshared, 1000),
+            ("collect/toml-line-quoted-once", toml_spaced, {}, 1),
+            ("collect/toml-line-quoted-once/red-when-reverted", toml_spaced, unshared, 1000)):
+        got = _with_globals(replacements, lambda: collected(surface, text))
+        quotes = None if isinstance(got, str) else [entry[5] for entry in got if entry[2] == HIDDEN]
+        check(name, quotes is not None and len(quotes) == 1000 and len({id(quote) for quote in quotes}) == want,
+              got if quotes is None else len({id(quote) for quote in quotes}))
+    for name, (surface, text), replacements in (
+            ("collect/markdown-copied-quotes-bound-reached", markdown_spaced, {"SHARED_QUOTES": False}),
+            ("collect/markdown-copied-quotes-bound-reached/red-when-reverted", markdown_spaced, unshared),
+            ("collect/toml-copied-quotes-bound-reached", toml_spaced, {"SHARED_QUOTES": False}),
+            ("collect/toml-copied-quotes-bound-reached/red-when-reverted", toml_spaced, unshared)):
+        got = _with_globals(replacements, lambda: collected(surface, text))
+        want_refused = not name.endswith("/red-when-reverted")
+        check(name, (isinstance(got, str) and collect_named in got) if want_refused
+              else (not isinstance(got, str) and len(got) == 1000), got if isinstance(got, str) else len(got))
+    # A location built anew for each unit is counted each time: a long header cell over many table rows
+    # (each cell's location names it), a long TOML key path over many string values.
+    long_header = (MD_SURFACE, "| " + "h" * 1000 + " |\n| --- |\n" + "| a |\n" * 4500)
+    long_key = (TOML_SURFACE, '["' + "k" * 1000 + '"]\n' + "".join("v{} = ''\n".format(i) for i in range(4500)))
+    for name, (surface, text), replacements in (
+            ("collect/table-header-cell-bound-reached", long_header, {}),
+            ("collect/table-header-cell-bound-reached/red-when-reverted", long_header, {"COLLECT_BOUNDED": False}),
+            ("collect/toml-key-path-bound-reached", long_key, {}),
+            ("collect/toml-key-path-bound-reached/red-when-reverted", long_key, {"COLLECT_BOUNDED": False})):
+        got = _with_globals(replacements, lambda: collected(surface, text))
+        want_refused = not name.endswith("/red-when-reverted")
+        check(name, (isinstance(got, str) and collect_named in got) if want_refused else not isinstance(got, str),
+              got if isinstance(got, str) else len(got))
+    # Within the bound nothing changes: the declared surfaces collect the same entries with it and without.
+    real = [(surface, _read_bytes(ROOT / surface["path"], surface["path"])) for surface in load_config(ROOT)["surface"]]
+    got = collect(real)
+    check("collect/within-bound-unchanged", got == _with_globals({"COLLECT_BOUNDED": False}, lambda: collect(real))
+          and got == _with_globals({"SHARED_QUOTES": False}, lambda: collect(real)), len(got))
+    # End to end under a memory limit: the draft entry point, in its own process limited to 512 MiB of
+    # address space, given the 52,907-byte document of 9,000 references on one fenced line with leading
+    # white space and non-BMP text. Before the quotes were shared, collection held a copy of the line per
+    # reference (about 950 MB) and ended in an uncaught MemoryError; it ends with the report bound named.
+    with tempfile.TemporaryDirectory(prefix="pending-pr-claims-memory-") as tmp:
+        draft = Path(tmp) / "draft.md"
+        draft.write_bytes(("```\n" + spaced(9000) + "\n```\n").encode("utf-8"))
+        child = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve()), "--draft", str(draft),
+                                "--target", "TODO.md"], capture_output=True, stdin=subprocess.DEVNULL, timeout=120,
+                               preexec_fn=_limit_address_space)
+        out = child.stdout.decode("utf-8", "replace")
+        err = child.stderr.decode("utf-8", "replace")
+        check("collect/memory-limited-draft-whitespace-non-bmp", draft.stat().st_size == 52907
+              and child.returncode == 2 and bound_named in out and "MemoryError" not in err,
+              (child.returncode, err[-300:], out[-300:]))
 
     # The copy bound counts the document's UTF-8 bytes, not its characters: a document whose bytes allow
     # its copies is evaluated, as is its twin of the same byte count in ASCII; the twin of the same
