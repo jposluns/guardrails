@@ -1712,6 +1712,17 @@ _COMPLETION_LAUNCH_TIMEOUT = 10
 # that still reaches it is no verdict (_WatchdogBoundReached), never a
 # failure: every refusal the leg asserts is a finished launch's outcome.
 _PREMATURE_EXIT_LAUNCH_TIMEOUT = 60
+# The reaper leg's backstop for its competing reap. The leg is judged by the
+# event itself: a competing waitpid must have collected the guardian before
+# the owner's own wait can be asked to refuse, so the leg polls for that reap
+# until it lands. The guardian's own life after GO is bounded by its launch
+# deadline (_COMPLETION_LAUNCH_TIMEOUT), its drain grace and the receipt
+# allowance, together _deadline_case_budget(_COMPLETION_LAUNCH_TIMEOUT), 16 s;
+# the backstop is 5x that derived worst. It decides only how long a reap that
+# never lands is waited for: reaching it is no verdict (_WatchdogBoundReached),
+# never a failure (the old flat 5 s join made a delayed reap a definite failure).
+_REAPER_COMPETE_MARGIN = 5
+_REAPER_COMPETE_BOUND = 80
 
 
 class _WatchdogBoundReached(BaseException):
@@ -5886,18 +5897,38 @@ def _watchdog_completion_case(mode, tree=None):
     elif mode == "reaper":
         real_wait = emit._fixture_wait
         for code in ("return 0", "import os; os._exit(37)"):
-            stolen = []
+            stolen, competed, expired = [], [], []
 
             def compete(pid, flags):
-                if not stolen:
-                    worker = threading.Thread(target=lambda: stolen.append(os.waitpid(pid, 0)))
-                    worker.start()
-                    worker.join(5)
-                    assert not worker.is_alive(), "reaper fixture exceeded its bound"
+                if not competed:
+                    competed.append(pid)
+
+                    def reaped():
+                        # The competing reaper collects the guardian first. Its
+                        # reap is a setup event, judged by the reap itself; a
+                        # WNOHANG poll leaves nothing blocked to race the
+                        # owner's cleanup if the backstop is reached.
+                        waited, raw = os.waitpid(pid, os.WNOHANG)
+                        if waited:
+                            stolen.append((waited, raw))
+                        return bool(stolen)
+
+                    try:
+                        _watchdog_bounded_await(
+                            reaped, _watchdog_deadline(_REAPER_COMPETE_BOUND),
+                            "completion/reaper: the competing reap of the guardian did not "
+                            "land within its %s s backstop" % _REAPER_COMPETE_BOUND, True)
+                    except _WatchdogBoundReached as reached:
+                        expired.append(str(reached))
+                        raise
                 return real_wait(pid, flags)
 
             with patch.object(emit, "_fixture_wait", compete):
                 refuses(emit.ChildStatusUnavailable, lambda: launch(code))
+            if expired:
+                # The owner's cleanup may have replaced the no-verdict on its
+                # way out; the reap never landed, so nothing was judged.
+                raise _WatchdogBoundReached(expired[0])
             assert len(stolen) == 1 and os.waitstatus_to_exitcode(stolen[0][1]) == 0
             assert signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL
     elif mode in ("nonce", "fixture-id", "status"):
@@ -16013,8 +16044,12 @@ def _watchdog_load_route_vectors():
     _PREMATURE_EXIT_LAUNCH_TIMEOUT. escalate-degraded: _watchdog_bounded_await reads an
     expired setup wait as no verdict (pre-fix: an AssertionError), an expired guarded wait
     as an AssertionError, and the guarded wait whose kill is observed pending as no
-    verdict. blocked-isolation: every isolation case is launched at its label's measured
-    bound, never under the margin times that label's recorded worst duration (pre-fix:
+    verdict. reaper: a competing reap that never lands within the leg's backstop makes the
+    real leg, run in process over a scripted run_status_owned and waitpid, the
+    CANNOT-EVALUATE marker on a clean exit (pre-fix: the flat 5 s join failed the leg),
+    while a landed reap passes and an owner that accepts the stolen status, or a stolen
+    failed guardian status, still fails it. blocked-isolation: every isolation case is
+    launched at its label's measured bound, never under the margin times that label's recorded worst duration (pre-fix:
     one flat 180 s, which a check case reached under CPU contention)."""
     import contextlib
     import io
@@ -16087,6 +16122,69 @@ def _watchdog_load_route_vectors():
         got = awaited(*args)
         if got != want:
             misses.append("bounded await %r -> %r, want %r" % (args[:1] + args[2:], got, want))
+
+    # reaper: the real leg, run in process over a scripted run_status_owned and
+    # a scripted waitpid for its (never forked) guardians, at a short patched
+    # backstop. A competing reap that never lands is no verdict (pre-fix: the
+    # flat 5 s join failed the leg); a reap that lands passes; an owner that
+    # accepts the stolen status, or a stolen nonzero guardian status, still
+    # fails it.
+    import signal
+    import threading
+    runner_module = sys.modules[_watchdog_completion_case.__module__]
+    real_waitpid = os.waitpid
+
+    def reaper(script):
+        guardians, collected, release = iter(range(1 << 30, (1 << 30) + 8)), set(), threading.Event()
+
+        def waitpid(pid, flags):
+            if pid < 1 << 30:
+                return real_waitpid(pid, flags)
+            if pid in collected:
+                raise ChildProcessError(10, "No child processes")
+            if script == "late":
+                if not flags & os.WNOHANG:
+                    release.wait(30)  # only a blocking reaper waits here; released below
+                return 0, 0
+            collected.add(pid)
+            return pid, (125 << 8 if script == "guardian-failed" else 0)
+
+        def owned(argv, *, fixture_id, timeout, **kwargs):
+            try:
+                emit._fixture_wait(next(guardians), os.WNOHANG)
+            except emit.ChildStatusUnavailable:
+                if script != "accepted":
+                    raise
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        out = io.StringIO()
+        try:
+            with patch.object(emit, "run_status_owned", owned), \
+                    patch.object(os, "waitpid", waitpid), \
+                    patch.object(runner_module, "_REAPER_COMPETE_BOUND", 0.05), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    rc = _watchdog_leg_entry(1, _watchdog_completion_case, "reaper")
+                except AssertionError:
+                    return "fail"
+        finally:
+            release.set()
+        return _watchdog_completion_verdict(rc, out.getvalue())
+
+    if signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL:
+        for script, want in (("late", "cannot-evaluate"), ("reaped", "pass"),
+                             ("accepted", "fail"), ("guardian-failed", "fail")):
+            got = reaper(script)
+            if got != want:
+                misses.append("reaper with a %s competing reap -> %r, want %r" % (script, got, want))
+    else:
+        misses.append("reaper vectors need SIGCHLD at SIG_DFL, found %r"
+                      % (signal.getsignal(signal.SIGCHLD),))
+    if not (_REAPER_COMPETE_MARGIN >= 5 and _REAPER_COMPETE_BOUND
+            >= _REAPER_COMPETE_MARGIN * _deadline_case_budget(_COMPLETION_LAUNCH_TIMEOUT)):
+        misses.append("reaper backstop %r is under %r x the guardian's bounded life %r"
+                      % (_REAPER_COMPETE_BOUND, _REAPER_COMPETE_MARGIN,
+                         _deadline_case_budget(_COMPLETION_LAUNCH_TIMEOUT)))
 
     # blocked-isolation: the real isolation self-test, run in process over a
     # scripted run_status_owned, launches every case at its label's measured
@@ -16314,7 +16412,12 @@ def _watchdog_regression_self_test():
                     2 * nested_launches[label] * _deadline_case_budget(5))
                    for label in launcher_labels for disposition in launcher_dispositions)
     budgets.update(("completion-" + mode, seconds) for mode, seconds in (
-        ("audit-ignore", 16), ("reaper", 42), ("nonce", 32), ("fixture-id", 32),
+        # reaper: two launches at their allowance, each with its competing
+        # reap's backstop (it was 2 x 16 + 2 x 5 = 42 at the flat 5 s join).
+        ("audit-ignore", 16),
+        ("reaper", 2 * _deadline_case_budget(_COMPLETION_LAUNCH_TIMEOUT)
+         + 2 * _REAPER_COMPETE_BOUND),
+        ("nonce", 32), ("fixture-id", 32),
         ("status", 32), ("early-exit", 48), ("cleanup-reaped", 15), ("cleanup-cancel", 16),
         # Five launches, each charged its allowance at the measured
         # _PREMATURE_EXIT_LAUNCH_TIMEOUT (it was 5 x 16 = 80 at the flat 10 s).
