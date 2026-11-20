@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "f25cb51743f3afa6f742f4fae7d287898432ebc59dc98a7602142be61b18f447"
+tree-sha256 = "b6a0fa44cbd6856c13cbfc2ae47fd0f7508c21607cb006e519954d6725d9f08c"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 642340
-sha256 = "89fd04085292fb22394c1ba3a9ddbaf85d637af832de4f9f9a93ba887189aaec"
+bytes = 643062
+sha256 = "3f923093f287bfa40e26fea3d179cc2a96e66b1142e3850c83c777271d0d8d02"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2487,8 +2487,8 @@ sha256 = "dc2f0b051983eacedcdd21085f6c53b99b2d96c79c1bae0034176ecf8a3b66c7"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 21765
-sha256 = "0156d5225bf96c68225e31e81aec6462dc27a1dbce168cf8e991c994c6a98c5f"
+bytes = 22737
+sha256 = "62e5b51e7bb161ca0df52be3dfb2328cd29a63d3b1908773a39739e2cfb28e45"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -4387,8 +4387,8 @@ sha256 = "63902bb6d3098492781660326c60848ae8d9b83cf54b10f63d29ffafcd3201d3"
 
 [[sources]]
 path = "tools/check_merge_resolution.py"
-bytes = 57528
-sha256 = "bd94aca3bfcc43cbbf215c31b192a768c02c751d49dc598f37b9cc910e49cf96"
+bytes = 86233
+sha256 = "45e899e7afbd2357c63bd9c5b282f6a6cc1736bc13a32004f94cd55bd416ae63"
 
 [[sources]]
 path = "tools/check_mistakes_register.py"
@@ -4802,8 +4802,8 @@ sha256 = "2b1d57119dd5e8849a0b28d9c58e35f2cfb900742b738b787e68b28650b39c22"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 36639
-sha256 = "17a366493590ed6d591cd306cd428ea13b2825daca426b3139f8d9493e552765"
+bytes = 36744
+sha256 = "2567a1ecaf33d11dc2482c194127dbba6dc17ee1fe4f77cb66221f978c10b71a"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -4817,8 +4817,8 @@ sha256 = "f020224b8fcec06196b11729da9a87046c471d120bd674bf5fe6b967a5860021"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 288064
-sha256 = "783c783ac9de4d13d109983f0ec6ca08a373f54e3b2950a857fc68c502c2466f"
+bytes = 289149
+sha256 = "35bd8caea7355bb56decdc8de9ddf4ac62fb0f1255c4bbfed7e1a38597e93a91"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -4872,8 +4872,8 @@ sha256 = "94d08fdf4f4ebd3d125c62ac83bf95c9a69563654634c8b7c5e2d5bda9a6374c"
 
 [[sources]]
 path = "tools/train_merge.py"
-bytes = 9061
-sha256 = "88b4d13dc4404e5cce66c1f0537447112abccd0b60a143334b52f80da7ec304a"
+bytes = 11751
+sha256 = "23faf8a8c385de35b499699a62871c33caeaa3f737b18f92b57fd779258353f4"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"

@@ -432,7 +432,8 @@ run_gate "internal-names"           python3 -I -B tools/check_internal_names.py
 # HEAD at or behind origin/main judges its uncommitted edits only and passes with a NOTE when clean.
 run_gate "review-labels-selftest"   python3 -I -B tools/check_selftest_execution.py --suite review-labels-selftest
 run_gate "review-labels"            python3 -I -B tools/check_review_labels.py
-# Every two-parent merge commit in HEAD^1..HEAD keeps the lines each side added to its conflicted files.
+# Every two-parent merge commit in HEAD^1..HEAD, and in origin/main..HEAD when that ref resolves, keeps the
+# lines each side added to every file either side changed (a merge-train-* branch needs origin/main).
 run_gate "merge-resolution-selftest" python3 -I -B tools/check_selftest_execution.py --suite merge-resolution-selftest
 run_gate "merge-resolution"         python3 -I -B tools/check_merge_resolution.py --audit-merges
 

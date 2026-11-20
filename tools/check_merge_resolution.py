@@ -10,7 +10,8 @@
                                   and the omission declaration block in its message
   check_merge_resolution.py --audit-merges [--repo DIR]
                                   judge every two-parent merge commit reachable from HEAD and not from
-                                  HEAD^1 (HEAD itself included), each as --commit does
+                                  HEAD^1 (HEAD itself included), and every one reachable from HEAD and not
+                                  from refs/remotes/origin/main when that ref resolves, each as --commit does
   check_merge_resolution.py --self-test
   check_merge_resolution.py [--self-test] --execution-report ABS_PATH
   any other argument list is refused with exit 2
@@ -18,58 +19,79 @@
 Exit: 0 every obligation held; 1 a finding; 2 cannot evaluate. DIR defaults to this file's repository.
 
 WHAT IT HOLDS. The merge base of the two parents is computed independently and must be exactly one
-readable commit. The merge is replayed with `git merge-tree --write-tree` (no worktree, no index, no
-hooks, rerere off, renormalize off, the caller's attributes file ignored, rename detection pinned on) to
-take the conflict inventory: every path git reports as conflicted. No caller can narrow that list. For
-each conflicted path, outside the generated exemption below, every line each side added since the merge
-base (an inserted or a replacing line in a deterministic difflib line diff of the whole base blob against
-the whole side blob, with autojunk off) must be present in the resolved blob. The whole file is judged,
-so a line added in a region git merged without conflict is covered too. Lines split at LF only; a CR and
-the presence or absence of a final LF are part of the line, and bytes are compared exactly. A side line
-counts as kept when the side-to-result diff aligns it, or else when an unaligned result line holds the same
-bytes, consumed once per occurrence, so a duplicated line needs its own occurrence. Each side is matched
-independently, so an identical line both sides added can be kept once.
+readable commit. Every path either side changed since the merge base is judged, whether git reports it
+as conflicted or merges it cleanly; a path only the resolution holds is not. For each judged path, outside
+the generated exemption below, every line each side added since the merge base (an inserted or a
+replacing line in a deterministic difflib line diff of the whole base blob against the whole side blob,
+with autojunk off) must be present in the resolved blob. A path git did not report as conflicted whose
+resolved blob is byte-identical to the only side that changed it (or to both sides) holds by
+construction and is read no further; a conflicted path is always judged. Lines
+split at LF only; a CR and the presence or absence of a final LF are part of the line, and bytes are
+compared exactly. A side line counts as kept when the side-to-result diff aligns it, or else when an
+unaligned result line holds the same bytes, consumed once per occurrence, so a duplicated line needs its
+own occurrence. A result line that the base-to-result diff aligns with a base line this side deleted
+never counts for that side, so a line a side moved is not kept by putting it back where it was. A line
+both sides added counts once for both only where the two additions replace or follow the same base
+lines (their base ranges meet); added in different places, the result must hold it once per side, and
+each occurrence short of that is reported against the right side first, then the left.
 
-TAKING ONE SIDE WHOLE. When the resolved blob of a conflicted path is byte-identical to one side's blob
-(or the path is absent in both), the other side's additions must all be in it already. Otherwise the run
+The merge is also replayed with `git merge-tree --write-tree` in a temporary bare repository that borrows
+the objects through an alternates file (no worktree, no index, no hooks, no info/attributes, the
+attribute source pinned to the empty tree, the caller's attributes file ignored, rerere off, renormalize
+off, rename detection pinned on), so no attribute file or merge driver anywhere can change the replay.
+The replay names the conflicted paths (each must be a conflict type the gate supports) and gives git's
+own merged tree, which shows where git carried one side's edits along a rename.
+
+TAKING ONE SIDE WHOLE. When the resolved blob of a judged path is byte-identical to one side's blob (or
+the path is absent in both), the other side's additions must all be in it already. Otherwise the run
 fails (exit 1) whatever the omission declaration says.
+
+KEEPING NONE OF A SIDE. When a side added lines to a judged path and the result keeps none of them, the
+run fails (exit 1) whatever the omission declaration says, so changing one line of a result and then
+declaring every line of the other side cannot stand in for taking that side whole.
 
 DECLARED OMISSIONS. A JSON document, format-version 1, bound to the merge base and both parent commit ids:
   {"format-version": 1, "base": OID, "left": OID, "right": OID,
    "omissions": [{"path": P, "side": "left"|"right", "line": N, "text": T, "rationale": R}]}
-Each entry names one added-line occurrence that the result drops: P the conflicted path, N its one-based
-line number in that side's blob, T its exact text without the terminating LF (a CR kept), R a nonempty
+Each entry names one added-line occurrence that the result drops: P the judged path, N its one-based line
+number in that side's blob, T its exact text without the terminating LF (a CR kept), R a nonempty
 reason. Unknown or missing fields, a duplicate key or entry, a wildcard path, a binding that names other
 commits, and an entry that names no dropped addition (a stale entry) are cannot-evaluate (exit 2). A
 recorded merge commit carries its declaration between a line Merge-Resolution-Omissions-Begin and a line
 Merge-Resolution-Omissions-End in its message; tools/train_merge.py writes that block.
 
-GENERATED EXEMPTION. Exactly .aiqt/manifest.toml, .aiqt/release/root.txt and
-.aiqt/release/announce-snippet.txt, the outputs tools/gen_manifest.py recomputes, skip the line and
-whole-side rules, and only when the resolved tree passes that generator's --check: the resolved tree is
-read into a fresh temporary repository (its objects borrowed through an alternates file, every
-conversion attribute unset, so the blobs are written byte for byte), and the tree's own
-tools/gen_manifest.py --check --root runs there. All three outputs must also be canonical in the resolved
-tree: regular, nonempty, strict UTF-8, LF line ends only, ending in LF. Generator drift or a noncanonical
-output is a finding; a generator that cannot run is cannot-evaluate.
+GENERATED EXEMPTION. Exactly the five outputs tools/gen_manifest.py recomputes (.gitattributes,
+.aiqt/manifest.toml, .aiqt/release/root.txt, .aiqt/release/announce-snippet.txt and .aiqt/frozen.json)
+skip the line, whole-side and keep-none rules, and only when the resolved tree passes that generator's
+--check: the resolved tree is read into a fresh temporary repository (its objects borrowed through an
+alternates file, every conversion attribute unset, so the blobs are written byte for byte), and the
+tree's own tools/gen_manifest.py --check --root runs there. That generator must be the one git's
+replayed merge holds, unconflicted; a resolution that edits it is a finding. The three release files,
+and each other exempt output the exemption is claimed for, must also be canonical in the resolved tree:
+regular, nonempty, strict UTF-8, LF line ends only, ending in LF. Generator drift or a noncanonical
+output is a finding; a generator that cannot run is cannot-evaluate. tools/train_merge.py regenerates
+the five outputs before it checks and records a member merge, so a train built through it passes here.
 
 FAIL CLOSED (exit 2). A parent, tree or base that does not resolve or cannot be read, no merge base or more
 than one, a shallow repository, an octopus or non-merge commit given to --commit, a merge-tree failure, a
 conflict git reports for a rename, a directory, a submodule or any type this gate does not know, a
-conflicted path that is absent from the base and from one side (a rename the gate cannot map), a
-symbolic link, submodule or binary (NUL-bearing) blob on a conflicted path, a blob over MAX_BLOB_BYTES, a
-.gitattributes in either parent or the base that sets a merge driver, and a malformed or stale
-declaration.
+conflicted path that is absent from the base and from one side (a rename the gate cannot map), a path
+git merged cleanly while one side deleted it and the other changed it, or that only one side added but
+git's merged blob differs from that side's (a rename carrying the other side's edits), a symbolic link,
+submodule or binary (NUL-bearing) blob on a judged path that does not hold by construction, a blob over
+MAX_BLOB_BYTES, a .gitattributes in the base, either parent or the resolved tree that sets a merge
+driver, a malformed or stale declaration, and an --audit-merges run on a merge-train-* branch when
+refs/remotes/origin/main does not resolve or no merge commit is in range.
 
 DISCLOSED LIMITS. This is a textual retention check: it does not show the kept lines are in a sensible
 order, that the result builds or behaves, or that a replacement line was meant to survive (a deliberate
-replacement needs a declared omission). A path that git merged without conflict is not judged (git kept
-both sides there by construction, and the conflict inventory is the scope). A repository-local
-info/attributes file, the repository's config and the git binary resolved through PATH are trusted. The
-generated exemption trusts the resolved tree's own generator: it shows that the outputs describe the
-resolved inputs, not that the inputs kept both sides (the rules above cover those inputs when they
-conflicted). The --audit-merges range is HEAD^1..HEAD only: run on a pull request's test merge it covers
-the merges the branch introduces; it never sees a merge that a squash discarded before it ran.
+replacement needs a declared omission). Lines the resolution adds that neither side had are not judged,
+so a conflict marker left in a result that also keeps both sides' lines passes.
+The repository's config and the git binary resolved through PATH are trusted. The generated exemption
+trusts the merged tools/gen_manifest.py but not the modules it imports: it shows that the outputs
+describe the resolved inputs, not that the inputs kept both sides (the rules above cover those inputs).
+On a pull request's test merge the --audit-merges range covers the merges the branch introduces; it never
+sees a merge that a squash discarded before it ran.
 """
 import sys
 
@@ -96,8 +118,12 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-GENERATED_EXEMPT = (".aiqt/manifest.toml", ".aiqt/release/root.txt", ".aiqt/release/announce-snippet.txt")
+RELEASE_FILES = (".aiqt/manifest.toml", ".aiqt/release/root.txt", ".aiqt/release/announce-snippet.txt")
+GENERATED_EXEMPT = RELEASE_FILES + (".gitattributes", ".aiqt/frozen.json")
 GENERATOR = "tools/gen_manifest.py"
+UPSTREAM_REF = "refs/remotes/origin/main"
+GENERATED_TAG = "generated exemption: "
+TRAIN_BRANCH_PREFIX = "merge-train-"
 MAX_BLOB_BYTES = 8 * 1024 * 1024
 MAX_DECLARATION_BYTES = 1024 * 1024
 GIT_TIMEOUT = 300
@@ -219,13 +245,52 @@ def read_blob(repo, oid, where):
     return data
 
 
+def _borrowing_repo(repo, prefix, bare):
+    """A fresh temporary repository (its path) that borrows repo's objects through an alternates file,
+    in repo's object format, with no hooks, no info/attributes and no worktree attributes of its own."""
+    objects = git(repo, ["rev-parse", "--path-format=absolute", "--git-path", "objects"]).stdout.decode(
+        "utf-8", "surrogateescape").strip()
+    object_format = git(repo, ["rev-parse", "--show-object-format"]).stdout.decode("ascii", "replace").strip()
+    if object_format not in ("sha1", "sha256"):
+        raise CannotEvaluate("unknown object format {!r}".format(object_format))
+    scratch = tempfile.mkdtemp(prefix=prefix)
+    try:
+        git(scratch, ["init", "-q", "--template=", "--object-format=" + object_format]
+            + (["--bare"] if bare else []) + ["."])
+        git_dir = scratch if bare else os.path.join(scratch, ".git")
+        os.makedirs(os.path.join(git_dir, "objects", "info"), exist_ok=True)
+        with open(os.path.join(git_dir, "objects", "info", "alternates"), "w", encoding="utf-8") as handle:
+            handle.write(objects + "\n")
+    except BaseException:
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise
+    return scratch
+
+
 def replay(repo, base, left, right):
-    """The sorted conflicted paths git reports for merging left and right over base."""
-    proc = git(repo, ["merge-tree", "--write-tree", "-z", "--name-only", "--merge-base=" + base, left, right],
-               ok=(0, 1), pins=REPLAY_PINS)
-    parts = proc.stdout.split(b"\0")
-    if not parts or not OID_RE.fullmatch(parts[0].decode("ascii", "replace")):
-        raise CannotEvaluate("merge-tree printed no result tree")
+    """(sorted conflicted paths, git's merged tree map) for merging left and right over base, replayed in
+    a temporary bare repository that reads no attribute file (module docstring)."""
+    scratch = _borrowing_repo(repo, "merge-resolution-replay-", bare=True)
+    try:
+        empty = git(scratch, ["hash-object", "-w", "-t", "tree", "--stdin"], stdin=b"").stdout.decode(
+            "ascii", "replace").strip()
+        if not OID_RE.fullmatch(empty):
+            raise CannotEvaluate("could not write the empty tree for the attribute source")
+        pins = REPLAY_PINS + ("-c", "attr.tree=" + empty, "--attr-source=" + empty)
+        proc = git(scratch, ["merge-tree", "--write-tree", "-z", "--name-only", "--merge-base=" + base, left,
+                             right], ok=(0, 1), pins=pins)
+        parts = proc.stdout.split(b"\0")
+        merged_oid = parts[0].decode("ascii", "replace") if parts else ""
+        if not OID_RE.fullmatch(merged_oid):
+            raise CannotEvaluate("merge-tree printed no result tree")
+        merged = list_tree(scratch, merged_oid)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return _conflicts(proc, parts), merged
+
+
+def _conflicts(proc, parts):
+    """The sorted conflicted paths of a merge-tree -z --name-only run."""
     if proc.returncode == 0:
         return []
     conflicted, index = set(), 1
@@ -254,9 +319,10 @@ def replay(repo, base, left, right):
 
 
 def refuse_merge_drivers(repo, maps):
-    """Cannot-evaluate when a .gitattributes in base or either parent selects a merge driver, which
-    could make the replayed inventory differ from the train's own merge."""
-    for role in ("base", "left", "right"):
+    """Cannot-evaluate when a .gitattributes in the base, either parent or the resolved tree selects a
+    merge driver: the replay reads none, so the train's own merge could differ from it, and a resolution
+    that brings one in would change later merges unseen."""
+    for role in ("base", "left", "right", "result"):
         for path, (mode, kind, oid) in sorted(maps[role].items()):
             if path != ".gitattributes" and not path.endswith("/.gitattributes"):
                 continue
@@ -280,18 +346,42 @@ def split_lines(data):
     return lines
 
 
+def side_changes(base_lines, side_lines):
+    """(additions, deleted, kept) of base -> side: additions [(one-based side line number, bytes,
+    (i1, i2) the base range it replaces or follows)] for every inserted or replacing line; deleted and
+    kept the sets of base indexes the side deleted (or replaced) and kept."""
+    matcher = difflib.SequenceMatcher(None, base_lines, side_lines, autojunk=False)
+    added, deleted, kept = [], set(), set()
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            kept.update(range(i1, i2))
+            continue
+        if tag in ("insert", "replace"):
+            added.extend((j + 1, side_lines[j], (i1, i2)) for j in range(j1, j2))
+        if tag in ("delete", "replace"):
+            deleted.update(range(i1, i2))
+    return added, deleted, kept
+
+
 def added_lines(base_lines, side_lines):
     """[(one-based side line number, bytes)] for every inserted or replacing line of base -> side."""
-    matcher = difflib.SequenceMatcher(None, base_lines, side_lines, autojunk=False)
-    added = []
-    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
-        if tag in ("insert", "replace"):
-            added.extend((j + 1, side_lines[j]) for j in range(j1, j2))
-    return added
+    return [(number, line) for number, line, _span in side_changes(base_lines, side_lines)[0]]
 
 
-def missing_additions(additions, side_lines, result_lines):
-    """The additions the result does not keep (see the module docstring for the occurrence rule)."""
+def aligned_pairs(a_lines, b_lines):
+    """{a index: b index} for every line the a -> b diff aligns."""
+    matcher = difflib.SequenceMatcher(None, a_lines, b_lines, autojunk=False)
+    pairs = {}
+    for tag, i1, i2, j1, _j2 in matcher.get_opcodes():
+        if tag == "equal":
+            pairs.update((i1 + k, j1 + k) for k in range(i2 - i1))
+    return pairs
+
+
+def missing_additions(additions, side_lines, result_lines, excluded=frozenset()):
+    """The additions the result does not keep (see the module docstring for the occurrence rule).
+    excluded: result indexes that never count as an unaligned occurrence (the result lines standing for
+    base lines this side deleted)."""
     if not additions:
         return []
     matcher = difflib.SequenceMatcher(None, side_lines, result_lines, autojunk=False)
@@ -300,7 +390,8 @@ def missing_additions(additions, side_lines, result_lines):
         if tag == "equal":
             aligned_side.update(range(i1, i2))
             aligned_result.update(range(j1, j2))
-    pool = collections.Counter(line for j, line in enumerate(result_lines) if j not in aligned_result)
+    pool = collections.Counter(line for j, line in enumerate(result_lines)
+                               if j not in aligned_result and j not in excluded)
     missing = []
     for number, line in additions:
         if number - 1 in aligned_side:
@@ -316,31 +407,110 @@ def _show(line):
     return repr(line)[1:]
 
 
-def judge_path(repo, path, maps):
-    """(dropped, whole_side) for one conflicted, non-exempt path. dropped is a list of
-    (side, side_blob, number, bytes); whole_side is None or (kept_side, dropped list of the other side)."""
+def changed_paths(maps):
+    """The sorted paths whose left or right entry differs from the base entry."""
+    paths = set(maps["base"]) | set(maps["left"]) | set(maps["right"])
+    return sorted(path for path in paths
+                  if maps["left"].get(path) != maps["base"].get(path)
+                  or maps["right"].get(path) != maps["base"].get(path))
+
+
+def holds_by_construction(maps, path):
+    """True when the resolved entry equals the only side that changed path, or both sides' equal entry:
+    every line either side added is then aligned in the result and nothing is left to judge."""
+    base, left, right, result = (maps[role].get(path) for role in ("base", "left", "right", "result"))
+    if left == right:
+        return result == left
+    if left == base:
+        return result == right
+    if right == base:
+        return result == left
+    return False
+
+
+def _shared_shortfall(lines, changes, per_side, blobs):
+    """[(side, blob, number, bytes, need, have)] for lines both sides added in different places that the
+    result holds fewer times than once per side (module docstring)."""
+    left_add, right_add = changes["left"][0], changes["right"][0]
+    texts = {line for _n, line, _s in left_add} & {line for _n, line, _s in right_add}
+    kept_both = changes["left"][2] & changes["right"][2]
+    short_entries = []
+    for text in sorted(texts):
+        lefts = [(number, span) for number, line, span in left_add if line == text]
+        rights = [(number, span) for number, line, span in right_add if line == text]
+        paired_left, paired_right = set(), set()
+        for li, (_number, (a1, a2)) in enumerate(lefts):
+            for ri, (_other, (b1, b2)) in enumerate(rights):
+                if ri not in paired_right and a1 <= b2 and b1 <= a2:
+                    paired_left.add(li)
+                    paired_right.add(ri)
+                    break
+        need = (sum(1 for index in kept_both if lines["base"][index] == text)
+                + len(lefts) + len(rights) - len(paired_right))
+        have = sum(1 for line in lines["result"] if line == text)
+        missing = {(side, entry[2]) for side in ("left", "right") for entry in per_side[side] if entry[3] == text}
+        short = need - have - len(missing)
+        if short <= 0:
+            continue
+        order = ([("right", n) for ri, (n, _s) in reversed(list(enumerate(rights))) if ri not in paired_right]
+                 + [("left", n) for li, (n, _s) in reversed(list(enumerate(lefts))) if li not in paired_left]
+                 + [("right", n) for ri, (n, _s) in reversed(list(enumerate(rights))) if ri in paired_right]
+                 + [("left", n) for li, (n, _s) in reversed(list(enumerate(lefts))) if li in paired_left])
+        order = [item for item in order if item not in missing]
+        for side, number in order[:short]:
+            short_entries.append((side, blobs[side], number, text, need, have))
+    return short_entries
+
+
+def judge_path(repo, path, maps, conflicted, merged):
+    """The judgement of one judged, non-exempt path, a dict:
+      dropped       [(side, side_blob, number, bytes)] additions the result does not keep
+      shared_short  [(side, side_blob, number, bytes, need, have)] lines both sides added in different
+                    places that the result holds too few times (each entry one occurrence short)
+      whole_side    None or (kept_side, the other side's dropped list)
+      none_kept     [(side, every dropped or short entry of that side)] for each side that added lines and
+                    has none of them kept"""
     entries = {role: maps[role].get(path) for role in ("base", "left", "right", "result")}
     for role, entry in entries.items():
         if entry is not None and (entry[1] != "blob" or entry[0] not in REGULAR_MODES):
             raise CannotEvaluate("{}: the {} entry is {} {}; only regular files are supported".format(
                 path, role, entry[1], entry[0]))
-    if entries["base"] is None and (entries["left"] is None or entries["right"] is None):
-        raise CannotEvaluate("{}: absent from the merge base and from one side (a rename this gate "
-                             "cannot map); unsupported".format(path))
+    present = [side for side in ("left", "right") if entries[side] is not None]
+    if conflicted:
+        if entries["base"] is None and len(present) < 2:
+            raise CannotEvaluate("{}: absent from the merge base and from one side (a rename this gate "
+                                 "cannot map); unsupported".format(path))
+    elif len(present) == 1 and entries["base"] is None and merged.get(path) != entries[present[0]]:
+        raise CannotEvaluate("{}: only the {} side added it, but git's merge holds other content there (a "
+                             "rename carrying the other side's edits, which this gate cannot map); "
+                             "unsupported".format(path, present[0]))
+    elif len(present) == 1 and entries["base"] is not None and entries[present[0]] != entries["base"]:
+        raise CannotEvaluate("{}: one side deleted it, the {} side changed it, and git merged it without a "
+                             "conflict (a rename this gate cannot map); unsupported".format(path, present[0]))
     lines = {}
     for role, entry in entries.items():
         data = b"" if entry is None else read_blob(repo, entry[2], "{} {}".format(role, path))
         if b"\0" in data:
             raise CannotEvaluate("{}: the {} blob is binary (holds a NUL byte); unsupported".format(path, role))
         lines[role] = split_lines(data)
+    base_to_result = aligned_pairs(lines["base"], lines["result"])
+    changes = {side: side_changes(lines["base"], lines[side]) for side in ("left", "right")}
+    blobs = {side: entries[side][2] if entries[side] else "(absent)" for side in ("left", "right")}
     dropped = []
     per_side = {}
     for side in ("left", "right"):
-        additions = added_lines(lines["base"], lines[side])
-        missing = missing_additions(additions, lines[side], lines["result"])
-        blob = entries[side][2] if entries[side] else "(absent)"
-        per_side[side] = [(side, blob, number, line) for number, line in missing]
+        additions, deleted, _kept = changes[side]
+        excluded = frozenset(base_to_result[index] for index in deleted if index in base_to_result)
+        missing = missing_additions([(number, line) for number, line, _span in additions], lines[side],
+                                    lines["result"], excluded)
+        per_side[side] = [(side, blobs[side], number, line) for number, line in missing]
         dropped.extend(per_side[side])
+    shared_short = _shared_shortfall(lines, changes, per_side, blobs)
+    none_kept = []
+    for side in ("left", "right"):
+        lost = per_side[side] + [entry[:4] for entry in shared_short if entry[0] == side]
+        if changes[side][0] and len(lost) >= len(changes[side][0]):
+            none_kept.append((side, lost))
     result_id = entries["result"][2] if entries["result"] else None
     left_id = entries["left"][2] if entries["left"] else None
     right_id = entries["right"][2] if entries["right"] else None
@@ -350,7 +520,7 @@ def judge_path(repo, path, maps):
             whole_side = ("left", per_side["right"])
         elif result_id == right_id and per_side["left"]:
             whole_side = ("right", per_side["left"])
-    return dropped, whole_side
+    return {"dropped": dropped, "shared_short": shared_short, "whole_side": whole_side, "none_kept": none_kept}
 
 
 def _strict_object(pairs):
@@ -435,30 +605,31 @@ def canonical_problem(data):
     return None
 
 
-def validate_generated(repo, tree, result_map):
-    """(findings, notes) for the generated exemption: the outputs are canonical and the resolved tree's
-    own generator --check passes on a byte-exact copy of the resolved tree."""
+def validate_generated(repo, tree, result_map, claimed, merged, conflicted):
+    """Findings for the generated exemption: the release files and every other claimed output are
+    canonical, the generator is git's own unconflicted merge of it, and that generator's --check passes on
+    a byte-exact copy of the resolved tree."""
     findings = []
-    for path in GENERATED_EXEMPT:
+    if GENERATOR in conflicted:
+        raise CannotEvaluate("{} conflicted in the replay, so no generator both sides agree on can vouch for "
+                             "the generated outputs".format(GENERATOR))
+    if result_map.get(GENERATOR) != merged.get(GENERATOR):
+        findings.append(GENERATED_TAG + "{}: the resolved generator differs from git's merge of the two sides; the generated "
+                        "exemption trusts only the merged generator".format(GENERATOR))
+    for path in RELEASE_FILES + tuple(path for path in claimed if path not in RELEASE_FILES):
         entry = result_map.get(path)
         if entry is None or entry[1] != "blob" or entry[0] != "100644":
-            findings.append("{}: generated output missing from the result or not a regular file".format(path))
+            findings.append(GENERATED_TAG + "{}: generated output missing from the result or not a regular file".format(path))
             continue
         problem = canonical_problem(read_blob(repo, entry[2], "result " + path))
         if problem:
-            findings.append("{}: generated output {}".format(path, problem))
+            findings.append(GENERATED_TAG + "{}: generated output {}".format(path, problem))
     entry = result_map.get(GENERATOR)
     if entry is None or entry[1] != "blob":
         raise CannotEvaluate("{} is absent from the resolved tree, so the generated outputs cannot be "
                              "recomputed".format(GENERATOR))
-    objects = git(repo, ["rev-parse", "--path-format=absolute", "--git-path", "objects"]).stdout.decode(
-        "utf-8", "surrogateescape").strip()
-    scratch = tempfile.mkdtemp(prefix="merge-resolution-candidate-")
+    scratch = _borrowing_repo(repo, "merge-resolution-candidate-", bare=False)
     try:
-        git(scratch, ["init", "-q", "--template=", "."])
-        os.makedirs(os.path.join(scratch, ".git", "objects", "info"), exist_ok=True)
-        with open(os.path.join(scratch, ".git", "objects", "info", "alternates"), "w", encoding="utf-8") as handle:
-            handle.write(objects + "\n")
         os.makedirs(os.path.join(scratch, ".git", "info"), exist_ok=True)
         with open(os.path.join(scratch, ".git", "info", "attributes"), "w", encoding="utf-8") as handle:
             handle.write("* -text !eol -filter -ident !working-tree-encoding\n")
@@ -472,7 +643,7 @@ def validate_generated(repo, tree, result_map):
             raise CannotEvaluate("cannot run {} --check ({})".format(GENERATOR, exc)) from None
         output = (proc.stdout + proc.stderr).decode("utf-8", "replace").strip().splitlines()
         if proc.returncode == 1:
-            findings.append("{} --check reports drift on the resolved tree: {}".format(
+            findings.append(GENERATED_TAG + "{} --check reports drift on the resolved tree: {}".format(
                 GENERATOR, " | ".join(output[-5:]) or "no output"))
         elif proc.returncode != 0:
             raise CannotEvaluate("{} --check could not evaluate the resolved tree (exit {}): {}".format(
@@ -494,17 +665,23 @@ def judge(repo, left_rev, right_rev, tree_rev, declaration_text):
             "right": list_tree(repo, right), "result": list_tree(repo, tree)}
     refuse_merge_drivers(repo, maps)
     declared = parse_declaration(declaration_text, base, left, right)
-    conflicted = replay(repo, base, left, right)
+    conflicted, merged = replay(repo, base, left, right)
+    changed = changed_paths(maps)
+    # A conflicted path is always judged (as before this rule widened the scope); another changed path
+    # is judged unless it holds by construction.
+    judged = sorted(set(conflicted) | {path for path in changed if not holds_by_construction(maps, path)})
     findings, notes, used = [], [], set()
-    notes.append("merge base {}, left {}, right {}, resolved tree {}: {} conflicted path(s)".format(
-        base[:12], left[:12], right[:12], tree[:12], len(conflicted)))
-    exempt = [path for path in conflicted if path in GENERATED_EXEMPT]
-    for path in conflicted:
+    notes.append("merge base {}, left {}, right {}, resolved tree {}: {} conflicted path(s); {} path(s) changed "
+                 "by a side, {} of them judged line by line".format(
+                     base[:12], left[:12], right[:12], tree[:12], len(conflicted), len(changed),
+                     len([path for path in judged if path not in GENERATED_EXEMPT])))
+    exempt = [path for path in judged if path in GENERATED_EXEMPT]
+    for path in judged:
         if path in GENERATED_EXEMPT:
             continue
-        dropped, whole_side = judge_path(repo, path, maps)
-        if whole_side is not None:
-            kept, lost = whole_side
+        verdict = judge_path(repo, path, maps, path in conflicted, merged)
+        if verdict["whole_side"] is not None:
+            kept, lost = verdict["whole_side"]
             other = "right" if kept == "left" else "left"
             findings.append("{}: the result is the {} version whole and drops {} line(s) the {} side added; "
                             "taking one side whole is refused unless that side already holds the other "
@@ -514,12 +691,31 @@ def judge(repo, left_rev, right_rev, tree_rev, declaration_text):
                 used.add((path, side, number))
                 findings.append("  {} line {} (blob {}): {}".format(side, number, blob[:12], _show(line)))
             continue
-        for side, blob, number, line in dropped:
+        refused_sides = set()
+        for side, lost in verdict["none_kept"]:
+            refused_sides.add(side)
+            findings.append("{}: the result keeps none of the {} line(s) the {} side added; dropping every "
+                            "addition of one side is refused, and a declared omission does not waive it".format(
+                                path, len(lost), side))
+            for _side, blob, number, line in lost:
+                used.add((path, side, number))
+                findings.append("  {} line {} (blob {}): {}".format(side, number, blob[:12], _show(line)))
+        short = {(entry[0], entry[2]): entry for entry in verdict["shared_short"]}
+        for side, blob, number, line in verdict["dropped"] + [entry[:4] for entry in verdict["shared_short"]]:
+            if side in refused_sides:
+                continue
             key = (path, side, number)
             text = declared.get(key)
             if text is not None and text.encode("utf-8", "surrogateescape") == _line_text(line):
                 used.add(key)
                 notes.append("declared omission: {} {} line {}: {}".format(path, side, number, _show(line)))
+                continue
+            if (side, number) in short:
+                need, have = short[(side, number)][4:]
+                findings.append("{}: {} line {} (blob {}) was added by both sides in different places, but the "
+                                "result holds it {} time(s) where the base lines both sides kept and each "
+                                "side's additions need {}: {}".format(
+                                    path, side, number, blob[:12], have, need, _show(line)))
                 continue
             findings.append("{}: {} line {} (blob {}) added since the merge base is missing from the result: "
                             "{}".format(path, side, number, blob[:12], _show(line)))
@@ -529,7 +725,7 @@ def judge(repo, left_rev, right_rev, tree_rev, declaration_text):
             len(stale), "; ".join("{} {} line {}".format(*key) for key in stale)))
     if exempt:
         notes.append("generated exemption claimed for: {}".format(", ".join(exempt)))
-        findings.extend(validate_generated(repo, tree, maps["result"]))
+        findings.extend(validate_generated(repo, tree, maps["result"], exempt, merged, conflicted))
     return findings, notes
 
 
@@ -559,25 +755,56 @@ def judge_commit(repo, rev):
     return judge(repo, left, right, tree, declaration_from_message(message))
 
 
-def audit_merges(repo):
-    """(findings, notes) over every merge commit in HEAD^1..HEAD (HEAD included)."""
-    refuse_shallow(repo)
-    head = resolve(repo, "HEAD", "commit", "HEAD")
-    raw = git(repo, ["cat-file", "commit", head]).stdout.partition(b"\n\n")[0]
-    parents = [line[7:].decode("ascii") for line in raw.split(b"\n") if line.startswith(b"parent ")]
-    if not parents:
-        return [], ["HEAD {} is a root commit: no merge to audit".format(head[:12])]
-    octopus = git(repo, ["rev-list", "--min-parents=3", head, "^" + parents[0]]).stdout.split()
+def _upstream(repo):
+    """The commit refs/remotes/origin/main names, or None when that ref does not resolve."""
+    proc = git(repo, ["rev-parse", "--verify", "--quiet", "--end-of-options", UPSTREAM_REF + "^{commit}"],
+               ok=(0, 1))
+    oid = proc.stdout.decode("ascii", "replace").strip()
+    return oid if proc.returncode == 0 and OID_RE.fullmatch(oid) else None
+
+
+def _merges_in(repo, head, exclude):
+    """The two-parent merge commits reachable from head and not from exclude, oldest first."""
+    octopus = git(repo, ["rev-list", "--min-parents=3", head, "^" + exclude]).stdout.split()
     if octopus:
         raise CannotEvaluate("octopus merge {} in the audited range; unsupported".format(octopus[0].decode()[:12]))
-    merges = [m.decode("ascii") for m in git(repo, ["rev-list", "--min-parents=2", "--reverse", head,
-                                                     "^" + parents[0]]).stdout.split()]
+    return [m.decode("ascii") for m in git(repo, ["rev-list", "--min-parents=2", "--reverse", "--topo-order",
+                                                  head, "^" + exclude]).stdout.split()]
+
+
+def audit_merges(repo):
+    """(findings, notes) over every merge commit in HEAD^1..HEAD (HEAD included) and, when
+    refs/remotes/origin/main resolves, in origin/main..HEAD; a merge-train-* branch needs that ref and at
+    least one merge in range."""
+    refuse_shallow(repo)
+    head = resolve(repo, "HEAD", "commit", "HEAD")
+    branch = git(repo, ["symbolic-ref", "-q", "--short", "HEAD"], ok=(0, 1)).stdout.decode(
+        "utf-8", "surrogateescape").strip()
+    on_train = branch.startswith(TRAIN_BRANCH_PREFIX)
+    upstream = _upstream(repo)
+    if on_train and upstream is None:
+        raise CannotEvaluate("HEAD is on train branch {} but {} does not resolve, so the train's member "
+                             "merges cannot be found; fetch origin/main".format(branch, UPSTREAM_REF))
+    raw = git(repo, ["cat-file", "commit", head]).stdout.partition(b"\n\n")[0]
+    parents = [line[7:].decode("ascii") for line in raw.split(b"\n") if line.startswith(b"parent ")]
+    ranges, merges = [], []
+    for exclude, label in ((upstream, UPSTREAM_REF), (parents[0] if parents else None, "HEAD^1")):
+        if exclude is None:
+            continue
+        ranges.append("{} ({})..{}".format(label, exclude[:12], head[:12]))
+        merges.extend(merge for merge in _merges_in(repo, head, exclude) if merge not in merges)
+    if not ranges:
+        return [], ["HEAD {} is a root commit and {} does not resolve: no merge to audit".format(
+            head[:12], UPSTREAM_REF)]
+    if on_train and not merges:
+        raise CannotEvaluate("HEAD is on train branch {} but no merge commit is in {}; a train's member "
+                             "merges must be in range".format(branch, " or ".join(ranges)))
     findings, notes = [], []
     for merge in merges:
         found, said = judge_commit(repo, merge)
         notes.extend("{}: {}".format(merge[:12], line) for line in said)
         findings.extend("merge {}: {}".format(merge[:12], line) for line in found)
-    notes.append("audited {} merge commit(s) in {}..{}".format(len(merges), parents[0][:12], head[:12]))
+    notes.append("audited {} merge commit(s) in {}".format(len(merges), " and ".join(ranges)))
     return findings, notes
 
 
@@ -587,9 +814,18 @@ def report(findings, notes):
     for line in findings:
         print("FAIL: " + line)
     if findings:
-        print("RESULT: FAIL, the resolution drops lines a side added (exit 1)")
+        generated = [line for line in findings if GENERATED_TAG in line]
+        lines = [line for line in findings if GENERATED_TAG not in line]
+        kinds = []
+        if lines:
+            kinds.append("the resolution drops lines a side added")
+        if generated:
+            kinds.append("a generated output the exemption covers does not match its generator or is not "
+                         "canonical")
+        print("RESULT: FAIL, {} (exit 1)".format("; and ".join(kinds) or "see the FAIL lines above"))
         return 1
-    print("PASS: every line each side added to a conflicted path is kept or declared")
+    print("PASS: every line each side added to a path either side changed is kept or declared, and every "
+          "generated output the exemption covers matches its generator")
     return 0
 
 
@@ -740,13 +976,25 @@ manifest = "".join("{} {}\\n".format(hashlib.sha256((root / n).read_bytes()).hex
 digest = hashlib.sha256(manifest.encode()).hexdigest()
 want = {".aiqt/manifest.toml": manifest, ".aiqt/release/root.txt": digest + "\\n",
         ".aiqt/release/announce-snippet.txt": "root " + digest + "\\n"}
+if (root / ".gitattributes").exists():
+    want[".gitattributes"] = "".join("{} text eol=lf\\n".format(n) for n in names) + "# digest " + digest + "\\n"
+if (root / ".aiqt/frozen.json").exists():
+    want[".aiqt/frozen.json"] = '{"digest": "' + digest + '"}\\n'
+if "--check" not in args:
+    for p, body in want.items():
+        (root / p).parent.mkdir(parents=True, exist_ok=True)
+        (root / p).write_bytes(body.encode())
+    print("wrote " + ", ".join(sorted(want)))
+    sys.exit(0)
 drift = [p for p, body in want.items() if (root / p).read_bytes() != body.encode()]
 print("drift: " + ", ".join(drift) if drift else "ok")
 sys.exit(1 if drift else 0)
 '''
 
 
-def _generated(sources):
+def _generated(sources, extras=False):
+    """The fixture tree for sources with its generated outputs (with extras, also .gitattributes and
+    .aiqt/frozen.json, as the fixture generator writes them)."""
     import hashlib
     manifest = "".join("{} {}\n".format(hashlib.sha256(data).hexdigest(), name) for name, data in sorted(sources.items()))
     digest = hashlib.sha256(manifest.encode()).hexdigest()
@@ -754,6 +1002,10 @@ def _generated(sources):
     files[".aiqt/manifest.toml"] = manifest.encode()
     files[".aiqt/release/root.txt"] = (digest + "\n").encode()
     files[".aiqt/release/announce-snippet.txt"] = ("root " + digest + "\n").encode()
+    if extras:
+        files[".gitattributes"] = ("".join("{} text eol=lf\n".format(name) for name in sorted(sources))
+                                   + "# digest " + digest + "\n").encode()
+        files[".aiqt/frozen.json"] = ('{"digest": "' + digest + '"}\n').encode()
     files[GENERATOR] = FIXTURE_GENERATOR.encode()
     return files
 
@@ -928,6 +1180,150 @@ def _self_test_lines(tmp):
     check("fail-closed/unreadable-base", code == 2, (code, text))
 
 
+def _self_test_clean_paths(tmp):
+    """A path git merges without a conflict is judged like a conflicted one (the unconflicted-path rule)."""
+    fx = _Fixture(os.path.join(tmp, "clean"))
+    repo = fx.repo
+    base = fx.commit({"f.txt": _lines(*BASE_LINES), "g.txt": _lines("g one", "g two")})
+    left = fx.commit({"f.txt": _variant({0: ["one LEFT"]}), "g.txt": _lines("g one", "g two")}, [base])
+    right = fx.commit({"f.txt": _variant({9: ["ten RIGHT"]}), "g.txt": _lines("g one", "g two", "g RIGHT")},
+                      [base])
+    merged = {"f.txt": _variant({0: ["one LEFT"], 9: ["ten RIGHT"]}), "g.txt": _lines("g one", "g two", "g RIGHT")}
+    code, text = _judge_quiet(repo, left, right, fx.tree(merged))
+    check("clean/git-merge-result-passes", code == 0 and "0 conflicted path" in text, (code, text))
+
+    reverted = dict(merged, **{"g.txt": _lines("g one", "g two")})
+    code, text = _judge_quiet(repo, left, right, fx.tree(reverted))
+    check("clean/unconflicted-file-reverted-fails", code == 1 and "g RIGHT" in text, (code, text))
+
+    both_changed = dict(merged, **{"f.txt": _variant({0: ["one LEFT"]})})
+    code, text = _judge_quiet(repo, left, right, fx.tree(both_changed))
+    check("clean/both-sides-changed-unconflicted-drop-fails", code == 1 and "ten RIGHT" in text, (code, text))
+
+    code, text = _judge_quiet(repo, left, right, fx.tree_of(left))
+    check("clean/ours-strategy-without-conflict-fails",
+          code == 1 and "whole" in text and "ten RIGHT" in text and "g RIGHT" in text, (code, text))
+
+    added = fx.commit({"f.txt": _lines(*BASE_LINES), "g.txt": _lines("g one", "g two"),
+                       "new.txt": _lines("new RIGHT")}, [base])
+    code, text = _judge_quiet(repo, left, added, fx.tree_of(left))
+    check("clean/file-one-side-added-left-out-fails", code == 1 and "new RIGHT" in text, (code, text))
+
+    long_base = _lines(*["line {}".format(n) for n in range(1, 30)])
+    rb = fx.commit({"old.txt": long_base})
+    renamed = fx.commit({"new.txt": long_base}, [rb])
+    edited = fx.commit({"old.txt": long_base.replace(b"line 5\n", b"line 5 RIGHT\n")}, [rb])
+    rename_merge = fx.tree({"new.txt": long_base.replace(b"line 5\n", b"line 5 RIGHT\n")})
+    code, text = _judge_quiet(repo, renamed, edited, rename_merge)
+    check("clean/rename-carrying-edits-cannot-evaluate", code == 2 and "rename" in text, (code, text))
+
+
+def _self_test_attributes(tmp):
+    """No attribute file outside the judged trees changes the replay (the attribute rule)."""
+    fx = _Fixture(os.path.join(tmp, "attributes"))
+    repo = fx.repo
+    base = fx.commit({"f.txt": _lines(*BASE_LINES)})
+    left_body = _variant({1: ["two LEFT"]})
+    right_body = _variant({1: ["two RIGHT"]}, ("eight", ["right distant A"]))
+    left = fx.commit({"f.txt": left_body}, [base])
+    right = fx.commit({"f.txt": right_body}, [base])
+    with open(os.path.join(repo, ".gitattributes"), "w", encoding="utf-8") as handle:
+        handle.write("*.txt merge=union\n")
+    os.makedirs(os.path.join(repo, ".git", "info"), exist_ok=True)
+    with open(os.path.join(repo, ".git", "info", "attributes"), "w", encoding="utf-8") as handle:
+        handle.write("*.txt merge=union\n")
+    try:
+        conflicted = replay(repo, base, left, right)[0]
+    except CannotEvaluate as exc:
+        conflicted = str(exc)
+    keep_left = _variant({1: ["two LEFT"]}, ("eight", ["right distant A"]))
+    code, text = _judge_quiet(repo, left, right, fx.tree({"f.txt": keep_left}))
+    check("attributes/worktree-and-info-attributes-do-not-change-replay",
+          conflicted == ["f.txt"] and code == 1 and "two RIGHT" in text, (conflicted, code, text))
+
+    nested = fx.tree({"f.txt": _variant({1: ["two LEFT", "two RIGHT"]}, ("eight", ["right distant A"])),
+                      "d/.gitattributes": b"*.txt merge=union\n"})
+    code, text = _judge_quiet(repo, left, right, nested)
+    check("attributes/resolution-bringing-a-merge-driver-cannot-evaluate",
+          code == 2 and "result d/.gitattributes" in text and "merge driver" in text, (code, text))
+
+
+def _self_test_occurrences(tmp):
+    """The shared-occurrence, moved-line and keep-none rules."""
+    fx = _Fixture(os.path.join(tmp, "occurrences"))
+    repo = fx.repo
+    s_base = _lines("a", "b", "c", "d", "e", "f")
+    b1 = fx.commit({"s.txt": s_base})
+    l1 = fx.commit({"s.txt": _lines("a", "b LEFT", "shared", "c", "d", "e", "f")}, [b1])
+    r1 = fx.commit({"s.txt": _lines("a", "b", "c", "d", "e RIGHT", "shared", "f")}, [b1])
+    once = fx.tree({"s.txt": _lines("a", "b LEFT", "shared", "c", "d", "e RIGHT", "f")})
+    code, text = _judge_quiet(repo, l1, r1, once)
+    check("lines/identical-additions-in-different-places-kept-once-fails",
+          code == 1 and "both sides in different places" in text and "right line 6" in text, (code, text))
+    twice = fx.tree({"s.txt": _lines("a", "b LEFT", "shared", "c", "d", "e RIGHT", "shared", "f")})
+    code, text = _judge_quiet(repo, l1, r1, twice)
+    check("lines/identical-additions-in-different-places-kept-twice-passes", code == 0, (code, text))
+
+    m_base = _lines("a", "b", "c", "d", "e", "f", "g")
+    b2 = fx.commit({"m.txt": m_base})
+    l2 = fx.commit({"m.txt": _lines("a", "c", "d", "e", "f", "b", "g")}, [b2])
+    r2 = fx.commit({"m.txt": _lines("a", "b", "c", "d", "e", "f", "g RIGHT")}, [b2])
+    put_back = fx.tree({"m.txt": _lines("a", "b", "c", "d", "e", "f", "g RIGHT")})
+    code, text = _judge_quiet(repo, l2, r2, put_back)
+    check("lines/moved-line-put-back-fails", code == 1 and "left line 6" in text and "'b\\n'" in text, (code, text))
+    moved = fx.tree({"m.txt": _lines("a", "c", "d", "e", "f", "b", "g RIGHT")})
+    code, text = _judge_quiet(repo, l2, r2, moved)
+    check("lines/moved-line-kept-moved-passes", code == 0, (code, text))
+
+    base = fx.commit({"f.txt": _lines(*BASE_LINES)})
+    left = fx.commit({"f.txt": _variant({1: ["two LEFT"]})}, [base])
+    right = fx.commit({"f.txt": _variant({1: ["two RIGHT"]}, ("eight", ["right distant A"]))}, [base])
+    nudged = fx.tree({"f.txt": _variant({1: ["two LEFT"]}) + b"\n"})
+    document = json.dumps({"format-version": 1, "base": base, "left": left, "right": right, "omissions": [
+        {"path": "f.txt", "side": "right", "line": 2, "text": "two RIGHT", "rationale": "fixture"},
+        {"path": "f.txt", "side": "right", "line": 9, "text": "right distant A", "rationale": "fixture"}]})
+    code, text = _judge_quiet(repo, left, right, nudged, document)
+    check("omission/declaring-every-addition-of-a-side-fails",
+          code == 1 and "keeps none of the 2 line(s) the right side added" in text, (code, text))
+
+
+def _self_test_audit_range(tmp):
+    """The local runner's audit finds a train branch's member merges (the audit-range rule)."""
+    fx = _Fixture(os.path.join(tmp, "audit"))
+    repo = fx.repo
+    base = fx.commit({"f.txt": _lines(*BASE_LINES)})
+    member_a = fx.commit({"f.txt": _variant({1: ["two A"]})}, [base])
+    member_b = fx.commit({"f.txt": _variant({8: ["nine B"]})}, [base])
+    lossy = fx.commit_tree(fx.tree_of(base), [base, member_a], "Merge member A\n")
+    good = fx.commit_tree(fx.tree({"f.txt": _variant({8: ["nine B"]})}), [lossy, member_b], "Merge member B\n")
+    tip = fx.commit_tree(fx.tree_of(good), [good], "Regenerate\n")
+    fx.git(["update-ref", "refs/heads/merge-train-fixture", tip])
+    fx.git(["symbolic-ref", "HEAD", "refs/heads/merge-train-fixture"])
+    code_missing = _main_exit(["--audit-merges", "--repo", repo])
+    fx.git(["update-ref", "refs/remotes/origin/main", base])
+    code_found = _main_exit(["--audit-merges", "--repo", repo])
+    check("audit/train-branch-member-merges-audited", (code_missing, code_found) == (2, 1),
+          (code_missing, code_found))
+
+
+def _self_test_report():
+    """The result line names what failed (the report-wording rule)."""
+    import contextlib
+    import io
+    drift = ["generated exemption: tools/gen_manifest.py --check reports drift on the resolved tree: drift"]
+    dropped = ["f.txt: right line 2 (blob 0123) added since the merge base is missing from the result: 'x'"]
+    outputs = []
+    for findings in (drift, dropped, []):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = report(findings, [])
+        outputs.append((code, buffer.getvalue()))
+    ok = (outputs[0][0] == 1 and "drops lines" not in outputs[0][1] and "generator" in outputs[0][1]
+          and outputs[1][0] == 1 and "drops lines" in outputs[1][1] and "generator" not in outputs[1][1].split(
+              "RESULT")[1] and outputs[2][0] == 0 and "conflicted path" not in outputs[2][1])
+    check("report/result-line-names-what-failed", ok, outputs)
+
+
 def _self_test_generated(tmp):
     fx = _Fixture(os.path.join(tmp, "generated"))
     repo = fx.repo
@@ -944,7 +1340,7 @@ def _self_test_generated(tmp):
           code == 0 and "generated exemption claimed for" in text and "3 conflicted path" in text, (code, text))
 
     stale = _generated(merged)
-    for path in GENERATED_EXEMPT:
+    for path in RELEASE_FILES:
         stale[path] = _generated(left_sources)[path]
     code, text = _judge_quiet(repo, left, right, fx.tree(stale))
     check("generated/stale-release-files-fail", code == 1 and "drift" in text, (code, text))
@@ -968,6 +1364,26 @@ def _self_test_generated(tmp):
     code, text = _judge_quiet(repo, l2, r2, fx.tree(_generated(keep_left_source)))
     check("generated/exemption-does-not-cover-sources", code == 1 and "src/b.txt" in text
           and "beta RIGHT" in text, (code, text))
+
+    edited = _generated(merged)
+    edited[GENERATOR] = FIXTURE_GENERATOR.encode() + b"# a resolution's own line\n"
+    code, text = _judge_quiet(repo, left, right, fx.tree(edited))
+    check("generated/resolution-edited-generator-fails",
+          code == 1 and "differs from git's merge" in text, (code, text))
+
+    # .gitattributes and .aiqt/frozen.json, the generator's other two outputs, are exempt only through it.
+    xbase = fx.commit(_generated(sources, extras=True))
+    xleft = fx.commit(_generated(left_sources, extras=True), [xbase])
+    xright = fx.commit(_generated(right_sources, extras=True), [xbase])
+    code, text = _judge_quiet(repo, xleft, xright, fx.tree(_generated(merged, extras=True)))
+    check("generated/regenerated-attributes-and-frozen-pass",
+          code == 0 and ".gitattributes" in text and ".aiqt/frozen.json" in text
+          and "generated exemption claimed for" in text, (code, text))
+    stale_frozen = _generated(merged, extras=True)
+    stale_frozen[".aiqt/frozen.json"] = _generated(left_sources, extras=True)[".aiqt/frozen.json"]
+    code, text = _judge_quiet(repo, xleft, xright, fx.tree(stale_frozen))
+    check("generated/stale-frozen-fails", code == 1 and "drift" in text and ".aiqt/frozen.json" in text,
+          (code, text))
 
 
 def _self_test_train(tmp):
@@ -1016,16 +1432,52 @@ def _self_test_train(tmp):
           recorded[0] == 0 and parents == [left, right] and pin_gone, (recorded, parents, pin_gone))
 
 
+def _self_test_train_regenerates(tmp):
+    """A train built through tools/train_merge.py records member merges whose generated outputs match their
+    generator, without a hand regeneration (the train-procedure rule)."""
+    fx = _Fixture(os.path.join(tmp, "train-generated"))
+    repo = fx.repo
+    sources = {"src/a.txt": _lines("alpha"), "src/b.txt": _lines("beta")}
+    base = fx.commit(_generated(sources))
+    a_sources = dict(sources, **{"src/a.txt": _lines("alpha", "alpha A")})
+    b_sources = dict(sources, **{"src/b.txt": _lines("beta", "beta B")})
+    member_a = fx.commit(_generated(a_sources), [base])
+    member_b = fx.commit(_generated(b_sources), [base])
+    fx.git(["config", "user.name", "Fixture"])
+    fx.git(["config", "user.email", "fixture@example.invalid"])
+    fx.git(["update-ref", "refs/heads/merge-train-fixture", base])
+    fx.git(["symbolic-ref", "HEAD", "refs/heads/merge-train-fixture"])
+    fx.git(["reset", "-q", "--hard"])
+    fx.git(["update-ref", "refs/remotes/origin/main", base])
+    tool = str(Path(__file__).resolve().parent / "train_merge.py")
+    message = os.path.join(tmp, "train-generated-message.txt")
+    with open(message, "w", encoding="utf-8") as handle:
+        handle.write("Merge member\n")
+    steps = []
+    for member in (member_a, member_b):
+        for args in (["start", member], ["record", "--message-file", message]):
+            proc = subprocess.run([sys.executable, "-I", "-B", tool] + args, cwd=repo, capture_output=True,
+                                  timeout=GENERATOR_TIMEOUT)
+            steps.append((args[0], proc.returncode, (proc.stdout + proc.stderr).decode("utf-8", "replace")[-400:]))
+    audited = _main_exit(["--audit-merges", "--repo", repo])
+    check("train/member-merges-regenerated-pass-the-audit",
+          [step[1] for step in steps] == [0, 0, 0, 0] and audited == 0, (steps, audited))
+
+
 def _self_test():
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import _git_fixture_env
     with _git_fixture_env.fixture_git_lifecycle():
         with tempfile.TemporaryDirectory(prefix="merge-resolution-selftest-") as tmp:
-            for runner in (_self_test_lines, _self_test_generated, _self_test_train):
+            for runner in (_self_test_lines, _self_test_clean_paths, _self_test_attributes, _self_test_occurrences,
+                           _self_test_audit_range, _self_test_generated, _self_test_train,
+                           _self_test_train_regenerates):
                 try:
                     runner(tmp)
                 except (CannotEvaluate, RuntimeError, OSError) as exc:
                     FAILURES.append("{}: harness error {}".format(runner.__name__, exc))
+
+    _self_test_report()
 
     split = [split_lines(b""), split_lines(b"a\r\nb"), split_lines(b"a\n\nb\n")]
     check("lines/split-at-lf-only", split == [[], [b"a\r\n", b"b"], [b"a\n", b"\n", b"b\n"]], split)
@@ -1043,11 +1495,18 @@ def _self_test():
     print("SELF-TEST PASS: check_merge_resolution {} checks (taking either side whole while it drops the other "
           "side's additions fails, also with omissions declared; a hand resolution keeping both sides passes; a "
           "whole side already holding the other's additions passes; a dropped line from a region git merged "
-          "cleanly fails; declared omissions pass only when exact, and stale or malformed declarations are "
-          "cannot-evaluate; duplicates, CR and the final LF are compared exactly; regenerated release files pass "
-          "through the generator check while stale or noncanonical ones fail; binary, symlink, rename and "
-          "merge-driver conflicts, an unreadable side or merge base, no base and criss-cross bases are "
-          "cannot-evaluate; recorded merges and the audit range are judged)".format(len(EXECUTED)))
+          "cleanly fails; a file git merged without a conflict is judged too, so a reverted file, an ours "
+          "strategy merge and a left-out added file fail, while a clean rename carrying edits is "
+          "cannot-evaluate; no worktree or info attribute changes the replay, and a resolution bringing a "
+          "merge driver is cannot-evaluate; a line both sides added in different places kept once fails, a "
+          "moved line put back fails, and declaring every addition of a side fails; declared omissions pass "
+          "only when exact, and stale or malformed declarations are cannot-evaluate; duplicates, CR and the "
+          "final LF are compared exactly; regenerated release files, .gitattributes and .aiqt/frozen.json pass "
+          "through the generator check while stale or noncanonical ones, or an edited generator, fail; binary, "
+          "symlink, rename and merge-driver conflicts, an unreadable side or merge base, no base and "
+          "criss-cross bases are cannot-evaluate; recorded merges and the audit range, a train branch's "
+          "member merges included, are judged; a train built through train_merge.py passes the audit; the "
+          "result line names what failed)".format(len(EXECUTED)))
     return 0
 
 

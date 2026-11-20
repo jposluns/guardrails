@@ -6,7 +6,12 @@
       (exit 2) when a merge is already in progress, a pin exists, or the index or tracked files differ
       from HEAD.
   train_merge.py record --message-file FILE [--omissions FILE]
-      Freeze the staged result as a tree (refused while any path is unmerged), check it with
+      Regenerate the five outputs of tools/gen_manifest.py (.gitattributes, .aiqt/manifest.toml,
+      .aiqt/release/root.txt, .aiqt/release/announce-snippet.txt and .aiqt/frozen.json) with the resolved
+      tree's own generator and stage them (a conflicted output is staged first, then overwritten), so
+      every member merge records outputs that match their generator and the CI audit of the train's
+      member merges passes on a correct train. Then freeze the staged result as a tree (refused while any
+      other path is unmerged), check it with
       check_merge_resolution.py against the pinned parents, and only on exit 0 record the merge with
       `git commit --cleanup=verbatim` (hooks run as usual). The omission declaration, when given, is
       appended to the message between the Merge-Resolution-Omissions-Begin and -End lines, where CI's
@@ -18,9 +23,9 @@
 Exit: 0 recorded (or started, or aborted); 1 the check found a dropped line, nothing recorded; 2 refused or
 cannot evaluate. Run it from inside the train's working tree; git is resolved through PATH.
 
-Procedure (RELEASING.md): start the member, resolve every conflicted source file by hand, regenerate the
-derived outputs (python3 -I -B tools/gen_manifest.py), stage the result, then record. A nonzero record
-leaves the merge in progress so the resolution can be fixed and recorded again.
+Procedure (RELEASING.md): start the member, resolve and stage every conflicted source file by hand, then
+record (it regenerates the release manifest outputs itself). A nonzero record leaves the merge in progress
+so the resolution can be fixed and recorded again.
 """
 import sys
 
@@ -46,6 +51,10 @@ PIN_NAME = "train-merge-pin.json"
 TIMEOUT = 900
 MESSAGE_BEGIN = "Merge-Resolution-Omissions-Begin"
 MESSAGE_END = "Merge-Resolution-Omissions-End"
+GENERATOR = "tools/gen_manifest.py"
+# The five outputs tools/gen_manifest.py writes; record regenerates and stages them for every member.
+GENERATED_OUTPUTS = (".gitattributes", ".aiqt/manifest.toml", ".aiqt/release/root.txt",
+                     ".aiqt/release/announce-snippet.txt", ".aiqt/frozen.json")
 
 
 class Refused(Exception):
@@ -120,8 +129,46 @@ def start(member_rev):
         raise Refused("git merge did not leave {} as MERGE_HEAD: {}".format(
             member[:12], (proc.stdout + proc.stderr).decode("utf-8", "replace").strip()))
     sys.stdout.write(proc.stdout.decode("utf-8", "replace"))
-    print("started: train head {} + member {}; resolve, regenerate, stage, then record".format(head[:12], member[:12]))
+    print("started: train head {} + member {}; resolve and stage, then record (it regenerates the release "
+          "manifest outputs)".format(head[:12], member[:12]))
     return 0
+
+
+def _unmerged_paths():
+    raw = git(["ls-files", "--unmerged", "-z"]).stdout
+    paths = set()
+    for record in raw.split(b"\0"):
+        if record:
+            paths.add(record.partition(b"\t")[2].decode("utf-8", "surrogateescape"))
+    return paths
+
+
+def regenerate(top):
+    """Regenerate the generated outputs with the resolved tree's own tools/gen_manifest.py and stage
+    them, so every member merge records outputs that match their generator. A conflicted generated output
+    is staged first (its conflicted text is then overwritten); any other conflicted path is left for the
+    unmerged-path refusal."""
+    for path in sorted(_unmerged_paths() & set(GENERATED_OUTPUTS)):
+        git(["add", "--", path])
+    generator = Path(top) / GENERATOR
+    if not generator.is_file():
+        if any((Path(top) / path).exists() for path in GENERATED_OUTPUTS):
+            raise Refused("{} is missing from the resolved tree, but generated outputs are present; nothing "
+                          "recorded".format(GENERATOR))
+        print("regenerated: nothing ({} and its outputs are absent)".format(GENERATOR))
+        return
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-B", str(generator), "--root", top], cwd=top,
+                              capture_output=True, env=_env(), timeout=TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refused("cannot run {} ({})".format(GENERATOR, exc)) from None
+    if proc.returncode != 0:
+        raise Refused("{} exited {}: {}".format(GENERATOR, proc.returncode, (proc.stdout + proc.stderr).decode(
+            "utf-8", "replace").strip()[-2000:]))
+    present = [path for path in GENERATED_OUTPUTS if (Path(top) / path).is_file()]
+    if present:
+        git(["add", "--"] + present)
+    print("regenerated: {}".format(", ".join(present) or "no output present"), flush=True)
 
 
 def _read_pin(git_dir):
@@ -141,10 +188,11 @@ def record(message_file, omissions_file):
         raise Refused("HEAD moved since start (pinned {}); nothing recorded".format(head[:12]))
     if _merge_head(git_dir) != member:
         raise Refused("MERGE_HEAD is not the pinned member {}; nothing recorded".format(member[:12]))
+    top = _out(["rev-parse", "--show-toplevel"])
+    regenerate(top)
     if _out(["ls-files", "--unmerged"]):
         raise Refused("unmerged paths remain in the index; resolve and stage them first")
     tree = _out(["write-tree"])
-    top = _out(["rev-parse", "--show-toplevel"])
     args = ["--left", head, "--right", member, "--tree", tree, "--repo", top]
     declaration = None
     if omissions_file is not None:

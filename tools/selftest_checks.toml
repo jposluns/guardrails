@@ -7053,6 +7053,16 @@ expected-check-ids = [
   "hand/keeps-both-sides-passes",
   "hand/keeps-both-sides-other-order-passes",
   "hand/clean-region-addition-dropped-fails",
+  # paths git merged without a conflict are judged too
+  "clean/git-merge-result-passes",
+  "clean/unconflicted-file-reverted-fails",
+  "clean/both-sides-changed-unconflicted-drop-fails",
+  "clean/ours-strategy-without-conflict-fails",
+  "clean/file-one-side-added-left-out-fails",
+  "clean/rename-carrying-edits-cannot-evaluate",
+  # no attribute outside the judged trees changes the replay
+  "attributes/worktree-and-info-attributes-do-not-change-replay",
+  "attributes/resolution-bringing-a-merge-driver-cannot-evaluate",
   # declared omissions
   "omission/undeclared-fails",
   "omission/declared-passes",
@@ -7060,10 +7070,15 @@ expected-check-ids = [
   "omission/stale-cannot-evaluate",
   "omission/wrong-text-cannot-evaluate",
   "omission/malformed-cannot-evaluate",
+  "omission/declaring-every-addition-of-a-side-fails",
   # occurrence and byte rules
   "lines/duplicate-occurrence-counted",
   "lines/duplicate-occurrence-kept-passes",
   "lines/identical-additions-share-one-occurrence",
+  "lines/identical-additions-in-different-places-kept-once-fails",
+  "lines/identical-additions-in-different-places-kept-twice-passes",
+  "lines/moved-line-put-back-fails",
+  "lines/moved-line-kept-moved-passes",
   "lines/crlf-compared-exactly",
   "lines/final-newline-compared-exactly",
   "lines/split-at-lf-only",
@@ -7081,15 +7096,22 @@ expected-check-ids = [
   # recorded merges and the CI audit range
   "commit/recorded-merge-judged-with-message-declaration",
   "audit/earlier-lossy-merge-restored-later-still-fails",
+  "audit/train-branch-member-merges-audited",
   # the generated exemption
   "generated/regenerated-release-files-pass",
   "generated/stale-release-files-fail",
   "generated/noncanonical-output-fails",
   "generated/generator-absent-cannot-evaluate",
   "generated/exemption-does-not-cover-sources",
+  "generated/resolution-edited-generator-fails",
+  "generated/regenerated-attributes-and-frozen-pass",
+  "generated/stale-frozen-fails",
   # the train entry point
   "train/dropped-line-records-no-commit",
   "train/kept-resolution-records-checked-merge",
+  "train/member-merges-regenerated-pass-the-audit",
+  # the report
+  "report/result-line-names-what-failed",
   # the command line
   "refuse/unrecognized-argument",
 ]

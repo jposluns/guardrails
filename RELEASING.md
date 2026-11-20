@@ -220,31 +220,41 @@ pull request (CLAUDE.md, Gates and CI).
 
 ## Recording a merge train member
 
-A resolution that takes one side of a conflicted file whole, then regenerates the release files, can drop
-lines the other side added, including lines in regions git merged without conflict. `tools/train_merge.py`
+A resolution that takes one side of a file whole, then regenerates the release files, can drop lines the
+other side added, in a conflicted file or in one git merged without a conflict. `tools/train_merge.py`
 records a member merge only after `tools/check_merge_resolution.py` passes on the exact parents and tree
-it records:
+it records. The check judges every file either side changed since the merge base, not only the
+conflicted ones:
 
 1. `python3 -I -B tools/train_merge.py start <member commit>` on a clean train head. It pins the train
    head and the member, and starts a merge that records nothing.
-2. Resolve every conflicted source file by hand, keeping what each side added. Regenerate the derived
-   outputs (`python3 -I -B tools/gen_manifest.py` for `.aiqt/manifest.toml`, `.aiqt/release/root.txt` and
-   `.aiqt/release/announce-snippet.txt`) and stage the result.
+2. Resolve every conflicted source file by hand, keeping what each side added, and stage it. Leave the
+   five outputs of `tools/gen_manifest.py` (`.gitattributes`, `.aiqt/manifest.toml`,
+   `.aiqt/release/root.txt`, `.aiqt/release/announce-snippet.txt` and `.aiqt/frozen.json`) to the next
+   step, even when they conflict.
 3. `python3 -I -B tools/train_merge.py record --message-file <file>`, adding `--omissions <file>` when a
-   line is dropped on purpose. The declaration names each dropped line by path, side, line number and
-   exact text, with a reason; the format is in the docstring of `tools/check_merge_resolution.py`. The
-   merge is recorded only on exit 0; on exit 1 the report names every dropped line and the merge stays in
-   progress for another resolution. A result identical to one side is refused unless that side already
-   holds the other side's additions, whatever the declaration says. The three release files are exempt
-   only while `tools/gen_manifest.py --check` passes on the resolved tree.
+   line is dropped on purpose. It first regenerates and stages the five outputs with the resolved tree's
+   own `tools/gen_manifest.py`, so every member merge records outputs that match their generator; a
+   train that regenerates them only once, at its tip, fails the audit below on every member merge. The
+   declaration names each dropped line by path, side, line number and exact text, with a reason; the
+   format is in the docstring of `tools/check_merge_resolution.py`. The merge is recorded only on exit 0;
+   on exit 1 the report names every dropped line and the merge stays in progress for another resolution.
+   A result identical to one side, or one keeping none of the lines a side added to a file, is refused
+   whatever the declaration says. A line both sides added in different places must be kept once for
+   each side. The five generated outputs are exempt only while the merged, unedited
+   `tools/gen_manifest.py --check` passes on the resolved tree.
 4. `python3 -I -B tools/train_merge.py abort` gives up the member.
 
-The Quality workflow audits every two-parent merge commit in `HEAD^1..HEAD`, so a train pull request's
-member merges are judged again from their parents and recorded trees, with the declaration their messages
-carry. Keep the member merges in the train branch until that run is green; the audit cannot see a merge
-squashed away before it ran. The procedure that builds a train outside this repository must call
-`tools/train_merge.py` for every member for the precommit check to hold; this repository cannot enforce
-that call.
+The Quality workflow audits every two-parent merge commit in `HEAD^1..HEAD`, and in
+`origin/main..HEAD` when `refs/remotes/origin/main` resolves, so a train pull request's member merges
+are judged again from their parents and recorded trees, with the declaration their messages carry. The
+local runner (`tools/run_all_checks.sh`) runs the same audit; on a `merge-train-*` branch it needs
+`origin/main` fetched and at least one merge in range, or it fails closed. Keep the member merges in the
+train branch until that run is green; the audit cannot see a merge squashed away before it ran. The
+procedure that builds a train outside this repository must call `tools/train_merge.py` for every member
+for the precommit check to hold; this repository cannot enforce that call. Until it does, a train built
+by that procedure today, which regenerates the release files once at its tip, fails this audit in the
+release job; rebuild such a train through `tools/train_merge.py`.
 
 ## Note on the evidence "Built from" field
 
