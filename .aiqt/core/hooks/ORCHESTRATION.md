@@ -537,7 +537,11 @@ declared directory (a copy run from inside one can source or import a deliverabl
 the same way the git form guards its working directory); and `cd` to one literal absolute directory
 outside the declared directories (the session's exit from a declared cwd). The reader or script the python/shell
 form runs may ITSELF import or run a path it is handed as data; the guard does not read it and does not
-prevent that. The command word must be a BARE allowlisted name (a name with a slash, so a file named
+prevent that. The standard-library exclusion is by containment only: a program outside those
+directories that runs the file or stdin it is handed passes as the reader, for example a third-party
+tool in site-packages or dist-packages (`pytest`, `coverage`) or a distribution launcher script such
+as `/usr/bin/pydoc3`. The standard-library set is built lazily inside the guard, and a failure to
+build it refuses every reader instead of stopping the shared hook script for every hook. The command word must be a BARE allowlisted name (a name with a slash, so a file named
 like a reader that sits inside a declared directory, never matches), and a segment carrying any
 assignment prefix, wrapper, builtin, reserved word, substitution, backtick, glob, brace, tilde, an
 ANSI-C `$'...'` quote, `xargs`, `find`, or any unlisted word is simply not on the allowlist and denies.
@@ -577,6 +581,59 @@ way; a write-shaped redirect must provably land outside every declared directory
 `.git/hooks` directory or at a registry file, while reads and quoted-heredoc bodies fed to an
 allowlisted reader pass.
 
+Unread launch targets. A segment that runs an interpreter, sources a file or runs a command-running
+wrapper is ALSO in scope when the guard cannot show that every file it will execute or import lies
+outside the declared directories. The guard does not read more to show that (it evaluates no
+expansion, no glob and no module search); it narrows instead. The launch words are the python family,
+the shells (`sh`, `bash`, `dash`, `zsh`, `ksh`, `ash`, `mksh`, `rbash`, `yash`, `posh`, `busybox`,
+`fish`, `csh`, `tcsh`), `source` and the dot builtin, `eval`, `exec`, the interpreters `perl`, `ruby`,
+`node`, `nodejs`, `php`, `lua`, `tclsh`, `Rscript`, `awk` (and `gawk`, `mawk`, `nawk`), `make` and
+`gmake`, and the command-running words `xargs`, `find`, `parallel`, `nohup`, `setsid`, `stdbuf`,
+`sudo`, `su`, `watch`, `flock`, `ionice`, `taskset`, `chrt`, `strace`, `ltrace`, `nice`, `time`,
+`timeout`, `env`, `command`, `builtin` and `trap`. Such a word anywhere in a segment counts, and so does
+a command word holding a slash or one the lexer reads as opaque. Such a launch is in scope when: any of
+its words or input redirect targets carries an expansion, glob, brace or tilde the lexer reads as opaque (so
+`python3 ~/x/drafts/evil.py`, `python3 $HOME/...`, `python3 <dir>/dra?ts/...` and
+`python3 <dir>/{drafts,zz}/...` deny), an ANSI-C or locale quote, or a tilde after `=` or `:`; a
+python-family run can reach a declared directory through its module search (a declared directory at
+or below the working directory for `-c`, `-m` and a stdin program, or below the script's directory for
+a script, unless `-I` or `-P` is given; or at or below a directory on the hook interpreter's `sys.path`,
+the hook environment's `PYTHONPATH`, or a `PYTHONPATH`/`PYTHONHOME`/`PYTHONUSERBASE`/`PYTHONSTARTUP`
+value the call assigns; an unknown working directory counts as reaching), so `python3 -m drafts.evil`
+and `python3 -c "import drafts.evil"` from the declared directory's parent deny while
+`python3 -I -m drafts.evil` there stays allowed (the module is not found); a shell or `source` operand
+without a slash (bash looks it up in PATH and the working directory) while the working directory is
+unknown or a PATH directory of the hook environment lies inside a declared directory; any relative
+launch operand while the working directory is unknown; and any launch while a PATH directory of the
+hook environment lies inside a declared directory. Module names are never resolved: reaching the
+search root is enough. The working directory a launch runs in follows `env -C`/`--chdir` and
+`sudo -D`/`--chdir` in its segment (an opaque or unresolvable value makes it unknown); any other
+wrapper that moves it (a `chroot`, a program's own `chdir`) is not followed. The VALUE of every `NAME=value` and `--option=value` word, and each
+`:`-separated part of it, is also resolved against the effective working directory, so
+`PYTHONPATH=drafts python3 -m evil`, `BASH_ENV=drafts/x.sh bash -c true` and
+`PATH=drafts:/usr/bin runme` from the declared directory's parent are in scope. A write destination at
+or below any `.git` directory (its `config`, which sets `core.fsmonitor`, `core.hooksPath` and
+`diff.external`, as well as its `hooks`), a file or directory itself named `.git`, a `.gitconfig` and
+a path ending in `git/config` is configuration that executes on the next ordinary git command, and is
+refused like `.git/hooks`.
+
+Ordinary work that names no declared directory. A command the lexer cannot read only because of an
+unquoted here-document or a here-string is re-read narrowly instead of refused whole, and only to show
+it OUT of scope: an unquoted here-document whose operator is followed, to the end of the command, by no
+`$`, backquote or backslash reads exactly like the quoted one, and a here-string whose word is a
+single-quoted string, a double-quoted string without `$`, backquote or backslash, or a plain word, is
+literal data. Each rewrite is made at the exact position where the lexer stopped, the result is lexed
+whole again, and it is accepted only when every segment's command word is one of the allowlist's
+readers or `echo`, `true`, `false`, `:`, `tee`, `tr`, `cut`, `uniq`, `cd` or `mkdir`, so the data
+never reaches an interpreter. So `cat <<EOF > <out>/notes.txt` with a literal body, and
+`grep -c x <<< 'xyz'`, are allowed where they name no declared directory; a here-document fed to a
+shell, one followed by a run, one whose body holds a `$`, and any such command in scope still refuse
+whole. Operator note: setting `deliverable_dirs` changes how the WHOLE session's Bash calls are judged,
+not only calls that name a declared directory: a program on stdin (`python3 -` with a quoted
+here-document, a pipe into `bash`), an unquoted here-document with an expansion in its body, a launch
+carrying any expansion, and a `python3 -m`/`-c` run from an ancestor of a declared directory deny
+wherever a directory is declared.
+
 The guard finds its registry and `deliverable_dirs` INDEPENDENTLY of the payload working directory:
 it consults the project directory the hook environment names (`CLAUDE_PROJECT_DIR`, the path the
 installed hook commands are themselves launched through) unioned with the session cwd's git-resolved
@@ -611,7 +668,20 @@ none (`echo 'echo hi' | bash`, `python3 -` with a quoted here-document, a bare `
 `bash --login`, and, behind a wrapper option the peel cannot parse, the first shell or python word
 with nothing after it even where it is only an argument, as in `env -vu FOO echo bash`). An unquoted
 heredoc or any other construct the lexer cannot read denies whole wherever a directory is declared,
-even where it only prints and names no declared directory from a working directory outside them all.
+even where it only prints and names no declared directory from a working directory outside them all,
+unless the narrow re-reading above shows it out of scope (an unquoted here-document whose body holds a
+`$`, backquote or backslash, one fed to anything but the listed inert consumers, and a here-string
+fed to a shell or an interpreter still deny). A launch carrying any expansion, glob, brace or tilde
+denies wherever a directory is declared, even where it names none (`python3 tools/run.py "$X"`,
+`bash ~/bin/x.sh`, `for f in *.py; do python3 -I r.py "$f"; done`); a `python3 -m` or `-c` run (or a
+script run without `-I`/`-P` whose directory is an ancestor of a declared directory) from an ancestor
+of a declared directory denies, even `python3 -m pytest`, so a declared directory inside the working
+tree makes those runs deny from the tree's root (use `python3 -I`, or run from a directory that is not
+an ancestor); a launch word that is only an argument (`echo python3`, `grep -r make`) is judged as a
+launch; a `PYTHONPATH`-style assignment that cannot be placed (an empty or relative part with no known
+working directory) puts every python launch in the call in scope; and a `cp` or redirect onto any path
+under a `.git` directory, a `.git` file, a `.gitconfig` or a `git/config` path denies even where it
+writes an inert file.
 `cp` into a declared directory denies even though `cp` runs nothing, and a one-call `cp` to a copy
 outside the directories FOLLOWED by running that copy (`cp ... && bash <copy>` or
 `cp ...; python3 -I <copy>`) denies alike, since the copy is not yet an existing regular file when the
@@ -631,8 +701,9 @@ use an allowlisted reader, or hand the path to a reader script kept outside the 
 
 Residuals (not caught, by construction). A command that reaches a declared file WITHOUT naming it or
 its directory in the call text and from a working directory that is not itself declared: a path held
-in a shell variable assigned in an earlier call, a path built by concatenation or an expansion the
-lexer reads as opaque, or a symlink or hard link made ELSEWHERE that points into a declared directory
+in a shell variable assigned in an earlier call and named through a word the lexer reads as literal, a
+path built by concatenation at run time, an expansion the lexer reads as opaque in a segment that
+launches no listed interpreter, source or wrapper, or a symlink or hard link made ELSEWHERE that points into a declared directory
 while the command names only the alias outside it. `bash -n` sources a `BASH_ENV` file set in an
 EARLIER call (an earlier-call variable the call text does not carry), the remaining disclosed path for
 the syntax-check form. The CDPATH handling covers the in-call spellings listed above: a relative `cd`
@@ -649,12 +720,23 @@ an opaque expansion or a command substitution the lexer cannot read, is not clas
 directory a quote splice hides inside such a body is not reached. The `cp` tree check reads each
 directory source as it stands when the guard runs; names an earlier segment of the same call adds
 without a tracked write (a `git apply`) are not seen. The same-call written-path comparison resolves
-symlinks as they stand when the guard runs. A write destination is constrained only at a
-`.git/hooks` directory and at the registry files
-this guard reads; any OTHER write target outside the declared directories (another file in a live
-checkout, a user dotfile, a PATH directory, a crontab) is unconstrained by this guard and left to the
+symlinks as they stand when the guard runs. A write destination is constrained only at a `.git`
+directory or file, a `.gitconfig`, a `git/config` path and the registry files this guard reads; any
+OTHER write target outside the declared directories (another file in a live checkout, a user dotfile
+such as `~/.bashrc`, an `include.path` or `GIT_CONFIG_GLOBAL` file, a `.gitattributes` naming a filter
+configured elsewhere, a PATH directory, a crontab) is unconstrained by this guard and left to the
 write-scope guard and the operator. Nothing in such a call's text or payload distinguishes the first
-class. Running an UNREAD copy outside the directories is also not caught: the rule's "full reading" half
+class. The unread-launch-target test covers only its listed launch words: a program outside them that
+runs a file or program text it is handed (`sed` with an `e` command, `git -c` aliases, `ssh`, `vim`,
+`gdb -x`) is not put in scope by an expansion, and an expansion in a NON-launch segment (for example
+`cp ~/x/drafts/evil.py ~/.bashrc`) is not in scope. Its module-search test reads the HOOK
+interpreter's `sys.path`, user site and `PYTHONPATH`, and the hook process's PATH; a different target
+interpreter (a virtual environment, `pypy3`, another version), a `.pth` file, a PATH or `PYTHONPATH`
+exported in an earlier call, and a `PYTHON*` variable assigned through a builtin other than a
+`NAME=value` word are not seen. Python program TEXT (`-c`, a quoted here-document) that opens, execs or
+`os.chdir`s to a declared path it builds at run time is not read (the existing `-c` residual), and a
+script or reader the guard allows may still import siblings or run what it is handed. A launch word
+whose command word is resolved through a PATH that only the session shell holds is not seen. Running an UNREAD copy outside the directories is also not caught: the rule's "full reading" half
 stays judgement-level, because no hook state could prove a full reading (Read limits and truncation
 stand in the way). A reader or script run outside the directories may itself import or run a path it is
 handed as data; the guard does not read it. A program fed on stdin to an interpreter other than a shell

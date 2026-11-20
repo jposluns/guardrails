@@ -13544,9 +13544,33 @@ _NRDO_FORMS = (
     ("fix/find-exec", "out", "find @ST@ -name o.sh -exec bash {} \\;"),
     ("fix/awk-system", "out", "awk 'BEGIN{system(\"bash @ST@/o.sh\")}'"),
     ("fix/make-f", "out", "make -f @ST@/Makefile"),
+    # the unread-launch-target class: a module-name import from the declared directory's parent, a
+    # relative path inside an assignment value, and tilde, $HOME, glob and brace spellings of the
+    # declared file (each ran declared code under real bash while the guard allowed it)
+    ("fix/launch-py-m-parent", "base", "python3 -m stage.o"),
+    ("fix/launch-py-c-import-parent", "base", "python3 -c 'import stage.o'"),
+    ("fix/launch-cd-parent-py-m", "out", "cd @BASE@ && python3 -m stage.o"),
+    ("fix/launch-subshell-cd-parent-py-m", "out", "(cd @BASE@ && python3 -m stage.o)"),
+    ("fix/launch-env-chdir-py-m", "out", "env -C @BASE@ python3 -m stage.o"),
+    ("fix/assign-pythonpath-rel", "base", "PYTHONPATH=stage python3 -m o"),
+    ("fix/assign-env-pythonpath-rel", "base", "env PYTHONPATH=stage python3 -m o"),
+    ("fix/assign-bash-env-rel", "base", "BASH_ENV=stage/o.sh bash -c true"),
+    ("fix/assign-path-rel", "base", "PATH=stage:/usr/bin:/bin orun"),
+    ("fix/launch-tilde-py", "out", "python3 ~/../stage/o.py"),
+    ("fix/launch-home-var-py", "out", "python3 $HOME/../stage/o.py"),
+    ("fix/launch-glob-py", "out", "python3 @BASE@/sta?e/o.py"),
+    ("fix/launch-star-py", "out", "python3 @BASE@/stag*/o.py"),
+    ("fix/launch-brace-py", "out", "python3 @BASE@/{stage,zz}/o.py"),
+    ("fix/launch-tilde-dot", "out", ". ~/../stage/o.sh"),
+    # the false-refusal re-reading: an unquoted literal here-document and a literal here-string fed to
+    # an inert reader allow; fed to a shell, or followed by a run, they still deny
+    ("fix/reread-heredoc-write", "out", "cat <<EOF > @OUT@/rr@N@.txt\nhello\nEOF\n"),
+    ("fix/reread-here-string-grep", "out", "grep -c x <<< 'xyz'"),
+    ("fix/reread-here-string-bash", "base", "bash <<< 'bash stage/o.sh'"),
+    ("fix/reread-heredoc-pipe-bash", "base", "cat <<EOF | bash\nbash stage/o.sh\nEOF\n"),
 )
 # The fixture rows this guard ALLOWS although real bash ran declared code for them: a program fed to a
-# shell through /dev/stdin, /dev/fd/0 or /proc/self/fd/0 or behind braces, a reserved word, the dot
+# shell through /dev/stdin, /dev/fd/0 or /proc/self/fd/0 or behind a reserved word, the dot
 # builtin, source or a wrapper the peel does not read; a shell word the guard does not list (rbash,
 # busybox); a directory change the scope walk does not model (eval, an alias, a sourced file,
 # cdable_vars, a symlink made in the same call, a cd that fails, is skipped or runs in a subshell, a
@@ -13556,11 +13580,11 @@ _NRDO_KNOWN_ALLOWED_RUNS = (
     "fix/cdable-vars", "fix/stdin-dev-stdin", "fix/stdin-dev-fd0", "fix/stdin-proc-fd0",
     "fix/stdin-ddash-dev-stdin", "fix/stdin-sh-dev-stdin", "fix/stdin-e-dev-stdin",
     "fix/stdin-nice-dev-stdin", "fix/stdin-timeout-dev-stdin", "fix/stdin-heredoc-dev-stdin",
-    "fix/stdin-nested-dev-stdin", "fix/stdin-brace", "fix/stdin-if", "fix/stdin-while",
-    "fix/stdin-heredoc-brace", "fix/stdin-heredoc-bang", "fix/stdin-dot-heredoc",
+    "fix/stdin-nested-dev-stdin", "fix/stdin-if", "fix/stdin-while",
+    "fix/stdin-heredoc-bang", "fix/stdin-dot-heredoc",
     "fix/stdin-source-pipe", "fix/stdin-dot-pipe", "fix/stdin-source-heredoc", "fix/stdin-rbash",
-    "fix/stdin-busybox-sh", "fix/stdin-py-c-system", "fix/stdin-nohup", "fix/stdin-stdbuf",
-    "fix/stdin-xargs-c", "fix/stdin-xargs-d", "fix/stdin-xargs-bash", "fix/stdin-c-eval-cat",
+    "fix/stdin-busybox-sh", "fix/stdin-nohup", "fix/stdin-stdbuf",
+    "fix/stdin-xargs-d", "fix/stdin-xargs-bash",
     "fix/cwd-eval-cd-back", "fix/cwd-command-eval-cd-back", "fix/cwd-dot-heredoc-cd-back",
     "fix/cwd-sourced-file", "fix/cwd-alias", "fix/symlink-made-then-run", "fix/symlink-made-then-cd",
     "fix/failed-cd-missing", "fix/failed-cd-notadir", "fix/failed-cd-P", "fix/failed-cd-ddash",
@@ -13665,7 +13689,7 @@ def _nrdo_pin(corpus):
     return (len(corpus), digest.hexdigest())
 
 
-_NRDO_CORPUS_PIN = (627, "bb7eca16fa3ada2f4813b8f97495194a7e1865c7381939cf8188aa128668b9a3")
+_NRDO_CORPUS_PIN = (646, "6d289ebf2f1dfae9615e5ae9f28e6c823ff2d55f0490eeb744499d122400571d")
 
 
 def _nrdo_setup(base, fixture):
@@ -18185,10 +18209,11 @@ def _main_isolated(report_path=None):
                          ("nrd/unread-unquoted-heredoc-denies", _nrd_unread[6]),
                          ("nrd/unread-control-lexed-denies", _nrd_rel)):
             check(cid, nrd_got(cmd, run_cwd=str(tmp), cwd=str(tmp), project=str(nd.root)), DENY_RAN)
-        # the accepted over-deny of that rule: an unreadable command that runs nothing, from a working
-        # directory outside every declared directory, still denies
-        check("nrd/over-deny-unread-unrelated",
-              nrd_got("cat <<EOF\nhi\nEOF\n", cwd=outd, project=str(nd.root)), DENY_INERT)
+        # an unreadable command that runs nothing, from a working directory outside every declared
+        # directory: an unquoted here-document with a literal body fed to an inert reader is re-read
+        # (_nrd_reread) and allowed; every row above still denies (in scope, or fed to a shell)
+        check("nrd/reread-unread-unrelated-allows",
+              nrd_got("cat <<EOF\nhi\nEOF\n", cwd=outd, project=str(nd.root)), ALLOW_INERT)
         # --- once the working directory is unknown (cd -, a bare cd, an unreadable cd operand) or a
         # directory-stack builtin appears, a later relative operand is in scope. Each row moves into the
         # declared directory's parent, loses the tracked directory, and runs the declared file through a
@@ -18572,6 +18597,24 @@ def _main_isolated(report_path=None):
                 for attr, real in reals:
                     setattr(aiqt_hooks, attr, real)
 
+        def _nrd_with(patches, fn):
+            # run fn with SEVERAL helpers patched (restored after). A flip whose vector a later, second
+            # layer also refuses removes that layer too, so the flip still shows its own layer is needed:
+            # the unread-launch-target test (_nrd_launch_unproven) also refuses an ANSI-C or relative
+            # launch after a lost working directory, and the .git configuration target
+            # (_nrd_git_config_target) also refuses every cp or redirect onto a .git path
+            reals = [(attr, getattr(aiqt_hooks, attr)) for attr, _repl in patches]
+            try:
+                for attr, repl in patches:
+                    setattr(aiqt_hooks, attr, repl)
+                return fn()
+            finally:
+                for attr, real in reals:
+                    setattr(aiqt_hooks, attr, real)
+
+        _nrd_no_launch = (("_nrd_launch_unproven", lambda seg, cwd, dirs, ctx: False),)
+        _nrd_no_git_config = (("_nrd_git_config_target", lambda path, eff_cwd: False),)
+
         # the looser -c reading is classified as well (so nothing it refused is allowed); a flip of the
         # -c extraction removes it alongside
         _nrd_no_prior = ("_nrd_shell_c_prior_body", lambda seg: None)
@@ -18608,8 +18651,9 @@ def _main_isolated(report_path=None):
                             "bash -n +n {}/x.sh".format(st)), "allow")
         # neutralising the ANSI-C scope decode hides the directory spelling again
         check("nrd/flip-ansi-c-allows",
-              _flip_verdict("_nrd_ansi_c_spelling", lambda c: c,
-                            "bash $'{}/nrd-sta\\x67e/x.sh'".format(tmp)), "allow")
+              _nrd_with(_nrd_no_launch, lambda: _flip_verdict(
+                  "_nrd_ansi_c_spelling", lambda c: c, "bash $'{}/nrd-sta\\x67e/x.sh'".format(tmp))),
+              "allow")
         # neutralising the CDPATH scope widening lets a relative cd through an inherited CDPATH escape
         _nrd_prev_cdpath2 = os.environ.get("CDPATH")
         os.environ["CDPATH"] = str(tmp)
@@ -18631,7 +18675,8 @@ def _main_isolated(report_path=None):
         # keeping the last known working directory after cd -, a bare cd, an unreadable cd operand or a
         # directory-stack builtin lets every lost-directory row above through again
         check("nrd/flip-cwd-lost-allows",
-              [_flip_verdict("_nrd_cwd_lost", lambda seg, cwd: False, c) for c in _nrd_cwd_rows],
+              _nrd_with(_nrd_no_launch, lambda: [_flip_verdict("_nrd_cwd_lost", lambda seg, cwd: False, c)
+                                                 for c in _nrd_cwd_rows]),
               ["allow"] * 4)
         # leaving a program a shell or python reads from stdin out of scope lets every stdin row through
         check("nrd/flip-stdin-program-allows",
@@ -18702,14 +18747,16 @@ def _main_isolated(report_path=None):
               _flip_verdict("_nrd_cp_targets", _nrd_old_cp_targets,
                             "cp {}/orchestration.local.json {}/live/.aiqt/".format(st, outd)), "allow")
         check("nrd/flip-cp-r-merge-git-hooks-allows",
-              _flip_verdict("_nrd_cp_targets", _nrd_old_cp_targets,
-                            "cp -r {}/hooks {}/hookrepo/.git".format(st, outd)), "allow")
+              _nrd_with(_nrd_no_git_config, lambda: _flip_verdict(
+                  "_nrd_cp_targets", _nrd_old_cp_targets,
+                  "cp -r {}/hooks {}/hookrepo/.git".format(st, outd))), "allow")
         # restoring the old git shape (no same-call written-directory check) lets git run the repository
         # a cp in the same call just built
         check("nrd/flip-git-written-allows",
-              _flip_verdict("_nrd_git_dir_written", lambda git_cwd, written: False,
-                            "cp {}/dotgit {}/gd2/.git; git -C {}/gd2 diff --no-index {}/a.txt {}/b.txt"
-                            .format(st, outd, outd, st, st)), "allow")
+              _nrd_with(_nrd_no_git_config, lambda: _flip_verdict(
+                  "_nrd_git_dir_written", lambda git_cwd, written: False,
+                  "cp {}/dotgit {}/gd2/.git; git -C {}/gd2 diff --no-index {}/a.txt {}/b.txt"
+                  .format(st, outd, outd, st, st))), "allow")
         # restoring the old shell/python copy-run shapes (no working-directory check) runs a copy that
         # sources or imports a deliverable by a relative path from inside a declared directory
         check("nrd/flip-shell-cwd-inside-allows",
@@ -18746,14 +18793,16 @@ def _main_isolated(report_path=None):
                             "read -r CDPATH < {}/cdp.txt; cd nrd-stage; bash x.sh".format(outd)),
               "allow")
         check("nrd/flip-cd-dotgit-chain-allows",
-              _flip_verdict("_nrd_git_dir_written", lambda git_cwd, written: False,
-                            "cp {}/dotgit {}/gd2/.git; cd {}/gd2; git diff --no-index {}/a.txt {}/b.txt"
-                            .format(st, outd, outd, st, st)), "allow")
+              _nrd_with(_nrd_no_git_config, lambda: _flip_verdict(
+                  "_nrd_git_dir_written", lambda git_cwd, written: False,
+                  "cp {}/dotgit {}/gd2/.git; cd {}/gd2; git diff --no-index {}/a.txt {}/b.txt"
+                  .format(st, outd, outd, st, st))), "allow")
 
-        # the cp -r .git chains are refused both by the copy's tree (it lands .git/hooks) and by the git
-        # same-call check; removing both lets them through
+        # the cp -r .git chains are refused by the copy's tree (it lands .git/hooks), by the git
+        # same-call check and by the .git configuration target; removing all three lets them through
         _nrd_no_written = (("_nrd_git_dir_written", lambda git_cwd, written: False),
-                           ("_nrd_cp_tree_targets", lambda sources, targets, eff, written: []))
+                           ("_nrd_cp_tree_targets", lambda sources, targets, eff, written: [])) \
+            + _nrd_no_git_config
         check("nrd/flip-git-C-cp-r-git-chain-allows",
               _flip_verdict_pair(_nrd_no_written,
                                  "cp -r {}/.git {}/gd/; git -C {}/gd diff --no-index {}/a.txt {}/b.txt"
@@ -18762,6 +18811,128 @@ def _main_isolated(report_path=None):
               _flip_verdict_pair(_nrd_no_written,
                                  "cp -r {}/.git {}/gd/; cd {}/gd; git diff --no-index {}/a.txt {}/b.txt"
                                  .format(st, outd, outd, st, st)), "allow")
+
+        # --- the unread-launch-target class: an interpreter or source launch whose executed or imported
+        # files the guard cannot place outside the declared directories is in scope. Each row runs from
+        # the declared directory's PARENT (an undeclared working directory) or names the declared file
+        # only through an expansion; real bash runs the declared file in every deny row.
+        _nrd_tmp = str(tmp)
+        # a payload working directory outside the fixture repository finds no git toplevel, so every row
+        # that sets one also names the project directory (the hook environment's anchor), as the
+        # unread-command rows above do; without it the guard is inert and allows everything
+        _nrd_proj = str(nd.root)
+        # module-name imports resolved from the working directory (Python puts it first on sys.path
+        # for -m, -c and a stdin program unless -I or -P is given)
+        for cid, cmd, run_cwd, cwd in (
+                ("nrd/launch-py-m-parent-denies", "python3 -m nrd-stage.x", _nrd_tmp, _nrd_tmp),
+                ("nrd/launch-py-c-import-parent-denies",
+                 "python3 -c \"__import__('nrd-stage.x')\"", _nrd_tmp, _nrd_tmp),
+                ("nrd/launch-cd-parent-py-m-denies",
+                 "cd {} && python3 -m nrd-stage.x".format(_nrd_tmp), outd, outd),
+                ("nrd/launch-subshell-cd-parent-py-m-denies",
+                 "(cd {} && python3 -m nrd-stage.x)".format(_nrd_tmp), outd, outd),
+                ("nrd/launch-env-chdir-parent-py-m-denies",
+                 "env -C {} python3 -m nrd-stage.x".format(_nrd_tmp), outd, outd)):
+            check(cid, nrd_got(cmd, run_cwd=run_cwd, cwd=cwd, project=_nrd_proj), DENY_RAN)
+        # the flips: with -I neither the working directory nor PYTHONPATH is searched, so the module is
+        # not found, nothing runs, and the guard allows; a working directory that is not an ancestor of
+        # a declared directory allows -m and -c as before
+        check("nrd/launch-py-m-isolated-allows",
+              nrd_got("python3 -I -m nrd-stage.x", run_cwd=_nrd_tmp, cwd=_nrd_tmp, project=_nrd_proj),
+              ALLOW_INERT)
+        check("nrd/launch-py-c-unrelated-cwd-allows",
+              nrd_got("python3 -c 'print(1)'", cwd=outd, project=_nrd_proj), ALLOW_INERT)
+        # without the module-search test the parent-directory import is allowed again
+        check("nrd/flip-launch-py-m-parent-allows",
+              _flip_verdict("_nrd_py_launch_unproven", lambda args, cwd, dirs, ctx: False,
+                            "python3 -m nrd-stage.x", cwd=_nrd_tmp, project=_nrd_proj), "allow")
+        # a relative path inside an assignment value is resolved against the effective working
+        # directory (the absolute form is pinned above as nrd/pythonpath-import-denies)
+        for cid, cmd in (("nrd/assign-bash-env-relative-denies", "BASH_ENV=nrd-stage/x.sh bash -c true"),
+                         ("nrd/assign-pythonpath-relative-denies", "PYTHONPATH=nrd-stage python3 -m x"),
+                         ("nrd/assign-env-pythonpath-relative-denies",
+                          "env PYTHONPATH=nrd-stage python3 -m x"),
+                         ("nrd/assign-path-relative-denies", "PATH=nrd-stage:/usr/bin:/bin runme")):
+            check(cid, nrd_got(cmd, run_cwd=_nrd_tmp, cwd=_nrd_tmp, project=_nrd_proj), DENY_RAN)
+        check("nrd/flip-assign-bash-env-relative-allows",
+              _flip_verdict("_nrd_assigned_value_in", lambda seg, cwd, dirs: False,
+                            "BASH_ENV=nrd-stage/x.sh bash -c true", cwd=_nrd_tmp, project=_nrd_proj),
+              "allow")
+        # tilde, $HOME, glob and brace spellings the guard does not evaluate put the launch in scope
+        for cid, cmd in (("nrd/launch-glob-py-denies", "python3 {}/nrd-sta?e/x.py".format(_nrd_tmp)),
+                         ("nrd/launch-star-sh-denies", "bash {}/nrd-st*/x.sh".format(_nrd_tmp)),
+                         ("nrd/launch-brace-py-denies",
+                          "python3 {}/{{nrd-stage,nrd-zz}}/x.py".format(_nrd_tmp)),
+                         ("nrd/launch-home-var-py-denies",
+                          "HOME={}; python3 $HOME/nrd-stage/x.py".format(_nrd_tmp)),
+                         ("nrd/launch-tilde-py-denies",
+                          "HOME={} bash -c 'python3 ~/nrd-stage/x.py'".format(_nrd_tmp)),
+                         ("nrd/launch-tilde-dot-denies",
+                          "HOME={} bash -c '. ~/nrd-stage/x.sh'".format(_nrd_tmp))):
+            check(cid, nrd_got(cmd), DENY_RAN)
+        check("nrd/flip-launch-glob-py-allows",
+              _flip_verdict("_nrd_launch_unproven", lambda seg, cwd, dirs, ctx: False,
+                            "python3 {}/nrd-sta?e/x.py".format(_nrd_tmp)), "allow")
+        # a glob that is not part of a launch stays out of scope, as before, and so does a launch whose
+        # only opaque-classed target is an output redirect through '..' (no expansion)
+        check("nrd/launch-glob-ls-unrelated-allows", nrd_got("ls {}/*.sh".format(outd)), ALLOW_INERT)
+        check("nrd/launch-dotdot-output-unrelated-allows",
+              nrd_got("python3 -c 'print(1)' > ../nrd-launch-log.txt", cwd=outd, project=_nrd_proj),
+              ALLOW_INERT)
+        # .git/config, like .git/hooks, is configuration that executes on the next ordinary git command
+        # (core.fsmonitor, core.hooksPath, diff.external): refused as a cp or redirect destination
+        # (verdict only: the write is not performed, so the fixture repository stays readable)
+        for cid, cmd in (("nrd/write-git-config-cp-denies",
+                          "cp {}/x.sh {}/hookrepo/.git/config".format(st, outd)),
+                         ("nrd/write-git-config-redirect-denies",
+                          "cat {}/x.sh > {}/hookrepo/.git/config".format(st, outd)),
+                         ("nrd/write-gitconfig-user-denies",
+                          "cp {}/x.sh {}/home-x/.gitconfig".format(st, outd))):
+            check(cid, _verdict(nrd(cmd)), "deny")
+        check("nrd/flip-write-git-config-allows",
+              _flip_verdict("_nrd_git_config_target", lambda path, eff_cwd: False,
+                            "cp {}/x.sh {}/hookrepo/.git/config".format(st, outd)), "allow")
+        # ordinary work that names no declared directory: an unquoted here-document with a literal body
+        # and a literal here-string are re-read and allowed; the re-reading never reaches an interpreter
+        # and never allows a command in scope
+        for cid, cmd in (("nrd/reread-unquoted-heredoc-write-allows",
+                          "cat <<EOF > {}/reread-out.txt\nhello\nEOF\n".format(outd)),
+                         ("nrd/reread-here-string-single-allows", "grep -c x <<< 'xyz'"),
+                         ("nrd/reread-here-string-double-allows", "wc -l <<< \"x y\"")):
+            check(cid, nrd_got(cmd, cwd=outd, project=_nrd_proj), ALLOW_INERT)
+        for cid, cmd in (("nrd/reread-heredoc-pipe-bash-denies",
+                          "cat <<EOF | bash\nbash nrd-stage/x.sh\nEOF\n"),
+                         ("nrd/reread-here-string-bash-denies", "bash <<< 'bash nrd-stage/x.sh'"),
+                         ("nrd/reread-heredoc-expansion-denies",
+                          "cat <<EOF\n$(bash nrd-stage/x.sh)\nEOF\n"),
+                         ("nrd/reread-heredoc-then-run-denies", "cat <<EOF\nhi\nEOF\nbash nrd-stage/x.sh")):
+            check(cid, nrd_got(cmd, run_cwd=_nrd_tmp, cwd=_nrd_tmp, project=_nrd_proj), DENY_RAN)
+        check("nrd/flip-reread-here-string-denies",
+              _flip_verdict("_nrd_reread", lambda command: None, "grep -c x <<< 'xyz'", cwd=outd,
+                            project=_nrd_proj), "deny")
+        # kept over-deny: a python program on a quoted here-document can build a declared path by
+        # concatenation (nrd/stdin-python-dash-denies), so it is not shown inert and stays refused
+        check("nrd/over-deny-py-stdin-qheredoc-unrelated",
+              nrd_got("python3 - <<'EOF'\nprint(1)\nEOF\n", cwd=outd, project=_nrd_proj), DENY_INERT)
+        # the standard-library set is built lazily inside the guard and a build failure refuses the
+        # reader (it never stops the shared script at import for every hook)
+        import sysconfig as _nrd_sysconfig
+        _nrd_real_get_paths = _nrd_sysconfig.get_paths
+
+        def _nrd_raise_paths(*_a, **_k):
+            raise RuntimeError("synthetic sysconfig failure")
+        _nrd_sysconfig.get_paths = _nrd_raise_paths
+        try:
+            try:
+                _nrd_built = aiqt_hooks._nrd_build_stdlib_dirs()
+            except Exception as exc:  # noqa: BLE001 - the pre-fix build lets it escape
+                _nrd_built = type(exc).__name__
+        finally:
+            _nrd_sysconfig.get_paths = _nrd_real_get_paths
+        check("nrd/stdlib-build-failure-contained", _nrd_built, None)
+        check("nrd/stdlib-build-failure-refuses-reader",
+              _flip_verdict_pair((("_NRD_STDLIB_DIRS", None), ("_nrd_build_stdlib_dirs", lambda: None)),
+                                 "python3 -I {}/r.py {}/x.py".format(nd.root, st)), "deny")
 
         def _nrd_prev_c_operand(argv, oq, j):
             # the previous -c scan: stops at the first option token whose letters include c (so --norc
@@ -19022,8 +19193,9 @@ def _main_isolated(report_path=None):
               "allow")
         # judging only the top-level cp target lets a whole .git or .aiqt tree land a hook or registry
         check("nrd/flip-cp-r-dotgit-tree-allows",
-              _flip_verdict("_nrd_cp_tree_targets", lambda sources, targets, eff, written: [],
-                            "cp -r {}/.git {}/hookrepo/".format(st, outd)), "allow")
+              _nrd_with(_nrd_no_git_config, lambda: _flip_verdict(
+                  "_nrd_cp_tree_targets", lambda sources, targets, eff, written: [],
+                  "cp -r {}/.git {}/hookrepo/".format(st, outd))), "allow")
         check("nrd/flip-cp-r-aiqt-tree-allows",
               _flip_verdict("_nrd_cp_tree_targets", lambda sources, targets, eff, written: [],
                             "cp -r {}/.aiqt {}/live/".format(st, outd)), "allow")
@@ -19047,8 +19219,9 @@ def _main_isolated(report_path=None):
                  "cp {}/dotgit {}/alias/.git; git -C {}/gd2 diff --no-index {}/a.txt {}/b.txt"),
                 ("nrd/flip-git-C-written-via-alias-allows",
                  "cp {}/dotgit {}/gd2/.git; git -C {}/alias diff --no-index {}/a.txt {}/b.txt")):
-            check(cid, _flip_verdict("_nrd_git_dir_written", _nrd_prev_git_dir_written,
-                                     cmd.format(st, outd, outd, st, st)), "allow")
+            check(cid, _nrd_with(_nrd_no_git_config, lambda: _flip_verdict(
+                "_nrd_git_dir_written", _nrd_prev_git_dir_written, cmd.format(st, outd, outd, st, st))),
+                  "allow")
 
         # --- scope and fail-closed postures (unchanged contracts) ---
         check("nrd/failopen-nonbash", _verdict(aiqt_hooks.orch_deliverable_exec_guard(

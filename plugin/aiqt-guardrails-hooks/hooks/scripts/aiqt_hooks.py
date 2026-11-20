@@ -29695,8 +29695,9 @@ def orch_untracked_wait_loop(data):
 # could prove a FULL reading (Read limits and truncation stand in the way), and the "full reading" half
 # stays judgement-level. The property holds BY CONSTRUCTION, not by enumerating the forms that run a
 # file (shell's grammar is open; no such list closes): a command in SCOPE of a declared directory (its
-# raw text names one, a lexed token resolves into one, or its effective working directory is inside one)
-# is DENIED unless EVERY lexed segment matches a closed allowlist of read-only forms with registered
+# raw text names one, a lexed token or assignment value resolves into one, its effective working
+# directory is inside one, or it launches an interpreter or sources a file whose targets the guard
+# cannot place outside them: the unread-launch-target class, _nrd_launch_unproven) is DENIED unless EVERY lexed segment matches a closed allowlist of read-only forms with registered
 # options (_NRD_READ_FORMS and the shaped forms in _nrd_segment_allowed); a compound command, backtick,
 # substitution, wrapper, builtin, assignment prefix, xargs, find or any other unlisted word in scope
 # denies, and a command the lexer cannot read is always in scope and denies whole (nothing short of
@@ -29795,39 +29796,53 @@ _NRD_GIT_DIFF_OPTS = frozenset(("--no-index", "--stat", "--numstat", "--shortsta
 # pydoc, timeit, code, pickle and more; runpy loads frozen (its spec origin is "frozen"), yet its spec and
 # __file__ still name a runpy.py in the standard library directory, as does loader_state.filename), so no enumeration of
 # them stays complete or true across versions. A command reaches the reader shape only when it is
-# already in scope of a declared directory, so refusing every stdlib script as the reader denies, by
-# construction, the `python3 -I <stdlib program> <deliverable>` and stdin-fed forms that would run the
-# deliverable, without listing the programs. Residual: a reader OUTSIDE the standard library that the
-# call hands a deliverable path still runs it (the disclosed reader residual).
+# already in scope of a declared directory, so refusing every stdlib script as the reader denies the
+# `python3 -I <stdlib program> <deliverable>` and stdin-fed forms that would run the deliverable,
+# without listing the programs. The exclusion is by standard-library CONTAINMENT only: a program
+# OUTSIDE these directories passes as a reader even when it runs the file or stdin it is handed, for
+# example a third-party tool in site-packages or dist-packages (pytest, coverage), a distribution
+# launcher script such as /usr/bin/pydoc3, or a reader the operator wrote (the disclosed reader
+# residual). The set is built lazily, inside the guard, never at import (_nrd_stdlib_dirs), so a failure
+# to build it cannot stop the shared script for every other hook; a build failure refuses every reader.
+_NRD_STDLIB_DIRS = None
+
+
 def _nrd_build_stdlib_dirs():
     """The realpath set of the running interpreter's standard-library directories (sysconfig's stdlib
-    and platstdlib, plus the directory os itself lives in). Built once at import; an unresolvable or
-    non-absolute entry contributes nothing."""
-    import sysconfig
-    out = set()
-    candidates = []
+    and platstdlib, plus the directory os itself lives in), or None when the set cannot be built (any
+    exception). An unresolvable or non-absolute entry contributes nothing."""
     try:
+        import sysconfig
+        out = set()
+        candidates = []
         paths = sysconfig.get_paths()
-    except (KeyError, OSError, ValueError):
-        paths = {}
-    for key in ("stdlib", "platstdlib"):
-        value = paths.get(key)
-        if isinstance(value, str) and value:
-            candidates.append(value)
-    osfile = getattr(os, "__file__", None)
-    if isinstance(osfile, str) and osfile:
-        candidates.append(os.path.dirname(osfile))
-    for value in candidates:
-        try:
-            real = os.path.realpath(value)
-        except (OSError, ValueError):
-            continue
-        if os.path.isabs(real):
-            out.add(real)
-    return frozenset(out)
+        for key in ("stdlib", "platstdlib"):
+            value = paths.get(key)
+            if isinstance(value, str) and value:
+                candidates.append(value)
+        osfile = getattr(os, "__file__", None)
+        if isinstance(osfile, str) and osfile:
+            candidates.append(os.path.dirname(osfile))
+        for value in candidates:
+            try:
+                real = os.path.realpath(value)
+            except (OSError, ValueError):
+                continue
+            if os.path.isabs(real):
+                out.add(real)
+        return frozenset(out)
+    except Exception:  # noqa: BLE001 - any failure refuses every reader (deny-biased), never every hook
+        return None
 
 
-_NRD_STDLIB_DIRS = _nrd_build_stdlib_dirs()
+def _nrd_stdlib_dirs():
+    """The cached standard-library directory set, built on first use inside the guard; None when it
+    cannot be built, which the reader test reads as 'cannot show the script is outside the standard
+    library' and refuses."""
+    global _NRD_STDLIB_DIRS
+    if _NRD_STDLIB_DIRS is None:
+        _NRD_STDLIB_DIRS = _nrd_build_stdlib_dirs()
+    return _NRD_STDLIB_DIRS
 _NRD_MAX_C_DEPTH = 6  # recursion bound for classifying nested shell -c bodies
 # ANSI-C quoting: the lexer does not reproduce bash's spelling of $'...' (it drops escapes rather than
 # decoding \x, \0NN, \u and \c), so a declared directory hidden inside one is read for SCOPE from a
@@ -30001,7 +30016,10 @@ def _nrd_outside_regular_file(script, eff_cwd, dirs):
             if f == base or f.startswith(base + "/"):
                 return False
     real = forms[-1]
-    for d in _NRD_STDLIB_DIRS:
+    stdlib = _nrd_stdlib_dirs()
+    if stdlib is None:
+        return False                        # the stdlib set could not be built: refuse every reader
+    for d in stdlib:
         if real == d or real.startswith(d + "/"):
             return False
     try:
@@ -30272,6 +30290,29 @@ def _nrd_write_forbidden(path, eff_cwd):
         for rel in _ORCH_REGISTRY_FILES:
             if f == "/" + rel or f.endswith("/" + rel):
                 return True
+    return _nrd_git_config_target(path, eff_cwd)
+
+
+def _nrd_git_config_target(path, eff_cwd):
+    """True when a write destination is git configuration that executes: any path at or below a
+    directory named .git (its config, which sets core.hooksPath, core.fsmonitor, core.sshCommand,
+    diff.external and filter drivers that the next ordinary git command runs; its hooks; its info and
+    worktree files), or a file or directory itself named .git (a gitdir pointer that re-points a later
+    git command at a repository the writer chose), and the user-level configuration files git reads on
+    every run (a file named .gitconfig, and a path ending in git/config, the XDG location). The
+    .git/hooks refusal above is the same class; this widens it to the whole repository control directory
+    and the user-level configuration. Both the lexical and the realpath spelling are judged; an
+    unresolvable destination is left to the caller's own check. Residual: configuration git reads from
+    elsewhere (an include.path target, a GIT_CONFIG_GLOBAL file, the system /etc/gitconfig written under
+    another name, or a worktree's .gitattributes naming a filter configured elsewhere) is not a refused
+    target."""
+    forms = _nrd_forms(path, eff_cwd)
+    if forms is None:
+        return False
+    for f in forms:
+        parts = f.split("/")
+        if ".git" in parts or parts[-1] == ".gitconfig" or parts[-2:] == ["git", "config"]:
+            return True
     return False
 
 
@@ -31052,6 +31093,419 @@ def _nrd_stdin_program(seg):
     return False
 
 
+# --- the unread-launch-target class ---------------------------------------------------------------------
+# A segment that runs an interpreter or sources a file is put IN SCOPE unless this guard can show that
+# every file it will execute or import lies outside the declared directories. The guard does not read
+# more to show that (it evaluates no expansion, no glob, no module search); it narrows instead: a launch
+# whose targets it cannot place is in scope, and in scope only the closed allowlist passes. The launch
+# words: the python family, the shells (the guard's shell words and the other common ones), source and
+# the dot builtin, eval, and the interpreters and command-running wrappers below. A word from these sets
+# ANYWHERE in a segment's words counts (fail closed: an argument that only looks like one, as in
+# `echo python3`, is judged as a launch too), and so does a command word that holds a slash (a path
+# run directly) or that the lexer reads as opaque.
+_NRD_LAUNCH_SHELLS = frozenset(_NRD_SHELL_WORDS | {"ash", "mksh", "rbash", "yash", "posh", "busybox",
+                                                   "fish", "csh", "tcsh"})
+_NRD_LAUNCH_WORDS = frozenset(("eval", "exec", "perl", "ruby", "node", "nodejs", "php", "lua", "tclsh",
+                               "Rscript", "awk", "gawk", "mawk", "nawk", "make", "gmake", "xargs", "find",
+                               "parallel", "nohup", "setsid", "stdbuf", "sudo", "su", "watch", "flock",
+                               "ionice", "taskset", "chrt", "strace", "ltrace", "nice", "time", "timeout",
+                               "env", "command", "builtin", "trap"))
+# Reserved words and grouping tokens skipped before a segment's command word.
+_NRD_RESERVED_LEAD = frozenset(("!", "{", "(", "if", "then", "elif", "else", "do", "while", "until"))
+# The PYTHON* environment names whose value places module or startup code (a ':'-separated directory
+# list, a prefix or a file); any PYTHON*= word the lexer reads as opaque makes every python launch in
+# the call unproven.
+_NRD_PY_PATH_NAMES = frozenset(("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSTARTUP",
+                                "PYTHONPLATLIBDIR", "PYTHONEXECUTABLE"))
+
+
+def _nrd_py_mode(args):
+    """(isolated, mode, target) for the words after a python-family word. isolated is True when -I or
+    -P stands before the mode (neither the working directory nor the script's directory is then put on
+    sys.path). mode is 'c' (target: the program text), 'm' (target: the module name), 'stdin' (no
+    script operand, or a - operand), 'script' (target: the script operand) or 'none' (the help and
+    version options, which run nothing). -W and -X take a value (attached, or the next word), as does
+    --check-hash-based-pycs; other long options are flags."""
+    isolated = False
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = args[i]
+        if tok == "-":
+            return (isolated, "stdin", None)
+        if tok == "--":
+            i += 1
+            break
+        if tok.startswith("--"):
+            if tok in ("--version", "--help", "--help-env", "--help-xoptions", "--help-all"):
+                return (isolated, "none", None)
+            i += 2 if tok == "--check-hash-based-pycs" else 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            skip = 0
+            for j, ch in enumerate(tok[1:], 1):
+                if ch in "IP":
+                    isolated = True
+                elif ch == "c":
+                    rest = tok[j + 1:]
+                    return (isolated, "c", rest if rest else (args[i + 1] if i + 1 < n else ""))
+                elif ch == "m":
+                    rest = tok[j + 1:]
+                    return (isolated, "m", rest if rest else (args[i + 1] if i + 1 < n else ""))
+                elif ch in "hV?":
+                    return (isolated, "none", None)
+                elif ch in "WX":
+                    skip = 0 if j + 1 < len(tok) else 1
+                    break
+            i += 1 + skip
+            continue
+        break
+    if i >= n:
+        return (isolated, "stdin", None)
+    return (isolated, "script", args[i])
+
+
+def _nrd_dir_reachable_from(base, dirs):
+    """True when a declared directory lies at or below base (either spelling of base), so a module
+    search rooted at base can import from it (namespace packages reach any descendant directory); also
+    True when base is inside a declared directory. base is a normalized absolute path."""
+    forms = _nrd_forms(base, None) or [base]
+    return any(_nrd_at_or_under(d, f) or _nrd_at_or_under(f, d) for f in forms for d in dirs)
+
+
+def _nrd_path_parts(value, cwd):
+    """The absolute directories one PATH-like value names (split on ':'), each relative part joined onto
+    cwd and an empty part read as cwd itself; None when a part cannot be placed (a relative or empty part
+    with no known working directory, or a part holding a '$' or starting with '~', which bash expands
+    in an assignment)."""
+    out = []
+    for part in value.split(":"):
+        if "$" in part or part.startswith("~") or "\x00" in part:
+            return None
+        if not part:
+            part = "."
+        placed = _nrd_abs_join(part, cwd)
+        if placed is None:
+            return None
+        out.append(placed)
+    return out
+
+
+class _NrdLaunchContext(object):
+    """Per-call inputs of the launch test, read once per scope scan: the hook interpreter's module
+    search directories (an approximation of the target interpreter's default sys.path), the hook
+    environment's PATH and PYTHONPATH values, and every PYTHON*=value assignment the command spells (in
+    any segment: an export persists to later segments of the same call)."""
+
+    def __init__(self, segments):
+        self.sys_dirs = None
+        self.sys_failed = False
+        self.env_path = os.environ.get("PATH")
+        self.env_pythonpath = os.environ.get("PYTHONPATH")
+        self.py_assigns = []
+        self.py_assign_opaque = False
+        for seg in segments:
+            for k, tok in enumerate(seg.argv):
+                name, sep, value = tok.partition("=")
+                name = name.rstrip("+")
+                if sep and name.startswith("PYTHON"):
+                    if seg.argv_opaque[k]:
+                        self.py_assign_opaque = True
+                    elif name in _NRD_PY_PATH_NAMES:
+                        self.py_assigns.append(value)
+
+    def module_dirs(self):
+        """The absolute module search directories of the hook interpreter (sys.path entries, the user
+        site directory and sysconfig's purelib and platlib); None when they cannot be read."""
+        if self.sys_dirs is None and not self.sys_failed:
+            try:
+                import site
+                import sysconfig
+                found = [p for p in sys.path if isinstance(p, str) and os.path.isabs(p)]
+                user_site = site.getusersitepackages()
+                if isinstance(user_site, str) and os.path.isabs(user_site):
+                    found.append(user_site)
+                paths = sysconfig.get_paths()
+                for key in ("purelib", "platlib"):
+                    value = paths.get(key)
+                    if isinstance(value, str) and os.path.isabs(value):
+                        found.append(value)
+                self.sys_dirs = tuple(os.path.normpath(p) for p in found)
+            except Exception:  # noqa: BLE001 - unreadable: every python launch is unproven (fail closed)
+                self.sys_failed = True
+        return None if self.sys_failed else self.sys_dirs
+
+    def path_hit(self, cwd, dirs):
+        """True when a PATH directory of the hook environment lies inside a declared directory, or a
+        relative or empty PATH entry cannot be placed (so a command word resolved through PATH may be a
+        declared file)."""
+        if not self.env_path:
+            return False
+        parts = _nrd_path_parts(self.env_path, cwd)
+        if parts is None:
+            return True
+        return any(_nrd_match(p, None, dirs) is True for p in parts)
+
+
+def _nrd_py_launch_unproven(args, cwd, dirs, ctx):
+    """True when a python-family run with these words may import or run a file inside a declared
+    directory that its words do not name: a module search directory (the hook interpreter's sys.path,
+    the hook environment's PYTHONPATH, or a PYTHON*= value the command assigns) at or above a declared
+    directory or unplaceable; or, without -I/-P, the directory Python puts first on sys.path (the
+    working directory for -c, -m and a stdin program; the script's directory for a script) at or above a
+    declared directory or unknown. A script operand that is relative while the working directory is
+    unknown cannot be placed either. Module names are never resolved: reaching the search root is
+    enough."""
+    isolated, mode, target = _nrd_py_mode(args)
+    if mode == "none":
+        return False
+    if ctx.py_assign_opaque:
+        return True
+    module_dirs = ctx.module_dirs()
+    if module_dirs is None:
+        return True
+    roots = list(module_dirs)
+    for value in ctx.py_assigns + ([ctx.env_pythonpath] if ctx.env_pythonpath else []):
+        parts = _nrd_path_parts(value, cwd)
+        if parts is None:
+            return True
+        roots.extend(parts)
+    if any(_nrd_dir_reachable_from(r, dirs) for r in roots):
+        return True
+    if mode == "script":
+        if not isinstance(target, str) or not target:
+            return True
+        script_forms = _nrd_forms(target, cwd)
+        if script_forms is None:
+            return True
+        if isolated:
+            return False
+        return any(_nrd_dir_reachable_from(os.path.dirname(f) or "/", dirs) for f in script_forms)
+    if isolated:
+        return False
+    if cwd is None:
+        return True
+    return _nrd_dir_reachable_from(cwd, dirs)
+
+
+def _nrd_shell_operand(args, word):
+    """The file operand a shell word or the source/dot builtin reads, or None when it reads none (a -c
+    body, a stdin program, a syntax check is still a read of its operand). For source and the dot builtin
+    the operand is the first word after an optional --; for a shell, the first word after its options
+    (each o or O letter of a single-dash cluster, and --rcfile/--init-file, take the next word)."""
+    i = 0
+    n = len(args)
+    if word in (".", "source"):
+        if i < n and args[i] == "--":
+            i += 1
+        return args[i] if i < n else None
+    while i < n:
+        tok = args[i]
+        if tok in ("-", "--"):
+            i += 1
+            break
+        if tok.startswith("--"):
+            i += 2 if tok in ("--rcfile", "--init-file") else 1
+            continue
+        if len(tok) > 1 and tok[0] in "-+":
+            if "c" in tok[1:]:
+                return None
+            i += 1 + tok[1:].count("o") + tok[1:].count("O")
+            continue
+        break
+    return args[i] if i < n else None
+
+
+def _nrd_redirect_expanded(r):
+    """True when a redirect target is opaque because the lexer read an expansion, glob, brace or tilde
+    in it, not only because it holds a '..' component or a relative dev/proc spelling (which the shared
+    classifier also marks opaque): a target the classifier would mark opaque WITHOUT the lexer's flag
+    counts only when its text holds one of $ ` * ? [ { ~."""
+    if r.target_class != "opaque":
+        return False
+    if not isinstance(r.target, str):
+        return True
+    if _target_class(r.target, False) != "opaque":
+        return True
+    return any(c in r.target for c in "$`*?[{~")
+
+
+def _nrd_wrapper_cwd(argv, oq, cwd):
+    """The working directory a launch in this segment runs in when a wrapper moves it: after an env word,
+    each -C/--chdir value (separate, attached or =-attached) and each sudo -D/--chdir value is resolved
+    against the directory so far; an opaque or unresolvable value makes it unknown (None). Read from
+    every token after the wrapper word (fail closed: a later program's own -C is read the same way)."""
+    wrapper = None
+    k = 0
+    while k < len(argv):
+        tok = argv[k]
+        word = tok.rsplit("/", 1)[-1]
+        if not oq[k] and word in ("env", "sudo"):
+            wrapper = word
+            k += 1
+            continue
+        if wrapper is not None:
+            flags = ("-C", "--chdir") if wrapper == "env" else ("-D", "--chdir")
+            value = None
+            if tok in flags:
+                if k + 1 >= len(argv) or oq[k + 1]:
+                    return None
+                value = argv[k + 1]
+                k += 1
+            elif tok.startswith("--chdir="):
+                value = tok[len("--chdir="):]
+            elif tok.startswith(flags[0]) and len(tok) > 2:
+                value = tok[2:]
+            if value is not None:
+                if oq[k]:
+                    return None
+                cwd = _nrd_abs_join(value, cwd)
+                if cwd is None:
+                    return None
+        k += 1
+    return cwd
+
+
+def _nrd_launch_unproven(seg, cwd, dirs, ctx):
+    """True when this segment runs an interpreter, sources a file, or runs a command-running wrapper,
+    and this guard cannot show that every file it will execute or import lies outside the declared
+    directories (the unread-launch-target class). cwd is the effective working directory the scope walk
+    knows, or None. Unproven: any word or input redirect target of the segment the lexer reads as opaque (an
+    expansion, glob, brace or tilde this guard does not evaluate), an ANSI-C or locale quote, or a tilde
+    after '=' or ':' in a word (bash expands it in an assignment); a python-family run whose module
+    search can reach a declared directory (_nrd_py_launch_unproven); a shell or source/dot operand
+    without a slash (bash searches PATH and the working directory for it) while the working directory is
+    unknown or a PATH directory lies inside a declared directory; a relative operand while the working
+    directory is unknown; and any launch while a PATH directory of the hook environment lies inside a
+    declared directory (the launched word itself is found through PATH)."""
+    argv = seg.argv
+    if not argv:
+        return False
+    oq = seg.argv_opaque
+    cwd = _nrd_wrapper_cwd(argv, oq, cwd)
+    launch = False
+    k = 0
+    while k < len(argv) and not oq[k] and (_ENV_ASSIGN_RE.match(argv[k]) or argv[k] in _NRD_RESERVED_LEAD):
+        k += 1
+    if k < len(argv) and (oq[k] or "/" in argv[k]):
+        launch = True
+    for j, tok in enumerate(argv):
+        if oq[j]:
+            continue
+        word = tok.rsplit("/", 1)[-1]
+        if _NRD_PY_WORD_RE.match(word):
+            launch = True
+            if _nrd_py_launch_unproven(argv[j + 1:], cwd, dirs, ctx):
+                return True
+        elif word in _NRD_LAUNCH_SHELLS or word in (".", "source"):
+            launch = True
+            operand = _nrd_shell_operand(argv[j + 1:], word)
+            if isinstance(operand, str) and operand and not os.path.isabs(operand):
+                if cwd is None:
+                    return True
+                if "/" not in operand and ctx.path_hit(cwd, dirs):
+                    return True
+        elif word in _NRD_LAUNCH_WORDS:
+            launch = True
+    if not launch:
+        return False
+    if any(oq) or any(r.op in ("<", "<>") and _nrd_redirect_expanded(r) for r in seg.redirects):
+        return True                         # an input target feeds the launch; an output target does not
+    if "$'" in seg.raw or '$"' in seg.raw:
+        return True
+    if any("=~" in tok or ":~" in tok for tok in argv):
+        return True
+    return ctx.path_hit(cwd, dirs)
+
+
+def _nrd_assigned_value_in(seg, cwd, dirs):
+    """True when the value of a NAME=value or --option=value word, or of a redirect target holding '=',
+    resolves into a declared directory: the text after the first '=' and each ':'-separated part of it,
+    relative parts joined onto the effective working directory (PYTHONPATH=drafts, BASH_ENV=drafts/x.sh,
+    PATH=drafts:/usr/bin, --rcfile=drafts/rc). A relative part with no known working directory is
+    judged like any relative operand (not in scope here)."""
+    words = list(seg.argv) + [r.target for r in seg.redirects
+                              if r.target_class != "descriptor" and isinstance(r.target, str)]
+    for tok in words:
+        _name, sep, value = tok.partition("=")
+        if not sep or not value:
+            continue
+        for part in [value] + value.split(":"):
+            if part and _nrd_match(part, cwd, dirs) is True:
+                return True
+    return False
+
+
+# --- re-reading an unreadable command (the false-refusal fix) --------------------------------------------
+# The lexer refuses an UNQUOTED here-document and a here-string. Two narrow re-readings let an ordinary
+# command of that shape be judged instead of refused whole, and ONLY to show it OUT of scope (in scope the
+# command still refuses whole, as before): (1) an unquoted here-document whose operator is followed, to the
+# end of the command, by no '$', backquote or backslash reads exactly like the quoted one (bash expands only
+# those three in such a body), so its delimiter is re-spelled quoted; (2) a here-string whose word is a
+# single-quoted string, a double-quoted string holding none of '$', backquote or backslash, or a plain word
+# of path characters is literal data, so it is re-spelled as a read of /dev/null. Each rewrite is made at
+# the exact position where the lexer stopped (its stop index), never by searching the text, and the result
+# is lexed in full again. The re-read command is then accepted only when every segment's command word is a
+# closed set of inert consumers (_NRD_REREAD_WORDS: the allowlist's readers plus echo, true, false, :, tee,
+# tr, cut, uniq, cd and mkdir), so the data never reaches an interpreter or any program that could run it.
+_NRD_REREAD_LIMIT = 16
+_NRD_REREAD_WORDS = frozenset(set(_NRD_READ_FORMS) | {"echo", "true", "false", ":", "tee", "tr", "cut",
+                                                      "uniq", "cd", "mkdir"})
+_NRD_HERESTRING_WORD_RE = re.compile(
+    r"[ \t]*(?:'[^']*'|\"[^\"$`\\]*\"|[A-Za-z0-9_.,:=+%@/-]+)(?=[ \t\n;&|)<>]|\Z)")
+_NRD_HEREDOC_DELIM_RE = re.compile(r"[A-Za-z0-9_.+@%,=-]+\Z")
+
+
+def _nrd_reread(command):
+    """The segments of the re-read command (see the block comment above), or None when the command
+    cannot be re-read: the lexer stops on anything other than an unquoted here-document or a here-string
+    of the accepted shapes, the rewrite count passes _NRD_REREAD_LIMIT, or a segment's command word is
+    outside _NRD_REREAD_WORDS (or is an assignment, a reserved word or opaque)."""
+    text = command
+    segments = None
+    for _round in range(_NRD_REREAD_LIMIT + 1):
+        try:
+            segments = _lex_command(text)
+            break
+        except ValueError as exc:
+            if _round >= _NRD_REREAD_LIMIT or str(exc) != "unsupported shell construct: <<":
+                return None
+            at = getattr(exc, "stop", None)
+            if not isinstance(at, int) or at < 0 or at >= len(text):
+                return None
+            while at < len(text) and text[at].isdigit():
+                at += 1                     # an IO_NUMBER glued to the operator (0<<EOF, 0<<<x)
+            if text.startswith("<<<", at):
+                m = _NRD_HERESTRING_WORD_RE.match(text, at + 3)
+                if m is None:
+                    return None
+                text = text[:at] + "< /dev/null" + text[m.end():]
+                continue
+            if not text.startswith("<<", at):
+                return None
+            if any(c in text[at:] for c in "$`\\"):
+                return None
+            parsed = _parse_heredoc_delim(text, at + 2, len(text))
+            if parsed is None or parsed[0]:
+                return None
+            _quoted, delim, _strip, nxt = parsed
+            spec = text[at + 2:nxt]
+            if not _NRD_HEREDOC_DELIM_RE.match(delim) or not spec.endswith(delim):
+                return None
+            lead = spec[:len(spec) - len(delim)]
+            if lead.strip(" \t") not in ("", "-"):
+                return None
+            text = text[:at + 2] + lead + "'" + delim + "'" + text[nxt:]
+    if segments is None:
+        return None
+    for seg in segments:
+        if not seg.argv:
+            continue
+        if seg.argv_opaque[0] or seg.argv[0] not in _NRD_REREAD_WORDS:
+            return None
+    return segments
+
+
 def _nrd_scope_scan(command, cwd, dirs, _depth=0):
     """The allowlist-by-construction judgement of one Bash command against the declared directories:
     (subject, why) to refuse, None to pass. SCOPE first: the command is in scope when its raw text (or
@@ -31070,11 +31524,19 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
     text is still reached. A command the lexer cannot read (an unquoted heredoc, a here-string, a
     process substitution, an unbalanced quote, a quoted heredoc the lexer cannot place) is IN SCOPE
     whenever any directory is declared (_nrd_unread_in_scope), and it has no segments to match, so it
-    refuses whole. Out of scope the command passes untouched. IN SCOPE the command passes only when
-    EVERY lexed segment matches the closed read-only allowlist (_nrd_segment_allowed). The residuals
-    are a command that reaches a declared file WITHOUT naming it or its directory and from an
-    undeclared working directory (a variable assigned in an earlier call, concatenation or an opaque
-    expansion, an alias file made elsewhere), a -c body behind a wrapper word the peel does not read,
+    refuses whole; the one exception is the narrow re-reading of an unquoted here-document or a
+    here-string (_nrd_reread), whose segments are walked for scope only and which passes only when the
+    walk finds it OUT of scope. A segment is also in scope when the value of a NAME=value or
+    --option=value word resolves into a declared directory (_nrd_assigned_value_in), and when it runs an
+    interpreter, sources a file or runs a command-running wrapper whose executed or imported files the
+    guard cannot place outside them (_nrd_launch_unproven: an expansion it does not evaluate, a python
+    module search rooted at or above a declared directory, an unknown working directory). Out of scope
+    the command passes untouched. IN SCOPE the command passes only when EVERY lexed segment matches the
+    closed read-only allowlist (_nrd_segment_allowed). The residuals are a command that reaches a
+    declared file WITHOUT naming it or its directory and from an undeclared working directory (a
+    variable assigned in an earlier call, concatenation at run time, an opaque expansion in a segment
+    that launches nothing listed, an alias file made elsewhere), a -c body behind a wrapper word the
+    peel does not read,
     and a program a non-shell, non-python interpreter or a wrapper outside the peel (xargs) reads from
     stdin: nothing in such a call's text or payload distinguishes it (disclosed in the manifest residue
     and ORCHESTRATION.md)."""
@@ -31082,17 +31544,24 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
     scope = (eff_cwd is not None and _nrd_match(eff_cwd, None, dirs) is True) \
         or _nrd_raw_names(command, dirs) \
         or _nrd_raw_names(_nrd_ansi_c_spelling(command), dirs)
+    reread = None
     try:
         segments = _lex_command(command)
     except ValueError:
         segments = None
         if _nrd_unread_in_scope(dirs):
-            scope = True
-    if segments is not None:
-        cdpath = _nrd_cdpath_active(segments)
+            # A command the lexer cannot read is in scope, unless a narrow re-reading of an unquoted
+            # here-document or a here-string (_nrd_reread) lexes whole and the walk below finds it OUT
+            # of scope; in scope it still refuses whole (the re-read segments are never allowlisted).
+            reread = None if scope else _nrd_reread(command)
+            scope = True if reread is None else scope
+    walk = segments if segments is not None else reread
+    if walk is not None:
+        ctx = _NrdLaunchContext(walk)
+        cdpath = _nrd_cdpath_active(walk)
         walk_cwd = eff_cwd
         cwd_lost = False
-        for seg in segments:
+        for seg in walk:
             if not scope and dirs and _nrd_stdin_program(seg):
                 # a shell or interpreter reading its program from stdin: the program is not in the
                 # lexed words, so nothing shows it names no declared directory (fail closed)
@@ -31120,6 +31589,14 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
             if not scope and (any(_nrd_match(tok, walk_cwd, dirs) is True for tok in seg.argv)
                               or any(_nrd_match(r.target, walk_cwd, dirs) is True
                                      for r in seg.redirects)):
+                scope = True
+            if not scope and _nrd_assigned_value_in(seg, walk_cwd, dirs):
+                # the value of an assignment or --option= word resolves into a declared directory
+                # (PYTHONPATH=drafts, BASH_ENV=drafts/x.sh, PATH=drafts:/usr/bin)
+                scope = True
+            if not scope and dirs and _nrd_launch_unproven(seg, None if cwd_lost else walk_cwd, dirs, ctx):
+                # an interpreter, source or command-running launch whose executed or imported files this
+                # guard cannot place outside the declared directories (the unread-launch-target class)
                 scope = True
             if cdpath and seg.argv:
                 w = 0
@@ -31202,12 +31679,15 @@ def _nrd_deny_text(subject, why):
         "deliverable directory (the registry's deliverable_dirs: the draft staging and hand-back "
         "directories): its text names one, an operand resolves into one, its working directory is "
         "inside one, a relative operand follows a cd or directory-stack word that loses the working "
-        "directory, a shell or python reads its program from stdin, or this guard's lexer cannot read "
-        "it. A worker-delivered file there is data until it is applied, so in that scope ONLY "
+        "directory, a shell or python reads its program from stdin, an assignment value resolves into "
+        "one, an interpreter or source launch has a target this guard cannot place outside them (an "
+        "expansion, glob, brace or tilde it does not evaluate, or a python module search from an "
+        "ancestor of one), or this guard's lexer cannot read it. A worker-delivered file there is data until it is applied, so in that scope ONLY "
         "a closed allowlist of read-only forms runs, each with its registered options: cat, wc, head, "
         "tail, ls, file, grep, diff, the coreutils hash tools, cp with the declared file only as a "
         "source and only where cp actually writes outside the declared directories, not under a "
-        ".git/hooks directory or at an orchestration registry file), git apply and "
+        ".git directory, at a .git, .gitconfig or git/config path, or at an orchestration registry "
+        "file), git apply and "
         "git diff --no-index from a working directory outside the declared directories, bash -n on one "
         "script operand, python3 -I (or a shell) running one script that is an existing regular file "
         "outside the declared directories, and cd to one literal absolute directory outside them. Take "
