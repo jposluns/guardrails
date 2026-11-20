@@ -7040,3 +7040,100 @@ expected-check-ids = [
   "cli/unexpected-exception-exit-2",
   "cli/unexpected-exception-exit-2/red-when-reverted",
 ]
+
+[[suite]]
+id = "merge-resolution-selftest"
+runner = "tools/check_merge_resolution.py"
+expected-check-ids = [
+  # taking one side whole
+  "whole-side/left-whole-drops-right-additions-fails",
+  "whole-side/right-whole-drops-left-additions-fails",
+  "whole-side/chosen-side-holds-other-additions-passes",
+  # hand resolutions, the whole file judged
+  "hand/keeps-both-sides-passes",
+  "hand/keeps-both-sides-other-order-passes",
+  "hand/clean-region-addition-dropped-fails",
+  # paths git merged without a conflict are judged too
+  "clean/git-merge-result-passes",
+  "clean/unconflicted-file-reverted-fails",
+  "clean/both-sides-changed-unconflicted-drop-fails",
+  "clean/ours-strategy-without-conflict-fails",
+  "clean/file-one-side-added-left-out-fails",
+  "clean/rename-carrying-edits-judged-passes",
+  "clean/rename-carrying-edits-dropped-edit-fails",
+  "clean/rename-on-the-right-judged-passes",
+  # no attribute outside the judged trees changes the replay
+  "attributes/worktree-and-info-attributes-do-not-change-replay",
+  "attributes/resolution-bringing-a-merge-driver-cannot-evaluate",
+  # declared omissions
+  "omission/undeclared-fails",
+  "omission/declared-passes",
+  "omission/whole-side-not-waived",
+  "omission/stale-cannot-evaluate",
+  "omission/wrong-text-cannot-evaluate",
+  "omission/malformed-cannot-evaluate",
+  "omission/declaring-every-addition-of-a-side-fails",
+  # occurrence and byte rules
+  "lines/duplicate-occurrence-counted",
+  "lines/duplicate-occurrence-kept-passes",
+  "lines/identical-additions-share-one-occurrence",
+  "lines/identical-additions-in-different-places-kept-once-fails",
+  "lines/identical-additions-in-different-places-kept-twice-passes",
+  "lines/moved-line-put-back-fails",
+  "lines/moved-line-kept-moved-passes",
+  "lines/crlf-compared-exactly",
+  "lines/final-newline-compared-exactly",
+  "lines/split-at-lf-only",
+  # file shapes
+  "shape/modify-delete-taking-delete-fails",
+  "shape/binary-cannot-evaluate",
+  "shape/symlink-cannot-evaluate",
+  "shape/rename-conflict-taking-one-side-fails",
+  "shape/rename-to-two-names-cannot-evaluate",
+  "shape/merge-driver-cannot-evaluate",
+  # fail closed on history that cannot be read
+  "fail-closed/unreadable-side",
+  "fail-closed/unreadable-base",
+  "fail-closed/no-merge-base",
+  "fail-closed/multiple-merge-bases",
+  # recorded merges and the CI audit range
+  "commit/recorded-merge-judged-with-message-declaration",
+  "audit/earlier-lossy-merge-restored-later-still-fails",
+  "audit/train-branch-member-merges-audited",
+  "audit/upstream-missing-cannot-evaluate-on-any-branch",
+  "audit/upstream-unreadable-cannot-evaluate",
+  # the generated exemption
+  "generated/regenerated-release-files-pass",
+  "generated/stale-release-files-fail",
+  "generated/noncanonical-output-fails",
+  "generated/generator-absent-cannot-evaluate",
+  "generated/exemption-does-not-cover-sources",
+  "generated/resolution-edited-generator-fails",
+  "generated/regenerated-attributes-and-frozen-pass",
+  "generated/stale-frozen-fails",
+  "generated/merged-generator-module-passes",
+  "generated/resolution-edited-generator-module-fails",
+  "generated/conflicted-generator-module-kept-both-passes",
+  "generated/conflicted-generator-module-added-line-fails",
+  # paths no side changed and conflict markers
+  "untouched/keeps-base-entries-passes",
+  "untouched/edit-to-path-no-side-changed-fails",
+  "untouched/file-only-the-resolution-adds-fails",
+  "markers/conflict-marker-left-in-fails",
+  "markers/marker-shaped-line-a-side-added-passes",
+  "markers/marker-shaped-line-both-sides-added-passes",
+  # base lines both sides kept
+  "base-lines/kept-base-line-deleted-fails",
+  "base-lines/declared-base-line-omission-passes",
+  "base-lines/kept-base-line-moved-passes",
+  "base-lines/kept-base-line-dropped-beside-a-side-copy-fails",
+  # the train entry point
+  "train/dropped-line-records-no-commit",
+  "train/kept-resolution-records-checked-merge",
+  "train/failed-git-merge-start-removes-pin",
+  "train/member-merges-regenerated-pass-the-audit",
+  # the report
+  "report/result-line-names-what-failed",
+  # the command line
+  "refuse/unrecognized-argument",
+]

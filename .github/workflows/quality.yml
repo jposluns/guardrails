@@ -973,6 +973,18 @@ jobs:
             fi
           fi
 
+      - name: Merge resolution self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite merge-resolution-selftest
+
+      # Every two-parent merge commit in HEAD^1..HEAD and in origin/main..HEAD (that ref must resolve): on a
+      # pull request, the merges the branch brings in (a merge train's member merges included), each
+      # replayed from its parents and judged on its recorded tree, every file either parent changed. The
+      # job checks out the full history (fetch-depth: 0); a shallow clone fails closed.
+      - name: Merge resolution keeps both sides
+        shell: bash
+        run: python3 -I -B tools/check_merge_resolution.py --audit-merges
+
       - name: Version monotonicity self-test
         shell: bash
         run: python3 -I -B tools/check_version_monotonicity.py --self-test

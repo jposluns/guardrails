@@ -9,3 +9,17 @@ id = "refuse/moved-suite-counts"
 state = "unreachable"
 capability-removed = "the move rule of tools/check_selftest_removal.py, introduced in the change series that also adds this record: a check id newly registered in another suite with the same launch (runner path and args) and the same check() body, not generic, is reported as moved, not removed, so the refusal of a move that this row asserted no longer exists"
 observed = "pass/moved-between-suites runs the same fixture (check id c moved from suite s to suite t, one runner) and asserts exit 0; refuse/move-target-held-at-base, refuse/move-absorbs-one-removal, refuse/move-other-body, refuse/move-other-runner, refuse/move-other-args, refuse/move-body-generic and refuse/move-live-generic-twin assert the refusals that remain"
+
+[[removal]]
+suite = "merge-resolution-selftest"
+id = "clean/rename-carrying-edits-cannot-evaluate"
+state = "unreachable"
+capability-removed = "the cannot-evaluate refusal of a clean merge that carries one side's edits along the other side's rename: tools/check_merge_resolution.py now follows every rename on both sides and judges the renamed path, so git's correct merge of a rename and an edit is judged, not refused with exit 2"
+observed = "clean/rename-carrying-edits-judged-passes runs the same fixture (old.txt renamed on the left, edited on the right, git's merge as the result) and asserts exit 0; clean/rename-carrying-edits-dropped-edit-fails asserts exit 1 when the result drops the edit, and clean/rename-on-the-right-judged-passes runs the mirror image"
+
+[[removal]]
+suite = "merge-resolution-selftest"
+id = "shape/rename-cannot-evaluate"
+state = "unreachable"
+capability-removed = "the cannot-evaluate refusal of a rename both sides edited: tools/check_merge_resolution.py now follows the rename, so a result taking one side of that conflict whole is judged and refused with exit 1 instead of exit 2"
+observed = "shape/rename-conflict-taking-one-side-fails runs the same fixture (old.txt renamed and edited on the left, edited on the right, the left tree as the result) and asserts exit 1 naming the dropped right line; shape/rename-to-two-names-cannot-evaluate asserts that a rename the gate cannot follow stays exit 2"
