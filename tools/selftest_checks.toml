@@ -7443,6 +7443,17 @@ expected-check-ids = [
   "growth/anchor-attributes-linear/red-when-reverted",
   "growth/reference-uses-linear",
   "growth/reference-uses-linear/red-when-reverted",
+  "growth/complete-anchors-linear",
+  "growth/complete-anchors-linear/red-when-reverted",
+  "growth/reference-uses-on-lines-linear",
+  "growth/reference-uses-on-lines-linear/red-when-reverted",
+  "growth/reference-uses-in-paragraphs-linear",
+  "growth/reference-uses-in-paragraphs-linear/red-when-reverted",
+  # the two URL copy paths no placeholder covers reach the copy bound (cannot evaluate) in bounded time
+  "growth/copied-reference-urls-bounded",
+  "growth/copied-reference-urls-bounded/red-when-reverted",
+  "growth/given-back-reference-urls-bounded",
+  "growth/given-back-reference-urls-bounded/red-when-reverted",
   "scale/classification-matches-rescanning-reading",
   "scale/reference-placeholders-read-as-urls",
   "scale/html-link-finder-matches-regex",
@@ -7514,6 +7525,11 @@ expected-check-ids = [
   "config/escaping-path",
   "config/limit-out-of-range",
   "input/unreadable-declared-file",
+  # the size bound at its ends, on a file and on a draft given as bytes
+  "input/size-under-bound-read",
+  "input/size-at-bound-read",
+  "input/size-over-bound-refused",
+  "input/draft-over-bound-refused",
   "input/draft-type-checked-on-descriptor",
   "input/draft-symlink-refused",
   "input/draft-fifo-refused-without-blocking",
@@ -7526,6 +7542,7 @@ expected-check-ids = [
   # the command line and the real tree
   "cli/unrecognized-arguments-exit-2",
   "live/real-tree-inputs-valid",
+  "live/real-records-within-half-the-size-bound",
   # staged content, draft application and the commit adapter
   "staged/uses-staged-bytes",
   "staged/complete-unit-evaluated",

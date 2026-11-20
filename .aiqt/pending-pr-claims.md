@@ -27,8 +27,9 @@ cannot-evaluate (exit 2), never a pass.
 | `changelog.toml` | `toml-strings`: every decoded string value is a unit; comments are not read | source (`CHANGELOG.md` is generated from it) |
 | `TODO.md` | `markdown`, with `Status` as the status column | generated view of the maintainer's private backlog; a correction belongs in that source |
 
-A declared surface that is missing, not a regular file, larger than 4 MiB, not UTF-8 or malformed (TOML
-that does not parse, a fenced block or HTML comment block never closed) is cannot-evaluate. Each file (a declared surface or
+A declared surface that is missing, not a regular file, larger than 64 KiB (65,536 bytes; see Running
+time), not UTF-8 or malformed (TOML that does not parse, a fenced block or HTML comment block never
+closed) is cannot-evaluate; a draft or staged blob over that size is too. Each file (a declared surface or
 a draft) is opened once without following a symlink and without waiting on a FIFO, and its type is
 checked on that open descriptor. In `--staged`, a declared surface whose index entry is not a regular
 file (mode `100644` or `100755`; a symlink `120000` or a gitlink is refused), is unmerged or is absent
@@ -236,6 +237,35 @@ one or more findings, evaluation otherwise complete. Exit 2: incomplete evaluati
 still printed beside the unknowns) or a usage error. No candidates means only that no supported current
 claim was found.
 
+## Running time
+
+Running time is bounded in two layers. Neither covers reading pull request state, which has its own
+bounds (State source).
+
+1. Each step that reads a document is meant to run in time linear in its size. The self-test shows
+   this only for the shapes its growth rows time: each row times the whole check at two sizes eight
+   times apart and passes when the time grows at most sixteen times, and its red leg, with that shape's
+   quadratic form put back, must grow more. The rows cover seventeen shapes, among them complete HTML
+   anchors on one line and one long reference link definition used on one line, on many lines and in
+   many paragraphs (a document's definitions are worked out once, in one table its units and scanned
+   lines share). A shape no row times is not shown to be linear. Where a definition URL is still copied
+   into the text (a URL holding a parenthesis, a square bracket or a backtick is copied into each use, and
+   a URL the markdown-link step does not read whole, as in `[a]( [x)]`, is given back in full), the copied
+   text is read and quoted as written, so n uses of a URL of length L cost n * L. Those copies are
+   bounded: a document whose reference links would copy more than eight characters of URL per byte of
+   the document, plus 65,536, is cannot-evaluate (exit 2). Two growth rows reach that bound on each copy
+   path, and their red legs (the bound removed) grow more.
+2. Defence in depth for a superlinear path no row has found: a declared surface, draft or staged blob
+   larger than 64 KiB is cannot-evaluate (exit 2). The bound was set from the real records the check
+   reads: the largest declared surface at any commit of this repository was 24,834 bytes (`TODO.md`;
+   `changelog.toml` at most 2,728 bytes), and 64 KiB is 2.6 times that. The self-test fails when a
+   declared surface grows past half the bound, so that the bound is measured again first. The slowest
+   residual known is the report itself: each finding, warning and cannot-evaluate line quotes its whole
+   clause, built in memory, so n references bound in one clause of length L (n claims, or one claim
+   naming n joined references, a Status cell included) give n * L characters. At 64 KiB that shape took
+   about 3 seconds on the host it was measured on (2026-11-20) to build about 860 million characters
+   of report, not counting the time to print it. A path not yet found can be slower than that.
+
 ## Residuals
 
 - A prose grammar cannot be complete, and this one is partial: an unfamiliar paraphrase, a pronoun,
@@ -314,6 +344,9 @@ claim was found.
   warn although the joined unit exempts or resolves it. Comments in a `toml-strings` surface are not
   read or scanned. Struck-through text, historical spans and single-line comments inside a line read in
   full are grammar exemptions and are not scanned.
+- The running-time bounds refuse rather than read: a record over 64 KiB, or one whose reference links
+  would copy definition URLs past the copy bound (Running time), is cannot-evaluate (exit 2), and none
+  of its claims is evaluated. The time stated for the size bound is one measurement on one host.
 - A named backlog item is not resolved to a pull request: only explicit references bind.
 - State can change after it is read (a closed pull request can be reopened); the API read and the file
   write are not one transaction.

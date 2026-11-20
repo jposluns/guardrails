@@ -59,21 +59,36 @@ added inside a blockquote that has a historical lead-in, and an issue claim (iss
 never read). A cue further back than the words directly before a claim is not seen, so that claim
 stays a finding. An imperative-looking `Open #N` at a clause start warns instead of finding.
 
-RUNNING TIME: every step that reads a document is meant to run in time linear in its size; that is
-shown only for the shapes the self-test times. Its growth rows time the whole check at two sizes, eight
-times apart, on fourteen shapes: unclosed comment, link bracket, anchor and quotation openers; an anchor
-tag with many href attributes; many uses of one long reference link definition; a line of list markers;
-lazy lines under many open list items; claims, and joined references, in one clause; and four paragraph
-shapes (closed comments, unclosed comment openers, code spans beside comments, comments cut across
-lines). A row passes when the time grows at most sixteen times, and its red leg, with that shape's
-quadratic form put back, must grow more. A shape the rows do not time is not shown to be linear.
-Remaining limits: each finding, warning and cannot-evaluate line quotes its whole clause or line, and
-these lines are built in memory, so n references bound in one clause of length L (n claims, or one claim
-naming n joined references, a Status cell included) give n * L characters and the run takes time in
-proportion to them (quadratic in the worst case). A reference link whose definition URL holds a
-parenthesis, a square bracket or a backtick, or whose inline form the markdown-link step does not read
-whole, still has its URL copied into the text, so n such uses of a URL of length L read n * L
-characters. Reading pull request state (tools/_pr_state.py) is outside these rows.
+RUNNING TIME is bounded in two layers.
+
+First, every step that reads a document is meant to run in time linear in its size; that is shown only
+for the shapes the self-test times. Its growth rows time the whole check at two sizes, eight times
+apart, on seventeen shapes: unclosed comment, link bracket, anchor and quotation openers; complete
+anchors on one line; an anchor tag with many href attributes; many uses of one long reference link
+definition, on one line, on many lines and in many paragraphs; a line of list markers; lazy lines under
+many open list items; claims, and joined references, in one clause; and four paragraph shapes (closed
+comments, unclosed comment openers, code spans beside comments, comments cut across lines). A row
+passes when the time grows at most sixteen times, and its red leg, with that shape's quadratic form put
+back, must grow more. A shape the rows do not time is not shown to be linear. One table of a document's
+link reference definitions serves all its units and scanned lines, so a definition's URL is read once.
+
+Where a URL is still copied into the text (a definition URL holding a parenthesis, a square bracket or
+a backtick, copied into each use, or a placeholder the markdown-link step leaves, as in `[a]( [x)]`, given
+its URL back), n uses of a URL of length L read n * L characters, and the clause they land in is quoted
+as copied. Those copies are bounded instead: past eight characters of URL per byte of the document plus
+65,536 the document is cannot-evaluate (exit 2), and two growth rows show that bound reached on each
+copy path, with their red legs (the bound removed) growing more.
+
+Second, a defence in depth for a superlinear path no row has found: a declared surface, a draft or a
+staged blob larger than MAX_BYTES (64 KiB) is cannot-evaluate (exit 2). The bound was set from the real
+records: the largest declared surface at any commit of this repository was 24,834 bytes (TODO.md), and
+64 KiB is 2.6 times that; the self-test fails when a declared surface passes half the bound. The
+slowest residual known: each finding, warning and cannot-evaluate line quotes its whole clause or line,
+built in memory, so n references bound in one clause of length L (n claims, or one claim naming n
+joined references, a Status cell included) give n * L characters and take time in proportion
+(quadratic). At the bound that shape took about 3 seconds on the host it was measured on (2026-11-20)
+to build its report of about 860 million characters, not counting the time to print it; a path no one
+has found can be slower. Reading pull request state (tools/_pr_state.py) is outside these bounds.
 """
 import sys
 
@@ -103,7 +118,14 @@ import _pr_state  # noqa: E402  (the lifecycle reader beside this checker)
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_REL = ".aiqt/pending-pr-claims.toml"
-MAX_BYTES = 4 * 1024 * 1024
+# The size bound on a declared surface, a draft and a staged blob: larger is cannot-evaluate (exit 2). It
+# is set from the real records, not from what the reader could take: the largest declared surface at
+# any commit of this repository was 24,834 bytes (TODO.md; changelog.toml at most 2,728), and 64 KiB is
+# 2.6 times that. The bound caps the residual superlinear paths (module docstring, RUNNING TIME): the
+# slowest known, n references joined in one clause, took about 3 seconds at this size on the
+# host it was measured on (2026-11-20), building its report (printing it not counted). The self-test fails when a declared surface grows past half the
+# bound, so the bound is measured again before a record outgrows its margin.
+MAX_BYTES = 64 * 1024
 FORMATS = ("toml-strings", "markdown")
 ROLES = ("source", "generated-view")
 TOP_KEYS = {"schema-version", "limits", "surface"}
@@ -299,9 +321,10 @@ def _header_name(cell):
 
 
 # A definition URL in a resolved reference link is written as a placeholder, NUL, the URL's index in
-# the prose's targets, NUL, so each use costs its own length, not the URL's (a Markdown document never
-# holds a NUL: _decode refuses one). Only a URL of characters the steps before the markdown-link step
-# and the code-span reading treat alike (PLACEHOLDER_URL_RE) is written so; any other URL is copied.
+# the document's targets (_Definitions), NUL, so each use costs its own length, not the URL's (a
+# Markdown document never holds a NUL: _decode refuses one). Only a URL of characters the steps before
+# the markdown-link step and the code-span reading treat alike (PLACEHOLDER_URL_RE) is written so; any
+# other URL is copied (and charged to the URL copy bound, below).
 REFERENCE_TARGET_RE = re.compile("\x00([0-9]+)\x00")
 PLACEHOLDER_URL_RE = re.compile(r"[^\s()<>\[\]`\x00]+")
 # Definition URLs are written as placeholders (True). The self-test sets it False, copying each URL into
@@ -324,40 +347,121 @@ def _link_stand_in(url):
     return ""
 
 
+# The URL copy bound: a Markdown document's reference links may copy at most URL_COPY_FACTOR characters
+# of definition URL per byte of the document, plus URL_COPY_FLOOR, into the text read; past it the
+# document is cannot-evaluate (exit 2). A URL is copied where no placeholder can stand for it: a URL
+# PLACEHOLDER_URL_RE refuses is copied into each use, and a placeholder the markdown-link step does not
+# consume is given its URL back (_with_targets). Later steps read the copied text, and the clause it
+# lands in is quoted, so n uses of a URL of length L read n * L characters; the bound keeps that work
+# linear in the document. The real records never come near it (they hold no reference link definition).
+URL_COPY_FACTOR = 8
+URL_COPY_FLOOR = 65536
+# The copy bound is enforced (True). The self-test sets it False, copying without a bound, for a growth
+# row's red leg.
+URL_COPY_BOUNDED = True
+
+
+class _CopyBudget:
+    """The characters of definition URL a document's reference links may still copy (URL_COPY_FACTOR)."""
+
+    def __init__(self, label, size):
+        self.label, self.limit = label, URL_COPY_FACTOR * size + URL_COPY_FLOOR
+        self.left = self.limit
+
+    def charge(self, count):
+        """Spend count characters; InputError (cannot evaluate) once more than the bound is spent."""
+        if not URL_COPY_BOUNDED or not count:
+            return
+        self.left -= count
+        if self.left < 0:
+            raise InputError("{}: its reference links would copy more than {} characters of definition URLs "
+                             "into the text read ({} per byte of the document plus {}), a bound on running "
+                             "time".format(self.label, self.limit, URL_COPY_FACTOR, URL_COPY_FLOOR))
+
+
+class _Targets(list):
+    """A document's (URL, stand-in) pairs, placeholder k naming item k, with its copy budget (or None)."""
+    budget = None
+
+
+class _Definitions(dict):
+    """A document's link reference definitions (a label's key -> its URL), with what a use of each is
+    written as worked out once per definition: whether its URL is written as a placeholder (it is read
+    whole for PLACEHOLDER_URL_RE once) and its stand-in (_link_stand_in, also once). One table serves
+    every record unit and every scanned raw line of the document, so n units or lines using one long
+    definition read its URL once, not n times. targets is the document's one list of (URL, stand-in)
+    pairs, placeholder k naming targets[k]; a _LinkedProse carries that list, never a copy of it. budget
+    is the document's _CopyBudget (None: unbounded), charged for every URL copied in."""
+
+    def __init__(self, pairs=(), budget=None):
+        super().__init__(pairs)
+        # A definition's key -> (its placeholder, True) or (its URL, False) when it cannot be one.
+        self.written = {}
+        self.targets = _Targets()
+        self.targets.budget = self.budget = budget
+
+    def copied(self, url):
+        """url, charged to the budget: a use that copies it into the text."""
+        if self.budget is not None:
+            self.budget.charge(len(url))
+        return url
+
+    def use(self, key):
+        """(what a use of key's definition is written as, True when that is a placeholder)."""
+        written = self.written.get(key)
+        if written is None:
+            url = self[key]
+            if PLACEHOLDER_URL_RE.fullmatch(url):
+                self.targets.append((url, _link_stand_in(url)))
+                written = ("\x00{}\x00".format(len(self.targets) - 1), True)
+            else:
+                written = (url, False)
+            self.written[key] = written
+        return written
+
+
+# One _Definitions table is shared by a document's units and its scanned lines (True). The self-test sets
+# it False, working each definition out again for every unit and line, for a growth row's red leg.
+SHARED_DEFINITIONS = True
+
+
 def _resolve_reference_links(prose, definitions):
     """prose with each reference link whose label is defined in the document rewritten as the inline
     link it stands for, so the markdown-link step reads its URL; an undefined one is left as text.
     Brackets inside a code span are inert (code_spans), as to the markdown-link step. The URL is written
     as a placeholder where it can be (REFERENCE_TARGET_RE; a _LinkedProse carries the URLs), and _normalize
     gives the markdown-link step a stand-in it reads as the URL and puts the URL back in any placeholder
-    that step leaves, so the text read is the text the copied URL would give."""
-    targets, written = [], {}   # written: a definition's key -> its URL or placeholder
+    that step leaves, so the text read is the text the copied URL would give. definitions is the
+    document's _Definitions table (a plain dict is given a table of its own, with no copy bound); a URL
+    copied into a use is charged to its copy budget."""
+    if not definitions:
+        return prose
+    if not isinstance(definitions, _Definitions) or not SHARED_DEFINITIONS:
+        definitions = _Definitions(definitions, getattr(definitions, "budget", None))
     placeholders = REFERENCE_PLACEHOLDERS and "\x00" not in prose
+    linked = False
 
     def replace(match):
+        nonlocal linked
         bang, text, label = match.group(1), match.group(2), match.group(3)
         key = " ".join((label if label else text).split()).casefold()
         if key not in definitions:
             return match.group(0)
-        if key not in written:
-            url = definitions[key]
-            if placeholders and PLACEHOLDER_URL_RE.fullmatch(url):
-                targets.append((url, _link_stand_in(url)))
-                url = "\x00{}\x00".format(len(targets) - 1)
-            written[key] = url
-        return "{}[{}]({})".format(bang, text, written[key])
-    if not definitions:
-        return prose
+        if not placeholders:
+            return "{}[{}]({})".format(bang, text, definitions.copied(definitions[key]))
+        written, placeheld = definitions.use(key)
+        linked = linked or placeheld
+        return "{}[{}]({})".format(bang, text, written if placeheld else definitions.copied(written))
     flags = _code_flags(prose)
     if flags is None:
         resolved = REFERENCE_LINK_RE.sub(replace, prose)
     else:
         resolved = _masked_sub(REFERENCE_LINK_RE, replace, prose, flags, True)[0]
-    if not targets:
+    if not linked:
         return resolved
-    linked = _LinkedProse(resolved)
-    linked.targets = tuple(targets)
-    return linked
+    resolved = _LinkedProse(resolved)
+    resolved.targets = definitions.targets
+    return resolved
 
 
 # The kinds block_context gives a Markdown line. The first five are never read: a blank line, a line
@@ -969,7 +1073,7 @@ def markdown_units(text, label, status_column=None, hidden=None):
         blocks = block_context(lines)
     except InputError as exc:
         raise InputError("{}: {}".format(label, exc))
-    definitions = {}
+    definitions = _Definitions(budget=_CopyBudget(label, len(text)))
     para, para_line = [], 0
     quote, quote_line = [], 0
     quote_numbers = []    # the line numbers of the open blockquote
@@ -1346,6 +1450,11 @@ def _markdown_link_matches(text):
         position = found.end()
 
 
+# The HTML link finder keeps the next line feed it found until the search passes it (True). The self-test
+# sets it False, seeking the line end again after each tag, for a growth row's red leg.
+KEPT_LINE_ENDS = True
+
+
 def _html_link_matches(text):
     """HTML_LINK_RE.finditer(text). An anchor tag ends at the first `>` after its `<a` (no part of the tag
     pattern can hold a `>`), so a start matches exactly when an href attribute (HTML_HREF_RE) lies between
@@ -1353,10 +1462,12 @@ def _html_link_matches(text):
     The two are sought apart, the href inside the tag and the closer after it, and HTML_LINK_RE is run
     only at a start where it matches, so it never retries each href of a tag against a missing closer.
     A failed start shows every `<a` before that `>` fails too; a tag whose line has no `</a>` shows every
-    later tag ending on that line has none either; and the next closer found is kept until the search
-    passes it, so the text after the tags is read for a closer once."""
+    later tag ending on that line has none either; and the next closer found, and the next line feed
+    found, are each kept until the search passes them, so the text after the tags is read for a closer
+    once and for a line end once (n complete anchors on one line do not each read the rest of it)."""
     position, no_close_before = 0, -1
     closer, closer_from = None, len(text) + 1   # the first closer at or after closer_from
+    line_end = -1   # the first line feed after the last tag end it was sought from, or len(text)
     while True:
         opener = HTML_ANCHOR_OPEN_RE.search(text, position)
         if opener is None:
@@ -1368,8 +1479,11 @@ def _html_link_matches(text):
         if tag_end >= no_close_before and HTML_HREF_RE.search(text, start + 3, tag_end) is not None:
             if closer_from > tag_end + 1 or (closer is not None and closer.start() <= tag_end):
                 closer, closer_from = HTML_ANCHOR_CLOSE_RE.search(text, tag_end + 1), tag_end + 1
-            line_end = text.find("\n", tag_end + 1)
-            line_end = len(text) if line_end < 0 else line_end
+            if line_end <= tag_end or not KEPT_LINE_ENDS:
+                # No line feed lies between the tag end the kept one was sought from and it, so it is
+                # still the first after this tag end while it lies past this tag end.
+                line_end = text.find("\n", tag_end + 1)
+                line_end = len(text) if line_end < 0 else line_end
             found = (HTML_LINK_RE.match(text, start) if closer is not None and closer.start() < line_end
                      else None)
             if found is not None:
@@ -1579,9 +1693,14 @@ def _reading_targets(link, targets):
 def _with_targets(text, flags, targets):
     """(text, flags) with each placeholder replaced by the URL it stands for, every character of it
     flagged as the placeholder is (no code span starts or ends inside one: it holds no backtick; one can
-    still lie inside a code span when a URL copied into the text brought a backtick)."""
+    still lie inside a code span when a URL copied into the text brought a backtick). The URLs given
+    back are charged to the targets' copy budget (_CopyBudget) before any of them is copied."""
+    placeholders = list(REFERENCE_TARGET_RE.finditer(text))
+    budget = getattr(targets, "budget", None)
+    if budget is not None:
+        budget.charge(sum(len(targets[int(found.group(1))][0]) for found in placeholders))
     pieces, out_flags, last = [], bytearray(), 0
-    for found in REFERENCE_TARGET_RE.finditer(text):
+    for found in placeholders:
         url = targets[int(found.group(1))][0]
         pieces.extend((text[last:found.start()], url))
         if flags is not None:
@@ -2016,6 +2135,8 @@ def judge_draft_bytes(root, target, data, transport=None, git_runner=_pr_state.r
         surface = _declared(config, target)
         if surface is None:
             raise InputError("{}: is not a declared surface in {}".format(target, CONFIG_REL))
+        if len(data) > MAX_BYTES:
+            raise InputError("{}: draft larger than {} bytes".format(target, MAX_BYTES))
         candidates = collect([(surface, data)])
     except InputError as exc:
         print("CANNOT EVALUATE: {}".format(exc), file=sys.stderr)
@@ -2871,8 +2992,9 @@ def _tag_retrying_html_link_matches(text):
         position = tag_end + 1
 
 
-def _growth(text_of, n, state):
-    """(growth, [seconds at n, seconds at GROWTH_FACTOR * n]) for the whole check on text_of's shape."""
+def _growth(text_of, n, state, refused=False):
+    """(growth, [seconds at n, seconds at GROWTH_FACTOR * n]) for the whole check on text_of's shape. When
+    refused, a run the check ends with InputError (cannot evaluate) is timed to that end."""
     import time
     table = {(REPO, 17): state}
     texts = [text_of(n), text_of(GROWTH_FACTOR * n)]
@@ -2881,7 +3003,11 @@ def _growth(text_of, n, state):
     for _ in range(GROWTH_REPEATS):
         for index, text in enumerate(texts):
             start = time.perf_counter()
-            _judge(text, table)
+            try:
+                _judge(text, table)
+            except InputError:
+                if not refused:
+                    raise
             took = time.perf_counter() - start
             seconds[index] = took if seconds[index] is None else min(seconds[index], took)
     return seconds[1] / max(seconds[0], 1e-9), [round(value, 4) for value in seconds]
@@ -2942,10 +3068,48 @@ def _growth_rows(m):
              {"STEP_FINDERS": {**STEP_FINDERS, HTML_LINK_RE: _tag_retrying_html_link_matches}}),
             ("growth/reference-uses-linear", "growth/reference-uses-linear/red-when-reverted",
              lambda n: "[x]: https://example.com/" + "a" * n + "\n\n" + "[x] " * n + "\n" + GROWTH_CLAIM,
-             "merged", 300, {"REFERENCE_PLACEHOLDERS": False})):
+             "merged", 300, {"REFERENCE_PLACEHOLDERS": False, "URL_COPY_BOUNDED": False}),
+            # Complete anchors on one line, each followed by a search for the line's end (in a fenced
+            # block, scanned for hidden references, so the line's other steps stay small beside it).
+            ("growth/complete-anchors-linear", "growth/complete-anchors-linear/red-when-reverted",
+             lambda n: "```\n" + "<a href=\"x\">y</a> " * n + "\n```\n" + GROWTH_CLAIM, "merged", 8000,
+             {"KEPT_LINE_ENDS": False}),
+            # One long definition used on n lines, and in n paragraphs: its URL is read once per document.
+            ("growth/reference-uses-on-lines-linear", "growth/reference-uses-on-lines-linear/red-when-reverted",
+             lambda n: "[x]: https://example.com/" + "a" * (8 * n) + "\n\n" + "[x]\n" * n + GROWTH_CLAIM,
+             "merged", 400, {"SHARED_DEFINITIONS": False}),
+            ("growth/reference-uses-in-paragraphs-linear",
+             "growth/reference-uses-in-paragraphs-linear/red-when-reverted",
+             lambda n: "[x]: https://example.com/" + "a" * (8 * n) + "\n\n" + "[x]\n\n" * n + GROWTH_CLAIM,
+             "merged", 300, {"SHARED_DEFINITIONS": False})):
         growth, seconds = _growth(text_of, n, state)
         check(name, growth <= GROWTH_LIMIT, (growth, seconds))
         growth, seconds = _with_globals(quadratic, lambda: _growth(text_of, n, state))
+        check(red_name, growth > GROWTH_LIMIT, (growth, seconds))
+    # The two URL copy paths no placeholder covers: a definition URL PLACEHOLDER_URL_RE refuses (copied
+    # into each use), and a placeholder the markdown-link step leaves ([a]( [x)] reads `[a]( [x)` as the
+    # link, so the URL is given back). Their text is read and quoted as copied, so n uses of a URL of
+    # length L are n * L characters of work; the copy bound (URL_COPY_FACTOR) makes that cannot-evaluate
+    # once it passes a multiple of the document's size. Each row's small input is evaluated (its one
+    # finding) and its large one refused naming the bound, and the time grows at most GROWTH_LIMIT times;
+    # with the bound removed, the large input is evaluated in time growing more (the red leg).
+    for name, red_name, text_of, n in (
+            ("growth/copied-reference-urls-bounded", "growth/copied-reference-urls-bounded/red-when-reverted",
+             lambda n: "[x]: https://example.com/" + "a" * n + "(b)\n\n" + "[x] " * n + "\n" + GROWTH_CLAIM, 100),
+            ("growth/given-back-reference-urls-bounded",
+             "growth/given-back-reference-urls-bounded/red-when-reverted",
+             lambda n: "[x)]: https://example.com/" + "a" * n + "\n\n" + "[a]( [x)] " * n + "\n" + GROWTH_CLAIM,
+             100)):
+        small = _judged_as(_code_span_leg({}, text_of(n), m, MD_SURFACE), 1, [(REPO, 17)], 0)
+        try:
+            _judge(text_of(GROWTH_FACTOR * n), m)
+            large = "evaluated"
+        except InputError as exc:
+            large = str(exc)
+        growth, seconds = _growth(text_of, n, "merged", refused=True)
+        check(name, small[0] and "a bound on running time" in large and growth <= GROWTH_LIMIT,
+              (small[1], large, growth, seconds))
+        growth, seconds = _with_globals({"URL_COPY_BOUNDED": False}, lambda: _growth(text_of, n, "merged"))
         check(red_name, growth > GROWTH_LIMIT, (growth, seconds))
     pick = random.Random(17)
     texts = ["`<!--\nPR #17 is pending\n-->`\n", "`a\nb <!-- PR #17 is pending\n-->`\n",
@@ -3476,6 +3640,23 @@ def _self_test():
         except InputError as exc:
             got = str(exc)
         check("input/unreadable-declared-file", got is not None and "cannot be read" in got, got)
+        # The size bound at its ends: one byte under and exactly MAX_BYTES are read, one byte over is not.
+        for name, size, refused in (("input/size-under-bound-read", MAX_BYTES - 1, False),
+                                    ("input/size-at-bound-read", MAX_BYTES, False),
+                                    ("input/size-over-bound-refused", MAX_BYTES + 1, True)):
+            sized = Path(tmp) / "sized.md"
+            sized.write_bytes(b"a" * size)
+            try:
+                got = len(_read_bytes(sized, "sized.md"))
+            except InputError as exc:
+                got = str(exc)
+            check(name, got == ("sized.md: larger than {} bytes".format(MAX_BYTES) if refused else size), got)
+    # A draft given as bytes (tools/apply_record_draft.py) is held to the same bound.
+    err = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        got = judge_draft_bytes(ROOT, "TODO.md", b"a" * (MAX_BYTES + 1))
+    check("input/draft-over-bound-refused", got == 2 and "draft larger than {} bytes".format(MAX_BYTES)
+          in err.getvalue(), (got, err.getvalue()))
 
     # --- real processes: a stub gh executable behind the production transport ---
     with tempfile.TemporaryDirectory(prefix="pending-pr-claims-gh-") as tmp:
@@ -3528,6 +3709,12 @@ def _self_test():
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         got = check_inputs(ROOT)
     check("live/real-tree-inputs-valid", got == 0, got)
+    # The size bound was set from the real records with a margin (MAX_BYTES): each declared surface of
+    # the tree stays within half of it, or the bound is to be measured again.
+    sizes = {surface["path"]: (Path(ROOT) / surface["path"]).stat().st_size
+             for surface in load_config(ROOT)["surface"]}
+    check("live/real-records-within-half-the-size-bound", all(size <= MAX_BYTES // 2 for size in sizes.values()),
+          sizes)
 
     if FAILURES:
         print("SELF-TEST FAIL: check_pending_pr_claims {} of {} check(s) failed".format(
