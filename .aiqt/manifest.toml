@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "b6a0fa44cbd6856c13cbfc2ae47fd0f7508c21607cb006e519954d6725d9f08c"
+tree-sha256 = "36eb7ee7a2cf61e1fd59bcc093015c926e8704fab4b035c8d3f3f6747eb7ac95"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 643062
-sha256 = "3f923093f287bfa40e26fea3d179cc2a96e66b1142e3850c83c777271d0d8d02"
+bytes = 643348
+sha256 = "3b80fcad93d0255e8c81c210495d09e0c7db72f02a621f285e855a045f5cd343"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2487,8 +2487,8 @@ sha256 = "dc2f0b051983eacedcdd21085f6c53b99b2d96c79c1bae0034176ecf8a3b66c7"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 22737
-sha256 = "62e5b51e7bb161ca0df52be3dfb2328cd29a63d3b1908773a39739e2cfb28e45"
+bytes = 22914
+sha256 = "ea2b4b963603cabd6e3a9edcc6f6185fd6086d315209d9abb88acab8c9e2eab2"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -4387,8 +4387,8 @@ sha256 = "63902bb6d3098492781660326c60848ae8d9b83cf54b10f63d29ffafcd3201d3"
 
 [[sources]]
 path = "tools/check_merge_resolution.py"
-bytes = 86233
-sha256 = "45e899e7afbd2357c63bd9c5b282f6a6cc1736bc13a32004f94cd55bd416ae63"
+bytes = 94095
+sha256 = "e41bbaec77366d1959015f28b457e69c31906267159c0d6a29a4947c0ccf921b"
 
 [[sources]]
 path = "tools/check_mistakes_register.py"
@@ -4817,8 +4817,8 @@ sha256 = "f020224b8fcec06196b11729da9a87046c471d120bd674bf5fe6b967a5860021"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 289149
-sha256 = "35bd8caea7355bb56decdc8de9ddf4ac62fb0f1255c4bbfed7e1a38597e93a91"
+bytes = 289535
+sha256 = "92aba328de5067b21964521c25ffea5b27029e5d01c49ce9c2b4fd41e92f272d"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -4872,8 +4872,8 @@ sha256 = "94d08fdf4f4ebd3d125c62ac83bf95c9a69563654634c8b7c5e2d5bda9a6374c"
 
 [[sources]]
 path = "tools/train_merge.py"
-bytes = 11751
-sha256 = "23faf8a8c385de35b499699a62871c33caeaa3f737b18f92b57fd779258353f4"
+bytes = 11971
+sha256 = "c2df5adb507e85f6a2c32e612bd13e2a1d85a66b3abf1bad98779a52ca9f1724"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"

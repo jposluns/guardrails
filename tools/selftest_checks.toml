@@ -7106,6 +7106,14 @@ expected-check-ids = [
   "generated/resolution-edited-generator-fails",
   "generated/regenerated-attributes-and-frozen-pass",
   "generated/stale-frozen-fails",
+  "generated/merged-generator-module-passes",
+  "generated/resolution-edited-generator-module-fails",
+  # paths no side changed and conflict markers
+  "untouched/keeps-base-entries-passes",
+  "untouched/edit-to-path-no-side-changed-fails",
+  "untouched/file-only-the-resolution-adds-fails",
+  "markers/conflict-marker-left-in-fails",
+  "markers/marker-shaped-line-a-side-added-passes",
   # the train entry point
   "train/dropped-line-records-no-commit",
   "train/kept-resolution-records-checked-merge",

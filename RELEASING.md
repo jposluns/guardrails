@@ -241,8 +241,10 @@ conflicted ones:
    on exit 1 the report names every dropped line and the merge stays in progress for another resolution.
    A result identical to one side, or one keeping none of the lines a side added to a file, is refused
    whatever the declaration says. A line both sides added in different places must be kept once for
-   each side. The five generated outputs are exempt only while the merged, unedited
-   `tools/gen_manifest.py --check` passes on the resolved tree.
+   each side. A result that changes a file neither side changed, or leaves a conflict marker in, is
+   refused. The five generated outputs are exempt only while the merged, unedited
+   `tools/gen_manifest.py --check` passes on the resolved tree and every `tools/**.py` module git merged
+   without a conflict is git's merge.
 4. `python3 -I -B tools/train_merge.py abort` gives up the member.
 
 The Quality workflow audits every two-parent merge commit in `HEAD^1..HEAD`, and in

@@ -20,7 +20,7 @@ Exit: 0 every obligation held; 1 a finding; 2 cannot evaluate. DIR defaults to t
 
 WHAT IT HOLDS. The merge base of the two parents is computed independently and must be exactly one
 readable commit. Every path either side changed since the merge base is judged, whether git reports it
-as conflicted or merges it cleanly; a path only the resolution holds is not. For each judged path, outside
+as conflicted or merges it cleanly. For each judged path, outside
 the generated exemption below, every line each side added since the merge base (an inserted or a
 replacing line in a deterministic difflib line diff of the whole base blob against the whole side blob,
 with autojunk off) must be present in the resolved blob. A path git did not report as conflicted whose
@@ -34,6 +34,16 @@ never counts for that side, so a line a side moved is not kept by putting it bac
 both sides added counts once for both only where the two additions replace or follow the same base
 lines (their base ranges meet); added in different places, the result must hold it once per side, and
 each occurrence short of that is reported against the right side first, then the left.
+
+PATHS NO SIDE CHANGED. A path neither side changed since the merge base must hold the base entry in the
+result (a path absent from the base stays absent): a resolution that edits, deletes or adds such a path
+makes a change no side made, and the run fails (exit 1). One of the five generated outputs below is the
+exception: it is claimed for the generated exemption and judged there.
+
+CONFLICT MARKERS. A result line of a judged path that is a conflict marker line (seven <, |, = or >
+characters, the first three kinds followed by a space or the line end, = alone on its line) and that the
+result holds more times than the base and each side do is a finding (exit 1): the resolution left
+a marker in, and no declaration waives it.
 
 The merge is also replayed with `git merge-tree --write-tree` in a temporary bare repository that borrows
 the objects through an alternates file (no worktree, no index, no hooks, no info/attributes, the
@@ -66,7 +76,10 @@ skip the line, whole-side and keep-none rules, and only when the resolved tree p
 --check: the resolved tree is read into a fresh temporary repository (its objects borrowed through an
 alternates file, every conversion attribute unset, so the blobs are written byte for byte), and the
 tree's own tools/gen_manifest.py --check --root runs there. That generator must be the one git's
-replayed merge holds, unconflicted; a resolution that edits it is a finding. The three release files,
+replayed merge holds, unconflicted; a resolution that edits it is a finding. So must every other
+tools/**.py module (the generator's import directory) that git merged without a conflict: one that
+differs from git's merge is a finding, so a resolution cannot quiet the --check through a helper module.
+The three release files,
 and each other exempt output the exemption is claimed for, must also be canonical in the resolved tree:
 regular, nonempty, strict UTF-8, LF line ends only, ending in LF. Generator drift or a noncanonical
 output is a finding; a generator that cannot run is cannot-evaluate. tools/train_merge.py regenerates
@@ -85,11 +98,13 @@ refs/remotes/origin/main does not resolve or no merge commit is in range.
 
 DISCLOSED LIMITS. This is a textual retention check: it does not show the kept lines are in a sensible
 order, that the result builds or behaves, or that a replacement line was meant to survive (a deliberate
-replacement needs a declared omission). Lines the resolution adds that neither side had are not judged,
-so a conflict marker left in a result that also keeps both sides' lines passes.
+replacement needs a declared omission). Lines the resolution adds to a path a side changed that neither
+side had are not judged, other than conflict markers, and a base line both sides kept is not protected:
+only added lines are. A conflicted tools/**.py module is judged by the line rules alone, so a line the
+resolution adds there reaches the generator unjudged.
 The repository's config and the git binary resolved through PATH are trusted. The generated exemption
-trusts the merged tools/gen_manifest.py but not the modules it imports: it shows that the outputs
-describe the resolved inputs, not that the inputs kept both sides (the rules above cover those inputs).
+shows that the outputs describe the resolved inputs, not that the inputs kept both sides (the rules
+above cover those inputs).
 On a pull request's test merge the --audit-merges range covers the merges the branch introduces; it never
 sees a merge that a squash discarded before it ran.
 """
@@ -123,6 +138,8 @@ GENERATED_EXEMPT = RELEASE_FILES + (".gitattributes", ".aiqt/frozen.json")
 GENERATOR = "tools/gen_manifest.py"
 UPSTREAM_REF = "refs/remotes/origin/main"
 GENERATED_TAG = "generated exemption: "
+UNTOUCHED_TAG = "(a change no side made)"
+MARKER_TAG = "the conflict marker line "
 TRAIN_BRANCH_PREFIX = "merge-train-"
 MAX_BLOB_BYTES = 8 * 1024 * 1024
 MAX_DECLARATION_BYTES = 1024 * 1024
@@ -134,6 +151,11 @@ MESSAGE_END = "Merge-Resolution-Omissions-End"
 OID_RE = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
 REV_RE = re.compile(r"[A-Za-z0-9_./^~@{}+-]{1,256}")
 REGULAR_MODES = ("100644", "100755")
+# A conflict marker line, as git writes one: seven <, | or > followed by a space or the line end, or
+# seven = alone on the line (a CR before the LF allowed).
+MARKER_RE = re.compile(rb"(?:(?:<{7}|\|{7}|>{7})(?: [^\n]*|\r)?|={7}\r?)\n?\Z")
+# The generator's import directory: tools/gen_manifest.py puts its own directory first on sys.path.
+GENERATOR_MODULES = ("tools/", ".py")
 # The conflict types the line rules can judge. Any other CONFLICT type merge-tree reports (a rename,
 # a directory, a submodule, a binary or one this gate does not know) is cannot-evaluate.
 SUPPORTED_CONFLICTS = ("CONFLICT (contents)", "CONFLICT (add/add)", "CONFLICT (modify/delete)")
@@ -469,7 +491,9 @@ def judge_path(repo, path, maps, conflicted, merged):
                     places that the result holds too few times (each entry one occurrence short)
       whole_side    None or (kept_side, the other side's dropped list)
       none_kept     [(side, every dropped or short entry of that side)] for each side that added lines and
-                    has none of them kept"""
+                    has none of them kept
+      markers       [(bytes, result count, most the base or a side holds)] conflict marker lines the
+                    result holds more often than the base and each side"""
     entries = {role: maps[role].get(path) for role in ("base", "left", "right", "result")}
     for role, entry in entries.items():
         if entry is not None and (entry[1] != "blob" or entry[0] not in REGULAR_MODES):
@@ -520,7 +544,13 @@ def judge_path(repo, path, maps, conflicted, merged):
             whole_side = ("left", per_side["right"])
         elif result_id == right_id and per_side["left"]:
             whole_side = ("right", per_side["left"])
-    return {"dropped": dropped, "shared_short": shared_short, "whole_side": whole_side, "none_kept": none_kept}
+    counts = {role: collections.Counter(line for line in lines[role] if MARKER_RE.fullmatch(line))
+              for role in ("base", "left", "right", "result")}
+    markers = sorted((line, have, max(counts[role][line] for role in ("base", "left", "right")))
+                     for line, have in counts["result"].items()
+                     if have > max(counts[role][line] for role in ("base", "left", "right")))
+    return {"dropped": dropped, "shared_short": shared_short, "whole_side": whole_side, "none_kept": none_kept,
+            "markers": markers}
 
 
 def _strict_object(pairs):
@@ -616,6 +646,13 @@ def validate_generated(repo, tree, result_map, claimed, merged, conflicted):
     if result_map.get(GENERATOR) != merged.get(GENERATOR):
         findings.append(GENERATED_TAG + "{}: the resolved generator differs from git's merge of the two sides; the generated "
                         "exemption trusts only the merged generator".format(GENERATOR))
+    prefix, suffix = GENERATOR_MODULES
+    for path in sorted(set(result_map) | set(merged)):
+        if (path != GENERATOR and path.startswith(prefix) and path.endswith(suffix) and path not in conflicted
+                and result_map.get(path) != merged.get(path)):
+            findings.append(GENERATED_TAG + "{}: a module in the generator's import directory differs from git's "
+                            "merge of the two sides; the generated exemption trusts only git's merged "
+                            "modules".format(path))
     for path in RELEASE_FILES + tuple(path for path in claimed if path not in RELEASE_FILES):
         entry = result_map.get(path)
         if entry is None or entry[1] != "blob" or entry[0] != "100644":
@@ -675,11 +712,27 @@ def judge(repo, left_rev, right_rev, tree_rev, declaration_text):
                  "by a side, {} of them judged line by line".format(
                      base[:12], left[:12], right[:12], tree[:12], len(conflicted), len(changed),
                      len([path for path in judged if path not in GENERATED_EXEMPT])))
-    exempt = [path for path in judged if path in GENERATED_EXEMPT]
+    # A path no side changed must keep its base entry; a generated output is judged by its generator.
+    changed_set = set(changed)
+    untouched = sorted(path for path in set(maps["base"]) | set(maps["result"])
+                       if path not in changed_set and maps["result"].get(path) != maps["base"].get(path))
+    exempt = sorted(set(path for path in judged if path in GENERATED_EXEMPT)
+                    | set(path for path in untouched if path in GENERATED_EXEMPT))
+    for path in untouched:
+        if path in GENERATED_EXEMPT:
+            continue
+        findings.append("{}: neither side changed this path since the merge base, but the result {} it (a change "
+                        "no side made); a merge resolution may change only paths a side changed".format(
+                            path, "adds" if path not in maps["base"] else
+                            "deletes" if path not in maps["result"] else "changes"))
     for path in judged:
         if path in GENERATED_EXEMPT:
             continue
         verdict = judge_path(repo, path, maps, path in conflicted, merged)
+        for line, have, most in verdict["markers"]:
+            findings.append("{}: the result holds the conflict marker line {} {} time(s), more than the base or "
+                            "either side ({}); a resolution must not leave a conflict marker in".format(
+                                path, _show(line), have, most))
         if verdict["whole_side"] is not None:
             kept, lost = verdict["whole_side"]
             other = "right" if kept == "left" else "left"
@@ -815,17 +868,24 @@ def report(findings, notes):
         print("FAIL: " + line)
     if findings:
         generated = [line for line in findings if GENERATED_TAG in line]
-        lines = [line for line in findings if GENERATED_TAG not in line]
+        untouched = [line for line in findings if GENERATED_TAG not in line and UNTOUCHED_TAG in line]
+        markers = [line for line in findings if GENERATED_TAG not in line and MARKER_TAG in line]
+        lines = [line for line in findings if line not in generated and line not in untouched and line not in markers]
         kinds = []
         if lines:
             kinds.append("the resolution drops lines a side added")
+        if untouched:
+            kinds.append("the resolution changes a path no side changed")
+        if markers:
+            kinds.append("the resolution leaves a conflict marker in")
         if generated:
             kinds.append("a generated output the exemption covers does not match its generator or is not "
                          "canonical")
         print("RESULT: FAIL, {} (exit 1)".format("; and ".join(kinds) or "see the FAIL lines above"))
         return 1
-    print("PASS: every line each side added to a path either side changed is kept or declared, and every "
-          "generated output the exemption covers matches its generator")
+    print("PASS: every line each side added to a path either side changed is kept or declared, no path that "
+          "neither side changed is changed, no conflict marker is left in, and every generated output the "
+          "exemption covers matches its generator")
     return 0
 
 
@@ -1385,6 +1445,64 @@ def _self_test_generated(tmp):
     check("generated/stale-frozen-fails", code == 1 and "drift" in text and ".aiqt/frozen.json" in text,
           (code, text))
 
+    # A module in the generator's import directory must be git's merge too, or a resolution could quiet the
+    # --check through it (the generator-module rule).
+    hb_files = _generated(sources)
+    hb_files["tools/helper.py"] = _lines("HELPER = 1")
+    hb = fx.commit(hb_files)
+    hl_files = _generated(left_sources)
+    hl_files["tools/helper.py"] = _lines("HELPER = 1", "LEFT = 2")
+    hl = fx.commit(hl_files, [hb])
+    hr_files = _generated(right_sources)
+    hr_files["tools/helper.py"] = hb_files["tools/helper.py"]
+    hr = fx.commit(hr_files, [hb])
+    good = _generated(merged)
+    good["tools/helper.py"] = hl_files["tools/helper.py"]
+    code, text = _judge_quiet(repo, hl, hr, fx.tree(good))
+    check("generated/merged-generator-module-passes", code == 0 and "generated exemption claimed for" in text,
+          (code, text))
+    tampered = dict(good, **{"tools/helper.py": hl_files["tools/helper.py"] + b"QUIET = True\n"})
+    code, text = _judge_quiet(repo, hl, hr, fx.tree(tampered))
+    check("generated/resolution-edited-generator-module-fails",
+          code == 1 and "tools/helper.py" in text and "import directory" in text, (code, text))
+
+
+def _self_test_untouched_and_markers(tmp):
+    """A path no side changed keeps its base entry, and no conflict marker is left in (the untouched-path
+    and conflict-marker rules)."""
+    fx = _Fixture(os.path.join(tmp, "untouched"))
+    repo = fx.repo
+    base_files = {"f.txt": _lines(*BASE_LINES), "keep.txt": _lines("keep one", "keep two")}
+    base = fx.commit(base_files)
+    left = fx.commit(dict(base_files, **{"f.txt": _variant({1: ["two LEFT"]})}), [base])
+    right = fx.commit(dict(base_files, **{"f.txt": _variant({1: ["two RIGHT"]})}), [base])
+    both = dict(base_files, **{"f.txt": _variant({1: ["two LEFT", "two RIGHT"]})})
+
+    code, text = _judge_quiet(repo, left, right, fx.tree(both))
+    check("untouched/keeps-base-entries-passes", code == 0, (code, text))
+
+    edited = dict(both, **{"keep.txt": _lines("keep one")})
+    code, text = _judge_quiet(repo, left, right, fx.tree(edited))
+    check("untouched/edit-to-path-no-side-changed-fails",
+          code == 1 and "keep.txt" in text and "a change no side made" in text, (code, text))
+
+    extra = dict(both, **{"extra.txt": _lines("resolution only")})
+    code, text = _judge_quiet(repo, left, right, fx.tree(extra))
+    check("untouched/file-only-the-resolution-adds-fails",
+          code == 1 and "extra.txt" in text and "adds it" in text, (code, text))
+
+    marked = dict(both, **{"f.txt": _variant({1: ["<<<<<<< ours", "two LEFT", "=======", "two RIGHT",
+                                                  ">>>>>>> theirs"]})})
+    code, text = _judge_quiet(repo, left, right, fx.tree(marked))
+    check("markers/conflict-marker-left-in-fails",
+          code == 1 and "<<<<<<< ours" in text and ">>>>>>> theirs" in text and "=======" in text
+          and "conflict marker" in text, (code, text))
+
+    rule_left = fx.commit(dict(base_files, **{"f.txt": _variant({1: ["two LEFT", "======="]})}), [base])
+    ruled = dict(base_files, **{"f.txt": _variant({1: ["two LEFT", "=======", "two RIGHT"]})})
+    code, text = _judge_quiet(repo, rule_left, right, fx.tree(ruled))
+    check("markers/marker-shaped-line-a-side-added-passes", code == 0, (code, text))
+
 
 def _self_test_train(tmp):
     """tools/train_merge.py records a member merge only after this gate passes."""
@@ -1470,8 +1588,8 @@ def _self_test():
     with _git_fixture_env.fixture_git_lifecycle():
         with tempfile.TemporaryDirectory(prefix="merge-resolution-selftest-") as tmp:
             for runner in (_self_test_lines, _self_test_clean_paths, _self_test_attributes, _self_test_occurrences,
-                           _self_test_audit_range, _self_test_generated, _self_test_train,
-                           _self_test_train_regenerates):
+                           _self_test_audit_range, _self_test_generated, _self_test_untouched_and_markers,
+                           _self_test_train, _self_test_train_regenerates):
                 try:
                     runner(tmp)
                 except (CannotEvaluate, RuntimeError, OSError) as exc:
@@ -1506,7 +1624,8 @@ def _self_test():
           "symlink, rename and merge-driver conflicts, an unreadable side or merge base, no base and "
           "criss-cross bases are cannot-evaluate; recorded merges and the audit range, a train branch's "
           "member merges included, are judged; a train built through train_merge.py passes the audit; the "
-          "result line names what failed)".format(len(EXECUTED)))
+          "result line names what failed; a change to a path no side changed fails, a conflict marker left in "
+          "fails, and an edited module in the generator's import directory fails)".format(len(EXECUTED)))
     return 0
 
 

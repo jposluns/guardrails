@@ -123,7 +123,13 @@ def start(member_rev):
     with open(pin, "x", encoding="utf-8") as handle:
         json.dump({"head": head, "member": member}, handle)
         handle.write("\n")
-    proc = git(["merge", "--no-ff", "--no-commit", member], ok=(0, 1))
+    try:
+        proc = git(["merge", "--no-ff", "--no-commit", member], ok=(0, 1))
+    except Refused:
+        # git merge itself failed (for example, no committer identity): no merge started, so the pin goes.
+        if _merge_head(git_dir) is None:
+            pin.unlink()
+        raise
     if _merge_head(git_dir) != member:
         pin.unlink()
         raise Refused("git merge did not leave {} as MERGE_HEAD: {}".format(
