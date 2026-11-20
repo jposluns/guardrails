@@ -7161,6 +7161,11 @@ expected-check-ids = [
   "output/process-wait-unbound-stderr-open-control-4",
   "output/process-wait-never-seen-stderr-open-control-3",
   "output/process-claim-stdout-and-stderr-closed-after-start-2",
+  # entry: the helper's own command line as real processes (usage errors, and the entry guard)
+  "entry/process-no-arguments-usage-2",
+  "entry/process-self-test-mode-removed-usage-2",
+  "entry/process-claim-sigchld-ignored-refused-2",
+  "entry/process-claim-sigchld-default-control-0",
   # revert: the incident case turns red when the id comparison is removed
   "revert/id-check-removed",
 ]

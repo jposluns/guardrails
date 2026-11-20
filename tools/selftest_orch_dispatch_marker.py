@@ -975,6 +975,43 @@ def _self_test():
         check("output/process-claim-stdout-and-stderr-closed-after-start-2", code == EXIT_CANNOT_EVALUATE
               and out == "" and err == "" and os.path.isdir(claim_path), (code, out, err[-400:]))
 
+        # --- entry, as real processes: the helper's own command line now that its self-test is this
+        # runner. An empty command line and the removed --self-test mode are usage errors (exit 2, the
+        # usage on stderr, nothing on stdout); no config lane launches the helper bare any more, so these
+        # are the only checks that do. A claim started with SIGCHLD ignored (an ignore survives exec) is
+        # refused by the entry guard by name at exit 2 before the directory is made; the control is the
+        # same claim through the same launcher with SIGCHLD at its default. ---
+        for name, argv in (("entry/process-no-arguments-usage-2", []),
+                           ("entry/process-self-test-mode-removed-usage-2", ["--self-test"])):
+            code, out, err = run_process("at-start", None, argv, "keep", "1")
+            check(name, code == EXIT_CANNOT_EVALUATE and out == "" and "cannot evaluate: usage:" in err
+                  and "Traceback" not in err, (code, out, err[-400:]))
+        sigchld_launcher = ("import os, signal, sys\n"
+                            "signal.signal(signal.SIGCHLD, signal.SIG_IGN if sys.argv[1] == 'ignore'"
+                            " else signal.SIG_DFL)\n"
+                            "os.execv(sys.executable, [sys.executable, '-I', '-B'] + sys.argv[2:])\n")
+
+        def run_sigchld(disposition, argv):
+            try:
+                proc = subprocess.run([sys.executable, "-I", "-B", "-c", sigchld_launcher, disposition, script]
+                                      + argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, cwd=base, timeout=120)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return "raised", "", "{}: {}".format(type(exc).__name__, exc)
+            return (proc.returncode, proc.stdout.decode("ascii", "replace"),
+                    proc.stderr.decode("utf-8", "replace"))
+
+        claim_path = os.path.join(base, "entry-claim-sigchld-ignored")
+        code, out, err = run_sigchld("ignore", ["claim", claim_path])
+        check("entry/process-claim-sigchld-ignored-refused-2", code == EXIT_CANNOT_EVALUATE and out == ""
+              and "orch_dispatch_marker.py refuses to run: SIGCHLD is ignored" in err
+              and not os.path.lexists(claim_path), (code, out, err[-400:]))
+        claim_path = os.path.join(base, "entry-claim-sigchld-default")
+        code, out, err = run_sigchld("default", ["claim", claim_path])
+        check("entry/process-claim-sigchld-default-control-0", code == EXIT_OK and err == ""
+              and out.endswith("\n") and is_dispatch_id(out[:-1]) and os.path.isdir(claim_path),
+              (code, out, err[-400:]))
+
         # --- revert: with the id comparison removed, the incident case would pass as a match ---
         d, m = fresh()
         _publish(m,old_id, 0)
@@ -1007,7 +1044,9 @@ def _self_test():
           "did not create alone, removes its temporary file when interrupted and refuses a bad status; a "
           "failed stdout write is exit 2, as is a descriptor 1 closed before or after Python starts, "
           "measured as the process's exit; a stderr closed before or after start, full, without a reader "
-          "or unflushable keeps exits 2, 3, 4 and 5 and puts nothing on stdout; with the id "
+          "or unflushable keeps exits 2, 3, 4 and 5 and puts nothing on stdout; the helper launched with "
+          "no arguments or with the removed --self-test mode is a usage error, and a claim under an "
+          "ignored SIGCHLD is refused at entry before it creates anything; with the id "
           "comparison removed the incident case would pass)".format(
               len(EXECUTED)))
     return 0
