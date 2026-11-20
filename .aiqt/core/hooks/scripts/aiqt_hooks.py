@@ -20,6 +20,8 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
   future_stamp_write  PreToolUse  tstamp  WARN (never deny) on a future-dated time written into a declared store
+  citation_read_recorder PostToolUse citint record (never block) the line spans a Read, Grep, plain Bash read, Write or Edit returned
+  citation_read_check PreToolUse  citint  allow+note (BAKE, never deny) a cited path:line range in a commit message or PR body that no recorded read covers
 
 Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
 as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
@@ -286,8 +288,9 @@ import sys
 # streams: with a sys.stderr whose write works but whose flush fails, `raise SystemExit` here ended
 # as the interpreter's own exit 120 instead of the refusal exit. Nothing runs before this guard, so
 # os._exit discards no other buffered output; the warning itself is flushed before the exit.
-FLOOR_FAIL_OPEN_MODES = ("clock_inject_failure", "clock_inject_post", "console_prefix_pretool",
-                         "diff_wall_stop", "future_stamp_write", "inline_errexit", "orch_dispatch_ledger",
+FLOOR_FAIL_OPEN_MODES = ("citation_read_recorder", "clock_inject_failure", "clock_inject_post",
+                         "console_prefix_pretool", "diff_wall_stop", "future_stamp_write", "inline_errexit",
+                         "orch_dispatch_ledger",
                          "orch_lease_heartbeat_post", "orch_lease_heartbeat_stop", "orch_prompt_stamp",
                          "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle")
 
@@ -644,6 +647,135 @@ class _WordSpellings:
     def __exit__(self, *exc_info):
         _WordSpellings.on = self.was_on
         return False
+
+
+class _AnsiCSpelling(_WordSpelling):
+    """The _WordSpelling of a word read inside _AnsiCQuotes (and _WordSpellings) any part of which is spelled through
+    an ANSI-C quote $'...': its fields are those every other record has, so a reader that reads only them reads it as
+    before. _AnsiCExact marks a word whose every ANSI-C part was decoded exactly as bash 5.3 decodes it
+    (_ansi_c_decode); _AnsiCInexact one with a part that could not be (its text then holds that part as the word
+    reader reads it outside _AnsiCQuotes, which is not the text bash passes)."""
+
+    __slots__ = ()
+
+
+class _AnsiCExact(_AnsiCSpelling):
+    __slots__ = ()
+
+
+class _AnsiCInexact(_AnsiCSpelling):
+    __slots__ = ()
+
+
+class _AnsiCQuotes:
+    """A context in which the word reader decodes the text of each ANSI-C quote $'...' exactly as bash 5.3 does
+    (_ansi_c_decode), where it can, and, inside _WordSpellings too, records each word that holds one with an
+    _AnsiCSpelling (_AnsiCExact or _AnsiCInexact), and each redirect target that holds one as opaque. Outside it
+    the reader keeps each escaped character as the character itself (\\n read as n), the reading every other caller
+    relies on. Only the citation check lexes inside it (_citechk_commands). It restores the previous setting on
+    exit, as _WordSpellings does."""
+
+    on = False
+
+    def __enter__(self):
+        self.was_on = _AnsiCQuotes.on
+        _AnsiCQuotes.on = True
+        return self
+
+    def __exit__(self, *exc_info):
+        _AnsiCQuotes.on = self.was_on
+        return False
+
+
+# _ansi_c_decode reads the one-character escapes of an ANSI-C quote from _ANSI_C_NAMED (beside _ansi_c_decoded), as
+# bash 5.3 decodes them (lib/sh/strtrans.c, ansicstr, with the flags $'...' passes): \a \b \e \E \f \n \r \t \v, and
+# \\ \' \" \? as the character itself. Any other character after a backslash keeps the backslash (\z is \z), and so
+# does \x, \u or \U followed by no hex digit.
+_ANSI_C_HEX = frozenset("0123456789abcdefABCDEF")
+_ANSI_C_OCTAL = frozenset("01234567")
+
+
+def _ansi_c_decode(raw):
+    """The text bash 5.3 passes for an ANSI-C quote whose text between $' and the closing quote is raw, or None
+    where it cannot be given exactly. Decoded as ansicstr does: the one-character escapes above; \\NNN, one to
+    three octal digits; \\xHH, one or two hex digits, and \\x{H...}, any number of them up to a '}' (consumed when
+    present); \\uHHHH and \\UHHHHHHHH, one to four and one to eight hex digits; \\cX, the control character of X
+    (X upper-cased, its low five bits; \\c? is DEL), where a \\c\\\\ takes both backslashes as X, and a \\c ending
+    the quote is kept as written. Each octal or \\x value keeps its low eight bits. None where a value is NUL
+    (bash ends the word's text there), is past 0x7f (an octal or \\x value is one raw byte, and a \\u or \\U value
+    is encoded in the locale's character set, neither of which this check reads as text), or where a \\c takes a
+    character past 0x7f, so a value read here is the one bash passes, never a guess. Linear in the length of raw. It differs from
+    _ansi_c_decoded, which reads every quote of a command for a parse-failure fallback where an extra reading can
+    only add a match, and so gives a character for a NUL or a value past 0x7f and has no \\x{...} form."""
+    out = []
+    i, n = 0, len(raw)
+    while i < n:
+        c = raw[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        if i + 1 >= n:
+            return None  # a backslash before the closing quote escapes it, so the word reader never gives this
+        e = raw[i + 1]
+        i += 2
+        if e in _ANSI_C_NAMED:
+            out.append(_ANSI_C_NAMED[e])
+            continue
+        if e in _ANSI_C_OCTAL:
+            value, more = int(e), 2
+            while more and i < n and raw[i] in _ANSI_C_OCTAL:
+                value = value * 8 + int(raw[i])
+                i += 1
+                more -= 1
+            value &= 0xFF
+        elif e == "x":
+            if i < n and raw[i] == "{":
+                i += 1
+                value = 0
+                while i < n and raw[i] in _ANSI_C_HEX:
+                    value = value * 16 + int(raw[i], 16)
+                    i += 1
+                if i < n and raw[i] == "}":
+                    i += 1
+            else:
+                value, more = 0, 2
+                while more and i < n and raw[i] in _ANSI_C_HEX:
+                    value = value * 16 + int(raw[i], 16)
+                    i += 1
+                    more -= 1
+                if more == 2:
+                    out.append("\\x")
+                    continue
+            value &= 0xFF
+        elif e in "uU":
+            value, more = 0, 4 if e == "u" else 8
+            digits = more
+            while more and i < n and raw[i] in _ANSI_C_HEX:
+                value = value * 16 + int(raw[i], 16)
+                i += 1
+                more -= 1
+            if more == digits:
+                out.append("\\" + e)
+                continue
+        elif e == "c":
+            if i >= n:
+                out.append("\\c")  # bash 5.3 passes a \c that ends the quote as written
+                continue
+            x = raw[i]
+            i += 1
+            if x == "\\" and i < n and raw[i] == "\\":
+                i += 1
+            if ord(x) > 0x7F:
+                return None
+            value = 0x7F if x == "?" else ord(x.upper()) & 0x1F
+        else:
+            out.append("\\" + e)
+            continue
+        if value == 0 or value > 0x7F:
+            return None
+        out.append(chr(value))
+    return "".join(out)
 
 
 class _LexStops:
@@ -1420,9 +1552,15 @@ def _skip_quoting_walk(command, i, n, stack, nest, hash_reading, heredoc, opened
 
 
 def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=False, heredoc=None,
-               spelling=None, marks=False):
+               spelling=None, spans=None, nested=True, marks=False):
     """Read exactly ONE shell word starting at index i (which must be at a word character, never a space,
-    newline, or metacharacter). Returns (text, opaque, started, all_digits, leading_tilde, new_i): text is
+    newline, or metacharacter). Where spans is a list, the (start, end) of each double-quoted string the word
+    holds (its opening quote to just past its closing one) is appended to it, in order; nothing else changes.
+    With nested True (the default), a command substitution or backquote inside a double-quoted string is
+    skipped as its own quoting context (_skip_quoting), so a quote nested in it does not close the string;
+    with nested False its '$' or backquote is an ordinary opaque character and the string ends at the next
+    unescaped double quote.
+    Returns (text, opaque, started, all_digits, leading_tilde, new_i): text is
     the quote/escape decoded word, opaque is True if it carried an unquoted
     expansion/substitution/glob/brace/leading-tilde, started is True once any character (even an empty ''
     quote) began the word, all_digits is True only when the whole word is UNQUOTED decimal digits (an
@@ -1469,6 +1607,7 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
     started = False
     all_digits = True
     leading_tilde = False
+    ansi_c = 0  # inside _AnsiCQuotes: 1 once an ANSI-C quote is read and decoded exactly, 2 once one is not
     # The index just past the last unquoted, unescaped '$' (a '{' read there opens '${') and just past the last
     # backquote that may open a substitution (a '#' read there is cannot-evaluate). Recording where each ends,
     # set only on those characters, leaves every other character free of this bookkeeping (COST above).
@@ -1552,6 +1691,8 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
                 d = command[i]
                 if d == '"':
                     i += 1
+                    if spans is not None:
+                        spans.append((quote_at, i))
                     break
                 if d == "\\":
                     if i + 1 >= n:
@@ -1567,8 +1708,8 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
                     chars.append("\\")  # a backslash before any other char is literal inside "..."
                     i += 1
                     continue
-                if d == "`" or (d == "$" and i + 1 < n and command[i + 1] in "({[\\"
-                                and _dollar_opener(command, i, n)[0] is not None):
+                if nested and (d == "`" or (d == "$" and i + 1 < n and command[i + 1] in "({[\\"
+                                            and _dollar_opener(command, i, n)[0] is not None)):
                     # A substitution or expansion (a '$[' included, and a '$' apart from its opener by
                     # backslash-newlines, _dollar_opener) opens a fresh context: skip it whole, applying the
                     # comment rule to a '#' inside it under this reading (_skip_quoting).
@@ -1611,6 +1752,7 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
                 literal = sum(map(len, chars))
             unquoted = True
             i += 2
+            ansi_at, ansi_from = i, len(chars)
             while True:
                 if i >= n:
                     raise ValueError("unterminated ANSI-C ($'...') quote")
@@ -1624,6 +1766,17 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
                     break
                 chars.append(d)
                 i += 1
+            if _AnsiCQuotes.on:
+                # Inside _AnsiCQuotes the quote's text is bash's where it decodes exactly; where it does not, the
+                # reading above stays and the word is marked inexact (_AnsiCInexact), so no reader takes it as
+                # the text bash passes.
+                decoded = _ansi_c_decode(command[ansi_at:i - 1])
+                if decoded is None:
+                    ansi_c = 2
+                else:
+                    del chars[ansi_from:]
+                    chars.append(decoded)
+                    ansi_c = ansi_c or 1
             all_digits = False
             continue
         if c == "\\":  # unquoted escape: the next character is literal (a backslash-newline continuation
@@ -1697,6 +1850,8 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
         literal = len(text) if literal < 0 else literal
         spelling[0] = (_WORD_SPELLINGS[4 * literal + 2 * brace + unquoted] if literal < 64
                        else _WordSpelling(literal, brace, unquoted))
+        if ansi_c:
+            spelling[0] = (_AnsiCExact if ansi_c == 1 else _AnsiCInexact)(*spelling[0])
     return text, opaque, started, all_digits, leading_tilde, i
 
 
@@ -1928,6 +2083,14 @@ def _parse_heredoc_delim(command, at, n):
     return (quoted, "".join(delim_chars), strip_tabs, j)
 
 
+def _heredoc_word_split(command, at, n):
+    """Whether the here-document delimiter word that starts right after a '<<' (index at, as
+    _parse_heredoc_delim reads it) holds a backslash-newline: a split delimiter, which the citation check
+    scans only as written (_citechk_split_delim)."""
+    parsed = _parse_heredoc_delim(command, at, n)
+    return parsed is not None and "\\\n" in command[at:parsed[3]]
+
+
 def _skip_line_continuations(command, j, n):
     """The index just past the run of backslash-newline line continuations that starts at index j (j itself
     where none does): bash removes each such pair before it reads a token, outside single quotes."""
@@ -1965,12 +2128,16 @@ def _heredoc_dq_fragment(command, k, n):
     return None
 
 
-def _skip_heredoc_bodies(command, i, n, heredocs):
+def _skip_heredoc_bodies(command, i, n, heredocs, bodies=None):
     """Advance past the bodies of a run of QUOTED heredocs (in the order their '<<' operators appeared on the
     line), each ending at a line that is EXACTLY its delimiter (leading tabs stripped for the <<- form). An
     unterminated heredoc consumes the rest of the command (bash would still be reading input). Returns the
-    index just past the last consumed body. The bodies are literal data and are excluded from analysis."""
+    index just past the last consumed body. The bodies are literal data and are excluded from analysis.
+    Where bodies is a list, each heredoc's body is appended to it in turn, as bash supplies it: its lines
+    before the delimiter line (or to the end of the command), joined with LF, each without its leading tabs
+    for the <<- form."""
     for delim, strip_tabs in heredocs:
+        body = []
         while i < n:
             nl = command.find("\n", i)
             line = command[i:(nl if nl != -1 else n)]
@@ -1978,6 +2145,10 @@ def _skip_heredoc_bodies(command, i, n, heredocs):
             i = n if nl == -1 else nl + 1
             if cand == delim:
                 break
+            if bodies is not None:
+                body.append(cand)
+        if bodies is not None:
+            bodies.append("\n".join(body))
     return i
 
 
@@ -2597,7 +2768,8 @@ def _empty_repeat(segments, sep):
     return last.sep_after == sep and not last.argv and not last.redirects
 
 
-def _lex_command(command, partial=False, locale=False, skip_empty=False):
+def _lex_command(command, partial=False, locale=False, skip_empty=False, heredocs=None, spans=None, nested=True,
+                 split_delims=False):
     """Lex the raw Bash command into ordered _Segment records. Raises ValueError on an unbalanced quote or
     escape, a NUL, an unsupported construct (an UNQUOTED heredoc, a here-string, a process substitution, a
     '{fd}>' redirect, or a malformed redirect), or a quoted here-document whose reading is uncertain (a '<<',
@@ -2616,6 +2788,53 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
     comment, heredoc body or nested substitution can read differently under bash), so the push
     guard never depends on it: _raw_push_guard rescans the raw text on every protected_line
     call. Linear, non-recursive, stdlib-only.
+
+    Where heredocs is a list, one (segment, before, body) per QUOTED heredoc is appended to it, in the order
+    of their '<<' operators: the index in the returned list of the segment the heredoc redirects, how many
+    of that segment's redirects precede it, and its body as _skip_heredoc_bodies gives it (empty where no
+    line follows its operator's line). A heredoc carries no source fd here (an fd before '<<' is
+    unsupported), so it is that segment's standard input unless a later redirect of fd 0 replaces it (one
+    that duplicates fd 0 onto itself, <&0, does not): bash gives a command the last of its standard-input
+    redirections. Only the citation check (_citechk_commands) passes it, and passing it changes nothing else
+    the lexer returns.
+
+    Where spans is a list, the (start, end) of each place the lexer reads as one of two things is appended to
+    it, in the order it reads them: the '<<' of each QUOTED heredoc (command[start:end]; the '-' of the <<-
+    form and the delimiter follow it), and each double-quoted string in a word or a redirect target (its
+    opening quote to just past its closing one). Text the lexer passes over, a comment or a heredoc's body,
+    gives none, and neither does a '<<' or a double quote inside quotes, after an escape or in a heredoc's
+    delimiter. Only the citation check (_citechk_commands) passes it, and passing it changes nothing else
+    the lexer returns.
+
+    Where heredocs or spans is a list, nested is False or split_delims is True, the command is lexed in one
+    pass as main's reading lexes it (_main_reading: each '#' as main's lexer reads it, _MAIN_HASH_READING, and
+    no here-document body read in a substitution), the reading the citation check's rules were written
+    against: each segment, heredoc and span is then one lex's, so a heredoc's segment index is an index into
+    that lex's list, and no uncertain '#' stops it.
+
+    split_delims True reads a here-document delimiter word that a backslash-newline splits and that is
+    unquoted once it is removed (as _parse_heredoc_delim reads the word, at a '<<' this lexer reads: <<E\\,
+    a newline and OF), which this lexer otherwise refuses, as a quoted delimiter that holds a newline, which
+    no line can match, so its body runs to the end of the command: the reading the citation check's
+    split-delimiter fallback names files and later commands from (_citechk_commands), which scans such a
+    command only as written, never acts on this lex, and names text in that body that bash can run
+    (_citechk_swallowed). A split delimiter that is quoted once the backslash-newline is removed (<<'E'\\, a
+    newline and OF) is read as bash reads it under either value. With split_delims True, a '<<' whose
+    delimiter word a backslash-newline splits (_heredoc_word_split), quoted or not, and every later '<<' on
+    its line, is read as an operator even while a '${', a marked '((' or one of THE TEXT MARKS is open (the
+    three raises at a '<<' in _lex_pass), and the newline that starts the bodies of that line and the skip of
+    those bodies take none of their raises (a '${', a marked '((' or one of THE TEXT MARKS still open, a
+    substitution opened after the line's first '<<' still open, a backquote substitution a '<<' sits in
+    closed, and an uncertain body end): the citation check scans such a command only as written
+    (_citechk_split_delim) and reads this lex only to name what it did not read, except where it reads the
+    command both ways (a double-quoted string before the split delimiter holds what its walk does not
+    follow): it then reads and judges the message and body files this lex names, and searches the bodies
+    this lex read for a command bash can run there as it does for the scan as written (_citechk_commands).
+    Every other raise still fails the lex, and the check then names no file the command holds; among them,
+    for example, a raise met before the first such '<<', one on another line, and one after that '<<' on
+    its own line that is none of those listed here, such as a later unquoted here-document (<<'E'\\, a
+    newline, ND <<Y). The default False reads every joined word as bash does and keeps every one of those
+    raises, the reading every other caller relies on.
 
     An unquoted '#' opens a comment only in a certain context (the comment rule above _nest_track). A command
     holding an uncertain '#' is lexed under both readings of each one (_lex_readings), and the segments of
@@ -2648,6 +2867,19 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
     as strictly as on main's segments too; where a full lex of main's reading fails, _SubstHeredocs.reads
     moves instead (MAIN'S DECISION AS A FLOOR, above _MainHashReading, and _beside_main_reading).
 
+    nested is passed to _read_word for every word: the default True reads a command substitution or
+    backquote inside a double-quoted string as its own quoting context, the nested-quote reading every other
+    caller relies on. Only the citation check (_citechk_commands) passes False, so a double-quoted string
+    ends at the next unescaped double quote, as the walk through it (_citechk_substituted_ops) expects; that
+    walk, which runs only on a command that holds a backslash-newline, reads a substitution still open at
+    that quote as one it does not follow and so reads the command both ways. The citation check also lexes
+    the command with nested True and reads it both ways wherever the two lexings differ (_citechk_shape) or
+    only one of them lexes, with or without a backslash-newline, so a quote form the nested lexing cannot
+    pair (an ANSI-C $'...' with an escaped quote in a substitution, where its quotes do not pair as
+    _skip_quoting reads them) still lets the message and body files of the lexing that lexes be read; a
+    backslash-newline that splits a here-document delimiter overrides this, and the command is then scanned
+    as one that does not lex (_citechk_commands).
+
     locale is passed to _read_word for every word, under every reading: True reads a bash locale quote
     $"..." as a double-quoted string, and the default False keeps the reading every other caller relies on.
 
@@ -2668,6 +2900,9 @@ def _lex_command(command, partial=False, locale=False, skip_empty=False):
     command word and with its backquote substitutions read as commands (A COMMAND'S SUBJECT PAST ITS COMPOUND
     WORDS, above _COMMAND_LEAD_WORDS); outside it nothing is added. A command reading that reaches its body
     budget raises _ReadingLimitError in partial mode too (COST, above _COMMAND_LEAD_WORDS)."""
+    if heredocs is not None or spans is not None or not nested or split_delims:
+        return _lex_pass(command, partial, _MAIN_HASH_READING, locale, None, skip_empty, heredocs=heredocs,
+                         spans=spans, nested=nested, split_delims=split_delims)
     try:
         readings = _lex_readings(command, partial, locale, skip_empty)
     except _UncertainHashError as exc:
@@ -2838,7 +3073,8 @@ def _beside_main_reading(command, partial, locale, readings, skip_empty=False):
     return readings + [mains]
 
 
-def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty=False, fork=None):
+def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty=False, fork=None, heredocs=None,
+              spans=None, nested=True, split_delims=False):
     """One pass of _lex_reading, reading a quoted here-document's body inside a command substitution through
     subst_heredocs (a _SubstHeredocs shared by the pass's substitution skips), or no body when it is None.
     skip_empty True leaves out every segment with no word and no redirect, and _SKIP_EMPTY_REPEATS only one that
@@ -2848,7 +3084,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
     the _UncertainHashError raised carries the _LexFork of this pass at the start of that token. Inside
     _WordSpellings each segment's argv that holds a word is a _SpelledWords holding the words' _WordSpelling records
     (spelled, the word reader's one-element list, and argv_spelling, parallel to argv), and a plain list outside it
-    or with no word."""
+    or with no word. heredocs, spans, nested and split_delims are those of _lex_command, which passes them only
+    to a pass from the start (fork None), so a resumed pass records no here-document place."""
     n = len(command)
     spelled = [None] if _WordSpellings.on else None
     if fork is None:
@@ -2880,6 +3117,10 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
         i = fork.at
         glued_at = fork.glued_at
         before = fork.before
+    pending_places = []  # for heredocs: the (segment, before) of each queued heredoc, its body still to come
+    # Whether, with split_delims, a heredoc queued on this line has a delimiter word a backslash-newline
+    # splits: the uncertain-end refusal is then lifted where the line's bodies are skipped (_lex_command).
+    split_pending = False
     # The index of the uncertain '#' whose reading the token at i is asking for, and the index a reading that
     # maps it resumes at (-1 for i): the start of a word read that began with backslash-newlines and stopped
     # at that '#', since that read already asked whether the reading takes the '#' as word text (_LexFork).
@@ -2941,13 +3182,23 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
         if (k >= n or command[k] == "\n" or command[k] in _METACHARS
                 or (command[k] == "#" and not hash_target)):
             raise ValueError("malformed redirect: no target")
+        t_spelled = [None] if _AnsiCQuotes.on else None
         target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n, nest,
                                                                       hash_reading=hash_reading, locale=locale,
-                                                                      heredoc=subst_heredocs, marks=True)
+                                                                      heredoc=subst_heredocs, spelling=t_spelled,
+                                                                      spans=spans, nested=nested, marks=True)
         if not started:
             raise ValueError("malformed redirect target")
+        if t_spelled is not None and isinstance(t_spelled[0], _AnsiCSpelling):
+            t_opaque = True  # inside _AnsiCQuotes a target spelled through an ANSI-C quote is one not resolved
         redirects.append(_classify_redirect(op, src_fd, target, t_opaque, t_ltilde))
         return k2
+
+    def split_operator(at):
+        # With split_delims, whether the '<<' at index at is read on as an operator while a '${', a marked '(('
+        # or one of THE TEXT MARKS is open: its delimiter word a backslash-newline splits, or one queued on its
+        # line does (split_pending), and the citation check scans that command only as written (_lex_command).
+        return split_delims and (split_pending or _heredoc_word_split(command, at + 2, n))
 
     try:
         if "\x00" in command:
@@ -2964,8 +3215,11 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                 i += 1
                 if pending_heredocs:
                     # the bodies of any QUOTED heredocs opened on this line follow the newline; skip them as
-                    # literal data, then resume lexing after the closing delimiter line(s).
-                    if "${" in nest:
+                    # literal data, then resume lexing after the closing delimiter line(s). With split_delims, a
+                    # line whose heredoc has a split delimiter word takes none of the raises below: the citation
+                    # check scans that command only as written and reads this lex only to name what it did not
+                    # read (_lex_command).
+                    if "${" in nest and not split_pending:
                         # A '${' opened after the '<<' on this line is still open at this newline. Inside a
                         # '${...}' parameter expansion the newline is text to bash, which starts the bodies
                         # only at the newline after the expansion closes, so a body skipped from here can
@@ -2975,7 +3229,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                         # is UNCERTAIN, as at a '<<' read while a '${' is open (the raise at that operator
                         # below): raise so the whole lex fails.
                         raise ValueError(_HEREDOC_DOLLAR_BRACE_OPEN)
-                    if "((" in nest:
+                    if "((" in nest and not split_pending:
                         # A '((' marked after the '<<' on this line is still open at this newline. Inside
                         # arithmetic the newline is text to bash, which starts the bodies only at the newline
                         # after the arithmetic closes (bash 5.3.9 runs the git in cat <<'EOF' $(( 1 +, then
@@ -2991,15 +3245,18 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                     # closed before this newline (bash reads that here-document no body here). Each makes the
                     # reading UNCERTAIN (above _HEREDOC_TEXT_MARKS): raise so the whole lex fails.
                     mark = _heredoc_text_mark(nest)
-                    if mark is not None:
+                    if mark is not None and not split_pending:
                         raise ValueError(mark)
-                    if "$(" in nest or "`" in nest:
+                    if ("$(" in nest or "`" in nest) and not split_pending:
                         if any(entry in ("$(", "`") for entry in nest[nest.low:]):
                             raise ValueError(_HEREDOC_SUBST_LATE)
-                    if 0 <= nest.heredoc_bq and nest.low <= nest.heredoc_bq:
+                    if 0 <= nest.heredoc_bq and nest.low <= nest.heredoc_bq and not split_pending:
                         raise ValueError(_HEREDOC_BACKQUOTE_CLOSED)
                     body_at = i
-                    i = _skip_heredoc_bodies(command, i, n, pending_heredocs)
+                    bodies = None if heredocs is None else []
+                    i = _skip_heredoc_bodies(command, i, n, pending_heredocs, bodies)
+                    if heredocs is not None:
+                        heredocs.extend(place + (body,) for place, body in zip(pending_places, bodies))
                     # The exact-delimiter-line skip above ends each body where bash ends it only
                     # when the body is read outside every substitution and group: inside a command
                     # or process substitution or a '${ cmd; }' or '${| cmd; }' one, bash 5.3 ends a
@@ -3015,13 +3272,17 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                     # searched once per pass, so the test stays linear however many bodies follow).
                     # No body opened while a '${', a marked '((' or one of THE TEXT MARKS was still open on the
                     # stack reaches here: the lex already failed at that '<<' (the uncertain operator raises
-                    # below).
+                    # below), except, with split_delims, on a line whose heredoc has a split delimiter word.
                     if nesting_at is None:
                         nesting = _HEREDOC_NESTING_RE.search(command)
                         nesting_at = n if nesting is None else nesting.start()
                     trusted = not nest and nesting_at >= body_at
-                    if not trusted and _heredoc_body_ends_early(command, body_at, i, pending_heredocs,
-                                                                "`" in nest):
+                    # With split_delims, a line whose heredoc has a split delimiter word is not refused here:
+                    # the citation check scans that command only as written and reads this lex only to name
+                    # what it did not read (_lex_command).
+                    if not trusted and not split_pending and _heredoc_body_ends_early(command, body_at, i,
+                                                                                      pending_heredocs,
+                                                                                      "`" in nest):
                         # An untrusted body whose end is uncertain under the bounded rule of
                         # _heredoc_body_ends_early: a line that starts with its delimiter and is not
                         # exactly it, a body with no exact delimiter line, or a backquote in a body a
@@ -3039,6 +3300,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                         # every other reader of this lex.
                         _LexPlaces.spans.append((body_at, i, "heredoc" if trusted else "body"))
                     del pending_heredocs[:]
+                    del pending_places[:]
+                    split_pending = False
                     seg_start[0] = i
                 if fork is not None and tail_key is None:
                     # A resumed pass's first newline: where an earlier reading reached the same state, take
@@ -3134,7 +3397,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                         i = run
                     continue
                 if kind == "cannot":
-                    if op == "<<" and "${" in nest:
+                    if op == "<<" and "${" in nest and not split_operator(i):
                         # A '<<' read while a '${' is open on the nesting stack. Inside a '${...}' parameter
                         # expansion bash reads it as text and opens no here-document, so a body skipped here
                         # would hide the lines after it, which bash runs (bash 5.3.9 runs the git in
@@ -3149,24 +3412,34 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                         # UNCERTAIN: raise so the whole lex fails and every guard takes its fail-closed
                         # fallback, as at the uncertain body end above (a disclosed over-refusal of a
                         # here-document in such a substitution). The newline that would start a body
-                        # follows the same rule (the raise above, where the bodies are skipped).
+                        # follows the same rule (the raise above, where the bodies are skipped). With
+                        # split_delims, a split one is read on as an operator (split_operator).
                         raise ValueError(_HEREDOC_DOLLAR_BRACE_OPEN)
-                    if op == "<<" and "((" in nest:
+                    if op == "<<" and "((" in nest and not split_operator(i):
                         # A '<<' read while a marked '((' is open anywhere on the stack: a shift to bash inside
                         # arithmetic, where it opens no here-document, and an operator in nested subshells; the
                         # mark cannot tell which (THE ARITHMETIC MARK, above _HEREDOC_ARITH_OPEN), so the
                         # reading is UNCERTAIN: raise so the whole lex fails and every guard takes its
                         # fail-closed fallback. The newline that would start a body follows the same rule.
+                        # With split_delims, a split one is read on as an operator (split_operator).
                         raise ValueError(_HEREDOC_ARITH_OPEN)
                     if op == "<<":
                         # A '<<' read while one of THE TEXT MARKS is open anywhere on the stack: text to bash in
                         # a '$[', a subscript or a pattern, and a syntax error in an array assignment, after
                         # which bash reads the next line (above _HEREDOC_TEXT_MARKS); the reading is UNCERTAIN:
                         # raise so the whole lex fails. The newline that would start a body follows the same rule.
+                        # With split_delims, a split one is read on as an operator (split_operator).
                         mark = _heredoc_text_mark(nest)
-                        if mark is not None:
+                        if mark is not None and not split_operator(i):
                             raise ValueError(mark)
                         parsed = _parse_heredoc_delim(command, i + oplen, n)
+                        if (split_delims and parsed is not None and not parsed[0]
+                                and "\\\n" in command[i + oplen:parsed[3]]):
+                            # A delimiter word a backslash-newline splits that is unquoted once it is removed,
+                            # which this lexer refuses: read for the citation check as a quoted delimiter
+                            # holding a newline, which no line matches (_lex_command). A split delimiter that
+                            # is quoted keeps the reading above, which is bash's.
+                            parsed = (True, "\n", parsed[2], parsed[3])
                         if parsed is not None and parsed[0]:
                             # a QUOTED heredoc: queue its delimiter; the literal body is skipped at the next
                             # newline. The delimiter spec is consumed here; the current line's
@@ -3181,6 +3454,11 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
                             if nest.backquotes:
                                 nest.heredoc_bq = max(nest.heredoc_bq, nest.backquotes[-1])
                             pending_heredocs.append((_delim, _strip))
+                            pending_places.append((len(segments), len(redirects)))
+                            if split_delims and "\\\n" in command[i + oplen:_next_i]:
+                                split_pending = True
+                            if spans is not None:
+                                spans.append((i, i + oplen))
                             i = _next_i
                             continue
                     raise ValueError("unsupported shell construct: {}".format(op))
@@ -3189,7 +3467,7 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
             text, w_opaque, started, all_digits, w_leading_tilde, j = _read_word(command, i, n, nest,
                                                                                  i == glued_at, hash_reading,
                                                                                  locale, subst_heredocs, spelled,
-                                                                                 True)
+                                                                                 spans, nested, True)
             if j == i:
                 # Unreachable while this loop decides every '#' before it calls the word reader, which then
                 # consumes at least one character (a '#' this reading takes as word text included); kept so a
@@ -3220,6 +3498,8 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
             else:
                 unstarted = (i, j)
             i = j
+        if heredocs is not None:
+            heredocs.extend(place + ("",) for place in pending_places)  # no line follows: an empty body
         end_segment("", n, n)
     except ValueError as exc:
         # partial mode recovers the COMPLETE segments lexed before the unparseable construct AND the
@@ -12390,15 +12670,16 @@ def _recovery_git(repo, args, env_extra=None, timeout=10, text=True):
     return subprocess.run(cmd, capture_output=True, text=text, timeout=timeout, env=env)
 
 
-def _recovery_toplevel(repo):
+def _recovery_toplevel(repo, timeout=5):
     """The absolute repo TOPLEVEL for repo, via `git rev-parse --show-toplevel` (run through _recovery_git,
-    so it inherits the discovery-env neutralization and targets the REAL repo). Returns the toplevel path, or
+    so it inherits the discovery-env neutralization and targets the REAL repo), given timeout seconds (a
+    caller with its own deadline passes what is left of it). Returns the toplevel path, or
     None when git cannot resolve it (a non-zero return or an empty result: a bare repo, a broken git dir, or
     not a work tree) - the caller treats None as a snapshot failure. This matters because `status --porcelain`
     paths are repo-ROOT-relative while the session cwd can be a SUBDIR, so the size-estimate joins and the
     inside-the-repo containment checks must anchor on the TOPLEVEL, not on the (possibly deeper) cwd."""
     try:
-        result = _recovery_git(repo, ["rev-parse", "--show-toplevel"], timeout=5)
+        result = _recovery_git(repo, ["rev-parse", "--show-toplevel"], timeout=timeout)
     except (subprocess.SubprocessError, OSError, ValueError):
         # ValueError covers a UnicodeDecodeError raised by text-mode decoding of a non-UTF-8 toplevel path.
         return None
@@ -29751,6 +30032,3462 @@ def orch_dispatch_ledger(data):
     return _allow()
 
 
+# --- citation read ledger (citint/refcap) ------------------------------------------------------------
+# PostToolUse recorder, never blocks. After a Read, Grep, plain Bash read (git show REV:PATH, grep or rg with
+# a line-number flag, sed -n 'A,Bp' PATH), Write or Edit it appends rows naming the 1-based inclusive line
+# span the call returned or wrote, with the sha256 of those lines' raw bytes, to an owner-only ledger file per
+# session under the state directory. A span is recorded only when the tool output is a shape recognized here
+# AND the text it shows equals the file's own text at that span; any other shape records nothing, so a span
+# is never guessed. Every digest is computed from bytes the hook reads itself (the file on disk, or the git
+# blob), never from tool output. A text it reads (a Read, Grep or Bash output, a Write content, an Edit's
+# new_string, old_string or originalFile) longer than _CITE_MAX_TEXT characters and a Bash command longer
+# than _CITE_MAX_COMMAND record nothing, and a path longer than _CITE_MAX_PATH, or one whose resolution would
+# follow more than _CITE_MAX_LINKS symlinks, is never resolved, so names no file; any other field is only
+# type-checked or compared with a fixed value, except a Read's startLine and numLines, also used in
+# arithmetic, and the payload's cwd, given to the toplevel probe and joined to the relative paths a call
+# names or prints. One deadline, set when the handler starts, covers the toplevel probe and the work up to
+# the append: each git probe is given only the time left and none starts once it is reached, a file read
+# checks it before each chunk, no path is resolved once it is reached and a resolution stops at it between
+# two of its components and before each symlink it reads, no file is opened or given to stat or fstat once
+# it is reached, and the split of a response into lines, the comparison of shown lines with the file, the
+# scan of grep output and of a grep or rg command's words, the merge of grep hits into spans and the digest
+# of each row check it at each line, word, line number or row; the rows digested by then are still
+# appended. A step under way when it is reached finishes first, and what the deadline does not cover is
+# bounded by size or count instead (both listed in citation_read_recorder).
+_CITE_TOOLS = frozenset(("Read", "Grep", "Bash", "Write", "Edit"))
+_CITE_DIR = "citation-ledger"
+_CITE_NAME_RE = re.compile(r"[0-9a-f]{16}\.jsonl(?:\.1)?")
+_CITE_MAX_FILE = 16 * 1024 * 1024        # a larger file or blob is not read, so nothing of it is recorded
+_CITE_CAP = 4 * 1024 * 1024              # a session file an append would take past this is rotated first
+_CITE_DEDUP_BELOW = 256 * 1024           # duplicate rows are skipped only while the file is smaller than this
+_CITE_ROW_MAX = 4096                     # a row whose JSON line is this many bytes or more is dropped
+_CITE_PIECES_MAX = 128                   # a row carries at most this many piece digests of its span
+_CITE_PIECE_HEX = 16                     # hex characters kept of each piece digest (64 bits)
+_CITE_PRUNE_AGE_NS = 14 * 86400 * 10 ** 9  # ledger files last modified longer ago than this are pruned
+_CITE_PRUNE_MAX = 50                     # at most this many files are pruned per new session file
+_CITE_EDIT_MAX = 50                      # at most this many replacements of a replace_all Edit are recorded
+_CITE_MAX_FILES = 50                     # at most this many distinct paths are read per tool call
+_CITE_MAX_ROWS = 500                     # at most this many rows are appended per tool call
+_CITE_MAX_SPLITS = 8                     # at most this many path splits are tried per output line
+_CITE_MAX_TEXT = 16 * 1024 * 1024        # a longer output, Write content or Edit text (characters) records nothing
+_CITE_MAX_COMMAND = 1024 * 1024          # a longer Bash command (characters) is not lexed, so records nothing
+_CITE_MAX_PATH = 4095                    # a longer path (characters) is not resolved (Linux PATH_MAX less its NUL)
+_CITE_MAX_LINKS = 40                     # a resolution that would follow more symlinks stops (Linux follows 40)
+_CITE_BUDGET = 5.0                       # seconds for the probes, reads, scans and digests of a call (timeout 10)
+_CITE_OPEN_FLAGS = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0)
+_CITE_APPEND_FLAGS = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+_CITE_SED_RE = re.compile(r"([1-9][0-9]{0,8})(?:,([1-9][0-9]{0,8}))?p")
+# A grep or rg output line names its file and line as PATH:N:TEXT (a match) or PATH-N-TEXT (context). The
+# lookahead finds every place the line could split that way, since a path may itself hold ':' or '-N-'.
+_CITE_SPLIT_RE = re.compile(r"(?=([:-])([1-9][0-9]{0,8})\1)")
+_CITE_BARE_RE = re.compile(r"([1-9][0-9]{0,8})[:-]")  # N:TEXT or N-TEXT, from a search of one named file
+# How grep and rg read their options, as GNU grep 3.12 and ripgrep 15.1.0 list them (grep --help, rg --help)
+# and parse them when each option is tried. Per tool, the short options that take a value (in an option
+# cluster the rest of the word is that value, so the n of -en is a pattern, not the line-number flag; where
+# nothing follows in the word the next word is) and the short flags.
+_CITE_GREP_SHORT = {"grep": ("ABCDXdefm", "EFGHILPRTUVZabchilnoqrsuvwxyz0123456789"),
+                    "rg": ("ABCEMTdefgjmrt", "FHILNPSUVabchilnopqsuvwxz0.")}
+
+
+def _cite_option_table(flags, optional, valued):
+    """A long option table: each space-separated name, written NAME, or NAME=CANONICAL for a second name of
+    one option, mapped to (canonical name, kind), the kind "flag" (takes nothing), "optional" (takes only an
+    attached =VALUE) or "value" (takes an attached =VALUE, else the next word)."""
+    table = {}
+    for kind, names in (("flag", flags), ("optional", optional), ("value", valued)):
+        for word in names.split():
+            name, _eq, canonical = word.partition("=")
+            table[name] = (canonical or name, kind)
+    return table
+
+
+# Per tool, its long options. GNU grep's --color and --colour take a value only after '=', so in
+# grep -n --color PAT FILE the pattern is PAT. GNU grep also takes an unambiguous prefix of a long option
+# (_CITE_GREP_PREFIX; a prefix of two names of one option, such as --colo, is unambiguous); rg takes only the
+# full name. An unknown option, an ambiguous prefix, =VALUE on a flag and a value missing at the end make the
+# tool fail, so they record nothing.
+_CITE_GREP_LONG = {
+    "grep": _cite_option_table(
+        "basic-regexp binary byte-offset count dereference-recursive extended-regexp files-with-matches "
+        "files-without-match fixed-regexp=fixed-strings fixed-strings help ignore-case initial-tab invert-match "
+        "line-buffered line-number line-regexp no-filename no-group-separator no-ignore-case no-messages null "
+        "null-data only-matching perl-regexp quiet recursive silent text version with-filename word-regexp",
+        "color colour=color",
+        "after-context before-context binary-files context devices directories exclude exclude-dir "
+        "exclude-from file group-separator include label max-count regexp"),
+    "rg": _cite_option_table(
+        "auto-hybrid-regex binary block-buffered byte-offset case-sensitive column count count-matches crlf "
+        "debug files files-with-matches files-without-match fixed-strings follow glob-case-insensitive heading "
+        "help hidden ignore ignore-case ignore-dot ignore-exclude ignore-file-case-insensitive ignore-files "
+        "ignore-global ignore-messages ignore-parent ignore-vcs include-zero invert-match json line-buffered "
+        "line-number line-regexp max-columns-preview messages mmap multiline multiline-dotall "
+        "no-auto-hybrid-regex no-binary no-block-buffered no-byte-offset no-column no-config "
+        "no-context-separator no-crlf no-encoding no-filename no-fixed-strings no-follow "
+        "no-glob-case-insensitive no-heading no-hidden no-ignore no-ignore-dot no-ignore-exclude "
+        "no-ignore-file-case-insensitive no-ignore-files no-ignore-global no-ignore-messages no-ignore-parent "
+        "no-ignore-vcs no-include-zero no-invert-match no-json no-line-buffered no-line-number "
+        "no-max-columns-preview no-messages no-mmap no-multiline no-multiline-dotall no-one-file-system "
+        "no-pcre2 no-pcre2-unicode no-pre no-require-git no-search-zip no-sort-files no-stats no-text no-trim "
+        "no-unicode null null-data one-file-system only-matching passthrough=passthru passthru pcre2 "
+        "pcre2-unicode pcre2-version pretty quiet require-git search-zip smart-case sort-files stats "
+        "stop-on-nonmatch text trace trim type-list unicode unrestricted version vimgrep with-filename "
+        "word-regexp",
+        "",
+        "after-context before-context color colors context context-separator dfa-size-limit encoding engine "
+        "field-context-separator field-match-separator file generate glob hostname-bin hyperlink-format iglob "
+        "ignore-file max-columns max-count max-depth max-filesize maxdepth=max-depth path-separator pre "
+        "pre-glob regex-size-limit regexp replace sort sortr threads type type-add type-clear type-not")}
+_CITE_GREP_PREFIX = frozenset(("grep",))
+# A row's identity for deduplication: two rows differing in any of these are different facts.
+_CITE_KEY = ("kind", "via", "path", "start", "end", "sha256", "rev")
+
+
+def _cite_sha256(blob):
+    """The sha256 hex of bytes."""
+    return __import__("hashlib").sha256(blob).hexdigest()
+
+
+def _cite_real(path, deadline):
+    """(path resolved through symlinks, None), or (None, why) where the walk stops without a result: why
+    "links" where it would follow more than _CITE_MAX_LINKS symlinks or meets a symlink again while that
+    symlink's own resolution is still under way (a loop), "deadline" where the call's deadline is reached
+    before it ends (checked before each component it takes and before each symlink it reads), and None where
+    the path cannot be resolved (an embedded NUL, for example). The walk is os.path.realpath's own as Python
+    3.14 makes it (non-strict, and a symlink met again at the same path is taken from its cache, not read
+    again), so where it ends its result is os.path.realpath's; a loop, which os.path.realpath leaves as the
+    link's own path, ends it without a result instead. Every symlink it meets counts toward the bound, a
+    cached one as many times as its first resolution followed symlinks (itself and those its target led
+    through), since Linux reads it again each time it meets it and counts each of those symlinks again.
+    Linux follows at most 40 symlinks in one path lookup, counting every one it meets, so for a path whose
+    every component exists the count is the kernel's own (a loop, which the kernel follows until it passes
+    that bound and then refuses with ELOOP, is refused here when it is met), and a path the kernel can open
+    is never refused for the bound. A loop met after a missing component is refused for the bound too,
+    where the kernel refuses the path as missing. The walk takes at most the path's components and those of
+    the at most _CITE_MAX_LINKS targets it reads (one lstat and one join, or one cut for '..', each).
+    The bound does not make that quick: where the targets are thousands of components long, each lstat is
+    of a path up to PATH_MAX characters, and a walk within the bound can take seconds of CPU time. The
+    deadline is what bounds such a walk."""
+    try:
+        rest = path.split("/")[::-1]
+        current = "/" if path.startswith("/") else os.getcwd()
+        seen, followed, left = {}, 0, len(rest)
+        while left:
+            if _cite_over(deadline):
+                return None, "deadline"
+            name = rest.pop()
+            if name is None:
+                # The symlink beneath this marker has now been resolved: cache where it led and how many
+                # symlinks its resolution followed, itself included (the count before it lies beneath it).
+                link = rest.pop()
+                seen[link] = current, followed - rest.pop()
+                continue
+            left -= 1
+            if not name or name == ".":
+                continue
+            if name == "..":
+                current = current[:current.rindex("/")] or "/"
+                continue
+            step = current + name if current == "/" else current + "/" + name
+            try:
+                if not stat.S_ISLNK(os.lstat(step).st_mode):
+                    current = step
+                    continue
+                cached = seen.get(step, False)
+                if cached is None:  # met again inside its own resolution: a loop, which Linux follows until
+                    return None, "links"  # it passes the bound, so it refuses the path (ELOOP)
+                followed += 1 if cached is False else cached[1]
+                if followed > _CITE_MAX_LINKS:
+                    return None, "links"
+                if cached is not False:  # resolved before: where it led, from the cache
+                    current = cached[0]
+                    continue
+                if _cite_over(deadline):  # the lstat may have used the last of the time: no readlink after it
+                    return None, "deadline"
+                target = os.readlink(step)
+            except OSError:
+                current = step
+                continue
+            current = "/" if target.startswith("/") else current
+            seen[step] = None
+            rest += [followed - 1, step, None]  # the count before this symlink, the symlink, and its marker
+            parts = target.split("/")[::-1]
+            rest += parts
+            left += len(parts)
+        return current, None
+    except (OSError, ValueError):
+        return None, None
+
+
+def _cite_over(deadline):
+    """Whether the call's deadline has been reached."""
+    return time.monotonic() >= deadline
+
+
+def _cite_resolution(path, deadline):
+    """(the resolution of path, None), or (None, why) where path is not resolved: why "path" for a path
+    longer than _CITE_MAX_PATH characters and "deadline" for the call's deadline reached, neither of them
+    walked, else what _cite_real gives ("links", "deadline", or None where the path cannot be resolved).
+    Every path the recorder or the citation check resolves goes through here, so a resolution starts only
+    before the deadline, is given at most _CITE_MAX_PATH characters, follows at most _CITE_MAX_LINKS
+    symlinks (each one met counted, as Linux counts them, and a loop refused as over that bound), and stops
+    at the deadline between any two of its components and before each symlink it reads."""
+    if len(path) > _CITE_MAX_PATH:
+        return None, "path"
+    if _cite_over(deadline):
+        return None, "deadline"
+    return _cite_real(path, deadline)
+
+
+def _cite_resolve(path, deadline):
+    """The resolution of path, or None where _cite_resolution gives none (the recorder needs no reason)."""
+    return _cite_resolution(path, deadline)[0]
+
+
+def _cite_left(deadline):
+    """The seconds a git probe of the call may take: what is left before deadline, or None when nothing is
+    left (the probe is not started)."""
+    left = deadline - time.monotonic()
+    return left if left > 0 else None
+
+
+def _cite_lines(text, deadline):
+    """The lines of text, split on LF and each without its LF, one at a time: the call's deadline is
+    checked before each line is split off, and once it is reached no further line is."""
+    begin = 0
+    while not _cite_over(deadline):
+        stop = text.find("\n", begin)
+        if stop == -1:
+            yield text[begin:]
+            return
+        yield text[begin:stop]
+        begin = stop + 1
+
+
+def _cite_split(text, deadline):
+    """The list of the lines of text, split as _cite_lines splits them, or None where text is longer than
+    _CITE_MAX_TEXT characters or the call's deadline is reached before the last line is split off."""
+    if len(text) > _CITE_MAX_TEXT:
+        return None
+    lines, begin = [], 0
+    while not _cite_over(deadline):
+        stop = text.find("\n", begin)
+        if stop == -1:
+            lines.append(text[begin:])
+            return lines
+        lines.append(text[begin:stop])
+        begin = stop + 1
+    return None
+
+
+def _cite_entry(blob, path):
+    """One file's bytes as the recorder sees them: its path, the bytes, and its lines as raw byte pieces
+    split on LF only, each without its LF (an empty piece after a final LF is no line)."""
+    lines = blob.split(b"\n")
+    if lines[-1] == b"":
+        lines.pop()
+    return {"path": path, "blob": blob, "lines": lines}
+
+
+def _cite_text(raw):
+    """A raw line's text: decoded as UTF-8 (an undecodable byte becomes U+FFFD) without one CR at its end."""
+    return raw.removesuffix(b"\r").decode("utf-8", "replace")
+
+
+def _cite_bytes(entry, start, end):
+    """The raw bytes of lines start..end of entry, each with its LF where the file has one."""
+    lines = entry["lines"]
+    tail = b"\n" if end < len(lines) or entry["blob"].endswith(b"\n") else b""
+    return b"\n".join(lines[start - 1:end]) + tail
+
+
+def _cite_pieces(entry, start, end):
+    """The piece digests of lines start..end: the span cut into runs of ceil(n/_CITE_PIECES_MAX)
+    consecutive lines (one line each for a span of at most _CITE_PIECES_MAX lines; the last run may be
+    shorter), each run's raw bytes (_cite_bytes) digested and the first _CITE_PIECE_HEX hex characters
+    kept, concatenated in the runs' order. The citation check matches each run of a changed span on its
+    own (_citechk_fresh), so an edit inside a recorded span leaves the span's other runs covering their
+    lines at their recorded positions."""
+    group = -((start - end - 1) // _CITE_PIECES_MAX)
+    return "".join(_cite_sha256(_cite_bytes(entry, at, min(at + group - 1, end)))[:_CITE_PIECE_HEX]
+                   for at in range(start, end + 1, group))
+
+
+def _cite_read(path, files, deadline):
+    """The _cite_entry of the regular file at path, resolved through symlinks, or None: the call's deadline
+    reached (before the resolution, before the open, before the fstat or before any of the read's chunks), a
+    path _cite_resolve does not resolve, a path under /dev or /proc, a call that has already read
+    _CITE_MAX_FILES paths, an open or read fault, a file that is not regular, or one larger than
+    _CITE_MAX_FILE bytes. The open is non-blocking, so a FIFO is refused at the fstat rather than waited on;
+    results are kept in files, keyed by resolved path."""
+    if _cite_over(deadline):
+        return None
+    real = _cite_resolve(path, deadline)
+    if real in files:
+        return files[real]
+    if real is None or len(files) >= _CITE_MAX_FILES \
+            or real in ("/dev", "/proc") or real.startswith(("/dev/", "/proc/")):
+        return None
+    if _cite_over(deadline):  # the resolution may have used the last of the time: no open after it
+        return None
+    entry = None
+    try:
+        fd = os.open(real, _CITE_OPEN_FLAGS)
+    except OSError:
+        fd = None
+    if fd is not None:
+        try:
+            st = None if _cite_over(deadline) else os.fstat(fd)  # the open may have used the last of the time
+            if st is not None and stat.S_ISREG(st.st_mode) and st.st_size <= _CITE_MAX_FILE:
+                chunks, total, ended = [], 0, False
+                while total <= _CITE_MAX_FILE and not ended and not _cite_over(deadline):
+                    chunk = os.read(fd, min(1 << 20, _CITE_MAX_FILE + 1 - total))
+                    ended = not chunk
+                    chunks.append(chunk)
+                    total += len(chunk)
+                if ended and total <= _CITE_MAX_FILE:
+                    entry = _cite_entry(b"".join(chunks), real)
+        except OSError:
+            entry = None
+        finally:
+            try:
+                os.close(fd)  # once: after a failed close the descriptor number may already be reused
+            except OSError:
+                pass
+    files[real] = entry
+    return entry
+
+
+def _cite_span(entry, start, shown, deadline):
+    """The last line of the span that starts at line start and shows the lines in shown, when each shown
+    line, without one trailing CR, equals the file's line at its position; None when any line differs, the
+    span starts before line 1, nothing is shown, the span runs past the file's last line, or the call's
+    deadline is reached before every line is compared."""
+    lines = entry["lines"]
+    if start < 1 or not shown or start - 1 + len(shown) > len(lines):
+        return None
+    for offset, line in enumerate(shown):
+        if _cite_over(deadline) or line.removesuffix("\r") != _cite_text(lines[start - 1 + offset]):
+            return None
+    return start - 1 + len(shown)
+
+
+def _cite_from_read(tool_input, response, files, deadline):
+    """Read: one span, from a tool_response {"type": "text", "file": {"filePath", "content", "startLine",
+    "numLines"}} whose filePath resolves to the requested file_path, whose content splits on LF into
+    numLines lines (one trailing empty piece after a final LF is dropped), and whose lines equal the file's
+    lines startLine onward. An empty line shown just past the file's last line, where the file ends in a
+    line feed, is no line of the file and is dropped. Any other shape (an image, PDF or notebook read, a
+    missing or non-integer field, a mismatch), a file_path or filePath longer than _CITE_MAX_PATH
+    characters, a content longer than _CITE_MAX_TEXT characters, and a resolution or a split of the content
+    the call's deadline cuts short record nothing."""
+    data = response.get("file") if isinstance(response, dict) and response.get("type") == "text" else None
+    if not isinstance(data, dict):
+        return []
+    want, got = tool_input.get("file_path"), data.get("filePath")
+    content, start, count = data.get("content"), data.get("startLine"), data.get("numLines")
+    if not (isinstance(want, str) and isinstance(got, str) and os.path.isabs(want) and os.path.isabs(got)
+            and isinstance(content, str) and type(start) is int and type(count) is int and count >= 1):
+        return []
+    real = _cite_resolve(want, deadline)
+    if real is None or real != _cite_resolve(got, deadline):
+        return []
+    entry = _cite_read(got, files, deadline)
+    shown = None if entry is None else _cite_split(content, deadline)
+    if shown is None:
+        return []
+    if len(shown) == count + 1 and shown[-1] == "":
+        shown.pop()
+    if len(shown) != count:
+        return []
+    blob = entry["blob"]
+    if start - 1 + count == len(entry["lines"]) + 1 and shown[-1] == "" and (not blob or blob.endswith(b"\n")):
+        shown.pop()
+    end = _cite_span(entry, start, shown, deadline)
+    return [] if end is None else [("read", "Read", entry, start, end, None)]
+
+
+def _cite_inside(path, scope):
+    """Whether the resolved path is one of the resolved paths in scope or lies under one of them."""
+    return any(path == root or path.startswith(root.rstrip("/") + "/") for root in scope)
+
+
+def _cite_hits(lines, cwd, single, scope, via, files, deadline):
+    """grep or rg output lines as read spans. Each line is split at every place it could name a file and a
+    line (PATH:N:TEXT, PATH-N-TEXT, and N:TEXT or N-TEXT where the search named the one file single), a
+    relative PATH resolving against cwd, and a split counts only when that file is the searched file or lies
+    under a searched directory (scope, resolved paths) and its line N equals TEXT; a split whose PATH, so
+    joined, is longer than _CITE_MAX_PATH characters names no file (_cite_resolve), and a line with no such
+    split, or with more than one, records nothing. Consecutive lines of one file merge into one span
+    (_cite_merge). Once the call's deadline is reached no further line is read and no further PATH is
+    resolved, and since _cite_merge builds no span past it either, a scan that reaches the deadline yields
+    no span."""
+    hits = {}
+    for line in lines:
+        if _cite_over(deadline):
+            break
+        splits = []
+        bare = _CITE_BARE_RE.match(line) if single is not None else None
+        if bare:
+            splits.append((single, int(bare.group(1)), line[bare.end():]))
+        for match in _CITE_SPLIT_RE.finditer(line):
+            if len(splits) >= _CITE_MAX_SPLITS:
+                break
+            if match.start() > 0:
+                splits.append((line[:match.start()], int(match.group(2)),
+                               line[match.start() + len(match.group(2)) + 2:]))
+        found = set()
+        for path, number, text in splits:
+            real = _cite_resolve(os.path.join(cwd, path), deadline)
+            inside = real is not None and _cite_inside(real, scope)
+            entry = _cite_read(real, files, deadline) if inside else None
+            if entry is not None and number <= len(entry["lines"]) \
+                    and _cite_text(entry["lines"][number - 1]) == text.removesuffix("\r"):
+                found.add((entry["path"], number))
+        if len(found) == 1:
+            path, number = found.pop()
+            hits.setdefault(path, set()).add(number)
+    return _cite_merge(hits, via, files, deadline)
+
+
+def _cite_merge(hits, via, files, deadline):
+    """The read spans of hits (resolved path: the set of its line numbers), in path order, each run of
+    consecutive numbers one span, at most _CITE_MAX_ROWS of them. The call's deadline is checked at each
+    number; once it is reached no further span is added, so each span returned is a whole run. The paths,
+    and each path's numbers before they are walked, are sorted whole: no sort is cut short by the deadline,
+    and each is bounded by the count of hits (at most one per output line)."""
+    spans = []
+    for path in sorted(hits):
+        numbers = sorted(hits[path])
+        start = prev = numbers[0]
+        for number in numbers[1:] + [None]:
+            if _cite_over(deadline):
+                return spans
+            if number is not None and number == prev + 1:
+                prev = number
+                continue
+            if len(spans) >= _CITE_MAX_ROWS:
+                return spans
+            spans.append(("read", via, files[path], start, prev, None))
+            start = prev = number
+    return spans
+
+
+def _cite_from_grep(tool_input, response, cwd, files, deadline):
+    """Grep: the hit and context lines of a tool_response {"mode": "content", "content": TEXT}, through
+    _cite_hits, each counted only inside the requested path (the file, or the directory and what lies under
+    it; cwd when no path is given), its lines split off one at a time (_cite_lines). A search run with "-n"
+    false prints no line numbers, a content longer than _CITE_MAX_TEXT characters is not read, a path
+    (joined to cwd where relative) that _cite_resolve does not resolve, and a resolution after which the
+    call's deadline has been reached (so the resolved path is never given to stat), each record nothing."""
+    if not isinstance(response, dict) or response.get("mode") != "content":
+        return []
+    content, base = response.get("content"), tool_input.get("path")
+    base = cwd if base is None else base
+    if not isinstance(content, str) or len(content) > _CITE_MAX_TEXT or tool_input.get("-n") is False \
+            or not isinstance(base, str) or not base:
+        return []
+    base = _cite_resolve(os.path.join(cwd, base), deadline)
+    if base is None or _cite_over(deadline):
+        return []
+    return _cite_hits(_cite_lines(content, deadline), cwd, base if os.path.isfile(base) else None, (base,),
+                      "Grep", files, deadline)
+
+
+def _cite_git_show(args, shown, cwd, root, deadline):
+    """git [--no-pager] [-C ABS] show REV:PATH, its stdout showing the blob from line 1: one span, digested
+    from the blob itself and recorded against the repository path PATH names at REV, never a working-tree
+    file: the row's path is PATH under the repository's resolved toplevel, PATH itself is not resolved
+    through the working tree, and its rel is PATH when that repository is the session's (else null). One
+    probe lists the tree entry (it must be a regular file blob, so a committed symlink, a submodule or a
+    tree records nothing) and a second reads that blob by its object id, at most _CITE_MAX_FILE bytes; each
+    runs within the call's deadline. A relative -C, a second operand, an option after show, a PATH with an
+    empty, '.' or '..' component, or a probe fault records nothing."""
+    repo, i = cwd, 0
+    while i < len(args) and args[i] in ("-C", "--no-pager"):
+        if args[i] == "-C":
+            if i + 1 >= len(args) or not os.path.isabs(args[i + 1]):
+                return []
+            repo = args[i + 1]
+            i += 2
+        else:
+            i += 1
+    if len(args) != i + 2 or args[i] != "show":
+        return []
+    rev, colon, rel = args[i + 1].partition(":")
+    if not (colon and rev and rel) or rev.startswith("-") or rev.count("{") != rev.count("}") \
+            or any(part in ("", ".", "..") for part in rel.split("/")):
+        return []
+    if repo == cwd:
+        top = root
+    else:
+        left = _cite_left(deadline)
+        top = None if left is None else _recovery_toplevel(repo, timeout=left)
+    top = None if top is None else _cite_resolve(top, deadline)
+    left = None if top is None else _cite_left(deadline)
+    listing = None if left is None else _review_git(repo, "ls-tree", "-z", "-l", "--full-tree", rev, "--", rel,
+                                                    timeout=left)
+    if listing is None or listing.returncode != 0 or listing.stdout.count(b"\0") != 1 \
+            or not listing.stdout.endswith(b"\0"):
+        return []
+    head, _tab, name = listing.stdout[:-1].partition(b"\t")
+    fields = head.split()
+    if name != os.fsencode(rel) or len(fields) != 4 or fields[0] not in (b"100644", b"100755") \
+            or fields[1] != b"blob" or not fields[3].isdigit() or int(fields[3]) > _CITE_MAX_FILE:
+        return []
+    oid, left = fields[2].decode("ascii", "replace"), _cite_left(deadline)
+    blob = None if left is None else _review_git(repo, "cat-file", "blob", oid, timeout=left)
+    if blob is None or blob.returncode != 0 or len(blob.stdout) != int(fields[3]):
+        return []
+    entry = _cite_entry(blob.stdout, os.path.join(top, rel))
+    entry["rel"] = rel if top == _cite_resolve(root, deadline) else None
+    end = _cite_span(entry, 1, shown, deadline)
+    return [] if end is None else [("read", "git-show", entry, 1, end, rev)]
+
+
+def _cite_long_option(tool, word):
+    """(canonical name, kind, attached value or None) of one --NAME or --NAME=VALUE word of grep or rg, as
+    _CITE_GREP_LONG gives it (for grep, an unambiguous prefix names its option), or None where the tool
+    refuses the word: no such option, an ambiguous prefix, or =VALUE on a flag."""
+    table = _CITE_GREP_LONG[tool]
+    name, eq, value = word[2:].partition("=")
+    found = {table[name]} if name in table else set()
+    if not found and name and tool in _CITE_GREP_PREFIX:
+        found = {table[full] for full in table if full.startswith(name)}
+    if len(found) != 1:
+        return None
+    canonical, kind = found.pop()
+    if eq and kind == "flag":
+        return None
+    return canonical, kind, value if eq else None
+
+
+def _cite_grep_command(argv, shown, cwd, files, deadline):
+    """grep or rg with -n (alone or in a short option cluster, not as the value of an option such as -e)
+    or --line-number (for grep, or an unambiguous prefix of it), not turned off again by a later rg -N or
+    --no-line-number: the output's lines through _cite_hits, each counted only inside a named path (a named
+    file, or a named directory and what lies under it; cwd where no path is named). Options are read as
+    _CITE_GREP_SHORT and _CITE_GREP_LONG give them, the deadline checked at each word; a command the tool
+    would refuse (an unknown option, an ambiguous prefix, a value missing at the end) records nothing. The
+    first operand is the pattern unless -e, -f, --regexp or --file gave one. Each named path is joined to
+    cwd and given to stat once, the deadline checked before each, then resolved through _cite_resolve, so a
+    path it does not resolve adds nothing to the scope. Where exactly one path is named and that stat found
+    a regular file, N:TEXT lines are read as that file's. Once the deadline is reached no further stat is
+    made and the command records nothing."""
+    valued, flags = _CITE_GREP_SHORT[argv[0]]
+    numbered, patterned, operands, take, ended = False, False, [], False, False
+    for word in argv[1:]:
+        if _cite_over(deadline):
+            return []
+        if take:
+            take = False
+        elif ended or word == "-" or not word.startswith("-"):
+            operands.append(word)
+        elif word == "--":
+            ended = True
+        elif word.startswith("--"):
+            option = _cite_long_option(argv[0], word)
+            if option is None:
+                return []
+            name, kind, value = option
+            if name in ("line-number", "no-line-number"):
+                numbered = name == "line-number"
+            patterned = patterned or name in ("regexp", "file")
+            take = kind == "value" and value is None
+        else:
+            for index, letter in enumerate(word[1:], 1):
+                if letter in valued:
+                    patterned = patterned or letter in "ef"
+                    take = index == len(word) - 1
+                    break
+                if letter not in flags:
+                    return []
+                if letter in "nN":  # -N is a short flag of rg only, where it turns numbering off
+                    numbered = letter == "n"
+    if take or not numbered:
+        return []
+    paths = [os.path.join(cwd, word) for word in (operands if patterned else operands[1:])]
+    named, regular = ([] if paths else [cwd]), []
+    for path in paths:
+        if _cite_over(deadline):
+            return []
+        try:
+            mode = os.stat(path).st_mode
+        except (OSError, ValueError):
+            continue
+        if stat.S_ISREG(mode) or stat.S_ISDIR(mode):
+            named.append(path)
+        if stat.S_ISREG(mode):
+            regular.append(path)
+    scope = tuple(real for real in (_cite_resolve(p, deadline) for p in named) if real is not None)
+    if _cite_over(deadline):  # a resolution may have used the last of the time: nothing is recorded
+        return []
+    single = scope[0] if len(paths) == 1 and len(scope) == 1 and regular else None
+    return _cite_hits(shown, cwd, single, scope, "grep", files, deadline)
+
+
+def _cite_sed(argv, shown, cwd, files, deadline):
+    """sed -n 'A,Bp' PATH (or 'Ap'): one span from line A, ending where the output ends, at line B at most."""
+    match = _CITE_SED_RE.fullmatch(argv[2]) if len(argv) == 4 and argv[1] == "-n" else None
+    if match is None or argv[3].startswith("-"):
+        return []
+    first, last = int(match.group(1)), int(match.group(2) or match.group(1))
+    entry = _cite_read(os.path.join(cwd, argv[3]), files, deadline)
+    end = None if entry is None else _cite_span(entry, first, shown, deadline)
+    return [] if end is None or end > last else [("read", "sed", entry, first, end, None)]
+
+
+def _cite_from_bash(tool_input, response, cwd, root, files, deadline):
+    """Bash: a command that lexes to one plain simple command (no separator, pipe, redirect, expansion or
+    glob) whose command word is literally git, grep, rg or sed, with a tool_response whose stdout is a
+    non-empty string and whose interrupted field is not true. One final LF is dropped from stdout before it
+    is split into lines (one at a time for grep and rg, through _cite_lines; whole, through _cite_split, for
+    git show and sed). A command longer than _CITE_MAX_COMMAND characters, a stdout longer than
+    _CITE_MAX_TEXT, a split the call's deadline cuts short and anything else record nothing."""
+    if not isinstance(response, dict) or response.get("interrupted") is True:
+        return []
+    out, command = response.get("stdout"), tool_input.get("command")
+    if not (isinstance(out, str) and out and len(out) <= _CITE_MAX_TEXT and isinstance(command, str)
+            and len(command) <= _CITE_MAX_COMMAND):
+        return []
+    try:
+        segments = _lex_command(command)
+    except ValueError:
+        return []
+    words = [seg for seg in segments if seg.argv or seg.redirects]
+    if len(words) != 1 or any(seg.sep_after for seg in segments) or words[0].redirects \
+            or words[0].opaque_shell:
+        return []
+    argv, text = words[0].argv, out.removesuffix("\n")
+    if argv[0] in ("grep", "rg"):
+        return _cite_grep_command(argv, _cite_lines(text, deadline), cwd, files, deadline)
+    shown = _cite_split(text, deadline) if argv[0] in ("git", "sed") else None
+    if shown is None:
+        return []
+    if argv[0] == "git":
+        return _cite_git_show(argv[1:], shown, cwd, root, deadline)
+    return _cite_sed(argv, shown, cwd, files, deadline)
+
+
+def _cite_within(text, start, stop, deadline):
+    """The first and last 1-based lines of text that lie wholly inside text[start:stop], or None when no
+    line does: a line only partly inside is left out, and an empty line counts only where its LF lies
+    inside too. Stops at the call's deadline with the lines found so far."""
+    begin = text.rfind("\n", 0, start) + 1
+    if begin < start:
+        begin = text.find("\n", start, stop) + 1
+        if begin == 0:
+            return None
+    first = line = text.count("\n", 0, begin) + 1
+    last = None
+    while begin < len(text) and not _cite_over(deadline):
+        close = text.find("\n", begin)
+        close = len(text) if close == -1 else close
+        if close > stop or (close == begin and close >= stop):
+            break
+        last, begin, line = line, close + 1, line + 1
+    return None if last is None else (first, last)
+
+
+def _cite_edit_ranges(tool_input, response, text, new):
+    """Where an Edit's new text lies in the edited file text (CRLF read as LF throughout): a list of
+    [start, stop) ranges. Where the tool_response carries originalFile (the file before the edit), each
+    range is the edit's own position: old_string must occur in it once (or, with replace_all, any number of
+    times, of which the first _CITE_EDIT_MAX are taken), and the text must equal originalFile with that
+    replacement made (its length is compared first, so the replacement is made only where it would be as
+    long as the text). Otherwise, without replace_all, the one occurrence of new_string in the text, when
+    it occurs exactly once (overlaps counted). Anything else is no range."""
+    old, every = tool_input.get("old_string"), tool_input.get("replace_all") is True
+    before = response.get("originalFile")
+    if isinstance(before, str) and isinstance(old, str) and old:
+        before, old = before.replace("\r\n", "\n"), old.replace("\r\n", "\n")
+        at = [before.find(old)]
+        if at[0] == -1 or (not every and before.find(old, at[0] + 1) != -1):
+            return []
+        while every and len(at) < _CITE_EDIT_MAX:
+            pos = before.find(old, at[-1] + len(old))
+            if pos == -1:
+                break
+            at.append(pos)
+        count = before.count(old) if every else 1
+        if len(before) + count * (len(new) - len(old)) != len(text) \
+                or (before.replace(old, new) if every else before.replace(old, new, 1)) != text:
+            return []
+        shift = len(new) - len(old)
+        return [(pos + k * shift, pos + k * shift + len(new)) for k, pos in enumerate(at)]
+    if every:
+        return []
+    pos = text.find(new)
+    return [] if pos == -1 or text.find(new, pos + 1) != -1 else [(pos, pos + len(new))]
+
+
+def _cite_from_write(tool, tool_input, response, files, deadline):
+    """Write and Edit, from a tool_response object whose filePath resolves to the requested file_path. A
+    Write is the whole file, recorded only when the file's text equals the written content (CRLF read as
+    LF on both sides). An Edit is, for each range _cite_edit_ranges gives, the lines that lie wholly inside
+    it (_cite_within): never another occurrence of the new text elsewhere in the file, and never a line the
+    new text only partly covers. An empty content or new_string, a content, new_string, old_string or
+    originalFile longer than _CITE_MAX_TEXT characters, and a file_path or filePath longer than
+    _CITE_MAX_PATH characters record nothing."""
+    path = tool_input.get("file_path")
+    got = response.get("filePath") if isinstance(response, dict) else None
+    if not (isinstance(path, str) and isinstance(got, str) and os.path.isabs(path) and os.path.isabs(got)):
+        return []
+    real = _cite_resolve(path, deadline)
+    if real is None or real != _cite_resolve(got, deadline):
+        return []
+    new = tool_input.get("content" if tool == "Write" else "new_string")
+    texts = (new,) if tool == "Write" else (new, tool_input.get("old_string"), response.get("originalFile"))
+    if any(isinstance(text, str) and len(text) > _CITE_MAX_TEXT for text in texts):
+        return []
+    entry = _cite_read(path, files, deadline) if isinstance(new, str) and new else None
+    if entry is None:
+        return []
+    text, new = entry["blob"].decode("utf-8", "replace").replace("\r\n", "\n"), new.replace("\r\n", "\n")
+    if tool == "Write":
+        return [("wrote", "Write", entry, 1, len(entry["lines"]), None)] if text == new else []
+    spans = []
+    for start, stop in _cite_edit_ranges(tool_input, response, text, new):
+        lines = None if _cite_over(deadline) else _cite_within(text, start, stop, deadline)
+        if lines is not None:
+            spans.append(("wrote", "Edit", entry, lines[0], lines[1], None))
+    return spans
+
+
+def _cite_rows(tool, tool_input, response, cwd, root, deadline):
+    """The ledger rows one finished tool call earns: {"v": 1, "ts", "kind": "read"|"wrote", "via", "path"
+    (resolved through symlinks; for git show, the repository path under the resolved toplevel), "rel"
+    (relative to the resolved root, or null outside it; for git show, the repository path, or null when the
+    repository is not the session's), "start", "end", "sha256" (of the raw bytes of lines start..end,
+    LF-split, CR kept), "pieces" (the span's piece digests, _cite_pieces, so the citation check can match
+    an unchanged run of a span that has changed elsewhere), "rev" (the git show revision exactly as the
+    command typed it, not resolved, else null)}. At most _CITE_MAX_ROWS rows; the call's deadline is
+    checked before each row is digested (its span digest and its piece digests are one step), and the rows
+    digested by then are returned (none where it is reached before root is resolved)."""
+    files = {}
+    if tool == "Read":
+        found = _cite_from_read(tool_input, response, files, deadline)
+    elif tool in ("Write", "Edit"):
+        found = _cite_from_write(tool, tool_input, response, files, deadline)
+    elif not (isinstance(cwd, str) and os.path.isabs(cwd)):
+        found = []
+    elif tool == "Grep":
+        found = _cite_from_grep(tool_input, response, cwd, files, deadline)
+    else:
+        found = _cite_from_bash(tool_input, response, cwd, root, files, deadline)
+    home = _cite_resolve(root, deadline)
+    if home is None:
+        return []
+    top = home.rstrip("/") + "/"
+    ts = _orch_now().isoformat()
+    rows = []
+    for kind, via, entry, start, end, rev in found[:_CITE_MAX_ROWS]:
+        if _cite_over(deadline):
+            break
+        path = entry["path"]
+        rel = entry["rel"] if "rel" in entry else (path[len(top):] if path.startswith(top) else None)
+        rows.append({"v": 1, "ts": ts, "kind": kind, "via": via, "path": path, "rel": rel, "start": start,
+                     "end": end, "sha256": _cite_sha256(_cite_bytes(entry, start, end)),
+                     "pieces": _cite_pieces(entry, start, end), "rev": rev})
+    return rows
+
+
+def _cite_fail(exc):
+    """A short failure detail: the exception's class name, with the system's error text where it gave one."""
+    text = getattr(exc, "strerror", None)
+    return "{}: {}".format(type(exc).__name__, text) if text else type(exc).__name__
+
+
+def _cite_open(dirfd, name):
+    """Open the ledger file name in the directory dirfd for appending, never through a symlink and without
+    waiting on a FIFO, creating it 0600 when absent: (fd, created)."""
+    try:
+        return os.open(name, _CITE_APPEND_FLAGS | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dirfd), True
+    except FileExistsError:
+        return os.open(name, _CITE_APPEND_FLAGS | os.O_CREAT, 0o600, dir_fd=dirfd), False
+
+
+def _cite_regular(fd):
+    """The size of the open ledger file, its permission bits set to 0600 first when they differ; None when
+    it is not a regular file."""
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    if stat.S_IMODE(st.st_mode) != 0o600:
+        os.fchmod(fd, 0o600)
+    return st.st_size
+
+
+def _cite_unseen(fd, size, items):
+    """items without those whose _CITE_KEY fields a row of the open ledger file (size bytes) already holds;
+    a line that is not a JSON object with those fields is passed over."""
+    have = set()
+    for line in os.pread(fd, size, 0).split(b"\n"):
+        try:
+            row = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(row, dict):
+            key = tuple(row.get(field) for field in _CITE_KEY)
+            rev = key[-1]
+            if all(isinstance(k, (str, int)) for k in key[:-1]) and (rev is None or isinstance(rev, str)):
+                have.add(key)
+    return [(key, line) for key, line in items if key not in have]
+
+
+def _cite_prune(dirfd, keep, now_ns):
+    """Remove up to _CITE_PRUNE_MAX regular files in the ledger directory whose names have the ledger shape,
+    other than keep and its .1, last modified more than _CITE_PRUNE_AGE_NS before now_ns (stat without
+    following a symlink; a fault skips that file). Returns how many were removed."""
+    cutoff, removed = now_ns - _CITE_PRUNE_AGE_NS, 0
+    try:
+        names = sorted(os.listdir(dirfd))
+    except OSError:
+        return removed
+    for name in names:
+        if removed >= _CITE_PRUNE_MAX:
+            break
+        if name in (keep, keep + ".1") or not _CITE_NAME_RE.fullmatch(name):
+            continue
+        try:
+            st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+            if stat.S_ISREG(st.st_mode) and st.st_mtime_ns < cutoff:
+                os.unlink(name, dir_fd=dirfd)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _cite_append_at(dirfd, name, items):
+    """The append of _cite_append in the open ledger directory dirfd (see there): None, or the failure
+    detail."""
+    if stat.S_IMODE(os.fstat(dirfd).st_mode) != 0o700:
+        os.fchmod(dirfd, 0o700)
+    fd, created = _cite_open(dirfd, name)
+    rotate = False
+    try:
+        size = _cite_regular(fd)
+        if size is None:
+            return "not a regular file"
+        if size < _CITE_DEDUP_BELOW:
+            items = _cite_unseen(fd, size, items)
+        data = b"".join(line for _key, line in items)
+        if data and size > 0 and size + len(data) > _CITE_CAP:
+            rotate = True
+        elif data and os.write(fd, data) != len(data):
+            return "short write"
+    finally:
+        os.close(fd)
+    if rotate:
+        os.replace(name, name + ".1", src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        fd, created = _cite_open(dirfd, name)
+        try:
+            if _cite_regular(fd) is None:
+                return "not a regular file"
+            if os.write(fd, data) != len(data):
+                return "short write"
+        finally:
+            os.close(fd)
+    if created:
+        _cite_prune(dirfd, name, time.time_ns())
+    return None
+
+
+def _cite_append(state_dir, session, rows):
+    """Append rows to this session's ledger, <state_dir>/citation-ledger/<first 16 hex of sha256(session
+    id)>.jsonl, in one write: None on success, else the failure detail. The directory is made 0700 (its
+    leaf opened without following a symlink) and the file 0600, whatever the umask. A row whose JSON line is
+    _CITE_ROW_MAX bytes or more is first written without its pieces (the span digest still covers the whole
+    span, as a row recorded before piece digests does), and dropped only where its line is still that long;
+    a row whose _CITE_KEY fields equal an earlier row's of the
+    same call, or (while the file is under _CITE_DEDUP_BELOW bytes) a row the file already holds, is
+    skipped. Where the append would take a non-empty file past _CITE_CAP bytes the file is first renamed
+    onto <name>.1, replacing the older generation. Creating a file (a new session's, or the fresh one after
+    a rotation) prunes old ledger files."""
+    items, seen = [], set()
+    for row in rows:
+        key = tuple(row[field] for field in _CITE_KEY)
+        line = (json.dumps(row, sort_keys=True) + "\n").encode("utf-8")
+        if len(line) >= _CITE_ROW_MAX and "pieces" in row:
+            slim = {field: value for field, value in row.items() if field != "pieces"}
+            line = (json.dumps(slim, sort_keys=True) + "\n").encode("utf-8")
+        if key not in seen and len(line) < _CITE_ROW_MAX:
+            seen.add(key)
+            items.append((key, line))
+    if not items:
+        return None
+    name = _cite_sha256(session.encode("utf-8", "replace"))[:16] + ".jsonl"
+    try:
+        directory = os.path.join(state_dir, _CITE_DIR)
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError) as exc:
+        return _cite_fail(exc)
+    try:
+        return _cite_append_at(dirfd, name, items)
+    except (OSError, ValueError) as exc:
+        return _cite_fail(exc)
+    finally:
+        try:
+            os.close(dirfd)  # once: after a failed close the descriptor number may already be reused
+        except OSError:
+            pass
+
+
+def citation_read_recorder(data):
+    """citint/refcap, PostToolUse (recorder, never blocks): record the line spans a Read, Grep, plain Bash
+    read, Write or Edit returned or wrote, for a later citation check. Inert (a silent allow) unless the
+    payload is a PostToolUse one with a non-empty session_id, a recorded tool and a tool_input object, and
+    the session cwd resolves to a git toplevel (the session cwd's own, the only directory probed: a
+    git -C naming another repository supplies none, so with the session cwd outside every git repository
+    the recorder is inert even for a git -C ... show read); not registry-gated and not holder-gated, since
+    each session writes only its own ledger file. A tool_response shape it does not recognize, or output that does not
+    equal the file's text, records nothing. Size bounds: a Bash command longer than _CITE_MAX_COMMAND
+    characters, and a Read, Grep or Bash output, a Write content or an Edit's new_string, old_string or
+    originalFile longer than _CITE_MAX_TEXT characters, record nothing, and a path longer than
+    _CITE_MAX_PATH characters, or one whose resolution would follow more than _CITE_MAX_LINKS symlinks, is
+    not resolved (_cite_resolution), so names no file; every other field of the tool input and response is
+    only type-checked or compared with a fixed value, except a Read's startLine and numLines, which are also
+    used in arithmetic (the first line of the span, its count of lines), and the payload's cwd, which is
+    given to the toplevel probe and joined to each relative path a Grep, grep, rg or sed call names or
+    prints (each joined path is then held to the path bound). One deadline, _CITE_BUDGET seconds from here,
+    covers the toplevel probe and the work of _cite_rows: each git probe is given only the time left and
+    none starts once it is reached, and it is checked before each of a file read's chunks, before each path
+    is resolved, between two components of its resolution and before each symlink it reads, before each
+    file is opened and before its fstat, and before each stat of a path a Grep, grep or rg call searches, at
+    each line of a response's split, of the comparison of shown lines with the file and of the scan of grep
+    output, at each word of a grep or rg command, at each line number of the merge of grep hits into spans,
+    before each Edit range and at each of its lines, and before each row's digests (its span digest and its
+    piece digests, _cite_pieces, are one row's step); the rows digested by
+    then are appended. A step under way when it is reached finishes first: the scan of one output line for
+    the places it could split, with the slicing of its at most _CITE_MAX_SPLITS splits and the join of each
+    split's path to cwd (at most _CITE_MAX_TEXT characters); the find and slice of one line when a response
+    text is split into lines (_cite_lines, _cite_split; at most _CITE_MAX_TEXT characters) and the find of
+    one line in an Edit range (_cite_within; a file of at most _CITE_MAX_FILE bytes); the decoding of one
+    file line and its comparison with a shown line (_cite_span, and _cite_hits through _cite_text; a line of
+    at most _CITE_MAX_FILE bytes); the parse of one word of a grep or rg command (at most _CITE_MAX_COMMAND
+    characters); one lstat of a path's resolution, with the join of the component to the path walked so
+    far, or one readlink; one stat, open or fstat; the read of one chunk; and the count of the lines before
+    one Edit range or the digests of one row, its span and its at most _CITE_PIECES_MAX pieces (at most
+    _CITE_MAX_FILE bytes each). Bounded by size or count
+    instead of the deadline: the payload, read and parsed whole before this handler starts; the lexing of a
+    command, the argument checks of git show and the parse of its one ls-tree line, and the join of each
+    path a grep or rg command names to cwd (a command of at most _CITE_MAX_COMMAND characters); the split of
+    a path into its components before its resolution (at most _CITE_MAX_PATH characters) and of each
+    symlink target it reads (at most _CITE_MAX_LINKS of them); the copy of a Bash output without its final
+    line feed (at most _CITE_MAX_TEXT characters); the split of a file's or blob's bytes into lines and, for
+    a Write or Edit, the decoding of the file and of the new text and a Write's comparison of the two (at
+    most _CITE_MAX_FILE bytes and _CITE_MAX_TEXT characters); the search for at most _CITE_EDIT_MAX
+    replacements and the replacement check of an Edit (texts of at most _CITE_MAX_TEXT characters); the sort
+    of the grep hits found before the deadline (at most one per output line); and, after the deadline, the
+    append: the digest of the session id that names the ledger file (as long as the payload gives it), the
+    orchestration registry read that locates the state directory (read whole, as every hook here reads it;
+    this hook sets no size bound on it), the duplicate scan (a session file under _CITE_DEDUP_BELOW bytes),
+    at most _CITE_MAX_ROWS rows of under _CITE_ROW_MAX bytes, and, when a session file is created, one
+    listing of the ledger directory (not bounded in entries) and at most _CITE_PRUNE_MAX removals. A failed
+    write SURFACES as a non-blocking systemMessage naming the error (nocncl), never a swallowed one."""
+    if data.get("hook_event_name") != "PostToolUse":
+        return _allow()
+    deadline = time.monotonic() + _CITE_BUDGET
+    session, tool, tool_input = data.get("session_id"), data.get("tool_name"), data.get("tool_input")
+    if not (isinstance(session, str) and session and isinstance(tool, str) and tool in _CITE_TOOLS
+            and isinstance(tool_input, dict)):
+        return _allow()
+    cwd, left = data.get("cwd"), _cite_left(deadline)
+    root = _recovery_toplevel(cwd, timeout=left) if isinstance(cwd, str) and cwd and left is not None else None
+    if root is None:
+        return _allow()
+    rows = _cite_rows(tool, tool_input, data.get("tool_response"), cwd, root, deadline)
+    if not rows:
+        return _allow()
+    failure = _cite_append(_orch_state_dir_for_root(root), session, rows)
+    if failure is not None:
+        return _allow_note("AIQT guardrail (rules citint/refcap): the citation-ledger write failed ({}); this "
+                           "read was not recorded, so a later citation of these lines cannot be matched to "
+                           "it.".format(failure))
+    return _allow()
+
+
+# --- citation read check (citint/refcap) -------------------------------------------------------------
+# PreToolUse Bash, stage BAKE: it surfaces a note and never denies. Where a git commit message (-m, -F) or a
+# gh pr create or edit body (--body, --body-file) cites a path with a line or a line range, it reads this
+# session's citation ledgers (both generations, as citation_read_recorder writes them, under the state
+# directory of each distinct toplevel among the session cwd's, each command's git -C toplevel and each cited
+# file's, at most _CITECHK_MAX_LEDGERS of them; _citechk_tops), merges their rows, and names each cited
+# range that no recorded read or write row covers at the cited lines with the content those lines hold now.
+# A row whose span has changed still covers at the pieces of it that hold their recorded content
+# (_citechk_fresh, from the row's piece digests), so an edit inside a read span stales only the cited lines
+# whose own piece changed, before and after that edit is committed; a row without piece digests (recorded
+# before them, or past the row size bound) is judged by its span digest alone, whole.
+# A toplevel whose ledger is not read (past that bound or the deadline, or a cited file's directory whose
+# toplevel is not probed) is named in the guard-events row and, when a range is judged, in the note (at
+# most _CITECHK_TOPS_SHOWN of them, the rest counted); a read recorded under any other toplevel is not
+# seen. A relative cited path that names no file under the command's repository is matched by its suffix
+# only to a recorded path under that repository's resolved toplevel (_citechk_resolve), whichever ledger
+# holds the row, so a read of another repository's file never covers it.
+# Quoted logs and tracebacks, URLs, times and versions, ranges a body labels as verifier-supplied, and lines
+# the author wrote (Write and Edit rows, and lines the relevant diff adds) are excluded by construction. Each
+# checked command earns one guard-events row (kind citint) recording every citation's class, the bake
+# evidence a later promotion is decided on. As in the recorder, one deadline set when the handler starts
+# covers the toplevel probes, every git probe (each given only the time left, none started once it is
+# reached), every path resolution, every stat, open or fstat of a resolved path, every message, body,
+# ledger and cited-file read, the scan of every message, body and here-document text (made first, before
+# the toplevel probe), and every row digest; a range not judged by then is named as such, and where the
+# deadline stops
+# a scan no toplevel probe is started and the note says no citation was checked. Every path the check
+# resolves goes through _cite_resolution (_citechk_real): a message or body file, a cited path (joined to
+# the repository top where relative), the repository top a diff is read against, and the session cwd and a
+# git -C directory it compares. A path longer than _CITE_MAX_PATH characters, one whose resolution would
+# follow more than _CITE_MAX_LINKS symlinks or meets a symlink loop (which Linux follows until it passes
+# that bound), and one reached, or still being walked, once the deadline has passed are not resolved: a body
+# file is named as not read, and each range that needs the path as not judged, with the bound or the budget
+# named (where the deadline passes before the toplevel probe, that note names each body file not read). The
+# deadline is checked at each line of a text's scan, before each citation is judged, before each path is
+# resolved, between two components of its resolution and before each symlink it reads, before each stat,
+# open or fstat of a resolved path, before each state directory's ledger is read, before each ledger
+# generation's open, before each chunk of a message, body, ledger or cited-file read and before each row's
+# digest. A step under way when it is reached finishes
+# first: one line of a scan, one lstat or readlink of a resolution, one stat, open or fstat, one chunk's
+# read, or one digest (at most _CITE_MAX_FILE bytes). Not checked against the deadline, and bounded by size
+# or count instead: the parse of each ledger generation read (at most _CITECHK_LEDGER_MAX bytes each, two
+# in each of at most _CITECHK_MAX_LEDGERS state directories); the decoding of a message or body file read
+# before the deadline (at most
+# _CITECHK_BODY_MAX bytes); a cited file's split into lines (at most _CITE_MAX_FILE bytes); for each of at
+# most _CITECHK_MAX_CITES citations, the match of a relative cited path against the paths the ledger
+# records and of the range against the rows of its file (ledgers within their bound); the parse of a diff
+# probe's output (what git printed in the time it was given); the lexing of the command and the parse of
+# its here-documents, once in each of its lexings (_citechk_commands: twice, or once for a command with no
+# double quote, whose two lexings read alike), for a command of at
+# most _CITECHK_COMMAND_MAX characters, with the join of a body file or
+# git -C path to the directory it is relative to; for a command that lexes and holds a backslash-newline,
+# the search of the here-document operators and double-quoted strings that lexing read for a here-document
+# delimiter one splits (each visited once, and the command not lexed again); for a command that does not lex,
+# or that is read both ways, the search of its text for arithmetic expansions and for here-documents with an
+# unquoted delimiter; for a command that does not lex, is read both ways or is over the bound, the search of
+# its text for the git commit or gh pr create or edit it names (_citechk_kind, with each backslash-newline
+# removed first), and in each line scanned, the masking of URLs (_CITECHK_URL), each of which reads its text
+# about once; the split of each text into lines before its scan (at the text's size); and the
+# orchestration registry read that locates each state directory (once per toplevel reached before
+# _CITECHK_MAX_LEDGERS state directories are read and before the deadline, read whole and through a
+# symlinked registry, as every hook here reads it, so the command's git -C directory and the citations in
+# its texts choose which repositories' registries are read) and the guard-events append. Of those steps,
+# all that grow with the command's length but the kind search are taken only for a command of at most
+# _CITECHK_COMMAND_MAX characters, and that bound is checked first, before the prefilter's search for a
+# commit or pr word, the kind search and any lexing: a longer command is neither lexed nor scanned
+# (_citechk_too_long), and it is always named as not read, with that bound, in the note and in its
+# guard-events row (parse too-long), whatever its text names and however its words are spelled, so no
+# citation in it is checked. The kind search only labels that row (its cmd) with the first git commit or gh
+# pr create or edit it finds, and with none where it finds none, as where quotes split a word (g'i't) or a
+# backslash-newline joins git to commit; a miss never drops the note or the row. Within the bound, the
+# prefilter reads the text as written, so a command whose commit or pr word a quote or a backslash-newline
+# splits is not checked there. Two other steps grow with the command's length at any length: the
+# dispatcher's read and parse of the payload, and, over the bound, the kind search, with its
+# removal of backslash-newlines and its test for a git or gh word (measured to 16 MiB by
+# tools/selftest_orch_hooks.py, _citecheck_cost_cases; a longer command was not measured). Without a
+# session cwd, or where the session cwd resolves to no git toplevel within the deadline, no state directory
+# is known, so the check is inert for every command there, one over the bound and a git -C <repo> commit
+# that itself names a repository included: only the session cwd is probed for the state directory, never
+# the command's git -C directory (a toplevel probe
+# the deadline cuts short is named in a note instead). A command's
+# standard input (-F -) is the here-document bash gives it, its last
+# standard-input redirection (a later one that duplicates fd 0 onto itself, such as <&0, leaves it), read
+# once however many -F - options name it; where that redirection is no here-document of the command,
+# standard input is named as not read (so is a here-document moved there through another descriptor, as in
+# <<'A' 3<&0 <&3, which bash gives the command: a note, never a hidden citation). A command that does not
+# lex is scanned as written, and so is one in which a backslash-newline splits the delimiter of a
+# here-document whose operator the lexer reads (quoted or not), or of one that bash reads as unquoted inside
+# a command substitution in a double-quoted string; the expansion of each here-document with an unquoted
+# delimiter in such a command is named as not read, and so is each message or body file a lexing of a
+# split-delimiter command names (_CITECHK_SPLIT_UNREAD: the file is never read or judged, since that
+# lexing's reading of the command is not bash's), and so is a git commit or gh pr create or edit that the
+# kind search finds in a here-document's body such a lexing read (_CITECHK_SWALLOWED: for a split delimiter
+# that is unquoted once the backslash-newline is removed, the lexer takes the rest of the command as that
+# body, while bash can still run it), and so is text in such a body that bash can run as commands where
+# that search finds none there (_CITECHK_SWALLOWED_TEXT, _citechk_swallowed), and so is a message or body
+# value that such a lexing names where the scan as written found no command to scan (_CITECHK_UNSCANNED).
+# A split delimiter that is quoted once the backslash-newline is removed is lexed as bash reads it, so a
+# command after its body is lexed and gives its own item. Where the walk through such a string
+# meets what it does not follow as bash does (_citechk_substituted_ops), the command is read both ways, and
+# so is a command
+# whose two lexings differ, or of which only one lexes (_citechk_commands), unless a backslash-newline splits
+# a here-document delimiter in it, when it is scanned as one that does not lex. Read both ways, a command is
+# lexed, with a read attempted of every message and body file that a lexing that lexed names (one that
+# cannot be read is named as not read; a lexing that did not lex is not evaluated, so a file only it names
+# is neither read nor named), and scanned as written, with those expansions named; where a lexing that
+# lexed read a '<<' whose delimiter a backslash-newline splits, a git commit or gh pr create or edit the
+# kind search finds in a here-document's body that lexing read, or text bash can run in such a body where it
+# finds none, is named as not read too (_CITECHK_SWALLOWED, _CITECHK_SWALLOWED_TEXT), as on the scan as
+# written, since that lexing reads that line past the lexer's refusals and can take a command bash runs as
+# body. A command is found after the reserved words that begin its segment, so one in a brace group, after
+# '!', 'if' or 'then', or after time -- or coproc is read.
+# Each text is scanned once, in the order the command's options name it, and a cited or body-file path
+# longer than _CITECHK_PATH_SHOWN characters is shown in the note and the row shortened to that many
+# characters (_citechk_short).
+_CITECHK_BODY_MAX = 1024 * 1024          # a message or body file larger than this is not read (noted)
+_CITECHK_COMMAND_MAX = _CITE_MAX_COMMAND  # a longer Bash command (characters) is not lexed or scanned (noted)
+_CITECHK_LEDGER_MAX = 2 * _CITE_CAP      # a ledger generation larger than this is not read (noted)
+_CITECHK_MAX_CITES = 200                 # at most this many citations are judged per Bash call
+_CITECHK_MAX_FILES = 50                  # at most this many distinct cited files are read per Bash call
+_CITECHK_READ_MAX = 64 * 1024 * 1024     # at most this many bytes of cited files are read per Bash call
+_CITECHK_SHOWN = 10                      # at most this many ranges are listed in the note
+_CITECHK_PATH_SHOWN = 200                # at most this many characters of a cited or body-file path are shown
+_CITECHK_BUDGET = 6.0                    # seconds for every probe, read and digest of a call (hook timeout 10)
+_CITECHK_MAX_LEDGERS = 8                 # at most this many state directories' ledgers are read per Bash call
+_CITECHK_TOPS_SHOWN = 10                 # at most this many toplevels not read are named (the rest counted)
+_CITECHK_HEAD = "AIQT guardrail (rules citint/refcap, BAKE: warning only, nothing is blocked): "
+_CITECHK_OUT_OF_TIME = "the check ran out of its time budget"
+_CITECHK_PREFILTER = re.compile(r"\bcommit\b|\bpr\b")
+# A command the lexer cannot read (an unquoted here-document, for example) is scanned whole as body text
+# when it names one of these, and the row of a command over the bound is labelled with the one it names (a
+# command over the bound that names none keeps its note and row, _citechk_too_long): a git (gh) word
+# followed in its segment, up to the next newline, ';', '&' or
+# '|', by a commit (pr create, pr edit) word, found where group 1 begins in its text with each
+# backslash-newline removed, as bash removes it (_citechk_kind), and searched for only where that text holds
+# that git or gh at all. Each pattern is tried only at a segment's start and
+# takes only that segment's first git or gh (an atomic group), so a search reads the command about once;
+# it finds what \bgit\b[^\n;&|]*\bcommit\b finds first, since a later git in a segment has no commit after
+# it where the first has none, and that plain form, which tries each later git again, takes time that
+# grows with the square of a segment's length. Each pattern begins with the newline, ';', '&' or '|' that
+# ends the segment before (the text searched is given a newline first, so the first segment has one too),
+# so a search passes from one of those characters to the next instead of trying the pattern at each
+# character; the commit (pr) word begins the tail and its leading \b is read after it, by a lookbehind, so
+# the search back from a segment's end for that word passes each other character without trying the tail
+# there; and one pattern judges a segment's first gh once for both pr create and pr edit, pr create first
+# (group 2), so a gh word followed by both gives gh-pr-create, as ordering the two kinds by position and
+# then by name gives it. A segment is then read about twice for each of the two words.
+_CITECHK_RAW_KINDS = (("git", re.compile(r"[\n;&|](?>[^\n;&|]*?(\bgit\b))[^\n;&|]*(commit)(?<=\bcommit)\b"),
+                       ("git-commit",)),
+                      ("gh", re.compile(r"[\n;&|](?>[^\n;&|]*?(\bgh\b))(?:[^\n;&|]*pr(?<=\bpr)\s+(create)\b"
+                                        r"|[^\n;&|]*pr(?<=\bpr)\s+edit\b)"), ("gh-pr-create", "gh-pr-edit")))
+# Why the expansions of an unquoted here-document in such a command are named as not read: in a command that
+# does not lex, and in one read both ways (_citechk_commands).
+_CITECHK_EXPANDED = ("its delimiter is unquoted, so bash expands parameters, command substitutions and "
+                     "arithmetic in its body, and the command does not lex, so only its text as written was "
+                     "scanned")
+_CITECHK_EXPANDED_BOTH = ("its delimiter is unquoted, so bash expands parameters, command substitutions and "
+                          "arithmetic in its body, and the command's text was scanned only as written")
+# Why a message or body file a lexing of a split-delimiter command names is named as not read: the command
+# is scanned as written, and the file it names is kept in the note instead of being dropped silently.
+_CITECHK_SPLIT_UNREAD = ("a backslash-newline splits a here-document delimiter in this command, so the "
+                         "command is scanned only as written and this file, which a lexing of it names, was "
+                         "not read: no citation in it was checked")
+# Why a git commit or gh pr create or edit that the kind search finds in a here-document's body a lexing of
+# a split-delimiter command read is named as not read: the check's lexing (split_delims, _lex_command) reads
+# a split delimiter that is unquoted once the backslash-newline is removed as one no line can match and
+# takes the rest of the command as that body, while bash can end the here-document at its own delimiter and
+# run the command, whose message or body files and standard input only a lexed reading could name, and the
+# scan of the command as written reads them only as text.
+_CITECHK_SWALLOWED = ("a backslash-newline splits a here-document delimiter in this command, so a lexing "
+                      "reads the rest of the command as that here-document's body and this command, which "
+                      "bash can still run, was scanned only as text: no message or body file it names was "
+                      "read and no standard input it reads was seen")
+# Why text in such a body that bash can run as commands is named as not read where the kind search finds no
+# git commit or gh pr create or edit in it (_citechk_swallowed): that search misses a command word that
+# quotes split (g'i't, "g"it, g"h"), which bash runs as git or gh, so a command there could read a message
+# or body file or standard input that no reading of the command names, and the body is named rather than
+# allowed silently.
+_CITECHK_SWALLOWED_TEXT = ("a backslash-newline splits a here-document delimiter in this command, so a "
+                           "lexing reads the rest of the command as that here-document's body, which holds "
+                           "text bash can run as commands; the search for a git commit or gh pr create or "
+                           "edit finds none there, but it misses one whose command word quotes split (such "
+                           "as g'i't), so a command there was not read: no message or body file it names "
+                           "was read and no standard input it reads was seen")
+# Why a message or body value (-m, --message, -b, --body) that a lexing of a split-delimiter command names is
+# named as not read where the kind search finds no command in the command's text: the scan as written, which
+# would read that value as text, then scans nothing (_citechk_as_written), so the value is named rather than
+# dropped silently (_citechk_items).
+_CITECHK_UNSCANNED = ("a backslash-newline splits a here-document delimiter in this command, so the command "
+                      "is scanned only as written, and the search for a git commit or gh pr create or edit "
+                      "in its text finds none (it misses one whose command word quotes split, such as "
+                      "g'i't), so this value, which a lexing of it names, was not scanned: no citation in "
+                      "it was checked")
+# Why standard input (-F -) is named as not read where it is not the command's own here-document: a pipe,
+# a file or descriptor redirection, or a redirection of the command's group supplies it, and this check
+# reads only the command's text and the files it names.
+_CITECHK_STDIN_UNSEEN = "it is read from standard input, which this check cannot see"
+# What _citechk_substituted_ops names where a substitution, quote, comment or delimiter word is still open at
+# the string's closing quote: bash reads on through that quote, so the lexer's reading of what follows it is
+# not bash's.
+_CITECHK_OPEN_AT_QUOTE = "a command substitution still open at its closing quote"
+# What _citechk_commands names where the command's two lexings (a double-quoted string ending at its next
+# double quote, and bash's nesting of a substitution's quotes in it) disagree, or only one of them lexes.
+_CITECHK_LEXINGS_DIFFER = "a substitution that the command's two lexings read differently"
+# The characters _citechk_substituted_ops stops at in a double-quoted string: a backslash, a backtick, a '$',
+# a single quote, a parenthesis, a '<', a '#' after a blank, a newline, ';', '&', '|' or a parenthesis, and a
+# word 'case' after one of those or a backtick. Bash begins a comment only at a '#' that begins a word, so a
+# '#' after any other character is passed over: inside a word, or after '<' or '>', where bash reads a
+# comment that leaves the redirection without a target, a syntax error that runs nothing. Passing over it
+# keeps a string of them from costing a step each.
+_CITECHK_SUBST_MARKS = re.compile(r"[\\`$'()<]|(?<=[ \t\n;&|()])#|(?<=[ \t\n;&|()`])case(?=[ \t\n])")
+# What ends an ANSI-C quote: its closing quote, found past the backslash escapes before it (_citechk_end).
+_CITECHK_ANSI_END = re.compile(r"\\.|'", re.S)
+# The reserved words after which bash reads a command in the same segment ({ git commit ...; }, ! git commit,
+# if git commit, then, elif, else, while, until, do, time and coproc): passed over to the command, with
+# time's -p and a '--' after time or its -p, and with coproc's NAME where bash reads one, before a compound
+# command (_CITECHK_COMPOUND; coproc NAME git commit runs NAME). The words are lexed, so a quoted spelling
+# ('{', or time's '-p' or '--'), which bash runs as a command name, is passed over too. A command in a
+# function definition (f() { git commit ...; }) is read, although defining the function runs nothing.
+_CITECHK_LEADING = frozenset(("{", "!", "if", "then", "elif", "else", "while", "until", "do", "time", "coproc"))
+# The words that begin a compound command, before which bash reads the word after coproc as its NAME ('(' and
+# '((' end a segment here, so the command inside them begins its own).
+_CITECHK_COMPOUND = frozenset(("{", "if", "while", "until", "for", "case", "select", "[["))
+# Option tables: the short options that take a value (attached, or the next word), the short options whose
+# value is optional and only ever attached, and the long options that take the next word as their value.
+_CITECHK_GIT_SHORT = "mFCct"
+_CITECHK_GIT_OPTIONAL = "uS"
+_CITECHK_GIT_LONG = frozenset(("--message", "--file", "--author", "--date", "--cleanup", "--reuse-message",
+                               "--reedit-message", "--fixup", "--squash", "--template", "--trailer",
+                               "--pathspec-from-file"))
+_CITECHK_GH_SHORT = "aBbFHlmprRTt"
+_CITECHK_GH_LONG = frozenset(("--assignee", "--base", "--body", "--body-file", "--head", "--label",
+                              "--milestone", "--project", "--reviewer", "--template", "--title", "--repo",
+                              "--recover", "--add-assignee", "--add-label", "--add-project", "--add-reviewer",
+                              "--remove-assignee", "--remove-label", "--remove-project", "--remove-reviewer"))
+_CITECHK_SOURCES = {"git-commit": (("-m", "--message"), ("-F", "--file")),
+                    "gh-pr-create": (("-b", "--body"), ("-F", "--body-file")),
+                    "gh-pr-edit": (("-b", "--body"), ("-F", "--body-file"))}
+# None labels a command over the bound whose text the kind search finds no command in (_citechk_too_long).
+_CITECHK_LABELS = {"git-commit": "git commit message", "gh-pr-create": "gh pr create body",
+                   "gh-pr-edit": "gh pr edit body", None: "Bash call"}
+# The citation grammar. FORM_A is PATH:N, PATH:N-M or PATH:N:COL; FORM_B is "line N of PATH" or "lines N-M in
+# PATH". A line number has one to nine digits and no leading zero.
+_CITECHK_PATH = r"(?<![A-Za-z0-9_./:-])(/?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*)"
+_CITECHK_N = r"([1-9][0-9]{0,8})"
+_CITECHK_FORM_A = re.compile(_CITECHK_PATH + ":" + _CITECHK_N + "(?:-" + _CITECHK_N
+                             + r")?(?::[0-9]+)?(?![0-9A-Za-z_-])")
+_CITECHK_FORM_B = re.compile(r"(?i:\blines?\s+)" + _CITECHK_N + r"(?:\s*-\s*" + _CITECHK_N
+                             + r")?\s+(?i:of|in)\s+`?" + _CITECHK_PATH)
+_CITECHK_EXT = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,9}$")  # a lettered extension, one to ten characters
+_CITECHK_LOG = re.compile(r": (?:(?:[A-Z][A-Za-z]*)?(?:Error|Exception|Warning|Failure)|error|warning)\b")
+# A URL (a scheme, '://' and what follows to a blank) or an autolink. A URL is tried only where a run of
+# scheme characters begins, its leading digits, '+', '.' and '-' (group lead) kept and the rest masked
+# (_citechk_blank), so a line is read about once; it masks what [A-Za-z][A-Za-z0-9+.-]*://\S+ masks, which
+# begins at the run's first letter, and that plain form, which tries each later letter of a run that holds
+# no '://' again, takes time that grows with the square of the run's length.
+_CITECHK_URL = re.compile(r"(?<![A-Za-z0-9+.-])(?P<lead>[0-9+.-]*)[A-Za-z][A-Za-z0-9+.-]*://\S+"
+                          r"|<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*>")
+_CITECHK_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
+_CITECHK_FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t]*")
+_CITECHK_QUOTE = re.compile(r" {0,3}>")
+_CITECHK_HEADING = re.compile(r"(#{1,6})(?:\s|$)")
+_CITECHK_VERIFIER = re.compile(r".*\b(?i:verifier|reviewer)\s+(?i:report|findings?)\b")  # after a heading's #
+_CITECHK_HUNK = re.compile(rb"@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@")
+_CITECHK_BLIND = (".ipynb", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp")  # a Read of these records nothing
+_CITECHK_FLAGGED = frozenset(("unread", "stale", "nofile", "unrecordable", "unjudged"))
+
+
+def _citechk_options(args, short, optional, long_names, indexed=False):
+    """The (name, value) pairs of a command's value-taking options, in order, up to a '--' word: a long option
+    written --name=VALUE, a long name in long_names followed by its value word, and a short option in short,
+    attached (-mVALUE) or followed by its value word, alone or ending a cluster of flags (-am VALUE). A short
+    option in optional takes only an attached value. A value missing at the end of the words is None. With
+    indexed True each is a (name, value, at) triple, at the index in args of the word that holds the value (None
+    where the value is missing)."""
+    out, i = [], 0
+    while i < len(args):
+        word = args[i]
+        i += 1
+        if word == "--":
+            break
+        if word.startswith("--"):
+            name, eq, value = word.partition("=")
+            if eq:
+                out.append((name, value, i - 1))
+            elif word in long_names:
+                out.append((word, args[i] if i < len(args) else None, i if i < len(args) else None))
+                i += 1
+        elif word.startswith("-"):
+            for j in range(1, len(word)):
+                if word[j] in optional:
+                    break
+                if word[j] in short:
+                    if j + 1 < len(word):
+                        out.append(("-" + word[j], word[j + 1:], i - 1))
+                    else:
+                        out.append(("-" + word[j], args[i] if i < len(args) else None, i if i < len(args) else None))
+                        i += 1
+                    break
+    return out if indexed else [(name, value) for name, value, _at in out]
+
+
+def _citechk_ansi_c(words, at):
+    """The ANSI-C spelling of word at of words, a segment's argv as the citation check lexes it (inside
+    _WordSpellings and _AnsiCQuotes): _AnsiCExact where a part of it is spelled through an ANSI-C quote $'...' and
+    every such part was decoded exactly as bash 5.3 decodes it, _AnsiCInexact where one could not be, and None
+    where no part is (or at is None, or words carries no spelling record)."""
+    spelling = getattr(words, "spelling", None)
+    if spelling is None or at is None or at >= len(spelling) or not isinstance(spelling[at], _AnsiCSpelling):
+        return None
+    return type(spelling[at])
+
+
+def _citechk_short(path):
+    """path as the note and the guard-events row show it: whole where it is at most _CITECHK_PATH_SHOWN
+    characters long, else its first and last characters around "...", _CITECHK_PATH_SHOWN characters in all,
+    so a long path never makes the note or the row longer than that per path shown."""
+    if len(path) <= _CITECHK_PATH_SHOWN:
+        return path
+    head = (_CITECHK_PATH_SHOWN - 3) // 2
+    return path[:head] + "..." + path[len(path) - (_CITECHK_PATH_SHOWN - 3 - head):]
+
+
+def _citechk_real(path, what, deadline):
+    """(path resolved through _cite_resolution, None), or (None, why it was not resolved): what (the path, as
+    the note names it) is longer than _CITE_MAX_PATH characters, its resolution would follow more than
+    _CITE_MAX_LINKS symlinks or meets a symlink loop (both named as the link bound), or the check's
+    deadline has been reached, before the resolution or during it
+    (_CITECHK_OUT_OF_TIME); (None, None) where it cannot be resolved (an embedded NUL, for example)."""
+    real, why = _cite_resolution(path, deadline)
+    if why == "path":
+        return None, "{} is longer than {} characters, the most this check resolves".format(what, _CITE_MAX_PATH)
+    if why == "links":
+        return None, "{} leads through more than {} symbolic links, the most this check follows".format(
+            what, _CITE_MAX_LINKS)
+    return real, _CITECHK_OUT_OF_TIME if why == "deadline" else None
+
+
+def _citechk_read_body(path, deadline):
+    """(text, None) for a message or body file, else (None, reason): resolved through symlinks
+    (_citechk_real, so a path over the length or link bound, or one reached once the check's deadline has
+    passed, is not resolved and the reason names the bound or the budget), never a path under /dev or
+    /proc, opened, given to fstat and read chunk by chunk only while the deadline has not been reached
+    (else the reason names the budget, and a descriptor opened is closed all the same), non-blocking (a
+    FIFO is refused at the fstat, never waited on), a regular file of at most _CITECHK_BODY_MAX bytes,
+    strict UTF-8; one leading byte-order mark is dropped."""
+    real, why = _citechk_real(path, "its path", deadline)
+    if real is None:
+        return None, why or "it cannot be resolved"
+    if real in ("/dev", "/proc") or real.startswith(("/dev/", "/proc/")):
+        return None, "it is under /dev or /proc, which this check does not read"
+    if _cite_over(deadline):  # the resolution may have used the last of the time: no open after it
+        return None, _CITECHK_OUT_OF_TIME
+    try:
+        fd = os.open(real, _CITE_OPEN_FLAGS)
+    except (OSError, ValueError) as exc:
+        return None, "it cannot be opened ({})".format(_cite_fail(exc))
+    try:
+        if _cite_over(deadline):  # the open may have used the last of the time: no fstat after it
+            return None, _CITECHK_OUT_OF_TIME
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None, "it is not a regular file"
+        chunks, total = [], 0
+        while total <= _CITECHK_BODY_MAX:
+            if _cite_over(deadline):  # checked before each chunk, so no read starts past the deadline
+                return None, _CITECHK_OUT_OF_TIME
+            chunk = os.read(fd, min(1 << 20, _CITECHK_BODY_MAX + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    except OSError as exc:
+        return None, "it cannot be read ({})".format(_cite_fail(exc))
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError:
+            pass
+    if total > _CITECHK_BODY_MAX:
+        return None, "it is larger than {} bytes".format(_CITECHK_BODY_MAX)
+    try:
+        text = b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError:
+        return None, "it is not valid UTF-8"
+    return text.removeprefix("\ufeff"), None
+
+
+def _citechk_arith_spans(text):
+    """The (start, end) spans of the arithmetic expansions $((...)) in text that hold no newline, quote,
+    backslash or backtick (whose parentheses this count does not follow as bash does) and no $( (a command
+    substitution, inside which a '<<' can be a here-document), each closing with '))' on the line it opens:
+    a '$((' that closes otherwise, as in $((cat) ), bash reads as a command substitution of a subshell.
+    Bash reads a '<<' inside such a span as a shift. The '$((' is not checked to be one bash expands: one in
+    a comment or in a line of a quoted here-document's body is text, and so is a '<<' after it on that
+    line, but a span from it that ran across a newline could reach a real here-document operator on a later
+    line. So a span ends at a newline, and the '<<' of an arithmetic expansion that spans lines is not
+    passed over (it is named: a note the command did not earn, never a hidden citation). A scan stops at the
+    next '$(', so the text is read about once."""
+    spans, at, n = [], text.find("$(("), len(text)
+    while at != -1:
+        depth, k, end = 2, at + 3, at + 3
+        while k < n and text[k] not in "'\"`\\\n" and not text.startswith("$(", k):
+            if text[k] == "(":
+                depth += 1
+            elif text[k] == ")":
+                depth -= 1
+                if depth == 1:
+                    if text.startswith(")", k + 1):
+                        spans.append((at, k + 2))
+                        end = k + 2
+                    break
+            k += 1
+        at = text.find("$((", end)
+    return spans
+
+
+def _citechk_operators(text):
+    """The index of each '<<' in text, in order, but for one inside an arithmetic expansion
+    (_citechk_arith_spans)."""
+    spans, s, out = _citechk_arith_spans(text), 0, []
+    at = text.find("<<")
+    while at != -1:
+        while s < len(spans) and spans[s][1] <= at:
+            s += 1
+        if s == len(spans) or at < spans[s][0]:
+            out.append(at)
+        at = text.find("<<", at + 2)
+    return out
+
+
+def _citechk_expanded_heredocs(command):
+    """The delimiters, in order, of the here-documents whose delimiter is unquoted in command, a command that
+    does not lex or in which a backslash-newline splits a here-document delimiter where bash reads one
+    (_citechk_split_delim): each '<<' or '<<-' whose delimiter word _parse_heredoc_delim reads as unquoted
+    (a here-string's '<<<' has none, its third '<' being no word), found in the text with each
+    backslash-newline removed (bash removes it before it reads the operator, so '<\\', a newline and '<EOF'
+    is one too). Found in the text as written, not lexed, so an operator that bash does not read as one,
+    inside quotes or a comment, for example, is named too where the word after it reads as an unquoted
+    delimiter ("x <<EOF y" in double quotes); where that word runs into the closing quote it does not parse
+    and none is named ('x <<EOF', whose closing quote opens a quote that does not close), and bash reads no
+    here-document there. A '<<' inside an arithmetic expansion $((...)) that holds no newline, quote,
+    backslash, backtick or $( is a shift and is passed over (_citechk_operators); one in a $((...)) that
+    spans lines, or in another arithmetic form, ((x<<2)), let or $[...], is named. A word that begins just
+    after the '<<' with a single or double quote is quoted, and _parse_heredoc_delim reads it as quoted or
+    not at all, so it is passed over without that parse: a command of many quoted here-documents costs a
+    look at each."""
+    text, out = command.replace("\\\n", ""), []
+    for at in _citechk_operators(text):
+        if text.startswith(("'", '"'), at + 2):
+            continue
+        parsed = _parse_heredoc_delim(text, at + 2, len(text))
+        if parsed is not None and not parsed[0]:
+            out.append(parsed[1])
+    return out
+
+
+def _citechk_end(regex, command, i, n):
+    """The index of the character in command[i:n] that ends what regex reads (_CITECHK_ANSI_END), past the
+    escapes it matches, or -1 where none does."""
+    for found in regex.finditer(command, i, n):
+        if found.end() == found.start() + 1:
+            return found.start()
+    return -1
+
+
+def _citechk_substituted_ops(command, start, end):
+    """The index, in order, of each '<<' (not a here-string's '<<<') in the double-quoted string
+    command[start:end] (from its opening quote to just past its closing one, as the lexer reads it) that
+    lies inside a command substitution $(...) there, where bash reads it as an operator; or, at the first
+    place where the walk would read the string otherwise than bash may, a phrase naming what it met there,
+    after which it yields nothing more (_citechk_split_delim then reads the command both ways). Inside $(...)
+    it follows single quotes, an ANSI-C quote $'...' with its backslash escapes, a backslash escape, an
+    arithmetic expansion $((...)) that closes with '))' (a '<<' there is a shift), parentheses, and a comment,
+    which begins at a '#' that begins a word once bash has removed the backslash-newlines before it: just
+    after the substitution's opening, or after an unescaped blank, newline, ';', '&', '|', or '(' or ')' that
+    opens or closes no substitution (a '#' after an escaped character, after a substitution's close, or after
+    any other character is passed over: inside a word, as in x#y, a\\ #y or $(a)#b, or after '<' or '>',
+    where bash reads a comment that leaves the redirection without a target, a syntax error that runs
+    nothing). A comment runs to the end of its line. Backticks are followed only where
+    their text, to the next backtick, holds no backslash and no '#' (bash removes some backslashes there
+    before it reads that text, and ends it at the first backtick, one inside a quote included); inside them a
+    '<<' with no newline after it in that text has an empty body and yields nothing. Named instead, in the
+    order the walk meets them: a backslash or a '#' inside backticks, a quote there that holds the closing
+    backtick, and a '<<' there with a newline after it (its body); '${' anywhere in the string, and a '$'
+    before a backslash-newline; '$[', an arithmetic command '((', a process substitution '<(' or '>(' (each
+    also where a backslash-newline splits its two characters) and a case command in a substitution, and a
+    '<<' that a backslash-newline splits there; a quote inside $((...)), and a '$((' that does not close
+    with '))' (bash reads it as a substitution of a subshell); and a substitution, quote or comment still
+    open at the string's closing quote, which bash reads on past (a double quote inside a substitution, for
+    example), so the lexer's reading of what follows it is not bash's. The string is visited once, from each
+    of the characters in _CITECHK_SUBST_MARKS to the next, with a search of each backtick's text for its
+    end, a backslash and a '#'. One entry is kept for each substitution open, with a count of the '(' open
+    inside it."""
+    opened, parens, last, tick = [], [], end - 1, -1  # opened: "$(", "$((" (a shift there) or "`"
+    # tick: the index of the closing backtick while backticks are open; glue: just past the latest escape or
+    # substitution's close; lead: where the run of backslash-newlines that ends at glue begins, or -1 where a
+    # character at glue follows an escaped character or a close
+    glue, lead = -1, -1
+    found = _CITECHK_SUBST_MARKS.search(command, start + 1, last)
+    while found is not None:
+        k = found.start()
+        c, step = command[k], 1
+        at = lead if k == glue else k  # where its word would begin, before any backslash-newlines
+        before = command[at - 1] if at != -1 else ""  # what bash reads just before it ("" after an escape)
+        if c == "\\":
+            step = 2  # an escaped character, or a backslash-newline, which bash removes
+            if not command.startswith("\n", k + 1):
+                lead = -1  # a '#' just after an escaped character is in its word
+            elif k != glue:
+                lead = k  # where a run of backslash-newlines begins
+            glue = k + 2
+        elif c == "`":
+            if tick != -1:  # the closing backtick closes whatever opened after the opening one
+                while opened.pop() != "`":
+                    parens.pop()
+                parens.pop()
+                tick = -1
+            else:
+                tick = command.find("`", k + 1, last)
+                if tick == -1:
+                    yield _CITECHK_OPEN_AT_QUOTE
+                    return
+                if command.find("\\", k + 1, tick) != -1:
+                    yield "a backslash inside backticks"
+                    return
+                if command.find("#", k + 1, tick) != -1:
+                    yield "a '#' inside backticks"
+                    return
+                opened.append("`")
+                parens.append(0)
+        elif c == "$":
+            if command.startswith("{", k + 1):
+                yield "a parameter expansion's braces"
+                return
+            if command.startswith("\\\n", k + 1):
+                yield "a backslash-newline after a '$'"
+                return
+            if command.startswith("((", k + 1):
+                opened.append("$((")
+                parens.append(0)
+                step = 3
+            elif command.startswith("(", k + 1):
+                opened.append("$(")
+                parens.append(0)
+                step = 2
+            elif opened and opened[-1] != "$((" and command.startswith("[", k + 1):
+                yield "an arithmetic expansion $[...]"
+                return
+            elif opened and opened[-1] != "$((" and command.startswith("'", k + 1):  # an ANSI-C quote
+                close = _citechk_end(_CITECHK_ANSI_END, command, k + 2, last)
+                if tick != -1 and (close == -1 or close > tick):
+                    yield "a quote inside backticks that holds the closing backtick"
+                    return
+                if close == -1:
+                    yield _CITECHK_OPEN_AT_QUOTE
+                    return
+                step = close + 1 - k
+        elif not opened:
+            pass  # text of the double-quoted string itself
+        elif c == "'":
+            if opened[-1] == "$((":
+                yield "a quote inside an arithmetic expansion"
+                return
+            close = command.find("'", k + 1, last)
+            if tick != -1 and (close == -1 or close > tick):
+                yield "a quote inside backticks that holds the closing backtick"
+                return
+            if close == -1:
+                yield _CITECHK_OPEN_AT_QUOTE
+                return
+            step = close + 1 - k
+        elif c == "#":
+            if opened[-1] != "$((" and at != -1 and before in " \t\n;&|()":
+                close = command.find("\n", k, last)
+                if close == -1:
+                    yield _CITECHK_OPEN_AT_QUOTE
+                    return
+                step = close - k
+        elif c == "(":
+            if opened[-1] != "$((" and before in ("<", ">"):
+                yield "a process substitution"
+                return
+            if opened[-1] != "$((" and before == "(":
+                yield "an arithmetic command ((...))"
+                return
+            parens[-1] += 1
+        elif c == ")":
+            if parens[-1]:
+                parens[-1] -= 1
+            elif opened[-1] != "`":
+                if opened.pop() == "$((":
+                    if not command.startswith(")", k + 1):
+                        yield "a '$((' that does not close with '))'"
+                        return
+                    step = 2  # the second ')' of '))'
+                parens.pop()
+                glue, lead = k + step, -1  # a '#' just after a substitution's close is in its word
+        elif opened[-1] == "$((":
+            pass  # a 'case' or a '<' inside arithmetic: a word, or a comparison or a shift
+        elif c == "c":
+            yield "a case command"
+            return
+        elif before == "<":
+            yield "a backslash-newline inside '<<'"
+            return
+        elif command.startswith("<<", k):
+            if command.startswith("<", k + 2):
+                step = 3  # a here-string
+            elif tick != -1:  # in backticks bash reads the delimiter and the body inside their text
+                if command.find("\n", k + 2, tick) != -1:
+                    yield "a here-document's body"
+                    return
+                step = 2  # no newline follows there: an empty body
+            else:
+                yield k
+                step = 2
+        found = _CITECHK_SUBST_MARKS.search(command, k + step, last)
+    if opened:
+        yield _CITECHK_OPEN_AT_QUOTE
+
+
+def _citechk_split_delim(command, spans, delims=None):
+    """How the citation check reads command, a command that lexes, from the places the lexer's reading of it
+    shows (spans, as _lex_command reports them): ("raw", None) where a backslash-newline splits a
+    here-document delimiter at a place where bash reads one, ("both", what) where the walk through a
+    double-quoted string meets what it does not follow as bash does before it finds one (what names it,
+    _citechk_substituted_ops), and ("lexed", None) otherwise. Bash removes each backslash-newline outside
+    single quotes before it reads the word: for <<E\\, a newline and OF it reads the unquoted delimiter EOF
+    and expands the body, and for <<E\\, a newline and 'OF', <<$\\, a newline and 'EOF', <<"E"\\, a newline
+    and OF, or <<"E\\, a newline and OF" it reads the quoted EOF. Two places count for "raw". One is a '<<'
+    that the lexer reads as a quoted here-document's operator, whose delimiter word, as _parse_heredoc_delim
+    reads it, holds a backslash-newline: the check lexes with split_delims (_lex_command), which reads that
+    delimiter, where it is unquoted once the backslash-newline is removed, as one that holds a newline, which
+    no line can, so the body runs to the end of the command and a later command in it gives no item (text
+    there that bash can run is named, _citechk_swallowed), and reads one that is quoted as bash does, so a
+    later command gives its own item. A
+    backslash-newline inside single quotes ('E\\, a newline and OF'), which bash keeps, counts too, although
+    bash also runs that body to the end, and so does a '<<' inside $((...)), which the lexer reads as an
+    operator and bash as a shift (each a note the command did not earn, and a message or body file the
+    command names is then not read). The other is a '<<' inside a command substitution $(...) in a
+    double-quoted string that the lexer reads, met before anything the walk does not follow, whose split
+    delimiter reads as unquoted once each backslash-newline is removed: the lexer reads that string as text,
+    but bash runs the here-document and expands its body (git commit -m "$(cat <<E\\, a newline, OF, the
+    body and EOF)"), an expansion that only the scan of the command as written names. A '<<' there that
+    does not count is read on past: one inside single quotes, an ANSI-C quote, a comment or $((...)) in
+    such a substitution, and one whose delimiter no backslash-newline splits or that bash reads as quoted.
+    The walk does not follow the body after such a '<<', so a newline after its delimiter in the string
+    reads the command both ways, and so do a delimiter word that does not parse and one that runs to the
+    string's closing quote (inside $(...) bash reads on through that quote). Only the spans that begin
+    before the last '<' ahead of the last backslash-newline are read, since a split operator or delimiter
+    lies before that backslash-newline and a string after that '<' cannot change how bash or the lexer
+    reads one; a double-quoted string with no '$' or backtick holds no substitution and is passed over. Each
+    span is visited once and the command is not lexed again, so the time this takes grows with the
+    command's length. Where delims is a dict, each quoted here-document's delimiter parsed here is kept in
+    it under the index just past its '<<', so the fallback's _citechk_swallowed reads it there instead of
+    parsing it again."""
+    join = command.rfind("\\\n")
+    if join == -1:
+        return "lexed", None
+    reach, n = command.rfind("<", 0, join), len(command)
+    for start, end in spans:
+        if start > reach:
+            break
+        if command[start] == "<":  # a quoted here-document's '<<', which the lexer reads
+            parsed = _parse_heredoc_delim(command, end, n)
+            if delims is not None:
+                delims[end] = parsed
+            if parsed is not None and "\\\n" in command[end:parsed[3]]:
+                return "raw", None
+            continue
+        if command.find("$", start, end) == -1 and command.find("`", start, end) == -1:
+            continue
+        text, joins, j = None, [], 0  # the string without its backslash-newlines, and where each was
+        for at in _citechk_substituted_ops(command, start, end):
+            if isinstance(at, str):
+                return "both", at
+            parsed = _parse_heredoc_delim(command, at + 2, end - 1)
+            if parsed is None:
+                return "both", "a here-document delimiter that does not parse"
+            if parsed[3] == end - 1:
+                return "both", _CITECHK_OPEN_AT_QUOTE
+            if "\\\n" in command[at + 2:parsed[3]]:
+                if text is None:
+                    text, k = command[start:end - 1].replace("\\\n", ""), command.find("\\\n", start, end)
+                    while k != -1:
+                        joins.append(k)
+                        k = command.find("\\\n", k + 2, end)
+                while j < len(joins) and joins[j] < at:
+                    j += 1
+                joined = _parse_heredoc_delim(text, at - start - 2 * j + 2, len(text))
+                if joined is None:
+                    return "both", "a here-document delimiter that does not parse"
+                if not joined[0]:
+                    return "raw", None
+            if command.find("\n", parsed[3], end - 1) != -1:
+                return "both", "a here-document's body"
+    return "lexed", None
+
+
+def _citechk_keeps_stdin(red):
+    """Whether a redirect of fd 0 leaves standard input as it was: one that duplicates or moves fd 0 onto
+    itself (<&0, 0<&00, 0>&0, 0<&0-), which bash makes without replacing what fd 0 reads."""
+    target = red.target[:-1] if red.target.endswith("-") else red.target
+    return red.op in ("<&", ">&") and target.isascii() and target.isdigit() and int(target) == 0
+
+
+def _citechk_kind(command):
+    """The first git commit, gh pr create or gh pr edit that command's text names, the kind whose git or gh
+    word comes first (_CITECHK_RAW_KINDS; pr create where one gh word is followed by both), or None where it
+    names none. Each backslash-newline is removed
+    first, as bash removes it and as the lexer does, so 'git \\<newline> commit' and 'gi\\<newline>t commit'
+    are found as the lexer finds them, and 'git\\<newline>commit', which bash runs as gitcommit, is not. It
+    removes no quote, so a word a quote splits (g'i't) is not found; over the bound that leaves the row
+    unlabelled and never drops it (_citechk_too_long), and in a here-document's body that a lexing of a
+    split-delimiter command runs to the end of the command, text that bash can run is named whatever it
+    finds (_citechk_swallowed)."""
+    joined = command.replace("\\\n", "")
+    text, hits = None, []
+    for word, regex, kinds in _CITECHK_RAW_KINDS:
+        if word in joined:
+            text = text or "\n" + joined  # a newline before the first segment, as before every later one
+            found = regex.search(text)
+            if found:
+                hits.append((found.start(1), kinds[0] if found.group(2) else kinds[-1]))
+    return min(hits)[1] if hits else None
+
+
+def _citechk_swallowed(command, end, body, delims=None):
+    """Whether body, the body a lexing of command with split_delims (_lex_command) gave the here-document whose
+    '<<' ends at index end, holds text that bash can run as commands: only where that lexing read its
+    delimiter word, which a backslash-newline splits and which is unquoted once it is removed, as one that no
+    line matches, so the body runs to the end of the command, and the body is not blank. Every other
+    here-document is read as main's lexer reads it (False). A lexing gives such a body to at most the first
+    such here-document of a line, since that body runs to the end of the command, so every later one there
+    has an empty body and costs only the parse of its delimiter. Where no '(', backquote, '[' or '${' comes
+    before the body, bash reads that '<<' as a here-document operator at the top level, whose body ends at
+    the first line that is exactly the joined delimiter once each backslash-newline is removed (leading tabs
+    stripped for the <<- form), as bash reads an unquoted here-document's lines: a line after that one that
+    is not blank is text bash can run, and with no such line bash runs nothing after the operator's line.
+    Elsewhere bash can read the '<<' as an arithmetic shift ($((...)), ((...)), $[...], a subscript,
+    ${x:...}) and run every line of the body, or end a body inside a substitution at a line that only
+    begins with the delimiter (bash 5.3), so any line that is not blank counts. Each mark is searched for up
+    to the start of the body, read as the length of command less that of body (body drops its last newline
+    and, for <<-, leading tabs, so that reaches at least the body's start), and the time this takes grows
+    with the command's length. The delimiter is read from delims where _citechk_split_delim parsed it
+    there, so each one is parsed once for both."""
+    if delims is not None and end in delims:
+        parsed = delims[end]
+    else:
+        parsed = _parse_heredoc_delim(command, end, len(command))
+    if parsed is None or parsed[0] or "\\\n" not in command[end:parsed[3]] or not body.strip():
+        return False
+    lines = body.replace("\\\n", "").split("\n")
+    reach = len(command) - len(body)
+    if all(command.find(mark, 0, reach) == -1 for mark in ("(", "`", "[", "${")):
+        _quoted, delim, strip, _next = parsed
+        close = next((k for k, line in enumerate(lines) if (line.lstrip("\t") if strip else line) == delim), None)
+        if close is None:
+            return False
+        lines = lines[close + 1:]
+    return any(line.strip() for line in lines)
+
+
+def _citechk_as_written(command, cwd, parse, reason):
+    """The command, scanned whole as body text, as the one item of the first git commit or gh pr create or
+    edit that its text names (_citechk_kind; none where it names none): parse is "raw" or "both", and each
+    here-document with an unquoted delimiter that its text shows (_citechk_expanded_heredocs) is named as
+    not read, with reason, since bash expands parameters, command substitutions and arithmetic in such a
+    body and the scan sees only the text as written."""
+    kind = _citechk_kind(command)
+    if kind is None:
+        return []
+    unread = [("expanded <<{} here-document".format(_citechk_short(delim)), reason)
+              for delim in _citechk_expanded_heredocs(command)]
+    # No lexing of the command is bash's here, so no cd in it is followed: where its text shows one (or a
+    # command that can run one) where a command can begin, the directory is not established (_citechk_raw_dir),
+    # and where its text is not the one plain shape _CITECHK_RAW_PLAIN allows, it is not established either.
+    if _citechk_raw_dir(command):
+        nodir = _CITECHK_RAW_DIR_WHY
+    elif _CITECHK_RAW_PLAIN.match(command.replace("\\\n", "")) is None:
+        nodir = _CITECHK_RAW_SHAPE_WHY
+    else:
+        nodir = None
+    return [{"cmd": kind, "parse": parse, "texts": [("command text", command)], "unread": unread,
+             "repo": cwd, "base": None, "nodir": nodir, "where": None}]
+
+
+def _citechk_too_long(command, cwd):
+    """A command longer than _CITECHK_COMMAND_MAX characters, as one item with parse "too-long", no text,
+    and the command named as not read, whatever its text names: it is neither lexed nor scanned, since the
+    lexings and the search for split delimiters are not checked against the deadline, the scan of its
+    text is checked only between lines, and each takes time that grows with its length (the shapes
+    tools/selftest_orch_hooks.py times, _citecheck_cost_cases), so no message, body file or here-document in
+    it is read and no citation in it is checked. The item's cmd is the first git commit or gh pr create or
+    edit that the kind search finds in its text (_citechk_kind), or None where it finds none: that search
+    only labels the item, and a miss (a word that quotes split, such as g'i't, git joined to commit by a
+    backslash-newline, or a command that names none) never drops it. Of the command, only its length and
+    that kind search are read before the toplevel probe."""
+    reason = ("this check cannot evaluate a command longer than {:,} characters, and this one is {:,}, so it "
+              "was neither lexed nor scanned: no message, body file or here-document in it was read and no "
+              "citation in it was checked").format(_CITECHK_COMMAND_MAX, len(command))
+    return [{"cmd": _citechk_kind(command), "parse": "too-long", "texts": [], "unread": [("command text", reason)],
+             "repo": cwd, "base": None}]
+
+
+def _citechk_commands(command, cwd, deadline):
+    """The git commit and gh pr create or edit commands of a Bash command, each a dict: cmd (git-commit,
+    gh-pr-create or gh-pr-edit), parse ("lexed"; "raw" where the command does not lex and its whole text is
+    scanned as body text; or "both"), texts [(label, text)] in the order the command's options name them,
+    unread [(label, reason)], repo (the directory the command runs in, after the cd and pushd before it that
+    _citechk_dirs follows and a git -C; None without an absolute session cwd, or where that directory is not
+    established), nodir (why the directory is not established, else None: for a command scanned as written,
+    a cd or similar word in its text, _CITECHK_RAW_DIR), where (what moved it: a git -C or a cd), base (a gh
+    --base value) and, where parse is "both", why (what the walk met, or
+    _CITECHK_LEXINGS_DIFFER). The command is lexed twice: as the walk reads a double-quoted string, which
+    ends at its next unescaped double quote (nested=False), and as bash reads a command substitution or
+    backquote in one, whose own quotes nest (nested=True); a command with no double quote is lexed once,
+    since the two lexings differ only inside a double-quoted string, and that one reading serves as both.
+    A command that neither lexes is scanned as written ("raw"). Each lexing reads as main's reading does
+    (_lex_command, _MAIN_HASH_READING), with split_delims. A command in which a backslash-newline splits a
+    here-document delimiter where bash
+    reads one (_citechk_split_delim, from the places the first lexing that lexes shows) is scanned as one
+    that does not lex: at an operator the lexer reads, these lexings read a delimiter that is unquoted once
+    the backslash-newline is removed as one that no line can match and run that body to the end of the
+    command, later commands included, and read one that is quoted as bash does, and in a command
+    substitution in a
+    double-quoted string, where bash reads that delimiter as unquoted, the lexer reads as text a body bash
+    expands. A raw command names, as not read, the expansion of each here-document with an unquoted delimiter
+    that its text shows (_citechk_as_written). A command whose double-quoted string holds what the walk there
+    does not follow as bash does, before any such delimiter, is read both ways, since the walk cannot tell
+    which reading bash makes: its commands as lexed, with a read attempted of every message and body file
+    (one that cannot be read named as not read), and after them the item that the raw scan gives, all with
+    parse "both"; a citation both readings find is judged in each,
+    so it can be listed twice. Where a lexing that lexes read a '<<' whose delimiter word a backslash-newline
+    splits, it read that line's operators and bodies past the lexer's refusals, so the bodies it read are
+    searched as for a split-delimiter command below (a commit or pr command there named with
+    _CITECHK_SWALLOWED, else text bash can run with _CITECHK_SWALLOWED_TEXT), each entry once, on the raw
+    scan's item, or as its own item where the kind search finds none in the command's text; the bodies of a
+    lexing that read no split delimiter are not searched. A command is read both ways too where only one of its two lexings lexes, or
+    where their words, redirects or here-documents differ (_citechk_shape; a double quote inside a
+    substitution in a double-quoted string, for example, which the first lexing takes as the string's end,
+    so a later -F file can fall inside one -m value): the commands of each lexing that lexes are read, the
+    first's then each of the second's that differs from all of the first's, with a read attempted of every
+    message and body file of each, and the raw scan's item after them; a lexing that does not lex is not
+    evaluated. This holds with or without a backslash-newline in the command, which is what the walk alone
+    needs before it runs, except where a backslash-newline splits a here-document delimiter: that command
+    is scanned as one that does not lex, as above, before the lexings are compared, and each message or
+    body file a lexing that lexed names is named as not read (_CITECHK_SPLIT_UNREAD; once per option
+    spelling and path as the command writes it, however many lexings name it: two spellings that name one
+    file give two entries, and one spelling that names a file in each of two repositories gives one), never
+    read or judged, since no lexing's reading of the command is bash's, standard input that -F - names
+    there is named as not read too (_CITECHK_STDIN_UNSEEN) unless it is the command's own here-document,
+    whose text the scan as written already reads, a message or body value is named as not read
+    (_CITECHK_UNSCANNED) where the kind search (_citechk_kind) finds no command in the text, so that scan
+    reads nothing, and a git commit or gh pr create or edit that the kind search finds in a here-document's
+    body a lexing read is named as not read as well (_CITECHK_SWALLOWED: these lexings read a split
+    delimiter that is unquoted once the backslash-newline is removed as one no line can match and take the
+    rest of the command, which bash can still run, as that body); where that search finds none in such a
+    body, which it does for a command word that quotes split, such as g'i't, the body is named as not read
+    whenever it holds text that bash can run (_CITECHK_SWALLOWED_TEXT, _citechk_swallowed), never allowed
+    silently; so a citation only such a file, stream or text holds is not judged, but the note and the row
+    say it was not read. A command is found after any reserved words
+    that begin its segment (_CITECHK_LEADING), so one
+    inside a brace group, after '!', 'if' or 'then', or after time -- or coproc is read; a redirection of
+    the group as a whole (after its '}') is not the command's own. A message or body file resolves against
+    repo and is read by _citechk_read_body within the check's deadline. "-" is standard input, one stream
+    however many -F - options name it, so it is taken once, at the first: the body of the here-document
+    bash gives the command, which is its last standard-input redirection (_lex_command; a later <&0 that
+    duplicates fd 0 onto itself leaves it), and otherwise, where that last redirection is a file, a
+    descriptor or none of the command's own (a pipe, or a redirection of its group, for example), named as
+    unseen. A here-document is read only by the command it redirects."""
+    readings = []  # (segments, heredocs, spans) of each lexing that lexes, the walk's (nested=False) first
+    # nested changes only how a double-quoted string is read (_read_word), so a command with no double quote
+    # anywhere in its text lexes the same both ways, raise included: it is lexed once and that one reading
+    # serves as both, so a command of many small segments costs one lexing and no shape comparison instead
+    # of two and one.
+    nestings = (False,) if '"' not in command else (False, True)
+    for nested in nestings:
+        heredocs, spans = [], []
+        try:
+            # Each word's spelling is recorded, and each ANSI-C quote decoded as bash 5.3 decodes it where it can
+            # be (_AnsiCQuotes): a word that holds one is outside the directory allowlist (_citechk_plain), and a
+            # message, body or file value that holds one not decoded exactly is not read (_citechk_items).
+            with _WordSpellings(), _AnsiCQuotes():
+                readings.append((_lex_command(command, heredocs=heredocs, spans=spans, nested=nested,
+                                              split_delims=True), heredocs, spans))
+        except ValueError:
+            continue
+    if not readings:
+        return _citechk_as_written(command, cwd, "raw", _CITECHK_EXPANDED)
+    delims = {}  # each '<<' delimiter the walk parsed, by the index past its '<<', for _citechk_swallowed
+    parse, why = _citechk_split_delim(command, readings[0][2], delims)
+
+    def bodies(heredocs, spans, parse):
+        # The items the search of each here-document body one lexing read gives, with parse: a commit or pr
+        # command that the kind search finds there, or, where it finds none, the body as text not read
+        # whenever bash can run text in it (_citechk_swallowed). The lexer records one '<<' span per
+        # here-document it reads, in the order of the heredocs list, so each body is paired with its operator.
+        items = []
+        places = [end for start, end in spans if command.startswith("<", start)]  # past each '<<'
+        for at, (_index, _before, body) in enumerate(heredocs):
+            kind = _citechk_kind(body)
+            if kind is not None:
+                items.append({"cmd": kind, "parse": parse, "texts": [],
+                              "unread": [("{} in a here-document's body".format(kind.replace("-", " ")),
+                                          _CITECHK_SWALLOWED)], "repo": cwd, "base": None})
+            elif at < len(places) and _citechk_swallowed(command, places[at], body, delims):
+                items.append({"cmd": None, "parse": parse, "texts": [],
+                              "unread": [("text in a here-document's body", _CITECHK_SWALLOWED_TEXT)],
+                              "repo": cwd, "base": None})
+        return items
+    if parse == "raw":
+        out = _citechk_as_written(command, cwd, "raw", _CITECHK_EXPANDED)
+        # The scan as written cannot read a message or body file, so each one a lexing that lexed names is
+        # kept as a not-read entry (never evaluated: no lexing's reading of the command is bash's), named
+        # once per option spelling and path as the command writes it, however many lexings name it, on the
+        # scan's item where the kind search found one, else as the lexed command's own item, and where it
+        # found none, so the scan reads nothing, each message or body value a lexing names is kept too. A
+        # commit or pr command that the kind search finds in a here-document's body a lexing read is kept the
+        # same way (these lexings read a split delimiter that is unquoted once the backslash-newline is
+        # removed as one no line can match, so the rest of the command, which bash can still run, is that
+        # body to them): the scan as written reads its message or body files and its standard input only as
+        # text, so the entry says they were not read. Where that search finds none in such a body, which it
+        # does for a command word that quotes split (g'i't), the body is kept as text not read whenever bash
+        # can run text in it (bodies).
+        scanned = bool(out)  # whether the scan as written reads the command's text
+        found = set()  # the entries already named, so a later lexing or option adds only entries new to
+        # it: a set, so many distinct entries cost time that grows with their number, not its square
+        for segments, heredocs, spans in readings:
+            items = _citechk_items(segments, heredocs, cwd, "raw", deadline, evaluate=False, scanned=scanned)
+            items += bodies(heredocs, spans, "raw")
+            for item in items:
+                unread = []
+                for entry in item["unread"]:
+                    if entry not in found:
+                        found.add(entry)
+                        unread.append(entry)
+                if not unread:
+                    continue
+                if out:
+                    out[0]["unread"] += unread
+                else:
+                    item["unread"] = unread
+                    out.append(item)
+        return out
+    differ = len(readings) < len(nestings) or (
+        len(readings) == 2 and _citechk_shape(*readings[0][:2]) != _citechk_shape(*readings[1][:2]))
+    if differ:
+        parse, why = "both", why or _CITECHK_LEXINGS_DIFFER
+    out = _citechk_items(readings[0][0], readings[0][1], cwd, parse, deadline)
+    if differ and len(readings) == 2:
+        first = list(out)
+        out += [item for item in _citechk_items(readings[1][0], readings[1][1], cwd, parse, deadline)
+                if item not in first]
+    if parse == "both":
+        scan = _citechk_as_written(command, cwd, "both", _CITECHK_EXPANDED_BOTH)
+        # A lexing that read a '<<' whose delimiter word a backslash-newline splits read that line's '<<'
+        # operators and bodies past the refusals that otherwise fail it (split_delims, _lex_command), so a
+        # body it read can hold a command that bash runs, as on the raw path above: each such lexing's
+        # bodies are searched as there, and each entry new to the search is kept on the scan's item where
+        # the kind search found one, else as its own item. A lexing that read no split delimiter took none
+        # of those lifts, so its bodies are read as main's lexer reads them and are not searched.
+        named = set()  # the entries already kept, as found is on the raw path
+        for _segments, heredocs, spans in readings:
+            if not any(_heredoc_word_split(command, end, len(command))
+                       for start, end in spans if command.startswith("<", start)):
+                continue
+            for item in bodies(heredocs, spans, "both"):
+                unread = [entry for entry in item["unread"] if entry not in named]
+                named.update(unread)
+                if not unread:
+                    continue
+                if scan:
+                    scan[0]["unread"] += unread
+                else:
+                    item["unread"] = unread
+                    out.append(item)
+        out += scan
+        for item in out:
+            item["why"] = why
+    return out
+
+
+def _citechk_shape(segments, heredocs):
+    """What the citation check takes from one lexing of a command, to compare two lexings by: each
+    segment's words and redirects, and the here-documents. The text of a word or a redirect target that
+    holds a substitution, an expansion or a glob (opaque) is left out and only its place compared, since the
+    two lexings decode one differently (the nested one keeps a substitution's text as written, its escapes
+    and backslash-newlines included); so a citation that only a backslash escape inside such a substitution
+    changes is read as the first lexing decodes it."""
+    return ([([None if opaque else word for word, opaque in zip(seg.argv, seg.argv_opaque)],
+              [(red.op, red.src_fd, red.target_class, None if red.target_class == "opaque" else red.target)
+               for red in seg.redirects]) for seg in segments], heredocs)
+
+
+# The directory walk of the citation check (_citechk_dirs). A directory the walk cannot establish:
+_CITECHK_DIR_UNKNOWN = object()
+_CITECHK_CD_WORDS = frozenset(("cd", "pushd", "popd"))
+# Command words that can move the shell, or change what a later cd or command word does, where the walk does
+# not follow (each with the reason it names): eval, source and '.' run text it does not lex; trap sets an
+# action bash runs in this shell (a DEBUG trap before each later command); mapfile and readarray run a -C
+# callback in this shell; fc runs commands from the history; alias and unalias change what a later command
+# word runs; enable can turn the cd builtin off or load another; shopt can turn on lastpipe, cdable_vars,
+# expand_aliases, autocd and the compat levels. builtin and command are read through to the word they run.
+_CITECHK_DIR_OPAQUE = frozenset(("eval", "source", ".", "builtin", "command", "trap", "mapfile", "readarray", "fc",
+                                 "alias", "unalias", "enable", "shopt"))
+_CITECHK_DIR_OPAQUE_WHY = {
+    "eval": "eval runs text this check does not lex, which may change the directory",
+    "source": "source runs a file this check does not read, which may change the directory",
+    ".": "'.' runs a file this check does not read, which may change the directory",
+    "trap": "trap sets an action, text this check does not lex, that bash may run in this shell before a later "
+            "command (a DEBUG trap runs before each one), so it may change the directory",
+    "mapfile": "mapfile may run a -C callback, text this check does not lex, in this shell",
+    "readarray": "readarray may run a -C callback, text this check does not lex, in this shell",
+    "fc": "fc runs commands from the history, which this check does not read",
+    "alias": "alias may change what a later command word (a cd, or the command itself) runs",
+    "unalias": "unalias may change what a later command word (a cd, or the command itself) runs",
+    "enable": "enable may turn the cd builtin off or load another in its place",
+    "shopt": "shopt may change how a later cd or pipeline runs (lastpipe, cdable_vars, expand_aliases, autocd, "
+             "a compat level)",
+}
+# The set options the walk knows leave every cd and pipeline as it reads them; any other option word (physical,
+# posix, xtrace, whose PS4 bash expands before each command, functrace, history, an expansion) is not followed.
+_CITECHK_SET_SAFE_LETTERS = frozenset("eufvC")
+_CITECHK_SET_SAFE_NAMES = frozenset(("errexit", "nounset", "pipefail", "noglob", "noclobber", "verbose"))
+_CITECHK_SET_WHY = ("set with an option other than -e, -u, -f, -v, -C or -o errexit, nounset, pipefail, noglob, "
+                    "noclobber or verbose may change how a later cd or command runs (physical, posix, xtrace's PS4 "
+                    "and others)")
+# A ${ cmd; } or ${| cmd; } substitution (bash 5.3) runs its commands in this shell, not a subshell, so a cd in
+# it moves the shell; it is found in a segment's raw text, quoted or not, since a PS4 or another prompt string
+# holding one runs it too.
+_CITECHK_FUNSUB_RE = re.compile(r"\$\{(?:[\s|]|$)")
+_CITECHK_FUNSUB_WHY = ("a ${ cmd; } or ${| cmd; } substitution runs its commands in this shell, where this check does "
+                       "not follow them")
+_CITECHK_ALIASES_WHY = "a word spelling BASH_ALIASES may define an alias for a later command word"
+_CITECHK_LASTPIPE_WHY = ("a {} that is the last element of a pipeline runs in this shell where lastpipe is on (set "
+                         "in this command or inherited), so it may change the directory")
+_CITECHK_DIR_OPTIONS = ("a {} with an option other than -L or -P before its operand, with anything after its operand, "
+                        "or with other than one operand, which this check does not resolve exactly")
+_CITECHK_DIR_TILDE = ("a ~ operand of {} in a command that spells HOME, or that holds an expansion that may set HOME, "
+                      "so ~ may not expand to the HOME this check reads")
+_CITECHK_DIR_CDPATH = ("a relative {} operand that CDPATH may redirect, after an expansion that may set CDPATH "
+                       "(printf -v, declare, read or an arithmetic assignment to a variable it names)")
+_CITECHK_LOOP_WORDS = frozenset(("for", "while", "until", "select"))
+_CITECHK_DIRS_MAX = 8  # the most directories a segment may run in that the walk keeps; past it, unknown
+_CITECHK_DIR_SPLIT = ("a cd or pushd before it may fail, or be skipped, with this command still run, so it may run "
+                      "in more than one directory")
+_CITECHK_DIR_LOOP = ("this command holds a loop or a function definition and a command that can change the "
+                     "directory, which this check does not follow across iterations or calls")
+# A command the check does not lex, or reads both ways, is scanned as written; where its text, read with each
+# backslash-newline and then each quote character and backslash removed (_citechk_raw_dir, so 'cd', c\d and
+# c""d read as cd), holds one of these words or an expanded command word ($ or a backquote) where a command can
+# begin, or a ${ } substitution that runs in this shell, or BASH_ALIASES, the directory its commit or pr
+# command runs in is not established. Only blanks and tabs are skipped after a mark: a newline is a mark
+# itself, so a run of newlines is read in linear time (with \s there, each newline of a run rescanned the
+# rest of it, which grew with its square).
+_CITECHK_RAW_DIR = re.compile(r"(?:^|[;&|(){}\n`])[ \t]*(?:(?:if|then|else|elif|do|while|until|time|-p|!)[ \t]+)*"
+                              r"(?:[A-Za-z_][A-Za-z0-9_]*\+?=[^\s;&|()]*[ \t]+)*\\?"
+                              r"(?:cd|pushd|popd|eval|source|builtin|command|trap|mapfile|readarray|fc|alias|"
+                              r"unalias|enable|shopt|set|\.)(?=[\s;&|)]|$)"
+                              r"|\$\{(?:[\s|]|$)|BASH_ALIASES")
+# An expanded command word ($ or a backquote) where a command of this shell can begin: at the start, after ';',
+# '&', '|', a newline or a '{ ' that opens a group, and after the reserved words and assignments above; not
+# after '(' or ')' (a subshell, an array value or a substitution's end) or a '}' or '{' of a ${...} expansion.
+_CITECHK_RAW_DIR_EXPANDED = re.compile(r"(?:^|[;&|\n]|\{[ \t])[ \t]*"
+                                       r"(?:(?:if|then|else|elif|do|while|until|time|-p|!)[ \t]+)*"
+                                       r"(?:[A-Za-z_][A-Za-z0-9_]*\+?=[^\s;&|()]*[ \t]+)*[$`]")
+_CITECHK_RAW_DIR_WHY = ("the command is scanned as written, and its text, read with its quotes and backslashes "
+                        "removed, holds a cd, pushd, popd, eval, source, '.', builtin, command, trap, mapfile, "
+                        "readarray, fc, alias, unalias, enable, shopt or set word or an expanded command word where "
+                        "a command can begin, a ${ } substitution that runs in this shell, or BASH_ALIASES")
+# The directory-certainty rule, an allowlist (_citechk_plain, _citechk_dirs): a command's directory counts as
+# established only where every segment of the command line up to and including it has one of the shapes below,
+# which the walk resolves exactly as bash does, and every segment before it ends in '&&', ';' or a newline.
+# Every other shape, wherever it stands before the command or in it, leaves that command and every later one
+# not judged, whatever the walk would make of it, so a form the walk's own list never named (a ${ cmd; } on
+# the commit itself, time -p before a cd) is not judged without being listed:
+#   - plain words: no word holds an expansion, a substitution, a ~ or a pattern the lexer marks (argv_opaque),
+#     no redirection target is one it cannot resolve (target_class opaque), and the raw text of the segment
+#     holds no ${ cmd; } or ${| cmd; } substitution, quoted or not;
+#   - the first word is no variable assignment and no reserved word, and is no bash builtin other than the
+#     few that touch no shell state (_CITECHK_PLAIN_BUILTINS): any other builtin (cd aside) can move the
+#     shell (pushd, popd), run text the walk does not lex (eval, source, '.', trap, mapfile, fc), or change
+#     what a later cd or command word does (set, shopt, export, declare, read, printf -v, alias, enable, hash);
+#   - a cd is exactly cd and one literal operand that is no option, no '-' and holds no pattern or brace
+#     character, so cd -P, cd -- and cd ~ are outside it;
+#   - a git -C with a literal path is a plain word of the git command, resolved by _citechk_items;
+#   - no word, and no redirection target, holds a part spelled through an ANSI-C quote $'...', whose escapes the
+#     walk would otherwise read as other text than bash passes ($'c\x64' is cd to bash): such a word is outside
+#     the allowlist wherever it stands (a command name, a cd or git -C operand, a -F path, a set option), so that
+#     command and every later one are not judged and no relative message file they name is read. The one
+#     exception is the value of a git commit -m or --message whose every ANSI-C part decodes exactly as bash 5.3
+#     decodes it (_ansi_c_decode, _citechk_message_words): it is text git records, read as the text bash passes.
+#     A message, body or file value with a part that does not decode exactly is not read (_CITECHK_ANSI_C_INEXACT).
+# Bash's builtins (5.3), each named so that none outside the plain few is taken for a program that moves nothing.
+_CITECHK_BUILTINS = frozenset((
+    ".", ":", "[", "alias", "bg", "bind", "break", "builtin", "caller", "cd", "command", "compgen", "complete",
+    "compopt", "continue", "declare", "dirs", "disown", "echo", "enable", "eval", "exec", "exit", "export",
+    "false", "fc", "fg", "getopts", "hash", "help", "history", "jobs", "kill", "let", "local", "logout",
+    "mapfile", "popd", "printf", "pushd", "pwd", "read", "readarray", "readonly", "return", "set", "shift",
+    "shopt", "source", "suspend", "test", "times", "trap", "true", "type", "typeset", "ulimit", "umask",
+    "unalias", "unset", "wait"))
+_CITECHK_PLAIN_BUILTINS = frozenset((":", "[", "echo", "false", "pwd", "test", "true"))
+_CITECHK_RESERVED = frozenset(("!", "{", "}", "[[", "]]", "case", "coproc", "do", "done", "elif", "else", "esac",
+                               "fi", "for", "function", "if", "in", "select", "then", "time", "until", "while"))
+_CITECHK_PLAIN_SEPS = frozenset(("&&", ";", ""))  # '' is a newline, which bash reads as ';', or the end
+_CITECHK_PLAIN_CD_BAD = frozenset("*?[]{}~")
+_CITECHK_SHAPE_WHY = ("the command line, up to and including this command, holds {}, a shape outside those this "
+                      "check resolves exactly as bash does (plain words, git -C with a literal path, cd to one "
+                      "literal path, a leading set of -e, -u or -o pipefail, a git commit -m or -F value of "
+                      "\"$(cat <<'EOF' ... EOF)\" with its delimiter single-quoted, and && or ; between such "
+                      "commands)")
+_CITECHK_ANSI_C_SHAPE = "a word spelled through an ANSI-C quote $'...' ({})"
+_CITECHK_ANSI_C_INEXACT = ("it is spelled through an ANSI-C quote $'...' with an escape this check does not decode "
+                           "exactly as bash does (a NUL, a byte past 0x7f, or a \\u or \\U character past 0x7f, "
+                           "which bash encodes in the locale's character set), so the text bash passes is not known")
+# The directory-neutral class, two shapes added to the allowlist above. Each is shown from the bash manual and a
+# bash 5.3 run to leave the shell's working directory where it is, and for (a), to give git exactly the text
+# this check reads (the self-test's cd-neutral-* checks):
+#   (a) the value of a git commit -m or -F, as its own word after the option, that is one double-quoted command
+#       substitution holding only cat and one here-document whose delimiter is single-quoted:
+#       "$(cat <<'D'<newline>BODY D<newline>)", D of letters, digits and underscores, BODY empty or whole lines
+#       holding no double quote and no backslash, no line of BODY beginning with D, and only blanks and newlines
+#       between the delimiter line and the ')'. A $( ) substitution runs in a subshell, so nothing in it moves
+#       this shell (a ${ cmd; } one, which does not, is excluded above); with its delimiter quoted, bash expands
+#       nothing in the body; in double quotes the result is neither split nor globbed; and bash deletes its
+#       trailing newlines. So git is given BODY less its trailing newlines, which is the text this check reads
+#       for that value (_citechk_neutral_value), and for -F the file it names. A body line that begins with D (a
+#       line "D)", for one) can end the here-document in bash 5.3, so that body is outside the class, as is an
+#       unquoted delimiter (bash expands the body, $( ) and ${ cmd; } included), a double-quoted one, a <<-, any
+#       other command or word in the substitution, an unquoted or attached substitution and a long option.
+#   (b) set at the start of the line, before any other command, whose words are only -e, -u, -o errexit,
+#       -o nounset or -o pipefail, or a cluster of e and u that may end in an o taking one of those names
+#       (set -euo pipefail), with no redirection: errexit and nounset can only end the shell before a later
+#       command runs, and pipefail only changes a pipeline's status, a shape the allowlist never holds, so none
+#       moves the shell or changes what a later cd resolves (_citechk_set_neutral). Every other set option is
+#       outside it (-P makes cd resolve links, -x expands PS4 before each command, -k, -a and posix change how
+#       later words act), and so is a set after another command.
+_CITECHK_NEUTRAL_OPEN = re.compile(r"\$\(cat[ \t]+<<[ \t]*'([A-Za-z0-9_]+)'[ \t]*\n")
+_CITECHK_NEUTRAL_OPTIONS = ("-m", "-F")
+_CITECHK_NEUTRAL_SET_LETTERS = frozenset("eu")
+_CITECHK_NEUTRAL_SET_NAMES = frozenset(("errexit", "nounset", "pipefail"))
+# A command scanned as written is not lexed, so the walk never reads it: its directory counts as established
+# only where its text, read with each backslash-newline removed, is a git commit or gh pr create or edit at its
+# very start, then plain words, one here-document operator with a plain delimiter and plain words to the end of
+# that line, and after that line no '$' and no backquote at all (bash expands an unquoted here-document's body
+# in the process git runs in, so a ${ cmd; } there could move it), and where _citechk_raw_dir finds no
+# directory word in it either. re.match is anchored and each word is bounded by blanks it cannot hold, so a
+# failing match backs off in linear time (the self-test times it on 1 MiB shapes, cd-allowlist-raw-linear).
+_CITECHK_RAW_PLAIN_WORD = r"[A-Za-z0-9_./:=@%+,-]+"
+_CITECHK_RAW_PLAIN = re.compile(r"[ \t]*(?:git[ \t]+commit|gh[ \t]+pr[ \t]+(?:create|edit))"
+                                r"(?:[ \t]+" + _CITECHK_RAW_PLAIN_WORD + r")*[ \t]+<<-?[ \t]*"
+                                r"(?:'[A-Za-z0-9_]+'|\"[A-Za-z0-9_]+\"|[A-Za-z0-9_]+)"
+                                r"(?:[ \t]+" + _CITECHK_RAW_PLAIN_WORD + r")*[ \t]*\n[^$`]*\Z")
+_CITECHK_RAW_SHAPE_WHY = ("the command is scanned as written, not lexed, and its text is not one git commit or gh pr "
+                          "create or edit of plain words at its start with one plain here-document and no '$' or "
+                          "backquote after that line, so this check cannot show that its directory is the session's")
+
+
+def _citechk_neutral_body(word):
+    """The text bash gives for word where word, as the lexer read it from inside double quotes, is a
+    $(cat <<'D' ... D) substitution of the directory-neutral class (a) (the comment above
+    _CITECHK_NEUTRAL_OPEN): the here-document's body less its trailing newlines. None for any other word.
+    Linear in its length."""
+    found = _CITECHK_NEUTRAL_OPEN.match(word)
+    if found is None or not word.endswith(")"):
+        return None
+    delim = found.group(1)
+    inner = word[found.end():-1]
+    end = inner.rstrip(" \t\n")
+    if not inner[len(end):].startswith("\n"):
+        return None  # the delimiter line must end at a newline, with nothing after D on it
+    if end == delim:
+        body = ""
+    elif end.endswith("\n" + delim):
+        body = end[:-len(delim)]
+    else:
+        return None
+    if '"' in body or "\\" in body or any(line.startswith(delim) for line in body.split("\n")):
+        return None
+    return body.rstrip("\n")
+
+
+def _citechk_neutral_value(seg, value):
+    """The text bash gives git for value, the value of a git commit -m or -F in segment seg, where it is of the
+    directory-neutral class (a): its own word, written once in the segment, double-quoted exactly as the lexer
+    read it (so no quote or escape of the lexing changed it). None otherwise."""
+    if value is None:
+        return None
+    body = _citechk_neutral_body(value)
+    if body is None or seg.argv.count(value) != 1 or seg.raw.count('"' + value + '"') != 1:
+        return None
+    return body
+
+
+def _citechk_neutral_words(seg):
+    """The words of segment seg, a git commit, that are the value of its -m or -F option and of the
+    directory-neutral class (a), as a set (empty where there are none or seg is no git commit)."""
+    words = seg.argv
+    if not words or words[0] != "git":
+        return frozenset()
+    sub, args = _git_sub_and_args(words)
+    if sub != "commit":
+        return frozenset()
+    offset = len(words) - len(args)
+    # A word spelled through an ANSI-C quote is never of the class (_citechk_ansi_c): its text is not the one the
+    # class reads from inside double quotes.
+    return frozenset(value for name, value, at in _citechk_options(args, _CITECHK_GIT_SHORT, _CITECHK_GIT_OPTIONAL,
+                                                                   _CITECHK_GIT_LONG, indexed=True)
+                     if name in _CITECHK_NEUTRAL_OPTIONS and _citechk_neutral_value(seg, value) is not None
+                     and (at is None or _citechk_ansi_c(words, offset + at) is None))
+
+
+def _citechk_message_words(seg):
+    """The indices in segment seg's argv of the words that hold the value of a git commit -m or --message option
+    (its own word, or attached: -mVALUE, -amVALUE, --message=VALUE), as a set (empty where seg is no git commit
+    whose command word is its first word). Such a value is text git records and runs nothing, so where it is
+    spelled through an ANSI-C quote decoded exactly (_AnsiCExact) it is no shape outside the directory allowlist
+    (_citechk_plain); the word that names the option is the same word only in the attached forms, whose option
+    letters bash passes as written."""
+    words = seg.argv
+    if not words or words[0] != "git" or _citechk_ansi_c(words, 0) is not None:
+        return frozenset()
+    sub, args = _git_sub_and_args(words)
+    if sub != "commit":
+        return frozenset()
+    offset = len(words) - len(args)
+    if _citechk_ansi_c(words, offset - 1) is not None:
+        return frozenset()  # the subcommand word itself spelled through an ANSI-C quote
+    return frozenset(offset + at for name, _value, at in _citechk_options(
+        args, _CITECHK_GIT_SHORT, _CITECHK_GIT_OPTIONAL, _CITECHK_GIT_LONG, indexed=True)
+        if name in ("-m", "--message") and at is not None)
+
+
+def _citechk_set_neutral(seg):
+    """Whether segment seg is a set of the directory-neutral class (b) (the comment above
+    _CITECHK_NEUTRAL_OPEN): set and one or more option words, each -e, -u, -o NAME or a cluster of e and u that
+    may end in an o taking NAME, NAME one of _CITECHK_NEUTRAL_SET_NAMES; no other word, no expansion, no
+    redirection and no ${ cmd; } text. Whether it leads the line is for _citechk_dirs."""
+    words = seg.argv
+    if len(words) < 2 or words[0] != "set" or any(seg.argv_opaque) or seg.redirects or _CITECHK_FUNSUB_RE.search(
+            seg.raw):
+        return False
+    if any(_citechk_ansi_c(words, at) is not None for at in range(len(words))):
+        return False  # a word spelled through an ANSI-C quote is outside the allowlist (_citechk_plain)
+    i = 1
+    while i < len(words):
+        word = words[i]
+        if len(word) < 2 or word[0] != "-":
+            return False
+        letters = word[1:]
+        if letters.endswith("o"):
+            if i + 1 >= len(words) or words[i + 1] not in _CITECHK_NEUTRAL_SET_NAMES:
+                return False
+            letters = letters[:-1]
+            i += 1
+        if not set(letters) <= _CITECHK_NEUTRAL_SET_LETTERS:
+            return False
+        i += 1
+    return True
+
+
+def _citechk_plain(seg):
+    """Why one segment of a lexing is outside the shapes the walk resolves exactly as bash does
+    (_CITECHK_SHAPE_WHY, the comment above _CITECHK_BUILTINS), as the text _CITECHK_SHAPE_WHY names, or None
+    where it is one of them. Its separator is judged by _citechk_dirs, not here, and so is a leading set of
+    the directory-neutral class (b). A word that is a git commit -m or -F value of the directory-neutral class
+    (a) is no expansion here (_citechk_neutral_words)."""
+    words, aop = seg.argv, seg.argv_opaque
+    if _CITECHK_FUNSUB_RE.search(seg.raw):
+        return "a ${ cmd; } or ${| cmd; } substitution, which runs its commands in this shell"
+    spelling = getattr(words, "spelling", None)
+    if spelling is not None and any(isinstance(record, _AnsiCSpelling) for record in spelling):
+        message = _citechk_message_words(seg)
+        for at, word in enumerate(words):
+            kind = _citechk_ansi_c(words, at)
+            if kind is not None and not (kind is _AnsiCExact and at in message):
+                return _CITECHK_ANSI_C_SHAPE.format(_citechk_short(word))
+    neutral = None
+    for word, opaque in zip(words, aop):
+        if opaque:
+            if neutral is None:
+                neutral = _citechk_neutral_words(seg)
+            if word in neutral:
+                continue
+            return "a word holding an expansion, a substitution, a ~ or a pattern ({})".format(_citechk_short(word))
+    if any(red.target_class == "opaque" for red in seg.redirects):
+        return "a redirection whose target this check cannot resolve"
+    if not words:
+        return None
+    name = words[0]
+    if _ENV_ASSIGN_RE.match(name):
+        return "a variable assignment ({}=)".format(_citechk_short(name.partition("=")[0].rstrip("+")))
+    if name in _CITECHK_RESERVED:
+        return "the reserved word {}".format(name)
+    if name == "cd":
+        if len(words) != 2 or not words[1] or words[1].startswith("-") or _CITECHK_PLAIN_CD_BAD.intersection(
+                words[1]):
+            return "a cd other than cd and one literal path"
+        return None
+    if name in _CITECHK_BUILTINS and name not in _CITECHK_PLAIN_BUILTINS:
+        return "the builtin {}, which may change the directory, the shell's state or what a later command runs".format(
+            name)
+    return None
+
+
+def _citechk_raw_dir(command):
+    """Whether the text of a command scanned as written may change the directory in a way the check does not
+    follow (_CITECHK_RAW_DIR, _CITECHK_RAW_DIR_EXPANDED), read with each backslash-newline removed and then
+    each quote character and backslash, so a cd spelled with quotes or escapes in it ('cd', c\\d, c""d) is
+    found: linear in its length."""
+    text = command.replace("\\\n", "")
+    for mark in ("'", '"', "\\"):
+        text = text.replace(mark, "")
+    return _CITECHK_RAW_DIR.search(text) is not None or _CITECHK_RAW_DIR_EXPANDED.search(text) is not None
+
+
+def _citechk_set_safe(words, aop):
+    """Whether a set command's words (after set) give only options _CITECHK_SET_SAFE_LETTERS and
+    _CITECHK_SET_SAFE_NAMES name, before '--' or its first positional word."""
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if aop[i]:
+            return False
+        if word == "--" or word in ("-", "+") or not word.startswith(("-", "+")):
+            return True
+        letters = word[1:]
+        if letters.endswith("o"):
+            # -o NAME, or a cluster ending in o (set -euo pipefail): the next word is the option's name
+            if i + 1 >= len(words) or aop[i + 1] or words[i + 1] not in _CITECHK_SET_SAFE_NAMES:
+                return False
+            letters = letters[:-1]
+            i += 1
+        if not set(letters) <= _CITECHK_SET_SAFE_LETTERS:
+            return False
+        i += 1
+    return True
+
+
+def _citechk_tainted(words, aop, atl):
+    """Whether a segment's words hold an expansion or substitution (an opaque word) that may set a variable
+    through a name it computes (printf -v "$v", declare "$v=...", an arithmetic assignment to $v), other than
+    a clean leading ~ (~ or ~/x) and the braces of a group."""
+    for word, opaque, tilde in zip(words, aop, atl):
+        if opaque and word not in ("{", "}") and not (tilde and _LITERAL_TILDE_RE.match(word)
+                                                      and not _GENSRC_OPAQUE_RE.search(word)):
+            return True
+    return False
+
+
+def _citechk_dir_step(seg, words, subshell, last, run, context, tainted):
+    """What one segment does to the shell's working directory, for _citechk_dirs: (None, None) where it
+    leaves it, ("to", dirs) for a cd or pushd whose destination from each directory of run the walk
+    establishes exactly as bash does (_gensrc_cd, where that change is certain), or ("unknown", reason) where
+    it may change it, or change what a later cd or command word does, in a way the walk cannot follow. words
+    is seg.argv; subshell says the segment is a pipeline element that a '|' follows or ends in '&', which
+    bash runs in a subshell, so nothing in it moves this shell; last says it is the last element of a
+    pipeline, which bash runs in this shell where lastpipe is on (set in this command or inherited), so a cd
+    there is not followed; tainted says an earlier segment, or a word of this one before its operand, holds an
+    expansion that may set HOME or CDPATH through a name it computes (_citechk_tainted)."""
+    k = 0
+    while k < len(words) and words[k] in _CITECHK_LEADING:
+        k += 1
+    pi = k + _command_word_index(words[k:])
+    if subshell:
+        return None, None
+    if _CITECHK_FUNSUB_RE.search(seg.raw):
+        return "unknown", _CITECHK_FUNSUB_WHY
+    if any("BASH_ALIASES" in word for word in words):
+        return "unknown", _CITECHK_ALIASES_WHY
+    if pi >= len(words):
+        return None, None
+    if seg.argv_opaque[pi]:
+        return "unknown", ("a command word this check cannot read (an expansion or a substitution) may change the "
+                           "directory")
+    name = words[pi]
+    wrapped = None
+    while name in ("builtin", "command"):
+        # builtin and command run the word after their options (command -v and -V only name it): read through
+        # to that word, so command eval or builtin cd is judged as the word it runs.
+        wrapped = wrapped or name
+        pi += 1
+        while pi < len(words) and words[pi].startswith("-") and not seg.argv_opaque[pi]:
+            pi += 1
+        if pi >= len(words):
+            return None, None
+        if seg.argv_opaque[pi]:
+            return "unknown", "{} may run a word this check cannot read (an expansion or a substitution)".format(
+                wrapped)
+        name = words[pi]
+    if name in _CITECHK_DIR_OPAQUE:
+        return "unknown", _CITECHK_DIR_OPAQUE_WHY[name]
+    if name == "set" and not _citechk_set_safe(words[pi + 1:], seg.argv_opaque[pi + 1:]):
+        return "unknown", _CITECHK_SET_WHY
+    if name not in _CITECHK_CD_WORDS:
+        return None, None  # a cd spelled with a path (/usr/bin/cd) runs as a program and moves no shell
+    if k:
+        return "unknown", "a {} inside a compound command (after {}) may or may not run".format(name, words[0])
+    if last:
+        return "unknown", _CITECHK_LASTPIPE_WHY.format(name)
+    if wrapped:
+        return "unknown", "{} may run a cd, pushd or popd this check does not read".format(wrapped)
+    if name == "popd":
+        return "unknown", "popd returns to a directory this check does not track"
+    # Exactly bash's grammar for the forms followed: cd [-L|-P]... [--] DIR and pushd DIR, one operand, nothing
+    # after it (bash 5 refuses a second word; an older bash ignores it), and no pushd option.
+    at = pi + 1
+    while name == "cd" and at < len(words) and not seg.argv_opaque[at] and re.match(r"-[LP]+\Z", words[at]):
+        at += 1
+    if name == "cd" and at < len(words) and words[at] == "--":
+        at += 1
+    if at != len(words) - 1 or words[at].startswith("-") or (name == "pushd" and words[at].startswith("+")):
+        return "unknown", _CITECHK_DIR_OPTIONS.format(name)
+    operand, opaque, tilde = words[at], seg.argv_opaque[at], seg.argv_leading_tilde[at]
+    if tilde and (context[4] != (True,) or tainted or _citechk_tainted(words[:at], seg.argv_opaque[:at],
+                                                                       seg.argv_leading_tilde[:at])):
+        return "unknown", _CITECHK_DIR_TILDE.format(name)
+    if not opaque and not os.path.isabs(operand) and operand not in (".", "..") and not operand.startswith(
+            ("./", "../")) and (tainted or _citechk_tainted(words[:at], seg.argv_opaque[:at],
+                                                            seg.argv_leading_tilde[:at])):
+        return "unknown", _CITECHK_DIR_CDPATH.format(name)
+    dirs = []
+    for base in run:
+        if base is _CITECHK_DIR_UNKNOWN:
+            return "unknown", None
+        reach = _gensrc_cd(name, words[pi:], seg.argv_opaque[pi:], seg.argv_leading_tilde[pi:], base, context,
+                           [] if base is None else [base])
+        if len(reach) != 1 or reach[0] is None:
+            return "unknown", ("a {} whose destination this check cannot establish (no operand or more than one, "
+                               "'-', an expansion, a relative path with no absolute session cwd, CDPATH, a pushd "
+                               "option, -P or a '..' across a link)".format(name))
+        dirs.append(reach[0])
+    return "to", frozenset(dirs)
+
+
+def _citechk_dirs(segments, cwd):
+    """The directory each segment of one lexing runs in, as a generator, one (directory, reason, off) per
+    segment in order: directory cwd, or the one the cd and pushd segments before it establish (None with reason
+    None where that is cwd and cwd is None), or (None, reason) where the walk cannot establish one directory;
+    off is True where the segment, or one before it, is outside the allowlist (_citechk_plain, a separator
+    other than '&&', ';' or a newline before it; a set of the directory-neutral class that only sets of
+    that class precede, _citechk_set_neutral, is inside it), and then the directory is never established,
+    with the walk's own reason where it has one and _CITECHK_SHAPE_WHY otherwise, and no git -C overrides it. The
+    allowlist is the rule; the walk below only narrows it further, so every reason it names still applies.
+    Bash's and-or lists are followed: after 'cd D &&' the next command runs in D, and a command reached
+    past a cd through ';', a newline, '||' or a later '||' or '&&' that a failed or skipped cd can reach may
+    run in either directory, so it is not established (_CITECHK_DIR_SPLIT). A cd in a pipeline element that
+    a '|' follows or in a command ending in '&' moves nothing; a subshell '(...)' or command substitution
+    '$(...)' keeps its changes inside; a list ending in '&' leaves the next one in the directory it began in.
+    Not established (each reason named; _citechk_dir_step): a cd or pushd in the last element of a pipeline
+    (lastpipe, set here or inherited, runs it in this shell); a cd with an option other than -L or -P, a word
+    after its operand or other than one operand, and a pushd with any option; a cd or pushd whose destination
+    _gensrc_cd does not find certain (an expansion, '-', CDPATH, -P or a '..' across a link); a ~ operand in a
+    command that spells HOME or after an expansion that may set it; a relative operand CDPATH may redirect
+    after such an expansion; popd; a cd after a reserved word ({, if, then, while, ...); an opaque command
+    word; eval, source, '.', trap, mapfile, readarray, fc, alias, unalias, enable, shopt and a set with an
+    option outside _CITECHK_SET_SAFE_LETTERS and _CITECHK_SET_SAFE_NAMES, also run through builtin or command;
+    a ${ cmd; } or ${| cmd; } substitution (it runs in this shell); a word spelling BASH_ALIASES; an unmatched
+    ')'; more than _CITECHK_DIRS_MAX possible directories; and every segment from the first loop or function
+    definition on, in a command that also holds a command that can change the directory (_CITECHK_DIR_LOOP),
+    since a later iteration or call can run such a segment elsewhere. Every segment after one of these, in
+    this shell, is not established either. What the shell brings with it is not seen: the walk assumes that
+    cd, pushd and popd are bash's builtins, and every other command word before the command a builtin or a
+    program, with no alias or function of that name defined before this call
+    (by a shell snapshot, a profile or BASH_ENV), and that HOME and CDPATH are those of the hook process."""
+    unknown = _CITECHK_DIR_UNKNOWN
+    def opens(argv):
+        # a loop (its keyword, or a do, among the reserved words that begin the segment) or a function definition
+        for word in argv:
+            if word in _CITECHK_LOOP_WORDS or word in ("do", "function"):
+                return True
+            if word not in _CITECHK_LEADING:
+                return False
+        return False
+    # A loop or function definition can run a segment again, or later, only from its own opener on, so the
+    # whole command is searched for a command that can change the directory once, at the first opener the
+    # walk reaches; a walk that stops before any opener (the generator is advanced only as far as a git or
+    # gh segment) searches nothing past it.
+    looped = None
+    run = list_start = frozenset((cwd,))
+    pass_s = pass_f = frozenset()  # directories a success or a failure carries past the next command
+    frames, why, prev, context, tainted = [], None, "", None, False
+    # The allowlist (_CITECHK_SHAPE_WHY): the first shape outside it, in a segment or in the separator after
+    # one, judged BEFORE that segment's own directory is given, so a segment outside it (a ${ cmd; } on the
+    # commit itself) is not judged either, nor any later one. It only adds to what the walk leaves unknown.
+    shape = None
+    leading = True  # no command yet but sets of the directory-neutral class (b), which pass while this holds
+    for seg in segments:
+        if shape is None and not (leading and _citechk_set_neutral(seg)):
+            leading = leading and not seg.argv
+            shape = _citechk_plain(seg)
+        off = shape is not None
+        if looped is None and seg.argv and (opens(seg.argv) or (
+                len(seg.argv) == 1 and seg.sep_after == "(" and not seg.argv_opaque[0])):
+            looped = any(other.argv and (any(other.argv_opaque) or _CITECHK_CD_WORDS.intersection(other.argv)
+                                         or _CITECHK_DIR_OPAQUE.intersection(other.argv)) for other in segments)
+        if looped:
+            yield None, _CITECHK_DIR_LOOP, off
+            continue
+        if unknown in run:
+            yield None, why, off
+        elif len(run) > 1:
+            yield None, _CITECHK_DIR_SPLIT, off
+        elif off:
+            yield None, _CITECHK_SHAPE_WHY.format(shape), True
+        else:
+            yield next(iter(run)), None, False
+        sep = seg.sep_after
+        if shape is None and sep not in _CITECHK_PLAIN_SEPS:
+            shape = "a {!r} after a command".format(sep)
+        subshell = sep in ("|", "|&", "&")  # an element a '|' follows, or one ending in '&': a subshell
+        last = prev in ("|", "|&") and not subshell  # the last element: this shell's, under lastpipe
+        if context is None and seg.argv and _CITECHK_CD_WORDS.intersection(seg.argv):
+            context = _gensrc_cd_context(segments)
+        kind, value = _citechk_dir_step(seg, seg.argv, subshell, last, run, context, tainted) if seg.argv else (
+            None, None)
+        tainted = tainted or _citechk_tainted(seg.argv, seg.argv_opaque, seg.argv_leading_tilde)
+        if kind == "to":
+            done_s, done_f = value, run
+        elif kind == "unknown":
+            why = value or why
+            done_s = done_f = frozenset((unknown,))
+        else:
+            done_s = done_f = run
+        if sep == "&&":
+            run, pass_f, pass_s = done_s | pass_s, pass_f | done_f, frozenset()
+        elif sep == "||":
+            run, pass_s, pass_f = done_f | pass_f, pass_s | done_s, frozenset()
+        elif sep in ("|", "|&"):
+            pass
+        elif sep == "(":
+            frames.append((run, pass_s, pass_f, list_start))
+            pass_s = pass_f = frozenset()
+            list_start = run
+        elif sep == ")":
+            if not frames:
+                why = "an unmatched ')'"
+                run = list_start = frozenset((unknown,))
+            else:
+                run, pass_s, pass_f, list_start = frames.pop()
+        elif sep == "&":
+            run, pass_s, pass_f = list_start, frozenset(), frozenset()
+        else:  # ';', a newline or the end: the list is done, however it went
+            run = list_start = done_s | done_f | pass_s | pass_f
+            pass_s = pass_f = frozenset()
+        if len(run) > _CITECHK_DIRS_MAX:
+            why = "more than {} directories are possible".format(_CITECHK_DIRS_MAX)
+            run = frozenset((unknown,))
+        prev = sep
+
+
+def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True, scanned=True):
+    """The git commit and gh pr create or edit commands of one lexing of a Bash command (segments and the
+    heredocs _lex_command gave with them), each a dict as _citechk_commands describes, with parse, and with
+    a read attempted of each message and body file it names (one that cannot be read named in unread).
+    With evaluate False (the split-delimiter fallback, _citechk_commands), nothing is read: each message or
+    body file the lexing names is named in unread with _CITECHK_SPLIT_UNREAD instead, standard input is
+    named with _CITECHK_STDIN_UNSEEN (taken once, at the first option that names it, whatever its
+    spelling, as when it is evaluated) unless it is
+    the command's own here-document, whose text the scan of the command as written already reads, and an
+    inline value, whose text that scan also reads, earns no entry. scanned False says that scan reads
+    nothing (the kind search found no command in the text, _citechk_as_written): each inline value is then
+    named in unread with _CITECHK_UNSCANNED, once per option spelling."""
+    stdin = {}  # segment index: (redirects before it, body) of its last here-document
+    for index, before, body in heredocs:
+        stdin[index] = before, body
+    out = []
+    walk, dirs = None, []  # the directory walk (_citechk_dirs), advanced only as far as a git or gh segment
+    for index, seg in enumerate(segments):
+        argv = seg.argv
+        # A first word that is no reserved word and no assignment (it holds no '=') is the command word, so
+        # a segment whose first word is neither git nor gh, by its basename, is passed over on that one
+        # judgement: a command of many one-word segments costs one look at each, not the walk below.
+        if argv and argv[0] not in _CITECHK_LEADING and "=" not in argv[0] \
+                and argv[0].rsplit("/", 1)[-1] not in ("git", "gh"):
+            continue
+        while argv and argv[0] in _CITECHK_LEADING:
+            if argv[0] == "time":  # time, then its -p, then a '--', as bash reads them
+                skip = 2 if argv[1:2] == ["-p"] else 1
+                skip += 1 if argv[skip:skip + 1] == ["--"] else 0
+            else:  # coproc's NAME only before a compound command
+                skip = 2 if argv[0] == "coproc" and len(argv) > 2 and argv[2] in _CITECHK_COMPOUND else 1
+            argv = argv[skip:]
+        at = _command_word_index(argv)
+        word = _command_word(argv)
+        if word not in ("git", "gh"):
+            continue
+        # The directory the command runs in: the session cwd, or where the cd and pushd before it moved
+        # the shell; where the walk cannot establish one, repo is None and nodir says why.
+        if walk is None:
+            walk = _citechk_dirs(segments, cwd)
+        while len(dirs) <= index:
+            dirs.append(next(walk))
+        repo, nodir, off = dirs[index]
+        where = "the directory a cd before the command moves to"
+        if word == "git":
+            sub, args = _git_sub_and_args(argv)
+            if sub != "commit":
+                continue
+            kind = "git-commit"
+            i = at + 1
+            while i < len(argv) and argv[i].startswith("-"):
+                if argv[i] == "-C" and i + 1 < len(argv):
+                    target = argv[i + 1]
+                    where = "the git -C directory"
+                    if off:
+                        pass  # outside the allowlist: not even an absolute -C is trusted (_CITECHK_SHAPE_WHY)
+                    elif os.path.isabs(target):
+                        repo, nodir = target, None  # an absolute -C names the directory, wherever the shell is
+                    else:
+                        repo = os.path.join(repo, target) if repo else None
+                i += 2 if "=" not in argv[i] and argv[i] in _GIT_ARG_OPTS else 1
+            options = _citechk_options(args, _CITECHK_GIT_SHORT, _CITECHK_GIT_OPTIONAL, _CITECHK_GIT_LONG,
+                                       indexed=True)
+            base = len(seg.argv) - len(args)  # where args begins in seg.argv, whose words carry their spelling
+        elif word == "gh":
+            rest = argv[at + 1:]
+            if len(rest) < 2 or rest[0] != "pr" or rest[1] not in ("create", "edit"):
+                continue
+            kind = "gh-pr-" + rest[1]
+            options = [(name, value[1:] if len(name) == 2 and value and value.startswith("=") else value, place)
+                       for name, value, place in _citechk_options(rest[2:], _CITECHK_GH_SHORT, "", _CITECHK_GH_LONG,
+                                                                  indexed=True)]
+            base = len(seg.argv) - len(rest) + 2
+        else:
+            continue
+        inline_names, file_names = _CITECHK_SOURCES[kind]
+        item = {"cmd": kind, "parse": parse, "texts": [], "unread": [], "repo": repo, "base": None,
+                "nodir": nodir, "where": where}
+        here = stdin.get(index)
+        if here is not None and any(red.src_fd == 0 and not _citechk_keeps_stdin(red)
+                                    for red in seg.redirects[here[0]:]):
+            here = None  # a later redirect of fd 0 replaces the here-document, unless it is fd 0 onto itself
+        taken = False  # whether standard input has been taken
+        for name, value, place in options:
+            if value is None:
+                continue
+            ansi = _citechk_ansi_c(seg.argv, base + place)
+            if evaluate and ansi is _AnsiCInexact and (name in inline_names or name in file_names
+                                                       or (name in ("-B", "--base") and kind != "git-commit")):
+                # a value holding an ANSI-C quote that does not decode exactly is never read as bash's text
+                label = "{} value".format(name) if name in inline_names else "{} {}".format(name, _citechk_short(value))
+                item["unread"].append((label, _CITECHK_ANSI_C_INEXACT))
+                continue
+            if evaluate and kind == "git-commit" and name in _CITECHK_NEUTRAL_OPTIONS and ansi is None:
+                # a value of the directory-neutral class (a) is read as the text bash gives git for it
+                body = _citechk_neutral_value(seg, value)
+                value = value if body is None else body
+            if name in ("-B", "--base") and kind != "git-commit":
+                item["base"] = value
+            elif not evaluate:
+                if name in inline_names and not scanned:
+                    entry = ("{} value".format(name), _CITECHK_UNSCANNED)
+                    if entry not in item["unread"]:
+                        item["unread"].append(entry)
+                    continue
+                if name not in file_names:
+                    continue
+                if value == "-":
+                    if taken:
+                        continue
+                    taken = True
+                    if here is None:
+                        item["unread"].append(("{} -".format(name), _CITECHK_STDIN_UNSEEN))
+                else:
+                    item["unread"].append(("{} {}".format(name, _citechk_short(value)), _CITECHK_SPLIT_UNREAD))
+            elif name in inline_names:
+                item["texts"].append(("{} value".format(name), value))
+            elif name in file_names and value == "-":
+                if taken:
+                    continue
+                taken = True
+                if here is not None:
+                    item["texts"].append(("here-document", here[1]))
+                else:
+                    item["unread"].append(("{} -".format(name), _CITECHK_STDIN_UNSEEN))
+            elif name in file_names:
+                label = "{} {}".format(name, _citechk_short(value))
+                if not os.path.isabs(value) and repo is None:
+                    item["unread"].append((label, "it is relative and the session has no absolute cwd to "
+                                           "resolve it against" if nodir is None else
+                                           "it is relative and the directory the command runs in is not "
+                                           "established ({})".format(nodir)))
+                    continue
+                text, reason = _citechk_read_body(os.path.join(repo or "/", value), deadline)
+                if text is None:
+                    item["unread"].append((label, reason))
+                else:
+                    item["texts"].append((label, text))
+        out.append(item)
+    return out
+
+
+def _citechk_blank(match):
+    """A URL or autolink match (_CITECHK_URL) replaced by as many spaces, so the columns of the rest of the
+    line hold, but for the leading characters of a URL's run before its scheme's first letter (group lead),
+    which are no part of the URL and stay as written."""
+    lead = match.group("lead") or ""
+    return lead + " " * (len(match.group(0)) - len(lead))
+
+
+def _citechk_cite(path, first, last, form, exempt, counts):
+    """One citation (path, first, last, form, exempt), or None for a reversed range (counted) or an empty
+    path."""
+    first, last = int(first), int(last or first)
+    if last < first:
+        counts["reversed"] += 1
+        return None
+    return (path, first, last, form, exempt) if path else None
+
+
+def _citechk_extract(text, deadline):
+    """The line citations in one message or body text: (cites, counts), each cite (path, first, last, form,
+    exempt). The text splits into lines on LF (a CR before it reads as a space). Masked to spaces first, so the
+    columns of the rest hold: a fenced block (an opening run of three or more backticks or tildes indented at
+    most three spaces, through the closing run of the same character at least as long, or to the end), an
+    indented block (four spaces or a tab, opened only after a blank line or at the start), a block-quote line
+    (> indented at most three spaces), and each URL or autolink. A FORM_A citation followed by ': ' and an
+    error name is a quoted log line and is passed over. A citation is exempt in a section under a heading of
+    one to six # that names a verifier or reviewer report or findings, to the next heading of the same or a
+    higher level, and on a line starting 'Verifier-cited: '. A reversed range is dropped. A FORM_B path loses
+    trailing dots (a sentence's full stop). The check's deadline is checked at each line of the masking and
+    of the search; where it is reached the scan stops and returns what it found before it (_citechk_run then
+    starts no toplevel probe, and its note says that no citation was checked, naming the budget)."""
+    counts = {"fence": 0, "indent": 0, "quote": 0, "url": 0, "log": 0, "reversed": 0}
+    masked, fence, blank, indented = [], None, True, False
+    for line in text.split("\n"):
+        if _cite_over(deadline):
+            return [], counts
+        line = line[:-1] + " " if line.endswith("\r") else line
+        hide, opened = None, _CITECHK_FENCE.match(line)
+        if fence is not None:
+            close = _CITECHK_FENCE_CLOSE.fullmatch(line)
+            if close and close.group(1)[0] == fence[0] and len(close.group(1)) >= fence[1]:
+                fence = None
+            hide = "fence"
+        elif opened and not (opened.group(1)[0] == "`" and "`" in line[opened.end():]):
+            fence, hide = (opened.group(1)[0], len(opened.group(1))), "fence"
+        elif not line.strip():
+            blank = True
+            masked.append(line)
+            continue
+        elif line.startswith(("\t", "    ")) and (blank or indented):
+            hide = "indent"
+        elif _CITECHK_QUOTE.match(line):
+            hide = "quote"
+        indented, blank = hide == "indent", False
+        if hide is not None:
+            counts[hide] += 1
+            line = " " * len(line)
+        masked.append(line)
+    cites, level = [], None
+    for line in masked:
+        if _cite_over(deadline):
+            break
+        heading = _CITECHK_HEADING.match(line)
+        if heading:
+            depth = len(heading.group(1))
+            if level is not None and depth <= level:
+                level = None
+            if level is None and _CITECHK_VERIFIER.match(line, heading.end()):
+                level = depth
+        exempt = level is not None or line.startswith("Verifier-cited: ")
+        spans = []
+        # A URL, an autolink and a FORM_A citation each hold a ':', and a FORM_B one begins with the word line,
+        # whose l only an l or L matches under its (?i), so a line without them is not searched for them: a
+        # text of many short lines costs a look for each, not three patterns, at each line.
+        if ":" in line:
+            line, urls = _CITECHK_URL.subn(_citechk_blank, line)
+            counts["url"] += urls
+            for found in _CITECHK_FORM_A.finditer(line):
+                spans.append(found.span())
+                if _CITECHK_LOG.match(line, found.end()):
+                    counts["log"] += 1
+                    continue
+                cites.append(_citechk_cite(found.group(1), found.group(2), found.group(3), "A", exempt, counts))
+        if "l" in line or "L" in line:
+            for found in _CITECHK_FORM_B.finditer(line):
+                if any(found.start() < end and start < found.end() for start, end in spans):
+                    continue
+                cites.append(_citechk_cite(found.group(3).rstrip("."), found.group(1), found.group(2), "B",
+                                           exempt, counts))
+    return [cite for cite in cites if cite is not None], counts
+
+
+def _citechk_scan(texts, deadline):
+    """(cites, counts) of texts, each scanned in turn by _citechk_extract; once the check's deadline is
+    reached no further text is scanned."""
+    cites, counts = [], {}
+    for text in texts:
+        if _cite_over(deadline):
+            break
+        found, seen = _citechk_extract(text, deadline)
+        cites += found
+        for name, value in seen.items():
+            counts[name] = counts.get(name, 0) + value
+    return cites, counts
+
+
+def _citechk_generation(dirfd, name, deadline):
+    """(bytes, None) for one ledger generation in the open ledger directory, (None, None) when it is absent,
+    or (None, reason) when it cannot be read: opened without following a symlink and non-blocking, refused
+    unless a regular file of at most _CITECHK_LEDGER_MAX bytes, and neither opened nor read on once the
+    check's deadline is reached (checked before the open and before each chunk; the budget named)."""
+    if _cite_over(deadline):
+        return None, _CITECHK_OUT_OF_TIME
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=dirfd)
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ValueError) as exc:
+        return None, "it cannot be opened ({})".format(_cite_fail(exc))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None, "it is not a regular file"
+        chunks, total = [], 0
+        while total <= _CITECHK_LEDGER_MAX:
+            if _cite_over(deadline):
+                return None, _CITECHK_OUT_OF_TIME
+            chunk = os.read(fd, min(1 << 20, _CITECHK_LEDGER_MAX + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    except OSError as exc:
+        return None, "it cannot be read ({})".format(_cite_fail(exc))
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError:
+            pass
+    if total > _CITECHK_LEDGER_MAX:
+        return None, "it is larger than {} bytes".format(_CITECHK_LEDGER_MAX)
+    return b"".join(chunks), None
+
+
+def _citechk_row(line):
+    """(path, start, end, sha256, pieces) of one ledger line holding a recorder row (v 1, kind read or
+    wrote, a non-empty path, 1 <= start <= end, a 64-character digest), else None. pieces is the row's
+    piece digests only where they are well formed (a non-empty lowercase-hex string of whole
+    _CITE_PIECE_HEX-character digests, their count at most the span's lines and _CITE_PIECES_MAX, and the
+    tiling _cite_pieces makes giving back that count; the count bounds are checked before the hex scan, so
+    the scan reads at most _CITE_PIECES_MAX digests), else None: a row recorded before piece digests, or
+    whose pieces field is malformed, is judged by its span digest alone."""
+    try:
+        row = json.loads(line)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(row, dict) or row.get("v") != 1 or row.get("kind") not in ("read", "wrote"):
+        return None
+    path, start, end, digest = row.get("path"), row.get("start"), row.get("end"), row.get("sha256")
+    if not (isinstance(path, str) and path and type(start) is int and type(end) is int and 1 <= start <= end
+            and isinstance(digest, str) and len(digest) == 64):
+        return None
+    pieces = row.get("pieces")
+    if isinstance(pieces, str) and pieces:
+        count, extra = divmod(len(pieces), _CITE_PIECE_HEX)
+        lines = end - start + 1
+        group = -(-lines // count) if 0 < count <= min(lines, _CITE_PIECES_MAX) else 0
+        if extra or not group or -(-lines // group) != count \
+                or not all(c in "0123456789abcdef" for c in pieces):
+            pieces = None
+    else:
+        pieces = None
+    return (path, start, end, digest, pieces)
+
+
+def _citechk_ledger(directory, key, deadline):
+    """This session's ledger rows in one ledger directory: (rows, faults), rows from <key>.jsonl.1 then
+    <key>.jsonl, faults naming each part that could not be read (the directory, a generation, or lines that
+    are not rows; a generation the deadline stops, _citechk_generation). An absent directory or generation is
+    no fault; it holds no rows."""
+    rows, faults = [], []
+    try:
+        dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
+        return rows, faults
+    except (OSError, ValueError) as exc:
+        return rows, ["the ledger directory {} cannot be opened ({})".format(directory, _cite_fail(exc))]
+    try:
+        for name in (key + ".jsonl.1", key + ".jsonl"):
+            blob, reason = _citechk_generation(dirfd, name, deadline)
+            if reason is not None:
+                faults.append("{}: {}".format(os.path.join(directory, name), reason))
+            bad = 0
+            for line in (blob or b"").split(b"\n"):
+                if line.strip():
+                    row = _citechk_row(line)
+                    bad += row is None
+                    rows += [] if row is None else [row]
+            if bad:
+                faults.append("{}: {} line(s) are not ledger rows".format(os.path.join(directory, name), bad))
+    finally:
+        try:
+            os.close(dirfd)  # once: after a failed close the descriptor number may already be reused
+        except OSError:
+            pass
+    return rows, faults
+
+
+def _citechk_tops(commands, root, deadline):
+    """(tops, missed): the toplevels whose ledgers the check reads, in order and each once, and the cited
+    files' directories whose toplevel is not known. The recorder writes a read to the ledger of the toplevel
+    of the session cwd at the time of the read, so the rows that can cover a citation lie under the session
+    cwd's toplevel (root), the command's repository top (its git -C toplevel, else root), or the toplevel of
+    the cited file's directory, which the recorder used where the session's cwd was there. That toplevel is
+    found as the recorder finds one (_recovery_toplevel, given only the time left) for the directory of the
+    regular file _citechk_resolve gives a citation the check judges (not exempt, within the citation cap, of
+    a command whose session cwd and git -C directory resolved), with no ledger path tried, so a cited path
+    matched only by its suffix to a recorded path adds none; a directory that is already one of the tops is
+    its own toplevel and is not probed. At most _CITECHK_MAX_FILES distinct directories are probed; missed
+    names, with the reason, each directory past that bound and each whose probe the deadline cut short or
+    left no time to start."""
+    tops, missed, seen = [root], [], set()
+    for item in commands:
+        if item["root"] not in tops:
+            tops.append(item["root"])
+    room = _CITECHK_MAX_CITES
+    for item in commands:
+        cites, room = item["found"][:max(room, 0)], room - len(item["found"])
+        if item["unresolved"]:
+            continue
+        for cite in cites:
+            if cite[4]:
+                continue
+            real, _why = _citechk_resolve(cite[0], item["root"], {}, deadline)
+            directory = None if real is None else os.path.dirname(real)
+            if directory is None or directory in seen or directory in tops:
+                continue
+            seen.add(directory)
+            if len(seen) > _CITECHK_MAX_FILES:
+                missed.append((directory, "not probed: more than {} distinct directories hold cited files"
+                               .format(_CITECHK_MAX_FILES)))
+                continue
+            left = _cite_left(deadline)
+            top = None if left is None else _recovery_toplevel(directory, timeout=left)
+            if top is None and _cite_over(deadline):
+                missed.append((directory, "not probed: " + _CITECHK_OUT_OF_TIME))
+            elif top is not None and top not in tops:
+                tops.append(top)
+    return tops, missed
+
+
+def _citechk_ledgers(tops, key, deadline):
+    """(rows, faults, read, skipped): this session's ledger rows under each toplevel in tops, merged. Each
+    toplevel's state directory is located as the recorder locates it (_orch_state_dir_for_root) and its
+    ledger read once however many toplevels share it (_citechk_ledger, within its byte bound and the
+    deadline); faults are those reads' faults, read the number of state directories read, at most
+    _CITECHK_MAX_LEDGERS, and skipped names, with the reason, each toplevel whose ledger was not read: one
+    past that bound, or one reached once the deadline has passed. The bound and the deadline are checked
+    before the registry read that locates a toplevel's state directory, so none is read for a toplevel
+    skipped; such a toplevel is named even where its state directory is one already read."""
+    rows, faults, done, skipped = [], [], set(), []
+    for top in tops:
+        if len(done) >= _CITECHK_MAX_LEDGERS:
+            skipped.append((top, "past the {} state directories read per call".format(_CITECHK_MAX_LEDGERS)))
+            continue
+        if _cite_over(deadline):
+            skipped.append((top, _CITECHK_OUT_OF_TIME))
+            continue
+        directory = os.path.join(_orch_state_dir_for_root(top), _CITE_DIR)
+        if directory in done:
+            continue
+        done.add(directory)
+        found, failed = _citechk_ledger(directory, key, deadline)
+        rows += found
+        faults += failed
+    return rows, faults, len(done), skipped
+
+
+def _citechk_covers(spans, first, last):
+    """Whether the union of the inclusive line spans covers every line first..last."""
+    reach = first
+    for start, end in sorted(spans):
+        if start > reach:
+            break
+        reach = max(reach, end + 1)
+    return reach > last
+
+
+def _citechk_base(repo, spec, merge, deadline):
+    """The commit a command's diff starts from: spec itself (HEAD for git commit) or, for a pull request,
+    the merge base of spec and HEAD; None where either does not resolve, spec reads as an option, or the
+    check's deadline leaves no time for a probe (each probe is given only the time left)."""
+    if not spec or spec.startswith("-"):
+        return None
+    left = _cite_left(deadline)
+    probe = None if left is None else _review_git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options",
+                                                  spec + "^{commit}", timeout=left)
+    if probe is None or probe.returncode != 0:
+        return None
+    commit = probe.stdout.decode("ascii", "replace").strip() or None
+    if commit is None or not merge:
+        return commit
+    left = _cite_left(deadline)
+    probe = None if left is None else _review_git(repo, "merge-base", commit, "HEAD", timeout=left)
+    if probe is None or probe.returncode != 0:
+        return None
+    return probe.stdout.decode("ascii", "replace").strip() or None
+
+
+def _citechk_added(repo, top, base, real, deadline):
+    """The inclusive line spans of real, as the working tree holds it, that the diff from commit base to the
+    working tree adds (its -U0 hunk headers), or None where real is outside top (repo, resolved), the probe
+    fails, or the check's deadline leaves no time for it (the probe is given only the time left)."""
+    top = top.rstrip("/") + "/"
+    left = _cite_left(deadline)
+    if not real.startswith(top) or left is None:
+        return None
+    probe = _review_git(repo, "diff", "-U0", "--no-ext-diff", "--no-textconv", "--no-color", base, "--",
+                        real[len(top):], timeout=left)
+    if probe is None or probe.returncode != 0:
+        return None
+    spans = []
+    for line in probe.stdout.split(b"\n"):
+        hunk = _CITECHK_HUNK.match(line)
+        if hunk:
+            first, count = int(hunk.group(1)), int(hunk.group(2) if hunk.group(2) is not None else 1)
+            if count > 0:
+                spans.append((first, first + count - 1))
+    return spans
+
+
+def _citechk_resolve(token, repo, index, deadline, tops=None):
+    """(real, None): the resolved regular file a cited path names, under repo (an absolute path kept), else,
+    for a relative path, the one ledger path under repo's resolved toplevel that ends in /token, where
+    exactly one does; (None, None) where it names none. A ledger path outside repo's toplevel is never
+    tried, so a read recorded in a repository outside it (whichever ledger holds it) never stands for a
+    relative path that names no file under repo. The test is on the path alone, so a read of a file in a
+    repository nested under repo's toplevel (a submodule, or a repository inside its tree) is tried and can
+    stand for one. (None, reason), with no ledger path tried, where the path, joined to
+    repo where relative, is not resolved (_citechk_real: over the length or link bound, or the check's
+    deadline reached, and the reason names which), where the deadline is reached after the resolution,
+    before the stat of the resolved path (the budget named), or where repo itself, resolved only when a
+    ledger path is to be tried and cached in tops (the cache _citechk_diff shares), is not resolved."""
+    real, why = _citechk_real(token if os.path.isabs(token) else os.path.join(repo, token),
+                              "the path it names (joined to the repository top where relative)", deadline)
+    if why is not None:
+        return None, why
+    if real is not None and _cite_over(deadline):  # the resolution may have used the last of the time
+        return None, _CITECHK_OUT_OF_TIME
+    try:
+        if real is not None and stat.S_ISREG(os.stat(real).st_mode):
+            return real, None
+    except (OSError, ValueError):
+        pass
+    if os.path.isabs(token) or not index:
+        return None, None
+    tops = {} if tops is None else tops
+    if repo not in tops:
+        tops[repo] = _citechk_real(repo, "the repository top", deadline)
+    top, why = tops[repo]
+    if why is not None:
+        return None, why
+    if top is None:
+        return None, None
+    under, suffix = top.rstrip("/") + "/", "/" + token.removeprefix("./")
+    hits = {path for path in index if path.startswith(under) and path.endswith(suffix)}
+    return (hits.pop() if len(hits) == 1 else None), None
+
+
+def _citechk_fresh(entry, start, end, pieces):
+    """The line spans of one recorded span that still hold the recorded content, judged piece by piece: for
+    each piece of the row's pieces (the tiling _cite_pieces made, re-derived from their count as
+    _citechk_row validated it), its span, where its lines all lie within the file and their bytes digest to
+    the recorded piece digest. An edit inside a recorded span leaves the span's other pieces covering their
+    lines, so only a cited line whose own piece changed is reported as changed (one line per piece for a
+    span of at most _CITE_PIECES_MAX lines, a run of ceil(n/_CITE_PIECES_MAX) lines beyond that)."""
+    count = len(pieces) // _CITE_PIECE_HEX
+    group = -((start - end - 1) // count)
+    spans, held = [], len(entry["lines"])
+    for k in range(count):
+        at = start + k * group
+        to = min(at + group - 1, end)
+        if to <= held and _cite_sha256(_cite_bytes(entry, at, to))[:_CITE_PIECE_HEX] \
+                == pieces[k * _CITE_PIECE_HEX:(k + 1) * _CITE_PIECE_HEX]:
+            spans.append((at, to))
+    return spans
+
+
+def _citechk_class(cite, item, index, state):
+    """(class, detail) of one citation, or (None, None) for a token that names no file and is not
+    path-shaped (not a citation): covered, authored-in-diff (the rest of the range is lines the relevant diff
+    adds), stale (only rows whose lines changed since cover it), unread, nofile (path-shaped, with a / and a
+    lettered extension, but no such file), unrecordable (a file the recorder never records), or unjudged.
+    A row is current where the file's lines start..end hash, as _cite_bytes gives them, to the row's digest:
+    the bytes the recorder digested, so a git show row of any revision counts where the working tree holds
+    the blob's bytes at those lines. A row that is not current covers at the pieces of its span that still
+    hash to its piece digests (_citechk_fresh), so freshness is judged per cited line, not per recorded
+    row: an edit inside a read span leaves the span's untouched pieces covering, and only a cited line
+    whose own piece changed (or one of a row without pieces: recorded before them, or past the row size
+    bound) falls through to stale. A read or a diff probe the check's deadline cuts short, a cited file
+    reached once it has passed (no stat or open is made then), and a range whose rows are not all digested
+    before it (checked before each row's digests; a row's span digest and, where it is not current, its
+    piece digests are that row's step), are unjudged, and state["budget"] says so; so is a range whose
+    cited path or repository top is not resolved, with the bound or the budget as its detail
+    (_citechk_real)."""
+    token, first, last = cite[0], cite[1], cite[2]
+    real, why = _citechk_resolve(token, item["root"], index, state["deadline"], state["tops"])
+    if why == _CITECHK_OUT_OF_TIME:
+        state["budget"] = True
+    if why is not None:
+        return "unjudged", why
+    if real is None:
+        shaped = "/" in token and _CITECHK_EXT.search(token.rsplit("/", 1)[-1])
+        return ("nofile", None) if shaped else (None, None)
+    files = state["files"]
+    if real not in files:
+        if len(files) >= _CITECHK_MAX_FILES:
+            return "unjudged", "more than {} distinct files are cited".format(_CITECHK_MAX_FILES)
+        if _cite_over(state["deadline"]):  # no stat once the deadline is reached
+            state["budget"] = True
+            return "unjudged", _CITECHK_OUT_OF_TIME
+        try:
+            size = os.stat(real).st_size
+        except (OSError, ValueError):
+            size = 0
+        if size > _CITE_MAX_FILE:
+            return "unrecordable", "a file over {} bytes".format(_CITE_MAX_FILE)
+        if state["bytes"] + size > _CITECHK_READ_MAX:
+            return "unjudged", "the cited files hold more than {} bytes".format(_CITECHK_READ_MAX)
+        state["bytes"] += size
+    entry = _cite_read(real, files, state["deadline"])
+    if entry is None and _cite_over(state["deadline"]):
+        state["budget"] = True
+        return "unjudged", _CITECHK_OUT_OF_TIME
+    if entry is None:
+        return "unjudged", "the file could not be read"
+    rows = index.get(real, ())
+    current = []
+    for start, end, digest, pieces in rows:
+        known = state["current"].get((real, start, end, digest))
+        if known is None and _cite_over(state["deadline"]):
+            state["budget"] = True
+            return "unjudged", _CITECHK_OUT_OF_TIME
+        if known is None:
+            known = end <= len(entry["lines"]) and _cite_sha256(_cite_bytes(entry, start, end)) == digest
+            state["current"][(real, start, end, digest)] = known
+        if known:
+            current.append((start, end))
+            continue
+        if not pieces:
+            continue
+        fresh = state["fresh"].get((real, start, end, digest))
+        if fresh is None and _cite_over(state["deadline"]):
+            state["budget"] = True
+            return "unjudged", _CITECHK_OUT_OF_TIME
+        if fresh is None:
+            fresh = _citechk_fresh(entry, start, end, pieces)
+            state["fresh"][(real, start, end, digest)] = fresh
+        current += fresh
+    if _citechk_covers(current, first, last):
+        return "covered", None
+    added, why = _citechk_diff(item, real, state)
+    if added is None and _cite_over(state["deadline"]):
+        state["budget"] = True
+        return "unjudged", _CITECHK_OUT_OF_TIME
+    if why is not None:
+        return "unjudged", why
+    if added and _citechk_covers(current + added, first, last):
+        return "authored-in-diff", None
+    if _citechk_covers([(start, end) for start, end, _digest, _pieces in rows], first, last):
+        return "stale", None
+    if real.lower().endswith(_CITECHK_BLIND):
+        return "unrecordable", "a notebook, PDF or image read"
+    return "unread", None
+
+
+def _citechk_diff(item, real, state):
+    """(added, why): added the lines of real the command's diff adds (see _citechk_added), cached, or None;
+    why, where the repository top is not resolved (_citechk_real, before any probe: longer than
+    _CITE_MAX_PATH characters, or the check's deadline reached), the bound or the budget, else None. The
+    command's diff status becomes "used", or "unavailable" where the top, the base or the probe fails."""
+    merge = item["cmd"] != "git-commit"
+    spec = (item["base"] or "origin/HEAD") if merge else "HEAD"
+    if item["root"] not in state["tops"]:
+        state["tops"][item["root"]] = _citechk_real(item["root"], "the repository top", state["deadline"])
+    top, why = state["tops"][item["root"]]
+    base_key = (item["root"], spec, merge)
+    if top is not None and base_key not in state["bases"]:
+        state["bases"][base_key] = _citechk_base(item["root"], spec, merge, state["deadline"])
+    base = state["bases"].get(base_key)
+    key = base_key + (real,)
+    if base is not None and key not in state["diffs"]:
+        state["diffs"][key] = _citechk_added(item["root"], top, base, real, state["deadline"])
+    added = state["diffs"].get(key)
+    if added is None:
+        item["diff"] = "unavailable"
+    elif item["diff"] != "unavailable":
+        item["diff"] = "used"
+    return added, why
+
+
+def _citechk_phrase(result, root):
+    """The note's text for one flagged citation."""
+    cls, detail = result["class"], result.get("detail")
+    if cls == "unread":
+        return "no read or write recorded this session covers these lines"
+    if cls == "stale":
+        return "recorded as read or written this session, but those lines have changed since"
+    if cls == "nofile":
+        return "no such file under {}, and no file there that this session recorded ends with that path" \
+            .format(root)
+    if cls == "unrecordable":
+        return "the recorder records nothing for {}, so this range cannot be matched; re-check it by hand" \
+            .format(detail)
+    return "not judged: {}".format(detail)
+
+
+def _citechk_run(data):
+    """The note citation_read_check surfaces for this payload, or None for a silent allow (see there)."""
+    if data.get("hook_event_name") != PRETOOL or data.get("tool_name") != "Bash":
+        return None
+    deadline = time.monotonic() + _CITECHK_BUDGET
+    tool_input, cwd = data.get("tool_input"), data.get("cwd")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return None
+    # The bound is checked first, before the prefilter, the kind search and any lexing: neither lexing nor
+    # the search for split delimiters is checked against the deadline (and a scan only between lines), and
+    # their time grows with the command's length, so a longer command is named as not read
+    # (_citechk_too_long) rather than lexed past the platform's timeout, where its note and row would be
+    # lost. That note and row do not depend on what its text names or how it is spelled: a text search
+    # cannot read every way bash splits or quotes a word, so a miss there must not end the check.
+    repo = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
+    if len(command) > _CITECHK_COMMAND_MAX:
+        commands = _citechk_too_long(command, repo)
+    elif not _CITECHK_PREFILTER.search(command):
+        return None
+    else:
+        commands = _citechk_commands(command, repo, deadline)
+    # Without a session cwd no toplevel can be probed and no state directory is known, so no row can be
+    # written: the check is inert there for every command, one over the bound included.
+    if not commands or not (isinstance(cwd, str) and cwd):
+        return None
+    # The texts are scanned for citations first, so no probe or resolution can use up the time a scan needs.
+    # A scan stops at the deadline (_citechk_extract); the toplevel probe is then not started, and the note
+    # below says that no citation was checked, naming the budget. Each command's texts are scanned once
+    # each, in the order its options name them, so its citations keep that order in the note, in the row
+    # and under the citation cap.
+    for item in commands:
+        item["found"], item["counts"] = _citechk_scan([text for _label, text in item["texts"]], deadline)
+    left = _cite_left(deadline)
+    root = None if left is None else _recovery_toplevel(cwd, timeout=left)
+    if root is None and _cite_over(deadline):
+        # No state directory is known, so no row is written: a body file not read (for the budget, or any
+        # other reason) is named here, as it would be in the full note.
+        return "\n".join(["{}the citation check ran out of its {} second budget before it resolved the "
+                          "repository, so no citation in this {} was checked.".format(
+                              _CITECHK_HEAD, _CITECHK_BUDGET,
+                              " and ".join(sorted({_CITECHK_LABELS[item["cmd"]] for item in commands})))]
+                         + ["The {} {} was not read: {}.".format(_CITECHK_LABELS[item["cmd"]], label, reason)
+                            for item in commands for label, reason in item["unread"]])
+    if root is None:
+        return None
+    session = data.get("session_id")
+    key = _cite_sha256(session.encode("utf-8", "replace"))[:16] if isinstance(session, str) and session else None
+    for item in commands:
+        item["results"], item["dropped"], item["diff"] = [], 0, "not-needed"
+        item["root"], item["unresolved"] = root, []
+        if item.get("nodir"):
+            # The directory the command runs in is not established (_citechk_dirs, _CITECHK_RAW_DIR): no
+            # repository top is known to resolve its citations against, so each range is named as not judged.
+            item["unresolved"].append("the directory this command runs in is not established ({})"
+                                      .format(item["nodir"]))
+        elif item["repo"] is not None and item["repo"] != cwd:
+            # A git -C directory, or one a cd before the command moved to, and the session cwd are compared
+            # resolved (_citechk_real); where either is refused, for a bound or the deadline, each range of
+            # the command is named as not judged, with the reason for each one refused (both, where both are).
+            here, why_here = _citechk_real(cwd, "the session cwd", deadline)
+            there, why_there = _citechk_real(item["repo"], item.get("where") or "the git -C directory", deadline)
+            for why in (why_here, why_there):
+                if why is not None and why not in item["unresolved"]:
+                    item["unresolved"].append(why)
+            left = _cite_left(deadline)
+            if not item["unresolved"] and here != there:
+                item["root"] = (None if left is None else _recovery_toplevel(item["repo"], timeout=left)) or root
+    # The ledgers read are those of the session cwd's toplevel, each command's and each cited file's
+    # (_citechk_tops), so a read made with the cwd in the repository a command commits to, or in the one a
+    # cited file lies in, is seen from a session cwd in another.
+    rows, faults, status, read, unread_tops = [], [], "not-read", 0, []
+    if any(not cite[4] for item in commands for cite in item["found"]):
+        if key is None:
+            status = "no-session"
+        else:
+            tops, missed = _citechk_tops(commands, root, deadline)
+            rows, faults, read, skipped = _citechk_ledgers(tops, key, deadline)
+            unread_tops = ["{} ({})".format(_citechk_short(top), why) for top, why in skipped] \
+                + ["the toplevel of {} ({})".format(_citechk_short(directory), why) for directory, why in missed]
+            status = "unreadable" if faults else ("ok" if rows else "empty")
+    # The note and the row name at most _CITECHK_TOPS_SHOWN toplevels not read and count the rest, so neither
+    # grows with the number of git -C directories or cited files' directories.
+    tops_shown, tops_more = unread_tops[:_CITECHK_TOPS_SHOWN], max(len(unread_tops) - _CITECHK_TOPS_SHOWN, 0)
+    index = {}
+    for path, start, end, digest, pieces in rows:
+        index.setdefault(path, []).append((start, end, digest, pieces))
+    state = {"files": {}, "current": {}, "fresh": {}, "tops": {}, "bases": {}, "diffs": {}, "bytes": 0,
+             "deadline": deadline, "budget": False}
+    judged, over_cap = 0, 0
+    for item in commands:
+        room = max(_CITECHK_MAX_CITES - judged, 0)
+        item["over_cap"] = max(len(item["found"]) - room, 0)  # counted, never listed, so a row stays bounded
+        over_cap += item["over_cap"]
+        for cite in item["found"][:room]:
+            judged += 1
+            shown = "{}:{}".format(_citechk_short(cite[0]), cite[1]) \
+                + ("-{}".format(cite[2]) if cite[2] != cite[1] else "")
+            result = {"cite": shown, "form": cite[3]}
+            if cite[4]:
+                result["class"] = "exempt-verifier"
+            elif item["unresolved"]:
+                state["budget"] = state["budget"] or _CITECHK_OUT_OF_TIME in item["unresolved"]
+                result["class"], result["detail"] = "unjudged", "; ".join(item["unresolved"])
+            elif _cite_over(deadline):
+                state["budget"] = True
+                result["class"], result["detail"] = "unjudged", _CITECHK_OUT_OF_TIME
+            else:
+                result["class"], result["detail"] = _citechk_class(cite, item, index, state)
+                if result["class"] is None:
+                    item["dropped"] += 1
+                    continue
+            item["results"].append(result)
+    budget = state["budget"]
+    flagged = [(item, result) for item in commands for result in item["results"]
+               if result["class"] in _CITECHK_FLAGGED]
+    considered = sum(1 for item in commands for result in item["results"] if result["class"] != "exempt-verifier")
+    ledger_faulty = considered > 0 and (status in ("no-session", "unreadable") or bool(unread_tops))
+    lines = []
+    for item, result in flagged[:_CITECHK_SHOWN]:
+        lines.append("  {} ({})".format(result["cite"], _citechk_phrase(result, item["root"])))
+    if len(flagged) > _CITECHK_SHOWN:
+        lines.append("  and {} more".format(len(flagged) - _CITECHK_SHOWN))
+    labels = " and ".join(sorted({_CITECHK_LABELS[item["cmd"]] for item in commands}))
+    head = _CITECHK_HEAD
+    parts = []
+    if flagged:
+        parts.append(head + "{} of {} cited line range(s) in this {} matched no read or write recorded this "
+                     "session at their current content:\n{}".format(len(flagged), considered, labels,
+                                                                     "\n".join(lines)))
+    for item in commands:
+        if item.get("nodir"):
+            parts.append("The {} was not judged: the directory its command runs in is not established ({}), so "
+                         "no citation in it was matched to a read and no message or body file it names by a "
+                         "relative path was read.".format(_CITECHK_LABELS[item["cmd"]], item["nodir"]))
+        for label, reason in item["unread"]:
+            parts.append("The {} {} was not read: {}.".format(_CITECHK_LABELS[item["cmd"]], label, reason))
+    both = next((item["why"] for item in commands if item.get("why")), None)  # one Bash command, one reason
+    if both is not None:
+        parts.append("This command was read both ways, as lexed (a read attempted of each message and body file "
+                     "that a lexing of it that lexed names, each one that could not be read named as not read; a "
+                     "lexing that did not lex is not evaluated, so a file only it names is neither read nor "
+                     "named) and as written (its text scanned, with the expansion of each "
+                     "here-document with an unquoted delimiter named), because a double-quoted string in it holds {}, which this check does not follow "
+                     "as bash does; a citation both readings find is judged in each.".format(both))
+    if ledger_faulty and status == "no-session":
+        parts.append("The payload carries no session id, so this session's citation ledger cannot be found and "
+                     "no cited range can be matched to a read.")
+    else:
+        if ledger_faulty and faults:
+            parts.append("This session's citation ledger could not be read in full ({}), so a range it holds may "
+                         "show here as unread.".format("; ".join(faults)))
+        if ledger_faulty and unread_tops:
+            parts.append("This session's citation ledger was not read under {} toplevel(s), so a range recorded "
+                         "there may show here as unread: {}{}.".format(
+                             len(unread_tops), "; ".join(tops_shown),
+                             "; and {} more".format(tops_more) if tops_more else ""))
+        if status == "empty" and read and flagged:
+            parts.append("This session has no citation-ledger rows at all in the {} state director{} read (session "
+                         "key {}): nothing was recorded for it there, or its session id changed (after a "
+                         "compaction or a resume, for example).".format(read, "y" if read == 1 else "ies", key))
+    if budget:
+        parts.append("The citation check is incomplete (budget): it ran out of its {} second budget before "
+                     "every range was judged.".format(_CITECHK_BUDGET))
+    if over_cap:
+        parts.append("The citation check is incomplete: {} citation(s) past the first {} were not judged."
+                     .format(over_cap, _CITECHK_MAX_CITES))
+    if flagged:
+        parts.append("The ledger records Read (text), Grep in content mode, one plain git show REV:PATH, grep or "
+                     "rg with a line-number flag, sed -n 'A,Bp' PATH, Write and Edit; it records nothing for any "
+                     "other tool (cat, head, tail, less, a pipeline or compound command, bash -c, a script), for "
+                     "an image, PDF or notebook read, or for another session's or a subagent's reads, so a range "
+                     "read that way shows here as unmatched. Each read is kept in the ledger of the repository the "
+                     "session's cwd was in at the time, and this check reads those of the session cwd's "
+                     "repository, the command's (git -C) and each cited file's, so a read made from any other "
+                     "repository shows as unmatched too. Re-open each range (Read with offset and limit, or "
+                     "git show REV:PATH) and re-check the claim before citing it, or cite the symbol alone "
+                     "without a line number. A range a verifier supplied can be placed under a \"Verifier "
+                     "report\" heading or on a \"Verifier-cited:\" line.")
+    if parts and not parts[0].startswith(head):
+        parts[0] = head + parts[0]
+    transcript = data.get("transcript_path")
+    failure = ""
+    for item in commands:
+        warn = bool(item["unread"]) or bool(item.get("nodir")) \
+            or any(r["class"] in _CITECHK_FLAGGED for r in item["results"]) \
+            or (ledger_faulty and any(r["class"] != "exempt-verifier" for r in item["results"])) \
+            or item["over_cap"] > 0
+        detail = {"v": 1, "control": "citation-read-check", "cmd": item["cmd"], "parse": item["parse"],
+                  "parse_why": item.get("why"), "session": key, "ledger": status, "ledger_rows": len(rows),
+                  "ledgers_read": read, "ledgers_not_read": tops_shown, "ledgers_not_read_more": tops_more,
+                  "budget_exhausted": budget,
+                  "citations": [{"cite": r["cite"], "class": r["class"], "form": r["form"]}
+                                for r in item["results"]],
+                  "not_judged_past_cap": item["over_cap"], "dropped_not_citation": item["dropped"],
+                  "masked": item["counts"],
+                  "sources": [label for label, _text in item["texts"]],
+                  "sources_unread": ["{}: {}".format(label, reason) for label, reason in item["unread"]],
+                  "directory_unknown": item.get("nodir"),
+                  "diff": item["diff"], "transcript": transcript if isinstance(transcript, str) else None}
+        if warn:
+            failure = _orch_event_warn(root, "citint", "warn", detail) or failure
+        else:
+            _orch_guard_event(root, "citint", "allow", detail)  # a clean row is the over-fire metric only
+    if not parts:
+        return None
+    return "\n".join(parts) + ("\n" + failure if failure else "")
+
+
+def citation_read_check(data):
+    """citint/refcap, PreToolUse Bash (stage BAKE: it surfaces and never denies): where a git commit message
+    (-m, --message, -F, --file, and on -F - the here-document the command's standard input receives) or a
+    gh pr create or edit body (--body, -b, --body-file, -F) cites a path with a line or line range, note
+    each cited range that this session's citation ledgers (both generations, merged over the state
+    directories of the session cwd's toplevel, each command's git -C toplevel and each cited file's
+    toplevel, at most _CITECHK_MAX_LEDGERS of them; _citechk_tops) do not cover at the cited lines with
+    matching content, naming the range and why (unread, stale, no such file, a file the recorder never
+    records, or not judged; a relative cited path that names no file under the command's repository is
+    matched by its suffix only to a recorded path under that repository's toplevel, _citechk_resolve), and
+    append one guard-events row (kind citint) per checked command, decision warn or allow. Inert (a silent
+    allow, no row) on any other event or tool, any other command within the bound below, a payload with no
+    command string, and, for every
+    command (one over the bound below and a git -C <repo> commit included: only the session cwd is probed
+    for the state directory, never the command's git -C directory), a payload with no session cwd and a
+    session cwd that
+    resolves to no git toplevel (a toplevel probe the deadline cuts short is named in a note instead).
+    A ledger that cannot be read, a toplevel whose ledger is not read (past that bound or the deadline, or
+    a cited file's directory whose toplevel is not probed; at most _CITECHK_TOPS_SHOWN named, the rest
+    counted), a missing session id, a body file that cannot be read, a body on standard input it cannot
+    see, a message or body file a lexing of a command with a split here-document delimiter names
+    (_CITECHK_SPLIT_UNREAD, never read or judged), a commit or pr command the kind search finds in a
+    here-document's body a lexing of such a command read (_CITECHK_SWALLOWED), text that bash can run in such
+    a body where that search finds none (_CITECHK_SWALLOWED_TEXT), a message or body value such a lexing
+    names where that search finds no command in the command's text (_CITECHK_UNSCANNED), the expansion of a
+    here-document with an unquoted delimiter in a command that does not lex or that is read both ways
+    (_citechk_commands; the note says why it was), a command longer than _CITECHK_COMMAND_MAX characters,
+    whatever its text names, which is neither lexed nor scanned (_citechk_too_long; that bound is checked
+    first, before the prefilter, the kind search and any lexing, though the dispatcher's read and parse of
+    the payload and the kind search that labels its row still take time that grows with the command's
+    length: tools/selftest_orch_hooks.py times such calls to 16 MiB, _citecheck_cost_cases, and a longer
+    command was not measured), and an exhausted budget (one that stops
+    the scan of the
+    message texts included), citation cap, file cap, read bound, path bound or link bound (a path the check
+    would resolve that is longer than _CITE_MAX_PATH characters, or whose resolution would follow more than
+    _CITE_MAX_LINKS symlinks or meets a symlink loop) are each named in the note, never a silent clean. Any
+    fault inside the check is caught and named in a note, so during the bake no path of this handler
+    blocks; HANDLER_EVENT classes it PRETOOL, not PRETOOL_WARN_ONLY and not in NOTE_ONLY_PRETOOL_MODES, so
+    main()'s own PreToolUse error paths still exit 2, as for every PreToolUse mode outside those two
+    fail-open classes: child exit status unobservable (_child_status_refusal: SIGCHLD inherited as
+    ignored or not at its default disposition, or a probe child that cannot be forked or read back),
+    checked before the payload read, a bad invocation, an unreadable payload, an interpreter below the
+    floor, a handler result that is not an exit code of 0 or 2 with a str or None stderr text, a check
+    that has not decided within PRETOOL_BUDGET_SECONDS, any other error out of the deadline window (an
+    ItimerError, or a caller's alarm handler raising), and a decision that cannot be written to stdout. A
+    command whose directory the walk cannot establish (_citechk_dirs) is named as not judged.
+    _CITECHK_BUDGET is below
+    PRETOOL_BUDGET_SECONDS, so the check's own budget, counted from the handler's start, ends before the
+    dispatcher's deadline unless the payload read and parse take the difference or more (a step already
+    under way when the budget ends still finishes first)."""
+    try:
+        message = _citechk_run(data)
+    except Exception as exc:  # a fault in the check never blocks during the bake; it is named instead
+        message = ("AIQT guardrail (rules citint/refcap, BAKE: warning only, nothing is blocked): the citation "
+                   "read check could not run ({}), so no citation in this command was checked."
+                   .format(_cite_fail(exc)))
+    if message is None:
+        return _allow()
+    return _allow_note(message)
+
+
 # --- review dispatch pin (vfxcmt) --------------------------------------------------------------------
 # PreToolUse Bash, registry scoped. Inert unless the orchestration registry declares a `review_dispatch`
 # binding (ORCHESTRATION.md, "The review dispatch binding"). A Bash call that names a declared dispatch
@@ -29823,7 +33560,7 @@ def _rdp_time_left(cap):
     return min(cap, left) if left > 0.05 else None
 
 
-def _review_git(repo, *args, stdin=None):
+def _review_git(repo, *args, stdin=None, timeout=_RDP_GIT_TIMEOUT):
     """One isolated git probe for the review dispatch pin: the _isolate_git_env scrub plus no optional
     locks, replacement refs and grafts disabled (so a `git replace --graft` or an info/grafts file cannot
     change the parents the base is derived from), literal pathspecs (a declared path is matched as a literal
@@ -29831,9 +33568,11 @@ def _review_git(repo, *args, stdin=None):
     program or caches working-tree state switched off on the command line (core.fsmonitor and
     core.untrackedCache), and the submodule settings that would hide a submodule change or recurse into
     one (diff.ignoreSubmodules, submodule.recurse; a .gitmodules `ignore` value is overridden by each
-    diff read's own --ignore-submodules=none). Bytes in and out. Returns the CompletedProcess, or None when git could not be run,
+    diff read's own --ignore-submodules=none). Bytes in and out. The probe is given timeout seconds at most
+    (_RDP_GIT_TIMEOUT unless a caller with its own deadline passes what is left of it). Returns the
+    CompletedProcess, or None when git could not be run,
     timed out, or the decision's deadline has passed (the caller's cannot-evaluate)."""
-    timeout = _rdp_time_left(_RDP_GIT_TIMEOUT)
+    timeout = _rdp_time_left(timeout)
     if timeout is None:
         return None
     env = _isolate_git_env(dict(os.environ))
@@ -44003,6 +47742,8 @@ HANDLERS = {
     "clock_inject_post": clock_inject_post,
     "clock_inject_failure": clock_inject_failure,
     "console_prefix_pretool": console_prefix_pretool,
+    "citation_read_recorder": citation_read_recorder,
+    "citation_read_check": citation_read_check,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -44051,6 +47792,8 @@ HANDLER_EVENT = {
     "clock_inject_post": "PostToolUse",
     "clock_inject_failure": "PostToolUseFailure",
     "console_prefix_pretool": PRETOOL,
+    "citation_read_recorder": "PostToolUse",
+    "citation_read_check": PRETOOL,
 }
 
 
