@@ -28,8 +28,8 @@ cannot-evaluate (exit 2), never a pass.
 | `TODO.md` | `markdown`, with `Status` as the status column | generated view of the maintainer's private backlog; a correction belongs in that source |
 
 A declared surface that is missing, not a regular file, larger than 64 KiB (65,536 bytes; see Running
-time), not UTF-8 or malformed (TOML that does not parse, a fenced block or HTML comment block never
-closed) is cannot-evaluate; a draft or staged blob over that size is too. Each file (a declared surface or
+time), not UTF-8 or malformed (TOML that does not parse or nests deeper than its bound, see Running
+time, a fenced block or HTML comment block never closed) is cannot-evaluate; a draft or staged blob over that size is too. Each file (a declared surface or
 a draft) is opened once without following a symlink and without waiting on a FIFO, and its type is
 checked on that open descriptor. In `--staged`, a declared surface whose index entry is not a regular
 file (mode `100644` or `100755`; a symlink `120000` or a gitlink is refused), is unmerged or is absent
@@ -272,14 +272,22 @@ bounds (State source).
    references, and the red leg (the bound removed) builds past it. On the worst report shapes then
    known at 64 KiB a whole run peaked at about 32 MiB resident on the host it was measured on
    (2026-11-20); before the report bound the same shapes needed more than 2 GiB. The report bound runs only after
-   the candidates are collected, so collection is bounded too: every entry found on one line shares one
-   copy of that line's quoted text and location, built once, and each record unit and entry is
-   charged 32 characters for itself plus each string it holds that the entry charged just before it
-   does not hold (the same object). Past 4 Mi characters (`COLLECT_MAX_CHARS`) the document is
-   cannot-evaluate (exit 2), naming the bound, before the entry that would pass it is kept. A string
-   built anew for each unit is charged each time: a long header cell over many table rows (each cell's
-   location names its header) or a long TOML key path over many string values reaches the bound, and
-   such a document is now cannot-evaluate where it was evaluated before. Self-test rows show one shared
+   the candidates are collected, so collection is bounded too, by an allowance of 4 Mi characters
+   (`COLLECT_MAX_CHARS`) per document. Past it the document is cannot-evaluate (exit 2), naming the
+   bound, before the entry that would pass it is kept. The allowance charges these fields and no
+   others: a record unit (a Markdown paragraph, list item, table cell or blockquote, or a TOML string
+   value) 32 characters plus its location, not its text; a claim entry 32 plus its quoted clause and
+   its phrase; an ambiguous-phrase entry 32 plus its quoted clause; an unevaluated-reference entry 32
+   plus its location and its quoted line. A field the entry charged just before also held (the same
+   object) is not counted again: every entry found on one line or clause shares one copy of its quoted
+   text and location, built once, and counts it once. A string built anew for each unit is counted each
+   time: a long header cell over many table rows (each cell's location names its header) or a long TOML
+   key path over many string values reaches the bound, and such a document is now cannot-evaluate where
+   it was evaluated before. The allowance counts characters in those fields; it does not measure or
+   bound the memory of the process. It leaves out the input bytes and decoded text, the parsed TOML
+   document, the units' texts, the reader's and tokenizer's temporaries and Python's object overhead
+   (the 32 per entry is a nominal charge, not a measured size), and one character can take four bytes.
+   No bound is set on the memory of the whole process; the peaks below were observed, not bounded. Self-test rows show one shared
    copy for 1,000 references on a line with leading white space and non-BMP text (the red leg, a copy
    per reference, holds 1,000), the bound reached when the copies are put back and on both long-location
    shapes (the red legs, unbounded, collect them), and, in a child process limited to 512 MiB of address
@@ -291,6 +299,19 @@ bounds (State source).
    hidden references at about 48 MiB (before, about 258 MiB), and a long non-BMP TOML key path over
    3,600 string values and a long non-BMP header cell over 8,900 rows, both now refused, at about 30
    and 31 MiB (before, evaluated, about 125 and 255 MiB). A path not yet found can need more.
+
+Nesting is bounded as well, so any document within 64 KiB ends in exit 0, 1 or 2, never a traceback.
+No walk over a document recurses: Markdown blocks, blockquotes and list items are read in loops over
+the lines, and the walk over a parsed TOML document keeps its own stack and builds a value's location
+only at that value. A TOML table or array nested more than 100 tables and arrays deep
+(`TOML_MAX_DEPTH`; the top-level table is not counted), or inline arrays and tables nested past what
+the TOML reader parses (it recurses and stops at Python's recursion limit), is cannot-evaluate (exit
+2), naming the bound. Before, a table header 5,000 tables deep (10,007 bytes) parsed and then ended
+the walk in an uncaught RecursionError (exit 1). Self-test rows give deep table headers,
+array-of-tables headers, dotted keys, inline arrays and inline tables (exit 2, naming the bound, in
+process and through `--draft`), read a value exactly 100 deep with its whole key path, refuse one
+101 deep, and read blockquotes and list items nested in documents of up to about 60,000 bytes as one
+level is read (those rows pass on the walk this replaced too: Markdown had no recursive walk).
 
 ## Residuals
 

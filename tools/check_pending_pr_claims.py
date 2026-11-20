@@ -92,15 +92,31 @@ are not built (a line is built only when the clause it quotes fits in what is le
 On the worst report shapes then known at 64 KiB (n uses of a long pull URL reference link, joined
 claims, hidden references on one line) a whole run peaked at about 32 MiB resident on the host it was
 measured on (2026-11-20; before the report bound, more than 2 GiB, and a 1 GiB limit ended the run with
-an uncaught MemoryError). The report bound runs after collection, so collection is bounded too: the
-entries found on one line share one copy of its quoted text and location, and what collecting one
-document holds is charged against COLLECT_MAX_CHARS (4 Mi characters), past which the document is
-cannot-evaluate (exit 2), naming the bound, before more is kept; a location built anew for each unit (a
-long header cell over many rows, a long TOML key path over many values) is charged each time. With
-the quotes shared, 9,000 hidden references on one line with leading white space and non-BMP text (52,907
-bytes) peaked at about 52 MiB (2026-11-20; before, a 1 GiB limit ended the run with an uncaught
-MemoryError); a path no one has found can need more. Reading pull request state
-(tools/_pr_state.py), whose reasons can quote the response, is outside these bounds.
+an uncaught MemoryError). The report bound runs after collection, so collection is bounded too, by an
+allowance of COLLECT_MAX_CHARS (4 Mi characters) per document, past which the document is
+cannot-evaluate (exit 2), naming the bound, before the entry that would pass it is kept. The allowance
+charges these fields and no others: a record unit (a Markdown paragraph, list item, table cell or
+blockquote, or a TOML string value) 32 characters plus its location, not its text; a claim entry 32
+plus its quoted clause and its phrase; an ambiguous-phrase entry 32 plus its quoted clause; an
+unevaluated-reference entry 32 plus its location and its quoted line. A string the entry charged just
+before also held (the same object) is not counted again, so the entries of one line or clause, which
+share one copy of its quoted text and location, count it once, while a location built anew for each
+unit (a long header cell over many rows, a long TOML key path over many values) is counted each time.
+The allowance counts characters of those fields; it is not a measure of the memory the process uses. It
+does not count the input bytes and decoded text, the parsed TOML document, the units' texts, the
+reader's and tokenizer's temporaries or Python's object overhead (the 32 per entry is a nominal charge,
+not a measured size), and a character can take up to four bytes. No bound is set on the memory of the
+whole process: the peaks given here were observed, not bounded. With the quotes shared, 9,000 hidden
+references on one line with leading white space and non-BMP text (52,907 bytes) peaked at about 52 MiB
+(2026-11-20; before, a 1 GiB limit ended the run with an uncaught MemoryError); a path no one has found
+can need more. Reading pull request state (tools/_pr_state.py), whose reasons can quote the response,
+is outside these bounds.
+
+NESTING is bounded too. No walk over a document recurses: Markdown blocks, blockquotes and list items
+are read in loops over the lines, and the walk over a parsed TOML document keeps its own stack and builds a
+value's location only at that value. A TOML table or array nested more than TOML_MAX_DEPTH (100) tables
+and arrays deep, or inline arrays and tables nested past what the TOML reader parses (it recurses and
+stops at Python's recursion limit), is cannot-evaluate (exit 2), naming the bound, never a traceback.
 """
 import sys
 
@@ -139,7 +155,16 @@ CONFIG_REL = ".aiqt/pending-pr-claims.toml"
 # existing destination up to its own bound (EXISTING_MAX_BYTES there), so an older, larger record can
 # still be replaced.
 MAX_BYTES = 64 * 1024
-FORMATS = ("toml-strings", "markdown")
+# The nesting bound on a TOML document: a table or array nested more than TOML_MAX_DEPTH tables and arrays
+# below the top-level table (itself counted, the top-level table not) is cannot-evaluate (exit 2), naming
+# the bound, and so is a document the TOML reader cannot parse for its depth (it recurses on inline arrays
+# and tables and ends at Python's recursion limit). The walk over the parsed document is iterative, so the
+# bound is not needed to protect it; it keeps every document that is read well inside the depth the
+# reader parses, so the two refusals stay one stated limit, and it is below the depth at which the
+# recursive walk this replaced ended in an uncaught RecursionError, so no document that walk failed on is
+# read now. The real records nest at most a few levels.
+TOML_MAX_DEPTH = 100
+FORMATS =("toml-strings", "markdown")
 ROLES = ("source", "generated-view")
 TOP_KEYS = {"schema-version", "limits", "surface"}
 LIMIT_KEYS = {"max-prs": (1, 1000), "call-timeout-seconds": (1, 60), "deadline-seconds": (1, 600)}
@@ -159,12 +184,17 @@ class InputError(Exception):
 # The declaration.
 
 def _parse_toml(text, label):
-    """(document, None), or (None, reason) for text that is not valid TOML. The one tomllib call site:
-    a bare ValueError (an integer past the int-string limit), a RecursionError (deep nesting) and a
-    MemoryError are each handled here, never re-raised."""
+    """(document, None), or (None, reason) for text that is not valid TOML or is nested too deeply to be
+    read. The one tomllib call site: a bare ValueError (an integer past the int-string limit), a
+    RecursionError (inline arrays and tables nested past what the reader parses) and a MemoryError are
+    each handled here, never re-raised."""
     try:
         return tomllib.loads(text), None
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+    except RecursionError:
+        return None, ("{}: nests inline arrays and tables too deeply for the TOML reader (it passed Python's "
+                      "recursion limit; this check reads at most {} nested tables and arrays, TOML_MAX_DEPTH), "
+                      "a bound on nesting; it was not read".format(label, TOML_MAX_DEPTH))
+    except (tomllib.TOMLDecodeError, ValueError, MemoryError) as exc:
         return None, "{}: is not valid TOML ({}: {})".format(label, type(exc).__name__, exc)
 
 
@@ -266,29 +296,57 @@ def _read_text(path, label):
 # ---------------------------------------------------------------------------------------------------
 # Record units: complete paragraphs, list items, table cells and decoded TOML strings, with locations.
 
+def _too_deep(label):
+    return InputError("{}: nests tables and arrays more than {} deep (TOML_MAX_DEPTH), a bound on nesting; "
+                      "it was not read".format(label, TOML_MAX_DEPTH))
+
+
 def toml_units(text, label, budget=None):
-    """[(location, prose, context)] for every decoded string value of a TOML document. Each unit is
-    charged to budget (a _CollectBudget, or None) before it is kept: its location names its whole key
-    path, so a long key path over many string values is counted once per value."""
+    """[(location, prose, context)] for every decoded string value of a TOML document, in document order.
+    Each unit is charged to budget (a _CollectBudget, or None) before it is kept: its location names its
+    whole key path, so a long key path over many string values is counted once per value. The walk is
+    iterative and builds a location only at a string value, from one shared list of key path pieces, so
+    reaching a value costs its own path, not the paths of every table above it; a table or array nested
+    more than TOML_MAX_DEPTH deep is InputError (cannot evaluate), naming the bound."""
     data, why = _parse_toml(text, label)
     if why is not None:
         raise InputError(why)
     units = []
-
-    def walk(value, where):
+    # The pieces of the key path to the value being visited, joined only at a string value; a key below
+    # an empty path is written alone, any other key after a dot, an array index in brackets.
+    pieces = []
+    # One frame per open table or array, the top-level table first: (an iterator over its (key, value)
+    # or (index, value) pairs, whether it is an array, how many pieces its path holds, whether that path
+    # is non-empty). A frame's depth is its place on the stack, the top-level table at 0.
+    stack = [(iter(data.items()), False, 0, False)]
+    while stack:
+        items, is_array, held, named = stack[-1]
+        del pieces[held:]
+        item = next(items, None)
+        if item is None:
+            stack.pop()
+            continue
+        key, value = item
+        if is_array:
+            pieces.append("[{}]".format(key))
+        elif named:
+            pieces.append(".")
+            pieces.append(key)
+        else:
+            pieces.append(key)
         if isinstance(value, str):
-            location = "{}: {}".format(label, where)
+            location = "{}: {}".format(label, "".join(pieces))
             if budget is not None:
                 budget.charge(location)
             units.append((location, value, "prose"))
-        elif isinstance(value, dict):
-            for key, item in value.items():
-                walk(item, "{}.{}".format(where, key) if where else key)
-        elif isinstance(value, list):
-            for index, item in enumerate(value):
-                walk(item, "{}[{}]".format(where, index))
-
-    walk(data, "")
+        elif isinstance(value, (dict, list)):
+            if len(stack) > TOML_MAX_DEPTH:
+                raise _too_deep(label)
+            child_named = named or is_array or bool(key)
+            if isinstance(value, dict):
+                stack.append((iter(value.items()), False, len(pieces), child_named))
+            else:
+                stack.append((iter(enumerate(value)), True, len(pieces), child_named))
     return units
 
 
@@ -2061,16 +2119,19 @@ class _ReportBudget:
                 path, REPORT_MAX_CHARS))
 
 
-# The collection bound: what collecting one document's candidates holds (its record units, candidate
-# entries and unevaluated-reference entries, and the locations, phrases, clauses and lines they quote)
-# counts at most COLLECT_MAX_CHARS characters; past it the document is cannot-evaluate (exit 2), naming
-# the bound, before the entry that would pass it is kept. Each entry is charged COLLECT_ENTRY_CHARS for
-# itself, plus the length of each string it holds that the entry charged just before it does not hold
-# (the same object): a clause or line is built once and shared by every entry that quotes it, so it is
-# counted once, while a string built anew for each entry (a table cell's location naming a long header
-# cell, a TOML string's location naming a long key path) is counted each time. The report bound
-# (REPORT_MAX_CHARS) runs after collection and only on the lines it builds; this bound keeps collection
-# itself from growing past it first. The real records never come near it.
+# The collection bound: an allowance of COLLECT_MAX_CHARS characters per document; past it the document
+# is cannot-evaluate (exit 2), naming the bound, before the entry that would pass it is kept. Each entry
+# is charged COLLECT_ENTRY_CHARS for itself plus the length of these fields only: a record unit its
+# location (not its text); a claim entry its quoted clause and its phrase; an ambiguous-phrase entry its
+# quoted clause; an unevaluated-reference entry its location and its quoted line. A field the entry
+# charged just before also held (the same object) is not counted again: a clause or line is built once
+# and shared by every entry that quotes it, so it is counted once, while a string built anew for each
+# entry (a table cell's location naming a long header cell, a TOML string's location naming a long key
+# path) is counted each time. It is a count of characters in those fields, not of memory: the input, the
+# parsed TOML document, the units' texts, temporaries and object overhead are not counted (the entry
+# charge is nominal). The report bound (REPORT_MAX_CHARS) runs after collection and only on the lines it
+# builds; this bound keeps collection itself from growing past it first. The real records never come
+# near it.
 COLLECT_MAX_CHARS = REPORT_MAX_CHARS
 COLLECT_ENTRY_CHARS = 32
 # The collection bound is enforced (True). The self-test sets it False, collecting without a bound, for a
@@ -3577,6 +3638,121 @@ def _cue_rows(m):
           (code, res.hard))
 
 
+def _self_test_nesting(m, tempfile, contextlib, io):
+    """Nesting: no walk over a nested document recurses, so deep nesting within the size bound ends in
+    exit 0, 1 or 2 with no traceback. A TOML document nested past TOML_MAX_DEPTH, deep table headers,
+    array-of-tables headers and dotted keys (which the TOML reader parses without recursing; the walk
+    over them used to recurse and ended in an uncaught RecursionError) or inline arrays and tables
+    (which the reader parses recursively), is cannot-evaluate, naming the bound; within the bound it is
+    read as before. Markdown blockquotes and lists are read line by line, so deep nesting gives the
+    result of one level."""
+    def named(text):
+        return "TOML_MAX_DEPTH" in text and "a bound on nesting" in text
+
+    def drafted(target, text):
+        """(exit code, output) of the draft entry point in process, or (None, the exception's name)."""
+        sink = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                code = judge_draft_bytes(ROOT, target, text.encode("utf-8"), FakeTransport(m), _origin_ok)
+        except Exception as exc:
+            return None, type(exc).__name__
+        return code, sink.getvalue()
+
+    # The reported document: 10,007 bytes, a table header 5,000 tables deep.
+    deep_headers = "[" + ".".join(["a"] * 5000) + ']\nx=""\n'
+    # Deep enough to pass the bound, shallow enough for the reader to parse (it was read before).
+    parsed_arrays = "x = " + "[" * 150 + '""' + "]" * 150 + "\n"
+    parsed_tables = "x = " + "{a=" * 150 + '""' + "}" * 150 + "\n"
+    # Past what the reader parses: it ends at Python's recursion limit.
+    unparsed_tables = "x = " + "{a=" * 5000 + '""' + "}" * 5000 + "\n"
+    check("nesting/reported-toml-document-size", len(deep_headers.encode("utf-8")) == 10007, len(deep_headers))
+    for name, text in (
+            ("nesting/toml-deep-table-headers-cannot-evaluate", deep_headers),
+            ("nesting/toml-deep-array-of-tables-headers-cannot-evaluate",
+             "[[" + ".".join(["a"] * 5000) + ']]\nx=""\n'),
+            ("nesting/toml-deep-dotted-keys-cannot-evaluate", ".".join(["a"] * 5000) + ' = ""\n'),
+            ("nesting/toml-deep-inline-arrays-parsed-cannot-evaluate", parsed_arrays),
+            ("nesting/toml-deep-inline-tables-parsed-cannot-evaluate", parsed_tables),
+            ("nesting/toml-deep-inline-arrays-past-the-reader-cannot-evaluate",
+             "x = " + "[" * 5000 + '""' + "]" * 5000 + "\n"),
+            ("nesting/toml-deep-inline-tables-past-the-reader-cannot-evaluate", unparsed_tables)):
+        code, out = drafted("changelog.toml", text)
+        check(name, code == 2 and named(out), (code, out[-300:]))
+
+    # Within the bound nothing changes: a value TOML_MAX_DEPTH tables and arrays deep is read, with its
+    # whole key path as its location; one level deeper is refused, naming the bound.
+    def header_at(depth):
+        return "[" + ".".join(["a"] * depth) + ']\nx = "PR #17 remains pending."\n', ".".join(["a"] * depth) + ".x"
+
+    def inline_at(depth):
+        pairs, extra = divmod(depth, 2)
+        return ("x = " + "[" * extra + "[{a=" * pairs + '"PR #17 remains pending."' + "}]" * pairs + "]" * extra
+                + "\n", "x" + "[0]" * extra + "[0].a" * pairs)
+    for name, (text, path) in (("nesting/toml-header-at-the-bound-read", header_at(TOML_MAX_DEPTH)),
+                               ("nesting/toml-inline-at-the-bound-read", inline_at(TOML_MAX_DEPTH))):
+        try:
+            code, res, _t = _judge(text, m, TOML_SURFACE)
+            got = (code, len(res.hard), len(res.hard) == 1 and "changes.toml: {}:".format(path) in res.hard[0])
+        except Exception as exc:
+            got = (type(exc).__name__, str(exc)[:300])
+        check(name, got == (1, 1, True), got)
+    for name, (text, _path) in (("nesting/toml-header-past-the-bound-refused", header_at(TOML_MAX_DEPTH + 1)),
+                                ("nesting/toml-inline-past-the-bound-refused", inline_at(TOML_MAX_DEPTH + 1))):
+        try:
+            got = ("collected", len(collect([(TOML_SURFACE, text.encode("utf-8"))])))
+        except InputError as exc:
+            got = named(str(exc))
+        except Exception as exc:
+            got = (type(exc).__name__, str(exc)[:300])
+        check(name, got is True, got)
+    # The iterative walk gives the locations, and their order, the recursive walk gave: a key under an
+    # empty path is written alone, any other key after a dot (an empty key too), an index in brackets.
+    fixture = ('"" = {f = "e0", "" = "e1"}\na = ["a0", ["a1", "a2"], {b = "a3", "" = "a4"}]\n'
+               '[t]\n"" = {c = "t0"}\n"d.e" = "t1"\n[[arr]]\nx = "r0"\n[[arr]]\ny = ["r1"]\n')
+    want = [("x.toml: f", "e0"), ("x.toml: ", "e1"), ("x.toml: a[0]", "a0"), ("x.toml: a[1][0]", "a1"),
+            ("x.toml: a[1][1]", "a2"), ("x.toml: a[2].b", "a3"), ("x.toml: a[2].", "a4"), ("x.toml: t..c", "t0"),
+            ("x.toml: t.d.e", "t1"), ("x.toml: arr[0].x", "r0"), ("x.toml: arr[1].y[0]", "r1")]
+    got = [(location, prose) for location, prose, _context in toml_units(fixture, "x.toml")]
+    check("nesting/toml-locations-unchanged", got == want, got)
+
+    # Markdown: blockquotes and list items nested deep within the size bound give the result of one level.
+    claim = "PR #17 remains pending.\n"
+    for name, shallow, nested in (
+            ("nesting/markdown-deep-blockquotes-read-as-one-level", "> " + claim, ">" * 60000 + " " + claim),
+            ("nesting/markdown-deep-spaced-blockquotes-read-as-one-level", "> " + claim, "> " * 30000 + claim),
+            ("nesting/markdown-deep-list-markers-on-one-line-read-as-one-level", "- " + claim, "- " * 30000 + claim),
+            ("nesting/markdown-deep-indented-list-items-read-as-one-level", "- " + claim,
+             "".join(" " * (2 * i) + "- item {}\n".format(i) for i in range(200)) + " " * 400 + "- " + claim),
+            ("nesting/markdown-deep-lists-in-blockquotes-read-as-one-level", "> - " + claim, "> - " * 15000 + claim)):
+        results = []
+        for text in (shallow, nested):
+            try:
+                code, res, t = _judge(text, m)
+                results.append((code, len(res.hard), len(res.warnings), len(res.unknown), t.calls))
+            except Exception as exc:
+                results.append((type(exc).__name__, str(exc)[:300]))
+        check(name, len(nested.encode("utf-8")) <= MAX_BYTES and results[0] == results[1]
+              and isinstance(results[0][0], int), results)
+
+    # End to end, each in its own process through --draft: no traceback, and the bound named where it is
+    # reached. The documents name no pull request, so no state is read.
+    with tempfile.TemporaryDirectory(prefix="pending-pr-claims-nesting-") as tmp:
+        for name, target, text, want in (
+                ("nesting/process-toml-deep-table-headers", "changelog.toml", deep_headers, 2),
+                ("nesting/process-toml-deep-inline-arrays", "changelog.toml", parsed_arrays, 2),
+                ("nesting/process-toml-deep-inline-tables", "changelog.toml", unparsed_tables, 2),
+                ("nesting/process-markdown-deep-lists", "TODO.md", "- " * 30000 + "item\n", 0),
+                ("nesting/process-markdown-deep-blockquotes", "TODO.md", "> " * 30000 + "text\n", 0)):
+            draft = Path(tmp) / ("draft" + Path(target).suffix)
+            draft.write_bytes(text.encode("utf-8"))
+            child = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve()), "--draft", str(draft),
+                                    "--target", target], capture_output=True, stdin=subprocess.DEVNULL, timeout=120)
+            err = child.stderr.decode("utf-8", "replace")
+            check(name, child.returncode == want and "Traceback" not in err and (want != 2 or named(err)),
+                  (child.returncode, err[-300:]))
+
+
 def _self_test():
     import contextlib
     import io
@@ -3918,6 +4094,8 @@ def _self_test():
         check("collect/memory-limited-draft-whitespace-non-bmp", draft.stat().st_size == 52907
               and child.returncode == 2 and bound_named in out and "MemoryError" not in err,
               (child.returncode, err[-300:], out[-300:]))
+
+    _self_test_nesting(m, tempfile, contextlib, io)
 
     # The copy bound counts the document's UTF-8 bytes, not its characters: a document whose bytes allow
     # its copies is evaluated, as is its twin of the same byte count in ASCII; the twin of the same
