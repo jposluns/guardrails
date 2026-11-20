@@ -65,7 +65,28 @@ description = "a numbered review finding"
 regex = '\bfinding[ -]?#?[0-9]+\b'
 ignore-case = true
 
+# A fix-round id (the backlog id, a hyphen, an R and the round) is matched by the backlog id it starts with.
 [[shape]]
 id = "backlog-id"
 description = "a tracker backlog id"
 regex = '\bFIX-[0-9]+(?:-R[0-9]+)?\b'
+
+# Upper-case QA joined to its number directly, by a hyphen or by one space, alone or after a reviewer
+# family name; a hyphen before it is allowed, so a QA tag inside a longer id is caught too. The word QA
+# alone and a lower-case token (a path or a process-search pattern) pass.
+[[shape]]
+id = "qa-round"
+description = "a QA round number"
+regex = '(?<![A-Za-z0-9_])QA[ \t-]?[0-9]+(?![0-9A-Za-z_])'
+
+# A reviewer family name (any case) and an upper-case severity grade side by side, in either order: the
+# family first may be one of several joined by a slash, may carry a possessive and a numbered round
+# before the grade, and may be joined to it by one comma, colon, semicolon, parenthesis or hyphen; the
+# grade first may carry its number and be joined to the family by spaces, a parenthesis, a slash or a
+# hyphen only, so rule text that lists the grades and then the families after a comma or a semicolon
+# passes. A grade word alone, a family name alone and a lower-case grade (ordinary prose) pass, and so
+# does a family name that opens a file name (a dot and a letter after it).
+[[shape]]
+id = "reviewer-grade"
+description = "a reviewer family name beside a severity grade"
+regex = '(?<![A-Za-z0-9_])(?i:codex|claude|gemini|fable)(?:\x27s)?(?:[ \t]*/[ \t]*(?i:codex|claude|gemini|fable))*(?:[ \t,-]+(?i:round|r)[ \t-]?[0-9]+)?[ \t]*[,:;(-]?[ \t]*(?:BLOCKER|MAJOR|MEDIUM|MINOR)(?![A-Za-z_])|(?<![A-Za-z0-9_])(?:BLOCKER|MAJOR|MEDIUM|MINOR)(?:[ \t-]?[0-9]+)?(?:[ \t]*[(/][ \t]*|[ \t]+|-)(?i:codex|claude|gemini|fable)(?![A-Za-z0-9_]|\.[A-Za-z])'
