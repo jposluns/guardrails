@@ -7150,6 +7150,21 @@ expected-check-ids = [
   "flip/stale-rebase-head-judged-refuses",
   "rebase/quit-stale-rebase-head-pruned-passes",
   "flip/stale-rebase-head-pruned-cannot-evaluate",
+  # --index validated only when there is something to judge
+  "index/outside-git-dir-no-operation-passes",
+  "index/absent-no-operation-passes",
+  "index/outside-git-dir-merge-msg-only-cannot-evaluate",
+  # a MERGE_MSG left over from an abandoned cherry-pick --no-commit
+  "merge-msg-only/stale-merge-msg-finding-names-reset-soft",
+  "merge-msg-only/stale-merge-msg-reset-soft-passes",
+  # a heading underline in a conflicted document
+  "rule/heading-underline-finding-names-underline",
+  "rule/heading-underline-lengthened-passes",
+  # a working tree whose git directory only GIT_DIR names
+  "repo/git-dir-only-environment-named-cannot-evaluate",
+  "repo/git-dir-file-markers-finding",
+  "repo/git-dir-elsewhere-index-outside-cannot-evaluate",
+  "flip/git-dir-elsewhere-index-unchecked-passes",
   # the command line
   "cli/staged-scan-reaches-verdict",
   "cli/index-reaches-verdict",

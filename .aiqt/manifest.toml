@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "c82f01ee887ab92653177985363931144096451006ce30fe85aed26b249c6422"
+tree-sha256 = "bc75c13af60ba62dfd1ce8c5d61aa0edbae753458036bef5c231315da0f6cf3c"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 645525
-sha256 = "e775bf5bf734d424062d76d15a1c630a9ee79797a1e8c0e5755b7bea140a75e3"
+bytes = 646613
+sha256 = "0c55499cf9fd861602dfe4c1105f642bf4a9bd45657fbc57c4979bc2a65a7ec2"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -837,8 +837,8 @@ sha256 = "622683b912a6c2720502d096f737f59326fa2b6319776dfdaf029cdd2243d1b7"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 1194867
-sha256 = "4578bf3cf31bdd9ebb19869767f69e6a722877321000d26a8fa498caaf1eade1"
+bytes = 1195955
+sha256 = "3ae7ce225c7d6beaa8a95250b67925c0b15c0d9f996b02137aeb04c251fb77ca"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2457,8 +2457,8 @@ sha256 = "b845e896ec04415f73c65ed5c52ccd0e03db62bc889f8d9a1e5cc72c196117c4"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 701230
-sha256 = "1ea98dae9fd54300605092671045e8a4ad793bfd0e3b1f8e948dccf3836eca32"
+bytes = 702318
+sha256 = "11562ade4299e60d915b0eb9917fc58ec9c06e8617758e54f8deda6e36d82f40"
 
 [[sources]]
 path = "GEMINI.md"
@@ -4062,8 +4062,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 765822
-sha256 = "13f33b4d06224d516db6f58e2ace1986dadeb0bf54e392b91bbc8a10949c851d"
+bytes = 766910
+sha256 = "70e16fab216026c275a3c7cd85f876ba592b271bcc6378c975c2228de611d046"
 
 [[sources]]
 path = "site/evidence.html"
@@ -4387,8 +4387,8 @@ sha256 = "63902bb6d3098492781660326c60848ae8d9b83cf54b10f63d29ffafcd3201d3"
 
 [[sources]]
 path = "tools/check_merge_markers.py"
-bytes = 70175
-sha256 = "6f667e8ddd36edf983624120f805f76820a15aeecb5b8a11aa561d7fd5cab9b9"
+bytes = 81456
+sha256 = "65f2b54bdd911cfcaee207920be562807fdc99d3cd9683a16483558417167724"
 
 [[sources]]
 path = "tools/check_mistakes_register.py"
@@ -4817,8 +4817,8 @@ sha256 = "f020224b8fcec06196b11729da9a87046c471d120bd674bf5fe6b967a5860021"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 291037
-sha256 = "0728527f0a0854838caac2f9985a9d1ead4bc441f4458db24acb3d37cc5bc045"
+bytes = 291833
+sha256 = "32e4ff3ebaa9e9800e9cbbdc1ffab2a3e1baf0188f9b03c704d6aaa99c211e4c"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
