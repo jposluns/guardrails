@@ -131,6 +131,7 @@ guarded-surfaces = [
     "tools/check_links.py",
     "tools/check_manifest.py",
     "tools/check_mappings.py",
+    "tools/check_merge_resolution.py",
     "tools/check_mistakes_register.py",
     "tools/check_msg_leaks.py",
     "tools/check_must_deliver.py",
@@ -216,6 +217,7 @@ guarded-surfaces = [
     "tools/selftest_git_fixture_env_core.py",
     "tools/selftest_opf_render.py",
     "tools/selftest_orch_hooks.py",
+    "tools/train_merge.py",
 ]
 nonblocking-surfaces = [
     ".preview/constraint-reread.py",

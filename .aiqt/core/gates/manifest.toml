@@ -407,6 +407,15 @@ class = "c"
 residue = "It checks that site/.well-known/security.txt and opf/site/.well-known/security.txt each exist as a regular file whose lines are exactly the 6 owner fields (Contact, Expires, Encryption, Policy, Preferred-Languages, Canonical) in that order, each once, with the owner's values and the Canonical URL of that root's own domain; a missing, unreadable, oversized, non-UTF-8 or not field-shaped file fails closed. It covers a recognizable SUBSET (class c, partial): it reads the repository only, so it does not show that Cloudflare serves the file, at that path, with a text/plain type, nor that the Contact, Encryption and Policy targets resolve, nor that the Expires date is still in the future at serving time. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
+id = "merge-resolution"
+script = "tools/check_merge_resolution.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = "It judges every two-parent merge commit in HEAD^1..HEAD (on a pull request, the merges the branch brings in, a merge train's member merges included): it computes the single merge base, replays the merge with git merge-tree to list the conflicted paths, and requires every line each parent added since the base (inserted or replacing lines of a whole-file line diff, compared byte for byte at LF boundaries) to be present in the recorded blob of each conflicted path, or named in the omission declaration the merge commit's message carries; a result identical to one parent's blob is refused unless that parent already holds the other's additions, whatever is declared; .aiqt/manifest.toml, .aiqt/release/root.txt and .aiqt/release/announce-snippet.txt are exempt only when tools/gen_manifest.py --check passes on a byte-exact copy of the recorded tree and the three outputs are canonical LF. A missing or unreadable parent or base, more than one base, a shallow clone, an octopus merge, a rename, directory, submodule, binary or unknown conflict, a symbolic link, a merge driver in .gitattributes, and a malformed or stale declaration fail closed. It covers a recognizable SUBSET (class c, partial): it checks textual retention only, not that kept lines are in a sensible order, that the result builds or behaves, or that a dropped replacement line was meant to go; a path git merged without conflict is not judged; it reads one range, so a merge squashed away before the run is not seen; the generated exemption trusts the recorded tree's own generator; and the precommit leg (tools/train_merge.py) holds only when the train is built through it. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
 id = "selftest-removal"
 script = "tools/check_selftest_removal.py"
 rules = ["gatdis"]

@@ -218,6 +218,34 @@ pull request (CLAUDE.md, Gates and CI).
      resolve it.
 7. Publish. The public flip is a separate, maintainer-owned step; nothing in steps 1 to 6 depends on it.
 
+## Recording a merge train member
+
+A resolution that takes one side of a conflicted file whole, then regenerates the release files, can drop
+lines the other side added, including lines in regions git merged without conflict. `tools/train_merge.py`
+records a member merge only after `tools/check_merge_resolution.py` passes on the exact parents and tree
+it records:
+
+1. `python3 -I -B tools/train_merge.py start <member commit>` on a clean train head. It pins the train
+   head and the member, and starts a merge that records nothing.
+2. Resolve every conflicted source file by hand, keeping what each side added. Regenerate the derived
+   outputs (`python3 -I -B tools/gen_manifest.py` for `.aiqt/manifest.toml`, `.aiqt/release/root.txt` and
+   `.aiqt/release/announce-snippet.txt`) and stage the result.
+3. `python3 -I -B tools/train_merge.py record --message-file <file>`, adding `--omissions <file>` when a
+   line is dropped on purpose. The declaration names each dropped line by path, side, line number and
+   exact text, with a reason; the format is in the docstring of `tools/check_merge_resolution.py`. The
+   merge is recorded only on exit 0; on exit 1 the report names every dropped line and the merge stays in
+   progress for another resolution. A result identical to one side is refused unless that side already
+   holds the other side's additions, whatever the declaration says. The three release files are exempt
+   only while `tools/gen_manifest.py --check` passes on the resolved tree.
+4. `python3 -I -B tools/train_merge.py abort` gives up the member.
+
+The Quality workflow audits every two-parent merge commit in `HEAD^1..HEAD`, so a train pull request's
+member merges are judged again from their parents and recorded trees, with the declaration their messages
+carry. Keep the member merges in the train branch until that run is green; the audit cannot see a merge
+squashed away before it ran. The procedure that builds a train outside this repository must call
+`tools/train_merge.py` for every member for the precommit check to hold; this repository cannot enforce
+that call.
+
 ## Note on the evidence "Built from" field
 
 The evidence page names the release tag, whose name (`vX.Y.Z`) is determined by the release version and

@@ -7040,3 +7040,56 @@ expected-check-ids = [
   "cli/unexpected-exception-exit-2",
   "cli/unexpected-exception-exit-2/red-when-reverted",
 ]
+
+[[suite]]
+id = "merge-resolution-selftest"
+runner = "tools/check_merge_resolution.py"
+expected-check-ids = [
+  # taking one side whole
+  "whole-side/left-whole-drops-right-additions-fails",
+  "whole-side/right-whole-drops-left-additions-fails",
+  "whole-side/chosen-side-holds-other-additions-passes",
+  # hand resolutions, the whole file judged
+  "hand/keeps-both-sides-passes",
+  "hand/keeps-both-sides-other-order-passes",
+  "hand/clean-region-addition-dropped-fails",
+  # declared omissions
+  "omission/undeclared-fails",
+  "omission/declared-passes",
+  "omission/whole-side-not-waived",
+  "omission/stale-cannot-evaluate",
+  "omission/wrong-text-cannot-evaluate",
+  "omission/malformed-cannot-evaluate",
+  # occurrence and byte rules
+  "lines/duplicate-occurrence-counted",
+  "lines/duplicate-occurrence-kept-passes",
+  "lines/identical-additions-share-one-occurrence",
+  "lines/crlf-compared-exactly",
+  "lines/final-newline-compared-exactly",
+  "lines/split-at-lf-only",
+  # file shapes
+  "shape/modify-delete-taking-delete-fails",
+  "shape/binary-cannot-evaluate",
+  "shape/symlink-cannot-evaluate",
+  "shape/rename-cannot-evaluate",
+  "shape/merge-driver-cannot-evaluate",
+  # fail closed on history that cannot be read
+  "fail-closed/unreadable-side",
+  "fail-closed/unreadable-base",
+  "fail-closed/no-merge-base",
+  "fail-closed/multiple-merge-bases",
+  # recorded merges and the CI audit range
+  "commit/recorded-merge-judged-with-message-declaration",
+  "audit/earlier-lossy-merge-restored-later-still-fails",
+  # the generated exemption
+  "generated/regenerated-release-files-pass",
+  "generated/stale-release-files-fail",
+  "generated/noncanonical-output-fails",
+  "generated/generator-absent-cannot-evaluate",
+  "generated/exemption-does-not-cover-sources",
+  # the train entry point
+  "train/dropped-line-records-no-commit",
+  "train/kept-resolution-records-checked-merge",
+  # the command line
+  "refuse/unrecognized-argument",
+]
