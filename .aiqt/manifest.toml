@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "c01cee36c62384e6b40f11db308af987c52fdea3b283e91ca48432567654fd16"
+tree-sha256 = "6ab6c97c741446b06ef24f4d1566a6a7de9dd03332b1b37bb75dd4b230aab509"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 643601
-sha256 = "955bde379a33c5a73cd3dd4615feac8f9e408590c01dd9bce9fd31b4543b8260"
+bytes = 643726
+sha256 = "37537214cacf7805c90dcfd4cc966956225763a58e5f0784d218e7b48e6c9e92"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -4387,8 +4387,8 @@ sha256 = "63902bb6d3098492781660326c60848ae8d9b83cf54b10f63d29ffafcd3201d3"
 
 [[sources]]
 path = "tools/check_merge_resolution.py"
-bytes = 109305
-sha256 = "acfdd8c90571b55a1c1b605768d9d090cb847d94b18e6f34654f8d3f1e102f9d"
+bytes = 113872
+sha256 = "5f0dd795ff14c2eaeea41f902fdf9d593857179b52fe3f4c463ef7f1ae386539"
 
 [[sources]]
 path = "tools/check_mistakes_register.py"
@@ -4817,8 +4817,8 @@ sha256 = "f020224b8fcec06196b11729da9a87046c471d120bd674bf5fe6b967a5860021"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 290134
-sha256 = "591b00c571e3e2f79ddbb5f4cee765f15417db1487d032ee892e3690eb0c5639"
+bytes = 290254
+sha256 = "c0e3a9843c893077fa7cae175531176e50ba5696737af0663177fb205f97db5f"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

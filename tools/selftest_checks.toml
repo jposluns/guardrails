@@ -7121,10 +7121,12 @@ expected-check-ids = [
   "untouched/file-only-the-resolution-adds-fails",
   "markers/conflict-marker-left-in-fails",
   "markers/marker-shaped-line-a-side-added-passes",
+  "markers/marker-shaped-line-both-sides-added-passes",
   # base lines both sides kept
   "base-lines/kept-base-line-deleted-fails",
   "base-lines/declared-base-line-omission-passes",
   "base-lines/kept-base-line-moved-passes",
+  "base-lines/kept-base-line-dropped-beside-a-side-copy-fails",
   # the train entry point
   "train/dropped-line-records-no-commit",
   "train/kept-resolution-records-checked-merge",

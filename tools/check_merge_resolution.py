@@ -38,8 +38,11 @@ each occurrence short of that is reported against the right side first, then the
 BASE LINES BOTH SIDES KEPT. On the same judged paths, every base line that both sides' deterministic
 diffs keep (an equal line in base -> left and in base -> right) must be in the resolved blob: aligned
 by the base-to-result diff, or else an unaligned result line holding the same bytes, consumed once per
-occurrence. A dropped one is a finding (exit 1) unless declared with side "base" and its one-based line
-number in the base blob.
+occurrence. One result line never counts twice: where only one side also added a line with the same
+bytes, the result must hold that text at least as many times as the base lines both sides kept and that
+side's additions of it together, and each occurrence short is reported against a kept base line. A
+dropped one is a finding (exit 1) unless declared with side "base" and its one-based line number in the
+base blob.
 
 RENAMES. A rename either side made since the merge base (git's rename detection, the default 50%
 similarity, no rename limit) is followed: the base entry and the other side's entry of the old path are
@@ -55,8 +58,9 @@ exception: it is claimed for the generated exemption and judged there.
 
 CONFLICT MARKERS. A result line of a judged path that is a conflict marker line (seven <, |, = or >
 characters, the first three kinds followed by a space or the line end, = alone on its line) and that the
-result holds more times than the base and each side do is a finding (exit 1): the resolution left
-a marker in, and no declaration waives it.
+result holds more times than max(base, left, right, left + right - base) occurrences (so a marker-shaped
+line each side added counts once per side) is a finding (exit 1): the resolution left a marker in, and
+no declaration waives it.
 
 The merge is also replayed with `git merge-tree --write-tree` in a temporary bare repository that borrows
 the objects through an alternates file (no worktree, no index, no hooks, no info/attributes, the
@@ -531,9 +535,39 @@ def holds_by_construction(maps, path):
     return False
 
 
-def _shared_shortfall(lines, changes, per_side, blobs):
+def _base_shortfall(lines, changes, per_side, base_dropped, base_to_result, base_blob):
+    """[("base", base_blob, number, bytes)] for base lines both sides kept whose text only one side also
+    added, one entry for each occurrence the result holds fewer times than the kept base lines and that
+    side's additions together need, after the entries already reported (module docstring)."""
+    kept_both = changes["left"][2] & changes["right"][2]
+    added = {side: collections.Counter(line for _n, line, _s in changes[side][0]) for side in ("left", "right")}
+    reported = collections.Counter(entry[3] for side in ("left", "right") for entry in per_side[side])
+    reported.update(entry[3] for entry in base_dropped)
+    dropped_numbers = {entry[2] for entry in base_dropped}
+    have = collections.Counter(lines["result"])
+    entries = []
+    for text in sorted({lines["base"][index] for index in kept_both}):
+        if not added["left"][text] and not added["right"][text]:
+            continue
+        if added["left"][text] and added["right"][text]:
+            continue  # _shared_shortfall counts the kept base lines with both sides' additions
+        indexes = [index for index in sorted(kept_both) if lines["base"][index] == text]
+        need = len(indexes) + added["left"][text] + added["right"][text]
+        short = need - have[text] - reported[text]
+        if short <= 0:
+            continue
+        # Unaligned base lines first (the ones a resolution moved or dropped), then from the end.
+        order = ([index for index in indexes if index not in base_to_result]
+                 + [index for index in reversed(indexes) if index in base_to_result])
+        order = [index for index in order if index + 1 not in dropped_numbers]
+        entries.extend(("base", base_blob, index + 1, text) for index in order[:short])
+    return entries
+
+
+def _shared_shortfall(lines, changes, per_side, blobs, base_dropped=()):
     """[(side, blob, number, bytes, need, have)] for lines both sides added in different places that the
-    result holds fewer times than once per side (module docstring)."""
+    result holds fewer times than the base lines both sides kept and once per side need (module
+    docstring); base_dropped entries already reported count as reported occurrences."""
     left_add, right_add = changes["left"][0], changes["right"][0]
     texts = {line for _n, line, _s in left_add} & {line for _n, line, _s in right_add}
     kept_both = changes["left"][2] & changes["right"][2]
@@ -552,7 +586,7 @@ def _shared_shortfall(lines, changes, per_side, blobs):
                 + len(lefts) + len(rights) - len(paired_right))
         have = sum(1 for line in lines["result"] if line == text)
         missing = {(side, entry[2]) for side in ("left", "right") for entry in per_side[side] if entry[3] == text}
-        short = need - have - len(missing)
+        short = need - have - len(missing) - sum(1 for entry in base_dropped if entry[3] == text)
         if short <= 0:
             continue
         order = ([("right", n) for ri, (n, _s) in reversed(list(enumerate(rights))) if ri not in paired_right]
@@ -573,10 +607,11 @@ def judge_path(repo, path, maps, conflicted, merged):
       whole_side    None or (kept_side, the other side's dropped list)
       none_kept     [(side, every dropped or short entry of that side)] for each side that added lines and
                     has none of them kept
-      markers       [(bytes, result count, most the base or a side holds)] conflict marker lines the
-                    result holds more often than the base and each side
+      markers       [(bytes, result count, bound)] conflict marker lines the result holds more often than
+                    max(base, left, right, left + right - base) occurrences
       base_dropped  [("base", base_blob, number, bytes)] base lines both sides kept that the result does
-                    not keep (number one-based in the base blob)"""
+                    not keep, or holds too few times beside one side's additions of the same text (number
+                    one-based in the base blob)"""
     entries = {role: maps[role].get(path) for role in ("base", "left", "right", "result")}
     for role, entry in entries.items():
         if entry is not None and (entry[1] != "blob" or entry[0] not in REGULAR_MODES):
@@ -612,13 +647,13 @@ def judge_path(repo, path, maps, conflicted, merged):
                                     lines["result"], excluded)
         per_side[side] = [(side, blobs[side], number, line) for number, line in missing]
         dropped.extend(per_side[side])
-    shared_short = _shared_shortfall(lines, changes, per_side, blobs)
     # A base line both sides kept must stay: aligned by the base-to-result diff, or else an unaligned
     # result line with the same bytes, consumed once per occurrence (the base-line rule).
+    kept_both = changes["left"][2] & changes["right"][2]
     aligned_result = set(base_to_result.values())
     base_pool = collections.Counter(line for j, line in enumerate(lines["result"]) if j not in aligned_result)
     base_dropped = []
-    for index in sorted(changes["left"][2] & changes["right"][2]):
+    for index in sorted(kept_both):
         if index in base_to_result:
             continue
         line = lines["base"][index]
@@ -626,6 +661,11 @@ def judge_path(repo, path, maps, conflicted, merged):
             base_pool[line] -= 1
             continue
         base_dropped.append(("base", entries["base"][2], index + 1, line))
+    # One result line never counts twice: a line only one side added that also stands as a base line both
+    # sides kept needs one result occurrence for each (the occurrence count rule).
+    base_dropped.extend(_base_shortfall(lines, changes, per_side, base_dropped, base_to_result,
+                                        entries["base"][2] if entries["base"] else "(absent)"))
+    shared_short = _shared_shortfall(lines, changes, per_side, blobs, base_dropped)
     none_kept = []
     for side in ("left", "right"):
         lost = per_side[side] + [entry[:4] for entry in shared_short if entry[0] == side]
@@ -642,9 +682,11 @@ def judge_path(repo, path, maps, conflicted, merged):
             whole_side = ("right", per_side["left"])
     counts = {role: collections.Counter(line for line in lines[role] if MARKER_RE.fullmatch(line))
               for role in ("base", "left", "right", "result")}
-    markers = sorted((line, have, max(counts[role][line] for role in ("base", "left", "right")))
-                     for line, have in counts["result"].items()
-                     if have > max(counts[role][line] for role in ("base", "left", "right")))
+    # The bound the conflicted-module rule uses: a marker-shaped line both sides added counts once per side.
+    bounds = {line: max(counts["base"][line], counts["left"][line], counts["right"][line],
+                        counts["left"][line] + counts["right"][line] - counts["base"][line])
+              for line in counts["result"]}
+    markers = sorted((line, have, bounds[line]) for line, have in counts["result"].items() if have > bounds[line])
     return {"dropped": dropped, "shared_short": shared_short, "whole_side": whole_side, "none_kept": none_kept,
             "markers": markers, "base_dropped": base_dropped}
 
@@ -861,8 +903,8 @@ def judge(repo, left_rev, right_rev, tree_rev, declaration_text):
             continue
         verdict = judge_path(repo, path, maps, path in conflicted, merged)
         for line, have, most in verdict["markers"]:
-            findings.append("{}: the result holds the conflict marker line {} {} time(s), more than the base or "
-                            "either side ({}); a resolution must not leave a conflict marker in".format(
+            findings.append("{}: the result holds the conflict marker line {} {} time(s), more than the base and "
+                            "the two sides account for ({}); a resolution must not leave a conflict marker in".format(
                                 path, _show(line), have, most))
         if verdict["whole_side"] is not None:
             kept, lost = verdict["whole_side"]
@@ -1701,6 +1743,13 @@ def _self_test_untouched_and_markers(tmp):
     code, text = _judge_quiet(repo, rule_left, right, fx.tree(ruled))
     check("markers/marker-shaped-line-a-side-added-passes", code == 0, (code, text))
 
+    # Both sides add a setext heading ruled with seven '=' in different places: git's clean merge holds two.
+    heading_left = fx.commit(dict(base_files, **{"f.txt": _lines("Install", "=======", *BASE_LINES)}), [base])
+    heading_right = fx.commit(dict(base_files, **{"f.txt": _lines(*BASE_LINES, "License", "=======")}), [base])
+    headings = dict(base_files, **{"f.txt": _lines("Install", "=======", *BASE_LINES, "License", "=======")})
+    code, text = _judge_quiet(repo, heading_left, heading_right, fx.tree(headings))
+    check("markers/marker-shaped-line-both-sides-added-passes", code == 0, (code, text))
+
     # A base line both sides kept must stay, or be declared (the base-line rule).
     dropped_base = dict(both, **{"f.txt": _lines("one", "two LEFT", "two RIGHT", "three", "four", "five", "six",
                                                  "eight", "nine", "ten")})
@@ -1716,6 +1765,16 @@ def _self_test_untouched_and_markers(tmp):
         b"two\n", b"two LEFT\ntwo RIGHT\n")})
     code, text = _judge_quiet(repo, left, right, fx.tree(moved_base))
     check("base-lines/kept-base-line-moved-passes", code == 0, (code, text))
+
+    # One result line never stands for both a base line both sides kept and one side's addition of the
+    # same text (the occurrence count rule).
+    copy_left = fx.commit(dict(base_files, **{"f.txt": _variant({1: ["two LEFT"]}) + b"seven\n"}), [base])
+    with_copy = _variant({1: ["two LEFT", "two RIGHT"]}) + b"seven\n"
+    code, text = _judge_quiet(repo, copy_left, right, fx.tree(dict(base_files, **{"f.txt": with_copy})))
+    one_seven = with_copy.replace(b"six\nseven\n", b"six\n")
+    code2, text2 = _judge_quiet(repo, copy_left, right, fx.tree(dict(base_files, **{"f.txt": one_seven})))
+    check("base-lines/kept-base-line-dropped-beside-a-side-copy-fails",
+          code == 0 and code2 == 1 and "base line 7" in text2 and "no side removed" in text2, (code, text, code2, text2))
 
 
 def _self_test_train(tmp):
