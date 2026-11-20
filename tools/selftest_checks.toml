@@ -7141,8 +7141,15 @@ expected-check-ids = [
   "merge-msg-only/merge-squash-markers-finding",
   # configured merge drivers never run in the recompute
   "driver/unreached-driver-clean-passes",
-  "driver/reached-driver-not-run-cannot-evaluate",
+  "driver/reached-driver-not-run-clean-passes",
+  "driver/reached-driver-not-run-markers-finding",
   "flip/driver-left-configured-runs",
+  # a rebase ended with git rebase --quit leaves a stale REBASE_HEAD
+  "rebase/quit-merge-msg-listed-markers-finding",
+  "rebase/quit-stale-rebase-head-not-judged",
+  "flip/stale-rebase-head-judged-refuses",
+  "rebase/quit-stale-rebase-head-pruned-passes",
+  "flip/stale-rebase-head-pruned-cannot-evaluate",
   # the command line
   "cli/staged-scan-reaches-verdict",
   "cli/index-reaches-verdict",

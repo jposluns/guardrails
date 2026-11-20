@@ -17,7 +17,10 @@ commit-time check for that class.
 WHEN IT ACTS. It acts while git records an operation in progress in the working tree's git directory
 (git rev-parse --absolute-git-dir): MERGE_HEAD (a merge, one line per merged commit), CHERRY_PICK_HEAD (a cherry-pick),
 REVERT_HEAD (a revert) or REBASE_HEAD (a rebase stopped on a conflict or at an edit stop; the commit it names is
-judged like a cherry-pick of it, so a stopped rebase finished with a plain git commit is judged). Each state file
+judged like a cherry-pick of it, so a stopped rebase finished with a plain git commit is judged). REBASE_HEAD is read
+only while a rebase is in progress as git reads it (a rebase-merge directory, or a rebase-apply directory that is not
+a git am session): git rebase --quit leaves REBASE_HEAD behind, and a stale one would otherwise judge, or once its
+commit is pruned refuse (exit 2), every later commit. Each state file
 present must be a regular file whose every line is one full commit id (40 or 64 lowercase hex) that names a commit;
 otherwise the run cannot evaluate (exit 2). MERGE_MSG must then be a readable regular file as well, except that a
 rebase alone may leave none (git 2.53 writes none for a rebase --apply conflict or an edit stop), and then it lists
@@ -47,10 +50,10 @@ A merge-tree that cannot run, exits other than 0 or 1, or prints output that doe
 MERGE DRIVERS. The recompute never runs a merge driver. Every merge.<name>.driver the repository's configuration
 defines (git config -z --get-regexp, under the isolation below) is replaced, for the merge-tree calls only, by a
 stand-in command path under /dev/null that cannot start (passed as GIT_CONFIG_COUNT entries), so no configured
-command and no shell runs. A recompute that reaches a configured driver (git 2.53 reports that it cannot exec the
-stand-in, which the check reads from merge-tree's error stream) is cannot-evaluate (exit 2): which paths the driver
-would have left unmerged cannot be said without running it. A git that reported the stand-in otherwise would either
-fail the merge-tree (cannot-evaluate) or count the path as a conflict (judged).
+command and no shell runs. A driver that cannot start is a failed driver, so git counts the path it applies to as a
+conflict (git 2.53 prints that it cannot exec the stand-in and exits 1 naming the path), and that path is judged
+whatever the driver would have done; a recompute that reached the stand-in and exited other than 1 is
+cannot-evaluate (exit 2).
 
 RULE. A conflict-marker line is a line (split on LF, one trailing CR removed) that starts with exactly N copies of one
 of the four marker characters git writes, <, |, = or >, followed by the end of the line or by a whitespace character
@@ -77,13 +80,13 @@ OVER-REJECTION, DISCLOSED. A conflicted path whose resolution legitimately holds
 that quotes git's markers) is a finding, and so is such a line in a path the resolution added while a conflicted
 path is absent from the staged tree (scope source 3). The remedy is git's own: set the conflict-marker-size
 attribute for that path in .gitattributes (git then writes markers of that size, and lines of another length are
-content), never a bypass of the commit-time check. A recompute that reaches a configured merge driver is
-cannot-evaluate (exit 2) whatever the resolution holds, so a commit while such a driver applies to a path both sides
-changed is refused; the remedy is to commit with that merge.<name>.driver configuration removed (the recompute then
-uses git's built-in merge for that path).
+content), never a bypass of the commit-time check. A path a configured merge driver applies to and both sides
+changed is judged even where the driver merged it cleanly, with the same remedy.
 
 RESIDUALS (not caught): a rebase finished with rebase --continue (git runs no pre-commit hook there), and git am
 outside a rebase (not probed here); a merge ended with merge --quit, which leaves no state file and no MERGE_MSG; a
+rebase ended with rebase --quit, unless the MERGE_MSG it leaves lists the conflicts (git 2.53 leaves one for the
+merge backend, none for rebase --apply); a
 cherry-pick --no-commit or a merge --squash whose MERGE_MSG Conflicts list was edited away or removed, since with no
 state file nothing else names its conflicts (a revert run with --no-commit leaves REVERT_HEAD, as git 2.53 does, and
 is judged); marker text in a path that did not conflict, including a conflicted path's content moved during the
@@ -253,10 +256,34 @@ def _is_commit(root, oid):
     return probe.returncode == 0 and probe.stdout == b"commit\n"
 
 
+def _exists(path, what):
+    """True when path exists (not followed when a symbolic link); a path that cannot be examined is cannot-evaluate."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise CannotEvaluate("{} cannot be examined: {}".format(what, exc))
+    return True
+
+
+def _rebase_in_progress(gitdir):
+    """True when a rebase is in progress as git itself reads it (git status, git rebase --continue): a rebase-merge
+    directory, or a rebase-apply directory that is not a git am session. git rebase --quit, and the removal of the
+    rebase directory git's own advice names, leave REBASE_HEAD behind, so REBASE_HEAD alone is stale state."""
+    if _exists(gitdir / "rebase-merge", "rebase-merge"):
+        return True
+    return (_exists(gitdir / "rebase-apply", "rebase-apply")
+            and not _exists(gitdir / "rebase-apply" / "applying", "rebase-apply/applying"))
+
+
 def _read_state(root, gitdir):
-    """[(operation, [commit id, ...])] for each state file present, validated."""
+    """[(operation, [commit id, ...])] for each state file present, validated; a REBASE_HEAD with no rebase in
+    progress is stale and not read."""
     state = []
     for name, operation in STATE_FILES:
+        if operation == "rebase" and not _rebase_in_progress(gitdir):
+            continue
         raw = _read_regular(gitdir / name, name)
         if raw is None:
             continue
@@ -319,10 +346,12 @@ def _merge_tree(root, ours, theirs, base=None, overrides=()):
         args += list(MERGE_TREE_OWN_BASE)
     args += [os.fsdecode(ours), os.fsdecode(theirs)]
     probe = _git(root, *args, config=overrides)
-    if overrides and os.fsencode(DRIVER_STAND_IN) in probe.stderr:
-        raise CannotEvaluate("the recompute reached a configured merge driver ({}); this check never runs one, so "
-                             "it cannot say which paths that driver would leave unmerged (commit with that driver "
-                             "configuration removed)".format(", ".join(key for key, _ in overrides)))
+    if overrides and os.fsencode(DRIVER_STAND_IN) in probe.stderr and probe.returncode != 1:
+        # A stand-in that cannot start is a failed driver, so git counts its path as a conflict (exit 1) and the path
+        # is judged; a recompute that reached the stand-in and reported anything else cannot say that.
+        raise CannotEvaluate("the recompute reached a configured merge driver ({}) and git merge-tree did not "
+                             "report a conflict (exit {})".format(", ".join(key for key, _ in overrides),
+                                                                  probe.returncode))
     if probe.returncode not in (0, 1):
         raise CannotEvaluate("git merge-tree failed (exit {}): {}".format(
             probe.returncode, os.fsdecode(probe.stderr).strip() or "no message"))
@@ -1085,9 +1114,10 @@ def _self_test_isolated(temp):
         got = _scan(v20b)
         check("merge-msg-only/merge-squash-markers-finding", got == 1, got)
     # V21 a merge driver configured for the conflicted path after the merge stopped: the recompute must not run
-    # it. Reaching it is cannot-evaluate and its sentinel stays unwritten; a driver configured only for a path the
-    # recompute does not merge leaves a clean resolution passing. Its fix reverted (the driver left configured) runs
-    # the driver, which writes its sentinel and, exiting 0, merges the path cleanly.
+    # it. Reaching it counts the path as a conflict, so a clean resolution passes and the markers are a finding,
+    # with its sentinel unwritten either way; a driver configured only for a path the recompute does not merge
+    # leaves a clean resolution passing. Its fix reverted (the driver left configured) runs the driver, which writes
+    # its sentinel and, exiting 0, merges the path cleanly.
     v21 = build("V21", lambda: _fixture_conflict(temp, "v21"))
     if v21 is not None:
         _stage(v21, "f.txt", clean)
@@ -1101,11 +1131,40 @@ def _self_test_isolated(temp):
         check("driver/unreached-driver-clean-passes", got == 0 and not sentinel.exists(), (got, sentinel.exists()))
         attributes.write_bytes(b"f.txt merge=selftest\n")
         got = _scan(v21)
-        check("driver/reached-driver-not-run-cannot-evaluate", got == 2 and not sentinel.exists(),
+        check("driver/reached-driver-not-run-clean-passes", got == 0 and not sentinel.exists(),
               (got, sentinel.exists()))
+        _stage(v21, "f.txt", marked)
+        got = _scan(v21)
+        check("driver/reached-driver-not-run-markers-finding", got == 1 and not sentinel.exists(),
+              (got, sentinel.exists()))
+        _stage(v21, "f.txt", clean)
         with _replaced("_driver_overrides", lambda root: ()):
             got = _scan(v21)
         check("flip/driver-left-configured-runs", got == 0 and sentinel.exists(), (got, sentinel.exists()))
+    # V22 a rebase stopped on a conflict and ended with git rebase --quit leaves REBASE_HEAD with no rebase in
+    # progress. While the MERGE_MSG it leaves lists the conflict, markers kept are still a finding; once that is
+    # gone (reset --hard), a later commit is not judged against the stale commit, and a stale REBASE_HEAD naming no
+    # commit is not cannot-evaluate. Its fix reverted (REBASE_HEAD read alone) refuses both.
+    v22 = build("V22", lambda: _fixture_conflict(temp, "v22", "rebase"))
+    if v22 is not None:
+        _fixture_git(v22, "rebase", "--quit")
+        stale = (_gitdir(v22) / "REBASE_HEAD").is_file() and not (_gitdir(v22) / "rebase-merge").exists()
+        _fixture_git(v22, "add", "f.txt")
+        got = _scan(v22)
+        check("rebase/quit-merge-msg-listed-markers-finding", got == 1 and stale, (got, stale))
+        _fixture_git(v22, "reset", "-q", "--hard", "main")
+        _stage(v22, "f.txt", b"Title\n=======\nbody\n")
+        got = _scan(v22)
+        check("rebase/quit-stale-rebase-head-not-judged", got == 0, got)
+        with _replaced("_rebase_in_progress", lambda gitdir: True):
+            got = _scan(v22)
+        check("flip/stale-rebase-head-judged-refuses", got == 1, got)
+        (_gitdir(v22) / "REBASE_HEAD").write_bytes(b"e" * 40 + b"\n")
+        got = _scan(v22)
+        check("rebase/quit-stale-rebase-head-pruned-passes", got == 0, got)
+        with _replaced("_rebase_in_progress", lambda gitdir: True):
+            got = _scan(v22)
+        check("flip/stale-rebase-head-pruned-cannot-evaluate", got == 2, got)
     # V15 the command line: the staged-scan mode reaches the verdict, a malformed argument list is a usage error
     # (exit 2), never a scan, and --staged-scan without --index while GIT_INDEX_FILE is set is exit 2 (the hook's
     # index would go unread). Its fix reverted reaches the scan of the repository's own index.
