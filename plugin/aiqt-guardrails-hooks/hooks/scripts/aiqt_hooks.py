@@ -31623,9 +31623,9 @@ def _citechk_as_written(command, cwd, parse, reason):
     unread = [("expanded <<{} here-document".format(_citechk_short(delim)), reason)
               for delim in _citechk_expanded_heredocs(command)]
     # No lexing of the command is bash's here, so no cd in it is followed: where its text shows one (or a
-    # command that can run one) where a command can begin, the directory is not established (_CITECHK_RAW_DIR).
+    # command that can run one) where a command can begin, the directory is not established (_citechk_raw_dir).
     return [{"cmd": kind, "parse": parse, "texts": [("command text", command)], "unread": unread,
-             "repo": cwd, "base": None, "nodir": _CITECHK_RAW_DIR_WHY if _CITECHK_RAW_DIR.search(command) else None,
+             "repo": cwd, "base": None, "nodir": _CITECHK_RAW_DIR_WHY if _citechk_raw_dir(command) else None,
              "where": None}]
 
 
@@ -31836,54 +31836,197 @@ def _citechk_shape(segments, heredocs):
 # The directory walk of the citation check (_citechk_dirs). A directory the walk cannot establish:
 _CITECHK_DIR_UNKNOWN = object()
 _CITECHK_CD_WORDS = frozenset(("cd", "pushd", "popd"))
-# Command words that can move the shell where the walk does not follow: eval, source and '.' run text it does
-# not lex, and builtin or command can run cd, pushd or popd.
-_CITECHK_DIR_OPAQUE = frozenset(("eval", "source", ".", "builtin", "command"))
+# Command words that can move the shell, or change what a later cd or command word does, where the walk does
+# not follow (each with the reason it names): eval, source and '.' run text it does not lex; trap sets an
+# action bash runs in this shell (a DEBUG trap before each later command); mapfile and readarray run a -C
+# callback in this shell; fc runs commands from the history; alias and unalias change what a later command
+# word runs; enable can turn the cd builtin off or load another; shopt can turn on lastpipe, cdable_vars,
+# expand_aliases, autocd and the compat levels. builtin and command are read through to the word they run.
+_CITECHK_DIR_OPAQUE = frozenset(("eval", "source", ".", "builtin", "command", "trap", "mapfile", "readarray", "fc",
+                                 "alias", "unalias", "enable", "shopt"))
+_CITECHK_DIR_OPAQUE_WHY = {
+    "eval": "eval runs text this check does not lex, which may change the directory",
+    "source": "source runs a file this check does not read, which may change the directory",
+    ".": "'.' runs a file this check does not read, which may change the directory",
+    "trap": "trap sets an action, text this check does not lex, that bash may run in this shell before a later "
+            "command (a DEBUG trap runs before each one), so it may change the directory",
+    "mapfile": "mapfile may run a -C callback, text this check does not lex, in this shell",
+    "readarray": "readarray may run a -C callback, text this check does not lex, in this shell",
+    "fc": "fc runs commands from the history, which this check does not read",
+    "alias": "alias may change what a later command word (a cd, or the command itself) runs",
+    "unalias": "unalias may change what a later command word (a cd, or the command itself) runs",
+    "enable": "enable may turn the cd builtin off or load another in its place",
+    "shopt": "shopt may change how a later cd or pipeline runs (lastpipe, cdable_vars, expand_aliases, autocd, "
+             "a compat level)",
+}
+# The set options the walk knows leave every cd and pipeline as it reads them; any other option word (physical,
+# posix, xtrace, whose PS4 bash expands before each command, functrace, history, an expansion) is not followed.
+_CITECHK_SET_SAFE_LETTERS = frozenset("eufvC")
+_CITECHK_SET_SAFE_NAMES = frozenset(("errexit", "nounset", "pipefail", "noglob", "noclobber", "verbose"))
+_CITECHK_SET_WHY = ("set with an option other than -e, -u, -f, -v, -C or -o errexit, nounset, pipefail, noglob, "
+                    "noclobber or verbose may change how a later cd or command runs (physical, posix, xtrace's PS4 "
+                    "and others)")
+# A ${ cmd; } or ${| cmd; } substitution (bash 5.3) runs its commands in this shell, not a subshell, so a cd in
+# it moves the shell; it is found in a segment's raw text, quoted or not, since a PS4 or another prompt string
+# holding one runs it too.
+_CITECHK_FUNSUB_RE = re.compile(r"\$\{(?:[\s|]|$)")
+_CITECHK_FUNSUB_WHY = ("a ${ cmd; } or ${| cmd; } substitution runs its commands in this shell, where this check does "
+                       "not follow them")
+_CITECHK_ALIASES_WHY = "a word spelling BASH_ALIASES may define an alias for a later command word"
+_CITECHK_LASTPIPE_WHY = ("a {} that is the last element of a pipeline runs in this shell where lastpipe is on (set "
+                         "in this command or inherited), so it may change the directory")
+_CITECHK_DIR_OPTIONS = ("a {} with an option other than -L or -P before its operand, with anything after its operand, "
+                        "or with other than one operand, which this check does not resolve exactly")
+_CITECHK_DIR_TILDE = ("a ~ operand of {} in a command that spells HOME, or that holds an expansion that may set HOME, "
+                      "so ~ may not expand to the HOME this check reads")
+_CITECHK_DIR_CDPATH = ("a relative {} operand that CDPATH may redirect, after an expansion that may set CDPATH "
+                       "(printf -v, declare, read or an arithmetic assignment to a variable it names)")
 _CITECHK_LOOP_WORDS = frozenset(("for", "while", "until", "select"))
 _CITECHK_DIRS_MAX = 8  # the most directories a segment may run in that the walk keeps; past it, unknown
 _CITECHK_DIR_SPLIT = ("a cd or pushd before it may fail, or be skipped, with this command still run, so it may run "
                       "in more than one directory")
 _CITECHK_DIR_LOOP = ("this command holds a loop or a function definition and a command that can change the "
                      "directory, which this check does not follow across iterations or calls")
-# A command the check does not lex, or reads both ways, is scanned as written; where its text holds one of
-# these words where a command can begin, the directory its commit or pr command runs in is not established.
-# Only blanks and tabs are skipped after a mark: a newline is a mark itself, so a run of newlines is read in
-# linear time (with \s there, each newline of a run rescanned the rest of it, which grew with its square).
-_CITECHK_RAW_DIR = re.compile(r"(?:^|[;&|(){}\n`])[ \t]*(?:(?:if|then|else|elif|do|while|until|time|!)[ \t]+)*"
-                              r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()]*[ \t]+)*\\?"
-                              r"(?:cd|pushd|popd|eval|source|builtin|command|\.)"
-                              r"(?=[\s;&|)]|$)")
-_CITECHK_RAW_DIR_WHY = ("the command is scanned as written, and its text holds a cd, pushd, popd, eval, source, '.', "
-                        "builtin or command word where a command can begin")
+# A command the check does not lex, or reads both ways, is scanned as written; where its text, read with each
+# backslash-newline and then each quote character and backslash removed (_citechk_raw_dir, so 'cd', c\d and
+# c""d read as cd), holds one of these words or an expanded command word ($ or a backquote) where a command can
+# begin, or a ${ } substitution that runs in this shell, or BASH_ALIASES, the directory its commit or pr
+# command runs in is not established. Only blanks and tabs are skipped after a mark: a newline is a mark
+# itself, so a run of newlines is read in linear time (with \s there, each newline of a run rescanned the
+# rest of it, which grew with its square).
+_CITECHK_RAW_DIR = re.compile(r"(?:^|[;&|(){}\n`])[ \t]*(?:(?:if|then|else|elif|do|while|until|time|-p|!)[ \t]+)*"
+                              r"(?:[A-Za-z_][A-Za-z0-9_]*\+?=[^\s;&|()]*[ \t]+)*\\?"
+                              r"(?:cd|pushd|popd|eval|source|builtin|command|trap|mapfile|readarray|fc|alias|"
+                              r"unalias|enable|shopt|set|\.)(?=[\s;&|)]|$)"
+                              r"|\$\{(?:[\s|]|$)|BASH_ALIASES")
+# An expanded command word ($ or a backquote) where a command of this shell can begin: at the start, after ';',
+# '&', '|', a newline or a '{ ' that opens a group, and after the reserved words and assignments above; not
+# after '(' or ')' (a subshell, an array value or a substitution's end) or a '}' or '{' of a ${...} expansion.
+_CITECHK_RAW_DIR_EXPANDED = re.compile(r"(?:^|[;&|\n]|\{[ \t])[ \t]*"
+                                       r"(?:(?:if|then|else|elif|do|while|until|time|-p|!)[ \t]+)*"
+                                       r"(?:[A-Za-z_][A-Za-z0-9_]*\+?=[^\s;&|()]*[ \t]+)*[$`]")
+_CITECHK_RAW_DIR_WHY = ("the command is scanned as written, and its text, read with its quotes and backslashes "
+                        "removed, holds a cd, pushd, popd, eval, source, '.', builtin, command, trap, mapfile, "
+                        "readarray, fc, alias, unalias, enable, shopt or set word or an expanded command word where "
+                        "a command can begin, a ${ } substitution that runs in this shell, or BASH_ALIASES")
 
 
-def _citechk_dir_step(seg, words, pipeline, run, context):
+def _citechk_raw_dir(command):
+    """Whether the text of a command scanned as written may change the directory in a way the check does not
+    follow (_CITECHK_RAW_DIR, _CITECHK_RAW_DIR_EXPANDED), read with each backslash-newline removed and then
+    each quote character and backslash, so a cd spelled with quotes or escapes in it ('cd', c\\d, c""d) is
+    found: linear in its length."""
+    text = command.replace("\\\n", "")
+    for mark in ("'", '"', "\\"):
+        text = text.replace(mark, "")
+    return _CITECHK_RAW_DIR.search(text) is not None or _CITECHK_RAW_DIR_EXPANDED.search(text) is not None
+
+
+def _citechk_set_safe(words, aop):
+    """Whether a set command's words (after set) give only options _CITECHK_SET_SAFE_LETTERS and
+    _CITECHK_SET_SAFE_NAMES name, before '--' or its first positional word."""
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if aop[i]:
+            return False
+        if word == "--" or word in ("-", "+") or not word.startswith(("-", "+")):
+            return True
+        letters = word[1:]
+        if letters.endswith("o"):
+            # -o NAME, or a cluster ending in o (set -euo pipefail): the next word is the option's name
+            if i + 1 >= len(words) or aop[i + 1] or words[i + 1] not in _CITECHK_SET_SAFE_NAMES:
+                return False
+            letters = letters[:-1]
+            i += 1
+        if not set(letters) <= _CITECHK_SET_SAFE_LETTERS:
+            return False
+        i += 1
+    return True
+
+
+def _citechk_tainted(words, aop, atl):
+    """Whether a segment's words hold an expansion or substitution (an opaque word) that may set a variable
+    through a name it computes (printf -v "$v", declare "$v=...", an arithmetic assignment to $v), other than
+    a clean leading ~ (~ or ~/x) and the braces of a group."""
+    for word, opaque, tilde in zip(words, aop, atl):
+        if opaque and word not in ("{", "}") and not (tilde and _LITERAL_TILDE_RE.match(word)
+                                                      and not _GENSRC_OPAQUE_RE.search(word)):
+            return True
+    return False
+
+
+def _citechk_dir_step(seg, words, subshell, last, run, context, tainted):
     """What one segment does to the shell's working directory, for _citechk_dirs: (None, None) where it
     leaves it, ("to", dirs) for a cd or pushd whose destination from each directory of run the walk
-    establishes (_gensrc_cd, where that change is certain), or ("unknown", reason) where it may change it
-    in a way the walk cannot follow. words is seg.argv; pipeline says the segment is a pipeline element or
-    ends in '&', which bash runs in a subshell, so a cd there moves nothing."""
+    establishes exactly as bash does (_gensrc_cd, where that change is certain), or ("unknown", reason) where
+    it may change it, or change what a later cd or command word does, in a way the walk cannot follow. words
+    is seg.argv; subshell says the segment is a pipeline element that a '|' follows or ends in '&', which
+    bash runs in a subshell, so nothing in it moves this shell; last says it is the last element of a
+    pipeline, which bash runs in this shell where lastpipe is on (set in this command or inherited), so a cd
+    there is not followed; tainted says an earlier segment, or a word of this one before its operand, holds an
+    expansion that may set HOME or CDPATH through a name it computes (_citechk_tainted)."""
     k = 0
     while k < len(words) and words[k] in _CITECHK_LEADING:
         k += 1
     pi = k + _command_word_index(words[k:])
+    if subshell:
+        return None, None
+    if _CITECHK_FUNSUB_RE.search(seg.raw):
+        return "unknown", _CITECHK_FUNSUB_WHY
+    if any("BASH_ALIASES" in word for word in words):
+        return "unknown", _CITECHK_ALIASES_WHY
     if pi >= len(words):
         return None, None
     if seg.argv_opaque[pi]:
-        return (None, None) if pipeline else (
-            "unknown", "a command word this check cannot read (an expansion or a substitution) may change the "
-                       "directory")
+        return "unknown", ("a command word this check cannot read (an expansion or a substitution) may change the "
+                           "directory")
     name = words[pi]
-    if name in _CITECHK_DIR_OPAQUE:
-        if pipeline or (name in ("builtin", "command") and not _CITECHK_CD_WORDS.intersection(words[pi + 1:])):
+    wrapped = None
+    while name in ("builtin", "command"):
+        # builtin and command run the word after their options (command -v and -V only name it): read through
+        # to that word, so command eval or builtin cd is judged as the word it runs.
+        wrapped = wrapped or name
+        pi += 1
+        while pi < len(words) and words[pi].startswith("-") and not seg.argv_opaque[pi]:
+            pi += 1
+        if pi >= len(words):
             return None, None
-        return "unknown", "{} may run a cd, pushd or popd this check does not read".format(name)
-    if name not in _CITECHK_CD_WORDS or pipeline:
+        if seg.argv_opaque[pi]:
+            return "unknown", "{} may run a word this check cannot read (an expansion or a substitution)".format(
+                wrapped)
+        name = words[pi]
+    if name in _CITECHK_DIR_OPAQUE:
+        return "unknown", _CITECHK_DIR_OPAQUE_WHY[name]
+    if name == "set" and not _citechk_set_safe(words[pi + 1:], seg.argv_opaque[pi + 1:]):
+        return "unknown", _CITECHK_SET_WHY
+    if name not in _CITECHK_CD_WORDS:
         return None, None  # a cd spelled with a path (/usr/bin/cd) runs as a program and moves no shell
     if k:
         return "unknown", "a {} inside a compound command (after {}) may or may not run".format(name, words[0])
+    if last:
+        return "unknown", _CITECHK_LASTPIPE_WHY.format(name)
+    if wrapped:
+        return "unknown", "{} may run a cd, pushd or popd this check does not read".format(wrapped)
     if name == "popd":
         return "unknown", "popd returns to a directory this check does not track"
+    # Exactly bash's grammar for the forms followed: cd [-L|-P]... [--] DIR and pushd DIR, one operand, nothing
+    # after it (bash 5 refuses a second word; an older bash ignores it), and no pushd option.
+    at = pi + 1
+    while name == "cd" and at < len(words) and not seg.argv_opaque[at] and re.match(r"-[LP]+\Z", words[at]):
+        at += 1
+    if name == "cd" and at < len(words) and words[at] == "--":
+        at += 1
+    if at != len(words) - 1 or words[at].startswith("-") or (name == "pushd" and words[at].startswith("+")):
+        return "unknown", _CITECHK_DIR_OPTIONS.format(name)
+    operand, opaque, tilde = words[at], seg.argv_opaque[at], seg.argv_leading_tilde[at]
+    if tilde and (context[4] != (True,) or tainted or _citechk_tainted(words[:at], seg.argv_opaque[:at],
+                                                                       seg.argv_leading_tilde[:at])):
+        return "unknown", _CITECHK_DIR_TILDE.format(name)
+    if not opaque and not os.path.isabs(operand) and operand not in (".", "..") and not operand.startswith(
+            ("./", "../")) and (tainted or _citechk_tainted(words[:at], seg.argv_opaque[:at],
+                                                            seg.argv_leading_tilde[:at])):
+        return "unknown", _CITECHK_DIR_CDPATH.format(name)
     dirs = []
     for base in run:
         if base is _CITECHK_DIR_UNKNOWN:
@@ -31904,15 +32047,24 @@ def _citechk_dirs(segments, cwd):
     where that is cwd and cwd is None), or (None, reason) where the walk cannot establish one directory.
     Bash's and-or lists are followed: after 'cd D &&' the next command runs in D, and a command reached
     past a cd through ';', a newline, '||' or a later '||' or '&&' that a failed or skipped cd can reach may
-    run in either directory, so it is not established (_CITECHK_DIR_SPLIT). A cd in a pipeline element or
-    a command ending in '&' moves nothing; a subshell '(...)' or command substitution '$(...)' keeps its
-    changes inside; a list ending in '&' leaves the next one in the directory it began in. Not established
-    (each reason named): a cd or pushd whose destination _gensrc_cd does not find certain, popd, a cd after
-    a reserved word ({, if, then, while, ...), an opaque command word, eval, source, '.', builtin or command
-    running a cd, an unmatched ')', more than _CITECHK_DIRS_MAX possible directories, and every segment from
-    the first loop or function definition on, in a command that also holds a command that can change the
-    directory (_CITECHK_DIR_LOOP), since a later iteration or call can run such a segment elsewhere. An alias, a
-    function defined in an earlier call, or a cd in a sourced file is not seen."""
+    run in either directory, so it is not established (_CITECHK_DIR_SPLIT). A cd in a pipeline element that
+    a '|' follows or in a command ending in '&' moves nothing; a subshell '(...)' or command substitution
+    '$(...)' keeps its changes inside; a list ending in '&' leaves the next one in the directory it began in.
+    Not established (each reason named; _citechk_dir_step): a cd or pushd in the last element of a pipeline
+    (lastpipe, set here or inherited, runs it in this shell); a cd with an option other than -L or -P, a word
+    after its operand or other than one operand, and a pushd with any option; a cd or pushd whose destination
+    _gensrc_cd does not find certain (an expansion, '-', CDPATH, -P or a '..' across a link); a ~ operand in a
+    command that spells HOME or after an expansion that may set it; a relative operand CDPATH may redirect
+    after such an expansion; popd; a cd after a reserved word ({, if, then, while, ...); an opaque command
+    word; eval, source, '.', trap, mapfile, readarray, fc, alias, unalias, enable, shopt and a set with an
+    option outside _CITECHK_SET_SAFE_LETTERS and _CITECHK_SET_SAFE_NAMES, also run through builtin or command;
+    a ${ cmd; } or ${| cmd; } substitution (it runs in this shell); a word spelling BASH_ALIASES; an unmatched
+    ')'; more than _CITECHK_DIRS_MAX possible directories; and every segment from the first loop or function
+    definition on, in a command that also holds a command that can change the directory (_CITECHK_DIR_LOOP),
+    since a later iteration or call can run such a segment elsewhere. Every segment after one of these, in
+    this shell, is not established either. What the shell brings with it is not seen: the walk assumes that
+    cd, pushd and popd are bash's builtins with no alias or function of that name defined before this call
+    (by a shell snapshot, a profile or BASH_ENV), and that HOME and CDPATH are those of the hook process."""
     unknown = _CITECHK_DIR_UNKNOWN
     def opens(argv):
         # a loop (its keyword, or a do, among the reserved words that begin the segment) or a function definition
@@ -31929,7 +32081,7 @@ def _citechk_dirs(segments, cwd):
     looped = None
     run = list_start = frozenset((cwd,))
     pass_s = pass_f = frozenset()  # directories a success or a failure carries past the next command
-    frames, why, prev, context = [], None, "", None
+    frames, why, prev, context, tainted = [], None, "", None, False
     for seg in segments:
         if looped is None and seg.argv and (opens(seg.argv) or (
                 len(seg.argv) == 1 and seg.sep_after == "(" and not seg.argv_opaque[0])):
@@ -31945,10 +32097,13 @@ def _citechk_dirs(segments, cwd):
         else:
             yield next(iter(run)), None
         sep = seg.sep_after
-        pipeline = prev in ("|", "|&") or sep in ("|", "|&", "&")
+        subshell = sep in ("|", "|&", "&")  # an element a '|' follows, or one ending in '&': a subshell
+        last = prev in ("|", "|&") and not subshell  # the last element: this shell's, under lastpipe
         if context is None and seg.argv and _CITECHK_CD_WORDS.intersection(seg.argv):
             context = _gensrc_cd_context(segments)
-        kind, value = _citechk_dir_step(seg, seg.argv, pipeline, run, context) if seg.argv else (None, None)
+        kind, value = _citechk_dir_step(seg, seg.argv, subshell, last, run, context, tainted) if seg.argv else (
+            None, None)
+        tainted = tainted or _citechk_tainted(seg.argv, seg.argv_opaque, seg.argv_leading_tilde)
         if kind == "to":
             done_s, done_f = value, run
         elif kind == "unknown":

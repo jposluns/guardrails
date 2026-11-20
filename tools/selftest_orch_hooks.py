@@ -8738,6 +8738,124 @@ def _citecheck_cd_cases(tmp):
     check("citeledger/cd-raw-scan-linear", taken, [(True, True, True), (True, True, True)])
 
 
+def _citecheck_cd_sound_cases(tmp):
+    """The directory walk treats a command's directory as established only where it can prove it
+    (_citechk_dirs, _citechk_dir_step): each construct that can leave bash in another directory than a plain
+    reading of the cd before the command gives is named as not judged, with its own reason, and the file of
+    that name in either directory is never read. Repository r holds tools/a.py, a msg.txt that cites nothing,
+    a sub/msg.txt that cites tools/a.py:1, an alt/sub/msg.txt that cites tools/a.py:2 (where a CDPATH of alt
+    sends cd sub) and a one.txt of one line (a mapfile input); nothing is read this session. Bash 5.3 runs
+    each git commit below in the other directory than the one the walk before this change read: the inherited
+    HOME is r while the command assigns sub to HOME (directly, or through printf -v of a name it computes); a
+    cd in the last element of a pipeline runs in this shell under lastpipe (set in the command, or inherited);
+    a cd inside a { } group in a pipeline element moves that element's commands; a DEBUG trap, a command or
+    builtin eval and a mapfile -C callback run a cd in this shell; an alias for cd (expand_aliases on, a later
+    line) runs true instead; a PS4 holding a ${ cmd; } substitution runs it in this shell under set -x; a
+    CDPATH set through printf -v sends cd sub to alt/sub; and, for a command scanned as written, a cd spelled
+    with quotes or run by a trap. The controls are still judged: a cd ~ under the inherited HOME alone, a cd
+    in a pipeline element a '|' follows, set -e and set -euo pipefail, cd -P --, an expansion after the cd,
+    and a raw command with no directory word."""
+    repo = _CiteRepo(tmp / "citecheck-cd-sound", {
+        "tools/a.py": b"a1\na2\n", "msg.txt": b"plain message\n", "sub/msg.txt": b"see tools/a.py:1\n",
+        "alt/sub/msg.txt": b"see tools/a.py:2\n", "one.txt": b"a\n"})
+    root, sub, alt = str(repo.root), str(repo.root / "sub"), str(repo.root / "alt")
+
+    def seen(command):
+        verdict, note, rows = _citecheck_run(repo.root, command, "cd-sound")
+        return (verdict, [(c["cite"], c["class"]) for r in rows for c in r["detail"]["citations"]],
+                [r["detail"]["sources"] for r in rows], [r["detail"].get("directory_unknown") for r in rows],
+                "was not judged: the directory its command runs in is not established" in note)
+
+    def unjudged(name, *args):
+        why = getattr(aiqt_hooks, name, "absent")
+        if isinstance(why, str) and args:
+            why = why.format(*args)
+        return ("warn", [], [[]], [why], True)
+    split_cmd = "git commit -F msg.txt <<E\\\nOF\nx\nEOF\n"
+    saved_home = os.environ.get("HOME")
+    try:
+        os.environ["HOME"] = root  # the inherited HOME: r, whose msg.txt cites nothing
+        cases = {
+            "HOME={}; cd ~ && git commit --allow-empty -F msg.txt".format(sub): unjudged("_CITECHK_DIR_TILDE", "cd"),
+            "v=HO; v+=ME; printf -v \"$v\" %s {}; cd ~ && git commit -F msg.txt".format(sub):
+                unjudged("_CITECHK_DIR_TILDE", "cd"),
+            "shopt -s lastpipe; true | cd sub; git commit --allow-empty -F msg.txt":
+                unjudged("_CITECHK_LASTPIPE_WHY", "cd"),
+            "true | cd sub && git commit -F msg.txt": unjudged("_CITECHK_LASTPIPE_WHY", "cd"),
+            "true | { cd sub; git commit -F msg.txt; }":
+                ("warn", [], [[]], ["a cd inside a compound command (after {) may or may not run"], True),
+            "trap 'cd sub' DEBUG; git commit -F msg.txt":
+                ("warn", [], [[]], [getattr(aiqt_hooks, "_CITECHK_DIR_OPAQUE_WHY", {}).get("trap")], True),
+            "command eval 'cd sub' && git commit -F msg.txt":
+                ("warn", [], [[]], [getattr(aiqt_hooks, "_CITECHK_DIR_OPAQUE_WHY", {}).get("eval")], True),
+            "builtin eval 'cd sub' && git commit -F msg.txt":
+                ("warn", [], [[]], [getattr(aiqt_hooks, "_CITECHK_DIR_OPAQUE_WHY", {}).get("eval")], True),
+            "mapfile -C 'cd sub #' -c 1 < one.txt && git commit -F msg.txt":
+                ("warn", [], [[]], [getattr(aiqt_hooks, "_CITECHK_DIR_OPAQUE_WHY", {}).get("mapfile")], True),
+            "shopt -s expand_aliases\nalias cd=true\ncd sub && git commit -F msg.txt":
+                ("warn", [], [[]], [getattr(aiqt_hooks, "_CITECHK_DIR_OPAQUE_WHY", {}).get("alias")], True),
+            "PS4='${ cd sub; }' && set -x && git commit -F msg.txt": unjudged("_CITECHK_SET_WHY"),
+            "PS4='${ cd sub; }' && git commit -F msg.txt": unjudged("_CITECHK_FUNSUB_WHY"),
+            "v=CD; v+=PATH; printf -v \"$v\" %s {}; cd sub && git commit -F msg.txt".format(alt):
+                unjudged("_CITECHK_DIR_CDPATH", "cd"),
+            "'cd' sub && " + split_cmd: ("warn", [], [["command text"]],
+                                         [getattr(aiqt_hooks, "_CITECHK_RAW_DIR_WHY", "absent")], True),
+            "trap 'cd sub' DEBUG; " + split_cmd: ("warn", [], [["command text"]],
+                                                  [getattr(aiqt_hooks, "_CITECHK_RAW_DIR_WHY", "absent")], True),
+        }
+        check("citeledger/cd-sound-not-established", {command: seen(command) for command in cases}, cases)
+        # The rest of the class, named as not judged too: a literal CDPATH, a pushd option, popd, a function
+        # definition, source, and the forms bash may resolve as the walk would but that it does not prove
+        # (a word after the operand, which bash 5 refuses and an older bash ignores; enable, which can take
+        # the cd builtin away; set -P).
+        destination = ("a cd whose destination this check cannot establish (no operand or more than one, '-', "
+                       "an expansion, a relative path with no absolute session cwd, CDPATH, a pushd option, -P "
+                       "or a '..' across a link)")
+        opaque_why = getattr(aiqt_hooks, "_CITECHK_DIR_OPAQUE_WHY", {})
+        rest = {
+            "CDPATH={} && cd sub && git commit -F msg.txt".format(alt): ("warn", [], [[]], [destination], True),
+            "pushd -n sub && git commit -F msg.txt": unjudged("_CITECHK_DIR_OPTIONS", "pushd"),
+            "popd && git commit -F msg.txt":
+                ("warn", [], [[]], ["popd returns to a directory this check does not track"], True),
+            "cd() { :; }; cd sub && git commit -F msg.txt": unjudged("_CITECHK_DIR_LOOP"),
+            "source ./env.sh && git commit -F msg.txt": ("warn", [], [[]], [opaque_why.get("source")], True),
+            "cd sub -P && git commit -F msg.txt": unjudged("_CITECHK_DIR_OPTIONS", "cd"),
+            "enable -n cd && cd sub && git commit -F msg.txt":
+                ("warn", [], [[]], [opaque_why.get("enable")], True),
+            "set -P && cd sub && git commit -F msg.txt": unjudged("_CITECHK_SET_WHY"),
+        }
+        check("citeledger/cd-sound-also-unjudged", {command: seen(command) for command in rest}, rest)
+        unread_sub = ("warn", [("tools/a.py:1", "unread")], [["-F msg.txt"]], [None], False)
+        controls = {
+            "cd sub | cat && git commit -F msg.txt": ("allow", [], [["-F msg.txt"]], [None], False),
+            "set -e && cd sub && git commit -F msg.txt": unread_sub,
+            "set -euo pipefail && cd sub && git commit -F msg.txt": unread_sub,
+            "cd -P -- sub && git commit -F msg.txt": unread_sub,
+            "cd sub && git commit -F msg.txt --author \"$A\"": unread_sub,
+            # scanned as written: it warns for its -F file, which that scan cannot read, never for its directory
+            split_cmd: ("warn", [], [["command text"]], [None], False),
+        }
+        got = {command: seen(command) for command in controls}
+        os.environ["HOME"] = sub  # with no word spelling HOME, ~ is read from the HOME the hook inherits
+        controls["cd ~ && git commit -F msg.txt"] = unread_sub
+        got["cd ~ && git commit -F msg.txt"] = seen("cd ~ && git commit -F msg.txt")
+        check("citeledger/cd-sound-plain-judged", got, controls)
+    finally:
+        if saved_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = saved_home
+    # The search for an expanded command word in a command scanned as written reads a run of newlines and a
+    # run of '{ ' openers in linear time, as the search for a directory word does (cd-raw-scan-linear).
+    search = getattr(aiqt_hooks, "_citechk_raw_dir", None)
+    taken = []
+    for text in ("git commit -m x <<E\\\nOF\n" + "\n" * (1 << 20), "git commit -m x <<E\\\nOF\n" + "{ " * (1 << 19)):
+        began = time.perf_counter()
+        found = None if search is None else search(text)
+        taken.append((search is not None, found, time.perf_counter() - began < 1.0))
+    check("citeledger/cd-sound-raw-linear", taken, [(True, False, True), (True, False, True)])
+
+
 class _CiteCutPattern:
     """Stands in for a compiled pattern of aiqt_hooks: match() is the pattern's own, and its cut-th call moves
     the stand-in clock set as clock on, so a scan that matches the pattern once per line reaches the
@@ -24436,6 +24554,7 @@ def _main_isolated(report_path=None):
             _citecheck_cross_cases(tmp)
             _citecheck_suffix_cases(tmp)
             _citecheck_cd_cases(tmp)
+            _citecheck_cd_sound_cases(tmp)
             _citeledger_walk_cases(tmp)
             _citecheck_step_cases(tmp)
             _citecheck_split_oracle_cases(tmp)
