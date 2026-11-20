@@ -684,7 +684,7 @@ def _validate_regenerate(regenerate):
         return None
     if len(parts) != 2 or parts[0] != "python3":
         return None
-    match = REGEN_RE.match(parts[1])
+    match = REGEN_RE.fullmatch(parts[1])
     return match.group(1) if match else None
 
 
@@ -2245,6 +2245,10 @@ def _self_test_main_isolated():
         _run_vector(cannot, failures, "off-grammar regenerate", lambda: _build_repo(
             tmp / "off-grammar", {"badcmd": _BADCMD}),
             expect_sweep(2, "off-grammar regenerate: expected fail-closed exit 2"))
+
+        # (g) The grammar is whole-value: a quoted path token ending in a newline is off the grammar.
+        if _validate_regenerate("python3 'tools/gen_x.py\n'") is not None:
+            failures.append("off-grammar regenerate: a path token with a trailing newline was accepted")
 
         # (h) Restoration: the synthetic real tree is byte-AND-mode identical after a normal run and after
         #     a run whose corrupted PROBE raises (the baseline succeeds first), and the raising run returns

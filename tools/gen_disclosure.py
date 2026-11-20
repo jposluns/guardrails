@@ -226,7 +226,7 @@ def validate(data):
         if unknown:
             raise ValueError("row {}: unknown key(s): {}".format(pos, ", ".join(sorted(unknown))))
         rid = _guard(row.get("id"), "row {} id".format(pos))
-        if not ID_RE.match(rid):
+        if not ID_RE.fullmatch(rid):
             raise ValueError("row {}: id {!r} must match [a-z0-9-]+".format(pos, rid))
         if rid in seen_ids:
             raise ValueError("row {}: duplicate id {!r}".format(pos, rid))
@@ -350,6 +350,8 @@ def _self_test():
         ("non-numeric port href", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": "https://host:notaport/x"}]}]}),
         ("hostless relative href", {**good, "row": [{**good["row"][0], "evidence": [{"text": "e", "href": "evidence#x"}]}]}),
         ("bad id chars", {**good, "row": [{**good["row"][0], "id": "Bad Id"}]}),
+        ("id with a trailing newline", {**good, "row": [good["row"][0], {**good["row"][0], "id": "extra\n"}]},
+         "must match [a-z0-9-]+"),
         ("duplicate id", {**good, "row": [good["row"][0], good["row"][0]]}),
         ("en dash", {**good, "row": [{**good["row"][0], "claim": "a" + EN + "b"}]}),
         ("placeholder", {**good, "row": [{**good["row"][0], "topic": PLACEHOLDER + "-D7]]"}]}),

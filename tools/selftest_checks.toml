@@ -3720,6 +3720,8 @@ expected-check-ids = [
   "mutant/link-outside-root-admitted-caught",
   "mutant/link-climb-above-root-admitted-caught",
   "mutant/listing-identity-unchecked-caught",
+  # ---------- a rule file name is matched whole (a trailing newline is a bad name) ----------
+  "name/aiqt-trailing-newline-bad-name",
   # ---------- the gate's own --root guard ----------
   "vector/every-vector-holds",
   "launch/nonexistent-root-cannot-evaluate",

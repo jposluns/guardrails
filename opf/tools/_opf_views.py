@@ -1567,7 +1567,7 @@ _MIRROR_RE = re.compile(r"^([A-Z0-9_]+)-INDEX\.md$")
 def _mirror_type(view_name):
     """The baseline type a `<TYPE>-INDEX.md` mirror name refers to (spec 10.1), or None when the name is
     not a mirror or names no baseline type."""
-    m = _MIRROR_RE.match(view_name)
+    m = _MIRROR_RE.fullmatch(view_name)
     if not m:
         return None
     type_name = m.group(1).lower()
@@ -2916,6 +2916,8 @@ def _self_test():
         # The positive mapping DISCRIMINATES the regex/baseline lookup: backlog_item IS a baseline type, so a
         # broken regex or baseline lookup flips it from "backlog_item" to None.
         check("mirror-type-resolves-record-type", _mirror_type("BACKLOG_ITEM-INDEX.md") == "backlog_item")
+        # A quoted TOML view key can end in "\n"; the mirror name is matched whole (fullmatch), never by $.
+        check("mirror-type-trailing-newline-rejected", _mirror_type("BACKLOG_ITEM-INDEX.md\n") is None)
         # The _LEDGER_SOURCES exclusion in _mirror_type IS load-bearing and needs its own discriminating
         # pin. "worklog" IS a key in _opf_schema.BASELINE_SPECS, so WITHOUT the exclusion
         # _mirror_type("WORKLOG-INDEX.md") would fall through to the baseline lookup and return "worklog" (a

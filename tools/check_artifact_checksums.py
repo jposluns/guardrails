@@ -30,7 +30,8 @@ is hashed against the working tree; older releases' recorded digests are neither
 by this gate (see RESIDUALS below):
   A1 each artifact key is a repo-relative path under site/downloads/; anything else is malformed (exit 2:
      the gate attests only the published tree).
-  A2 each value matches ^sha256:[0-9a-f]{64}$; a malformed or empty table is exit 2.
+  A2 each value is exactly sha256: and 64 lowercase hex (a full match, so a trailing newline, which a
+     `$` anchor under .match() would admit, is malformed too); a malformed or empty table is exit 2.
   A3 each named file exists and is readable; a missing or unreadable file is exit 2 (a check fails closed
      on input it cannot read, never "nothing to check").
   A4 the computed SHA-256 of the file equals the recorded value; a mismatch is exit 1, naming path,
@@ -105,7 +106,8 @@ from _gen_common import repo_root, load_toml  # noqa: E402
 
 ARTIFACT_ROOT = "site/downloads/"
 EVIDENCE_PATH = "site/evidence.html"
-# A well-formed recorded digest: the sha256 algorithm tag and 64 lowercase hex (A2).
+# A well-formed recorded digest: the sha256 algorithm tag and 64 lowercase hex (A2). Apply it with
+# fullmatch only: `$` also matches before a final newline, so .match() would admit "sha256:<hex>\n".
 DIGEST_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
 # A published full digest token on the evidence page (D1 dormant honesty; A5 raw-text match uses the hex).
 EVIDENCE_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -193,7 +195,7 @@ def validate_table(version, artifacts):
         if not isinstance(value, str):
             raise GateError("release {} artifact {!r} has a non-string digest {!r} (A2)".format(
                 version, path, value))
-        m = DIGEST_RE.match(value)
+        m = DIGEST_RE.fullmatch(value)
         if m is None:
             raise GateError("release {} artifact {!r} digest {!r} is not sha256 + 64 lowercase hex "
                             "(A2)".format(version, path, value))
@@ -455,6 +457,14 @@ def self_test_main(_mkdtemp=None, _vectors=True):
             (r / EVIDENCE_PATH).write_bytes(b"<html>\xff\xfe pending</html>")
             if _run_quiet(r) != 2:
                 failures.append("invalid-UTF-8 evidence.html expected fail-closed exit 2 (not a traceback)")
+
+            # 12. a correct digest followed by a newline (the TOML escape \n) -> exit 2 (A2). The file
+            #     and evidence page match, so a `$`-anchored .match() would pass this armed (exit 0).
+            newline = dict(good)
+            newline[zip_key] = good[zip_key] + "\\n"
+            r = _build(base_tmp / "armed-trailing-newline", [("1.0.0", newline)], evidence_armed, content)
+            if _run_quiet(r) != 2:
+                failures.append("a digest with a trailing newline expected fail-closed exit 2 (A2)")
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 

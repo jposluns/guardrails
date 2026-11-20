@@ -667,7 +667,7 @@ def is_versioned_zip(filename):
     The stable alias aiqt-skill.zip has no version segment, so it does not match. A backup, a 'v' prefix, a
     case variant or a suffix (aiqt-skill-backup.zip, AIQT-skill-1.0.5.zip, aiqt-skill-1.0.5.ZIP) does not
     match either; latest_only_problems refuses those as unrecognised skill entries."""
-    return _VERSIONED_ZIP.match(filename) is not None
+    return _VERSIONED_ZIP.fullmatch(filename) is not None
 
 
 def _is_regular(path):
@@ -2414,12 +2414,13 @@ def self_test_main():
         #    instructions file stays drifted), --check exits 1, each names the entry and git rm, and the
         #    entry is kept byte for byte. Removing the allow-list scan makes this leg fail (nothing else
         #    sees an extra entry); removing its normal-run exit-2 path makes the exit-2 assertion fail;
-        #    reverting to the old aiqt[-_]skill name-pattern scan fails on the last six names.
+        #    reverting to the old aiqt[-_]skill name-pattern scan fails on the last six names. A name ending
+        #    in a newline is not a versioned zip (is_versioned_zip uses fullmatch, since $ admits a final LF).
         foreign = ("aiqt-skill-0.0.0.zip", "aiqt-skill-backup.zip", "aiqt-skill-notes.zip",
                    "AIQT-skill-1.0.5.zip", "aiqt-skill-1.0.5.ZIP", "aiqt_skill-1.0.5.zip",
                    "aiqt-skill-latest.zip", "aiqt-skill-v1.0.5.zip", "aiqt-skill-1.0.5.zip.bak",
-                   ".aiqt-skill-1.0.5.zip", "aiqtskill-1.0.5.zip", "skill-aiqt-1.0.5.zip",
-                   "aiqt skill-1.0.5.zip", "aiqt\u2010skill-1.0.5.zip", "user-notes.txt")
+                   "aiqt-skill-1.0.5.zip\n", ".aiqt-skill-1.0.5.zip", "aiqtskill-1.0.5.zip",
+                   "skill-aiqt-1.0.5.zip", "aiqt skill-1.0.5.zip", "aiqt\u2010skill-1.0.5.zip", "user-notes.txt")
         for i, fn in enumerate(foreign):
             fx = tmp / "foreign{}".format(i)
             fx.mkdir()
