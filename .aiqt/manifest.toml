@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "c3959fdf6cb5fc89a46d45c937553971c3598803831fc3f2be94d6f13432b2fe"
+tree-sha256 = "59fc144655f6d7034bcb14ab0a02aac2116327c4d82a80c9262a1a72547ddc65"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -3142,8 +3142,8 @@ sha256 = "7e2a33aeb02898da84fbb3e9aa956f9618a676f21c10982e73475e400cb8fd37"
 
 [[sources]]
 path = "opf/tools/_child_status.py"
-bytes = 14704
-sha256 = "e6cfac395a640fa1ed1b4a6ad2e55af65f043a4866e42cbad31da8803327c67b"
+bytes = 16422
+sha256 = "0b3a873d05822fdb34fef0ca4dfe97dbc6334f8a500bbe3a3c0b4d0fc4d750c0"
 
 [[sources]]
 path = "opf/tools/_commonmark_headings.py"
@@ -3562,8 +3562,8 @@ sha256 = "5f13d71937d37efa09894c7176e98c1a94dbb2271143f155a56e051562b121bc"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1444208
-sha256 = "55526c18bda5a9036ad9c5f9580405d1f1a349b004ccc79da7856fc33ce299a2"
+bytes = 1457473
+sha256 = "1e4e1fc9a7ee1093c3098c807e6db3010b033084e05505f0d20ff25599f6b11f"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
@@ -4277,8 +4277,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 229032
-sha256 = "1443a965e10874116a36d7454c90e8360b39bbc2fab17faa20713f9e7c68d834"
+bytes = 231196
+sha256 = "68206156a803f8724f784e47e02f3b75e8a493dfe957d0240592c0362e3f487c"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4812,8 +4812,8 @@ sha256 = "f020224b8fcec06196b11729da9a87046c471d120bd674bf5fe6b967a5860021"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 286114
-sha256 = "08cdb506489bacbb1c43f14b77abdab0e0379157e2e3b904b6e1dddfbc887c7c"
+bytes = 286149
+sha256 = "c250bab49ea11a499b777d760b284a515d7df684a1638f814537db221b22ac83"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

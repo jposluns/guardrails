@@ -1665,6 +1665,48 @@ _DEADLINE_RECEIPT_ALLOWANCE = 1.0
 _WATCHDOG_LAUNCH_MARGIN = 30
 # The per-launch timeout of _watchdog_completion_case's launch() helper.
 _COMPLETION_LAUNCH_TIMEOUT = 10
+# premature-exit's per-launch timeout, sized from measurement: one of its
+# run_status_owned launches (an isolated interpreter that imports _opf_emit
+# and runs a one-line body) measured 0.45 s alone and 6.3 to 11.2 s (16
+# launches, median 6.45) with 24 busy loops on each of the 4 CPUs the launch
+# shared (2026-11-20), over the old flat 10 s, which that load reached and
+# read as a definite failure. 60 s is over 5x the measured worst. A launch
+# that still reaches it is no verdict (_WatchdogBoundReached), never a
+# failure: every refusal the leg asserts is a finished launch's outcome.
+_PREMATURE_EXIT_LAUNCH_TIMEOUT = 60
+
+
+class _WatchdogBoundReached(BaseException):
+    """A watchdog leg reached a bound that the behaviour under test does not
+    decide: a _watchdog_completion_case launch() that reached its own
+    process bound, or a setup wait (a fixture event the exercise needs
+    before it can judge anything) that reached its own. That run said
+    nothing about the behaviour its leg tests, so _watchdog_leg_entry
+    reports the leg as the distinct CANNOT-EVALUATE (the marker on a clean
+    exit), never a pass and never a finding. A BaseException, so no
+    assertion helper's `except` (refuses() included) can read it as the
+    refusal it expects. A guarded assertion never raises it."""
+
+
+def _watchdog_bounded_await(reached, bound, note, setup, pending=None, clock=None):
+    """Poll reached() every 5 ms until it holds or the monotonic clock (clock, for the
+    vectors) reaches bound. A SETUP wait, an event the exercise needs before it can judge
+    anything, that reaches its bound raises _WatchdogBoundReached (no verdict). A GUARDED
+    wait, the behaviour under test, that reaches its bound is a definite AssertionError
+    unless pending() observes the awaited outcome already decided (a SIGKILL pending on the
+    process whose exit is awaited), when only its scheduling remains: no verdict."""
+    import time
+    clock = time.monotonic if clock is None else clock
+    while not reached():
+        if clock() >= bound:
+            if setup:
+                raise _WatchdogBoundReached(note + ": a setup wait reached its bound")
+            assert pending is not None and pending(), note
+            raise _WatchdogBoundReached(note + ": its kill is observed pending; only its exit "
+                                               "was unscheduled at the bound")
+        time.sleep(0.005)
+
+
 # The tree legs' startup liveness backstop (nested-timeout/nested-cancel).
 # It is NOT the stimulus deadline: the stimulus (the guardian's expiry or
 # the cancel) is EVENT-ORDERED, mounted only at the first wait poll that
@@ -2915,7 +2957,14 @@ def _watchdog_leg_entry(budget, case, *args):
         _watchdog_install_charges()
     _WATCHDOG_LEDGERS.append(ledger)
     try:
-        rc = case(*args)
+        try:
+            rc = case(*args)
+        except _WatchdogBoundReached as reached:
+            # A launch or setup bound, not the behaviour under test, ended
+            # the leg: no verdict (the marker on this clean exit), never a
+            # pass. Any assertion that failed before it had already ended it.
+            print(_WATCHDOG_CANNOT_EVALUATE + " (" + str(reached) + ")")
+            rc = EXIT_OK  # the marker above makes this CANNOT-EVALUATE, not a pass
     finally:
         # Removal is by IDENTITY, never list.remove, which compares
         # dicts by VALUE: a nested leg whose ledger has no charges
@@ -4085,8 +4134,32 @@ def _watchdog_ledger_case(mode, budget):
     raise ValueError("unknown runtime ledger vector %r" % (mode,))
 
 
-def _watchdog_deadline_case(mode):
-    """Private subprocess: at-fork hooks cannot be unregistered, so never install them in the runner."""
+def _watchdog_deadline_verdict(result, execution_ok, cleanup_ok, reached, reaped, disarmed):
+    """One deadline fixture run's verdict, "pass", "fail" or "no-verdict", from what it
+    observed: the run_bounded result, the cancel latency and cleanup checks, whether the
+    subject reached its stall point (the started token), whether the owned child was
+    reaped, and whether a parent-deadline mode's child timer was disarmed at its arming
+    seam. The 0.25 s parent deadline starts before the fork, so a starved host can expire
+    it before the subject runs at all (at 24 busy loops on each of 4 shared CPUs every
+    transient-census run did, 2026-11-20: one cancel row, no child-timer row, no drain):
+    the stall, the census window and the drain under test were then never exercised.
+    That run is no verdict ONLY when the unreached stall point is its one failing part:
+    a wrong result, a late cancel, a cleanup overrun, an unreaped child, or a reached
+    stall point with the child timer still armed stays a definite failure."""
+    if result == "TIMEOUT" and execution_ok and cleanup_ok and reaped:
+        if reached and disarmed:
+            return "pass"
+        if not reached:
+            return "no-verdict"
+    return "fail"
+
+
+def _watchdog_deadline_case(mode, unestablished=None):
+    """Private subprocess: at-fork hooks cannot be unregistered, so never install them in the runner.
+    A run whose exercise was never established (the parent deadline expired before the subject
+    reached its stall point) with every other check holding is no verdict: as a leg (unestablished
+    None) it prints the _WATCHDOG_CANNOT_EVALUATE marker and returns EXIT_OK; an in-process caller
+    passes the value it reads that outcome as."""
     import signal
     import time
     from unittest.mock import patch
@@ -4127,9 +4200,25 @@ def _watchdog_deadline_case(mode):
         else:
             stall()
 
+    real_setitimer = signal.setitimer
+    parent_deadline_modes = ("pipe-stall", "exit-stall", "transient-census")
+
+    def disarmed_setitimer(which, seconds, *rest):
+        # Defeat the independent child timer AT ITS ARMING SITE (run_bounded's
+        # subject), never after it: disarming only inside the thunk left a
+        # window between the arm and the thunk's first statement, and a
+        # subject starved across that window could be killed by its own
+        # SIGALRM, so the PARENT deadline under test would not be the one that
+        # acted. The interception is recorded and required below: a run that
+        # reached its stall point without this record is a failure.
+        if os.getpid() != caller and which == signal.ITIMER_REAL and seconds:
+            record(["child-timer", seconds])
+            return real_setitimer(which, 0, *rest)
+        return real_setitimer(which, seconds, *rest)
+
     def thunk():
-        if mode in ("pipe-stall", "exit-stall", "transient-census"):
-            # Defeat the independent child timer deliberately: exercise the PARENT deadline.
+        if mode in parent_deadline_modes:
+            # Belt and braces: the timer was never armed (disarmed_setitimer).
             signal.setitimer(signal.ITIMER_REAL, 0)
             os.write(started_w, b"started")
             os.write(pipe[1], b"BUFFERED-TOKEN")
@@ -4168,13 +4257,16 @@ def _watchdog_deadline_case(mode):
                 return []
         return real_children()
 
-    result, elapsed, reaped = None, None, False
+    import contextlib
+    result, elapsed, reaped, ok, no_verdict = None, None, False, False, False
     try:
         start = time.monotonic()
         with patch.object(os, "fork", fork), patch.object(os, "pipe", capture_pipe), \
                 patch.object(_opf_emit, "_fixture_signal", cancel), \
                 patch.object(_opf_emit, "_fixture_drain", drain), \
-                patch.object(_opf_emit, "_fixture_children", census):
+                patch.object(_opf_emit, "_fixture_children", census), \
+                (patch.object(signal, "setitimer", disarmed_setitimer)
+                 if mode in parent_deadline_modes else contextlib.nullcontext()):
             # The thunk writes started_w and the guardian-side drain/cancel hooks
             # write the events file: both must be DECLARED under the fd allowlist.
             result = _opf_emit.run_bounded(thunk, timeout_s=_DEADLINE_CASE_TIMEOUT,
@@ -4196,22 +4288,39 @@ def _watchdog_deadline_case(mode):
                             [(cancelled or start) + _opf_emit._FIXTURE_CLEANUP_GRACE])
         cleanup_ok = (all(row[1] <= row[2] for row in drains)
                       and finished <= cleanup_limit + _DEADLINE_RECEIPT_ALLOWANCE)
-        if mode == "transient-census":
-            # The old combined 1.5 s assertion rejects this passing cleanup.
-            assert elapsed > 1.5 and drains, (elapsed, rows)
         # The helper owns cleanup. A diagnostic never sends another signal.
         reaped = _opf_emit._fixture_child_reaped(child[0])
         os.set_blocking(started_r, False)
-        reached = os.read(started_r, 200) == b"started"
-        ok = (result == "TIMEOUT" and execution_ok and cleanup_ok
-              and reached and reaped)
+        try:
+            reached = os.read(started_r, 200) == b"started"
+        except BlockingIOError:
+            reached = False  # nothing written: the stall point was never reached
+        # The parent-deadline modes must have reached the subject's timer
+        # arming seam (and had it disarmed there), so a run in which the
+        # child timer, not the parent deadline, could have acted is no pass.
+        disarmed = (mode not in parent_deadline_modes
+                    or any(row[0] == "child-timer" for row in rows))
+        if mode == "transient-census" and reached:
+            # The old combined 1.5 s assertion rejects this passing cleanup.
+            assert elapsed > 1.5 and drains, (elapsed, rows)
+        verdict = _watchdog_deadline_verdict(result, execution_ok, cleanup_ok, reached, reaped,
+                                             disarmed)
+        ok, no_verdict = verdict == "pass", verdict == "no-verdict"
     finally:
         os.close(started_r)
         os.close(started_w)
         events.close()
-    print("opf watchdog deadline:", mode, "PASS" if ok else "FAIL",
+    print("opf watchdog deadline:", mode, "PASS" if ok else (
+          "NO VERDICT" if no_verdict else "FAIL"),
           result, "execution", None if cancelled is None else cancelled - start,
-          "total", elapsed, "cleanup", cleanup_ok, "reaped", reaped)
+          "total", elapsed, "cleanup", cleanup_ok, "reaped", reaped,
+          "child-timer-disarmed", disarmed)
+    if no_verdict:
+        if unestablished is not None:
+            return unestablished
+        print(_WATCHDOG_CANNOT_EVALUATE + " (deadline/" + mode + ": the parent deadline expired "
+              "before the subject reached its stall point; rows " + json.dumps(rows) + ")")
+        return EXIT_OK  # the marker above makes this CANNOT-EVALUATE, not a pass
     return EXIT_OK if ok else EXIT_FINDING
 
 
@@ -5495,10 +5604,16 @@ def _watchdog_completion_case(mode, tree=None):
 
     command = [sys.executable, "-I", "-B", "-c", "return 0"]
 
-    def launch(code="return 0", **kwargs):
-        return emit.run_status_owned([*command[:4], code],
-                                     fixture_id="completion/" + mode,
-                                     timeout=_COMPLETION_LAUNCH_TIMEOUT, **kwargs)
+    def launch(code="return 0", bound=_COMPLETION_LAUNCH_TIMEOUT, **kwargs):
+        try:
+            return emit.run_status_owned([*command[:4], code],
+                                         fixture_id="completion/" + mode,
+                                         timeout=bound, **kwargs)
+        except subprocess.TimeoutExpired as exc:
+            # The launch reached its own bound, so it finished nothing the leg
+            # judges: no verdict (see _WatchdogBoundReached), never a failure.
+            raise _WatchdogBoundReached("completion/%s: a launch reached its %s s bound (%r)"
+                                         % (mode, bound, code)) from exc
 
     def refuses(error, call):
         try:
@@ -5623,11 +5738,11 @@ def _watchdog_completion_case(mode, tree=None):
             return real_run(thunk, **dict(
                 kwargs, timeout_s=_DEADLINE_EXECUTION_BOUND + 1))
         with patch.object(emit, "run_bounded", late):
-            assert _watchdog_deadline_case("pipe-stall") == EXIT_FINDING
+            assert _watchdog_deadline_case("pipe-stall", unestablished=EXIT_FINDING) == EXIT_FINDING
         import time
         with patch.object(emit, "_fixture_cleanup_deadline",
                           side_effect=lambda deadline=None: time.monotonic() - 1):
-            assert _watchdog_deadline_case("pipe-stall") == EXIT_FINDING
+            assert _watchdog_deadline_case("pipe-stall", unestablished=EXIT_FINDING) == EXIT_FINDING
         real_signal, first = emit._fixture_signal, [True]
         def census_only(*args, **kwargs):
             if first[0]:
@@ -5644,7 +5759,8 @@ def _watchdog_completion_case(mode, tree=None):
         runner_module = sys_module.modules[_watchdog_deadline_case.__module__]
         with patch.object(emit, "_fixture_signal", census_only), \
                 patch.object(runner_module, "_DEADLINE_EXECUTION_BOUND", 1.6):
-            assert _watchdog_deadline_case("transient-census") == EXIT_FINDING
+            assert _watchdog_deadline_case("transient-census",
+                                           unestablished=EXIT_FINDING) == EXIT_FINDING
     elif mode == "subject-setup":
         real_subreaper, real_setsid = emit._fixture_subreaper, os.setsid
         in_guardian = [False]
@@ -5785,12 +5901,13 @@ def _watchdog_completion_case(mode, tree=None):
                 refuses(emit.FixtureIncomplete, lambda: launch(env=env))
         refuses(emit.FixtureIncomplete, lambda: launch("import os; os._exit(0)"))
     elif mode == "premature-exit":
-        launch("return 0")  # normal-return control
+        bound = _PREMATURE_EXIT_LAUNCH_TIMEOUT
+        launch("return 0", bound)  # normal-return control
         for code in ("raise SystemExit()", "raise SystemExit(0)",
                      "raise RuntimeError('before postconditions')"):
-            refuses(emit.FixtureIncomplete, lambda: launch(code))
+            refuses(emit.FixtureIncomplete, lambda: launch(code, bound))
         # CLI exit-status subjects have an explicit, separately supervised path.
-        launch("raise SystemExit(2)", process_fixture=True, expected_returncode=2)
+        launch("raise SystemExit(2)", bound, process_fixture=True, expected_returncode=2)
     elif mode in ("nested-timeout", "nested-cancel"):
         verdict, cause = _watchdog_tree_case(mode, **(tree or {}))
         if verdict != "pass":
@@ -8287,11 +8404,29 @@ def _watchdog_completion_case(mode, tree=None):
                     return None
                 return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
 
-            def await_state(target, wanted, note):
-                bound = _watchdog_deadline(30)
-                while state(target) not in wanted:
-                    assert time.monotonic() < bound, note
-                    time.sleep(0.005)
+            def kill_pending(target):
+                # Whether SIGKILL is pending on target (its PR_SET_PDEATHSIG
+                # signal, sent by the kernel at the guardian's death): read
+                # from /proc, so the kill is an observed event, not a time.
+                try:
+                    lines = Path("/proc", str(target), "status").read_text(
+                        encoding="ascii").splitlines()
+                except (FileNotFoundError, ProcessLookupError):
+                    return False
+                mask = 0
+                for line in lines:
+                    name, _, value = line.partition(":")
+                    if name in ("SigPnd", "ShdPnd"):
+                        mask |= int(value.strip(), 16)
+                return bool(mask & (1 << (int(signal.SIGKILL) - 1)))
+
+            def await_state(target, wanted, note, setup=True):
+                # 30 s per wait: the whole leg (two exercises, every wait in
+                # it) measured 4.9 s alone and 52 to 57 s at 48 busy loops on
+                # each of 4 shared CPUs (2026-11-20).
+                _watchdog_bounded_await(lambda: state(target) in wanted, _watchdog_deadline(30),
+                                        "completion/escalate-degraded: " + note, setup,
+                                        lambda: kill_pending(target))
 
             def by_pid(child_self, failure):
                 # The pre-fix suffix chose by subject_pid and always claimed a
@@ -8312,11 +8447,9 @@ def _watchdog_completion_case(mode, tree=None):
                     child = emit._FixtureProcess(time.monotonic() + _WATCHDOG_FIXTURE_HOLD,
                                                  subject=lambda: time.sleep(3600))
                     child.start()
-                bound = _watchdog_deadline(30)
-                while not wedged.exists():
-                    assert time.monotonic() < bound, \
-                        "the guardian never reached its stop point"
-                    time.sleep(0.005)
+                _watchdog_bounded_await(wedged.exists, _watchdog_deadline(30),
+                                        "completion/escalate-degraded: the guardian never "
+                                        "reached its stop point", True)
                 gpid = int(wedged.read_text(encoding="ascii"))
                 assert gpid == child.pid, "the hook stopped an unexpected process"
                 await_state(gpid, ("T",), "the guardian did not stop")
@@ -8335,7 +8468,8 @@ def _watchdog_completion_case(mode, tree=None):
                 assert failures and "escalat" in failures[0], failures
                 assert child.subject_pid == subject, (child.subject_pid, subject)
                 await_state(subject, (None, "Z"),
-                            "the unacknowledged subject outlived the degraded escalation")
+                            "the unacknowledged subject outlived the degraded escalation",
+                            setup=False)
                 return failures[0]
 
             message = exercise(flip=False)
@@ -15826,6 +15960,96 @@ def _watchdog_run_legs(cases, launch):
     return EXIT_FINDING if failed else EXIT_OK
 
 
+def _watchdog_load_route_vectors():
+    """The load-sensitive-verdict routes, each red on its pre-fix rule: a bound that
+    host load reaches, and not the behaviour under test, ends a run as no verdict,
+    while every guarded outcome stays definite. Returns the discrepancies.
+
+    transient-census (and its deadline siblings): _watchdog_deadline_verdict reads an
+    unreached stall point, every other check holding, as no verdict (the pre-fix rule
+    failed it), and a wrong result, a late cancel, a cleanup overrun, an unreaped child or
+    a still-armed child timer as a failure. premature-exit: a launch that reached its bound
+    makes the real leg, run in process over a scripted run_status_owned, the
+    CANNOT-EVALUATE marker on a clean exit (pre-fix: the TimeoutExpired failed the leg),
+    while an accepted premature exit still fails it and every launch asks for the measured
+    _PREMATURE_EXIT_LAUNCH_TIMEOUT. escalate-degraded: _watchdog_bounded_await reads an
+    expired setup wait as no verdict (pre-fix: an AssertionError), an expired guarded wait
+    as an AssertionError, and the guarded wait whose kill is observed pending as no
+    verdict."""
+    import contextlib
+    import io
+    import subprocess
+    from unittest.mock import patch
+    import _opf_emit as emit
+    misses = []
+
+    def pre_fix_deadline(result, execution_ok, cleanup_ok, reached, reaped, disarmed):
+        return "pass" if (result == "TIMEOUT" and execution_ok and cleanup_ok and reached
+                          and reaped) else "fail"
+
+    for args, want in ((("TIMEOUT", True, True, False, True, False), "no-verdict"),
+                       (("TIMEOUT", True, True, False, True, True), "no-verdict"),
+                       (("TIMEOUT", True, True, False, False, False), "fail"),
+                       (("TIMEOUT", False, True, False, True, False), "fail"),
+                       (("TIMEOUT", True, False, False, True, False), "fail"),
+                       (("RETURNED", True, True, False, True, False), "fail"),
+                       (("TIMEOUT", True, True, True, True, False), "fail"),
+                       (("TIMEOUT", True, True, True, True, True), "pass")):
+        got = _watchdog_deadline_verdict(*args)
+        if got != want:
+            misses.append("deadline verdict %r -> %r, want %r" % (args, got, want))
+    if pre_fix_deadline("TIMEOUT", True, True, False, True, False) == "no-verdict":
+        misses.append("the deadline verdict vector does not discriminate the pre-fix rule")
+
+    def premature(script):
+        seen = []
+
+        def owned(argv, *, fixture_id, timeout, **kwargs):
+            seen.append(timeout)
+            step = script[min(len(seen), len(script)) - 1]
+            if step == "bound":
+                raise subprocess.TimeoutExpired(argv, timeout)
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        out = io.StringIO()
+        with patch.object(emit, "run_status_owned", owned), contextlib.redirect_stdout(out):
+            try:
+                rc = _watchdog_leg_entry(1, _watchdog_completion_case, "premature-exit")
+            except AssertionError:
+                return "fail", seen
+            except subprocess.TimeoutExpired:
+                return "raised-timeout", seen
+        return _watchdog_completion_verdict(rc, out.getvalue()), seen
+
+    for script, want in ((("bound",), "cannot-evaluate"), (("ok", "bound"), "cannot-evaluate"),
+                         (("ok",), "fail")):
+        got, seen = premature(script)
+        if got != want:
+            misses.append("premature-exit over launches %r -> %r, want %r" % (script, got, want))
+        if not seen or set(seen) != {_PREMATURE_EXIT_LAUNCH_TIMEOUT}:
+            misses.append("premature-exit launch bounds %r, want %r"
+                          % (seen, _PREMATURE_EXIT_LAUNCH_TIMEOUT))
+
+    def awaited(setup, pending, done=False):
+        ticks = iter((0.0, 100.0, 100.0))
+        try:
+            _watchdog_bounded_await(lambda: done, 10.0, "vector", setup, pending,
+                                    clock=lambda: next(ticks))
+        except _WatchdogBoundReached:
+            return "no-verdict"
+        except AssertionError:
+            return "fail"
+        return "reached"
+
+    for args, want in (((True, None), "no-verdict"), ((False, lambda: False), "fail"),
+                       ((False, None), "fail"), ((False, lambda: True), "no-verdict"),
+                       ((False, lambda: False, True), "reached")):
+        got = awaited(*args)
+        if got != want:
+            misses.append("bounded await %r -> %r, want %r" % (args[:1] + args[2:], got, want))
+    return misses
+
+
 def _watchdog_regression_self_test():
     """R10: startup/collection/exit bounds and the registered runner under hostile inherited state."""
     import ast
@@ -16011,7 +16235,9 @@ def _watchdog_regression_self_test():
     budgets.update(("completion-" + mode, seconds) for mode, seconds in (
         ("audit-ignore", 16), ("reaper", 42), ("nonce", 32), ("fixture-id", 32),
         ("status", 32), ("early-exit", 48), ("cleanup-reaped", 15), ("cleanup-cancel", 16),
-        ("premature-exit", 80),
+        # Five launches, each charged its allowance at the measured
+        # _PREMATURE_EXIT_LAUNCH_TIMEOUT (it was 5 x 16 = 80 at the flat 10 s).
+        ("premature-exit", 5 * _deadline_case_budget(_PREMATURE_EXIT_LAUNCH_TIMEOUT)),
         # The tree legs charge exactly one fixture launch at the startup
         # backstop (their stimulus is event-ordered; the backstop is the
         # only declared wait), so each budget IS that call's allowance,
@@ -16807,6 +17033,7 @@ def _watchdog_regression_self_test():
     # each derived path under a virtual clock, must fit that path's total
     # and reach each of its waits.
     flip_missed.extend(_watchdog_closeout_vectors())
+    flip_missed.extend(_watchdog_load_route_vectors())
     flip_missed.extend("startup diagnosis %r -> %r, want %r" % miss
                        for miss in _watchdog_startup_vectors())
     floor = _watchdog_bound_faults(live, budgets)
