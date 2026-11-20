@@ -1021,6 +1021,12 @@ jobs:
             python3 -I -B tools/check_branch_root.py --protected "origin/${GITHUB_REF_NAME}" --max-lag 200
           fi
 
+      # The committed-conflict-marker check runs at commit time (its --staged-scan mode, called by a
+      # pre-commit hook); CI runs its self-test over fixture repositories.
+      - name: Merge conflict markers self-test
+        shell: bash
+        run: python3 -I -B tools/check_merge_markers.py --self-test
+
       - name: Release delta self-test
         shell: bash
         run: python3 -I -B tools/check_release_delta.py --self-test

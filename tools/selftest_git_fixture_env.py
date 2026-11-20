@@ -5415,6 +5415,11 @@ _SCAN_ALLOWED_UNPINNED = (
     ("tools/check_branch_root.py", "_git", ("git",),
      "production gate probe over the real checkout (rev-parse/merge-base family reads under"
      " _git_env); read-only by design, and production launches stay unchanged"),
+    ("tools/check_merge_markers.py", "_git", ("git",),
+     "production commit-time gate read funnel under _git_env (rev-parse/cat-file/rev-list/"
+     " ls-files/ls-tree/check-attr/hash-object --stdin without -w, and merge-tree --write-tree,"
+     " which writes only unreferenced objects); never a maintenance-triggering subcommand, and"
+     " production launches stay unchanged"),
     ("tools/check_msg_leaks.py", "_run_git", ("git",),
      "production gate read helper (log/rev-parse over the real repository); read-only by"
      " design, and production launches stay unchanged"),
