@@ -58,6 +58,16 @@ suffix other than /files, /commits or /checks, a reference split inside a word, 
 added inside a blockquote that has a historical lead-in, and an issue claim (issue references are
 never read). A cue further back than the words directly before a claim is not seen, so that claim
 stays a finding. An imperative-looking `Open #N` at a clause start warns instead of finding.
+
+RUNNING TIME: every step that reads a document is meant to run in time linear in its size; the steps
+found growing faster (unclosed comment, link, anchor and quotation openers in the normalization, a line
+of list markers, lazy lines under many open list items, claims and joined references in one clause)
+read each stretch of text a bounded number of times. The self-test's growth rows time the whole check
+on twelve such shapes at two sizes and fail when a shape's quadratic form is put back; a shape they do
+not time is not shown to be linear. Remaining limits: each finding, warning and cannot-evaluate line
+quotes its whole clause or line, so n claims in one clause of length L print n * L characters and the
+run takes time in proportion to that output (quadratic in the worst case). Reading pull request state
+(tools/_pr_state.py) is outside these rows.
 """
 import sys
 
@@ -254,6 +264,8 @@ QUOTE_RE = re.compile(r" {0,3}>[ ]?(.*)")
 HEADING_RE = re.compile(r" {0,3}#{1,6}(?:\s+(.*))?$")
 # A list item: indentation and the space after the marker are spaces and tabs only (CommonMark).
 ITEM_RE = re.compile(r"[ \t]*(?:[-*+]|[0-9]{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?(.*)")
+# A list item's marker alone: its end is where ITEM_RE's text group starts.
+ITEM_MARKER_RE = re.compile(r"[ \t]*(?:[-*+]|[0-9]{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?")
 # Markdown indentation and blank lines are made of spaces and tabs only; any other whitespace (a
 # no-break space, for example) is text, so it never indents a line or makes it a fence.
 MD_SPACE = " \t"
@@ -354,15 +366,19 @@ def _content_column(text, match):
     return len(text[:match.start(1)].expandtabs(4))
 
 
-# The scanning work of the block classifier, in characters read for backtick runs plus lines stepped
-# over by the paragraph and comment scans (_backtick_runs, _paragraph_ends, _interrupts_paragraph). The
-# self-test reads it to show that classifying a document is linear in its size.
-SCAN_WORK = [0]
+def _expanded_past(length, column, piece):
+    """(length, column) after piece, continuing str.expandtabs(4) from an expansion of that length that
+    ends at that column (a tab advances to the next multiple of four; a carriage return or line feed
+    starts the column again), so len(text[:end].expandtabs(4)) is read in pieces, each read once."""
+    pad = column % 4
+    expanded = ("x" * pad + piece).expandtabs(4) if "\t" in piece else "x" * pad + piece
+    cut = max(expanded.rfind("\r"), expanded.rfind("\n"))
+    return (length + len(expanded) - pad,
+            column - pad + len(expanded) if cut < 0 else len(expanded) - cut - 1)
 
 
 def _backtick_runs(text):
     """[(start, end)] for the maximal backtick runs of text: the one place text is read for them."""
-    SCAN_WORK[0] += len(text) + 1
     return [(match.start(), match.end()) for match in BACKTICK_RUN_RE.finditer(text)]
 
 
@@ -422,10 +438,15 @@ def _comment_start(text):
 PARAGRAPH_CODE_SPANS = True
 
 
+def _ends_comment_search(line):
+    """True for a line no inline comment runs past: a blank line or a line that starts a fence, heading,
+    blockquote or list item (_interrupts_paragraph). The closer search stops there."""
+    return _blank(line) or _interrupts_paragraph(line)
+
+
 def _paragraph_ends(line):
     """True for a line that ends the paragraph read for code spans: a blank line, a line that starts a
     fence, heading, blockquote or list item, or a line that opens an HTML comment block."""
-    SCAN_WORK[0] += 1
     return _blank(line) or _interrupts_paragraph(line) or line.lstrip(MD_SPACE).startswith("<!--")
 
 
@@ -467,9 +488,12 @@ def _rescanning_comment_start(scan, first, index, text):
 
 
 class _ParagraphScan:
-    """The paragraph-wide readings block_context makes, each built in one pass, so a line that holds an
-    inline comment opener costs work in proportion to that line, not to its paragraph: a paragraph of n
-    such lines is read in O(n), never O(n^2).
+    """The paragraph-wide readings block_context makes, each built in one pass, so the inline comment
+    openers of a paragraph together cost work in proportion to the paragraph: a paragraph of n such
+    lines is read in O(n), never O(n^2). The cost is linear in total, not per opener: an opener that
+    follows a change of paragraph or of raw run pays for reading the earlier kept lines (_follow) or
+    for finding the first literal again (_first_alive). The self-test's growth rows time the whole
+    check on four paragraph shapes of such lines.
 
     closer(index): the line whose `-->` closes an inline comment opened on line index (the first later
     line holding one before a blank line or a line that starts a fence, heading, blockquote or list
@@ -518,7 +542,7 @@ class _ParagraphScan:
         for index in range(count - 1, -1, -1):
             self._closer[index] = after
             line = lines[index]
-            if _blank(line) or _interrupts_paragraph(line):
+            if _ends_comment_search(line):
                 after = -1
             elif "-->" in line:
                 after = index
@@ -645,24 +669,32 @@ def _delimiter_row(line):
 def _interrupts_paragraph(line):
     """True for a line that starts a block and so ends a paragraph: an inline HTML comment does not run
     past it."""
-    SCAN_WORK[0] += 1
     body = line.lstrip(MD_SPACE)
     return (FENCE_OPEN_RE.match(body) is not None or HEADING_RE.match(body) is not None
             or QUOTE_RE.match(body) is not None or ITEM_RE.match(body) is not None)
+
+
+def _open_items(items, indent):
+    """The content columns of items (ascending) at most indent: the open items a line so indented stays
+    inside."""
+    return items[:bisect.bisect_right(items, indent)]
 
 
 def _list_block_opener(text, nested):
     """(item content columns, block) when text is a list item line (or a run of markers: `- 1. `) whose
     content opens a fence or an HTML comment block, else None: the block opens inside the innermost
     item, at its content column; nested holds the content columns of the enclosing open items."""
-    item = ITEM_RE.match(text)
+    # Each marker is matched without the rest of the line (ITEM_MARKER_RE) and its content column is
+    # carried on from the previous one (_expanded_past), so a line of n markers is read in O(n).
+    item = ITEM_MARKER_RE.match(text)
     if item is None:
         return None
-    chain, at = nested + [_content_column(text, item)], item.start(1)
-    deeper = ITEM_RE.match(text, at)
-    while deeper is not None and deeper.start(1) > at:
-        chain, at = chain + [_content_column(text, deeper)], deeper.start(1)
-        deeper = ITEM_RE.match(text, at)
+    chain, at, length, column = list(nested), 0, 0, 0
+    while item is not None and item.end() > at:
+        length, column = _expanded_past(length, column, text[at:item.end()])
+        chain.append(length)
+        at = item.end()
+        item = ITEM_MARKER_RE.match(text, at)
     opener = _fence_opener(text, at)
     if opener is not None:
         return chain, (FENCE, opener.group(1), chain[-1], _example_fence(text, opener))
@@ -785,7 +817,10 @@ def block_context(lines):
             kinds.append((BLANK, ""))
             continue
         lead = _lead(text)
-        nested = [column for column in items if column <= indent]
+        # items ascends (an item's content column is past every column it nests in), so the items this
+        # line stays inside are a prefix, found by bisection: a lazy line under n open items costs
+        # O(log n) plus the items it keeps (fewer than its indent), not O(n).
+        nested = _open_items(items, indent)
         column = nested[-1] if nested else 0
         if not para:
             items = nested
@@ -1124,14 +1159,22 @@ STRAIGHT_SPAN = r"'(?:[^']|'(?=\w))*'(?!\w)"
 BACKTICK_SPAN = r"(?P<tick>`+)(?!`)[^`]*(?<!`)(?P=tick)(?!`)"
 
 
+# A historical lead-in before a quoted span, up to where the span must start.
+HISTORY_SPAN_LEAD = (r"(?i)\b(?:previously recorded|earlier note|the old note read|old note read|was recorded as|"
+                     r"previously read)\s*:?\s*")
+
+
 def _history_span_re(straight, backtick=BACKTICK_SPAN):
     return re.compile(
-        r"(?i)\b(?:previously recorded|earlier note|the old note read|old note read|was recorded as|"
-        r"previously read)\s*:?\s*(?:\u201c[^\u201d]*\u201d|\"[^\"]*\"|" + backtick + r"|\u2018[^\u2019]*\u2019"
+        HISTORY_SPAN_LEAD + r"(?:\u201c[^\u201d]*\u201d|\"[^\"]*\"|" + backtick + r"|\u2018[^\u2019]*\u2019"
         r"|" + straight + r")")
 
 
 HISTORY_SPAN_RE = _history_span_re(STRAIGHT_SPAN)
+HISTORY_SPAN_LEAD_RE = re.compile(HISTORY_SPAN_LEAD)
+# Where a straight single-quoted span after a lead-in ends (STRAIGHT_SPAN): the first quote no word
+# character follows.
+STRAIGHT_SPAN_END_RE = re.compile(r"'(?!\w)")
 CLAUSE_SPLIT_RE = re.compile(r"[;:!?\u00a6]|\.(?=\s|$)|\s[\u2013\u2014]\s|\s-\s")
 # A status cell keeps its colon (In progress: #17) inside one clause.
 STATUS_CLAUSE_SPLIT_RE = re.compile(r"[;!?\u00a6]|\.(?=\s|$)|\s[\u2013\u2014]\s|\s-\s")
@@ -1192,13 +1235,153 @@ def _issue(match):
     return match.group(0).replace("#", "\ue003")
 
 
+HTML_COMMENT_RE = re.compile(r"<!--.*?-->")
+MARKDOWN_LINK_RE = re.compile(r"!?\[([^\]]*)\]\(\s*<?([^\s()<>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)")
+# An HTML anchor's opening tag; HTML_LINK_RE is it, then the anchor text up to `</a>` on the same line.
+HTML_ANCHOR_TAG = r"(?i)<a\s+[^>]*?\bhref\s*=\s*[\"']([^\"'\s<>]+)[\"'][^>]*>"
+HTML_ANCHOR_TAG_RE = re.compile(HTML_ANCHOR_TAG)
+HTML_LINK_RE = re.compile(HTML_ANCHOR_TAG + r"(.*?)</a\s*>")
+HTML_ANCHOR_OPEN_RE = re.compile(r"(?i)<a\s")
+
+
+# Each step regex below can fail at many starts that all scan the same stretch of text (n unclosed `<!--`
+# on one line each scan to the line's end), quadratic in the text when the regex is run as it stands.
+# Its finder yields exactly the matches regex.finditer yields, in order, as the real Match objects
+# (regex.match at each start it finds), but tries the regex only at a start where it can match or
+# where no earlier start has scanned the same stretch: a failed start shows every start it covers fails
+# too, so each character is read a bounded number of times and a text is normalized in linear time.
+
+def _html_comment_matches(text):
+    """HTML_COMMENT_RE.finditer(text): the first `-->` after a `<!--`, on its line. A `<!--` with none
+    shows every later `<!--` on that line has none either (its search is a part of the first one's)."""
+    position, line_end = 0, -1
+    while True:
+        start = text.find("<!--", position)
+        if start < 0:
+            return
+        if line_end < start:
+            line_end = text.find("\n", start)
+            line_end = len(text) if line_end < 0 else line_end
+        end = text.find("-->", start + 4, line_end)
+        if end < 0:
+            position = line_end + 1
+            continue
+        found = HTML_COMMENT_RE.match(text, start)
+        yield found
+        position = found.end()
+
+
+def _markdown_link_matches(text):
+    """MARKDOWN_LINK_RE.finditer(text). A `[` can only close at the first `]` after it, so when the link
+    after that `]` does not match, no `[` before it opens one either; the search goes on after it."""
+    position = 0
+    while True:
+        bracket = text.find("[", position)
+        if bracket < 0:
+            return
+        close = text.find("]", bracket + 1)
+        if close < 0:
+            return
+        start = bracket - 1 if bracket > position and text[bracket - 1] == "!" else bracket
+        found = MARKDOWN_LINK_RE.match(text, start)
+        if found is None:
+            position = close + 1
+            continue
+        yield found
+        position = found.end()
+
+
+def _html_link_matches(text):
+    """HTML_LINK_RE.finditer(text). An anchor tag ends at the first `>` after its `<a`, so a failed start
+    shows every `<a` before that `>` fails too; and when the tag matches but its line has no `</a>`,
+    every later tag ending on that line fails as well (its search is a part of the first one's)."""
+    position, no_close_before = 0, -1
+    while True:
+        opener = HTML_ANCHOR_OPEN_RE.search(text, position)
+        if opener is None:
+            return
+        start = opener.start()
+        tag_end = text.find(">", start)
+        if tag_end < 0:
+            return
+        if tag_end >= no_close_before:
+            found = HTML_LINK_RE.match(text, start)
+            if found is not None:
+                yield found
+                position = found.end()
+                continue
+            if HTML_ANCHOR_TAG_RE.match(text, start) is not None:
+                line_end = text.find("\n", tag_end + 1)
+                no_close_before = len(text) if line_end < 0 else line_end
+        position = tag_end + 1
+
+
+def _history_span_matches(text):
+    """HISTORY_SPAN_RE.finditer(text). A span starts right after its lead-in, and the quotation mark
+    there decides where it can end; that end is found once and reused for every later lead-in before it,
+    so n lead-ins before one unclosed quotation mark read it once, not n times."""
+    ends = {}   # the closing mark sought -> (searched from, found at or -1)
+
+    def end_after(key, start):
+        searched, found = ends.get(key, (len(text) + 1, -1))
+        if not (searched <= start and (found < 0 or found >= start)):
+            if key == "'":
+                hit = STRAIGHT_SPAN_END_RE.search(text, start)
+                found = -1 if hit is None else hit.start()
+            else:
+                found = text.find(key, start)
+            ends[key] = (start, found)
+        return found
+
+    position = 0
+    while True:
+        lead = HISTORY_SPAN_LEAD_RE.search(text, position)
+        if lead is None:
+            return
+        at = lead.end()
+        mark = text[at:at + 1]
+        closer = {"\u201c": "\u201d", "\"": "\"", "\u2018": "\u2019", "'": "'"}.get(mark)
+        if mark == "`" or (closer is not None and end_after(closer, at + 1) >= 0):
+            found = HISTORY_SPAN_RE.match(text, lead.start())
+            if found is not None:
+                yield found
+                position = found.end()
+                continue
+        position = max(at, lead.start() + 1)
+
+
+# The step regexes read through a finder (above) rather than run as they stand (True). The self-test
+# sets it False, running each regex as it stands, for the growth rows' red legs.
+LINEAR_FINDERS = True
+STEP_FINDERS = {HTML_COMMENT_RE: _html_comment_matches, MARKDOWN_LINK_RE: _markdown_link_matches,
+                HTML_LINK_RE: _html_link_matches, HISTORY_SPAN_RE: _history_span_matches}
+
+
+def _step_matches(regex, text):
+    """regex.finditer(text), through its finder when it has one (STEP_FINDERS)."""
+    finder = STEP_FINDERS.get(regex) if LINEAR_FINDERS else None
+    return regex.finditer(text) if finder is None else finder(text)
+
+
+def _step_sub(regex, replacement, text):
+    """regex.sub(replacement, text), with the matches _step_matches gives."""
+    if not LINEAR_FINDERS or regex not in STEP_FINDERS:
+        return regex.sub(replacement, text)
+    pieces, last = [], 0
+    for found in _step_matches(regex, text):
+        pieces.extend((text[last:found.start()],
+                       replacement(found) if callable(replacement) else found.expand(replacement)))
+        last = found.end()
+    pieces.append(text[last:])
+    return "".join(pieces)
+
+
 # The normalization steps tokenize applies, in order, before pull request references are found:
 # (name, regex, replacement). The self-test removes one at a time by name (red-when-reverted).
 NORMALIZE = (
-    ("html-comment", re.compile(r"<!--.*?-->"), " "),
-    ("markdown-link", re.compile(r"!?\[([^\]]*)\]\(\s*<?([^\s()<>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)"),
-     _link),
-    ("html-link", re.compile(r"(?i)<a\s+[^>]*?\bhref\s*=\s*[\"']([^\"'\s<>]+)[\"'][^>]*>(.*?)</a\s*>"), _html_link),
+    ("html-comment", HTML_COMMENT_RE, " "),
+    ("markdown-link", MARKDOWN_LINK_RE, _link),
+    ("html-link", HTML_LINK_RE, _html_link),
     # A bracket that is not a link ([#17] with no definition) is text: its brackets are dropped.
     ("bracket", re.compile(r"\[([^\[\]]*)\]"), r" \1 "),
     # A curly apostrophe inside a word (isn\u2019t, we\u2019d) is an apostrophe, not a closing quotation mark.
@@ -1283,7 +1466,7 @@ def _masked_sub(regex, replacement, text, flags, outside_code):
     if outside_code:
         view = "".join(CODE_FILLER if flag else char for char, flag in zip(text, flags))
     pieces, out_flags, last = [], bytearray(), 0
-    for found in regex.finditer(view):
+    for found in _step_matches(regex, view):
         new_text, new_flags = _replacement(_RealMatch(found, text), replacement, flags)
         pieces.extend((text[last:found.start()], new_text))
         out_flags += flags[last:found.start()] + new_flags
@@ -1313,7 +1496,7 @@ def _normalize(text, skips=()):
         if name in skips:
             continue
         if flags is None:
-            text = regex.sub(replacement, text)
+            text = _step_sub(regex, replacement, text)
         else:
             text, flags = _masked_sub(regex, replacement, text, flags, name in CODE_SPAN_INERT_STEPS)
     return text
@@ -1398,20 +1581,53 @@ def tokenize(prose, context="prose"):
     return [clause for clause in clauses if clause], refs
 
 
-def _words_before(clause, start):
-    return [word.lower() for word in re.findall(r"[A-Za-z]+", clause[:start])]
+WORD_RE = re.compile(r"[A-Za-z]+")
+
+
+class _ClauseWords:
+    """The words of one clause (runs of ASCII letters, lowercased), read once: backwards(start) gives the
+    words of clause[:start], last first, without reading the clause again, so a clause with n claims is
+    read once, not n times."""
+
+    def __init__(self, clause):
+        self.clause = clause
+        found = list(WORD_RE.finditer(clause))
+        self.starts = [match.start() for match in found]
+        self.ends = [match.end() for match in found]
+        self.words = [match.group(0).lower() for match in found]
+
+    def backwards(self, start):
+        for index in range(bisect.bisect_left(self.starts, start) - 1, -1, -1):
+            if self.ends[index] > start:   # a word that start cuts: its part before start
+                yield self.clause[self.starts[index]:start].lower()
+            else:
+                yield self.words[index]
+
+
+_CLAUSE_WORDS = [None]
+
+
+def _clause_words(clause):
+    """The _ClauseWords of clause, kept for the clause find_candidates is reading."""
+    held = _CLAUSE_WORDS[0]
+    if held is None or held.clause is not clause:
+        held = _CLAUSE_WORDS[0] = _ClauseWords(clause)
+    return held
 
 
 def _instruction_before(clause, start):
-    words = _words_before(clause, start)
-    return bool(words) and words[-1] in INSTRUCTION_WORDS
+    last = next(_clause_words(clause).backwards(start), None)
+    return last is not None and last in INSTRUCTION_WORDS
 
 
 def _imperative_open(clause, start):
     """True when `open #N` starts its clause or follows a comma (Open #17 to see it; To review it,
-    open #17): an instruction as likely as a claim, so it warns rather than finds."""
-    before = clause[:start].rstrip()
-    return before == "" or before.endswith(",")
+    open #17): an instruction as likely as a claim, so it warns rather than finds. Only the white space
+    directly before start is read."""
+    at = start
+    while at > 0 and clause[at - 1].isspace():
+        at -= 1
+    return at == 0 or clause[at - 1] == ","
 
 
 def _cue_before(clause, start):
@@ -1420,12 +1636,55 @@ def _cue_before(clause, start):
     waiting", "Neither #16 nor #17 is open", "If #17 is still open", "no pending PRs". The cue never
     exempts a claim; it makes it a warning. Present perfect with no cue ("have been waiting", "it's
     been waiting") has none, so it stays a finding."""
-    for word in reversed(_words_before(clause, start)):
+    for word in _clause_words(clause).backwards(start):
         if word in CUES:
             return word
         if word not in CUE_PASSES:
             return None
     return None
+
+
+# The separator between two references of one LIST, as LIST spells it.
+LIST_SEPARATOR_RE = re.compile(r"\s*,\s*(?:and\s+|or\s+)?|\s+(?:and|or|&)\s+", re.I)
+# A rule whose regex starts with LIST is tried only at the first reference of each run of joined
+# references (True). The self-test sets it False, running the regex as it stands, for a growth row's red
+# leg.
+LIST_RUN_STARTS = True
+
+
+def _claim_matches(regex, clause):
+    """regex.finditer(clause). A regex that starts with LIST is tried at each reference, and fails at a
+    reference in a run of n joined ones (#1, #2 and #3) only after reading the run to its end, so a
+    clause holding such a run would cost O(n^2). Whatever LIST can match from a later reference of the
+    run it can match from an earlier one too, so when the regex fails at a reference it fails at every
+    reference joined after it; those are passed over, and each run is read once."""
+    list_first = _LIST_FIRST.get(regex)
+    if list_first is None:
+        list_first = _LIST_FIRST[regex] = regex.pattern.startswith(LIST) and bool(regex.flags & re.I)
+    if not LIST_RUN_STARTS or not list_first:
+        return regex.finditer(clause)
+    return _list_run_matches(regex, clause)
+
+
+_LIST_FIRST = {}   # regex -> whether it starts with LIST (and, as LIST_SEPARATOR_RE, ignores case)
+
+
+def _list_run_matches(regex, clause):
+    """_claim_matches for a regex that starts with LIST."""
+    position, failed_end = 0, -1   # failed_end: the end of the last reference the regex failed at
+    for mark in REF_MARK_RE.finditer(clause):
+        if mark.start() < position:
+            continue
+        if failed_end >= 0 and LIST_SEPARATOR_RE.fullmatch(clause, failed_end, mark.start()):
+            failed_end = mark.end()
+            continue
+        found = regex.match(clause, mark.start())
+        if found is None:
+            failed_end = mark.end()
+            continue
+        failed_end = -1
+        yield found
+        position = found.end()
 
 
 def find_candidates(prose, context):
@@ -1440,7 +1699,7 @@ def find_candidates(prose, context):
         for rule, kind, phrase, regex, contexts in PATTERNS:
             if contexts is not None and context not in contexts:
                 continue
-            for match in regex.finditer(clause):
+            for match in _claim_matches(regex, clause):
                 hit_kind, hit_phrase = kind, phrase
                 if rule == "open-lead" and _instruction_before(clause, match.start()):
                     continue
@@ -2333,7 +2592,8 @@ def _code_span_rows(m):
         ok = code == 0 and t.calls == [] and not res.hard and (warned if not replacements else not res.warnings)
         check(name, ok, (code, t.calls, res.hard, res.warnings))
     _code_span_binding_rows(m)
-    _linear_scan_rows(m)
+    _growth_rows(m)
+    _closer_search_rows()
 
 
 def _autolink_steps_before_formatting():
@@ -2431,22 +2691,60 @@ def _code_span_binding_rows(m):
         check(closed_name, ok, detail)
 
 
-# The repeat counts of each paragraph shape _linear_scan_rows classifies.
-SCAN_LINES = (100, 400)
-# The most SCAN_WORK may grow from the smaller input to the larger (four times the size): linear
-# classification grows about fourfold, the rescanning reading about sixteenfold.
-SCAN_GROWTH_LIMIT = 6
 # Classification inputs read both ways: deterministic mixes of these pieces, plus the self-test's own
 # wrapped-opener rows.
 SCAN_PIECES = ("`", "``", "```", "<!--", "-->", "a ", "\n", "\n", "\n    > ", "\n<!-- x --> a", "x <!-- y",
                "--> z", "`a", "b`", "``c", " <!-- q --> ", "\n| a |", "\n- ", "\n\n", "PR #17 is pending")
+# The growth rows time the whole check (_judge) on each shape at two sizes, GROWTH_FACTOR apart. Linear
+# work grows about GROWTH_FACTOR times, quadratic work about its square; a row passes when the time grows
+# at most GROWTH_LIMIT times (twice the linear growth), and its red leg, the quadratic form put back,
+# must grow more. Each time is the fastest of GROWTH_REPEATS runs, so a pause in one run does not count.
+# The rows time real runs: on a machine busy enough to slow every run of one size and none of the
+# other, a row can still fail without a quadratic step (the self-test reports its times).
+GROWTH_FACTOR = 8
+GROWTH_LIMIT = 16
+GROWTH_REPEATS = 5
+GROWTH_CLAIM = "PR #17 is pending\n"
 
 
-def _scan_work(text):
-    """The SCAN_WORK block_context spends classifying text."""
-    SCAN_WORK[0] = 0
-    block_context(text.split("\n"))
-    return SCAN_WORK[0]
+def _rescanning_list_block_opener(text, nested):
+    """_list_block_opener as it was: each marker matched with the rest of its line and its content column
+    read from the line's start, quadratic in a line's markers (a growth row's red leg)."""
+    item = ITEM_RE.match(text)
+    if item is None:
+        return None
+    chain, at = nested + [_content_column(text, item)], item.start(1)
+    deeper = ITEM_RE.match(text, at)
+    while deeper is not None and deeper.start(1) > at:
+        chain, at = chain + [_content_column(text, deeper)], deeper.start(1)
+        deeper = ITEM_RE.match(text, at)
+    opener = _fence_opener(text, at)
+    if opener is not None:
+        return chain, (FENCE, opener.group(1), chain[-1], _example_fence(text, opener))
+    if text.startswith("<!--", at) and _comment_start(text) == at:
+        return chain, (COMMENT, None, chain[-1], False)
+    return None
+
+
+def _every_open_item(items, indent):
+    """_open_items as it was: every open item read at every line (a growth row's red leg)."""
+    return [column for column in items if column <= indent]
+
+
+def _growth(text_of, n, state):
+    """(growth, [seconds at n, seconds at GROWTH_FACTOR * n]) for the whole check on text_of's shape."""
+    import time
+    table = {(REPO, 17): state}
+    texts = [text_of(n), text_of(GROWTH_FACTOR * n)]
+    seconds = [None, None]
+    # The two sizes are timed in turn, so a pause that lasts a while slows runs of both.
+    for _ in range(GROWTH_REPEATS):
+        for index, text in enumerate(texts):
+            start = time.perf_counter()
+            _judge(text, table)
+            took = time.perf_counter() - start
+            seconds[index] = took if seconds[index] is None else min(seconds[index], took)
+    return seconds[1] / max(seconds[0], 1e-9), [round(value, 4) for value in seconds]
 
 
 def _classified(text):
@@ -2456,29 +2754,53 @@ def _classified(text):
         return str(exc)
 
 
-def _linear_scan_rows(m):
-    """Classifying a paragraph of n inline comment lines is linear in n: SCAN_WORK (characters read for
-    backtick runs and lines stepped over) grows at most SCAN_GROWTH_LIMIT times when the input grows
-    four times, for each shape; with the rescanning reading put back it grows about sixteen times (the
-    red leg). The classification equals the rescanning reading's on a fixed set of inputs, and the
-    input of the quadratic report still gives its one finding."""
+def _growth_rows(m):
+    """The whole check runs in time linear in its input on each shape below: its time grows at most
+    GROWTH_LIMIT times when the input grows GROWTH_FACTOR times; with that shape's quadratic form put
+    back it grows more (the red leg). The classification equals the rescanning reading's on a fixed set
+    of inputs, and the input of the quadratic report still gives its one finding."""
     import random
-    # Each shape is repeated SCAN_LINES times before one claim: comments closed on their own line,
-    # openers never closed, code spans beside the comments, and comments that cut lines (so the kept
-    # text differs from the raw lines).
-    for name, red_name, line in (
-            ("scale/closed-comments-linear", "scale/closed-comments-linear/red-when-reverted",
-             "text <!-- ordinary comment -->\n"),
-            ("scale/unclosed-openers-linear", "scale/unclosed-openers-linear/red-when-reverted",
-             "text <!-- unclosed\n"),
-            ("scale/code-spans-beside-linear", "scale/code-spans-beside-linear/red-when-reverted",
-             "`a` text `` <!-- c --> ``b\n"),
-            ("scale/cut-lines-linear", "scale/cut-lines-linear/red-when-reverted", "a ` b <!-- x\n--> c ``\n")):
-        work = [_scan_work(line * count + "PR #17 is pending\n") for count in SCAN_LINES]
-        check(name, work[1] <= SCAN_GROWTH_LIMIT * work[0], work)
-        work = _with_globals({"_paragraph_comment_start": _rescanning_comment_start},
-                             lambda: [_scan_work(line * count + "PR #17 is pending\n") for count in SCAN_LINES])
-        check(red_name, work[1] > SCAN_GROWTH_LIMIT * work[0], work)
+    # (row id, its red leg's id, text of size n, the pull request's state, n, the quadratic form the red
+    # leg puts back). The first four are the shapes of the review that found them, the next four the
+    # paragraph shapes the comment reader was made linear for, the rest the other steps found growing
+    # faster than their input. A shape whose claims bind to an open pull request prints no line per claim
+    # (each line quotes its clause, so that output alone grows as claims times clause length).
+    for name, red_name, text_of, state, n, quadratic in (
+            ("growth/unclosed-comments-linear", "growth/unclosed-comments-linear/red-when-reverted",
+             lambda n: "a <!-- b\n" * n + GROWTH_CLAIM, "merged", 400, {"LINEAR_FINDERS": False}),
+            ("growth/unclosed-link-brackets-linear", "growth/unclosed-link-brackets-linear/red-when-reverted",
+             lambda n: "[a " * n + "\n" + GROWTH_CLAIM, "merged", 300, {"LINEAR_FINDERS": False}),
+            ("growth/list-markers-linear", "growth/list-markers-linear/red-when-reverted",
+             lambda n: "+ " * n + "x\n" + GROWTH_CLAIM, "merged", 1500,
+             {"_list_block_opener": _rescanning_list_block_opener}),
+            ("growth/claims-in-one-clause-linear", "growth/claims-in-one-clause-linear/red-when-reverted",
+             lambda n: "PR #17 is pending " * n + "\n", "open", 60, {"_clause_words": _ClauseWords}),
+            ("growth/closed-comments-linear", "growth/closed-comments-linear/red-when-reverted",
+             lambda n: "text <!-- ordinary comment -->\n" * n + GROWTH_CLAIM, "merged", 60,
+             {"_paragraph_comment_start": _rescanning_comment_start}),
+            ("growth/unclosed-openers-linear", "growth/unclosed-openers-linear/red-when-reverted",
+             lambda n: "text <!-- unclosed\n" * n + GROWTH_CLAIM, "merged", 80,
+             {"_paragraph_comment_start": _rescanning_comment_start}),
+            ("growth/code-spans-beside-linear", "growth/code-spans-beside-linear/red-when-reverted",
+             lambda n: "`a` text `` <!-- c --> ``b\n" * n + GROWTH_CLAIM, "merged", 40,
+             {"_paragraph_comment_start": _rescanning_comment_start}),
+            ("growth/cut-lines-linear", "growth/cut-lines-linear/red-when-reverted",
+             lambda n: "a ` b <!-- x\n--> c ``\n" * n + GROWTH_CLAIM, "merged", 40,
+             {"_paragraph_comment_start": _rescanning_comment_start}),
+            ("growth/unclosed-anchors-linear", "growth/unclosed-anchors-linear/red-when-reverted",
+             lambda n: "<a href=\"x\">y " * n + "\n" + GROWTH_CLAIM, "merged", 150, {"LINEAR_FINDERS": False}),
+            ("growth/unclosed-history-quotes-linear", "growth/unclosed-history-quotes-linear/red-when-reverted",
+             lambda n: "previously read \u201c" * n + "\n" + GROWTH_CLAIM, "merged", 200,
+             {"LINEAR_FINDERS": False}),
+            ("growth/joined-references-linear", "growth/joined-references-linear/red-when-reverted",
+             lambda n: "PR #17" + ", #17" * n + "\n", "merged", 50, {"LIST_RUN_STARTS": False}),
+            ("growth/lazy-lines-under-items-linear", "growth/lazy-lines-under-items-linear/red-when-reverted",
+             lambda n: "- " * n + "```\n" + " " * (2 * n) + "```\n" + " " * (2 * n) + "t\n" + "t\n" * n
+             + GROWTH_CLAIM, "merged", 600, {"_open_items": _every_open_item})):
+        growth, seconds = _growth(text_of, n, state)
+        check(name, growth <= GROWTH_LIMIT, (growth, seconds))
+        growth, seconds = _with_globals(quadratic, lambda: _growth(text_of, n, state))
+        check(red_name, growth > GROWTH_LIMIT, (growth, seconds))
     pick = random.Random(17)
     texts = ["`<!--\nPR #17 is pending\n-->`\n", "`a\nb <!-- PR #17 is pending\n-->`\n",
              "- `<!--\n  PR #17 is pending\n  -->`\n", "a ` b <!-- PR #17 is pending\n--> c\n"]
@@ -2489,6 +2811,34 @@ def _linear_scan_rows(m):
     code, res, t = _judge("text <!-- ordinary comment -->\n" * 4000 + "PR #17 is pending\n", m)
     check("scale/report-input-still-finds", code == 1 and t.calls == [(REPO, 17)] and len(res.hard) == 1
           and not res.warnings, (code, t.calls, res.hard, res.warnings))
+
+
+def _closer_search_rows():
+    """An inline comment opened on a paragraph line runs only to a `-->` before the next line that starts
+    a heading, list item, blockquote or fence: that line is read as its own block (the classification
+    reading and its comparison both use the one closer search, so neither shows this). Each red leg puts
+    back a closer search that steps over that one kind of line, which hides it in the comment."""
+    starts = {"heading": HEADING_RE, "list-item": ITEM_RE, "blockquote": QUOTE_RE, "fence": FENCE_OPEN_RE}
+    for name, red_name, start, text, want in (
+            ("comment/closer-search-stops-at-heading", "comment/closer-search-stops-at-heading/red-when-reverted",
+             "heading", "x <!-- y\n# PR #17 is pending\n-->\n", HEADING),
+            ("comment/closer-search-stops-at-list-item",
+             "comment/closer-search-stops-at-list-item/red-when-reverted",
+             "list-item", "x <!-- y\n- PR #17 is pending\n-->\n", ITEM),
+            ("comment/closer-search-stops-at-blockquote",
+             "comment/closer-search-stops-at-blockquote/red-when-reverted",
+             "blockquote", "x <!-- y\n> PR #17 is pending\n-->\n", QUOTE_LINE),
+            ("comment/closer-search-stops-at-fence", "comment/closer-search-stops-at-fence/red-when-reverted",
+             "fence", "x <!-- y\n```\nPR #17 is pending\n```\n-->\n", FENCE)):
+        kinds = _classified(text)
+        check(name, kinds[0] == (PARA, "x <!-- y") and kinds[1][0] == want, kinds)
+        kept = [regex for kind, regex in starts.items() if kind != start]
+
+        def stepping_over(line, kept=kept):
+            return _blank(line) or any(regex.match(line.lstrip(MD_SPACE)) for regex in kept)
+
+        kinds = _with_globals({"_ends_comment_search": stepping_over}, lambda: _classified(text))
+        check(red_name, kinds[1][0] != want, kinds)
 
 
 def _no_unevaluated_references(_label, _lines, _blocks, _units, _exempt=(), _definitions=None):
