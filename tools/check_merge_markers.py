@@ -73,13 +73,16 @@ the ambient GIT_DIR, GIT_WORK_TREE or GIT_COMMON_DIR; a .git file in the working
 (gitdir: PATH, the layout git init --separate-git-dir writes) makes it judgeable. --index FILE (taken from the
 current directory when relative) must be a regular file, not a symbolic link, whose real path lies inside the git
 directory, or the run exits 2; it is validated once there is something to judge, before any index read, so with
-nothing in progress the NOTE and exit 0 come first, except that while GIT_DIR, GIT_WORK_TREE or GIT_COMMON_DIR is set
-in the caller's environment it is validated before the state is read (the commit, and its index, may then belong to
-a repository other than ROOT's, whose having nothing in progress says nothing about it). The index reads are then
-given GIT_INDEX_FILE set to that real path. Under git commit -a or git commit PATH, git hands the hook a temporary
-index named only by GIT_INDEX_FILE, so a hook that omits --index would judge the wrong index: --staged-scan without
---index while GIT_INDEX_FILE is set in the caller's environment (git sets it for the pre-commit hook) exits 2 before
-any scan. The git binary is resolved through PATH (a trusted-toolchain concern). Installing it: a pre-commit hook running
+nothing in progress the NOTE and exit 0 come first, except that while GIT_DIR, GIT_WORK_TREE or GIT_COMMON_DIR in the
+caller's environment may name another repository it is validated before the state is read (the commit, and its
+index, may then belong to a repository other than ROOT's, whose having nothing in progress says nothing about it). A
+GIT_DIR resolving to ROOT's git directory, as git sets it for a hook in a linked worktree, names ROOT's own repository
+and does not count, nor is it named in a refusal to accept --index; GIT_WORK_TREE and GIT_COMMON_DIR always count.
+The index reads are then given GIT_INDEX_FILE set to that real path. Under
+git commit -a or git commit PATH, git hands the hook a temporary index named only by GIT_INDEX_FILE, so a hook that
+omits --index would judge the wrong index: --staged-scan without --index while GIT_INDEX_FILE is set in the caller's
+environment (git sets it for the pre-commit hook) exits 2 before any scan. The git binary is resolved through PATH (a
+trusted-toolchain concern). Installing it: a pre-commit hook running
   python3 -I -B tools/check_merge_markers.py --staged-scan "$(git rev-parse --show-toplevel)" --index "$GIT_INDEX_FILE"
 This pack ships no installer for it.
 
@@ -94,16 +97,18 @@ conflicted document that keeps one is a finding wherever it stands, inside a con
 cannot tell): a NOTE names it, and lengthening the underline, or the attribute above, is the remedy. A MERGE_MSG
 left over from an abandoned cherry-pick --no-commit or merge --squash (for example one undone with git restore) is
 indistinguishable from one in progress, so the paths its Conflicts list names stay in scope until it goes: with no
-state file a finding adds a NOTE that git reset --soft (no other argument) removes it and keeps the index and the
-working tree (git reset --merge removes it too, but can discard staged changes).
+state file a finding adds a NOTE that, once each named line is confirmed not to be a conflict marker, git reset
+--soft (no other argument) removes it and keeps the index and the working tree, setting ORIG_HEAD to HEAD (git reset
+--merge removes it too, but can discard staged changes); run while such an operation is in fact in progress, that
+removal takes its listed paths out of scope.
 
 RESIDUALS (not caught): a rebase finished with rebase --continue (git runs no pre-commit hook there), and git am
-outside a rebase (not probed here); a merge ended with merge --quit, which leaves no state file and no MERGE_MSG; a
-rebase ended with rebase --quit, unless the MERGE_MSG it leaves lists the conflicts (git 2.53 leaves one for the
-merge backend, none for rebase --apply); a
-cherry-pick --no-commit or a merge --squash whose MERGE_MSG Conflicts list was edited away or removed, since with no
-state file nothing else names its conflicts (a revert run with --no-commit leaves REVERT_HEAD, as git 2.53 does, and
-is judged); marker text in a path that did not conflict, including a conflicted path's content moved during the
+outside a rebase (git 2.53 leaves no state file and no MERGE_MSG for a git am -3 conflict); a merge ended with
+merge --quit, which leaves no state file and no MERGE_MSG; a rebase ended with rebase --quit, unless the MERGE_MSG it
+leaves lists the conflicts (git 2.53 leaves one for the merge backend, none for rebase --apply); a cherry-pick
+--no-commit or a merge --squash whose MERGE_MSG Conflicts list was edited away or removed, since with no state file
+nothing else names its conflicts (a revert run with --no-commit leaves REVERT_HEAD, as git 2.53 does, and is
+judged); marker text in a path that did not conflict, including a conflicted path's content moved during the
 resolution onto a path HEAD or a merged commit already holds, or moved while the conflicted path itself stays staged,
 since only added paths are judged and only while a conflicted path is absent; a conflict neither the recompute nor
 the MERGE_MSG list names (the user can edit MERGE_MSG, and the recompute uses the current configuration and
@@ -252,19 +257,32 @@ def _validated_index(index_arg, gitdir):
     return real
 
 
-def _ambient_repository():
-    """The repository-naming variables (GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR) set in the caller's environment."""
-    return [name for name in AMBIENT_REPOSITORY if name in os.environ]
+def _resolves_to(value, path):
+    """True when the variable's value (taken from the current directory when relative) resolves to path."""
+    try:
+        return bool(value) and Path(value).resolve(strict=True) == path
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _ambient_repository(gitdir=None):
+    """The repository-naming variables (GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR) set in the caller's environment;
+    given ROOT's git directory, only those that may name another repository: a GIT_DIR resolving to ROOT's git
+    directory (git sets it so for a hook in a linked worktree) names ROOT's own and does not count, while
+    GIT_WORK_TREE (git may then find the git directory from elsewhere) and GIT_COMMON_DIR always count."""
+    return [name for name in AMBIENT_REPOSITORY if name in os.environ
+            and not (name == "GIT_DIR" and gitdir is not None and _resolves_to(os.environ[name], gitdir))]
 
 
 @contextlib.contextmanager
-def _ambient_repository_named():
+def _ambient_repository_named(gitdir=None):
     """Name the ambient GIT_DIR, GIT_WORK_TREE or GIT_COMMON_DIR in a refusal to find the repository or to accept
-    --index: the check drops them, so a working tree whose git directory only GIT_DIR names cannot be judged."""
+    --index: the check drops them, so a working tree whose git directory only GIT_DIR names cannot be judged. Once
+    ROOT is found (gitdir given), a GIT_DIR naming ROOT's own git directory is not named."""
     try:
         yield
     except CannotEvaluate as exc:
-        ambient = _ambient_repository()
+        ambient = _ambient_repository(gitdir)
         if not ambient:
             raise
         raise CannotEvaluate(
@@ -554,10 +572,12 @@ def staged_scan(root_arg, index_arg=None, out=None):
     try:
         with _ambient_repository_named():
             root, gitdir = _repository(root_arg)
-            # With a repository named in the caller's environment, the commit (and the index the hook passes) may
-            # belong to that repository rather than ROOT's, whose having nothing in progress then says nothing, so
-            # the index is validated first, before ROOT's state can answer.
-            if index_arg is not None and _ambient_repository():
+        # With another repository named in the caller's environment, the commit (and the index the hook passes) may
+        # belong to that repository rather than ROOT's, whose having nothing in progress then says nothing, so the
+        # index is validated first, before ROOT's state can answer. A GIT_DIR naming ROOT's own git directory (git
+        # sets it so for a hook in a linked worktree) names no other repository.
+        with _ambient_repository_named(gitdir):
+            if index_arg is not None and _ambient_repository(gitdir):
                 _validated_index(index_arg, gitdir)
         state = _read_state(root, gitdir)
         if state:
@@ -576,8 +596,8 @@ def staged_scan(root_arg, index_arg=None, out=None):
             head = _head_or_none(root)
             sides = [] if head is None else [head]
         # The index is validated once there is something to judge and before any read of it: with nothing in
-        # progress (and no repository named in the caller's environment) the NOTE above answers without it.
-        with _ambient_repository_named():
+        # progress (and no other repository named in the caller's environment) the NOTE above answers without it.
+        with _ambient_repository_named(gitdir):
             index = None if index_arg is None else _validated_index(index_arg, gitdir)
         entries = _staged_entries(root, index)
         missing = sorted(path for path in scope if path not in entries)
@@ -617,9 +637,10 @@ def staged_scan(root_arg, index_arg=None, out=None):
         if subject == MERGE_MSG_ONLY:
             print("merge-markers: NOTE no merge, cherry-pick, revert or rebase is in progress, so only the Conflicts "
                   "list in MERGE_MSG puts these paths in scope; if no cherry-pick --no-commit or merge --squash is "
-                  "in progress either, that MERGE_MSG is left over from an abandoned one, and git reset --soft "
-                  "(with no other argument) removes it and keeps the index and the working tree (git reset --merge "
-                  "removes it too, but can discard staged changes)", file=out)
+                  "in progress either, that MERGE_MSG is left over from an abandoned one; once each named line is "
+                  "confirmed not to be a conflict marker, git reset --soft (with no other argument) removes it and "
+                  "keeps the index and the working tree, setting ORIG_HEAD to HEAD (git reset --merge removes it "
+                  "too, but can discard staged changes)", file=out)
         return 1
     print("merge-markers: OK {} scoped path(s) of {} hold no conflict-marker line".format(len(judged), subject),
           file=out)
@@ -1321,9 +1342,36 @@ def _self_test_isolated(temp):
         with _environ("GIT_DIR", str(separate)), _environ("GIT_WORK_TREE", str(v26b)):
             got = _scan(v26b, str(separate / "index"))
             check("repo/git-dir-elsewhere-index-outside-cannot-evaluate", got == 2, got)
-            with _replaced("_ambient_repository", lambda: []):
+            with _replaced("_ambient_repository", lambda gitdir=None: []):
                 got = _scan(v26b, str(separate / "index"))
             check("flip/git-dir-elsewhere-index-unchecked-passes", got == 0, got)
+    # V27 a linked worktree, where git sets GIT_DIR for the pre-commit hook to the worktree's own git directory: that
+    # GIT_DIR names ROOT's repository, so with nothing in progress an --index outside the git directory passes with
+    # the NOTE, as it does in the main worktree; a merge in progress there keeps its markers a finding, and a refusal
+    # of an --index outside the git directory does not name GIT_DIR or the .git-file remedy, since the worktree has
+    # its .git file. Its fix reverted (any GIT_DIR counted as another repository) refuses the first commit (exit 2).
+    v27 = build("V27", lambda: _fixture_conflict(temp, "v27"))
+    if v27 is not None:
+        _fixture_git(v27, "merge", "--abort")
+        linked = temp / "v27-linked"
+        _fixture_git(v27, "worktree", "add", "-q", "-b", "linked", str(linked), "main")
+        linked_gitdir = _gitdir(linked)
+        outside = temp / "v27-outside-index"
+        shutil.copyfile(linked_gitdir / "index", outside)
+        with _environ("GIT_DIR", str(linked_gitdir)):
+            got = _scan(linked, str(outside))
+            check("worktree/git-dir-set-by-git-outside-index-no-operation-passes", got == 0, got)
+            with _replaced("_resolves_to", lambda value, path: False):
+                got = _scan(linked, str(outside))
+            check("flip/worktree-git-dir-counted-foreign-cannot-evaluate", got == 2, got)
+        _fixture_git(linked, "merge", "side", check_exit=False)
+        _fixture_git(linked, "add", "f.txt")
+        with _environ("GIT_DIR", str(linked_gitdir)):
+            got = _scan(linked, str(linked_gitdir / "index"))
+            check("worktree/git-dir-set-by-git-markers-finding", got == 1, got)
+            got, text = _scan_output(linked, str(outside))
+            check("worktree/git-dir-set-by-git-index-refusal-names-no-remedy",
+                  got == 2 and "lies outside the git directory" in text and "GIT_DIR" not in text, (got, text))
     # V15 the command line: the staged-scan mode reaches the verdict, a malformed argument list is a usage error
     # (exit 2), never a scan, and --staged-scan without --index while GIT_INDEX_FILE is set is exit 2 (the hook's
     # index would go unread). Its fix reverted reaches the scan of the repository's own index.

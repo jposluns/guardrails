@@ -7165,6 +7165,11 @@ expected-check-ids = [
   "repo/git-dir-file-markers-finding",
   "repo/git-dir-elsewhere-index-outside-cannot-evaluate",
   "flip/git-dir-elsewhere-index-unchecked-passes",
+  # a linked worktree, whose GIT_DIR git sets to its own git directory for the hook
+  "worktree/git-dir-set-by-git-outside-index-no-operation-passes",
+  "flip/worktree-git-dir-counted-foreign-cannot-evaluate",
+  "worktree/git-dir-set-by-git-markers-finding",
+  "worktree/git-dir-set-by-git-index-refusal-names-no-remedy",
   # the command line
   "cli/staged-scan-reaches-verdict",
   "cli/index-reaches-verdict",
