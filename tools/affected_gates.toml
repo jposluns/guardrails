@@ -5,7 +5,11 @@
 # whole-tree = true (any changed path selects it) and/or always = true (selected whatever changed),
 # with its reason. Narrowed inputs list the gate's scripts, their literal local import closure (the
 # selector's self-test holds that closure covered) and the data the gate reads, as established by a
-# static review of each gate; a gate whose boundary was not established is whole-tree or always.
+# static review of each gate and held against observation: the affected-gates-observed gate
+# (affected_gates.py --observe-inputs) runs every narrowed gate once under a Python audit hook and
+# fails on any read, directory listing or launch of a repository path an entry does not cover. A gate
+# whose boundary was not established, whose reads follow its input, or that launches a non-Python
+# child in or on the repository (whose reads the hook cannot see) is whole-tree or always.
 # Globs are repository-relative and case-sensitive: * and ? stay in one component, ** spans
 # components. A gate with new reads needs its entry updated in the same change.
 format-version = 1
@@ -185,11 +189,8 @@ whole-tree = true
 reason = "whole-tree: gitleaks scans the whole working directory"
 
 [gate.gitleaks-pin-selftest]
-inputs = [
-  ".github/workflows/quality.yml",
-  "tools/check_gitleaks_pin.py",
-]
-reason = "inputs: the gate's scripts, their local import closure and the data the gate reads"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.gitleaks-pin]
 always = true
@@ -215,14 +216,8 @@ inputs = [
 reason = "inputs: the gate's scripts and their local import closure; the self-test builds synthetic fixtures"
 
 [gate.portability-selftest]
-inputs = [
-  "tools/_entry_restore_selftest.py",
-  "tools/_git_fixture_env.py",
-  "tools/_walk.py",
-  "tools/check_leaks.py",
-  "tools/check_portability.py",
-]
-reason = "inputs: the gate's scripts and their local import closure; the self-test builds synthetic fixtures"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.portability]
 whole-tree = true
@@ -283,8 +278,9 @@ inputs = [
   "tools/_git_fixture_env.py",
   "tools/_selftest_exit_report.py",
   "tools/ci_site_scope.py",
+  "tools/selftest_checks.toml",
 ]
-reason = "inputs: the gate's scripts and their local import closure; the self-test builds synthetic fixtures"
+reason = "inputs: the gate's scripts, their local import closure and the self-test registry it reconciles its executed checks against (observed); the self-test builds synthetic fixtures"
 
 [gate.overclaim-selftest]
 whole-tree = true
@@ -392,45 +388,8 @@ always = true
 reason = "always: a generated-file --check, which the runner requires of every member head"
 
 [gate.baseline-pin-selftest]
-inputs = [
-  ".baseline/**",
-  ".github/workflows/quality.yml",
-  "tools/_git_fixture_env.py",
-  "tools/_selftest_exit_report.py",
-  "tools/affected_gates.py",
-  "tools/check_baseline_pin.py",
-  "tools/check_brief_capability.py",
-  "tools/check_child_status_coverage.py",
-  "tools/check_ci_parity.py",
-  "tools/check_entry_guard.py",
-  "tools/check_headers.py",
-  "tools/check_hook_coverage.py",
-  "tools/check_instruction_budget.py",
-  "tools/check_internal_names.py",
-  "tools/check_mappings.py",
-  "tools/check_opf_declaration.py",
-  "tools/check_python_floor.py",
-  "tools/check_record_readers.py",
-  "tools/check_review_labels.py",
-  "tools/check_rule_placement.py",
-  "tools/check_security_txt.py",
-  "tools/check_selftest_execution.py",
-  "tools/check_selftest_removal.py",
-  "tools/check_site.py",
-  "tools/check_sitemap.py",
-  "tools/check_verifier_delivery.py",
-  "tools/ci_build_bash.py",
-  "tools/ci_site_scope.py",
-  "tools/measure_hook_latency.py",
-  "tools/selftest_checks.toml",
-  "tools/selftest_ci_status.py",
-  "tools/selftest_git_fixture_env_config_combined.py",
-  "tools/selftest_git_fixture_env_config_malformed.py",
-  "tools/selftest_git_fixture_env_config_system.py",
-  "tools/selftest_git_fixture_env_core.py",
-  "tools/selftest_orch_hooks.py",
-]
-reason = "inputs: the suite launcher (registry, launch rosters, registered runners), the runner, its local import closure and the data it reads"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.baseline-pin]
 always = true
@@ -613,6 +572,7 @@ reason = "inputs: the gate's scripts and their local import closure; the self-te
 
 [gate.opf-homes-selftest]
 inputs = [
+  ".gitignore",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
@@ -625,18 +585,29 @@ reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modul
 
 [gate.opf-tooling-selftest-core]
 inputs = [
+  ".gitignore",
+  "CHANGELOG.md",
+  "TODO.md",
+  "VERSION",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
 
 [gate.opf-tooling-selftest-adopt]
 inputs = [
+  "AGENTS.md",
+  "CHANGELOG.md",
+  "TODO.md",
+  "VERSION",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
 
 [gate.opf-tooling-selftest-watchdog]
 inputs = [
+  "CHANGELOG.md",
+  "TODO.md",
+  "VERSION",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
@@ -655,6 +626,8 @@ reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modul
 
 [gate.opf-drift-selftest]
 inputs = [
+  "TODO.md",
+  "VERSION",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
@@ -664,10 +637,8 @@ whole-tree = true
 reason = "whole-tree: the gate enumerates the working tree or the tracked surface (or reads paths its data names)"
 
 [gate.opf-doctor-selftest]
-inputs = [
-  "opf/**",
-]
-reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.opf-doctor]
 whole-tree = true
@@ -675,12 +646,14 @@ reason = "whole-tree: the gate enumerates the working tree or the tracked surfac
 
 [gate.opf-init-selftest]
 inputs = [
+  ".gitignore",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
 
 [gate.opf-init]
 inputs = [
+  ".gitignore",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
@@ -692,15 +665,12 @@ inputs = [
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
 
 [gate.opf-init-contract-check-selftest]
-inputs = [
-  "opf/**",
-  "tools/check_opf_standalone_closure.py",
-  "tools/run_all_checks.sh",
-]
-reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates; also the parent runner and closure check the parent leg reads"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.opf-init-contract-check]
 inputs = [
+  "TODO.md",
   "opf/**",
   "tools/check_opf_standalone_closure.py",
   "tools/run_all_checks.sh",
@@ -708,25 +678,27 @@ inputs = [
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates; also the parent runner and closure check the parent leg reads"
 
 [gate.opf-record-selftest]
-inputs = [
-  "opf/**",
-]
-reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
+whole-tree = true
+reason = "whole-tree: its run exceeds the observation bound, so its reads are not established by observation (it reads root-level records and its own tree)"
 
 [gate.opf-adopt-selftest]
-inputs = [
-  "opf/**",
-]
-reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
+whole-tree = true
+reason = "whole-tree: it does not pass under the audit hook, so its reads are not established by observation"
 
 [gate.opf-adopt-apply-selftest]
 inputs = [
+  "AGENTS.md",
+  "CHANGELOG.md",
+  "TODO.md",
+  "VERSION",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
 
 [gate.opf-adopt-state-selftest]
 inputs = [
+  "CHANGELOG.md",
+  "TODO.md",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
@@ -739,6 +711,12 @@ reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modul
 
 [gate.opf-adopt-complete-selftest]
 inputs = [
+  "AGENTS.md",
+  "CHANGELOG.md",
+  "CLAUDE.md",
+  "GEMINI.md",
+  "TODO.md",
+  "VERSION",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
@@ -751,6 +729,7 @@ reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modul
 
 [gate.opf-import-complete-selftest]
 inputs = [
+  "TODO.md",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
@@ -762,19 +741,16 @@ inputs = [
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
 
 [gate.opf-pack-manifest-selftest]
-inputs = [
-  "opf/**",
-]
-reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.opf-adopt-observe-selftest]
-inputs = [
-  "opf/**",
-]
-reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
+whole-tree = true
+reason = "whole-tree: it does not pass under the audit hook, so its reads are not established by observation"
 
 [gate.opf-adopt-discover-selftest]
 inputs = [
+  "TODO.md",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
@@ -847,15 +823,16 @@ reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modul
 
 [gate.opf-init-operation-selftest]
 inputs = [
+  ".gitignore",
+  "CHANGELOG.md",
+  "TODO.md",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
 
 [gate.opf-init-p0-selftest]
-inputs = [
-  "opf/**",
-]
-reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.opf-init-observe-selftest]
 inputs = [
@@ -888,18 +865,8 @@ whole-tree = true
 reason = "whole-tree: the self-test also judges the live tree, or its dependency boundary is not established"
 
 [gate.opf-standalone-closure-a]
-inputs = [
-  "opf/**",
-  "tools/_gen_common.py",
-  "tools/_git_fixture_env.py",
-  "tools/_selftest_exit_report.py",
-  "tools/_standards.py",
-  "tools/check_ci_parity.py",
-  "tools/check_opf_standalone_closure.py",
-  "tools/check_selftest_execution.py",
-  "tools/selftest_git_fixture_env.py",
-]
-reason = "inputs: the gate's scripts, their local import closure and the data the gate reads"
+whole-tree = true
+reason = "whole-tree: its run exceeds the observation bound, so its reads are not established by observation (it reads root-level records and its own tree)"
 
 [gate.opf-standalone-closure-b]
 inputs = [
@@ -944,18 +911,8 @@ inputs = [
 reason = "inputs: the gate's scripts, their local import closure and the data the gate reads"
 
 [gate.opf-standalone-closure-e]
-inputs = [
-  "opf/**",
-  "tools/_gen_common.py",
-  "tools/_git_fixture_env.py",
-  "tools/_selftest_exit_report.py",
-  "tools/_standards.py",
-  "tools/check_ci_parity.py",
-  "tools/check_opf_standalone_closure.py",
-  "tools/check_selftest_execution.py",
-  "tools/selftest_git_fixture_env.py",
-]
-reason = "inputs: the gate's scripts, their local import closure and the data the gate reads"
+whole-tree = true
+reason = "whole-tree: its run exceeds the observation bound, so its reads are not established by observation (it reads root-level records and its own tree)"
 
 [gate.opf-standalone-closure-f]
 inputs = [
@@ -995,13 +952,8 @@ inputs = [
 reason = "inputs: the gate's scripts, their local import closure and the data the gate reads"
 
 [gate.release-cut-selftest]
-inputs = [
-  "VERSION",
-  "changelog.toml",
-  "opf/tools/**",
-  "tools/**",
-]
-reason = "inputs: the gate's scripts, their local import closure and the data the gate reads"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.release-cut]
 always = true
@@ -1239,6 +1191,7 @@ inputs = [
   ".aiqt/core/rules/**",
   ".aiqt/standards/**",
   "AGENTS.md",
+  "GEMINI.md",
   "tools/_adapter_compose.py",
   "tools/_gen_common.py",
   "tools/_git_fixture_env.py",
@@ -1442,13 +1395,8 @@ always = true
 reason = "always: a generated-file --check, which the runner requires of every member head"
 
 [gate.ci-build-bash-selftest]
-inputs = [
-  "tools/_selftest_exit_report.py",
-  "tools/check_ci_parity.py",
-  "tools/check_selftest_execution.py",
-  "tools/ci_build_bash.py",
-]
-reason = "inputs: the gate's scripts and their local import closure; the self-test builds synthetic fixtures"
+whole-tree = true
+reason = "whole-tree: launches bash in the repository (its bash version probe), a non-Python child whose reads the audit hook cannot see; it also reads the self-test registry"
 
 [gate.hooks-behaviour-selftest]
 always = true
@@ -1477,12 +1425,8 @@ inputs = [
 reason = "inputs: the gate's scripts, their local import closure and the data the gate reads"
 
 [gate.hooks-preview]
-inputs = [
-  ".preview/**",
-  "tools/_load_bound.py",
-  "tools/check_hooks_preview.py",
-]
-reason = "inputs: the gate's scripts, their local import closure and the data the gate reads"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.hook-coverage-behaviour-selftest]
 inputs = [
@@ -1531,55 +1475,16 @@ inputs = [
 reason = "inputs: the gate's scripts and their local import closure; the self-test builds synthetic fixtures"
 
 [gate.selftest-execution-selftest]
-inputs = [
-  "tools/check_ci_parity.py",
-  "tools/check_selftest_execution.py",
-]
-reason = "inputs: the gate's scripts and their local import closure; the self-test builds synthetic fixtures"
+whole-tree = true
+reason = "whole-tree: does not pass under the audit hook (its late-teardown witness sees the hook), so its reads are not established by observation; it reads the exit-report finalizer source for its fixtures"
 
 [gate.orch-behaviour-selftest]
 whole-tree = true
 reason = "whole-tree: the self-test also judges the live tree, or its dependency boundary is not established"
 
 [gate.ci-status-behaviour-selftest]
-inputs = [
-  ".github/workflows/quality.yml",
-  "tools/_selftest_exit_report.py",
-  "tools/affected_gates.py",
-  "tools/check_baseline_pin.py",
-  "tools/check_brief_capability.py",
-  "tools/check_child_status_coverage.py",
-  "tools/check_ci_parity.py",
-  "tools/check_entry_guard.py",
-  "tools/check_headers.py",
-  "tools/check_hook_coverage.py",
-  "tools/check_instruction_budget.py",
-  "tools/check_internal_names.py",
-  "tools/check_mappings.py",
-  "tools/check_opf_declaration.py",
-  "tools/check_python_floor.py",
-  "tools/check_record_readers.py",
-  "tools/check_review_labels.py",
-  "tools/check_rule_placement.py",
-  "tools/check_security_txt.py",
-  "tools/check_selftest_execution.py",
-  "tools/check_selftest_removal.py",
-  "tools/check_site.py",
-  "tools/check_sitemap.py",
-  "tools/check_verifier_delivery.py",
-  "tools/ci-status.sh",
-  "tools/ci_build_bash.py",
-  "tools/ci_site_scope.py",
-  "tools/measure_hook_latency.py",
-  "tools/selftest_checks.toml",
-  "tools/selftest_ci_status.py",
-  "tools/selftest_git_fixture_env_config_combined.py",
-  "tools/selftest_git_fixture_env_config_malformed.py",
-  "tools/selftest_git_fixture_env_config_system.py",
-  "tools/selftest_git_fixture_env_core.py",
-  "tools/selftest_orch_hooks.py",
-]
-reason = "inputs: the suite launcher (registry, launch rosters, registered runners), the runner, its local import closure and the data it reads"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.ci-site-scope-selftest]
 inputs = [
@@ -1646,99 +1551,32 @@ always = true
 reason = "always: reads git history or the live tree through git"
 
 [gate.ci-build-bash-behaviour-selftest]
-inputs = [
-  ".github/workflows/quality.yml",
-  "tools/_selftest_exit_report.py",
-  "tools/affected_gates.py",
-  "tools/check_baseline_pin.py",
-  "tools/check_brief_capability.py",
-  "tools/check_child_status_coverage.py",
-  "tools/check_ci_parity.py",
-  "tools/check_entry_guard.py",
-  "tools/check_headers.py",
-  "tools/check_hook_coverage.py",
-  "tools/check_instruction_budget.py",
-  "tools/check_internal_names.py",
-  "tools/check_mappings.py",
-  "tools/check_opf_declaration.py",
-  "tools/check_python_floor.py",
-  "tools/check_record_readers.py",
-  "tools/check_review_labels.py",
-  "tools/check_rule_placement.py",
-  "tools/check_security_txt.py",
-  "tools/check_selftest_execution.py",
-  "tools/check_selftest_removal.py",
-  "tools/check_site.py",
-  "tools/check_sitemap.py",
-  "tools/check_verifier_delivery.py",
-  "tools/ci_build_bash.py",
-  "tools/ci_site_scope.py",
-  "tools/measure_hook_latency.py",
-  "tools/selftest_checks.toml",
-  "tools/selftest_ci_status.py",
-  "tools/selftest_git_fixture_env_config_combined.py",
-  "tools/selftest_git_fixture_env_config_malformed.py",
-  "tools/selftest_git_fixture_env_config_system.py",
-  "tools/selftest_git_fixture_env_core.py",
-  "tools/selftest_orch_hooks.py",
-]
-reason = "inputs: the suite launcher (registry, launch rosters, registered runners), the runner, its local import closure and the data it reads"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.hook-latency-selftest]
-inputs = [
-  ".github/workflows/quality.yml",
-  "plugin/aiqt-guardrails-hooks/**",
-  "tools/_selftest_exit_report.py",
-  "tools/affected_gates.py",
-  "tools/check_baseline_pin.py",
-  "tools/check_brief_capability.py",
-  "tools/check_child_status_coverage.py",
-  "tools/check_ci_parity.py",
-  "tools/check_entry_guard.py",
-  "tools/check_headers.py",
-  "tools/check_hook_coverage.py",
-  "tools/check_instruction_budget.py",
-  "tools/check_internal_names.py",
-  "tools/check_mappings.py",
-  "tools/check_opf_declaration.py",
-  "tools/check_python_floor.py",
-  "tools/check_record_readers.py",
-  "tools/check_review_labels.py",
-  "tools/check_rule_placement.py",
-  "tools/check_security_txt.py",
-  "tools/check_selftest_execution.py",
-  "tools/check_selftest_removal.py",
-  "tools/check_site.py",
-  "tools/check_sitemap.py",
-  "tools/check_verifier_delivery.py",
-  "tools/ci_build_bash.py",
-  "tools/ci_site_scope.py",
-  "tools/measure_hook_latency.py",
-  "tools/selftest_checks.toml",
-  "tools/selftest_ci_status.py",
-  "tools/selftest_git_fixture_env_config_combined.py",
-  "tools/selftest_git_fixture_env_config_malformed.py",
-  "tools/selftest_git_fixture_env_config_system.py",
-  "tools/selftest_git_fixture_env_core.py",
-  "tools/selftest_orch_hooks.py",
-]
-reason = "inputs: the suite launcher (registry, launch rosters, registered runners), the runner, its local import closure and the data it reads"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.entry-guard-selftest]
 inputs = [
+  ".baseline/*.py",
+  ".github/*.py",
   ".github/workflows/**",
   "opf/tools/**",
   "tools/**",
 ]
-reason = "inputs: the suite launcher (registry, launch rosters, registered runners), the runner, its local import closure and the data it reads"
+reason = "inputs: the suite launcher (registry, launch rosters, registered runners), the runner, its local import closure and the data it reads (every launched script, the .github contract scripts and the .baseline palette check included, as observed)"
 
 [gate.entry-guard]
 inputs = [
+  ".baseline/*.py",
+  ".github/*.py",
   ".github/workflows/**",
   "opf/tools/**",
   "tools/**",
 ]
-reason = "inputs: the gate's scripts, their local import closure and the data the gate reads"
+reason = "inputs: the gate's scripts, their local import closure and the data the gate reads (every script the runner and the registry launch, the .github contract scripts and the .baseline palette check included, as observed)"
 
 [gate.verifier-delivery-selftest]
 inputs = [
@@ -1746,6 +1584,7 @@ inputs = [
   "opf/tools/_vendor/**",
   "tools/_git_fixture_env.py",
   "tools/_input_declarations.py",
+  "tools/_input_declarations_child.py",
   "tools/_selftest_exit_report.py",
   "tools/affected_gates.py",
   "tools/check_baseline_pin.py",
@@ -1791,14 +1630,8 @@ whole-tree = true
 reason = "whole-tree: the gate enumerates the working tree or the tracked surface (or reads paths its data names)"
 
 [gate.record-drift-selftest]
-inputs = [
-  "tools/_gen_common.py",
-  "tools/_git_fixture_env.py",
-  "tools/_standards.py",
-  "tools/check_mistakes_register.py",
-  "tools/check_record_drift.py",
-]
-reason = "inputs: the gate's scripts and their local import closure; the self-test builds synthetic fixtures"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.record-drift]
 always = true
@@ -1822,31 +1655,20 @@ inputs = [
 reason = "inputs: the gate's scripts, their local import closure and the data the gate reads"
 
 [gate.record-sections-selftest]
-inputs = [
-  "tools/_entry_restore_selftest.py",
-  "tools/_git_fixture_env.py",
-  "tools/check_record_sections.py",
-]
-reason = "inputs: the gate's scripts and their local import closure; the self-test builds synthetic fixtures"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.mistakes-register-selftest]
-inputs = [
-  "tools/_git_fixture_env.py",
-  "tools/check_mistakes_register.py",
-]
-reason = "inputs: the gate's scripts and their local import closure; the self-test builds synthetic fixtures"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.mistakes-register]
 always = true
 reason = "always: reads git history or refs (merge base, origin/main, tags), which no changed path represents"
 
 [gate.mistakes-register-append-selftest]
-inputs = [
-  "tools/_git_fixture_env.py",
-  "tools/check_mistakes_register.py",
-  "tools/orch_register.py",
-]
-reason = "inputs: the gate's scripts and their local import closure; the self-test builds synthetic fixtures"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.aei-enumerator-selftest]
 inputs = [
@@ -2303,13 +2125,8 @@ whole-tree = true
 reason = "whole-tree: the gate enumerates the working tree or the tracked surface (or reads paths its data names)"
 
 [gate.qa-adapter-selftest]
-inputs = [
-  ".aiqt/assurance.toml",
-  "tools/_entry_restore_selftest.py",
-  "tools/_git_fixture_env.py",
-  "tools/_qa_adapter.py",
-]
-reason = "inputs: the gate's scripts, their local import closure and the data the gate reads"
+whole-tree = true
+reason = "whole-tree: it launches a non-Python child (git, bash, sh or another binary) in or on the repository, whose reads the audit hook cannot see"
 
 [gate.audit-reference-selftest]
 inputs = [
@@ -2341,6 +2158,10 @@ reason = "always and whole-tree: judges every line added since the merge base wi
 [gate.affected-gates-selftest]
 whole-tree = true
 reason = "whole-tree: the self-test holds every tracked path to a reviewed domain"
+
+[gate.affected-gates-observed]
+whole-tree = true
+reason = "whole-tree: it runs every narrowed gate, so it reads whatever those gates read, and copies the whole tree"
 
 [gate.qa-advisory-digest]
 always = true

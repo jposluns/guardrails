@@ -6,6 +6,7 @@ chosen by hand.
   affected_gates.py --base REV [--head REV] [--json | --explain]
   affected_gates.py --self-test
   affected_gates.py [--self-test] --execution-report ABS_PATH   (the registered suite launch)
+  affected_gates.py --observe-inputs [--gate NAME]... [--jobs N]
 
 The selector lists gates; it runs none of them and certifies nothing. The full runner stays the
 authority for a merge: rerun the selection after a rebase or any input change, and keep the train's
@@ -57,10 +58,36 @@ selection with each gate's command variants and reasons, and diagnostics; on fai
 member is null. Conditional gates keep their runner behaviour: baseline-pin lists both variants and
 its probe, and is run by the runner's block, never as a bare command.
 
+OBSERVATION. The declarations are held against what the gates really read. --observe-inputs runs
+every gate whose declaration narrows its inputs (neither whole-tree nor always; those two are selected
+by any change, so no read of theirs can go uncovered) once, in a disposable clone of this tree that
+carries its staged, unstaged and untracked files, under a Python audit hook (sys.addaudithook) that
+records open, os.listdir, os.scandir and every process launch (subprocess.Popen, os.exec,
+os.posix_spawn, os.spawn, os.system). The hook reaches the gate's Python children through a startup
+hook (a .pth file) that the check writes only into its own throwaway virtual environment, whose
+interpreter replaces python3 for the gate and comes first on PATH, so sys.executable and python3
+children carry it and no other interpreter does. The check fails (exit 1) for a gate that, through any
+of its Python processes, opens for reading (or probes) a repository path its declaration does not
+match, lists a directory where a new entry would not be matched (or lists the repository root),
+names a repository file on a launched command line its declaration does not match, launches a
+non-Python child (or a Python child that skips site) in the repository or on one of its paths, or
+does not exit 0 in the copy. A gate the check fails for is declared whole-tree unless its narrowed
+inputs are corrected to cover every observed read. RESIDUAL, NOT MEASURED: the audit hook sees no
+read of a non-Python child (git, bash, gitleaks, a shell); every gate that launches one in or on the
+repository is therefore whole-tree, and a non-Python child that runs elsewhere and names no
+repository path is trusted not to reach the tree. One run observes one input state: a read that only
+other inputs would trigger is not seen, which is why a gate whose reads follow its input (it walks a
+tree or reads paths its data names) is whole-tree. Reads through a directory descriptor (dir_fd) carry
+no directory in the audit event and are judged only when their first component exists at the root;
+bytecode caches (__pycache__) and .git internals are not inputs. The hook keeps only paths inside the
+copy and writes each distinct record once per process. A gate that runs past OBSERVE_GATE_TIMEOUT is
+stopped through its process group and reported; a descendant that started a session of its own is
+not stopped by the check.
+
 EXIT. 0 selection complete (an empty change set included: the always gates are then the selection);
 2 cannot evaluate, invalid invocation, unknown path, or an invalid roster or declaration (no gate
-name is printed on stdout); 1 only for a failed --self-test assertion. Callers check the exit code
-before reading the output.
+name is printed on stdout); 1 for a failed --self-test assertion or an --observe-inputs finding.
+Callers check the exit code before reading the output.
 """
 import sys
 
@@ -496,6 +523,442 @@ def collect_changes(root, base, head_rev=None, env=None):
 
 
 # ---------------------------------------------------------------------------------------------
+# Observation: the declarations held against what each gate really reads
+
+# The startup hook the observation check writes into its own disposable virtual environment, and
+# nowhere else: a .pth line imports it as site starts, which -I leaves running for a virtual
+# environment's own site-packages, so every Python process launched through that environment's
+# interpreter (sys.executable, or python3 found first on PATH) records its opens, directory listings
+# and process launches. The log directory is read from the one file the check rewrites before each
+# gate, so a child whose environment a gate scrubs still records. The hook imports nothing beyond
+# os and _thread, never raises into the gate, and writes one repr() tuple per line.
+OBSERVE_HOOK_MODULE = "_affected_gates_observe_hook"
+OBSERVE_HOOK_TEMPLATE = '''\
+"""Audit hook of tools/affected_gates.py --observe-inputs (a disposable environment only)."""
+import sys
+
+
+def _install():
+    import os
+    import _thread
+    try:
+        with open(@CURRENT@, "r", encoding="utf-8") as handle:
+            log_dir, root = handle.read().split("\\n")[:2]
+        fd = os.open(os.path.join(log_dir, "{}-{}.log".format(os.getpid(), os.urandom(8).hex())),
+                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND, 0o600)
+    except (OSError, ValueError):
+        return
+    local = _thread._local()
+    seen = set()
+    inside = root + "/"
+
+    def in_root(where, path):
+        joined = os.path.normpath(os.path.join(where or "/", path))
+        return joined == root or joined.startswith(inside)
+    watched = frozenset(("open", "os.listdir", "os.scandir", "subprocess.Popen", "os.exec",
+                         "os.posix_spawn", "os.spawn", "os.system"))
+
+    def text(value):
+        try:
+            if isinstance(value, (str, bytes, os.PathLike)):
+                return os.fsdecode(os.fspath(value))
+        except Exception:
+            pass
+        return None
+
+    def env_path(env):
+        try:
+            if env is None:
+                return os.environ.get("PATH")
+            value = env.get("PATH", env.get(b"PATH"))
+            return text(value)
+        except Exception:
+            return None
+
+    def emit(record):
+        # One line per distinct record: a gate that reopens a file a thousand times logs it once.
+        try:
+            line = repr(record)
+            if line in seen:
+                return
+            seen.add(line)
+            os.write(fd, (line + "\\n").encode("utf-8", "surrogateescape"))
+        except Exception:
+            pass
+
+    def cwd():
+        try:
+            return os.getcwd()
+        except OSError:
+            return None
+
+    def importing():
+        frame = sys._getframe(2)
+        depth = 0
+        while frame is not None and depth < 16:
+            if frame.f_code.co_filename.startswith("<frozen importlib"):
+                return True
+            frame = frame.f_back
+            depth += 1
+        return False
+
+    def hook(event, args):
+        if event not in watched or getattr(local, "busy", False):
+            return
+        local.busy = True
+        try:
+            if event == "open":
+                path = text(args[0])
+                where = cwd()
+                if path is not None and in_root(where, path):
+                    emit(("open", 0, where, path, args[1] if isinstance(args[1], str) else None,
+                          args[2] if isinstance(args[2], int) else None))
+            elif event in ("os.listdir", "os.scandir"):
+                path = "." if not args or args[0] is None else text(args[0])
+                where = cwd()
+                if path is not None and in_root(where, path) and not importing():
+                    emit(("list", 0, where, path, False))
+            elif event == "subprocess.Popen":
+                executable, argv, where, env = args
+                argv = [text(argv)] if isinstance(argv, (str, bytes)) else [text(a) for a in argv]
+                emit(("launch", os.getpid(), cwd(), text(executable), argv,
+                      None if where is None else text(where), env_path(env)))
+            elif event in ("os.exec", "os.posix_spawn", "os.spawn"):
+                path, argv = args[0], args[1]
+                emit(("launch", os.getpid(), cwd(), text(path), [text(a) for a in argv], None,
+                      env_path(args[2] if len(args) > 2 else None)))
+            elif event == "os.system":
+                emit(("launch", os.getpid(), cwd(), None, ["/bin/sh", "-c", text(args[0])], None, None))
+        except Exception:
+            pass
+        finally:
+            local.busy = False
+
+    emit(("start", os.getpid(), cwd(), list(sys.orig_argv)))
+    sys.addaudithook(hook)
+
+
+_install()
+del _install
+'''
+OBSERVE_PROBE_ENTRY = "observed-new-entry"
+OBSERVE_GATE_TIMEOUT = 1800
+OBSERVE_DEFAULT_JOBS = 8
+# Interpreter options that skip site (so the startup hook): a Python child launched with one of them
+# is unobserved, like a non-Python child.
+OBSERVE_NO_SITE_FLAGS = frozenset("S")
+
+
+def observed_gates(gates, manifest):
+    """The gates whose declaration narrows their inputs: a whole-tree gate is selected by every
+    changed path and an always gate by every change, so observing them can find no uncovered read."""
+    return [g for g in gates if not (manifest.gates[g.name].whole_tree or manifest.gates[g.name].always)]
+
+
+def _build_observer_env(parent, index):
+    """(python, bin dir, current-gate file) of one disposable virtual environment carrying the hook."""
+    venv = Path(parent) / "venv-{}".format(index)
+    done = subprocess.run([sys.executable, "-I", "-m", "venv", "--without-pip", str(venv)],
+                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          check=False)
+    if done.returncode != 0:
+        raise CannotEvaluate("cannot create the observation environment: {}".format(
+            done.stderr.decode("utf-8", "replace")[:300]))
+    bindir = venv / "bin"
+    python = bindir / "python3"
+    current = Path(parent) / "current-{}".format(index)
+    current.write_text("", encoding="utf-8")
+    probe = subprocess.run([str(python), "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    site_dir = Path(probe.stdout.decode("utf-8", "replace").strip())
+    if probe.returncode != 0 or not site_dir.is_dir() or Path(parent) not in site_dir.parents:
+        raise CannotEvaluate("the observation environment has no site-packages of its own")
+    (site_dir / (OBSERVE_HOOK_MODULE + ".py")).write_text(
+        OBSERVE_HOOK_TEMPLATE.replace("@CURRENT@", repr(str(current))), encoding="utf-8")
+    (site_dir / (OBSERVE_HOOK_MODULE + ".pth")).write_text("import " + OBSERVE_HOOK_MODULE + "\n",
+                                                           encoding="utf-8")
+    return python, bindir, current
+
+
+def read_observations(log_dir):
+    """Every record the hook wrote under log_dir."""
+    records = []
+    for entry in sorted(Path(log_dir).iterdir()):
+        for line in entry.read_text(encoding="utf-8", errors="surrogateescape").splitlines():
+            try:
+                record = ast.literal_eval(line)
+            except (ValueError, SyntaxError, MemoryError, RecursionError):
+                continue
+            if isinstance(record, tuple) and record:
+                records.append(record)
+    return records
+
+
+def _repo_rel(root, cwd, path):
+    """The repository-relative form of path (resolved against cwd) inside root, "" for root itself,
+    or None outside it."""
+    if path is None:
+        return None
+    joined = os.path.normpath(os.path.join(cwd or "/", path))
+    if joined == root:
+        return ""
+    if joined.startswith(root + "/"):
+        return joined[len(root) + 1:]
+    return None
+
+
+def _python_options(argv):
+    """The single-letter options of a Python command line before its script, -c or -m."""
+    letters = set()
+    words = list(argv[1:])
+    index = 0
+    while index < len(words):
+        word = words[index]
+        index += 1
+        if not word or not word.startswith("-") or word == "-":
+            break
+        if word.startswith("--"):
+            continue
+        body = word[1:]
+        for at, letter in enumerate(body):
+            letters.add(letter)
+            if letter in "cm":
+                return letters
+            if letter in "WX":
+                if at + 1 == len(body):
+                    index += 1
+                break
+    return letters
+
+
+def observed_requirements(root, bindir, records):
+    """(reads, listed directories, unobserved launches) of one gate's records, repository-relative.
+
+    A read is an open for reading (whether or not the path exists, since a gate that probes for a file
+    depends on its absence too) or a repository path named on a launched command line; directory opens
+    carry no content and the import system's own directory listings are not the gate's. A launch is
+    unobserved when its program is not a Python of the observation environment (or skips site), and it
+    is recorded only when it runs in or names a path of the repository: its reads are invisible."""
+    root = os.path.realpath(str(root))
+    bindir = str(bindir)
+    reads, listed, unobserved = set(), set(), []
+
+    def kept(rel, path):
+        if not rel or rel == ".git" or rel.startswith(".git/") or "__pycache__" in rel.split("/"):
+            return False
+        # A relative name whose first component the repository root does not hold was resolved
+        # against a directory descriptor the audit event does not carry (shutil.rmtree, os.fwalk,
+        # dir_fd opens); a root-level name outside every domain is refused by the selector anyway.
+        if not os.path.isabs(path) and not os.path.lexists(os.path.join(root, rel.split("/")[0])):
+            return False
+        return True
+    for record in records:
+        kind = record[0]
+        if kind == "open" and len(record) == 6:
+            _k, _pid, cwd, path, mode, flags = record
+            if isinstance(mode, str):
+                reading = "r" in mode or "+" in mode
+            else:
+                reading = isinstance(flags, int) and (flags & os.O_ACCMODE) in (os.O_RDONLY, os.O_RDWR)
+            if isinstance(flags, int) and flags & getattr(os, "O_DIRECTORY", 0):
+                reading = False
+            rel = _repo_rel(root, cwd, path)
+            if reading and kept(rel, path) and not os.path.isdir(os.path.join(root, rel)):
+                reads.add(rel)
+        elif kind == "list" and len(record) == 5:
+            _k, _pid, cwd, path, importing = record
+            rel = _repo_rel(root, cwd, path)
+            if not importing and rel is not None and (rel == "" or kept(rel, path)):
+                listed.add(rel)
+        elif kind == "launch" and len(record) == 7:
+            _k, _pid, cwd, executable, argv, where, path_env = record
+            argv = [a for a in argv if isinstance(a, str)]
+            run_cwd = cwd if where is None else os.path.join(cwd or "/", where)
+            program = executable or (argv[0] if argv else None)
+            if program is None:
+                continue
+            if "/" not in program:
+                found = shutil.which(program, path=path_env if path_env is not None else os.defpath)
+                program = found or program
+            program = os.path.normpath(os.path.join(run_cwd or "/", program))
+            words = argv[1:] if argv else []
+            observed = (os.path.dirname(program) == bindir
+                        and not (OBSERVE_NO_SITE_FLAGS & _python_options(argv)))
+            effective = run_cwd
+            if os.path.basename(program) == "git" and "-C" in words:
+                at = words.index("-C")
+                if at + 1 < len(words):
+                    effective = os.path.join(run_cwd or "/", words[at + 1])
+            names = []
+            for word in words + [program]:
+                if not word or word.startswith("-"):
+                    continue
+                rel = _repo_rel(root, effective, word)
+                if rel and kept(rel, word) and os.path.isfile(os.path.join(root, rel)):
+                    names.append(rel)
+            reads.update(names)
+            if observed or words == ["--version"]:
+                continue
+            in_repo = _repo_rel(root, effective, ".") is not None
+            if in_repo or names or any(_repo_rel(root, run_cwd, w) is not None for w in words
+                                       if w and w.startswith("/")):
+                unobserved.append(" ".join([os.path.basename(program)] + words)[:200])
+    return reads, listed, unobserved
+
+
+def uncovered_observations(manifest, name, reads, listed, unobserved):
+    """The findings of one gate: every observed read or listing its declaration does not cover."""
+    decl = manifest.gates[name]
+    if decl.whole_tree or decl.always:
+        return []
+    patterns = [rx for _p, rx in decl.inputs] + [rx for _p, rx in manifest.full_roster]
+    findings = []
+    for rel in sorted(reads):
+        if not any(rx.fullmatch(rel) for rx in patterns):
+            findings.append("reads {}".format(rel))
+    for rel in sorted(listed):
+        if rel == "":
+            findings.append("lists the repository root (its reads depend on input: whole-tree)")
+        elif not any(rx.fullmatch(rel + "/" + OBSERVE_PROBE_ENTRY) for rx in patterns):
+            findings.append("lists {}/ (a new entry there is not covered)".format(rel))
+    for launch in sorted(set(unobserved)):
+        findings.append("launches a child the audit hook cannot see, in or on the repository "
+                        "(whole-tree): {}".format(launch))
+    return findings
+
+
+def _tracked_and_untracked(root):
+    out, _err = _git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], git_env())
+    return sorted({_decode_path(p) for p in out.split(b"\0") if p})
+
+
+def _disposable_copy(root, target):
+    """A clone of root at target whose working tree is root's (staged, unstaged and untracked files
+    the ignore rules admit), sharing root's object store read-only."""
+    env = git_env()
+    done = subprocess.run(["git", "clone", "--quiet", "--shared", "--no-hardlinks", str(root), str(target)],
+                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          env=env, check=False)
+    if done.returncode != 0:
+        raise CannotEvaluate("cannot clone the disposable copy: {}".format(
+            done.stderr.decode("utf-8", "replace").strip()[:300]))
+    for rel in _tracked_and_untracked(root):
+        source, dest = Path(root) / rel, Path(target) / rel
+        try:
+            st = os.lstat(source)
+        except FileNotFoundError:
+            if dest.is_symlink() or dest.is_file():
+                dest.unlink()
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if stat.S_ISLNK(st.st_mode):
+            if dest.is_symlink() or dest.exists():
+                dest.unlink()
+            os.symlink(os.readlink(source), dest)
+        elif stat.S_ISREG(st.st_mode):
+            if dest.is_symlink() or not dest.is_file() or dest.read_bytes() != source.read_bytes():
+                if dest.is_symlink():
+                    dest.unlink()
+                shutil.copyfile(source, dest)
+            os.chmod(dest, stat.S_IMODE(st.st_mode))
+
+
+def _observe_one(gate, copy, python, bindir, current, work, index):
+    """(exit code or None on timeout, records) of one gate run once in copy under the hook."""
+    log_dir = Path(work) / "log-{}".format(index)
+    tmp = Path(work) / "tmp-{}".format(index)
+    log_dir.mkdir()
+    tmp.mkdir()
+    current.write_text("{}\n{}".format(log_dir, os.path.realpath(str(copy))), encoding="utf-8")
+    argv = list(gate.variants[-1])
+    if argv[0] != "python3":
+        raise CannotEvaluate("gate {!r} is not a python3 launch; declare it whole-tree".format(gate.name))
+    argv[0] = str(python)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update({"PATH": str(bindir) + os.pathsep + env.get("PATH", os.defpath), "TMPDIR": str(tmp),
+                "PYTHONDONTWRITEBYTECODE": "1"})
+    with open(Path(work) / "out-{}.txt".format(index), "wb") as sink:
+        proc = subprocess.Popen(argv, cwd=str(copy), stdin=subprocess.DEVNULL, stdout=sink,
+                                stderr=subprocess.STDOUT, env=env, start_new_session=True)
+        try:
+            code = proc.wait(timeout=OBSERVE_GATE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, 9)
+            proc.wait()
+            code = None
+    current.write_text("", encoding="utf-8")
+    records = read_observations(log_dir)
+    tail = (Path(work) / "out-{}.txt".format(index)).read_bytes()[-1500:].decode("utf-8", "replace")
+    shutil.rmtree(log_dir, ignore_errors=True)
+    shutil.rmtree(tmp, ignore_errors=True)
+    return code, records, tail
+
+
+def observe_inputs(root, names, jobs, out):
+    """Run each narrowed gate (or the named ones) once in a disposable copy under the audit hook and
+    report every read, listing or launch its declaration does not cover. 0 when none, 1 otherwise."""
+    import concurrent.futures
+    import queue
+    gates, manifest = read_inputs(root)
+    targets = observed_gates(gates, manifest)
+    if names:
+        unknown = sorted(set(names) - {g.name for g in gates})
+        if unknown:
+            raise CannotEvaluate("no such gate {}".format(unknown))
+        targets = [g for g in gates if g.name in names]
+    # A hex-only name: a gate may refuse a temporary root holding a character Markdown renders (an
+    # underscore, which tempfile.mkdtemp's random part can carry).
+    import secrets
+    work = Path(tempfile.gettempdir()) / "affected-gates-observe-{}".format(secrets.token_hex(8))
+    work.mkdir(mode=0o700)
+    try:
+        jobs = max(1, min(jobs, len(targets)))
+        slots = queue.Queue()
+        for slot in range(jobs):
+            copy = work / "copy-{}".format(slot)
+            _disposable_copy(root, copy)
+            python, bindir, current = _build_observer_env(work, slot)
+            slots.put((copy, python, bindir, current))
+
+        def observe(item):
+            index, gate = item
+            slot = slots.get()
+            try:
+                copy, python, bindir, current = slot
+                code, records, tail = _observe_one(gate, copy, python, bindir, current, work, index)
+                reads, listed, unobserved = observed_requirements(copy, bindir, records)
+                return gate, code, uncovered_observations(manifest, gate.name, reads, listed, unobserved), \
+                    len(records), tail
+            finally:
+                slots.put(slot)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+            results = list(pool.map(observe, enumerate(targets)))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    failed = 0
+    for gate, code, findings, count, tail in results:
+        if code != 0:
+            findings = ["exited {} in the disposable copy, so its observation is incomplete; output ends: "
+                        "{}".format("by timeout" if code is None else code,
+                                    " | ".join(tail.strip().splitlines()[-8:]))] + findings
+        if count == 0:
+            findings.append("no record was observed (the startup hook did not run)")
+        if findings:
+            failed += 1
+            out.write("UNCOVERED: {}\n".format(gate.name))
+            for finding in findings:
+                out.write("  {}\n".format(finding))
+    if failed:
+        out.write("FAIL: {} of {} observed gate(s) read, list or launch repository paths their declaration "
+                  "does not cover\n".format(failed, len(results)))
+        return 1
+    out.write("PASS: {} gate(s) observed under the audit hook; every read, listing and launch of a "
+              "repository path is covered by its declaration (NOT MEASURED: reads of non-Python children "
+              "that run outside the repository and name none of its paths)\n".format(len(results)))
+    return 0
+
+
+# ---------------------------------------------------------------------------------------------
 # Command line
 
 def run(root, base, head_rev, form, out, err, env=None):
@@ -539,6 +1002,19 @@ def _parse_cli(argv):
     """(mode, options) or None for an invalid invocation."""
     if argv and argv[0] == "--self-test" and len(argv) == 1:
         return "self-test", None
+    if argv and argv[0] == "--observe-inputs":
+        observe = {"gates": [], "jobs": OBSERVE_DEFAULT_JOBS}
+        rest, seen_jobs = argv[1:], False
+        while rest:
+            if rest[0] == "--gate" and len(rest) > 1 and rest[1] and rest[1] not in observe["gates"]:
+                observe["gates"].append(rest[1])
+            elif rest[0] == "--jobs" and len(rest) > 1 and rest[1].isdigit() and int(rest[1]) > 0 \
+                    and not seen_jobs:
+                observe["jobs"], seen_jobs = int(rest[1]), True
+            else:
+                return None
+            rest = rest[2:]
+        return "observe", observe
     options = {"base": None, "head": None, "form": "names"}
     index = 0
     while index < len(argv):
@@ -573,10 +1049,16 @@ def main(argv=None):
         report_path, argv = argv[-1], ["--self-test"]
     parsed = _parse_cli(argv)
     if parsed is None:
-        print("error: usage: affected_gates.py --base REV [--head REV] [--json | --explain] | --self-test",
-              file=sys.stderr)
+        print("error: usage: affected_gates.py --base REV [--head REV] [--json | --explain] | --self-test"
+              " | --observe-inputs [--gate NAME]... [--jobs N]", file=sys.stderr)
         return 2
     mode, options = parsed
+    if mode == "observe":
+        try:
+            return observe_inputs(ROOT, options["gates"], options["jobs"], sys.stdout)
+        except CannotEvaluate as exc:
+            print("CANNOT EVALUATE: {}".format(exc), file=sys.stderr)
+            return 2
     if mode == "self-test":
         if report_path is not None:
             # Finalized at interpreter exit by tools/_selftest_exit_report.py; nothing writes it in band.
@@ -892,6 +1374,112 @@ def _self_test_selection(gates, manifest):
     check("raw/unmerged-record-refused", refused)
 
 
+def _self_test_regressions(gates, manifest):
+    """The three under-declarations the observation check found, written here independently of the
+    declarations under test, each failing once its own mapping is narrowed to the gate's script."""
+    if gates is None:
+        return
+    for check_id, path, required in (
+            ("regress/github-contract-selects-entry-guard", ".github/check_newtab_contract.py",
+             ("entry-guard", "entry-guard-selftest")),
+            ("regress/baseline-palette-selects-entry-guard", ".baseline/check_palette.py",
+             ("entry-guard", "entry-guard-selftest")),
+            ("regress/registry-selects-direct-selftests", SUITES_REL,
+             ("site-scope-selftest", "ci-build-bash-selftest")),
+            ("regress/finalizer-selects-execution-selftest", "tools/_selftest_exit_report.py",
+             ("selftest-execution-selftest",))):
+        sel = _selected_names(gates, manifest, [path]) or []
+        check(check_id, all(name in sel for name in required), [n for n in required if n not in sel])
+    for check_id, path, name in (
+            ("regress/entry-guard-missed-without-mapping", ".github/check_newtab_contract.py", "entry-guard"),
+            ("regress/site-scope-missed-without-mapping", SUITES_REL, "site-scope-selftest"),
+            ("regress/execution-selftest-missed-without-mapping", "tools/_selftest_exit_report.py",
+             "selftest-execution-selftest")):
+        flipped = _selected_names(gates, _narrowed(manifest, name), [path])
+        check(check_id, flipped is not None and name not in flipped, flipped)
+
+
+OBSERVE_FIXTURE_GATE = '''\
+import os
+import subprocess
+import sys
+open("data/read.txt", encoding="utf-8").read()
+try:
+    open("data/missing.toml", "rb")
+except FileNotFoundError:
+    pass
+os.listdir("listed")
+open("written.out", "w").close()
+subprocess.run([sys.executable, "-I", "-c", "open('data/child.txt').read()"], check=True)
+subprocess.run(["python3", "-I", "-B", "child_script.py"], check=True)
+subprocess.run([sys.executable, "-I", "-S", "-c", "pass"], check=True)
+subprocess.run(["sh", "-c", "true"], check=True)
+subprocess.run(["git", "--version"], check=True, stdout=subprocess.DEVNULL)
+'''
+
+
+def _self_test_observation(work):
+    """The audit hook and the comparison over a fixture tree: opens, listings and launches are recorded
+    in the gate and in its Python children (through sys.executable and PATH), a child that skips site
+    and a non-Python child in the tree are unobserved, and only an uncovered read is reported."""
+    fixture = Path(work) / "observe-tree"
+    _write(fixture / "gate.py", OBSERVE_FIXTURE_GATE)
+    _write(fixture / "child_script.py", "open('data/script-read.txt').read()\n")
+    for rel in ("data/read.txt", "data/child.txt", "data/script-read.txt", "listed/one.md"):
+        _write(fixture / rel, "x\n")
+    try:
+        python, bindir, current = _build_observer_env(work, "selftest")
+    except CannotEvaluate as exc:
+        # The observation rows never run, so the execution reconcile fails too.
+        FAILURES.append("observation fixture harness: {}".format(exc))
+        return
+    log_dir = Path(work) / "observe-log"
+    log_dir.mkdir()
+    current.write_text("{}\n{}".format(log_dir, os.path.realpath(str(fixture))), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "PYTHON"))}
+    env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", os.defpath)
+    done = subprocess.run([str(python), "-I", "-B", "gate.py"], cwd=str(fixture), stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, check=False)
+    current.write_text("", encoding="utf-8")
+    records = read_observations(log_dir)
+    reads, listed, unobserved = observed_requirements(fixture, bindir, records)
+    check("observe/hook-records-gate-and-children", done.returncode == 0
+          and {"gate.py", "data/read.txt", "data/missing.toml", "data/child.txt", "child_script.py",
+               "data/script-read.txt"} <= reads, (done.returncode, sorted(reads), done.stderr[-300:]))
+    check("observe/write-only-open-not-a-read", "written.out" not in reads, sorted(reads))
+    check("observe/listing-recorded-import-listings-not", listed == {"listed"}, sorted(listed))
+    check("observe/unobserved-children-named",
+          any(u.startswith("sh -c") for u in unobserved) and any("-S" in u for u in unobserved)
+          and not any("--version" in u for u in unobserved) and len(set(unobserved)) == 2, unobserved)
+    gate = "fixture-gate"
+    def manifest_of(entry):
+        return Manifest(manifest_full, (), {gate: entry})
+    manifest_full = ((MANIFEST_REL, glob_regex(MANIFEST_REL)),)
+    narrow = Declaration(tuple((p, glob_regex(p)) for p in ("gate.py", "child_script.py", "data/**")),
+                         False, False, "fixture")
+    findings = uncovered_observations(manifest_of(narrow), gate, reads, listed, [])
+    check("observe/uncovered-listing-reported", findings == ["lists listed/ (a new entry there is not covered)"],
+          findings)
+    wide = narrow._replace(inputs=narrow.inputs + (("listed/*", glob_regex("listed/*")),))
+    check("observe/covered-declaration-passes", uncovered_observations(manifest_of(wide), gate, reads, listed, [])
+          == [], uncovered_observations(manifest_of(wide), gate, reads, listed, []))
+    short = narrow._replace(inputs=narrow.inputs[:2] + (("listed/*", glob_regex("listed/*")),))
+    findings = uncovered_observations(manifest_of(short), gate, reads, listed, [])
+    check("observe/uncovered-read-reported", "reads data/read.txt" in findings
+          and "reads data/missing.toml" in findings, findings)
+    findings = uncovered_observations(manifest_of(wide), gate, reads, listed, unobserved)
+    check("observe/unobserved-launch-needs-whole-tree", len(findings) == 2
+          and all("whole-tree" in f for f in findings), findings)
+    whole = Declaration((), True, False, "fixture")
+    check("observe/whole-tree-declaration-covers",
+          uncovered_observations(manifest_of(whole), gate, reads, listed | {""}, unobserved) == [])
+    check("observe/root-listing-needs-whole-tree",
+          any("repository root" in f for f in uncovered_observations(manifest_of(wide), gate, set(), {""}, [])))
+    check("observe/system-python-unaffected", subprocess.run(
+        [sys.executable, "-I", "-c", "import sys; sys.exit(1 if '{}' in sys.modules else 0)".format(
+            OBSERVE_HOOK_MODULE)], stdin=subprocess.DEVNULL, check=False).returncode == 0)
+
+
 def _self_test_live_coverage(gates, manifest):
     if gates is None:
         return
@@ -1042,7 +1630,9 @@ def _self_test_git(work):
 def _self_test_cli():
     got = []
     for argv in (["--bogus"], [], ["--base"], ["--base", "a", "--base", "b"], ["--base", "a", "--json", "--explain"],
-                 ["--self-test", "--base", "a"], ["--execution-report", "relative/report"]):
+                 ["--self-test", "--base", "a"], ["--execution-report", "relative/report"],
+                 ["--observe-inputs", "--jobs", "0"], ["--observe-inputs", "--gate"],
+                 ["--observe-inputs", "--base", "a"], ["--self-test", "--observe-inputs"]):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             got.append(main(argv))
     check("cli/invalid-invocation-exit-2", got == [2] * len(got), got)
@@ -1053,10 +1643,12 @@ def self_test():
     gates, manifest = gates_manifest
     _self_test_roster(gates, manifest, error)
     _self_test_selection(gates, manifest)
+    _self_test_regressions(gates, manifest)
     _self_test_live_coverage(gates, manifest)
     _self_test_cli()
     work = Path(tempfile.mkdtemp(prefix="affected-gates-selftest-"))
     try:
+        _self_test_observation(work)
         try:
             _self_test_git(work)
         except CannotEvaluate as exc:

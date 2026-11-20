@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "55559babc067575828661c1bbfb65b49277269d66328ecb23d67f1b12bd4c653"
+tree-sha256 = "ee9e492cae390a68dc7ce59a88b52fad44efefa7c66972db97f21367b7e6d05f"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 640473
-sha256 = "e596c1d3af706c871fb963d23176a1eb9e360366cee59c11b0963522e30d1bcd"
+bytes = 642199
+sha256 = "66894dfe0af6cd6dac4ef2a54d5ac4e14e7c965c92ecff9d321ded4ff4f28ef9"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2483,7 +2483,7 @@ sha256 = "bae43dcfb3e30c428f59a243370f83e2835ef9706caa5692c83f9d7137964cb3"
 [[sources]]
 path = "README.md"
 bytes = 5543
-sha256 = "d46c725ff08fb25c20a3f25a8d6a02a1a3e7fd72472207d694394154aa07979f"
+sha256 = "dc2f0b051983eacedcdd21085f6c53b99b2d96c79c1bae0034176ecf8a3b66c7"
 
 [[sources]]
 path = "RELEASING.md"
@@ -4237,13 +4237,13 @@ sha256 = "7d280b167418e3c7e47161ba7f670dac8cc65fab277a4f966d0afa3d0496f2da"
 
 [[sources]]
 path = "tools/affected_gates.py"
-bytes = 56660
-sha256 = "e24e2f7ee3bcf765e8fa6888de59042c858707d8ef7763800b65ef3025fe2efb"
+bytes = 87204
+sha256 = "bd35d92744ff8f608bf2ced2768f301861aba8aae89d1ed58cba89f2eaa45c2d"
 
 [[sources]]
 path = "tools/affected_gates.toml"
-bytes = 73165
-sha256 = "4d6aed20f2e9a5aa2e44f3db0c038cf3529406bec20aa0b33f996731a533c9a1"
+bytes = 68980
+sha256 = "b9fbfe47a2d07f32b98fd2e1553ae323611ac0ed8c663fbfb38e0df4dd48be8c"
 
 [[sources]]
 path = "tools/aiqt_corpus.py"
@@ -4807,8 +4807,8 @@ sha256 = "2b1d57119dd5e8849a0b28d9c58e35f2cfb900742b738b787e68b28650b39c22"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 36718
-sha256 = "a96d81ed26a36fc9bab11b14c1d93c461b8794ec3a9a570f25efd484d874766b"
+bytes = 37120
+sha256 = "c2d2c5241593b6fcaecb52c7fda8f5fd8719154b5d255287b82b6acab060a4a6"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -4822,8 +4822,8 @@ sha256 = "f020224b8fcec06196b11729da9a87046c471d120bd674bf5fe6b967a5860021"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 288812
-sha256 = "0b43bac44a43968271c77c43fe4d96771004762ad731da3270414d6d08be13ff"
+bytes = 289798
+sha256 = "7d893c33fdd321fd53dc4647380d17648dabc75834f01b1abf51326c767c5042"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
