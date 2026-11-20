@@ -956,6 +956,7 @@ tools/og-cards/aiqt-og.html text eol=lf
 tools/og-cards/card.css text eol=lf
 tools/og-cards/opfiles-og.html text eol=lf
 tools/opf_render.py text eol=lf
+tools/orch_dispatch_marker.py text eol=lf
 tools/orch_doctor.py text eol=lf
 tools/orch_preflight.py text eol=lf
 tools/orch_register.py text eol=lf
