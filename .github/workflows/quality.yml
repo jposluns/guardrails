@@ -3163,6 +3163,12 @@ jobs:
       - name: Review labels on added lines
         shell: bash
         run: python3 -I -B tools/check_review_labels.py
+      - name: Affected-gate selector self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite affected-gates-selftest
+      - name: Affected-gate declarations held against observed reads
+        shell: bash
+        run: python3 -I -B tools/affected_gates.py --observe-inputs
       - name: QA advisory digest (non-gating finding)
         shell: bash
         run: python3 -I -B tools/audit_reference.py --digest

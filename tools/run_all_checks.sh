@@ -432,6 +432,14 @@ run_gate "internal-names"           python3 -I -B tools/check_internal_names.py
 # HEAD at or behind origin/main judges its uncommitted edits only and passes with a NOTE when clean.
 run_gate "review-labels-selftest"   python3 -I -B tools/check_selftest_execution.py --suite review-labels-selftest
 run_gate "review-labels"            python3 -I -B tools/check_review_labels.py
+# The affected-gate selector (tools/affected_gates.py) derives member checks from changed paths through
+# tools/affected_gates.toml. Its self-test holds those declarations equal to this roster and replays the
+# selection and its fail-closed exits over temporary fixture repositories.
+run_gate "affected-gates-selftest"  python3 -I -B tools/check_selftest_execution.py --suite affected-gates-selftest
+# The declarations held against observation: every gate with narrowed inputs runs once in a disposable
+# copy under a Python audit hook, and a read, listing or launch of a repository path its declaration
+# does not cover fails this gate (the residual, reads of non-Python children, is in the tool's docstring).
+run_gate "affected-gates-observed"  python3 -I -B tools/affected_gates.py --observe-inputs
 
 # ADVISORY QA digest, run under run_gate. It runs the reference audit and prints a compact digest that
 # distinguishes a required-unavailable surface from an optional-disabled one. audit_reference.py --digest
