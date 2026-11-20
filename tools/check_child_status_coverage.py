@@ -386,7 +386,6 @@ DYNAMIC_NAMES = frozenset(("__import__", "exec", "eval"))
 DYNAMIC_ATTRS = frozenset(("__import__", "import_module", "spec_from_file_location", "exec_module", "load_module",
                            "run_path", "run_module", "resolve_name", "locate"))
 LOCAL_DIRS = ("tools", "opf/tools")
-CHILD_TIMEOUT = 120
 
 # Stage 1 keeps the direct-launch check off; it turns on, with DIRECT_LAUNCH_RESIDUAL emptied in the same
 # change, once the Python-floor prelude refuses an ignored SIGCHLD in every entry point.
