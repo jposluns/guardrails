@@ -600,8 +600,8 @@ or below the working directory for `-c`, `-m` and a stdin program, or below the 
 a script, unless `-I` or `-P` is given; or at or below a directory on the hook interpreter's `sys.path`,
 the hook environment's `PYTHONPATH`, or a `PYTHONPATH`/`PYTHONHOME`/`PYTHONUSERBASE`/`PYTHONSTARTUP`
 value the call assigns; an unknown working directory counts as reaching), so `python3 -m drafts.evil`
-and `python3 -c "import drafts.evil"` from the declared directory's parent deny while
-`python3 -I -m drafts.evil` there stays allowed (the module is not found); a shell or `source` operand
+and `python3 -c "import drafts.evil"` from the declared directory's parent deny (and, under the
+refuse-wide rule below, so does `python3 -I -m drafts.evil` there); a shell or `source` operand
 without a slash (bash looks it up in PATH and the working directory) while the working directory is
 unknown or a PATH directory of the hook environment lies inside a declared directory; any relative
 launch operand while the working directory is unknown; and any launch while a PATH directory of the
@@ -617,22 +617,48 @@ or below any `.git` directory (its `config`, which sets `core.fsmonitor`, `core.
 a path ending in `git/config` is configuration that executes on the next ordinary git command, and is
 refused like `.git/hooks`.
 
-Ordinary work that names no declared directory. A command the lexer cannot read only because of an
-unquoted here-document or a here-string is re-read narrowly instead of refused whole, and only to show
-it OUT of scope: an unquoted here-document whose operator is followed, to the end of the command, by no
-`$`, backquote or backslash reads exactly like the quoted one, and a here-string whose word is a
-single-quoted string, a double-quoted string without `$`, backquote or backslash, or a plain word, is
-literal data. Each rewrite is made at the exact position where the lexer stopped, the result is lexed
-whole again, and it is accepted only when every segment's command word is one of the allowlist's
-readers or `echo`, `true`, `false`, `:`, `tee`, `tr`, `cut`, `uniq`, `cd` or `mkdir`, so the data
-never reaches an interpreter. So `cat <<EOF > <out>/notes.txt` with a literal body, and
-`grep -c x <<< 'xyz'`, are allowed where they name no declared directory; a here-document fed to a
-shell, one followed by a run, one whose body holds a `$`, and any such command in scope still refuse
-whole. Operator note: setting `deliverable_dirs` changes how the WHOLE session's Bash calls are judged,
-not only calls that name a declared directory: a program on stdin (`python3 -` with a quoted
-here-document, a pipe into `bash`), an unquoted here-document with an expansion in its body, a launch
-carrying any expansion, and a `python3 -m`/`-c` run from an ancestor of a declared directory deny
-wherever a directory is declared.
+Refuse wide, allow narrow. Wherever any directory is declared, a construct this guard does not fully
+read puts the command IN SCOPE whatever directory it names, so only the closed allowlist can pass it,
+and none of these constructs is on the allowlist. Each test reads the widest view: the raw command
+text (quoted strings and here-document bodies included) for command substitutions, and every word of a
+segment wherever it stands for the rest. The constructs:
+
+- a command substitution (`$( )`, an arithmetic `$(( ))` or a backquote) anywhere in the raw text. The
+  one proof that clears one is a `$( )` whose WHOLE body is `cat` reading one here-document with a
+  quoted delimiter (`git commit -m "$(cat <<'EOF' ... EOF)"`), which is literal data; every other `$(`
+  and backquote, inside such a body too, is judged on its own, so a commit message holding a backquote
+  denies (use `git commit -F <file>`).
+- an unquoted here-document or a here-string: the lexer refuses both, so the command is unread and
+  refuses whole. There is no re-reading of either (the previous release's re-reading let a command
+  substitution beside one through).
+- program text: `eval`, `trap`, `perl`, `ruby`, `node`, `php`, `lua`, `tclsh`, `Rscript`, `awk` (and
+  `gawk`, `mawk`, `nawk`), `busybox`, `watch`, `su`, `script`, `flock`, `ssh`, `rsync`, `parallel`,
+  `gdb`, the vi and emacs editors and the other words `_NRD_PROGRAM_TEXT_WORDS` lists; a python-family
+  `-c`; a shell `-c` body the wrapper peel does not read (behind `xargs`, `find -exec`, `sudo`); a
+  python or shell word reading its program from stdin behind a launch wrapper; and `sed` with any script
+  other than line addresses with `p`, `d`, `n` and `q` (sed's `e` command runs a shell command).
+- a test collector or runner started from an ancestor of a declared directory: a `python3 -m` run (with
+  `-I` too: `unittest discover` and pytest put their start directory on `sys.path` themselves), a
+  python script named like a collector, and `pytest`, `tox`, `nox`, `coverage`, `make`, `npm`, `cargo`,
+  `go` and the other words `_NRD_RUNNER_WORDS` lists, when the working directory is unknown or at or
+  above a declared directory, or any word resolves to a path at or above one.
+- git configuration that can run program text: `git -c` with a key outside a closed inert set
+  (`color.*`, `core.quotepath`, `user.name`, `user.email`, `advice.*`, `init.defaultBranch`,
+  `column.ui`, `i18n.*`, `core.autocrlf`), any `--config-env`, an `--exec-path=` value, a `git config`
+  call that sets a key outside that set or edits, and any `GIT_*`, `PAGER`, `EDITOR`, `VISUAL`,
+  `LESSOPEN`, `BROWSER` or askpass assignment word.
+- any word or file redirect target naming configuration that executes, read or written: a `.git`
+  component in any letter case, a bare repository (`repo.git/config`, or a directory holding `HEAD` and
+  `objects/`), a `.gitconfig` or `git/config` path, a shell startup file, `.envrc`, `.gitmodules`,
+  anything in a `.claude` directory, an ssh `config`, `rc` or `environment` file, and a Python
+  `sitecustomize.py`, `usercustomize.py`, `.pythonrc` or `.pth` file. The same set is refused as a `cp`
+  or write-redirect destination in scope. An allowlisted reader still passes (`cat ~/.bashrc`,
+  `ls .git/hooks`).
+
+Operator note: setting `deliverable_dirs` changes how the WHOLE session's Bash calls are judged, not
+only calls that name a declared directory: every construct above, a program on stdin (`python3 -` with
+a quoted here-document, a pipe into `bash`), an unquoted here-document or here-string, and a launch
+carrying any expansion deny wherever a directory is declared.
 
 The guard finds its registry and `deliverable_dirs` INDEPENDENTLY of the payload working directory:
 it consults the project directory the hook environment names (`CLAUDE_PROJECT_DIR`, the path the
@@ -668,16 +694,21 @@ none (`echo 'echo hi' | bash`, `python3 -` with a quoted here-document, a bare `
 `bash --login`, and, behind a wrapper option the peel cannot parse, the first shell or python word
 with nothing after it even where it is only an argument, as in `env -vu FOO echo bash`). An unquoted
 heredoc or any other construct the lexer cannot read denies whole wherever a directory is declared,
-even where it only prints and names no declared directory from a working directory outside them all,
-unless the narrow re-reading above shows it out of scope (an unquoted here-document whose body holds a
-`$`, backquote or backslash, one fed to anything but the listed inert consumers, and a here-string
-fed to a shell or an interpreter still deny). A launch carrying any expansion, glob, brace or tilde
+even where it only prints and names no declared directory from a working directory outside them all
+(`cat <<EOF > out.txt`, `grep -c x <<< 'xyz'`, a here-document with a trailing space after its
+delimiter, and `cd <ancestor> && cat <<EOF`, which the previous release re-read and allowed, deny
+again). Every refuse-wide construct denies wherever a directory is declared even where it names none:
+`python3 -I -c 'print(1)'`, `awk '{print $1}'`, `sed 's/a/b/'`, a commit message built with
+`$(cat <<'EOF' ... EOF)` whose body holds a backquote or `$(`, `git -c` outside the inert keys,
+`GIT_PAGER=cat git log`, `make` or `pytest` from an ancestor of a declared directory, and an ordinary
+command whose word names a `.git` path, a `.gitmodules`, a shell startup file or a `.claude` path
+unless every segment is an allowlisted reader (`git add .gitmodules` denies). A launch carrying any expansion, glob, brace or tilde
 denies wherever a directory is declared, even where it names none (`python3 tools/run.py "$X"`,
 `bash ~/bin/x.sh`, `for f in *.py; do python3 -I r.py "$f"; done`); a `python3 -m` or `-c` run (or a
 script run without `-I`/`-P` whose directory is an ancestor of a declared directory) from an ancestor
-of a declared directory denies, even `python3 -m pytest`, so a declared directory inside the working
-tree makes those runs deny from the tree's root (use `python3 -I`, or run from a directory that is not
-an ancestor); a launch word that is only an argument (`echo python3`, `grep -r make`) is judged as a
+of a declared directory denies, even `python3 -m pytest` and `python3 -I -m unittest`, so a declared
+directory inside the working tree makes those runs deny from the tree's root (run from a directory
+that is not an ancestor); a launch word that is only an argument (`echo python3`, `grep -r make`) is judged as a
 launch; a `PYTHONPATH`-style assignment that cannot be placed (an empty or relative part with no known
 working directory) puts every python launch in the call in scope; and a `cp` or redirect onto any path
 under a `.git` directory, a `.git` file, a `.gitconfig` or a `git/config` path denies even where it

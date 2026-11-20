@@ -30290,7 +30290,7 @@ def _nrd_write_forbidden(path, eff_cwd):
         for rel in _ORCH_REGISTRY_FILES:
             if f == "/" + rel or f.endswith("/" + rel):
                 return True
-    return _nrd_git_config_target(path, eff_cwd)
+    return _nrd_git_config_target(path, eff_cwd) or _nrd_exec_config_target(path, eff_cwd)
 
 
 def _nrd_git_config_target(path, eff_cwd):
@@ -30302,10 +30302,12 @@ def _nrd_git_config_target(path, eff_cwd):
     every run (a file named .gitconfig, and a path ending in git/config, the XDG location). The
     .git/hooks refusal above is the same class; this widens it to the whole repository control directory
     and the user-level configuration. Both the lexical and the realpath spelling are judged; an
-    unresolvable destination is left to the caller's own check. Residual: configuration git reads from
-    elsewhere (an include.path target, a GIT_CONFIG_GLOBAL file, the system /etc/gitconfig written under
-    another name, or a worktree's .gitattributes naming a filter configured elsewhere) is not a refused
-    target."""
+    unresolvable destination is left to the caller's own check. The wider configuration-that-executes
+    set (a .git component in any letter case, a bare repository, shell startup files, .envrc, .gitmodules,
+    a .claude directory, ssh and Python startup files) is judged by _nrd_exec_config_target, which
+    _nrd_write_forbidden also consults. Residual: configuration git reads from elsewhere (an include.path
+    target, a GIT_CONFIG_GLOBAL file, the system /etc/gitconfig written under another name, or a
+    worktree's .gitattributes naming a filter configured elsewhere) is not a refused target."""
     forms = _nrd_forms(path, eff_cwd)
     if forms is None:
         return False
@@ -31436,74 +31438,341 @@ def _nrd_assigned_value_in(seg, cwd, dirs):
     return False
 
 
-# --- re-reading an unreadable command (the false-refusal fix) --------------------------------------------
-# The lexer refuses an UNQUOTED here-document and a here-string. Two narrow re-readings let an ordinary
-# command of that shape be judged instead of refused whole, and ONLY to show it OUT of scope (in scope the
-# command still refuses whole, as before): (1) an unquoted here-document whose operator is followed, to the
-# end of the command, by no '$', backquote or backslash reads exactly like the quoted one (bash expands only
-# those three in such a body), so its delimiter is re-spelled quoted; (2) a here-string whose word is a
-# single-quoted string, a double-quoted string holding none of '$', backquote or backslash, or a plain word
-# of path characters is literal data, so it is re-spelled as a read of /dev/null. Each rewrite is made at
-# the exact position where the lexer stopped (its stop index), never by searching the text, and the result
-# is lexed in full again. The re-read command is then accepted only when every segment's command word is a
-# closed set of inert consumers (_NRD_REREAD_WORDS: the allowlist's readers plus echo, true, false, :, tee,
-# tr, cut, uniq, cd and mkdir), so the data never reaches an interpreter or any program that could run it.
-_NRD_REREAD_LIMIT = 16
-_NRD_REREAD_WORDS = frozenset(set(_NRD_READ_FORMS) | {"echo", "true", "false", ":", "tee", "tr", "cut",
-                                                      "uniq", "cd", "mkdir"})
-_NRD_HERESTRING_WORD_RE = re.compile(
-    r"[ \t]*(?:'[^']*'|\"[^\"$`\\]*\"|[A-Za-z0-9_.,:=+%@/-]+)(?=[ \t\n;&|)<>]|\Z)")
-_NRD_HEREDOC_DELIM_RE = re.compile(r"[A-Za-z0-9_.+@%,=-]+\Z")
+# --- refuse wide, allow narrow ----------------------------------------------------------------------------
+# A construct whose effect this guard does not fully read puts the command IN SCOPE whenever any directory
+# is declared, whatever directory it names, so only the closed allowlist can pass it (and none of these
+# constructs is on the allowlist). Each test reads the WIDEST view of the command: the raw text for command
+# substitutions (quoted strings and here-document bodies included), and every word of a segment, wherever
+# it stands (an argument that only looks like one counts too), for the rest. The constructs:
+# - a command substitution ($( ) or a backquote) anywhere in the raw text: its body is not lexed into the
+#   segment's words, so nothing shows what it runs. The one proof that clears one: a $( ) whose whole body
+#   is `cat` reading one here-document with a QUOTED delimiter (the commit-message form), which is literal
+#   data printed by cat (_nrd_subst_cat_heredoc). Every other $( and backquote, inside such a body too, is
+#   judged on its own.
+# - an unquoted here-document or a here-string (the lexer refuses both, so the command is unread and in
+#   scope; there is no re-reading of them).
+# - eval, trap and the other words that take program text (_NRD_PROGRAM_TEXT_WORDS), a python-family -c,
+#   a shell -c body the wrapper peel does not read (behind xargs, find -exec, sudo, a shell the guard does
+#   not list), a python or shell word reading its program from stdin behind a launch wrapper, and sed
+#   with any script outside line-number printing (sed's e command and s///e flag run shell commands).
+# - a python -m run, a test collector or a build or task runner (_NRD_RUNNER_WORDS) whose working
+#   directory or any operand is at or above a declared directory (or unknown): collection and discovery
+#   put the start directory on sys.path themselves, so -I does not prevent the import.
+# - git configuration that can run program text: git -c (except a closed set of keys whose values are
+#   never run), --config-env, --exec-path=, a git config call that sets a key outside that set or opens
+#   an editor, and any GIT_* (or PAGER, EDITOR, VISUAL, LESSOPEN, LESSCLOSE, BROWSER, MANPAGER,
+#   SSH_ASKPASS, SUDO_ASKPASS) assignment word.
+# - any word or redirect target naming configuration that executes (_nrd_exec_config_target), read or
+#   written: a .git directory or file in any letter case, a config file or hooks directory below a
+#   directory named *.git, a file in a directory shaped like a bare repository, a .gitconfig or git/config path, a shell startup file, .envrc, .gitmodules, a .claude
+#   directory, an ssh configuration, a Python sitecustomize/usercustomize module or a .pth file.
+_NRD_PROGRAM_TEXT_WORDS = frozenset((
+    "eval", "trap", "perl", "ruby", "irb", "node", "nodejs", "deno", "bun", "php", "lua", "luajit", "tclsh",
+    "wish", "expect", "Rscript", "R", "julia", "guile", "awk", "gawk", "mawk", "nawk", "busybox", "pwsh",
+    "osascript", "watch", "su", "runuser", "script", "flock", "ssh", "rsync", "parallel", "gdb", "vim", "vi",
+    "nvim", "ex", "emacs"))
+_NRD_RUNNER_WORDS = frozenset((
+    "pytest", "py.test", "nosetests", "nose2", "trial", "tox", "nox", "coverage", "behave", "ward", "make",
+    "gmake", "npm", "npx", "yarn", "pnpm", "cargo", "go", "bazel", "gradle", "mvn", "ctest", "just", "rake",
+    "hatch", "poetry", "pipenv", "uv", "pdm", "ipython", "jupyter"))
+_NRD_SED_WORDS = frozenset(("sed", "gsed"))
+# sed scripts the guard clears: line addresses, ranges, negation and the p, d, n and q commands only.
+_NRD_SED_INERT_SCRIPT_RE = re.compile(r"[0-9,$;!pdnq \t\n]*\Z")
+_NRD_SED_INERT_FLAGS = frozenset(("--quiet", "--silent", "--posix", "--regexp-extended", "--separate",
+                                  "--unbuffered", "--null-data", "--debug", "--sandbox"))
+_NRD_PROGRAM_ENV_RE = re.compile(
+    r"(?:GIT_[A-Za-z0-9_]*|PAGER|MANPAGER|EDITOR|VISUAL|LESSOPEN|LESSCLOSE|BROWSER|SSH_ASKPASS|"
+    r"SUDO_ASKPASS)\+?=")
+# git configuration keys whose values git never runs as a program (case-insensitive section and key).
+_NRD_GIT_INERT_KEY_RE = re.compile(
+    r"(?:color\.[A-Za-z0-9.-]+|core\.quotepath|user\.name|user\.email|advice\.[A-Za-z0-9]+|"
+    r"init\.defaultbranch|column\.ui|i18n\.[A-Za-z0-9]+|core\.autocrlf)\Z", re.IGNORECASE)
+_NRD_GIT_GLOBAL_VALUE = frozenset(("-C", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
+                                   "--attr-source"))
+_NRD_GIT_CONFIG_READ = frozenset(("--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list",
+                                  "--get-color", "--get-colorbool"))
+_NRD_GIT_CONFIG_FLAGS = frozenset(("--global", "--system", "--local", "--worktree", "--show-origin",
+                                   "--show-scope", "--name-only", "-z", "--null", "--includes",
+                                   "--no-includes", "--bool", "--int", "--bool-or-int", "--path",
+                                   "--expiry-date"))
+_NRD_SUBST_CAT_RE = re.compile(r"\$\(cat[ \t]+<<(-?)[ \t]*'([A-Za-z0-9_]+)'[ \t]*\n")
+_NRD_SUBST_CLOSE_RE = re.compile(r"[ \t\n]*\)")
+# Basenames of configuration files a later ordinary command runs (shell startup files, direnv, git
+# submodule configuration, Python startup modules).
+_NRD_EXEC_CONFIG_NAMES = frozenset((
+    ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".zshrc", ".zshenv", ".zprofile",
+    ".zlogin", ".zlogout", ".kshrc", ".mkshrc", ".cshrc", ".tcshrc", ".login", ".envrc", ".gitmodules",
+    ".pythonrc", ".pythonrc.py", "sitecustomize.py", "usercustomize.py"))
 
 
-def _nrd_reread(command):
-    """The segments of the re-read command (see the block comment above), or None when the command
-    cannot be re-read: the lexer stops on anything other than an unquoted here-document or a here-string
-    of the accepted shapes, the rewrite count passes _NRD_REREAD_LIMIT, or a segment's command word is
-    outside _NRD_REREAD_WORDS (or is an assignment, a reserved word or opaque)."""
-    text = command
-    segments = None
-    for _round in range(_NRD_REREAD_LIMIT + 1):
-        try:
-            segments = _lex_command(text)
-            break
-        except ValueError as exc:
-            if _round >= _NRD_REREAD_LIMIT or str(exc) != "unsupported shell construct: <<":
-                return None
-            at = getattr(exc, "stop", None)
-            if not isinstance(at, int) or at < 0 or at >= len(text):
-                return None
-            while at < len(text) and text[at].isdigit():
-                at += 1                     # an IO_NUMBER glued to the operator (0<<EOF, 0<<<x)
-            if text.startswith("<<<", at):
-                m = _NRD_HERESTRING_WORD_RE.match(text, at + 3)
-                if m is None:
-                    return None
-                text = text[:at] + "< /dev/null" + text[m.end():]
-                continue
-            if not text.startswith("<<", at):
-                return None
-            if any(c in text[at:] for c in "$`\\"):
-                return None
-            parsed = _parse_heredoc_delim(text, at + 2, len(text))
-            if parsed is None or parsed[0]:
-                return None
-            _quoted, delim, _strip, nxt = parsed
-            spec = text[at + 2:nxt]
-            if not _NRD_HEREDOC_DELIM_RE.match(delim) or not spec.endswith(delim):
-                return None
-            lead = spec[:len(spec) - len(delim)]
-            if lead.strip(" \t") not in ("", "-"):
-                return None
-            text = text[:at + 2] + lead + "'" + delim + "'" + text[nxt:]
-    if segments is None:
-        return None
-    for seg in segments:
-        if not seg.argv:
+def _nrd_subst_cat_heredoc(command, at):
+    """True when the text at index at is a command substitution whose WHOLE body is `cat` reading one
+    here-document with a quoted delimiter: `$(cat <<'EOF'`, optional spaces, a newline, body lines, a
+    line equal to the delimiter (leading tabs stripped for <<-), then only blanks before the closing
+    parenthesis. The body is literal data and cat prints it; nothing in it runs. Anything else at at
+    (another word, an option, a pipe, a second command, text after the delimiter line) is not this
+    shape."""
+    m = _NRD_SUBST_CAT_RE.match(command, at)
+    if m is None:
+        return False
+    strip = m.group(1) == "-"
+    delim = m.group(2)
+    pos = m.end()
+    while True:
+        nl = command.find("\n", pos)
+        if nl < 0:
+            return False
+        line = command[pos:nl]
+        if (line.lstrip("\t") if strip else line) == delim:
+            return _NRD_SUBST_CLOSE_RE.match(command, nl) is not None
+        pos = nl + 1
+
+
+def _nrd_subst_unproven(command):
+    """True when the raw command text holds a command substitution this guard has not shown inert: any
+    backquote, or any '$(' (an arithmetic '$((' included) that does not open the quoted cat here-document
+    shape (_nrd_subst_cat_heredoc). The raw text is the widest view: a '$(' inside quotes or inside a
+    here-document body counts too (deny-biased), and no span is skipped, so each '$(' inside a cleared
+    body is judged on its own."""
+    if "`" in command:
+        return True
+    start = 0
+    while True:
+        at = command.find("$(", start)
+        if at < 0:
+            return False
+        if not _nrd_subst_cat_heredoc(command, at):
+            return True
+        start = at + 2
+
+
+def _nrd_exec_config_target(path, eff_cwd):
+    """True when a path names configuration that executes on a later ordinary command: a component
+    named .git in any letter case (a case-insensitive filesystem maps .GIT onto .git), a config file or
+    hooks directory below a component ending in .git (a bare repository: repo.git/config,
+    repo.git/hooks/x), a file
+    inside a directory shaped like a bare repository (HEAD plus objects/, up to two levels up), a
+    .gitconfig or git/config path, a shell startup file, .envrc or .gitmodules (_NRD_EXEC_CONFIG_NAMES),
+    anything inside a .claude directory (settings files register hooks the next tool call runs), an ssh
+    config or rc file, and a Python sitecustomize or usercustomize module or .pth file. A relative path
+    with no known working directory is judged as written below the root. Both the lexical and the
+    realpath spelling are judged."""
+    forms = _nrd_forms(path, eff_cwd if eff_cwd is not None else "/")
+    if forms is None:
+        return False
+    for f in forms:
+        parts = f.split("/")
+        low = [p.lower() for p in parts]
+        name = low[-1]
+        if ".git" in low or name == ".gitconfig" or low[-2:] == ["git", "config"]:
+            return True
+        if any(low[k].endswith(".git") and low[k + 1] in ("config", "hooks") for k in range(len(low) - 1)):
+            return True
+        if parts[-1] in _NRD_EXEC_CONFIG_NAMES or name.endswith(".pth"):
+            return True
+        if ".claude" in low[:-1] or (".ssh" in low[:-1] and name in ("config", "rc", "environment")):
+            return True
+        base = f
+        for _up in range(2):
+            base = os.path.dirname(base)
+            if not base or base == "/":
+                break
+            try:
+                if os.path.isfile(os.path.join(base, "HEAD")) and os.path.isdir(os.path.join(base, "objects")):
+                    return True
+            except (OSError, ValueError):
+                return True
+    return False
+
+
+def _nrd_sed_inert(args, oq):
+    """True when a sed call with these words runs only line-number printing: every option is a flag
+    that neither writes nor reads a script file (-n, -E, -r, -s, -u, -z and their long spellings), each
+    script (-e values, or the first operand when no -e is given) matches _NRD_SED_INERT_SCRIPT_RE, and
+    no word is opaque. -i, -f, -l, --in-place, --file and every other option fail."""
+    scripts = []
+    operands = []
+    i = 0
+    while i < len(args):
+        if oq[i]:
+            return False
+        tok = args[i]
+        if tok in ("-e", "--expression"):
+            if i + 1 >= len(args) or oq[i + 1]:
+                return False
+            scripts.append(args[i + 1])
+            i += 2
             continue
-        if seg.argv_opaque[0] or seg.argv[0] not in _NRD_REREAD_WORDS:
-            return None
-    return segments
+        if tok.startswith("--expression="):
+            scripts.append(tok.split("=", 1)[1])
+        elif tok.startswith("-e") and len(tok) > 2:
+            scripts.append(tok[2:])
+        elif tok in _NRD_SED_INERT_FLAGS:
+            pass
+        elif tok.startswith("-") and tok != "-":
+            if tok.startswith("--") or not all(ch in "nErsuz" for ch in tok[1:]):
+                return False
+        else:
+            operands.append(tok)
+        i += 1
+    if not scripts and operands:
+        scripts.append(operands[0])
+    return all(_NRD_SED_INERT_SCRIPT_RE.match(s) for s in scripts)
+
+
+def _nrd_runner_reaches(args, oq, cwd, dirs):
+    """True when a test collector, build runner or python -m run with these words may start from a
+    directory at or above a declared directory: its working directory is unknown or reaches one
+    (_nrd_dir_reachable_from), any word is opaque, or any word (or the value after '=' in it) resolves
+    to a path that reaches one."""
+    if cwd is None or _nrd_dir_reachable_from(cwd, dirs):
+        return True
+    for tok, opaque in zip(args, oq):
+        if opaque:
+            return True
+        for part in (tok, tok.partition("=")[2]):
+            if not part or part.startswith("-"):
+                continue
+            placed = _nrd_abs_join(part, cwd)
+            if placed is not None and _nrd_dir_reachable_from(placed, dirs):
+                return True
+    return False
+
+
+def _nrd_git_key_inert(key):
+    """True when a git configuration key is in the closed set whose values git never runs."""
+    return bool(_NRD_GIT_INERT_KEY_RE.match(key))
+
+
+def _nrd_git_config_reads(args, oq):
+    """True when the words after `git config` only read configuration, or set one key from the closed
+    inert set: --get/--list forms, the get and list subcommands, a single key operand (a read), or
+    a set whose key is inert. An --add, --unset, --replace-all, --edit, -e or any other option, a set or
+    unset subcommand of another key, or an opaque word fails."""
+    operands = []
+    reading = False
+    i = 0
+    while i < len(args):
+        if oq[i]:
+            return False
+        tok = args[i]
+        if tok in _NRD_GIT_CONFIG_READ:
+            reading = True
+        elif tok in _NRD_GIT_CONFIG_FLAGS or tok.startswith(("--type=", "--default=", "--file=", "--blob=")):
+            pass
+        elif tok in ("-f", "--file", "--blob", "--type", "--default"):
+            i += 1
+        elif tok.startswith("-"):
+            return False
+        else:
+            operands.append(tok)
+        i += 1
+    if operands and operands[0] in ("get", "list"):
+        return True
+    if operands and operands[0] in ("set", "unset", "rename-section", "remove-section", "edit"):
+        return operands[0] == "set" and len(operands) >= 2 and _nrd_git_key_inert(operands[1])
+    if reading or len(operands) <= 1:
+        return True
+    return _nrd_git_key_inert(operands[0])
+
+
+def _nrd_git_runs_config(args, oq):
+    """True when the words after a git word can make git run program text from configuration the
+    command supplies: -c with a key outside the inert set (or an opaque or missing value), any
+    --config-env, an --exec-path= value, an opaque global option, or a `git config` call that writes
+    a key outside the inert set or opens an editor (_nrd_git_config_reads)."""
+    i = 0
+    n = len(args)
+    while i < n:
+        if oq[i]:
+            return True
+        tok = args[i]
+        if tok == "-c":
+            if i + 1 >= n or oq[i + 1] or not _nrd_git_key_inert(args[i + 1].partition("=")[0]):
+                return True
+            i += 2
+            continue
+        if tok.startswith("-c") and len(tok) > 2:
+            if not _nrd_git_key_inert(tok[2:].partition("=")[0]):
+                return True
+            i += 1
+            continue
+        if tok.startswith("--config-env") or tok.startswith("--exec-path="):
+            return True
+        if tok in _NRD_GIT_GLOBAL_VALUE:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        break
+    if i >= n or args[i] != "config":
+        return False
+    return not _nrd_git_config_reads(args[i + 1:], oq[i + 1:])
+
+
+def _nrd_shell_has_c(args):
+    """True when any single-dash option cluster among a shell word's following words holds c (the
+    widest reading: a -c anywhere after the word counts, not only before the first operand)."""
+    return any(len(tok) > 1 and tok[0] == "-" and tok[1] != "-" and "c" in tok[1:] for tok in args)
+
+
+def _nrd_wide_unproven(seg, cwd, dirs):
+    """True when one lexed segment holds a construct this guard does not fully read (the block comment
+    above): a program-text word, a python -c, a shell -c body the peel does not reach, a python or
+    shell word reading its program from stdin behind a launch wrapper, a sed script outside line-number
+    printing, a python -m run, collector or runner that may start at or above a declared directory, git
+    configuration that can run program text, a program-running environment assignment, or a word or
+    redirect target naming configuration that executes. cwd is the effective working directory the
+    scope walk knows, or None."""
+    argv = seg.argv
+    oq = seg.argv_opaque
+    run_cwd = _nrd_wrapper_cwd(argv, oq, cwd) if argv else cwd
+    for j, tok in enumerate(argv):
+        if _NRD_PROGRAM_ENV_RE.match(tok):
+            return True
+        value = tok.partition("=")[2]
+        if _nrd_exec_config_target(tok, cwd) or (value and _nrd_exec_config_target(value, cwd)):
+            return True
+        if oq[j]:
+            continue
+        word = tok.rsplit("/", 1)[-1]
+        rest = argv[j + 1:]
+        rest_oq = oq[j + 1:]
+        if word in _NRD_PROGRAM_TEXT_WORDS:
+            return True
+        if word in _NRD_SED_WORDS:
+            if not _nrd_sed_inert(rest, rest_oq):
+                return True
+        elif _NRD_PY_WORD_RE.match(word):
+            _isolated, mode, target = _nrd_py_mode(rest)
+            if mode == "c":
+                return True
+            if mode == "stdin" and any(not oq[k] and argv[k].rsplit("/", 1)[-1] in _NRD_LAUNCH_WORDS
+                                       for k in range(j)):
+                return True
+            if mode == "m" or (mode == "script" and isinstance(target, str)
+                               and target.rsplit("/", 1)[-1] in _NRD_RUNNER_WORDS):
+                if _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
+                    return True
+        elif word in _NRD_RUNNER_WORDS:
+            if _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
+                return True
+        elif word in _NRD_LAUNCH_SHELLS:
+            if _nrd_shell_has_c(rest) and _nrd_shell_c_body(seg) is None:
+                return True
+            if _nrd_shell_reads_stdin(rest) and any(
+                    not oq[k] and argv[k].rsplit("/", 1)[-1] in _NRD_LAUNCH_WORDS for k in range(j)):
+                return True
+        elif word == "git":
+            if _nrd_git_runs_config(rest, rest_oq):
+                return True
+    for r in seg.redirects:
+        if r.target_class == "descriptor" or r.op.startswith("<<") or not isinstance(r.target, str):
+            continue
+        if _nrd_exec_config_target(r.target, cwd):
+            return True
+    return False
 
 
 def _nrd_scope_scan(command, cwd, dirs, _depth=0):
@@ -31524,9 +31793,12 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
     text is still reached. A command the lexer cannot read (an unquoted heredoc, a here-string, a
     process substitution, an unbalanced quote, a quoted heredoc the lexer cannot place) is IN SCOPE
     whenever any directory is declared (_nrd_unread_in_scope), and it has no segments to match, so it
-    refuses whole; the one exception is the narrow re-reading of an unquoted here-document or a
-    here-string (_nrd_reread), whose segments are walked for scope only and which passes only when the
-    walk finds it OUT of scope. A segment is also in scope when the value of a NAME=value or
+    refuses whole. REFUSE WIDE: whenever any directory is declared, a command substitution anywhere in
+    the raw text other than the quoted cat here-document shape (_nrd_subst_unproven) puts the command in
+    scope, and so does a segment holding a construct this guard does not fully read (_nrd_wide_unproven:
+    program text, a collector or runner from an ancestor of a declared directory, git configuration that
+    runs program text, a word naming configuration that executes). A segment is also in scope when the
+    value of a NAME=value or
     --option=value word resolves into a declared directory (_nrd_assigned_value_in), and when it runs an
     interpreter, sources a file or runs a command-running wrapper whose executed or imported files the
     guard cannot place outside them (_nrd_launch_unproven: an expansion it does not evaluate, a python
@@ -31544,18 +31816,19 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
     scope = (eff_cwd is not None and _nrd_match(eff_cwd, None, dirs) is True) \
         or _nrd_raw_names(command, dirs) \
         or _nrd_raw_names(_nrd_ansi_c_spelling(command), dirs)
-    reread = None
     try:
         segments = _lex_command(command)
     except ValueError:
         segments = None
         if _nrd_unread_in_scope(dirs):
-            # A command the lexer cannot read is in scope, unless a narrow re-reading of an unquoted
-            # here-document or a here-string (_nrd_reread) lexes whole and the walk below finds it OUT
-            # of scope; in scope it still refuses whole (the re-read segments are never allowlisted).
-            reread = None if scope else _nrd_reread(command)
-            scope = True if reread is None else scope
-    walk = segments if segments is not None else reread
+            # A command the lexer cannot read (an unquoted here-document, a here-string and the rest) is
+            # in scope and refuses whole; no re-reading of it can allow it.
+            scope = True
+    if not scope and dirs and _nrd_subst_unproven(command):
+        # a command substitution anywhere in the raw text, other than the quoted cat here-document
+        # shape: its body is not in the lexed words, so nothing shows what it runs (refuse wide)
+        scope = True
+    walk = segments
     if walk is not None:
         ctx = _NrdLaunchContext(walk)
         cdpath = _nrd_cdpath_active(walk)
@@ -31597,6 +31870,11 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
             if not scope and dirs and _nrd_launch_unproven(seg, None if cwd_lost else walk_cwd, dirs, ctx):
                 # an interpreter, source or command-running launch whose executed or imported files this
                 # guard cannot place outside the declared directories (the unread-launch-target class)
+                scope = True
+            if not scope and dirs and _nrd_wide_unproven(seg, None if cwd_lost else walk_cwd, dirs):
+                # a construct this guard does not fully read: program text, a collector or runner from an
+                # ancestor of a declared directory, git configuration that runs program text, or a word
+                # naming configuration that executes (refuse wide, allow narrow)
                 scope = True
             if cdpath and seg.argv:
                 w = 0
@@ -31682,7 +31960,11 @@ def _nrd_deny_text(subject, why):
         "directory, a shell or python reads its program from stdin, an assignment value resolves into "
         "one, an interpreter or source launch has a target this guard cannot place outside them (an "
         "expansion, glob, brace or tilde it does not evaluate, or a python module search from an "
-        "ancestor of one), or this guard's lexer cannot read it. A worker-delivered file there is data until it is applied, so in that scope ONLY "
+        "ancestor of one), this guard's lexer cannot read it, or it holds a construct this guard does "
+        "not fully read wherever a directory is declared (a command substitution other than $(cat "
+        "<<'EOF' ... EOF), eval or other program text, a test collector or build runner from an "
+        "ancestor of a declared directory, git configuration or environment that can run program "
+        "text, or a word naming configuration that executes). A worker-delivered file there is data until it is applied, so in that scope ONLY "
         "a closed allowlist of read-only forms runs, each with its registered options: cat, wc, head, "
         "tail, ls, file, grep, diff, the coreutils hash tools, cp with the declared file only as a "
         "source and only where cp actually writes outside the declared directories, not under a "
