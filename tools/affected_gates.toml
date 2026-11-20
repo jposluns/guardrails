@@ -6,10 +6,12 @@
 # with its reason. Narrowed inputs list the gate's scripts, their literal local import closure (the
 # selector's self-test holds that closure covered) and the data the gate reads, as established by a
 # static review of each gate and held against observation: the affected-gates-observed gate
-# (affected_gates.py --observe-inputs) runs every narrowed gate once under a Python audit hook and
-# fails on any read, directory listing or launch of a repository path an entry does not cover. A gate
-# whose boundary was not established, whose reads follow its input, or that launches a non-Python
-# child in or on the repository (whose reads the hook cannot see) is whole-tree or always.
+# (affected_gates.py --observe-inputs) runs every narrowed gate once, in a copy built from the index,
+# under a Python audit hook and wrapped metadata functions, and fails on any read, metadata-only
+# probe (existence, type, mode, size, timestamps), directory listing or launch of a repository path
+# an entry does not cover. A gate whose boundary was not established, whose reads follow its input,
+# or that launches a non-Python child in or on the repository (whose reads the hook cannot see) is
+# whole-tree or always.
 # Globs are repository-relative and case-sensitive: * and ? stay in one component, ** spans
 # components. A gate with new reads needs its entry updated in the same change.
 format-version = 1
@@ -23,8 +25,8 @@ full-roster = [
   "tools/check_ci_parity.py",
 ]
 
-# Reviewed path domains: a changed path outside every domain is cannot-evaluate (exit 2), even though
-# the whole-tree gates would select themselves.
+# Reviewed path domains: a changed path outside every domain has no declaration to show any gate
+# unaffected, so it selects the entire roster (every gate and, through them, every registered suite).
 [[domain]]
 path = ".aiqt/"
 owner = "the rule corpus, standards, registers and release records (corpus, generator and release gates)"
@@ -312,6 +314,8 @@ inputs = [
   "COPYING",
   "DISCLOSURE.md",
   "LICENSE",
+  "LICENSE.md",
+  "LICENSE.txt",
   "README.md",
   "disclosure.toml",
   "docs/**",
@@ -585,8 +589,13 @@ reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modul
 
 [gate.opf-tooling-selftest-core]
 inputs = [
+  ".claude/**",
+  ".cursor/**",
   ".gitignore",
+  "AGENTS.md",
   "CHANGELOG.md",
+  "CLAUDE.md",
+  "GEMINI.md",
   "TODO.md",
   "VERSION",
   "opf/**",
@@ -595,16 +604,23 @@ reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modul
 
 [gate.opf-tooling-selftest-adopt]
 inputs = [
+  ".claude/**",
+  ".cursor/**",
+  ".gitignore",
   "AGENTS.md",
   "CHANGELOG.md",
+  "CLAUDE.md",
+  "GEMINI.md",
   "TODO.md",
   "VERSION",
+  "docs/**",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
 
 [gate.opf-tooling-selftest-watchdog]
 inputs = [
+  ".gitignore",
   "CHANGELOG.md",
   "TODO.md",
   "VERSION",
@@ -687,18 +703,30 @@ reason = "whole-tree: it does not pass under the audit hook, so its reads are no
 
 [gate.opf-adopt-apply-selftest]
 inputs = [
+  ".claude/**",
+  ".cursor/**",
+  ".gitignore",
   "AGENTS.md",
   "CHANGELOG.md",
+  "CLAUDE.md",
+  "GEMINI.md",
   "TODO.md",
   "VERSION",
+  "docs/**",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
 
 [gate.opf-adopt-state-selftest]
 inputs = [
+  ".claude/**",
+  ".cursor/**",
+  "AGENTS.md",
   "CHANGELOG.md",
+  "CLAUDE.md",
+  "GEMINI.md",
   "TODO.md",
+  "VERSION",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
@@ -711,6 +739,9 @@ reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modul
 
 [gate.opf-adopt-complete-selftest]
 inputs = [
+  ".claude/**",
+  ".cursor/**",
+  ".github/**",
   "AGENTS.md",
   "CHANGELOG.md",
   "CLAUDE.md",
@@ -750,7 +781,17 @@ reason = "whole-tree: it does not pass under the audit hook, so its reads are no
 
 [gate.opf-adopt-discover-selftest]
 inputs = [
+  ".aiqt/**",
+  ".claude/**",
+  ".cursor/**",
+  ".github/**",
+  "AGENTS.md",
+  "CHANGELOG.md",
+  "CLAUDE.md",
+  "GEMINI.md",
   "TODO.md",
+  "VERSION",
+  "docs/**",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
@@ -826,6 +867,7 @@ inputs = [
   ".gitignore",
   "CHANGELOG.md",
   "TODO.md",
+  "VERSION",
   "opf/**",
 ]
 reason = "inputs: the OPF tree (opf/**), which holds the tool, its sibling modules, specs and templates"
@@ -1190,6 +1232,7 @@ inputs = [
   ".aiqt/core/adapter-blocks.toml",
   ".aiqt/core/rules/**",
   ".aiqt/standards/**",
+  ".github/**",
   "AGENTS.md",
   "GEMINI.md",
   "tools/_adapter_compose.py",
@@ -1847,6 +1890,7 @@ inputs = [
   ".aiqt/standards/**",
   ".claude/**",
   ".github/workflows/quality.yml",
+  "LICENSE",
   "tools/_gen_common.py",
   "tools/_git_fixture_env.py",
   "tools/_selftest_exit_report.py",
@@ -2037,6 +2081,7 @@ reason = "inputs: the gate's scripts, their local import closure and the data th
 [gate.cited-standards-selftest]
 inputs = [
   ".aiqt/**",
+  "docs/**",
   "opf/prompt-pack/**",
   "tools/_gen_common.py",
   "tools/_standards.py",

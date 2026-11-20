@@ -47,25 +47,35 @@ failed git call, an unreadable declaration and a path that is not strict UTF-8 a
 NOT MEASURED: ignored files and the external environment are not part of the change set, so a
 selection is no evidence that those inputs are clean.
 
-UNKNOWN PATHS. Every changed path must lie in a reviewed domain before any selection is released.
-Matching a whole-tree gate does not cover a path: a path outside every domain is cannot-evaluate even
-though the whole-tree gates would select themselves. There is no switch that allows it.
+UNCOVERED PATHS. The selection only ever fails toward more: whenever it cannot show a gate is
+unaffected, it selects it. A changed path outside every reviewed domain has no declaration to show
+any gate unaffected, so it selects the full roster: every gate of the runner and, through them, every
+suite of tools/selftest_checks.toml (each registered suite must be launched by a runner gate, or the
+roster is cannot-evaluate), never a subset. Matching a whole-tree gate does not cover a path. The
+uncovered paths are named on stderr, in the --explain reasons and in the JSON uncovered member.
 
 OUTPUT. Default: the selected gate names, one per line, deduplicated, in runner order. --explain adds
 the reasons (the matched path and declaration, whole-tree, always, full-roster). --json prints one
-object (schema 1) with the resolved base, merge base and head, the changed paths, the ordered
-selection with each gate's command variants and reasons, and diagnostics; on failure its selected
-member is null. Conditional gates keep their runner behaviour: baseline-pin lists both variants and
-its probe, and is run by the runner's block, never as a bare command.
+object (schema 1) with the resolved base, merge base and head, the changed paths, the uncovered
+paths, the ordered selection with each gate's command variants and reasons, and diagnostics; on
+failure its selected and uncovered members are null. Conditional gates keep their runner behaviour:
+baseline-pin lists both variants and its probe, and is run by the runner's block, never as a bare
+command.
 
 OBSERVATION. The declarations are held against what the gates really read. --observe-inputs runs
 every gate whose declaration narrows its inputs (neither whole-tree nor always; those two are selected
-by any change, so no read of theirs can go uncovered) once, in a disposable clone of this tree that
-carries its staged, unstaged and untracked files, under a Python audit hook (sys.addaudithook) that
-records open, os.listdir, os.scandir and every process launch (subprocess.Popen, os.exec,
-os.posix_spawn, os.spawn, os.system). The hook reaches the gate's Python children through a startup
-hook (a .pth file) that the check writes only into its own throwaway virtual environment, whose
-interpreter replaces python3 for the gate and comes first on PATH, so sys.executable and python3
+by any change, so no read of theirs can go uncovered) once, in a disposable clone of this tree built
+from its index exactly (a staged deletion stays deleted, a staged rename moves; unstaged changes and
+untracked files are not observed, so stage them first), under a Python audit hook
+(sys.addaudithook) that records open, os.listdir, os.scandir and every process launch
+(subprocess.Popen, os.exec, os.posix_spawn, os.spawn, os.system). Metadata reads raise no audit
+event, so the same startup hook wraps os.stat, os.lstat, os.access and os.readlink (and through
+them os.path.exists, isfile, isdir, getsize, getmtime, pathlib's exists, is_file, stat and resolve):
+a file probed only for its existence, type, mode, size or timestamps is an input exactly like a file
+opened for reading, and a probed directory is covered only when its declaration covers a file under
+it or a new entry in it. The hook reaches the gate's Python children through a startup hook (a .pth
+file) that the check writes only into its own throwaway virtual environment, whose interpreter
+replaces python3 for the gate and comes first on PATH, so sys.executable and python3
 children carry it and no other interpreter does. The check fails (exit 1) for a gate that, through any
 of its Python processes, opens for reading (or probes) a repository path its declaration does not
 match, lists a directory where a new entry would not be matched (or lists the repository root),
@@ -79,13 +89,17 @@ repository path is trusted not to reach the tree. One run observes one input sta
 other inputs would trigger is not seen, which is why a gate whose reads follow its input (it walks a
 tree or reads paths its data names) is whole-tree. Reads through a directory descriptor (dir_fd) carry
 no directory in the audit event and are judged only when their first component exists at the root;
-bytecode caches (__pycache__) and .git internals are not inputs. The hook keeps only paths inside the
-copy and writes each distinct record once per process. A gate that runs past OBSERVE_GATE_TIMEOUT is
-stopped through its process group and reported; a descendant that started a session of its own is
-not stopped by the check.
+bytecode caches (__pycache__) and a path with a .git component (.git internals, or a probe for a
+work-tree marker such as tools/.git; git tracks no such path) are not inputs. A metadata read the
+wrapped functions do not carry (os.DirEntry.stat after a recorded listing, os.fstat of a recorded
+open, a C extension's own stat) is not seen; a probed path that is missing is held as a file, so a
+directory later created at that path is not covered by a file glob. The hook keeps only paths inside the copy and writes
+each distinct record once per process. A gate that runs past OBSERVE_GATE_TIMEOUT is stopped
+through its process group and reported; a descendant that started a session of its own is not
+stopped by the check.
 
 EXIT. 0 selection complete (an empty change set included: the always gates are then the selection);
-2 cannot evaluate, invalid invocation, unknown path, or an invalid roster or declaration (no gate
+2 cannot evaluate, invalid invocation, or an invalid roster, suite registry or declaration (no gate
 name is printed on stdout); 1 for a failed --self-test assertion or an --observe-inputs finding.
 Callers check the exit code before reading the output.
 """
@@ -363,6 +377,40 @@ def check_roster_equality(gates, manifest):
             missing, extra))
 
 
+def read_suites(root):
+    """{suite id: runner} of the self-test registry at root, or CannotEvaluate."""
+    raw = _read_bounded(Path(root) / SUITES_REL)
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise CannotEvaluate("{} is not UTF-8".format(SUITES_REL))
+    data, problem = _parse_toml(decoded)
+    if problem is not None:
+        raise CannotEvaluate("{}: {}".format(SUITES_REL, problem))
+    rows = data.get("suite")
+    if not isinstance(rows, list) or not rows:
+        raise CannotEvaluate("{}: no [[suite]] rows".format(SUITES_REL))
+    suites = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"] \
+                or not isinstance(row.get("runner"), str) or row["id"] in suites:
+            raise CannotEvaluate("{}: suite row without one unique id and a runner".format(SUITES_REL))
+        suites[row["id"]] = row["runner"]
+    return suites
+
+
+def check_suite_reach(gates, suites):
+    """CannotEvaluate unless every registered suite is launched by a roster gate, so selecting every
+    gate runs every check and every suite."""
+    launched = set()
+    for gate in gates:
+        for argv in gate.variants:
+            launched.update(argv[index + 1] for index, word in enumerate(argv[:-1]) if word == "--suite")
+    missing = sorted(set(suites) - launched)
+    if missing:
+        raise CannotEvaluate("registered suite(s) no runner gate launches: {}".format(missing))
+
+
 def read_inputs(root):
     """(gates, manifest) for the tree at root, or CannotEvaluate."""
     runner = _read_bounded(Path(root) / RUNNER_REL)
@@ -371,6 +419,7 @@ def read_inputs(root):
     if diagnostic is not None:
         raise CannotEvaluate("{}: {}".format(RUNNER_REL, diagnostic.message))
     gates = parse_roster(text)
+    check_suite_reach(gates, read_suites(root))
     raw = _read_bounded(Path(root) / MANIFEST_REL)
     try:
         decoded = raw.decode("utf-8")
@@ -392,11 +441,14 @@ def in_domain(path, domains):
 
 
 def select(gates, manifest, changes):
-    """(selected [(gate, reasons)], unknown paths). changes is a list of Change."""
-    unknown = sorted(c.path for c in changes if not in_domain(c.path, manifest.domains))
-    if unknown:
-        return None, unknown
-    full = []
+    """(selected [(gate, reasons)], uncovered paths). changes is a list of Change.
+
+    A changed path outside every reviewed domain has no declaration that can show any gate
+    unaffected, so it selects the whole roster: every gate, and through them every registered suite
+    (read_inputs holds each suite to a roster gate). The selection only ever fails toward more."""
+    uncovered = sorted(c.path for c in changes if not in_domain(c.path, manifest.domains))
+    full = ["full-roster: {} lies outside every reviewed domain (no declaration covers it)".format(path)
+            for path in uncovered]
     for change in changes:
         if change.gitlink:
             full.append("submodule change {}".format(change.path))
@@ -417,7 +469,9 @@ def select(gates, manifest, changes):
                     reasons.append("input: {} matches {}".format(change.path, pattern))
         if reasons:
             selected.append((gate, reasons))
-    return selected, []
+    if full and len(selected) != len(gates):
+        raise CannotEvaluate("a full-roster change selected {} of {} gates".format(len(selected), len(gates)))
+    return selected, uncovered
 
 
 # ---------------------------------------------------------------------------------------------
@@ -431,12 +485,16 @@ def git_env(base_env=None):
     return env
 
 
-def _git(root, args, env):
+def _git(root, args, env, stdin_bytes=None):
     argv = ["git", "--no-optional-locks", "-c", "core.excludesFile=" + os.devnull,
             "-c", "core.quotePath=false", "-c", "diff.external=", "-C", str(root)] + list(args)
     try:
-        done = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, env=env, check=False)
+        if stdin_bytes is None:
+            done = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, env=env, check=False)
+        else:
+            done = subprocess.run(argv, input=stdin_bytes, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, env=env, check=False)
     except OSError as exc:
         raise CannotEvaluate("cannot run git ({})".format(type(exc).__name__))
     if done.returncode != 0:
@@ -634,6 +692,45 @@ def _install():
         finally:
             local.busy = False
 
+    # Metadata reads (existence, type, mode, size, timestamps) raise no audit event: the os functions
+    # they all reach are wrapped, and the fd-capability sets keep naming the wrappers so shutil and
+    # os.fwalk keep their behaviour. An fd argument is skipped (its open was recorded).
+    def probe(name, args, kwargs):
+        if getattr(local, "busy", False):
+            return
+        local.busy = True
+        try:
+            value = args[0] if args else kwargs.get("path")
+            if value is not None and not isinstance(value, int):
+                path = text(value)
+                where = cwd()
+                if path is not None and in_root(where, path):
+                    emit(("probe", 0, where, path, name))
+        except Exception:
+            pass
+        finally:
+            local.busy = False
+
+    def wrap(name):
+        original = getattr(os, name, None)
+        if original is None:
+            return
+
+        def wrapper(*args, **kwargs):
+            probe(name, args, kwargs)
+            return original(*args, **kwargs)
+        wrapper.__name__ = getattr(original, "__name__", name)
+        wrapper.__qualname__ = wrapper.__name__
+        wrapper.__doc__ = getattr(original, "__doc__", None)
+        setattr(os, name, wrapper)
+        for capability in ("supports_dir_fd", "supports_fd", "supports_follow_symlinks",
+                           "supports_effective_ids"):
+            members = getattr(os, capability, None)
+            if isinstance(members, set) and original in members:
+                members.add(wrapper)
+    for name in ("stat", "lstat", "access", "readlink"):
+        wrap(name)
+
     emit(("start", os.getpid(), cwd(), list(sys.orig_argv)))
     sys.addaudithook(hook)
 
@@ -732,23 +829,27 @@ def _python_options(argv):
 
 
 def observed_requirements(root, bindir, records):
-    """(reads, listed directories, unobserved launches) of one gate's records, repository-relative.
+    """(reads, listed directories, unobserved launches, {probed directory: files under it}) of one
+    gate's records, repository-relative.
 
-    A read is an open for reading (whether or not the path exists, since a gate that probes for a file
-    depends on its absence too) or a repository path named on a launched command line; directory opens
+    A read is an open for reading or a metadata probe of a file (whether or not the path exists, since
+    a gate that probes for a file depends on its absence too) or a repository path named on a launched
+    command line; a metadata probe of a directory is kept apart with the files under it; directory opens
     carry no content and the import system's own directory listings are not the gate's. A launch is
     unobserved when its program is not a Python of the observation environment (or skips site), and it
     is recorded only when it runs in or names a path of the repository: its reads are invisible."""
     root = os.path.realpath(str(root))
     bindir = str(bindir)
-    reads, listed, unobserved = set(), set(), []
+    reads, listed, unobserved, probed = set(), set(), [], set()
 
     def kept(rel, path):
-        if not rel or rel == ".git" or rel.startswith(".git/") or "__pycache__" in rel.split("/"):
+        # git never tracks a path with a .git component, so no change can name one: a probe for a
+        # repository marker (tools/.git while finding the work tree's root) is not an input.
+        if not rel or ".git" in rel.split("/") or "__pycache__" in rel.split("/"):
             return False
         # A relative name whose first component the repository root does not hold was resolved
         # against a directory descriptor the audit event does not carry (shutil.rmtree, os.fwalk,
-        # dir_fd opens); a root-level name outside every domain is refused by the selector anyway.
+        # dir_fd opens); a root-level name outside every domain selects the whole roster anyway.
         if not os.path.isabs(path) and not os.path.lexists(os.path.join(root, rel.split("/")[0])):
             return False
         return True
@@ -765,6 +866,15 @@ def observed_requirements(root, bindir, records):
             rel = _repo_rel(root, cwd, path)
             if reading and kept(rel, path) and not os.path.isdir(os.path.join(root, rel)):
                 reads.add(rel)
+        elif kind == "probe" and len(record) == 5:
+            _k, _pid, cwd, path, _function = record
+            rel = _repo_rel(root, cwd, path)
+            if kept(rel, path):
+                where = os.path.join(root, rel)
+                if os.path.isdir(where) and not os.path.islink(where):
+                    probed.add(rel)
+                else:
+                    reads.add(rel)
         elif kind == "list" and len(record) == 5:
             _k, _pid, cwd, path, importing = record
             rel = _repo_rel(root, cwd, path)
@@ -803,11 +913,22 @@ def observed_requirements(root, bindir, records):
             if in_repo or names or any(_repo_rel(root, run_cwd, w) is not None for w in words
                                        if w and w.startswith("/")):
                 unobserved.append(" ".join([os.path.basename(program)] + words)[:200])
-    return reads, listed, unobserved
+    directories = {}
+    for rel in probed:
+        under = []
+        for dirpath, dirnames, filenames in os.walk(os.path.join(root, rel)):
+            dirnames[:] = [d for d in dirnames if d not in (".git", "__pycache__")]
+            here = _repo_rel(root, None, dirpath)
+            under.extend(here + "/" + f for f in filenames)
+        directories[rel] = tuple(sorted(under))
+    return reads, listed, unobserved, directories
 
 
-def uncovered_observations(manifest, name, reads, listed, unobserved):
-    """The findings of one gate: every observed read or listing its declaration does not cover."""
+def uncovered_observations(manifest, name, reads, listed, unobserved, probed=None):
+    """The findings of one gate: every observed read, metadata probe or listing its declaration does
+    not cover. probed maps each metadata-probed directory to the files under it: the directory's
+    existence and type change only through a change under it, so it is covered when a declared input
+    matches a file under it or a new entry in it."""
     decl = manifest.gates[name]
     if decl.whole_tree or decl.always:
         return []
@@ -816,6 +937,10 @@ def uncovered_observations(manifest, name, reads, listed, unobserved):
     for rel in sorted(reads):
         if not any(rx.fullmatch(rel) for rx in patterns):
             findings.append("reads {}".format(rel))
+    for rel, under in sorted((probed or {}).items()):
+        if not any(rx.fullmatch(path) for rx in patterns
+                   for path in under + (rel + "/" + OBSERVE_PROBE_ENTRY,)):
+            findings.append("probes {}/ (no declared input lies under it)".format(rel))
     for rel in sorted(listed):
         if rel == "":
             findings.append("lists the repository root (its reads depend on input: whole-tree)")
@@ -827,40 +952,42 @@ def uncovered_observations(manifest, name, reads, listed, unobserved):
     return findings
 
 
-def _tracked_and_untracked(root):
-    out, _err = _git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], git_env())
-    return sorted({_decode_path(p) for p in out.split(b"\0") if p})
+def _index_records(root):
+    """The NUL-terminated `ls-files --stage` records of root's index, or CannotEvaluate."""
+    out, _err = _git(root, ["ls-files", "-z", "--stage"], git_env())
+    records = [record for record in out.split(b"\0") if record]
+    for record in records:
+        meta, tab, _path = record.partition(b"\t")
+        fields = meta.split(b" ")
+        if not tab or len(fields) != 3:
+            raise CannotEvaluate("unrecognized index record {!r}".format(record[:200]))
+        if fields[2] != b"0":
+            raise CannotEvaluate("the index holds unmerged entries")
+    return records
 
 
 def _disposable_copy(root, target):
-    """A clone of root at target whose working tree is root's (staged, unstaged and untracked files
-    the ignore rules admit), sharing root's object store read-only."""
+    """A clone of root at target whose index and working tree are root's index exactly, sharing
+    root's object store read-only. The clone is made without a checkout, its index is written from
+    root's index records and the working tree is checked out from that index alone, so nothing of
+    HEAD survives that the index does not hold: a staged deletion stays deleted and a staged rename
+    moves. Unstaged changes and untracked files are not part of the copy."""
     env = git_env()
-    done = subprocess.run(["git", "clone", "--quiet", "--shared", "--no-hardlinks", str(root), str(target)],
+    done = subprocess.run(["git", "clone", "--quiet", "--shared", "--no-checkout", "--no-hardlinks",
+                           str(root), str(target)],
                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           env=env, check=False)
     if done.returncode != 0:
         raise CannotEvaluate("cannot clone the disposable copy: {}".format(
             done.stderr.decode("utf-8", "replace").strip()[:300]))
-    for rel in _tracked_and_untracked(root):
-        source, dest = Path(root) / rel, Path(target) / rel
-        try:
-            st = os.lstat(source)
-        except FileNotFoundError:
-            if dest.is_symlink() or dest.is_file():
-                dest.unlink()
-            continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if stat.S_ISLNK(st.st_mode):
-            if dest.is_symlink() or dest.exists():
-                dest.unlink()
-            os.symlink(os.readlink(source), dest)
-        elif stat.S_ISREG(st.st_mode):
-            if dest.is_symlink() or not dest.is_file() or dest.read_bytes() != source.read_bytes():
-                if dest.is_symlink():
-                    dest.unlink()
-                shutil.copyfile(source, dest)
-            os.chmod(dest, stat.S_IMODE(st.st_mode))
+    records = _index_records(root)
+    _git(target, ["read-tree", "--empty"], env)
+    if records:
+        _git(target, ["update-index", "-z", "--index-info"], env, b"\0".join(records) + b"\0")
+    _git(target, ["checkout-index", "--all", "--force"], env)
+    copied = _index_records(target)
+    if copied != records:
+        raise CannotEvaluate("the disposable copy's index differs from the source index")
 
 
 def _observe_one(gate, copy, python, bindir, current, work, index):
@@ -926,9 +1053,9 @@ def observe_inputs(root, names, jobs, out):
             try:
                 copy, python, bindir, current = slot
                 code, records, tail = _observe_one(gate, copy, python, bindir, current, work, index)
-                reads, listed, unobserved = observed_requirements(copy, bindir, records)
-                return gate, code, uncovered_observations(manifest, gate.name, reads, listed, unobserved), \
-                    len(records), tail
+                reads, listed, unobserved, probed = observed_requirements(copy, bindir, records)
+                return gate, code, uncovered_observations(manifest, gate.name, reads, listed, unobserved,
+                                                          probed), len(records), tail
             finally:
                 slots.put(slot)
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
@@ -968,19 +1095,20 @@ def run(root, base, head_rev, form, out, err, env=None):
     try:
         gates, manifest = read_inputs(root)
         info, changes = collect_changes(root, base, head_rev, env)
-        selected, unknown = select(gates, manifest, changes)
-        if unknown:
-            raise CannotEvaluate("changed path(s) outside every reviewed domain: {}".format(unknown))
+        selected, uncovered = select(gates, manifest, changes)
     except CannotEvaluate as exc:
         if form == "json":
             out.write(json.dumps(dict(info, schema=SCHEMA, status="cannot-evaluate", selected=None,
-                                      changed=[c.path for c in changes],
+                                      changed=[c.path for c in changes], uncovered=None,
                                       diagnostics=[str(exc)]), indent=1, sort_keys=True) + "\n")
         print("CANNOT EVALUATE: {}".format(exc), file=err)
         return 2
+    if uncovered:
+        print("NOTE: changed path(s) outside every reviewed domain select the full roster: {}".format(
+            uncovered), file=err)
     if form == "json":
         out.write(json.dumps(dict(
-            info, schema=SCHEMA, status="ok", diagnostics=[],
+            info, schema=SCHEMA, status="ok", diagnostics=[], uncovered=uncovered,
             changed=[{"path": c.path, "sources": list(c.sources), "submodule": c.gitlink} for c in changes],
             selected=[{"gate": g.name, "line": g.line, "kind": g.kind,
                        "variants": [list(v) for v in g.variants],
@@ -1167,10 +1295,7 @@ def _gate_scripts(root, gate, suites):
 
 
 def _suite_runners(root):
-    data, problem = _parse_toml(_read_bounded(Path(root) / SUITES_REL).decode("utf-8"))
-    if problem is not None:
-        raise CannotEvaluate(problem)
-    return {row["id"]: row["runner"] for row in data.get("suite", [])}
+    return read_suites(root)
 
 
 def _uncovered_imports(root, gates, manifest):
@@ -1216,7 +1341,7 @@ def _fixture_repo(parent, name, env, runner_text=None, manifest_text=None):
     """A git repository holding a copy of the selector, its loader, the runner and the declarations,
     plus a few ordinary files, committed once; returns (path, base commit)."""
     repo = Path(parent) / name
-    for rel in (SELF_REL, "tools/check_ci_parity.py"):
+    for rel in (SELF_REL, "tools/check_ci_parity.py", SUITES_REL):
         _write(repo / rel, _read_bounded(ROOT / rel))
     _write(repo / RUNNER_REL, runner_text if runner_text is not None else _read_bounded(ROOT / RUNNER_REL))
     _write(repo / MANIFEST_REL,
@@ -1348,10 +1473,31 @@ def _self_test_selection(gates, manifest):
     always = [g.name for g in gates if manifest.gates[g.name].always]
     check("empty/only-always-gates", _selected_names(gates, manifest, []) == always and "child-status" in always,
           always[:5])
-    _sel, unknown = select(gates, manifest, [Change("newdir/notes.md", ("untracked",), False)])
-    check("unknown/new-directory-refused", _sel is None and unknown == ["newdir/notes.md"], unknown)
-    whole = [n for n in every if manifest.gates[n].whole_tree]
-    check("unknown/whole-tree-match-does-not-cover", whole and _sel is None, whole[:3])
+    # A path no declaration covers selects the whole roster, never a subset (and never nothing), alone
+    # or beside a narrowly selected path.
+    sel, uncovered = select(gates, manifest, [Change("newdir/notes.md", ("untracked",), False)])
+    check("uncovered/path-selects-full-roster", sel is not None and [g.name for g, _r in sel] == every
+          and uncovered == ["newdir/notes.md"]
+          and all(any("newdir/notes.md" in r for r in reasons) for _g, reasons in sel),
+          (uncovered, None if sel is None else len(sel)))
+    sel, uncovered = select(gates, manifest, [Change("site/index.html", ("committed",), False),
+                                              Change("NEWFILE", ("untracked",), False)])
+    check("uncovered/mixed-change-selects-full-roster",
+          sel is not None and [g.name for g, _r in sel] == every and uncovered == ["NEWFILE"], uncovered)
+    try:
+        suites = read_suites(ROOT)
+    except CannotEvaluate as exc:
+        suites = {"<cannot evaluate>": str(exc)}
+    launched = {argv[i + 1] for g in gates for argv in g.variants for i, w in enumerate(argv[:-1])
+                if w == "--suite"}
+    check("uncovered/full-roster-reaches-every-suite", bool(suites) and set(suites) <= launched,
+          sorted(set(suites) - launched))
+    try:
+        check_suite_reach(gates, dict(suites, **{"unlaunched-suite": "tools/x.py"}))
+        refused = False
+    except CannotEvaluate:
+        refused = True
+    check("uncovered/unlaunched-suite-refused", refused)
     first = _selected_names(gates, manifest, ["site/index.html", "tools/check_versions.py"])
     second = _selected_names(gates, manifest, ["tools/check_versions.py", "site/index.html"])
     check("output/deterministic-runner-order", first == second and first == [n for n in every if n in first])
@@ -1415,6 +1561,13 @@ subprocess.run(["python3", "-I", "-B", "child_script.py"], check=True)
 subprocess.run([sys.executable, "-I", "-S", "-c", "pass"], check=True)
 subprocess.run(["sh", "-c", "true"], check=True)
 subprocess.run(["git", "--version"], check=True, stdout=subprocess.DEVNULL)
+from pathlib import Path
+if not Path("data/required.txt").is_file():
+    sys.exit(3)
+os.path.getsize("data/sized.txt")
+os.access("data/access.txt", os.R_OK)
+os.path.isdir("data/sub")
+os.path.exists("data/.git")
 '''
 
 
@@ -1425,7 +1578,8 @@ def _self_test_observation(work):
     fixture = Path(work) / "observe-tree"
     _write(fixture / "gate.py", OBSERVE_FIXTURE_GATE)
     _write(fixture / "child_script.py", "open('data/script-read.txt').read()\n")
-    for rel in ("data/read.txt", "data/child.txt", "data/script-read.txt", "listed/one.md"):
+    for rel in ("data/read.txt", "data/child.txt", "data/script-read.txt", "listed/one.md",
+                "data/required.txt", "data/sized.txt", "data/access.txt", "data/sub/inner.txt"):
         _write(fixture / rel, "x\n")
     try:
         python, bindir, current = _build_observer_env(work, "selftest")
@@ -1442,7 +1596,7 @@ def _self_test_observation(work):
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, check=False)
     current.write_text("", encoding="utf-8")
     records = read_observations(log_dir)
-    reads, listed, unobserved = observed_requirements(fixture, bindir, records)
+    reads, listed, unobserved, probed = observed_requirements(fixture, bindir, records)
     check("observe/hook-records-gate-and-children", done.returncode == 0
           and {"gate.py", "data/read.txt", "data/missing.toml", "data/child.txt", "child_script.py",
                "data/script-read.txt"} <= reads, (done.returncode, sorted(reads), done.stderr[-300:]))
@@ -1467,6 +1621,19 @@ def _self_test_observation(work):
     findings = uncovered_observations(manifest_of(short), gate, reads, listed, [])
     check("observe/uncovered-read-reported", "reads data/read.txt" in findings
           and "reads data/missing.toml" in findings, findings)
+    # A file the gate reads only for metadata (existence, size, access) and a directory it only probes
+    # are inputs: recorded through the wrapped os functions, and reported when the declaration misses them.
+    check("observe/metadata-probes-recorded",
+          {"data/required.txt", "data/sized.txt", "data/access.txt"} <= reads
+          and probed.get("data/sub") == ("data/sub/inner.txt",), (sorted(reads), probed))
+    check("observe/git-component-probe-not-an-input", "data/.git" not in reads, sorted(reads))
+    findings = uncovered_observations(manifest_of(short), gate, reads, listed, [], probed)
+    check("observe/metadata-only-dependency-reported",
+          {"reads data/required.txt", "reads data/sized.txt", "reads data/access.txt",
+           "probes data/sub/ (no declared input lies under it)"} <= set(findings), findings)
+    check("observe/probed-directory-covered-by-file-under-it",
+          uncovered_observations(manifest_of(wide), gate, reads, listed, [], probed) == [],
+          uncovered_observations(manifest_of(wide), gate, reads, listed, [], probed))
     findings = uncovered_observations(manifest_of(wide), gate, reads, listed, unobserved)
     check("observe/unobserved-launch-needs-whole-tree", len(findings) == 2
           and all("whole-tree" in f for f in findings), findings)
@@ -1541,14 +1708,18 @@ def _self_test_git(work):
           and (not baseline or (len(baseline[0]["variants"]) == 2 and baseline[0]["prerequisite"])),
           {k: doc.get(k) for k in ("schema", "base", "head")})
 
+    every = [g.name for g in read_inputs(repo)[0]]
     _write(repo / "newdir/notes.md", "x\n")
     code, out, err = _launch(repo, ["--base", base], env)
-    check("git/unknown-path-exit-2-no-selection", code == 2 and out == "" and "newdir/notes.md" in err,
-          (code, out[:100], err[:200]))
+    check("git/uncovered-path-selects-full-roster",
+          code == 0 and out.split("\n")[:-1] == every and "newdir/notes.md" in err,
+          (code, len(out.split("\n")) - 1, len(every), err[:200]))
     code, out, _err = _launch(repo, ["--base", base, "--json"], env)
     doc = _json_selection(out) or {}
-    check("git/unknown-path-json-unavailable", code == 2 and doc.get("selected", 0) is None
-          and doc.get("status") == "cannot-evaluate", doc.get("status"))
+    check("git/uncovered-path-json-full-roster", code == 0 and doc.get("status") == "ok"
+          and doc.get("uncovered") == ["newdir/notes.md"]
+          and [s["gate"] for s in doc.get("selected") or []] == every,
+          (code, doc.get("status"), doc.get("uncovered")))
     (repo / "newdir/notes.md").unlink()
     (repo / "newdir").rmdir()
 
@@ -1618,6 +1789,7 @@ def _self_test_git(work):
     _write(bad / "tools/check_ci_parity.py", _read_bounded(ROOT / "tools/check_ci_parity.py"))
     _write(bad / RUNNER_REL, _read_bounded(ROOT / RUNNER_REL))
     _write(bad / MANIFEST_REL, _read_bounded(ROOT / MANIFEST_REL))
+    _write(bad / SUITES_REL, _read_bounded(ROOT / SUITES_REL))
     code, out, err = _launch(bad, ["--base", "HEAD"], env)
     check("git/git-failure-exit-2", code == 2 and out == "", (code, err[:200]))
 
@@ -1625,6 +1797,33 @@ def _self_test_git(work):
     _write(repo7 / os.fsdecode(b"docs/bad-\xff.md"), "x\n")
     code, out, err = _launch(repo7, ["--base", base7], env)
     check("git/non-utf8-path-exit-2", code == 2 and out == "", (code, err[:200]))
+
+    # The observation copy is the index exactly: a staged deletion stays deleted (even when the file
+    # is back in the working tree, untracked), a staged rename moves, a staged edit is the staged text.
+    repo8 = work / "r8"
+    for rel in ("gone.txt", "kept-untracked.txt", "old.txt", "edit.txt", "same.txt"):
+        _write(repo8 / rel, rel + "\n")
+    _fixture_git(repo8, ["init", "-q"], env)
+    _fixture_git(repo8, ["add", "-A"], env)
+    _fixture_git(repo8, ["commit", "-q", "-m", "base"], env)
+    _fixture_git(repo8, ["rm", "-q", "gone.txt"], env)
+    _fixture_git(repo8, ["rm", "-q", "--cached", "kept-untracked.txt"], env)
+    _fixture_git(repo8, ["mv", "old.txt", "new.txt"], env)
+    _write(repo8 / "edit.txt", "staged\n")
+    _fixture_git(repo8, ["add", "edit.txt"], env)
+    _write(repo8 / "edit.txt", "unstaged\n")
+    _write(repo8 / "untracked.txt", "x\n")
+    copy8 = work / "r8-copy"
+    try:
+        _disposable_copy(repo8, copy8)
+        present = sorted(p.name for p in copy8.iterdir() if p.name != ".git")
+        edit = (copy8 / "edit.txt").read_text(encoding="utf-8")
+        problem = None
+    except (CannotEvaluate, OSError) as exc:
+        present, edit, problem = None, None, str(exc)
+    check("observe/copy-is-the-index-exactly",
+          present == ["edit.txt", "new.txt", "same.txt"] and edit == "staged\n",
+          (present, edit, problem))
 
 
 def _self_test_cli():
@@ -1663,9 +1862,10 @@ def self_test():
         return 1
     print("SELF-TEST PASS: affected_gates {} checks (the roster is read through the parity loader with "
           "baseline-pin as one gate and the inline gitleaks scan named; declarations equal the roster; the "
-          "three named misses are selected and each is missed once its mapping is narrowed; unknown paths, "
-          "bad revisions, shallow history, unmerged entries, git failures and non-UTF-8 paths exit 2 with no "
-          "selection)".format(len(EXECUTED)))
+          "three named misses are selected and each is missed once its mapping is narrowed; a path no "
+          "declaration covers selects the full roster; bad revisions, shallow history, unmerged entries, git "
+          "failures and non-UTF-8 paths exit 2 with no selection; the observation copy is the index exactly "
+          "and metadata-only reads are held by the declarations)".format(len(EXECUTED)))
     return 0
 
 

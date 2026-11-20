@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "ee9e492cae390a68dc7ce59a88b52fad44efefa7c66972db97f21367b7e6d05f"
+tree-sha256 = "0062991fc6e54f29683afcc9373f2645473ccc225c5ebee92bddda4728bb00f3"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 642199
-sha256 = "66894dfe0af6cd6dac4ef2a54d5ac4e14e7c965c92ecff9d321ded4ff4f28ef9"
+bytes = 643012
+sha256 = "0ef9c1adc80a546c6f65925905150101114746af09312c8415d4c522bf4baec5"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -4237,13 +4237,13 @@ sha256 = "7d280b167418e3c7e47161ba7f670dac8cc65fab277a4f966d0afa3d0496f2da"
 
 [[sources]]
 path = "tools/affected_gates.py"
-bytes = 87204
-sha256 = "bd35d92744ff8f608bf2ced2768f301861aba8aae89d1ed58cba89f2eaa45c2d"
+bytes = 98768
+sha256 = "90782d8d1bcc4705b87d7cdd8f087c3cc62ed214c8aaf3e211fc345527089036"
 
 [[sources]]
 path = "tools/affected_gates.toml"
-bytes = 68980
-sha256 = "b9fbfe47a2d07f32b98fd2e1553ae323611ac0ed8c663fbfb38e0df4dd48be8c"
+bytes = 69813
+sha256 = "fbe48eca6f6708699c69c7e0eeb1ab25c8bcbcd1095c9b49b4e26a669a81080c"
 
 [[sources]]
 path = "tools/aiqt_corpus.py"
@@ -4822,8 +4822,8 @@ sha256 = "f020224b8fcec06196b11729da9a87046c471d120bd674bf5fe6b967a5860021"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 289798
-sha256 = "7d893c33fdd321fd53dc4647380d17648dabc75834f01b1abf51326c767c5042"
+bytes = 290274
+sha256 = "43c15ba342ede99a761647b9a40e7333445e570048e8af6cb9cb493445e2cd40"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
