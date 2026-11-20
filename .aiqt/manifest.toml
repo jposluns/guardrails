@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "d6edc902b3ac64aa4b9ee544cb0442848bef9a377eeede7fdb09c468965049ca"
+tree-sha256 = "ec13e2aa47355654a91b0b1683919dba480370a93dd1bc8d6e6815fbbb3d6ab4"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4807,8 +4807,8 @@ sha256 = "59f6155486925ab9adea0da0203964283937c0dc7543bcfba335d4ac0820279e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 2919415
-sha256 = "f04f81212780df68108d74ce25d8a584c17ea799e0cc248b7d03d7934e09a3e5"
+bytes = 2919574
+sha256 = "08c0f65c17ee6cc109f39fb9bad4a70b392cd5462b02f56a61c3f782fb35a92d"
 
 [[sources]]
 path = "tools/selftest_checks.toml"

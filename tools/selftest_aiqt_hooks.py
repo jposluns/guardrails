@@ -1946,10 +1946,12 @@ def _test_stdin_locale_decoding(failures, tmp):
     base_env.update(HOME=str(home), XDG_STATE_HOME=str(home / "state"),
                     XDG_CONFIG_HOME=str(home / "config"), XDG_CACHE_HOME=str(home / "cache"))
 
-    def run(label, argv, payload, env):
+    def run(label, args, payload, env):
+        # Every child is the interpreter, spelled here as the literal launch head, so the repo-wide
+        # maintenance pin scan can see it is not git; args holds only what follows -I -B.
         try:
-            return subprocess.run(argv, input=payload, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  env=env, cwd=str(cwd), timeout=60)
+            return subprocess.run([sys.executable, "-I", "-B", *args], input=payload, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, env=env, cwd=str(cwd), timeout=60)
         except (OSError, subprocess.SubprocessError) as exc:
             failures.append("(" + label + ") could not run the child: " + repr(exc))
             return None
@@ -1962,7 +1964,7 @@ def _test_stdin_locale_decoding(failures, tmp):
     for tag, name, flags, want_mode, required in configs:
         env = dict(base_env, LC_ALL=name)
         label = "stdin-loc-probe-" + tag
-        proc = run(label, [sys.executable, "-I", "-B"] + flags + ["-c", _STDIN_LOCALE_PROBE], b"", env)
+        proc = run(label, flags + ["-c", _STDIN_LOCALE_PROBE], b"", env)
         if proc is None:
             continue
         words = proc.stdout.decode("utf-8", "replace").split()
@@ -2099,13 +2101,13 @@ def _test_stdin_locale_decoding(failures, tmp):
     modes = sorted(aiqt_hooks.HANDLERS)
 
     for name, lc_all, flags, env, effective in locales:
-        argv_head = [sys.executable, "-I", "-B"] + flags + [hook]
+        hook_args = flags + [hook]
         where = " under LC_ALL={} ({})".format(lc_all, effective)
         for label, mode, obj, raw, escaped, kind in paired:
             row = "stdin-loc-" + name + "-" + label
             raw_payload, escaped_payload = _stdin_fixture(obj, raw, escaped)
-            got = run(row, argv_head + [mode], raw_payload, env)
-            want = run(row + "-escaped", argv_head + [mode], escaped_payload, env)
+            got = run(row, hook_args + [mode], raw_payload, env)
+            want = run(row + "-escaped", hook_args + [mode], escaped_payload, env)
             if got is None or want is None:
                 continue
             if not shape_ok(kind, want):
@@ -2121,7 +2123,7 @@ def _test_stdin_locale_decoding(failures, tmp):
                                 "{!r} against {!r}".format(row, where, got.stdout, want.stdout))
         for label, mode, payload, want_rc, err_needle, out_needle in postured:
             row = "stdin-loc-" + name + "-" + label
-            got = run(row, argv_head + [mode], payload, env)
+            got = run(row, hook_args + [mode], payload, env)
             if got is None:
                 continue
             out = got.stdout.decode("utf-8", "replace")
@@ -2137,10 +2139,10 @@ def _test_stdin_locale_decoding(failures, tmp):
             if out_needle is not None and (out_needle not in out or "systemMessage" not in out):
                 failures.append("({}) the fail-open warning does not name {!r}{}: {!r}".format(
                     row, out_needle, where, out))
-        lf = run("stdin-loc-" + name + "-deny-lf", argv_head + ["absolute_paths"], deny_text, env)
+        lf = run("stdin-loc-" + name + "-deny-lf", hook_args + ["absolute_paths"], deny_text, env)
         for label, mode, payload in line_ends:
             row = "stdin-loc-" + name + "-" + label
-            got = run(row, argv_head + [mode], payload, env)
+            got = run(row, hook_args + [mode], payload, env)
             if got is None or lf is None:
                 continue
             if not shape_ok("deny", got) or got.stdout != lf.stdout:
@@ -2150,8 +2152,8 @@ def _test_stdin_locale_decoding(failures, tmp):
             row = "stdin-loc-" + name + "-mode-" + mode
             raw_payload, escaped_payload = _stdin_fixture(_stdin_mode_fixture(mode, str(cwd)), b"\xff",
                                                           "\\udcff")
-            got = run(row, argv_head + [mode], raw_payload, env)
-            want = run(row + "-escaped", argv_head + [mode], escaped_payload, env)
+            got = run(row, hook_args + [mode], raw_payload, env)
+            want = run(row + "-escaped", hook_args + [mode], escaped_payload, env)
             if got is None or want is None:
                 continue
             got_outcome, want_outcome = _stdin_outcome(got), _stdin_outcome(want)
