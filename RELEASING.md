@@ -50,8 +50,9 @@ pull request (CLAUDE.md, Gates and CI).
    that table into a new last `[[release]]` with `version = N`, a real `date` (a quoted `YYYY-MM-DD`), a
    `title` and the collected `items`, deletes `[unreleased]`, and writes `.aiqt/release-cut.toml`
    (`operation = "append"`, `previous-version` the previous release, `next-version = N`, and the base
-   changelog digest). The generator sweep below then turns every one of those outputs back into the plain
-   `N`. The declaration is a tracked path, so it needs an ownership class: `python3 tools/gen_manifest.py`
+   changelog digest). The `python3 tools/gen_changelog.py` run that follows the fold makes `VERSION` the
+   plain `N`, and the generator sweep below then turns every other one of those outputs back into the
+   plain `N`. The declaration is a tracked path, so it needs an ownership class: `python3 tools/gen_manifest.py`
    refuses an unclassified tracked path (exit 2, "COMPLETENESS: ... carry no class, e.g.
    .aiqt/release-cut.toml"). The first cut that writes the declaration therefore also adds this row to
    `.aiqt/core/ownership.toml`, beside the `changelog.toml` row; it cannot land earlier, because the map
@@ -82,6 +83,12 @@ pull request (CLAUDE.md, Gates and CI).
    declared N or that keeps `[unreleased]`, and step 5b refuses a candidate whose manifest carries a `-dev`
    version or whose `changelog.toml` still carries `[unreleased]`.
 
+   Then, before the skill checklist below, run `python3 tools/gen_changelog.py`. It regenerates `VERSION`
+   and `CHANGELOG.md` from the folded `changelog.toml`, so `VERSION` reads the plain `N` that the
+   checklist's generators compare against. Until it runs, `VERSION` still says `N-dev` while
+   `changelog.toml` has no `[unreleased]` table, and `python3 tools/gen_draft_site.py` refuses that (exit 2,
+   "VERSION N-dev is a development version and there is no [unreleased] table").
+
    Skill version bump checklist. The skill is independently versioned before the 1.1.1 pack release
    (skill 1.0.6 under pack release 1.0.5); from the 1.1.1 pack release on, the skill version equals the
    pack version. `gen_skill.build_outputs` enforces this: once `VERSION` is at or above
@@ -92,8 +99,8 @@ pull request (CLAUDE.md, Gates and CI).
    `plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json` with `python3 tools/gen_hooks.py`. The root
    `VERSION` is the pack version only in this repository (the tree carrying `.aiqt/authoring.toml`), so the
    rule is a release-time rule of this repository and is enforced only here. A development `VERSION`
-   (`X.Y.Z-dev`, main between cuts) skips both checks, and the freeze's fold makes `VERSION` plain again, so
-   the rule re-arms exactly at the cut; any other suffix still fails closed (exit 2); in an adopter's tree, where
+   (`X.Y.Z-dev`, main between cuts) skips both checks, and the `gen_changelog.py` run after the freeze's fold
+   makes `VERSION` plain again, so the rule re-arms exactly at the cut; any other suffix still fails closed (exit 2); in an adopter's tree, where
    `VERSION` is the adopter's own, neither generator nor `conformance.py` re-checks it (a release ships only
    after this check passed). A deleted `.aiqt/authoring.toml` that the git index still tracks is refused
    (exit 2), not read as an adopter tree. Only the latest skill version is served: exactly
@@ -148,16 +155,21 @@ pull request (CLAUDE.md, Gates and CI).
    AIQT pack release <pack version>.", reworded once the two versions are equal); and the
    `/downloads/aiqt-skill-<skill version>.zip` entry of `KEPT_LIVE_PATHS` in `tools/gen_draft_site.py`.
    Search `site/draft-src/` for the old skill version and update any other prose that names it (the
-   teams and future pages state the chat Skill's version). Then run `python3 tools/gen_draft_site.py`;
-   a link left at the old zip is refused (exit 2) once `KEPT_LIVE_PATHS` names the new one. Finally, set the `Version X.Y.Z` line in the three
+   teams and future pages state the chat Skill's version). Then run `python3 tools/gen_draft_site.py`,
+   which must exit 0. Its exit 2 is a refusal whose message names the cause, so read the message, not
+   the exit code alone: once `KEPT_LIVE_PATHS` names the new zip, a link left at the old zip is refused
+   ("is not a site-relative href or a kept live path"); a new zip that `gen_skill.py` has not yet written
+   is refused ("kept live path(s) with no target under site/"); and a `VERSION` still at `N-dev` is
+   refused when `gen_changelog.py` has not run since the fold. Finally, set the `Version X.Y.Z` line in the three
    hand-written condensations (`site/downloads/aiqt-instructions-8k.txt`, `-5k.txt`, `-1_5k.txt`) and
    re-bless them with `python3 tools/check_sized_instructions.py --update`. Before the generator sweep,
    confirm that both index changes are in place: `git rm site/downloads/aiqt-skill-<old>.zip` and
    `git add site/downloads/aiqt-skill-<new>.zip`. Otherwise `gen_manifest.py` refuses the untracked binary
    (exit 2, "is not a tracked in-scope path; fail-closed"). Stage the cut records the same way
    (`git add .aiqt/release-cut.toml .aiqt/core/ownership.toml`, plus `.aiqt/pending-fixes.toml` when the
-   cut keeps one): `gen_manifest.py` reads the tracked set from the git index, so an unstaged
-   declaration is left out of the manifest. Then run every
+   cut keeps one): `gen_manifest.py` reads the tracked set from the git index, so it refuses an unstaged
+   declaration whose ownership row is in place (exit 2, "selector '.aiqt/release-cut.toml' matches no
+   tracked in-scope path (NO-STRAYS)") rather than leaving it out of the manifest. Then run every
    `tools/gen_*.py` generator, with `python3 tools/gen_manifest.py` last: besides the generators named
    above, the bump also changes the outputs of `python3 tools/gen_renderers.py` (`.aiqt/core/renderers.toml`)
    and `python3 tools/gen_gensrc.py` (`.aiqt/gensrc.json`). Finally run each generator with `--check`

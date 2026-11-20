@@ -297,7 +297,7 @@ reason = "It reads changelog.toml at the head, the base and each tag, and where 
 path = "tools/check_release_cut.py"
 records = ["changelog.toml", "pending-fixes.toml"]
 disposition = "stays-outside-store"
-reason = "It reads changelog.toml and the optional, untracked pending-fix list, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+reason = "It reads changelog.toml and the optional pending-fix list a cut may keep (.aiqt/pending-fixes.toml, tracked but not shipped, RELEASING step 1), and where changelog.toml lives in OPF awaits the maintainer's ruling."
 
 [[reader]]
 path = "tools/check_release_delta.py"
