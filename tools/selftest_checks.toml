@@ -7439,7 +7439,13 @@ expected-check-ids = [
   "growth/joined-references-linear/red-when-reverted",
   "growth/lazy-lines-under-items-linear",
   "growth/lazy-lines-under-items-linear/red-when-reverted",
+  "growth/anchor-attributes-linear",
+  "growth/anchor-attributes-linear/red-when-reverted",
+  "growth/reference-uses-linear",
+  "growth/reference-uses-linear/red-when-reverted",
   "scale/classification-matches-rescanning-reading",
+  "scale/reference-placeholders-read-as-urls",
+  "scale/html-link-finder-matches-regex",
   "scale/report-input-still-finds",
   # an inline comment's closer search stops at a heading, list item, blockquote or fence
   "comment/closer-search-stops-at-heading",

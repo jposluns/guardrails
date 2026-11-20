@@ -59,15 +59,21 @@ added inside a blockquote that has a historical lead-in, and an issue claim (iss
 never read). A cue further back than the words directly before a claim is not seen, so that claim
 stays a finding. An imperative-looking `Open #N` at a clause start warns instead of finding.
 
-RUNNING TIME: every step that reads a document is meant to run in time linear in its size; the steps
-found growing faster (unclosed comment, link, anchor and quotation openers in the normalization, a line
-of list markers, lazy lines under many open list items, claims and joined references in one clause)
-read each stretch of text a bounded number of times. The self-test's growth rows time the whole check
-on twelve such shapes at two sizes and fail when a shape's quadratic form is put back; a shape they do
-not time is not shown to be linear. Remaining limits: each finding, warning and cannot-evaluate line
-quotes its whole clause or line, so n claims in one clause of length L print n * L characters and the
-run takes time in proportion to that output (quadratic in the worst case). Reading pull request state
-(tools/_pr_state.py) is outside these rows.
+RUNNING TIME: every step that reads a document is meant to run in time linear in its size; that is
+shown only for the shapes the self-test times. Its growth rows time the whole check at two sizes, eight
+times apart, on fourteen shapes: unclosed comment, link bracket, anchor and quotation openers; an anchor
+tag with many href attributes; many uses of one long reference link definition; a line of list markers;
+lazy lines under many open list items; claims, and joined references, in one clause; and four paragraph
+shapes (closed comments, unclosed comment openers, code spans beside comments, comments cut across
+lines). A row passes when the time grows at most sixteen times, and its red leg, with that shape's
+quadratic form put back, must grow more. A shape the rows do not time is not shown to be linear.
+Remaining limits: each finding, warning and cannot-evaluate line quotes its whole clause or line, and
+these lines are built in memory, so n references bound in one clause of length L (n claims, or one claim
+naming n joined references, a Status cell included) give n * L characters and the run takes time in
+proportion to them (quadratic in the worst case). A reference link whose definition URL holds a
+parenthesis, a square bracket or a backtick, or whose inline form the markdown-link step does not read
+whole, still has its URL copied into the text, so n such uses of a URL of length L read n * L
+characters. Reading pull request state (tools/_pr_state.py) is outside these rows.
 """
 import sys
 
@@ -292,22 +298,66 @@ def _header_name(cell):
     return match.group(2).strip() if match else cell
 
 
+# A definition URL in a resolved reference link is written as a placeholder, NUL, the URL's index in
+# the prose's targets, NUL, so each use costs its own length, not the URL's (a Markdown document never
+# holds a NUL: _decode refuses one). Only a URL of characters the steps before the markdown-link step
+# and the code-span reading treat alike (PLACEHOLDER_URL_RE) is written so; any other URL is copied.
+REFERENCE_TARGET_RE = re.compile("\x00([0-9]+)\x00")
+PLACEHOLDER_URL_RE = re.compile(r"[^\s()<>\[\]`\x00]+")
+# Definition URLs are written as placeholders (True). The self-test sets it False, copying each URL into
+# every use, for a growth row's red leg.
+REFERENCE_PLACEHOLDERS = True
+
+
+class _LinkedProse(str):
+    """Prose whose reference links _resolve_reference_links rewrote with placeholders: targets[k] is
+    (URL, stand-in) for the placeholder with index k (_normalize reads them back)."""
+    targets = ()
+
+
+def _link_stand_in(url):
+    """What the markdown-link step is given for url, worked out once per definition, so a long URL is not
+    read again at each use: a pull request or issue URL without its fragment, and any other URL as the
+    empty string; _link_target reads each as it reads url (the same target, or the link text)."""
+    if PULL_URL_RE.fullmatch(url) or ISSUE_URL_RE.fullmatch(url):
+        return url.split("#")[0]
+    return ""
+
+
 def _resolve_reference_links(prose, definitions):
     """prose with each reference link whose label is defined in the document rewritten as the inline
     link it stands for, so the markdown-link step reads its URL; an undefined one is left as text.
-    Brackets inside a code span are inert (code_spans), as to the markdown-link step."""
+    Brackets inside a code span are inert (code_spans), as to the markdown-link step. The URL is written
+    as a placeholder where it can be (REFERENCE_TARGET_RE; a _LinkedProse carries the URLs), and _normalize
+    gives the markdown-link step a stand-in it reads as the URL and puts the URL back in any placeholder
+    that step leaves, so the text read is the text the copied URL would give."""
+    targets, written = [], {}   # written: a definition's key -> its URL or placeholder
+    placeholders = REFERENCE_PLACEHOLDERS and "\x00" not in prose
+
     def replace(match):
         bang, text, label = match.group(1), match.group(2), match.group(3)
         key = " ".join((label if label else text).split()).casefold()
         if key not in definitions:
             return match.group(0)
-        return "{}[{}]({})".format(bang, text, definitions[key])
+        if key not in written:
+            url = definitions[key]
+            if placeholders and PLACEHOLDER_URL_RE.fullmatch(url):
+                targets.append((url, _link_stand_in(url)))
+                url = "\x00{}\x00".format(len(targets) - 1)
+            written[key] = url
+        return "{}[{}]({})".format(bang, text, written[key])
     if not definitions:
         return prose
     flags = _code_flags(prose)
     if flags is None:
-        return REFERENCE_LINK_RE.sub(replace, prose)
-    return _masked_sub(REFERENCE_LINK_RE, replace, prose, flags, True)[0]
+        resolved = REFERENCE_LINK_RE.sub(replace, prose)
+    else:
+        resolved = _masked_sub(REFERENCE_LINK_RE, replace, prose, flags, True)[0]
+    if not targets:
+        return resolved
+    linked = _LinkedProse(resolved)
+    linked.targets = tuple(targets)
+    return linked
 
 
 # The kinds block_context gives a Markdown line. The first five are never read: a blank line, a line
@@ -1038,7 +1088,7 @@ def _references(text, skips=HIDDEN_SCAN_SKIPS):
     references and the other spelling steps applied) but with the skips steps left out (none: exactly as
     a record unit is read); key is (repository casefolded or None for the surface default, number), ref
     is (repository or None, number, original text)."""
-    body = _normalize(" ".join(text.split()), skips)
+    body = _normalize(" ".join(text.split()), skips, getattr(text, "targets", ()))
     found = []
     for match in REF_RE.finditer(body):
         if match.group("un"):
@@ -1242,6 +1292,9 @@ HTML_ANCHOR_TAG = r"(?i)<a\s+[^>]*?\bhref\s*=\s*[\"']([^\"'\s<>]+)[\"'][^>]*>"
 HTML_ANCHOR_TAG_RE = re.compile(HTML_ANCHOR_TAG)
 HTML_LINK_RE = re.compile(HTML_ANCHOR_TAG + r"(.*?)</a\s*>")
 HTML_ANCHOR_OPEN_RE = re.compile(r"(?i)<a\s")
+# The href attribute HTML_ANCHOR_TAG reads, and the closing tag HTML_LINK_RE ends at, each sought alone.
+HTML_HREF_RE = re.compile(r"(?i)\bhref\s*=\s*[\"']([^\"'\s<>]+)[\"']")
+HTML_ANCHOR_CLOSE_RE = re.compile(r"(?i)</a\s*>")
 
 
 # Each step regex below can fail at many starts that all scan the same stretch of text (n unclosed `<!--`
@@ -1249,7 +1302,9 @@ HTML_ANCHOR_OPEN_RE = re.compile(r"(?i)<a\s")
 # Its finder yields exactly the matches regex.finditer yields, in order, as the real Match objects
 # (regex.match at each start it finds), but tries the regex only at a start where it can match or
 # where no earlier start has scanned the same stretch: a failed start shows every start it covers fails
-# too, so each character is read a bounded number of times and a text is normalized in linear time.
+# too. Each finder's docstring argues that it reads each character of the text a bounded number of
+# times; the growth rows time that on their shapes only. The other steps have no finder and are not
+# argued here.
 
 def _html_comment_matches(text):
     """HTML_COMMENT_RE.finditer(text): the first `-->` after a `<!--`, on its line. A `<!--` with none
@@ -1292,10 +1347,16 @@ def _markdown_link_matches(text):
 
 
 def _html_link_matches(text):
-    """HTML_LINK_RE.finditer(text). An anchor tag ends at the first `>` after its `<a`, so a failed start
-    shows every `<a` before that `>` fails too; and when the tag matches but its line has no `</a>`,
-    every later tag ending on that line fails as well (its search is a part of the first one's)."""
+    """HTML_LINK_RE.finditer(text). An anchor tag ends at the first `>` after its `<a` (no part of the tag
+    pattern can hold a `>`), so a start matches exactly when an href attribute (HTML_HREF_RE) lies between
+    its `<a ` and that `>` and a `</a>` (HTML_ANCHOR_CLOSE_RE) starts after the `>` on the same line.
+    The two are sought apart, the href inside the tag and the closer after it, and HTML_LINK_RE is run
+    only at a start where it matches, so it never retries each href of a tag against a missing closer.
+    A failed start shows every `<a` before that `>` fails too; a tag whose line has no `</a>` shows every
+    later tag ending on that line has none either; and the next closer found is kept until the search
+    passes it, so the text after the tags is read for a closer once."""
     position, no_close_before = 0, -1
+    closer, closer_from = None, len(text) + 1   # the first closer at or after closer_from
     while True:
         opener = HTML_ANCHOR_OPEN_RE.search(text, position)
         if opener is None:
@@ -1304,15 +1365,18 @@ def _html_link_matches(text):
         tag_end = text.find(">", start)
         if tag_end < 0:
             return
-        if tag_end >= no_close_before:
-            found = HTML_LINK_RE.match(text, start)
+        if tag_end >= no_close_before and HTML_HREF_RE.search(text, start + 3, tag_end) is not None:
+            if closer_from > tag_end + 1 or (closer is not None and closer.start() <= tag_end):
+                closer, closer_from = HTML_ANCHOR_CLOSE_RE.search(text, tag_end + 1), tag_end + 1
+            line_end = text.find("\n", tag_end + 1)
+            line_end = len(text) if line_end < 0 else line_end
+            found = (HTML_LINK_RE.match(text, start) if closer is not None and closer.start() < line_end
+                     else None)
             if found is not None:
                 yield found
                 position = found.end()
                 continue
-            if HTML_ANCHOR_TAG_RE.match(text, start) is not None:
-                line_end = text.find("\n", tag_end + 1)
-                no_close_before = len(text) if line_end < 0 else line_end
+            no_close_before = line_end
         position = tag_end + 1
 
 
@@ -1488,17 +1552,68 @@ def _code_flags(text):
     return flags
 
 
-def _normalize(text, skips=()):
+class _TargetMatch:
+    """A markdown-link match whose URL group, when it is a placeholder, reads as its URL's stand-in
+    (_link_stand_in), which the link replacement reads as it reads the URL."""
+
+    def __init__(self, match, targets):
+        self._match, self._targets = match, targets
+
+    def group(self, group=0):
+        value = self._match.group(group)
+        placeholder = None if value is None else REFERENCE_TARGET_RE.fullmatch(value)
+        return value if placeholder is None else self._targets[int(placeholder.group(1))][1]
+
+
+# The steps a placeholder (REFERENCE_TARGET_RE) reaches: they read it as they read its URL (no character
+# of either opens or closes a comment or a link, or splits the URL group); before any other step, each
+# placeholder the markdown-link step left is replaced by its URL.
+PLACEHOLDER_STEPS = ("html-comment", "markdown-link")
+
+
+def _reading_targets(link, targets):
+    """The markdown-link replacement link, given each match with a placeholder URL read as its stand-in."""
+    return lambda match: link(_TargetMatch(match, targets))
+
+
+def _with_targets(text, flags, targets):
+    """(text, flags) with each placeholder replaced by the URL it stands for, every character of it
+    flagged as the placeholder is (no code span starts or ends inside one: it holds no backtick; one can
+    still lie inside a code span when a URL copied into the text brought a backtick)."""
+    pieces, out_flags, last = [], bytearray(), 0
+    for found in REFERENCE_TARGET_RE.finditer(text):
+        url = targets[int(found.group(1))][0]
+        pieces.extend((text[last:found.start()], url))
+        if flags is not None:
+            out_flags += flags[last:found.start()] + bytearray(flags[found.start():found.start() + 1] * len(url))
+        last = found.end()
+    pieces.append(text[last:])
+    if flags is not None:
+        out_flags += flags[last:]
+    return "".join(pieces), (None if flags is None else out_flags)
+
+
+def _normalize(text, skips=(), targets=()):
     """text with the NORMALIZE steps applied in order, except those named in skips. The code spans are
-    read once, before the first step; a CODE_SPAN_INERT_STEPS step never sees their content."""
+    read once, before the first step; a CODE_SPAN_INERT_STEPS step never sees their content. targets are
+    the (URL, stand-in) pairs of the placeholders in text (_resolve_reference_links): the markdown-link
+    step reads a placeholder that is a link's URL as its stand-in, and any placeholder left is given back
+    its URL before the first step outside PLACEHOLDER_STEPS."""
     flags = _code_flags(text)
     for name, regex, replacement in NORMALIZE:
+        if targets and name not in PLACEHOLDER_STEPS:
+            text, flags = _with_targets(text, flags, targets)
+            targets = ()
         if name in skips:
             continue
+        if targets and name == "markdown-link" and callable(replacement):
+            replacement = _reading_targets(replacement, targets)
         if flags is None:
             text = _step_sub(regex, replacement, text)
         else:
             text, flags = _masked_sub(regex, replacement, text, flags, name in CODE_SPAN_INERT_STEPS)
+    if targets:
+        text = _with_targets(text, flags, targets)[0]
     return text
 
 PATTERNS = (
@@ -1559,7 +1674,7 @@ def tokenize(prose, context="prose"):
     """(clauses, refs): the prose normalized (NORMALIZE), each pull request reference replaced by a
     token, split into clauses; refs[k] = (repo or None for the surface default, number, original
     text)."""
-    text = " ".join(_normalize(" ".join(prose.split())).split())
+    text = " ".join(_normalize(" ".join(prose.split()), (), getattr(prose, "targets", ())).split())
     refs = []
 
     def replace(match):
@@ -2731,6 +2846,31 @@ def _every_open_item(items, indent):
     return [column for column in items if column <= indent]
 
 
+def _tag_retrying_html_link_matches(text):
+    """_html_link_matches as it was: HTML_LINK_RE run at each tag that can start a match, so a tag with n
+    href attributes and no `</a>` on its line retries each href against the rest of the line, quadratic
+    in the tag (a growth row's red leg)."""
+    position, no_close_before = 0, -1
+    while True:
+        opener = HTML_ANCHOR_OPEN_RE.search(text, position)
+        if opener is None:
+            return
+        start = opener.start()
+        tag_end = text.find(">", start)
+        if tag_end < 0:
+            return
+        if tag_end >= no_close_before:
+            found = HTML_LINK_RE.match(text, start)
+            if found is not None:
+                yield found
+                position = found.end()
+                continue
+            if HTML_ANCHOR_TAG_RE.match(text, start) is not None:
+                line_end = text.find("\n", tag_end + 1)
+                no_close_before = len(text) if line_end < 0 else line_end
+        position = tag_end + 1
+
+
 def _growth(text_of, n, state):
     """(growth, [seconds at n, seconds at GROWTH_FACTOR * n]) for the whole check on text_of's shape."""
     import time
@@ -2796,7 +2936,13 @@ def _growth_rows(m):
              lambda n: "PR #17" + ", #17" * n + "\n", "merged", 50, {"LIST_RUN_STARTS": False}),
             ("growth/lazy-lines-under-items-linear", "growth/lazy-lines-under-items-linear/red-when-reverted",
              lambda n: "- " * n + "```\n" + " " * (2 * n) + "```\n" + " " * (2 * n) + "t\n" + "t\n" * n
-             + GROWTH_CLAIM, "merged", 600, {"_open_items": _every_open_item})):
+             + GROWTH_CLAIM, "merged", 600, {"_open_items": _every_open_item}),
+            ("growth/anchor-attributes-linear", "growth/anchor-attributes-linear/red-when-reverted",
+             lambda n: "<a " + "href=\"x\" " * n + "> " + GROWTH_CLAIM, "merged", 1000,
+             {"STEP_FINDERS": {**STEP_FINDERS, HTML_LINK_RE: _tag_retrying_html_link_matches}}),
+            ("growth/reference-uses-linear", "growth/reference-uses-linear/red-when-reverted",
+             lambda n: "[x]: https://example.com/" + "a" * n + "\n\n" + "[x] " * n + "\n" + GROWTH_CLAIM,
+             "merged", 300, {"REFERENCE_PLACEHOLDERS": False})):
         growth, seconds = _growth(text_of, n, state)
         check(name, growth <= GROWTH_LIMIT, (growth, seconds))
         growth, seconds = _with_globals(quadratic, lambda: _growth(text_of, n, state))
@@ -2808,6 +2954,34 @@ def _growth_rows(m):
     differ = [text for text in texts if _classified(text) != _with_globals(
         {"_paragraph_comment_start": _rescanning_comment_start}, lambda: _classified(text))]
     check("scale/classification-matches-rescanning-reading", not differ, differ[:3])
+    # A reference link reads the same with its URL written as a placeholder as with the URL copied in,
+    # a link the markdown-link step does not read whole ([a]( [x)]) and a URL it cannot stand for
+    # included; and the HTML link finder gives exactly the regex's matches.
+    pieces = ("[x]", "[t][x]", "[x][]", "![x]", "[x)]", "[a](", " [y]", ")", "`", "<!--", "-->", " ", "\n",
+              "PR #17 is pending", " is pending", "#17", " still open", "<a href=\"q\">", "</a>", "[")
+    urls = ("https://github.com/acme/widgets/pull/17", "https://github.com/acme/widgets/pull/17#top",
+            "https://github.com/acme/widgets/issues/17", "https://x.org/a(b)", "x/#17", "u`v", "a]b")
+    texts = ["[x]: https://github.com/acme/widgets/pull/17\n\n[x] is pending\n",
+             "[x)]: https://github.com/acme/widgets/pull/17\n\n[a]( [x)] is pending\n",
+             "[x]: https://x.org/a(b)\n\n[x] PR #17 is pending\n", "[x]: x/#17\n\n`[x]` [x] is pending <!-- [x] -->\n"]
+    texts += ["[x]: {}\n[x)]: {}\n[y]: {}\n\n".format(*(pick.choice(urls) for _ in range(3)))
+              + "".join(pick.choice(pieces) for _ in range(pick.randint(1, 30))) for _ in range(200)]
+
+    def judged(text):
+        try:
+            code, res, t = _judge(text, {(REPO, 17): "merged"})
+        except InputError as exc:
+            return str(exc)
+        return code, re.sub(r"\(read [^)]*\)", "", repr((res.hard, res.warnings, res.unknown))), t.calls
+    differ = [text for text in texts
+              if judged(text) != _with_globals({"REFERENCE_PLACEHOLDERS": False}, lambda: judged(text))]
+    check("scale/reference-placeholders-read-as-urls", not differ, differ[:3])
+    alphabet = ("<a ", "<A\t", "href=\"x\" ", "href='y'", "href=z ", ">", "</a>", "</a  >", "</A\n>", "\n", "x",
+                " ", "\"", "'", "<", "</a")
+    texts = ["".join(pick.choice(alphabet) for _ in range(pick.randint(1, 30))) for _ in range(2000)]
+    differ = [text for text in texts if [(found.span(), found.groups()) for found in _html_link_matches(text)]
+              != [(found.span(), found.groups()) for found in HTML_LINK_RE.finditer(text)]]
+    check("scale/html-link-finder-matches-regex", not differ, differ[:3])
     code, res, t = _judge("text <!-- ordinary comment -->\n" * 4000 + "PR #17 is pending\n", m)
     check("scale/report-input-still-finds", code == 1 and t.calls == [(REPO, 17)] and len(res.hard) == 1
           and not res.warnings, (code, t.calls, res.hard, res.warnings))
