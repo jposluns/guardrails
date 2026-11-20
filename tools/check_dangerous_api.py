@@ -744,10 +744,6 @@ ALLOWLIST = (
      "self-test differential oracle loader: exec_module of the repository's own hook source at the"
      " fixed base commit _CMO_BASE, read by git show (replacement objects disabled) from this"
      " checkout and written under the self-test's temporary directory; no external input"),
-    ("tools/selftest_aiqt_hooks.py", "_gw_mutant", "code", 1,
-     _MUTANT + " (each _GW_MUTANTS one-line substitution of the hook source read from"
-     " aiqt_hooks.__file__, its anchor matched exactly once, compiled into a fresh module that is"
-     " never registered in sys.modules)"),
     ("tools/_close_selftest.py", "_StCloseFault.__init__", "shell", 1,
      "self-test fault injector: wraps the os functions named in its own fixed _ST_WATCHED"
      " tuple (descriptor stat and seek calls) to count closes; never runs a shell"),

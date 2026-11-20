@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "ec4a236058bbfc962ff2dc791422cf7ece009d13d91c1cb25c0cba4315c17966"
+tree-sha256 = "838c82e95aaf59fac5417e323da4920be7ea090101b54745691ff5ca00886882"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4302,8 +4302,8 @@ sha256 = "0238bb4c907c358a4718a70f8630a92517444f64139b4c0517004bfdbf2321ec"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 229077
-sha256 = "0e198e8bd875f0d2d9c1af99f812513a0638ab7ae85a6672bcf54cf3a2273deb"
+bytes = 228786
+sha256 = "233f51b2d80cf5b2f49f10911fd138e591dd4015a58a57f48a57126c0971c66f"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
@@ -4807,8 +4807,8 @@ sha256 = "59f6155486925ab9adea0da0203964283937c0dc7543bcfba335d4ac0820279e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 2919740
-sha256 = "b635c5f61d2e4fd0968f5a2b0dcc3acf490abded5269cf41f1fc0eea08325d33"
+bytes = 2923292
+sha256 = "dd2635190c584d9b529807db73eecaa7d86aba2876b05e09956f6e7fbaa3a9bf"
 
 [[sources]]
 path = "tools/selftest_checks.toml"

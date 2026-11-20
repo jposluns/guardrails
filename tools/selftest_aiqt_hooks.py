@@ -8039,7 +8039,7 @@ def _gw_work_failures(hooks=None):
     no here-document body to mask, one more split and one more doubt test where there is one, each distinct span of
     the two splits read once, the any-word walk reading only the words after the word it is given, and the
     run-time walk's verb search starting after that word too. hooks is the hook module (aiqt_hooks, or a mutated
-    copy, _gw_mutant_failures); the counts of the passes some rows add up are read from it too, but the
+    copy run as a child's main module, _gw_mutant_child); the counts of the passes some rows add up are read from it too, but the
     split rows (gw-cnt-heredoc-skip, gw-cnt-heredoc-split, and the split part of gw-cnt-span-dedup) are worked
     out from their inputs, so a mutation that charges the split more cannot raise the expected count with it."""
     hooks = aiqt_hooks if hooks is None else hooks
@@ -8218,54 +8218,113 @@ _GW_MUTANTS = (
 )
 
 
-def _gw_mutant(anchor, line, mutated):
-    """A copy of the hook module, loaded from its source with one line changed (_GW_MUTANTS), or None when the
-    anchor is not in the source exactly once or line does not follow it."""
-    path = Path(aiqt_hooks.__file__)
-    source = path.read_text(encoding="utf-8")
+# The hook's own entry guard, which it holds once, at its end. A mutated copy is written out as a script with
+# _GW_MUTANT_DRIVER ahead of that guard (_gw_mutant_source), so the copy run as the main module of a child
+# interpreter runs the row its mutation targets (_gw_mutant_child) and exits before the hook's main is reached.
+_GW_HOOK_MAIN_GUARD = '\n\nif __name__ == "__main__":\n'
+_GW_MUTANT_DRIVER = (
+    '\n\nif __name__ == "__main__":\n'
+    "    sys.path.insert(0, sys.argv[1])\n"
+    "    import selftest_aiqt_hooks\n"
+    "    sys.exit(selftest_aiqt_hooks._gw_mutant_child(sys.modules[__name__], sys.argv[2]))\n")
+# The most a child running one mutated copy may take (its compile of the hook, its import of this file, and one row).
+_GW_MUTANT_TIMEOUT = 300
+
+
+def _gw_mutant_source(anchor, line, mutated):
+    """The source of a copy of the hook with one line changed (_GW_MUTANTS) and _GW_MUTANT_DRIVER ahead of its
+    entry guard, or None when the anchor is not in the source exactly once, line does not follow it, or the
+    changed source does not hold the entry guard exactly once."""
+    source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
     if source.count(anchor) != 1:
         return None
     at = source.find(line, source.index(anchor))
     if at < 0:
         return None
-    module = types.ModuleType("aiqt_hooks_mutant")
-    module.__file__ = str(path)
-    exec(compile(source[:at] + mutated + source[at + len(line):], str(path), "exec"), module.__dict__)
-    return module
+    source = source[:at] + mutated + source[at + len(line):]
+    if source.count(_GW_HOOK_MAIN_GUARD) != 1:
+        return None
+    return source.replace(_GW_HOOK_MAIN_GUARD, _GW_MUTANT_DRIVER + _GW_HOOK_MAIN_GUARD)
+
+
+def _gw_mutant_child(hooks, spec):
+    """The child side of _gw_mutant_run. hooks is the mutated copy of the hook, the child's main module, and spec
+    the JSON of [row, case]: case is [unit, prefix, suffix, scan name, want] for a gw-lin growth row, run on the
+    copy at _GW_MUT_REPS units (_gw_lin_failures), or null for a gw-cnt row (_gw_work_failures on the copy).
+    Prints the JSON list of what the row got wrong on the copy as its last line and returns 0."""
+    row, case = json.loads(spec)
+    if case is None:
+        got = _gw_work_failures(hooks)
+    else:
+        unit, prefix, suffix, scan, want = case
+
+        def once(cmd, scan_fn):
+            return _gw_count_once(cmd, scan_fn, hooks)
+
+        got = _gw_lin_failures(((row, unit, prefix, suffix, getattr(hooks, scan), want),), once, _GW_MUT_REPS)
+    print(json.dumps(got))
+    return 0
+
+
+def _gw_mutant_run(path, row, case):
+    """(failures, None) for the row on the mutated copy of the hook at path, run as a script in a child interpreter
+    (_gw_mutant_child; case as there), or (None, why) when the child gave no such list: it did not exit within
+    _GW_MUTANT_TIMEOUT seconds, exited other than 0, or did not end its output with a JSON list of strings."""
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-B", str(path), str(Path(__file__).resolve().parent),
+                               json.dumps([row, case])], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=_GW_MUTANT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None, "no exit within {}s".format(_GW_MUTANT_TIMEOUT)
+    lines = proc.stdout.splitlines()
+    try:
+        got = json.loads(lines[-1]) if proc.returncode == 0 and lines else None
+    except ValueError:
+        got = None
+    if not isinstance(got, list) or not all(isinstance(text, str) for text in got):
+        return None, "exit {}, output {!r}".format(proc.returncode, (proc.stdout + proc.stderr)[-1000:])
+    return got, None
 
 
 def _gw_mutant_failures(cases):
     """(gw-lin-mut-control, gw-lin-mut-<label>) Each _GW_MUTANTS mutation run on a copy of the hook must fail the
-    row it names; cases are the gw-lin growth rows. gw-lin-mut-control: every growth row passes on the hook itself
-    at _GW_MUT_REPS units, so a failure on a copy is the mutation's."""
+    row it names; cases are the gw-lin growth rows. Each copy is written to a temporary directory and run as a
+    script in its own child interpreter (_gw_mutant_run), so no mutated source is executed in this process; a child
+    that gives no verdict fails its row. gw-lin-mut-control: every growth row passes on the hook itself at
+    _GW_MUT_REPS units, so a failure on a copy is the mutation's."""
     out = []
     by_label = {case[0]: case for case in cases}
     for got in _gw_lin_failures(cases, size=_GW_MUT_REPS):
         out.append("(gw-lin-mut-control) at {} units: {}".format(_GW_MUT_REPS, got))
-    for label, anchor, line, mutated, row in _GW_MUTANTS:
-        name = "gw-lin-mut-" + label
-        line = anchor if line is None else line
-        hooks = _gw_mutant(anchor, line, mutated)
-        if hooks is None:
-            out.append("({}) the hook does not hold the anchor {!r} once with {!r} after it".format(name, anchor, line))
-            continue
-        if row in by_label:
-            _row, unit, prefix, suffix, scan, want = by_label[row]
-
-            def once(cmd, scan_fn, hooks=hooks):
-                return _gw_count_once(cmd, scan_fn, hooks)
-
-            got = _gw_lin_failures(((row, unit, prefix, suffix, getattr(hooks, scan.__name__), want),), once,
-                                   _GW_MUT_REPS)
-            caught = any(text.startswith("({}) doubling the input grew".format(row)) for text in got)
-        else:
-            got = _gw_work_failures(hooks)
-            # a count failure, not only a result failure, so the count itself shows the lost work
-            caught = any(text.startswith("({}) ".format(row)) and " counted " in text for text in got)
-        if not caught:
-            out.append("({}) a copy of the hook with {!r} made {!r} did not trigger the required count failure in "
-                       "{}, so its count does not show the lost work: {!r}".format(name, line.strip(), mutated.strip(),
-                                                                                    row, got))
+    with tempfile.TemporaryDirectory(prefix="gw-mutant-") as tmp:
+        path = Path(tmp) / "aiqt_hooks_mutant.py"
+        for label, anchor, line, mutated, row in _GW_MUTANTS:
+            name = "gw-lin-mut-" + label
+            line = anchor if line is None else line
+            source = _gw_mutant_source(anchor, line, mutated)
+            if source is None:
+                out.append("({}) the hook does not hold the anchor {!r} once with {!r} after it, and its entry guard "
+                           "{!r} once".format(name, anchor, line, _GW_HOOK_MAIN_GUARD))
+                continue
+            path.write_text(source, encoding="utf-8")
+            if row in by_label:
+                _row, unit, prefix, suffix, scan, want = by_label[row]
+                got, why = _gw_mutant_run(path, row, [unit, prefix, suffix, scan.__name__, want])
+            else:
+                got, why = _gw_mutant_run(path, row, None)
+            if got is None:
+                out.append("({}) the child running a copy of the hook with {!r} made {!r} gave no verdict for {}: "
+                           "{}".format(name, line.strip(), mutated.strip(), row, why))
+                continue
+            if row in by_label:
+                caught = any(text.startswith("({}) doubling the input grew".format(row)) for text in got)
+            else:
+                # a count failure, not only a result failure, so the count itself shows the lost work
+                caught = any(text.startswith("({}) ".format(row)) and " counted " in text for text in got)
+            if not caught:
+                out.append("({}) a copy of the hook with {!r} made {!r} did not trigger the required count failure "
+                           "in {}, so its count does not show the lost work: {!r}".format(
+                               name, line.strip(), mutated.strip(), row, got))
     return out
 
 
