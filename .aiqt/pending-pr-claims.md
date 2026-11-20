@@ -309,11 +309,18 @@ Before, a table header 5,000 tables deep (10,007 bytes) parsed and then ended th
 RecursionError (exit 1).
 
 The bound is enforced before the TOML reader runs. One linear scan of the document's text
-(`_toml_nesting`) counts the depth its syntax gives: a table header's parts (one more for an
-array-of-tables header), a dotted key's parts before its last below its table, and one level per inline
-array or table; strings (basic, literal and multi-line, with their escapes) and comments are stepped
-over. It refuses at the first part past the bound, so the reader is never given a key of more than 101
-parts or inline nesting more than 100 deep. The reader copies a dotted key's prefixes, quadratic in its
+(`_toml_nesting`) counts the depth the reader will build, following TOML 1.0's tables and arrays of
+tables: a table header's parts, each one level, except that a part naming an array of tables is two
+(the array and its last element), where an earlier array-of-tables header named that array and an
+array-of-tables header's own last part always names one (header keys are read as the reader reads them,
+so a quoted, escaped or spaced spelling of a name is the same name, and a new element forgets what the
+earlier one held); a dotted key's parts before its last below its table, inside an inline table too; and
+one level per inline array or table; strings (basic, literal and multi-line, with their escapes) and
+comments are stepped over. It refuses at the first part past the bound, so the reader is never given a
+key of more than 101 parts, a table or inline nesting more than 100 deep. Before, the scan counted only
+the array of tables a header itself named, so 51 array-of-tables headers, each one part longer than the
+one before (2,878 bytes), passed it and were parsed 102 deep before the walk refused them; now they are
+refused before the reader. The reader copies a dotted key's prefixes, quadratic in its
 parts: before the scan, a dotted key of 4,000, 8,000 and 12,000 parts (8,003 to 24,003 bytes) peaked at
 about 90, 278 and 592 MiB resident and 16,000 parts at about 1 GiB, and at 21,000 parts a 1 GiB address
 space limit ended the read in a MemoryError; with the scan each ends naming the bound at about 28 MiB in
@@ -321,10 +328,11 @@ under 0.2 seconds, as do table headers of 8,000 and 21,000 parts, inline arrays 
 inline tables up to 5,000 deep and a dotted key of 21,000 parts with no value (measured on 2026-11-20 on the host it was run on,
 through `--draft`). Documents within the bound, filled to 64 KiB with keys of 101 parts, keys under a
 header 100 deep, array-of-tables headers 99 deep or inline arrays and tables 100 deep, peaked at about 28
-to 33 MiB and 0.6 seconds, as before the scan. The scan counts no more than the parsed document holds,
-so it refuses no document the walk after the reader would read; the walk still refuses the levels the
-scan cannot see (an array-of-tables header named earlier adds a level under a later header). The
-`RecursionError` and `MemoryError` handling at the reader stays as a defence in depth.
+to 33 MiB and 0.6 seconds, as before the scan. For a document the reader reads, the scan's depth is
+the parsed document's, no lower and no higher, so it refuses no document the walk after the reader
+would read and passes none the walk would refuse; the self-test compares the two over a generated
+corpus. The walk's own refusal and the `RecursionError` and `MemoryError` handling at the reader stay as
+a defence in depth.
 
 Self-test rows give deep table headers, array-of-tables headers, dotted keys, inline arrays and inline
 tables (exit 2, naming the bound, in process and through `--draft`); show that the reported dotted key,
@@ -332,8 +340,14 @@ one with no value, and headers, dotted keys and inline nesting just past the bou
 the reader is called (the red leg, the scan off, calls it); read a value exactly 100 deep with its whole
 key path, a dotted key of 101 parts, a header and a dotted key that together reach the bound and an
 array-of-tables element at the bound; read a document whose strings and comments are full of brackets,
-braces, dots and quotes exactly as with the scan off; refuse through the walk the array-of-tables level
-the scan does not count; end the reported 16,000-part dotted key through `--draft` in a child limited to
+braces, dots and quotes exactly as with the scan off; refuse before the reader the 2,878-byte
+array-of-tables chain and a table header under an array of tables that together pass the bound, in
+process and through `--draft` (the red leg, the scan counting only a header's own array of tables, calls
+the reader), and read the chain one header shorter, at the bound; show, over every sequence of up to
+three table and array-of-tables headers of up to three parts from two names spelled in each of the
+reader's ways, and over 4,000 seeded documents mixing headers, dotted keys, inline tables and nested
+inline arrays, that the scan's depth is the parsed document's (the red leg finds a document it counts
+too shallow); end the reported 16,000-part dotted key through `--draft` in a child limited to
 512 MiB of address space with the bound named; refuse one 101 deep; and read blockquotes and list items
 nested in documents of up to about 60,000 bytes as one level is read (those rows pass on the walk this
 replaced too: Markdown had no recursive walk). The Markdown reader has no shape bound beyond the size
