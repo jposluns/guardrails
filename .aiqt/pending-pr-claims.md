@@ -304,14 +304,54 @@ Nesting is bounded as well, so any document within 64 KiB ends in exit 0, 1 or 2
 No walk over a document recurses: Markdown blocks, blockquotes and list items are read in loops over
 the lines, and the walk over a parsed TOML document keeps its own stack and builds a value's location
 only at that value. A TOML table or array nested more than 100 tables and arrays deep
-(`TOML_MAX_DEPTH`; the top-level table is not counted), or inline arrays and tables nested past what
-the TOML reader parses (it recurses and stops at Python's recursion limit), is cannot-evaluate (exit
-2), naming the bound. Before, a table header 5,000 tables deep (10,007 bytes) parsed and then ended
-the walk in an uncaught RecursionError (exit 1). Self-test rows give deep table headers,
-array-of-tables headers, dotted keys, inline arrays and inline tables (exit 2, naming the bound, in
-process and through `--draft`), read a value exactly 100 deep with its whole key path, refuse one
-101 deep, and read blockquotes and list items nested in documents of up to about 60,000 bytes as one
-level is read (those rows pass on the walk this replaced too: Markdown had no recursive walk).
+(`TOML_MAX_DEPTH`; the top-level table is not counted) is cannot-evaluate (exit 2), naming the bound.
+Before, a table header 5,000 tables deep (10,007 bytes) parsed and then ended the walk in an uncaught
+RecursionError (exit 1).
+
+The bound is enforced before the TOML reader runs. One linear scan of the document's text
+(`_toml_nesting`) counts the depth its syntax gives: a table header's parts (one more for an
+array-of-tables header), a dotted key's parts before its last below its table, and one level per inline
+array or table; strings (basic, literal and multi-line, with their escapes) and comments are stepped
+over. It refuses at the first part past the bound, so the reader is never given a key of more than 101
+parts or inline nesting more than 100 deep. The reader copies a dotted key's prefixes, quadratic in its
+parts: before the scan, a dotted key of 4,000, 8,000 and 12,000 parts (8,003 to 24,003 bytes) peaked at
+about 90, 278 and 592 MiB resident and 16,000 parts at about 1 GiB, and at 21,000 parts a 1 GiB address
+space limit ended the read in a MemoryError; with the scan each ends naming the bound at about 28 MiB in
+under 0.2 seconds, as do table headers of 8,000 and 21,000 parts, inline arrays up to 30,000 deep,
+inline tables up to 5,000 deep and a dotted key of 21,000 parts with no value (measured on 2026-11-20 on the host it was run on,
+through `--draft`). Documents within the bound, filled to 64 KiB with keys of 101 parts, keys under a
+header 100 deep, array-of-tables headers 99 deep or inline arrays and tables 100 deep, peaked at about 28
+to 33 MiB and 0.6 seconds, as before the scan. The scan counts no more than the parsed document holds,
+so it refuses no document the walk after the reader would read; the walk still refuses the levels the
+scan cannot see (an array-of-tables header named earlier adds a level under a later header). The
+`RecursionError` and `MemoryError` handling at the reader stays as a defence in depth.
+
+Self-test rows give deep table headers, array-of-tables headers, dotted keys, inline arrays and inline
+tables (exit 2, naming the bound, in process and through `--draft`); show that the reported dotted key,
+one with no value, and headers, dotted keys and inline nesting just past the bound are refused before
+the reader is called (the red leg, the scan off, calls it); read a value exactly 100 deep with its whole
+key path, a dotted key of 101 parts, a header and a dotted key that together reach the bound and an
+array-of-tables element at the bound; read a document whose strings and comments are full of brackets,
+braces, dots and quotes exactly as with the scan off; refuse through the walk the array-of-tables level
+the scan does not count; end the reported 16,000-part dotted key through `--draft` in a child limited to
+512 MiB of address space with the bound named; refuse one 101 deep; and read blockquotes and list items
+nested in documents of up to about 60,000 bytes as one level is read (those rows pass on the walk this
+replaced too: Markdown had no recursive walk). The Markdown reader has no shape bound beyond the size
+bound: it reads lines in loops, and blockquotes, list markers and lists in blockquotes nested to 60,000
+bytes ran in about 28 MiB and at most 0.6 seconds, before and after this change.
+
+In-band marks. The check writes a few characters into a text as its own marks and reads them back by
+their spelling: NUL (a reference link's URL placeholder), U+E000 and U+E001 (a pull request reference's
+token), U+E002 (an escaped table pipe), U+E003 (an issue number's `#`) and U+E004 (code-span content as
+an exemption recognizer sees it), together `IN_BAND_MARKS`. A document that carries any of them, raw or
+decoded from a TOML escape in a string value or a key, is cannot-evaluate (exit 2), naming the
+character, before any of it is read. Before, an eight-byte Markdown draft spelling a reference token,
+or its 18-byte TOML escape, ended in an uncaught `IndexError` (exit 1), a token index of 5,000 digits in
+an uncaught `ValueError`, and the other marks changed what was read. Other private-use characters are
+text. Self-test rows refuse each mark raw in Markdown and as a TOML escape in a value and in a key
+(through `--draft` too for the reference token and an oversized index), read a claim beside another
+private-use character as without it, and fail when the checker's code spells a NUL or private-use
+character `IN_BAND_MARKS` does not hold.
 
 ## Residuals
 

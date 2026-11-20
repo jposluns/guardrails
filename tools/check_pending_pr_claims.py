@@ -115,8 +115,19 @@ is outside these bounds.
 NESTING is bounded too. No walk over a document recurses: Markdown blocks, blockquotes and list items
 are read in loops over the lines, and the walk over a parsed TOML document keeps its own stack and builds a
 value's location only at that value. A TOML table or array nested more than TOML_MAX_DEPTH (100) tables
-and arrays deep, or inline arrays and tables nested past what the TOML reader parses (it recurses and
-stops at Python's recursion limit), is cannot-evaluate (exit 2), naming the bound, never a traceback.
+and arrays deep is cannot-evaluate (exit 2), naming the bound, never a traceback. The bound is enforced
+before the TOML reader runs, by one linear scan of the document's text (_toml_nesting) that counts the
+depth its syntax gives (table headers, dotted keys, inline arrays and tables; strings and comments are
+stepped over), so the reader is never given a key of more than TOML_MAX_DEPTH + 1 parts or inline
+nesting more than TOML_MAX_DEPTH deep: its copying of a dotted key's prefixes (quadratic in the key's
+parts; a 16,000-part key held about 1 GiB) and its recursion on inline nesting stay bounded. The scan
+never counts more than the parsed document holds, so it refuses no document the walk would read; the
+walk still refuses the levels the scan cannot see (an array-of-tables header named earlier).
+
+IN-BAND MARKS. The check writes a few characters into a text as its own marks and reads them back by
+their spelling (IN_BAND_MARKS: NUL and U+E000 to U+E004). A document that carries one, raw or decoded
+from a TOML escape in a string value or a key, is cannot-evaluate (exit 2) before any of it is read, so
+no input can spell a mark; other private-use characters are text.
 """
 import sys
 
@@ -157,10 +168,11 @@ CONFIG_REL = ".aiqt/pending-pr-claims.toml"
 MAX_BYTES = 64 * 1024
 # The nesting bound on a TOML document: a table or array nested more than TOML_MAX_DEPTH tables and arrays
 # below the top-level table (itself counted, the top-level table not) is cannot-evaluate (exit 2), naming
-# the bound, and so is a document the TOML reader cannot parse for its depth (it recurses on inline arrays
-# and tables and ends at Python's recursion limit). The walk over the parsed document is iterative, so the
-# bound is not needed to protect it; it keeps every document that is read well inside the depth the
-# reader parses, so the two refusals stay one stated limit, and it is below the depth at which the
+# the bound. A scan of the text before the TOML reader (_toml_nesting) refuses the depth the syntax gives,
+# so the reader never parses a key of more than TOML_MAX_DEPTH + 1 parts or inline nesting past the bound
+# (its cost per key is quadratic in the key's parts, and it recurses on inline arrays and tables); the walk
+# over the parsed document, iterative, refuses the levels the scan cannot see. The bound keeps every
+# document that is read well inside the depth the reader parses, and it is below the depth at which the
 # recursive walk this replaced ended in an uncaught RecursionError, so no document that walk failed on is
 # read now. The real records nest at most a few levels.
 TOML_MAX_DEPTH = 100
@@ -183,11 +195,137 @@ class InputError(Exception):
 # ---------------------------------------------------------------------------------------------------
 # The declaration.
 
+# The characters the nesting scan stops at outside strings and comments, and where each kind of string
+# ends (a backslash escape is stepped over in a basic string; a multi-line closer may take up to two more
+# quotes, which are the string's).
+_TOML_SCAN_RE = re.compile(r"\"\"\"|'''|[\"'#\[\]{}=,.\n]")
+_TOML_BASIC_END_RE = re.compile(r"\\[^\n]|[\"\n]")
+_TOML_LITERAL_END_RE = re.compile(r"['\n]")
+_TOML_ML_BASIC_END_RE = re.compile(r"\\[\s\S]|\"\"\"\"{0,2}")
+_TOML_ML_LITERAL_END_RE = re.compile(r"''''{0,2}")
+_TOML_STRING_ENDS = {'"""': _TOML_ML_BASIC_END_RE, "'''": _TOML_ML_LITERAL_END_RE,
+                     '"': _TOML_BASIC_END_RE, "'": _TOML_LITERAL_END_RE}
+# The nesting scan runs before the TOML reader (True). The self-test sets it False, for the red legs of
+# its rows (the reader's own cost on deep dotted keys and headers, and the walk's refusal after it).
+TOML_PRE_SCAN = True
+# How many documents have been given to the TOML reader (the self-test reads it to show which ones the
+# scan kept from the reader).
+_TOML_READS = [0]
+
+
+def _toml_nesting(text, label):
+    """None, or the reason text is refused before the TOML reader runs: a table header, a dotted key or an
+    inline array or table that puts a table or array more than TOML_MAX_DEPTH deep. One pass over text,
+    each character read once, holding a stack of the open inline arrays and tables; strings and comments
+    are stepped over whole. The depth it counts is the depth the syntax gives (a header's parts, plus one
+    for an array-of-tables header; a key's parts before its last, below its table; one per inline array or
+    table), never more than the parsed document's (an array-of-tables header named earlier adds a level the
+    scan does not count, which the walk in toml_units still refuses), so every document it refuses is one
+    the walk would refuse after parsing; and since it stops at the first part past the bound, the reader
+    is never given a key of more than TOML_MAX_DEPTH + 1 parts or inline nesting more than TOML_MAX_DEPTH
+    deep, which bounds the reader's work per key (it copies a key's prefixes, quadratic in its parts) and
+    its recursion on inline nesting. Text that is not TOML may be scanned loosely; the reader refuses it."""
+    def refused(position, what):
+        return ("{}: line {}: {} nests tables and arrays more than {} deep (TOML_MAX_DEPTH), a bound on "
+                "nesting, found before the TOML reader ran; it was not read".format(
+                    label, text.count("\n", 0, position) + 1, what, TOML_MAX_DEPTH))
+    stack = []            # the open inline arrays and tables: (bracket, the depth of that array or table)
+    table = 0             # the depth of the table the latest header opened (the top-level table is 0)
+    mode = "key"          # "key" (a key is read, or at a line start a header), "header" or "value"
+    base, parts = 0, 1    # in key mode: the depth of the table holding the key, its parts so far
+    header_extra = 0      # in header mode: 1 for an array-of-tables header
+    level = 0             # in value mode: the depth an inline array or table opened here would have
+    position, end = 0, len(text)
+    while position < end:
+        found = _TOML_SCAN_RE.search(text, position)
+        if found is None:
+            break
+        token, position = found.group(0), found.end()
+        if token == "#":
+            newline = text.find("\n", position)
+            position = end if newline < 0 else newline
+            continue
+        if token[0] in "\"'":
+            closer = _TOML_STRING_ENDS[token]
+            while True:
+                stop = closer.search(text, position)
+                if stop is None:
+                    return None          # an unclosed string: the reader refuses the text
+                if stop.group(0)[0] == "\\":
+                    position = stop.end()
+                    continue
+                # A single-line string ends at its quote; at a line end it is unclosed (the reader
+                # refuses it) and the line end is read as a line end.
+                position = stop.end() if stop.group(0) != "\n" else stop.start()
+                break
+            continue
+        if mode == "header":
+            if token == ".":
+                parts += 1
+                if parts + header_extra > TOML_MAX_DEPTH:
+                    return refused(found.start(), "a table header")
+            elif token == "]":
+                if header_extra and text.startswith("]", position):
+                    position += 1
+                table = parts + header_extra
+                mode, base, parts = "key", table, 1
+            elif token == "\n":
+                mode, base, parts = "key", table, 1
+            continue
+        if mode == "key":
+            if token == ".":
+                parts += 1
+                # The key's parts before its last are tables, one level each below its table.
+                if base + parts - 1 > TOML_MAX_DEPTH:
+                    return refused(found.start(), "a dotted key")
+            elif token == "=":
+                mode, level = "value", base + parts
+            elif token == "[" and not stack:
+                header_extra = 1 if text.startswith("[", position) else 0
+                position += header_extra
+                mode, parts = "header", 1
+                if 1 + header_extra > TOML_MAX_DEPTH:
+                    return refused(found.start(), "a table header")
+            elif token == "}" and stack and stack[-1][0] == "{":
+                stack.pop()
+                mode, level = "value", (stack[-1][1] + 1) if stack else table + 1
+            elif token == "\n" and not stack:
+                base, parts = table, 1
+            continue
+        # Value mode: a dot is part of a number or a date, and a line end outside any inline array or
+        # table ends the key/value pair.
+        if token in "[{":
+            if level > TOML_MAX_DEPTH:
+                return refused(found.start(), "an inline array or table")
+            stack.append((token, level))
+            if token == "{":
+                mode, base, parts = "key", level, 1
+            else:
+                level += 1
+        elif token in "]}":
+            if stack:
+                stack.pop()
+            level = (stack[-1][1] + 1) if stack else table + 1
+        elif token == ",":
+            if stack and stack[-1][0] == "{":
+                mode, base, parts = "key", stack[-1][1], 1
+            elif stack:
+                level = stack[-1][1] + 1
+        elif token == "\n" and not stack:
+            mode, base, parts = "key", table, 1
+    return None
+
+
 def _parse_toml(text, label):
     """(document, None), or (None, reason) for text that is not valid TOML or is nested too deeply to be
-    read. The one tomllib call site: a bare ValueError (an integer past the int-string limit), a
-    RecursionError (inline arrays and tables nested past what the reader parses) and a MemoryError are
-    each handled here, never re-raised."""
+    read. The one tomllib call site: the nesting scan (_toml_nesting) runs first, so a document nested past
+    TOML_MAX_DEPTH by its syntax never reaches the reader; a bare ValueError (an integer past the
+    int-string limit), a RecursionError and a MemoryError (kept as a defence in depth) are each handled
+    here, never re-raised."""
+    why = _toml_nesting(text, label) if TOML_PRE_SCAN else None
+    if why is not None:
+        return None, why
+    _TOML_READS[0] += 1
     try:
         return tomllib.loads(text), None
     except RecursionError:
@@ -279,6 +417,28 @@ def _read_bytes(path, label):
     return data
 
 
+# The characters this check writes into a text as its own marks: NUL (a reference link's URL placeholder,
+# REFERENCE_TARGET_RE), U+E000 and U+E001 (a pull request reference's token, REF_MARK), U+E002 (an escaped
+# table pipe, _cells), U+E003 (an issue number's '#', _issue) and U+E004 (code-span content as an
+# exemption recognizer sees it, CODE_FILLER). A mark is read back by its spelling alone, so no input may
+# spell one: a document carrying any of them, raw or decoded from a TOML escape (a key or a string value),
+# is cannot-evaluate (exit 2) before any of it is read. A new mark must be added here; the self-test fails
+# when the source writes a NUL or private-use character this set does not hold.
+IN_BAND_MARKS = "\x00"
+IN_BAND_MARK_RE = re.compile("[" + IN_BAND_MARKS + "]")
+
+
+def _refuse_marks(text, where, lines=False):
+    """InputError (cannot evaluate) when text carries a mark of IN_BAND_MARKS, naming where, the mark and,
+    when lines, the line it is on; else nothing."""
+    found = IN_BAND_MARK_RE.search(text)
+    if found is not None:
+        if lines:
+            where = "{}: line {}".format(where, text.count("\n", 0, found.start()) + 1)
+        raise InputError("{}: carries U+{:04X}, a character this check reserves for its own marks "
+                         "(IN_BAND_MARKS); it was not read".format(where, ord(found.group(0))))
+
+
 def _decode(data, label):
     try:
         text = data.decode("utf-8")
@@ -286,6 +446,7 @@ def _decode(data, label):
         raise InputError("{}: is not UTF-8".format(label))
     if "\x00" in text:
         raise InputError("{}: carries a NUL character".format(label))
+    _refuse_marks(text, label, lines=True)
     return text
 
 
@@ -307,7 +468,8 @@ def toml_units(text, label, budget=None):
     whole key path, so a long key path over many string values is counted once per value. The walk is
     iterative and builds a location only at a string value, from one shared list of key path pieces, so
     reaching a value costs its own path, not the paths of every table above it; a table or array nested
-    more than TOML_MAX_DEPTH deep is InputError (cannot evaluate), naming the bound."""
+    more than TOML_MAX_DEPTH deep is InputError (cannot evaluate), naming the bound, and so is a key or a
+    string value that carries a mark of IN_BAND_MARKS (a TOML escape can spell one)."""
     data, why = _parse_toml(text, label)
     if why is not None:
         raise InputError(why)
@@ -330,12 +492,16 @@ def toml_units(text, label, budget=None):
         if is_array:
             pieces.append("[{}]".format(key))
         elif named:
+            _refuse_marks(key, "{}: a key".format(label))
             pieces.append(".")
             pieces.append(key)
         else:
+            _refuse_marks(key, "{}: a key".format(label))
             pieces.append(key)
         if isinstance(value, str):
             location = "{}: {}".format(label, "".join(pieces))
+            # A TOML escape (\u0000, ) can spell a mark the raw text cannot hold.
+            _refuse_marks(value, location)
             if budget is not None:
                 budget.charge(location)
             units.append((location, value, "prose"))
@@ -397,8 +563,8 @@ def _header_name(cell):
 
 
 # A definition URL in a resolved reference link is written as a placeholder, NUL, the URL's index in
-# the document's targets (_Definitions), NUL, so each use costs its own length, not the URL's (a
-# Markdown document never holds a NUL: _decode refuses one). Only a URL of characters the steps before
+# the document's targets (_Definitions), NUL, so each use costs its own length, not the URL's (no
+# document text holds a NUL: _decode refuses one, and toml_units one decoded from an escape; IN_BAND_MARKS). Only a URL of characters the steps before
 # the markdown-link step and the code-span reading treat alike (PLACEHOLDER_URL_RE) is written so; any
 # other URL is copied (and charged to the URL copy bound, below).
 REFERENCE_TARGET_RE = re.compile("\x00([0-9]+)\x00")
@@ -1392,7 +1558,7 @@ REF_RE = re.compile(
     r"|(?<![\w&#/])#(?P<hn>[0-9]{1,9})(?![\w]))",
     re.IGNORECASE)
 # The placeholder a pull request reference is replaced with before the phrase rules run (private-use
-# characters, so no record text can spell it).
+# characters in IN_BAND_MARKS, so no record text can spell it: a document carrying one is refused).
 REF_MARK = "\ue000[0-9]+\ue001"
 REF_MARK_RE = re.compile("\ue000([0-9]+)\ue001")
 LIST = r"(?P<l>{0}(?:\s*,\s*(?:and\s+|or\s+)?{0}|\s+(?:and|or|&)\s+{0})*)".format(REF_MARK)
@@ -1686,7 +1852,7 @@ CODE_SPANS_INERT = True
 # What a code span's content reads as to an exemption recognizer: a private-use character no delimiter,
 # space or word pattern matches (its backticks stay, so a backticked span after a historical lead-in is
 # still that span).
-CODE_FILLER = ""
+CODE_FILLER = "\ue004"
 
 
 class _RealMatch:
@@ -3752,6 +3918,156 @@ def _self_test_nesting(m, tempfile, contextlib, io):
             check(name, child.returncode == want and "Traceback" not in err and (want != 2 or named(err)),
                   (child.returncode, err[-300:]))
 
+    # Before the reader: the nesting scan refuses a document whose syntax nests past the bound before
+    # tomllib is given it (the reader copies a dotted key's prefixes, so a 12,000-part key held about
+    # 590 MiB before it was read), naming the bound. The red leg, the scan off, hands each to the reader.
+    early = "found before the TOML reader ran"
+
+    def scanned(text):
+        """(the reason _parse_toml gives, or None; whether the reader was given text)."""
+        before = _TOML_READS[0]
+        why = _parse_toml(text, "x.toml")[1]
+        return why, _TOML_READS[0] != before
+    small_past = (".".join(["a"] * (TOML_MAX_DEPTH + 2)) + ' = ""\n',
+                  "[[" + ".".join(["a"] * TOML_MAX_DEPTH) + "]]\n",
+                  "[" + ".".join(["a"] * 60) + "]\n" + ".".join(["b"] * 42) + ' = ""\n',
+                  "x = {" + ".".join(["a"] * 150) + ' = ""}\n', parsed_arrays, parsed_tables)
+    for name, text in (
+            ("nesting/toml-reported-dotted-key-refused-before-the-reader", ".".join(["a"] * 12000) + '=""\n'),
+            ("nesting/toml-dotted-key-without-a-value-refused-before-the-reader", ".".join(["a"] * 12000) + "\n"),
+            ("nesting/toml-dotted-key-past-the-bound-refused-before-the-reader", small_past[0]),
+            ("nesting/toml-array-of-tables-header-past-the-bound-refused-before-the-reader", small_past[1]),
+            ("nesting/toml-header-then-dotted-key-past-the-bound-refused-before-the-reader", small_past[2]),
+            ("nesting/toml-inline-dotted-key-past-the-bound-refused-before-the-reader", small_past[3]),
+            ("nesting/toml-deep-header-refused-before-the-reader", deep_headers),
+            ("nesting/toml-deep-inline-arrays-refused-before-the-reader", parsed_arrays),
+            ("nesting/toml-deep-inline-tables-refused-before-the-reader", unparsed_tables)):
+        why, reached = scanned(text)
+        check(name, why is not None and named(why) and early in why and not reached, (why, reached))
+    red = [_with_globals({"TOML_PRE_SCAN": False}, lambda: scanned(text)) for text in small_past]
+    check("nesting/toml-refused-before-the-reader/red-when-reverted",
+          all(reached and (why is None or early not in why) for why, reached in red), red)
+    # The scan counts only what the syntax nests: brackets, braces, dots and quotes inside strings and
+    # comments are stepped over, so such a document is read exactly as with the scan off.
+    stepped = ('a = "' + "[{." * 200 + '\\" ]" # [[[[ {{{{ ' + "." * 200 + "\n"
+               "b = '" + "[" * 200 + "'\n"
+               'c = """ "" ' + "[" * 200 + ' \\""" ' + "." * 200 + ' """"\n'
+               "d = '''" + "{" * 200 + " '' ''''\n"
+               '"' + "e." * 200 + '" = "PR #17 remains pending."\n'
+               "f = [ # [[[[\n  1.5, 1979-05-27T07:32:00.5Z, 'x[', \"y{\",\n]\n"
+               "[t] # [[[[ " + "." * 200 + "\n" + "g." * 90 + 'h = "#17 is open"\n')
+    on = _with_globals({"TOML_PRE_SCAN": True}, lambda: toml_units(stepped, "x.toml"))
+    off = _with_globals({"TOML_PRE_SCAN": False}, lambda: toml_units(stepped, "x.toml"))
+    check("nesting/toml-scan-steps-over-strings-and-comments", _toml_nesting(stepped, "x.toml") is None
+          and on == off and len(on) == 8, (len(on), len(off)))
+    # At the bound the scan lets the document through and it is read as before: a dotted key of
+    # TOML_MAX_DEPTH + 1 parts, a header and a dotted key that together reach the bound, and an
+    # array-of-tables header whose element is at the bound.
+    for name, text, path in (
+            ("nesting/toml-dotted-key-at-the-bound-read",
+             ".".join(["a"] * (TOML_MAX_DEPTH + 1)) + ' = "PR #17 remains pending."\n',
+             ".".join(["a"] * (TOML_MAX_DEPTH + 1))),
+            ("nesting/toml-header-and-dotted-key-at-the-bound-read",
+             "[" + ".".join(["a"] * 60) + "]\n" + ".".join(["b"] * 41) + ' = "PR #17 remains pending."\n',
+             ".".join(["a"] * 60 + ["b"] * 41)),
+            ("nesting/toml-array-of-tables-at-the-bound-read",
+             "[[" + ".".join(["a"] * (TOML_MAX_DEPTH - 1)) + ']]\nx = "PR #17 remains pending."\n',
+             ".".join(["a"] * (TOML_MAX_DEPTH - 1)) + "[0].x")):
+        try:
+            code, res, _t = _judge(text, m, TOML_SURFACE)
+            got = (code, len(res.hard), len(res.hard) == 1 and "changes.toml: {}:".format(path) in res.hard[0])
+        except Exception as exc:
+            got = (type(exc).__name__, str(exc)[:300])
+        check(name, got == (1, 1, True), got)
+    # The scan counts the depth the syntax gives, never more: an array-of-tables header named earlier
+    # adds a level it does not count, and the walk after the reader still refuses that document.
+    prefixed = "[[a]]\n[" + ".".join(["a"] * TOML_MAX_DEPTH) + ']\nx = ""\n'
+    try:
+        got = (_toml_nesting(prefixed, "x.toml"), len(collect([(TOML_SURFACE, prefixed.encode("utf-8"))])))
+    except InputError as exc:
+        got = named(str(exc)) and early not in str(exc)
+    check("nesting/toml-array-of-tables-prefix-refused-by-the-walk", got is True, got)
+    # End to end under a memory limit: the reported dotted key at 16,000 parts (32,003 bytes; before,
+    # about 1 GiB resident, and a 512 MiB limit gave a MemoryError) through --draft in a child limited
+    # to 512 MiB of address space ends naming the bound, before the reader.
+    with tempfile.TemporaryDirectory(prefix="pending-pr-claims-nesting-") as tmp:
+        draft = Path(tmp) / "draft.toml"
+        draft.write_bytes((".".join(["a"] * 16000) + '=""\n').encode("utf-8"))
+        child = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve()), "--draft", str(draft),
+                                "--target", "changelog.toml"], capture_output=True, stdin=subprocess.DEVNULL,
+                               timeout=120, preexec_fn=_limit_address_space)
+        err = child.stderr.decode("utf-8", "replace")
+        check("nesting/process-memory-limited-toml-deep-dotted-key", draft.stat().st_size == 32003
+              and child.returncode == 2 and named(err) and early in err and "MemoryError" not in err
+              and "Traceback" not in err, (child.returncode, err[-300:]))
+
+
+def _self_test_marks(m, tempfile):
+    """In-band marks: the characters this check writes into a text as its own marks (IN_BAND_MARKS) are
+    refused in input, raw or spelled by a TOML escape in a string value or a key, so no input can spell a
+    mark (before, a spelled pull request token ended in an uncaught IndexError, or a ValueError past the
+    int-string limit, and the other marks changed what was read). Other private-use characters are text."""
+    def refused(surface, text):
+        try:
+            got = collect([(surface, text.encode("utf-8"))])
+        except InputError as exc:
+            return "IN_BAND_MARKS" in str(exc) and "reserves for its own marks" in str(exc)
+        except Exception as exc:
+            return type(exc).__name__
+        return ("collected", len(got))
+    for name, surface, text in (
+            ("marks/markdown-reference-token-refused", MD_SURFACE, "\ue0000\ue001\n"),
+            ("marks/markdown-oversized-token-index-refused", MD_SURFACE, "\ue000" + "9" * 5000 + "\ue001\n"),
+            ("marks/markdown-escaped-pipe-mark-refused", MD_SURFACE, _status_table("In progress (#17) \ue002")),
+            ("marks/markdown-issue-mark-refused", MD_SURFACE, "PR \ue00317 remains pending.\n"),
+            ("marks/markdown-code-filler-refused", MD_SURFACE, "PR #17 \ue004 remains pending.\n"),
+            ("marks/toml-escaped-reference-token-refused", TOML_SURFACE, 'x="\\uE0000\\uE001"\n'),
+            ("marks/toml-escaped-oversized-token-index-refused", TOML_SURFACE,
+             'x="\\uE000' + "9" * 5000 + '\\uE001"\n'),
+            ("marks/toml-escaped-nul-placeholder-refused", TOML_SURFACE, 'x = "[a][b] \\u00000\\u0000"\n'),
+            ("marks/toml-escaped-pipe-mark-refused", TOML_SURFACE, 'x = "a \\uE002 b"\n'),
+            ("marks/toml-escaped-issue-mark-refused", TOML_SURFACE, 'x = "PR \\uE00317 remains pending."\n'),
+            ("marks/toml-escaped-code-filler-refused", TOML_SURFACE, 'x = "PR #17 \\ue004 remains pending."\n'),
+            ("marks/toml-literal-mark-refused", TOML_SURFACE, "x = 'PR \ue00017\ue001 remains pending.'\n"),
+            ("marks/toml-escaped-key-mark-refused", TOML_SURFACE, '"k\\uE000" = "PR #17 remains pending."\n'),
+            ("marks/toml-escaped-table-key-mark-refused", TOML_SURFACE, '[t."\\uE001"]\nx = "PR #17 is open."\n')):
+        check(name, refused(surface, text) is True, refused(surface, text))
+    # Every NUL or private-use character the checker's code (before the self-test) writes or reads as a
+    # mark, spelled raw or as an escape, is one IN_BAND_MARKS holds, so a new mark cannot go unrefused.
+    source = Path(__file__).read_text(encoding="utf-8")
+    code = source[:source.index("\n# Self-test (synthetic")]
+    spelled = {int(found, 16) for found in re.findall(r"\\u([eEfF][0-9a-fA-F]{3})", code)
+               if 0xE000 <= int(found, 16) <= 0xF8FF}
+    spelled |= {0} if re.search(r"\\(?:x00|u0000)", code) else set()
+    spelled |= {ord(ch) for ch in code if ch == "\x00" or 0xE000 <= ord(ch) <= 0xF8FF}
+    check("marks/every-source-mark-reserved", spelled == {ord(ch) for ch in IN_BAND_MARKS},
+          sorted(hex(point) for point in spelled))
+    # Other private-use characters are text: the claim beside them is read as without them.
+    for name, text in (("marks/other-private-use-is-text", "PR #17 remains pending. " + chr(0xE005) + "\n"),
+                       ("marks/supplementary-private-use-is-text", chr(0xF0000) + " PR #17 remains pending.\n")):
+        try:
+            code_, res, _t = _judge(text, m)
+            got = (code_, len(res.hard))
+        except Exception as exc:
+            got = (type(exc).__name__, str(exc)[:200])
+        check(name, got == (1, 1), got)
+    # End to end, each in its own process through --draft: exit 2 naming the reservation, no traceback
+    # (before: exit 1 and an uncaught IndexError or ValueError).
+    with tempfile.TemporaryDirectory(prefix="pending-pr-claims-marks-") as tmp:
+        for name, target, text in (
+                ("marks/process-markdown-reference-token", "TODO.md", "\ue0000\ue001\n"),
+                ("marks/process-markdown-oversized-token-index", "TODO.md", "\ue000" + "9" * 5000 + "\ue001\n"),
+                ("marks/process-toml-escaped-reference-token", "changelog.toml", 'x="\\uE0000\\uE001"\n'),
+                ("marks/process-toml-escaped-oversized-token-index", "changelog.toml",
+                 'x="\\uE000' + "9" * 5000 + '\\uE001"\n')):
+            draft = Path(tmp) / ("draft" + Path(target).suffix)
+            draft.write_bytes(text.encode("utf-8"))
+            child = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve()), "--draft", str(draft),
+                                    "--target", target], capture_output=True, stdin=subprocess.DEVNULL, timeout=120)
+            err = child.stderr.decode("utf-8", "replace")
+            check(name, child.returncode == 2 and "IN_BAND_MARKS" in err and "Traceback" not in err,
+                  (child.returncode, err[-300:]))
+
 
 def _self_test():
     import contextlib
@@ -4096,6 +4412,7 @@ def _self_test():
               (child.returncode, err[-300:], out[-300:]))
 
     _self_test_nesting(m, tempfile, contextlib, io)
+    _self_test_marks(m, tempfile)
 
     # The copy bound counts the document's UTF-8 bytes, not its characters: a document whose bytes allow
     # its copies is evaluated, as is its twin of the same byte count in ASCII; the twin of the same
