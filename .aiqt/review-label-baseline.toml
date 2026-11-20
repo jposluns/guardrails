@@ -1,0 +1,5 @@
+# The shrink-only finding baseline of tools/check_review_labels.py: each entry grandfathers up to count
+# added lines of the named file whose exact bytes have that sha256 and match that shape. Print it with
+# python3 -I -B tools/check_review_labels.py --write-baseline --head COMMIT; never edit it by hand.
+format-version = 1
+source-commit = "782e23106ad24915123471d601c84d0cd1bf9acc"

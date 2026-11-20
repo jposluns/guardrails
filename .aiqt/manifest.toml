@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "ff1d962f71da0ff18003dc3febee28c37e05ab5d7262e99db7352c11d8d9671c"
+tree-sha256 = "2cd9d55795e410e74802390353b2425472ee4dc513c90aa63ccdcdff8029ffa9"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -82,8 +82,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 651178
-sha256 = "733704077a2f4ef530dc82a57da691e965ffec3e0aca41bad2670cc10432f295"
+bytes = 658456
+sha256 = "e5d8a8d51873196ec8166ea745de83cdd90b96baf9ac8494f60b2b0cf617fc4a"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -132,8 +132,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 29019
-sha256 = "5d617bcf316050be1cac1e069754e102771f108242fc305c7cb4d393e4ae67ce"
+bytes = 29469
+sha256 = "9345c25ab28a8170bee504df22a844b1fe610630af04e2384e13f848f4db31cd"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -4497,8 +4497,8 @@ sha256 = "62cba7c3a3a459fbd31a27c52bc7ab11a792bd52189db8ba826e27c0327fd55b"
 
 [[sources]]
 path = "tools/check_review_labels.py"
-bytes = 106546
-sha256 = "1bfd3ad2bb6d90c48923550465dfc02ab889fb4f010272cfd8c53dad4f01a274"
+bytes = 308767
+sha256 = "359e128a84a3c66d9376e122e62c37b1c2b63b40902d135e442664532e1e6a53"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
@@ -4817,8 +4817,8 @@ sha256 = "f020224b8fcec06196b11729da9a87046c471d120bd674bf5fe6b967a5860021"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 296598
-sha256 = "bccd5217388cf3fff597989f803d66f05624c92a6e7b1fe17ed1ba8762988df4"
+bytes = 306954
+sha256 = "3e93653263cbb9bbaa60f305ee0a86d9de278060853cb89fe1295ca715902758"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
