@@ -20,14 +20,18 @@ evaluate (exit 2). MERGE_MSG must then be a readable regular file as well.
 SCOPE. The paths judged are the union of two sources, so marker text quoted in any other path never fires:
   1. a recompute from the commits, never from the index (staging a resolution removes its unmerged entries, so the
      index cannot say what conflicted): git merge-tree --write-tree --name-only --no-messages -z, for a merge HEAD
-     against each MERGE_HEAD commit; for a cherry-pick of C, HEAD against C with --merge-base set to each parent of C
-     (the empty tree for a root commit); for a revert of C, HEAD against each parent of C with --merge-base=C (for a
-     revert of a root commit, which merge-tree cannot recompute, every path of C's tree);
+     against each MERGE_HEAD commit with --allow-unrelated-histories (a merge state file means git already ran that
+     merge, so a merge of unrelated histories is recomputed rather than refused); for a cherry-pick of C, HEAD
+     against C with --merge-base set to each parent of C (the empty tree for a root commit); for a revert of C, HEAD
+     against each parent of C with --merge-base=C (for a revert of a root commit, which merge-tree cannot recompute,
+     every path of C's tree);
   2. the Conflicts list git writes into MERGE_MSG for the operation that actually ran (a "Conflicts:" line behind the
      comment prefix, then one prefixed, tab-indented path per line; the legacy form with no prefix is read too). It
      covers a conflict the recompute does not reproduce, such as one under a strategy option or a configuration the
      recompute does not share.
-A merge-tree that cannot run, exits other than 0 or 1, or prints output that does not parse is cannot-evaluate.
+A merge-tree that cannot run, exits other than 0 or 1, or prints output that does not parse is cannot-evaluate. The
+recompute runs under the repository's own configuration and attributes, so a custom merge driver configured for a
+scoped path (merge.<name>.driver) runs again on each check, as it ran during the operation.
 
 RULE. A conflict-marker line is a line (split on LF, one trailing CR removed) that starts with exactly N copies of one
 of the four marker characters git writes, <, |, = or >, followed by the end of the line or by a whitespace character
@@ -54,15 +58,19 @@ that quotes git's markers) is a finding. The remedy is git's own: set the confli
 path in .gitattributes (git then writes markers of that size, and lines of another length are content), never a
 bypass of the commit-time check.
 
-RESIDUALS (not caught): a rebase (git runs no pre-commit hook on rebase --continue) and git am; a cherry-pick or
-revert run with --no-commit, a conflicted merge --squash (no MERGE_HEAD), and a merge ended with merge --quit, since
-each leaves no state file; marker text in a path that did not conflict; a conflict neither the recompute nor the
-MERGE_MSG list names (the user can edit MERGE_MSG, and the recompute uses the current configuration and attributes);
-an octopus merge, recomputed pairwise against HEAD; a conflict-marker-size attribute changed in the staged
-.gitattributes to make the markers git wrote count as content; a marker line in a file the merge treated as binary is
-judged like any other; a commit made in a clone without the hook, or with git commit --no-verify by a person (the
-pack's gate-weakening hook refuses --no-verify for the assistant); and every commit already in history (no CI range
-mode ships: the CI roster runs this gate's self-test only).
+RESIDUALS (not caught): a rebase and git am, whether finished with rebase --continue (git runs no pre-commit hook
+there) or with a plain git commit while the rebase is stopped (the hook runs, but git records REBASE_HEAD, not one of
+the three state files read here); a cherry-pick run with --no-commit, a conflicted merge --squash (no MERGE_HEAD), and
+a merge ended with merge --quit, since each leaves no state file (a revert run with --no-commit leaves REVERT_HEAD,
+as git 2.53 does, and is judged); marker text in a path that did not conflict, including a conflicted path's content
+moved during the resolution to a new path (git mv, or a delete and an add), since the conflicted path is then absent
+and the new path is outside the scope; a conflict neither the recompute nor the MERGE_MSG list names (the user can
+edit MERGE_MSG, and the recompute uses the current configuration and attributes); an octopus merge, recomputed
+pairwise against HEAD; a conflict-marker-size attribute changed in the staged .gitattributes to make the markers
+git wrote count as content; a marker line in a file the merge treated as binary is judged like any other; a commit
+made in a clone without the hook, or with git commit --no-verify by a person (the pack's gate-weakening hook refuses
+--no-verify for the assistant); and every commit already in history (no CI range mode ships: the CI roster runs this
+gate's self-test only).
 
 Exit: 0 nothing found (or no operation in progress); 1 a finding; 2 cannot evaluate or a bad argument.
 """
@@ -98,6 +106,9 @@ STATE_FILES = (("MERGE_HEAD", "merge"), ("CHERRY_PICK_HEAD", "cherry-pick"), ("R
 _OID = re.compile(rb"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _ATOI = re.compile(rb"\A[ \t\n\v\f\r]*\+?([0-9]+)")
 _WHITESPACE = b" \t\r\n\v\f"
+# The merge-tree options of a recompute that computes its own merge base (a merge): git already ran the merge whose
+# state file is present, so a merge of unrelated histories (merge --allow-unrelated-histories) is recomputed too.
+MERGE_TREE_OWN_BASE = ("--allow-unrelated-histories",)
 
 
 class CannotEvaluate(RuntimeError):
@@ -242,6 +253,8 @@ def _merge_tree(root, ours, theirs, base=None):
     args = ["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z"]
     if base is not None:
         args.append("--merge-base=" + os.fsdecode(base))
+    else:
+        args += list(MERGE_TREE_OWN_BASE)
     args += [os.fsdecode(ours), os.fsdecode(theirs)]
     probe = _git(root, *args)
     if probe.returncode not in (0, 1):
@@ -446,10 +459,31 @@ def _fixture_conflict(parent, name, operation="merge", ours=b"a\nOURS\nc\n", the
         # Revert the main commit after a later commit rewrote the same line, so the revert conflicts with it.
         (root / "f.txt").write_bytes(theirs)
         _fixture_git(root, "commit", "-q", "-a", "-m", "later")
-        probe = _fixture_git(root, *style_args, "revert", "--no-edit", "HEAD~1", check=False)
+        mode = ("--no-commit",) if operation == "revert-no-commit" else ("--no-edit",)
+        probe = _fixture_git(root, *style_args, "revert", *mode, "HEAD~1", check=False)
     if probe.returncode != 1:
         raise RuntimeError("fixture {}: {} did not stop on a conflict (exit {})".format(
             name, operation, probe.returncode))
+    return root
+
+
+def _fixture_unrelated(parent, name):
+    """A repository stopped on an add/add conflict in f.txt by merge --allow-unrelated-histories; returns its root."""
+    root = parent / name
+    root.mkdir()
+    _fixture_git(root, "init", "-q", "-b", "main")
+    (root / "f.txt").write_bytes(b"a\nOURS\nc\n")
+    _fixture_git(root, "add", "-A")
+    _fixture_git(root, "commit", "-q", "-m", "main root")
+    _fixture_git(root, "switch", "-q", "--orphan", "other")
+    (root / "f.txt").write_bytes(b"a\nTHEIRS\nc\n")
+    _fixture_git(root, "add", "-A")
+    _fixture_git(root, "commit", "-q", "-m", "other root")
+    _fixture_git(root, "switch", "-q", "main")
+    probe = _fixture_git(root, "merge", "--allow-unrelated-histories", "other", check=False)
+    if probe.returncode != 1:
+        raise RuntimeError("fixture {}: the unrelated-histories merge did not stop on a conflict (exit {})".format(
+            name, probe.returncode))
     return root
 
 
@@ -690,6 +724,24 @@ def _self_test_isolated(temp):
         (v14 / "sub").mkdir()
         case("V14a ROOT below the top level", 2, v14 / "sub")
         case("V14b unmerged entry in the index", 2, v14)
+    # V16 a merge of unrelated histories (merge --allow-unrelated-histories) stopped on an add/add conflict: a clean
+    # resolution passes and the markers staged are a finding. Its fix reverted (the recompute refusing unrelated
+    # histories) makes even the clean resolution cannot-evaluate, a commit no resolution can make.
+    v16 = build("V16", lambda: _fixture_unrelated(temp, "v16"))
+    if v16 is not None:
+        _fixture_git(v16, "add", "f.txt")
+        case("V16a unrelated-histories merge markers staged", 1, v16)
+        _stage(v16, "f.txt", clean)
+        case("V16b unrelated-histories merge clean resolution", 0, v16)
+        with _replaced("MERGE_TREE_OWN_BASE", ()):
+            case("V16-revert recompute refusing unrelated histories", 2, v16)
+    # V17 a revert run with --no-commit leaves REVERT_HEAD, so it is judged: the markers staged are a finding.
+    v17 = build("V17", lambda: _fixture_conflict(temp, "v17", "revert-no-commit"))
+    if v17 is not None:
+        if not (_gitdir(v17) / "REVERT_HEAD").is_file():
+            failures.append("V17: revert --no-commit left no REVERT_HEAD")
+        _fixture_git(v17, "add", "f.txt")
+        case("V17 revert --no-commit markers staged", 1, v17)
     # V15 the command line: the staged-scan mode reaches the verdict, and a malformed argument list is a usage
     # error (exit 2), never a scan.
     for label, argv, expected in (
