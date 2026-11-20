@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "04d4a925473b05d9bdb851b66023effddd28d81b7bf53d0b00cfe62433381719"
+tree-sha256 = "c3959fdf6cb5fc89a46d45c937553971c3598803831fc3f2be94d6f13432b2fe"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4582,8 +4582,8 @@ sha256 = "116e7acb4fe99f5c9ced0787d088ea9b8dba12e94f610be3be9287cc3290842f"
 
 [[sources]]
 path = "tools/ci_build_bash.py"
-bytes = 36684
-sha256 = "9f6e69a905087a48b13eedda8580d6d59af678e6481d754f4d84689ea60a7dc8"
+bytes = 142522
+sha256 = "6d1cbe482407eaced7e8dd7ecc89942df665500371be80956aeb8c9d5a01c307"
 
 [[sources]]
 path = "tools/ci_site_scope.py"
@@ -4812,8 +4812,8 @@ sha256 = "f020224b8fcec06196b11729da9a87046c471d120bd674bf5fe6b967a5860021"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 284352
-sha256 = "7287507acae3b258f4e5772614b6bd6187d9fbfefb86d1bb143a44159466c6ba"
+bytes = 286114
+sha256 = "08cdb506489bacbb1c43f14b77abdab0e0379157e2e3b904b6e1dddfbc887c7c"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
