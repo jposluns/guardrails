@@ -9111,16 +9111,24 @@ def _deadline_fixtures(tmp):
 # lex-cost and dl-shape rows used before, and the upper-middle rule the deadline-path rows used before, it
 # adds the replay, which can only add a failure. The hard limits keep the single-invocation failure they had.
 # Residual, exactly (two blind spots, both a slowdown that times alone cannot tell from host noise or never
-# see): (a) a slowdown that shows on one run in three only because of state earlier rows left in this
-# process, and on neither the other two runs nor the replay, passes (for a deadline-path row the replay runs
-# in this same process, so state those runs share escapes it too); (b) COLD WORK BEFORE MEASUREMENT: work a
-# handler does only on its first call in a process (a lazily compiled pattern, a first-use cache fill, an
-# import), when an untimed call of the same handler ran earlier in this process, is spent before the first
-# timed run, so no run measures it and no excursion triggers the replay that would measure it cold. A
-# cold-only slowdown is caught only where the first timed run is also the handler's first call in the
-# process (then run 1 is the excursion and the fresh-process replay, cold again, fails it); cp-oversized-cost
-# is the demonstrated row where it is not (its handler is called untimed by the cp-* rows before it, see that
-# row), and no row adds an unconditional cold measurement.
+# see; the rules these rows used before pass every such case too, so neither is a reduction): (a) ANY
+# INTERMITTENT SLOWDOWN THE REPLAY MISSES: a slowdown on fewer runs than (2) fails (one run in three for a
+# handler, lex-cost or dl-shape row) that does not show again on the replay passes, whatever its cause: host
+# noise, state earlier rows left in this process, or a fault that strikes only now and then (for a
+# deadline-path row the replay runs in this same process, so state those runs share escapes it too);
+# (b) COLD WORK BEFORE MEASUREMENT: work a handler does only on its first call in a process (a lazily
+# compiled pattern, a first-use cache fill, an import), when an untimed call of the same handler ran earlier
+# in this process, is spent before the first timed run, so no run measures it and no excursion triggers the
+# replay that would measure it cold. A cold-only slowdown is caught only where the first timed run is also
+# the handler's first call in the process (then run 1 is the excursion and the fresh-process replay, cold
+# again, fails it). In the suite's real order no in-process handler row (_timed_case) is such a row: each
+# has an untimed call of its handler earlier in this process: cp-oversized-cost (console_prefix_pretool,
+# called by the cp-* rows before it, see that row); psm-t1 to psm-t3 (pgrep_self_match, called by the
+# mbp-* and nul-* rows run just before them); the lex-cost pairs (gate_weakening, bash_absolute_paths and
+# protected_line, called by the gsf-*, glx-* and other rows before them); the timed ci-* rows
+# (commit_identity, called by the gsf-d, ci-l11* and other rows before them); and ap-c95e and ap-c95f
+# (bash_absolute_paths, called by the ap-c101 and ap-c95 rows just before them). No row adds an
+# unconditional cold measurement.
 _TimingPolicy = collections.namedtuple("_TimingPolicy", ("name", "rule", "inclusive"))
 # rule "median": _judged, the lower middle of an even count; "upper-middle": _judged_half_fails; "hard": every
 # invocation alone, no median, no replay. inclusive: the row fails at the bound, not only over it.
@@ -12991,7 +12999,11 @@ def _deadline_outer_deadline_failures():
     windows, injector and handler (_deadline_outer_deadline_run), and every run must meet every check,
     the time included: the 1.0 s is a per-scenario hard limit (the shared policy _TIMING_HARD_AT,
     _deadline_outer_deadline_verdict), so one scenario that takes 1.0 s or more fails the row whatever the
-    others took, as the single scenario of earlier versions did; no median and no replay clears it."""
+    others took, as the single scenario of earlier versions did; no median and no replay clears it.
+    Disclosed cost: earlier versions ran one scenario under this limit and this row runs three, each under
+    the same hard limit, so on a loaded host it has about three times their exposure to a spurious failure
+    from one scheduling stall (honest scenarios take about 0.3 s, so a stall of about 0.7 s in any of the
+    three fails the row)."""
     return _deadline_outer_deadline_verdict([_deadline_outer_deadline_run() for _ in range(_TIMED_RUNS)])
 
 
