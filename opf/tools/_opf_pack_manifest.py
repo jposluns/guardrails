@@ -4,6 +4,9 @@
 ROOT hashes exact bytes, never parsed/re-serialized TOML. TREE hashes source
 rows in their supplied order. VALID means schema-valid, not authenticated.
 TREE equality and actual content/ownership checks remain consumer obligations.
+release-version is X.Y.Z, or X.Y.Z-dev for a development build between release
+cuts; a copy of this module older than that widening refuses a development
+manifest (it fails closed). opf-version stays a bare X.Y.Z.
 
 R6: coverage is bounded to the manifest and consumer contract; a managed-block
 digest covers only that block, never the whole containing file.
@@ -45,6 +48,7 @@ from _opf_adopt_plan import (  # noqa: E402
     MAX_FILE_BYTES, MAX_ENTRIES, MAX_PATH_BYTES, MAX_DEPTH,
 )
 from _semver import _parse as _parse_version  # noqa: E402
+from _semver import parse_tree_version as _parse_tree_version  # noqa: E402
 
 MANIFEST_TOP_KEYS = frozenset({
     "format-version", "release-version", "genesis", "tree-sha256",
@@ -140,9 +144,11 @@ def _parse_manifest(raw):
     _require(type(document["format-version"]) is int, "format-type")
     _require(document["format-version"] == 1, "format-vocabulary", CANNOT_EVALUATE)
     _require(type(document["genesis"]) is bool, "genesis-type")
+    # release-version is the tree version: a bare X.Y.Z on a cut or tag tree, or X.Y.Z-dev on main between
+    # cuts (exactly that suffix, no counter; _semver.parse_tree_version). opf-version stays bare.
     _require(
         type(document["release-version"]) is str
-        and _parse_version(document["release-version"]) is not None,
+        and _parse_tree_version(document["release-version"]) is not None,
         "release-version",
     )
     _require(
@@ -299,6 +305,16 @@ def _test_vectors():
     for value in (b'"01.0.0"', b'"1.0.0\\n"', b'"1.0.0-beta"', b"1"):
         flip("version-" + value.decode(), base, b'release-version = "1.0.0"',
              b"release-version = " + value)
+    # Main between release cuts declares the development form X.Y.Z-dev (exactly that suffix, no counter);
+    # every other pre-release or build form stays INVALID, and opf-version stays bare.
+    flip("version-development", base, b'release-version = "1.0.0"',
+         b'release-version = "1.0.0-dev"', VALID)
+    for value in (b'"1.0.0-dev.0"', b'"1.0.0-rc1"', b'"1.0.0-DEV"', b'"1.0.0+dev"',
+                  b'"1.0.0-dev\\n"', b'"01.0.0-dev"'):
+        flip("version-" + value.decode(), base, b'release-version = "1.0.0"',
+             b"release-version = " + value)
+    flip("opf-version-development", base, b'release-version = "1.0.0"',
+         b'release-version = "1.0.0"\nopf-version = "2.0.0-dev"')
     with_opf = b'release-version = "1.0.0"\nopf-version = "2.0.0"'
     flip("opf-version", base, b'release-version = "1.0.0"', with_opf, VALID)
     for value in (b'"01.0.0"', b'"2.0.0\\n"', b'"2.0.0-beta"', b'"2.0"', b"2", b"true"):
@@ -1218,6 +1234,7 @@ def self_test(vectors_only=False):
         # fixture must now yield VALID AND its original discriminator go red.
         mutations = (
             ("manifest-keys", "unknown-top"),
+            ("release-version", "version-\"1.0.0-rc1\""),
             ("opf-version", "opf-version-\"2.0\""),
             ("format-vocabulary", "format-2"),
             ("source-size", "size-true"),
