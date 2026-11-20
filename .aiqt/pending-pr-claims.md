@@ -320,7 +320,13 @@ comments are stepped over. It refuses at the first part past the bound, so the r
 key of more than 101 parts, a table or inline nesting more than 100 deep. Before, the scan counted only
 the array of tables a header itself named, so 51 array-of-tables headers, each one part longer than the
 one before (2,878 bytes), passed it and were parsed 102 deep before the walk refused them; now they are
-refused before the reader. The reader copies a dotted key's prefixes, quadratic in its
+refused before the reader. The reader builds the table or array of tables a header's key names before it
+looks for the closing bracket or brackets, so a header whose closer is missing or partial is counted and
+bounded as a closed one. Before, the scan read such a header by its syntax alone, losing the levels of
+earlier arrays of tables and of the header's own array, so an array-of-tables header with one closing
+bracket under an earlier array of tables (207 bytes) passed it and the reader built it 101 deep before
+refusing it; now it is refused before the reader. For a document the reader refuses, the scan's depth is
+never lower than the depth the reader builds before refusing it. The reader copies a dotted key's prefixes, quadratic in its
 parts: before the scan, a dotted key of 4,000, 8,000 and 12,000 parts (8,003 to 24,003 bytes) peaked at
 about 90, 278 and 592 MiB resident and 16,000 parts at about 1 GiB, and at 21,000 parts a 1 GiB address
 space limit ended the read in a MemoryError; with the scan each ends naming the bound at about 28 MiB in
@@ -331,7 +337,8 @@ header 100 deep, array-of-tables headers 99 deep or inline arrays and tables 100
 to 33 MiB and 0.6 seconds, as before the scan. For a document the reader reads, the scan's depth is
 the parsed document's, no lower and no higher, so it refuses no document the walk after the reader
 would read and passes none the walk would refuse; the self-test compares the two over a generated
-corpus. The walk's own refusal and the `RecursionError` and `MemoryError` handling at the reader stay as
+corpus, and over a generated corpus of malformed documents it compares the scan's depth with the depth
+the reader builds before refusing each, measured by instrumenting the reader. The walk's own refusal and the `RecursionError` and `MemoryError` handling at the reader stay as
 a defence in depth.
 
 Self-test rows give deep table headers, array-of-tables headers, dotted keys, inline arrays and inline
@@ -343,11 +350,20 @@ array-of-tables element at the bound; read a document whose strings and comments
 braces, dots and quotes exactly as with the scan off; refuse before the reader the 2,878-byte
 array-of-tables chain and a table header under an array of tables that together pass the bound, in
 process and through `--draft` (the red leg, the scan counting only a header's own array of tables, calls
-the reader), and read the chain one header shorter, at the bound; show, over every sequence of up to
+the reader), and read the chain one header shorter, at the bound; show that the instrumented reader
+builds the 207-byte unclosed array-of-tables header 101 deep, and refuse it before the reader, in
+process and through `--draft`, with the same header with no closer, at the end of the text and with its
+closer split by a space, and a table header with no closer under the array (the red leg, the scan
+reading an unclosed header by its syntax alone, calls the reader for each array-of-tables header); hand
+the unclosed header one level shorter, at the bound, to the reader; show, over every sequence of up to
 three table and array-of-tables headers of up to three parts from two names spelled in each of the
 reader's ways, and over 4,000 seeded documents mixing headers, dotted keys, inline tables and nested
 inline arrays, that the scan's depth is the parsed document's (the red leg finds a document it counts
-too shallow); end the reported 16,000-part dotted key through `--draft` in a child limited to
+too shallow); show, over every sequence of one or two of those headers whose last header is unclosed or
+(an array-of-tables header) half closed and over the seeded documents each cut short or with one
+character dropped, inserted or replaced, that the scan's depth is never lower than the depth the
+instrumented reader builds before refusing a document (the red leg finds one it counts too shallow),
+and that the instrumented depth is the parsed document's for each document the reader reads; end the reported 16,000-part dotted key through `--draft` in a child limited to
 512 MiB of address space with the bound named; refuse one 101 deep; and read blockquotes and list items
 nested in documents of up to about 60,000 bytes as one level is read (those rows pass on the walk this
 replaced too: Markdown had no recursive walk). The Markdown reader has no shape bound beyond the size

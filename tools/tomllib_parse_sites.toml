@@ -1134,6 +1134,15 @@ count = 1
 class = "EXEMPT"
 reason = "test-code"
 
+# the self-test instrument that wraps the reader's rules for one call and restores them (reader_depth)
+[[site]]
+path = "tools/check_pending_pr_claims.py"
+function = "_self_test_nesting.reader_depth"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
 # the self-test seam that rebinds and restores tomllib._parser.parse_key (_key_part_capped)
 [[site]]
 path = "tools/check_python_floor.py"

@@ -118,13 +118,16 @@ value's location only at that value. A TOML table or array nested more than TOML
 and arrays deep is cannot-evaluate (exit 2), naming the bound, never a traceback. The bound is enforced
 before the TOML reader runs, by one linear scan of the document's text (_toml_nesting) that counts the
 depth the reader will build (table headers, with a level for every array of tables an earlier header
-named that a later header goes through; dotted keys; inline arrays and tables; strings and comments are
-stepped over), so the reader is never given a key of more than TOML_MAX_DEPTH + 1 parts, a table or
+named that a later header goes through, also when the header's closing bracket is missing, since the
+reader builds its table first; dotted keys; inline arrays and tables; strings and comments are stepped
+over), so the reader is never given a key of more than TOML_MAX_DEPTH + 1 parts, a table or
 inline nesting more than TOML_MAX_DEPTH deep: its copying of a dotted key's prefixes (quadratic in the
 key's parts; a 16,000-part key held about 1 GiB) and its recursion on inline nesting stay bounded. For a
 document the reader reads, the scan's depth is the parsed document's (the self-test compares them over a
 generated corpus), so it refuses no document the walk would read and passes none the walk would refuse;
-the walk keeps its own refusal as a defence in depth.
+for a document the reader refuses, it is never lower than the depth the reader builds before refusing it
+(the self-test measures that depth by instrumenting the reader over generated malformed documents); the
+walk keeps its own refusal as a defence in depth.
 
 IN-BAND MARKS. The check writes a few characters into a text as its own marks and reads them back by
 their spelling (IN_BAND_MARKS: NUL and U+E000 to U+E004). A document that carries one, raw or decoded
@@ -224,6 +227,11 @@ TOML_PRE_SCAN = True
 # goes through (True). The self-test sets it False, for the red legs of its rows (the scan that counted
 # only the array of tables its own header named).
 TOML_SCAN_ARRAYS = True
+# The nesting scan counts and bounds the table or array of tables an unclosed header names, as the reader
+# builds it before refusing the header (True). The self-test sets it False, for the red legs of its rows
+# (the scan that read an unclosed header by its syntax alone, losing the levels of earlier arrays of
+# tables and the header's own array).
+TOML_SCAN_UNCLOSED = True
 # How many documents have been given to the TOML reader (the self-test reads it to show which ones the
 # scan kept from the reader).
 _TOML_READS = [0]
@@ -256,8 +264,10 @@ def _toml_key_part(found):
 def _toml_header(text, position, array, arrays, bound):
     """Reads the table header whose key starts at position (just past its "[", or its "[[" when array, an
     array-of-tables header) as the TOML reader reads it. Returns (the depth of the table it opens, the
-    position past its closing bracket or brackets); or (None, the position of the part that passes
-    bound); or None when the reader refuses the header itself (it then reads nothing after it).
+    position past its closing bracket or brackets); or (that depth, None) when its key is read but its
+    closing bracket or brackets are missing (the reader builds the table first, then refuses the header
+    and reads nothing after it); or (None, the position of the part that passes bound); or None when the
+    reader refuses the header's key (it then builds nothing from the header and reads nothing after it).
 
     The depth follows TOML 1.0's tables and arrays of tables as the reader builds them: each part of the
     key is a table one level below the one before, except a part that names an array of tables, which is
@@ -284,14 +294,20 @@ def _toml_header(text, position, array, arrays, bound):
         if not text.startswith(".", position):
             break
         position += 1
+    # The reader builds the table or array of tables the key names before it looks for the closing
+    # bracket or brackets (tomllib), so the last level is counted and bounded first: a header whose
+    # closer is missing or partial still reaches this depth before the reader refuses it.
     closer = "]]" if array else "]"
-    if not text.startswith(closer, position):
+    closed = text.startswith(closer, position)
+    if not (closed or TOML_SCAN_UNCLOSED):
         return None
+    if array and not (node[0] and TOML_SCAN_ARRAYS):
+        depth += 1
+        if depth > bound:
+            return None, start
+    if not closed:
+        return depth, None
     if array:
-        if not (node[0] and TOML_SCAN_ARRAYS):
-            depth += 1
-            if depth > bound:
-                return None, start
         node[0], node[1] = True, {}
     return depth, position + len(closer)
 
@@ -309,9 +325,14 @@ def _toml_depth(text, bound):
     toml_units would refuse after parsing; and since it stops at the first part past the bound, the reader
     is never given a key of more than bound + 1 parts, inline nesting more than bound deep or a table more
     than bound deep, which bounds the reader's work per key (it copies a key's prefixes, quadratic in its
-    parts) and its recursion on inline nesting. A header the reader refuses is counted as its syntax gives
-    (its parts, plus one for an array-of-tables header), and other text that is not TOML may be scanned
-    loosely; the reader refuses it and reads nothing after it."""
+    parts) and its recursion on inline nesting. For a document the reader refuses, the depth is never lower
+    than the depth the reader builds before it refuses it (the self-test measures that depth by
+    instrumenting the reader over a generated corpus of malformed documents): a header whose key the
+    reader reads but whose closing bracket or brackets are missing is counted and bounded as a header that
+    is closed (the reader builds its table before it looks for the closer), and the rest of its line, like
+    a header whose key the reader refuses (it builds nothing from it), is counted as its syntax gives (its
+    parts, plus one for an array-of-tables header); other text that is not TOML may be scanned loosely,
+    never below what the reader builds from it; the reader refuses it and reads nothing after it."""
     deepest = 0
     arrays = {}           # the arrays of tables earlier headers named (_toml_header)
     stack = []            # the open inline arrays and tables: (bracket, the depth of that array or table)
@@ -345,7 +366,8 @@ def _toml_depth(text, bound):
                 break
             continue
         if mode == "header":
-            # A header the reader refuses (_toml_header gave None): its parts, as its syntax gives them.
+            # A header the reader refuses (_toml_header gave None, or an unclosed header's depth, already
+            # counted): its parts, as its syntax gives them.
             if token == ".":
                 parts += 1
                 if parts + header_extra > bound:
@@ -371,13 +393,17 @@ def _toml_depth(text, bound):
             elif token == "[" and not stack:
                 header_extra = 1 if text.startswith("[", position) else 0
                 header = _toml_header(text, position + header_extra, header_extra == 1, arrays, bound)
-                if header is None:
+                if header is not None and header[0] is None:
+                    return None, (header[1], "a table header")
+                if header is None or header[1] is None:
+                    # The reader refuses this header (an unclosed one after building its table, counted
+                    # here), and the rest of the line is read loosely by its syntax.
+                    if header is not None:
+                        deepest = max(deepest, header[0])
                     position += header_extra
                     mode, parts = "header", 1
                     if 1 + header_extra > bound:
                         return None, (found.start(), "a table header")
-                elif header[0] is None:
-                    return None, (header[1], "a table header")
                 else:
                     table, position = header
                     deepest = max(deepest, table)
@@ -4130,13 +4156,11 @@ def _self_test_nesting(m, tempfile, contextlib, io):
         got = (type(exc).__name__, str(exc)[:300])
     check("nesting/toml-array-of-tables-chain-at-the-bound-read", got == (1, 1, True), got)
 
-    # The scan's depth is the parsed document's, never lower (the reader is never given a document past
-    # the bound) and never higher (no document within the bound is refused), over a generated corpus:
-    # every sequence of one to three table and array-of-tables headers whose keys are one to three parts
-    # from two names, each followed by a dotted key holding an inline array of inline tables, with every
-    # name spelled bare, literal, basic, escaped and spaced in turn (the same key, however spelled); and
-    # seeded documents mixing headers, dotted keys, inline tables with dotted keys, nested inline arrays
-    # and multi-line arrays. A document the reader refuses is scanned too (no exception) and not compared.
+    # The depth the reader builds, measured by instrumenting it (never read from its error): its rules
+    # and value readers are wrapped for one call, and the depth is the deepest of the document it built
+    # (headers and dotted keys, kept when it refuses the text later), each inline array or table as the
+    # reader opens it, and each dotted key's tables as the reader reads the key and its value, each at the
+    # depth it has or would have in the document.
     def parsed_depth(data):
         deepest, pending = 0, [(data, 0)]
         while pending:
@@ -4146,16 +4170,143 @@ def _self_test_nesting(m, tempfile, contextlib, io):
                            if isinstance(child, (dict, list)))
         return deepest
 
+    def reader_depth(text):
+        """(the deepest table or array the TOML reader built from text before it returned or refused it,
+        the parsed document or None when it refused text)."""
+        import tomllib._parser
+        space = tomllib._parser.__dict__      # the reader's module globals, which its functions call through
+        names = ("create_dict_rule", "create_list_rule", "key_value_rule", "parse_key_value_pair", "parse_key",
+                 "parse_array", "parse_inline_table")
+        saved = {name: space[name] for name in names}
+        seen, frames, outputs = [0], [], []     # frames: ["kv", its table's depth, its key's parts] or
+                                                # ["array", its depth], the open key/value pairs and arrays
+
+        def path_depth(data, key):
+            depth, value = 0, data
+            for part in key:
+                value = value[part]
+                depth += 1
+                if isinstance(value, list):
+                    value, depth = value[-1], depth + 1
+            return depth
+
+        def opened():
+            top = frames[-1]
+            return top[1] + (top[2] if top[0] == "kv" else 1)
+
+        def header_rule(name):
+            def rule(src, pos, out, *rest):
+                outputs.append(out)
+                return saved[name](src, pos, out, *rest)
+            return rule
+
+        def key_value_rule(src, pos, out, header, *rest):
+            outputs.append(out)
+            frames.append(["kv", path_depth(out.data.dict, header), 0])
+            try:
+                return saved["key_value_rule"](src, pos, out, header, *rest)
+            finally:
+                frames.pop()
+
+        def parse_key_value_pair(*args):
+            frames[-1][2] = 0
+            got = saved["parse_key_value_pair"](*args)
+            seen[0] = max(seen[0], frames[-1][1] + len(got[1]) - 1)
+            return got
+
+        def parse_key(*args):
+            got = saved["parse_key"](*args)
+            if frames and frames[-1][0] == "kv" and frames[-1][2] == 0:
+                frames[-1][2] = len(got[1])
+            return got
+
+        def inline(name, kind):
+            def read(*args):
+                depth = opened()
+                seen[0] = max(seen[0], depth)
+                frames.append([kind, depth, 0])
+                try:
+                    return saved[name](*args)
+                finally:
+                    frames.pop()
+            return read
+        wrapped = {"create_dict_rule": header_rule("create_dict_rule"),
+                   "create_list_rule": header_rule("create_list_rule"), "key_value_rule": key_value_rule,
+                   "parse_key_value_pair": parse_key_value_pair, "parse_key": parse_key,
+                   "parse_array": inline("parse_array", "array"),
+                   "parse_inline_table": inline("parse_inline_table", "kv")}
+        space.update(wrapped)
+        try:
+            try:
+                data = tomllib.loads(text)
+            except (ValueError, RecursionError, MemoryError):
+                data = None     # not TOML the reader reads (TOMLDecodeError is a ValueError)
+        finally:
+            space.update(saved)
+        return max([seen[0]] + [parsed_depth(out.data.dict) for out in outputs[:1]]), data
+
+    # A header whose closing bracket or brackets are missing: the reader builds the table or array of
+    # tables its key names before it looks for the closer, so the scan counts and bounds that level as for
+    # a closed header. The reported document, 207 bytes, an array-of-tables header with one closing bracket
+    # under an earlier array of tables, passed the scan (read by its syntax alone, 100 deep) and the reader
+    # built it 101 deep before refusing it; now it is refused before the reader, as are the same header
+    # with no closer, at the end of the text and with its closer split by a space, and (as before, its
+    # key passes the bound) a table header with no closer under the array. The red leg, the scan reading
+    # an unclosed header by its syntax alone, hands each array-of-tables header to the reader. One level
+    # shorter, the header passes the scan and the reader refuses it.
+    unclosed_key = ".".join(["a"] * (TOML_MAX_DEPTH - 1))
+    reported_unclosed = "[[a]]\n[[" + unclosed_key + "]\n"
+    check("nesting/reported-unclosed-array-of-tables-header-size", len(reported_unclosed.encode("utf-8")) == 207,
+          len(reported_unclosed.encode("utf-8")))
+    built = reader_depth(reported_unclosed)
+    check("nesting/toml-reported-unclosed-header-built-past-the-bound-by-the-reader",
+          built[0] == TOML_MAX_DEPTH + 1 and built[1] is None, built[0])
+    unclosed = (reported_unclosed, "[[a]]\n[[" + unclosed_key + "\n", "[[a]]\n[[" + unclosed_key,
+                "[[a]]\n[[" + unclosed_key + "] ]\n", "[[a]]\n[" + ".".join(["a"] * TOML_MAX_DEPTH) + "\n")
+    why, reached = scanned(reported_unclosed)
+    check("nesting/toml-reported-unclosed-header-refused-before-the-reader",
+          why is not None and named(why) and early in why and "line 2:" in why and not reached, (why, reached))
+    got = [scanned(text) for text in unclosed[1:]]
+    check("nesting/toml-unclosed-headers-refused-before-the-reader",
+          all(why is not None and named(why) and early in why and not reached for why, reached in got), got)
+    red = [_with_globals({"TOML_SCAN_UNCLOSED": False}, lambda: scanned(text)) for text in unclosed[:4]]
+    check("nesting/toml-unclosed-headers/red-when-reverted",
+          all(reached and (why is None or early not in why) for why, reached in red), red)
+    at_bound = "[[a]]\n[[" + ".".join(["a"] * (TOML_MAX_DEPTH - 2)) + "]\n"
+    why, reached = scanned(at_bound)
+    check("nesting/toml-unclosed-header-at-the-bound-given-to-the-reader",
+          reached and why is not None and "is not valid TOML" in why
+          and _toml_depth(at_bound, TOML_MAX_DEPTH) == (TOML_MAX_DEPTH, None)
+          and reader_depth(at_bound) == (TOML_MAX_DEPTH, None), (why, reached))
+
+    # The scan's depth is the parsed document's, never lower (the reader is never given a document past
+    # the bound) and never higher (no document within the bound is refused), over a generated corpus:
+    # every sequence of one to three table and array-of-tables headers whose keys are one to three parts
+    # from two names, each followed by a dotted key holding an inline array of inline tables, with every
+    # name spelled bare, literal, basic, escaped and spaced in turn (the same key, however spelled); and
+    # seeded documents mixing headers, dotted keys, inline tables with dotted keys, nested inline arrays
+    # and multi-line arrays. For a document the reader refuses, the scan's depth is never lower than the
+    # depth the reader built before refusing it (reader_depth), over a generated corpus of malformed
+    # documents: every sequence of one or two of those headers whose last header has no closer or (an
+    # array-of-tables header) one closing bracket, and the seeded documents each cut short, with one
+    # character dropped, or with one character inserted or replaced. For a document the reader reads, the
+    # instrumented depth is the parsed document's (the instrument itself is checked).
     def compared(texts):
-        """[valid, lower, higher, an example of each difference] over texts."""
-        tally = [0, 0, 0, []]
+        """[read, lower, higher, an example of each difference, refused, lower than the reader built
+        before refusing, instrumented depth not the parsed depth] over texts."""
+        tally = [0, 0, 0, [], 0, 0, 0]
         for text in texts:
             got = _toml_depth(text, 10 ** 9)[0]
-            try:
-                want = parsed_depth(tomllib.loads(text))
-            except (ValueError, RecursionError, MemoryError):
-                continue        # not TOML the reader reads (TOMLDecodeError is a ValueError)
+            built, data = reader_depth(text)
+            if data is None:
+                tally[4] += 1
+                if got < built:
+                    tally[5] += 1
+                    tally[3].append((text, got, built))
+                continue
+            want = parsed_depth(data)
             tally[0] += 1
+            tally[6] += built != want
             if got != want:
                 tally[1 if got < want else 2] += 1
                 tally[3].append((text, got, want))
@@ -4192,12 +4343,33 @@ def _self_test_nesting(m, tempfile, contextlib, io):
             else:
                 lines.append(".".join(pick.choices("xyz", k=pick.randrange(1, 4))) + " = " + pick.choice(values))
         mixed.append("\n".join(lines) + "\n")
+    malformed = []
+    for count in (1, 2):
+        for sequence in itertools.product(heads, repeat=count):
+            before = "".join(kind + spelled(parts) + ("]]" if kind == "[[" else "]") + "\nk.v = [{w = 1}]\n"
+                             for kind, parts in sequence[:-1])
+            kind, parts = sequence[-1]
+            key = spelled(parts)
+            malformed.extend(before + kind + key + closer + "\nk.v = [{w = 1}]\n"
+                             for closer in (("", "]") if kind == "[[" else ("",)))
+    noise = "[]{}=.,\"'#\n \tab1"
+    for text in mixed:
+        for _ in range(2):
+            at, how = pick.randrange(len(text) + 1), pick.randrange(4)
+            malformed.append(text[:at] if how == 0 else text[:at] + text[at + 1:] if how == 1
+                             else text[:at] + pick.choice(noise) + text[at + (how == 3):])
     for name, texts in (("nesting/toml-scan-depth-is-the-parsed-depth-over-generated-headers", headed),
                         ("nesting/toml-scan-depth-is-the-parsed-depth-over-generated-documents", mixed)):
         tally = compared(texts)
-        check(name, tally[0] >= len(texts) // 2 and tally[1:3] == [0, 0], tally)
+        check(name, tally[0] >= len(texts) // 2 and tally[1:3] == [0, 0] and tally[5:] == [0, 0], tally)
+    tally = compared(malformed)
+    check("nesting/toml-scan-depth-never-below-the-reader-over-generated-malformed-documents",
+          tally[4] >= len(malformed) // 2 and tally[0] > 0 and tally[1:3] == [0, 0] and tally[5:] == [0, 0],
+          tally)
     tally = _with_globals({"TOML_SCAN_ARRAYS": False}, lambda: compared(headed))
     check("nesting/toml-scan-depth-is-the-parsed-depth/red-when-reverted", tally[1] > 0, tally[:3])
+    tally = _with_globals({"TOML_SCAN_UNCLOSED": False}, lambda: compared(malformed))
+    check("nesting/toml-scan-depth-never-below-the-reader/red-when-reverted", tally[5] > 0, tally[4:6])
     # End to end under a memory limit: the reported dotted key at 16,000 parts (32,003 bytes; before,
     # about 1 GiB resident, and a 512 MiB limit gave a MemoryError) through --draft in a child limited
     # to 512 MiB of address space ends naming the bound, before the reader.
@@ -4221,6 +4393,16 @@ def _self_test_nesting(m, tempfile, contextlib, io):
         check("nesting/process-toml-reported-array-of-tables-chain", draft.stat().st_size == 2878
               and child.returncode == 2 and named(err) and early in err and "Traceback" not in err,
               (child.returncode, err[-300:]))
+        # The reported unclosed array-of-tables header through --draft ends naming the bound, before the
+        # reader (before, the reader built it 101 deep and refused it as TOML that does not parse).
+        draft.write_bytes(reported_unclosed.encode("utf-8"))
+        child = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve()), "--draft", str(draft),
+                                "--target", "changelog.toml"], capture_output=True, stdin=subprocess.DEVNULL,
+                               timeout=120)
+        err = child.stderr.decode("utf-8", "replace")
+        check("nesting/process-toml-reported-unclosed-array-of-tables-header", draft.stat().st_size == 207
+              and child.returncode == 2 and named(err) and early in err and "is not valid TOML" not in err
+              and "Traceback" not in err, (child.returncode, err[-300:]))
 
 
 def _self_test_marks(m, tempfile):
