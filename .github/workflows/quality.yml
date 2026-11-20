@@ -977,7 +977,7 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite merge-resolution-selftest
 
-      # Every two-parent merge commit in HEAD^1..HEAD, and in origin/main..HEAD when that ref resolves: on a
+      # Every two-parent merge commit in HEAD^1..HEAD and in origin/main..HEAD (that ref must resolve): on a
       # pull request, the merges the branch brings in (a merge train's member merges included), each
       # replayed from its parents and judged on its recorded tree, every file either parent changed. The
       # job checks out the full history (fetch-depth: 0); a shallow clone fails closed.

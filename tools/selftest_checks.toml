@@ -7059,7 +7059,9 @@ expected-check-ids = [
   "clean/both-sides-changed-unconflicted-drop-fails",
   "clean/ours-strategy-without-conflict-fails",
   "clean/file-one-side-added-left-out-fails",
-  "clean/rename-carrying-edits-cannot-evaluate",
+  "clean/rename-carrying-edits-judged-passes",
+  "clean/rename-carrying-edits-dropped-edit-fails",
+  "clean/rename-on-the-right-judged-passes",
   # no attribute outside the judged trees changes the replay
   "attributes/worktree-and-info-attributes-do-not-change-replay",
   "attributes/resolution-bringing-a-merge-driver-cannot-evaluate",
@@ -7086,7 +7088,8 @@ expected-check-ids = [
   "shape/modify-delete-taking-delete-fails",
   "shape/binary-cannot-evaluate",
   "shape/symlink-cannot-evaluate",
-  "shape/rename-cannot-evaluate",
+  "shape/rename-conflict-taking-one-side-fails",
+  "shape/rename-to-two-names-cannot-evaluate",
   "shape/merge-driver-cannot-evaluate",
   # fail closed on history that cannot be read
   "fail-closed/unreadable-side",
@@ -7097,6 +7100,8 @@ expected-check-ids = [
   "commit/recorded-merge-judged-with-message-declaration",
   "audit/earlier-lossy-merge-restored-later-still-fails",
   "audit/train-branch-member-merges-audited",
+  "audit/upstream-missing-cannot-evaluate-on-any-branch",
+  "audit/upstream-unreadable-cannot-evaluate",
   # the generated exemption
   "generated/regenerated-release-files-pass",
   "generated/stale-release-files-fail",
@@ -7108,15 +7113,22 @@ expected-check-ids = [
   "generated/stale-frozen-fails",
   "generated/merged-generator-module-passes",
   "generated/resolution-edited-generator-module-fails",
+  "generated/conflicted-generator-module-kept-both-passes",
+  "generated/conflicted-generator-module-added-line-fails",
   # paths no side changed and conflict markers
   "untouched/keeps-base-entries-passes",
   "untouched/edit-to-path-no-side-changed-fails",
   "untouched/file-only-the-resolution-adds-fails",
   "markers/conflict-marker-left-in-fails",
   "markers/marker-shaped-line-a-side-added-passes",
+  # base lines both sides kept
+  "base-lines/kept-base-line-deleted-fails",
+  "base-lines/declared-base-line-omission-passes",
+  "base-lines/kept-base-line-moved-passes",
   # the train entry point
   "train/dropped-line-records-no-commit",
   "train/kept-resolution-records-checked-merge",
+  "train/failed-git-merge-start-removes-pin",
   "train/member-merges-regenerated-pass-the-audit",
   # the report
   "report/result-line-names-what-failed",

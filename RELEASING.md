@@ -241,17 +241,19 @@ conflicted ones:
    on exit 1 the report names every dropped line and the merge stays in progress for another resolution.
    A result identical to one side, or one keeping none of the lines a side added to a file, is refused
    whatever the declaration says. A line both sides added in different places must be kept once for
-   each side. A result that changes a file neither side changed, or leaves a conflict marker in, is
-   refused. The five generated outputs are exempt only while the merged, unedited
-   `tools/gen_manifest.py --check` passes on the resolved tree and every `tools/**.py` module git merged
-   without a conflict is git's merge.
+   each side, and a line both sides kept must stay (or be declared with side `base`). A renamed file is
+   judged where git's merge carries it. A result that changes a file neither side changed, or leaves a
+   conflict marker in, is refused. The five generated outputs are exempt only while the merged, unedited
+   `tools/gen_manifest.py --check` passes on the resolved tree, every `tools/**.py` module git merged
+   without a conflict is git's merge, and every conflicted one holds no line the resolution added.
 4. `python3 -I -B tools/train_merge.py abort` gives up the member.
 
-The Quality workflow audits every two-parent merge commit in `HEAD^1..HEAD`, and in
-`origin/main..HEAD` when `refs/remotes/origin/main` resolves, so a train pull request's member merges
-are judged again from their parents and recorded trees, with the declaration their messages carry. The
-local runner (`tools/run_all_checks.sh`) runs the same audit; on a `merge-train-*` branch it needs
-`origin/main` fetched and at least one merge in range, or it fails closed. Keep the member merges in the
+The Quality workflow audits every two-parent merge commit in `HEAD^1..HEAD` and in
+`origin/main..HEAD`, so a train pull request's member merges are judged again from their parents and
+recorded trees, with the declaration their messages carry. The local runner (`tools/run_all_checks.sh`)
+runs the same audit. On any branch it needs `refs/remotes/origin/main` fetched and readable, so a train
+branch not named `merge-train-*` is still audited in full; on a `merge-train-*` branch it also needs at
+least one merge in range. Otherwise it fails closed. Keep the member merges in the
 train branch until that run is green; the audit cannot see a merge squashed away before it ran. The
 procedure that builds a train outside this repository must call `tools/train_merge.py` for every member
 for the precommit check to hold; this repository cannot enforce that call. Until it does, a train built
