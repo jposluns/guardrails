@@ -1286,7 +1286,7 @@ def _self_test_floor_probe(registry, directory, elsewhere):
 def _self_test_group_probe(registry):
     """Flip the group partition and the selector. Each synthetic grouping of the live registry must yield its
     fault; over a synthetic registry of recording callables, a group runs exactly its own labels in registry
-    order and forwards the worst outcome, a broken partition and an unknown name return 2 having run nothing,
+    order and forwards the aggregate outcome, a broken partition and an unknown name return 2 having run nothing,
     and main() hands `--self-test-group NAME` to the selector. Returns a list of the discrepancies."""
     from unittest.mock import patch
     misses = []
@@ -1336,7 +1336,7 @@ def _self_test_group_probe(registry):
 
 def _aggregator_self_test():
     """Guard the aggregator's fail-closed return-vocabulary check. A helper returning a value
-    OUTSIDE the {0,1,2} int vocabulary must fail the aggregate CLOSED (a non-zero worst), never be
+    OUTSIDE the {0,1,2} int vocabulary must fail the aggregate CLOSED (a non-zero exit), never be
     admitted as clean because a bool or float compares equal to an allowed int (False == 0, True == 1,
     0.0 == 0). Returns 0 clean, 1 on a failure. Registered below so `opf.py --self-test` exercises it;
     the store legs did not, letting a helper returning False produce an aggregate exit 0. It also holds
@@ -24378,7 +24378,8 @@ def _self_test_group_faults(registry, groups):
 
 def run_self_test_group(name, groups=None, tests=None):
     """Run the one group of SELF_TEST_GROUPS named `name` through run_self_tests: its registered self-tests, in
-    registry order, with the aggregate's worst-outcome exit. Returns 2 (cannot evaluate) and runs nothing when the
+    registry order, with the aggregate's verdict-precedence exit (run_self_tests_isolated: a finding over
+    cannot-evaluate over clean). Returns 2 (cannot evaluate) and runs nothing when the
     groups are not a partition of the registry (_self_test_group_faults) or no group has that name."""
     groups = SELF_TEST_GROUPS if groups is None else groups
     tests = _self_tests() if tests is None else tests

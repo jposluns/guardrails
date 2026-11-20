@@ -3605,7 +3605,9 @@ def _core_lanes(base):
     # A lane RETURN VALUE can only fail the suite, never pass it: each vector runs the
     # production main() in a child over an injected lane that returns 0 (nothing executed;
     # every expected id failed; a missing expectation manifest; a pending cannot-evaluate
-    # record), exits 0 on the reverted lane-return guard, and must exit 2 here.
+    # record) or records a failure and returns 2, and the reverted lane-return guard turns
+    # it red. A definite finding the lane recorded outranks its harness error (exit 1, the
+    # findings listed); every other vector must exit 2 here.
     lane_fixture = base / "lane-return"
     lane_fixture.mkdir()
     observed = _lane_return_fail_closed(lane_fixture)

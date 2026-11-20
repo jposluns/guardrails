@@ -2767,13 +2767,17 @@ MAIN_VERDICT_EXPECTED = [(True, True, True, False, False, True, ""),
 
 
 # The children for config/lane-return-fail-closed: main() runs with an injected lane whose
-# return value must never read as a pass. Four vectors, each exiting 0 on an engine whose
-# _suite_main returns a non-None lane value unchecked (the reverted guard), and 2 here: a
-# lane that executes nothing and returns 0; one that runs every expected id with failures
-# and returns 0; a missing expectation manifest with a 0 return; and a pending
-# cannot-evaluate record with a 0 return. The child takes the vector index, the probe id,
-# the pending record text and the absent manifest name through argv, so all four vectors
-# share one child source with no vector-specific literals.
+# return value must never read as a pass. Five vectors, each exiting 0 or 2 on an engine
+# whose _suite_main returns a non-None lane value unchecked (the reverted guard): a lane
+# that executes nothing and returns 0; a missing expectation manifest with a 0 return; and
+# a pending cannot-evaluate record with a 0 return, each exiting 2 here; and two whose
+# definite findings outrank the lane's harness error, exiting 1 here with the findings
+# listed (each exits 2 with nothing listed when a harness error is let outrank a definite
+# finding again): one that runs every expected id with failures and returns 0, and one
+# that records a failure, names its own harness error and returns 2 (the shape of the core
+# lane's decoy-setup failure after its earlier checks). The child takes the vector index,
+# the probe id, the pending record text and the absent manifest name through argv, so all
+# five vectors share one child source with no vector-specific literals.
 _LANE_RETURN_CHILD = "\n".join((
     "import sys",
     "sys.path.insert(0, sys.argv[1])",
@@ -2791,6 +2795,10 @@ _LANE_RETURN_CHILD = "\n".join((
     "            suite.check(check_id, False, True)",
     "    if vector == 3:",
     "        suite.check(probe_id, True, True)",
+    "    if vector == 4:",
+    "        suite.check(probe_id, False, True)",
+    "        print('SELF-TEST HARNESS ERROR: injected lane setup failure', file=sys.stderr)",
+    "        return 2",
     "    return 0",
     "sys.exit(suite.main(None, lanes))",
 ))
@@ -2800,18 +2808,22 @@ LANE_RETURN_VECTORS = (
     (1, "all-expected-fail-0"),
     (2, "missing-manifest-0"),
     (3, "pending-cannot-evaluate-0"),
+    (4, "definite-then-harness-2"),
 )
-LANE_RETURN_EXPECTED = [("runs-nothing-0", 2, True, False),
-                        ("all-expected-fail-0", 2, True, False),
-                        ("missing-manifest-0", 2, True, False),
-                        ("pending-cannot-evaluate-0", 2, True, False)]
+LANE_RETURN_EXPECTED = [("runs-nothing-0", 2, True, False, False),
+                        ("all-expected-fail-0", 1, True, False, True),
+                        ("missing-manifest-0", 2, True, False, False),
+                        ("pending-cannot-evaluate-0", 2, True, False, False),
+                        ("definite-then-harness-2", 1, True, False, True)]
 
 
 def _lane_return_fail_closed(fixture):
-    """One (vector name, exit code, harness error named, PASS line printed) observation per
-    LANE_RETURN_VECTORS row, or that row timeout message when its child reached the bound;
-    config/lane-return-fail-closed compares this against LANE_RETURN_EXPECTED: every vector
-    must exit 2 with the harness error on its own (captured) stderr and no PASS line."""
+    """One (vector name, exit code, harness error named, PASS line printed, definite findings
+    listed) observation per LANE_RETURN_VECTORS row, or that row timeout message when its child
+    reached the bound; config/lane-return-fail-closed compares this against
+    LANE_RETURN_EXPECTED: every vector must name the harness error on its own (captured) stderr
+    and print no PASS line, and exits 1 with its findings listed when the lane recorded a
+    definite finding, else 2."""
     observed = []
     pending = "TIMEOUT: injected pending record (cannot evaluate)"
     for index, name in LANE_RETURN_VECTORS:
@@ -2824,7 +2836,7 @@ def _lane_return_fail_closed(fixture):
             observed.append(rc)
             continue
         observed.append((name, rc, "SELF-TEST HARNESS ERROR" in err,
-                         "SELF-TEST PASS" in out))
+                         "SELF-TEST PASS" in out, "SELF-TEST FAIL:" in out))
     return observed
 
 
@@ -4817,6 +4829,14 @@ def _member_timeout_timely(elapsed, budget, recorded=None):
     return message
 
 
+def _definite_findings(failures, cannot_evaluate, caused):
+    """The definite findings in failures, in order: every finding that caused does not attribute
+    to timeout messages all recorded in cannot_evaluate (see _verdict)."""
+    recorded = set(cannot_evaluate)
+    return [finding for finding in failures
+            if not (caused.get(finding) and set(caused[finding]) <= recorded)]
+
+
 def _verdict(failures, cannot_evaluate, caused):
     """The suite exit code. A finding is attributed to a timeout when caused maps it to timeout
     messages that were all recorded in cannot_evaluate (check() derives that from a result that is
@@ -4825,10 +4845,8 @@ def _verdict(failures, cannot_evaluate, caused):
     definite finding outranks cannot-evaluate; the timeouts are listed beside it); 2 when a time
     bound was reached and every finding is attributed to one; 0 when clean (main prints the PASS
     line)."""
-    recorded = set(cannot_evaluate)
-    attributed = [finding for finding in failures
-                  if caused.get(finding) and set(caused[finding]) <= recorded]
-    definite = [finding for finding in failures if finding not in attributed]
+    definite = _definite_findings(failures, cannot_evaluate, caused)
+    attributed = [finding for finding in failures if finding not in definite]
     note = "a member reached its time bound, so this run is no verdict on that member"
     if definite:
         print("SELF-TEST FAIL:")
@@ -8135,13 +8153,24 @@ def _suite_main(report_path, lanes):
             # A lane return value can only FAIL the suite, never pass it: None falls
             # through to the expected-id reconciliation and the verdict below; the
             # exact int 2 is a harness error the lane reported for itself; any other
-            # value (0, 1, a bool, a non-int) is itself a harness error. Whatever a
-            # lane returns, the only exit taken here is 2.
+            # value (0, 1, a bool, a non-int) is itself a harness error. The lane did
+            # not finish, so the executed set is not reconciled, but the verdict
+            # precedence still holds (_verdict): a definite finding the lane recorded
+            # before its harness error outranks that cannot-evaluate, so it is listed
+            # and the exit is 1; with none, the exit is 2.
             if type(code) is not int or code != 2:
                 print("SELF-TEST HARNESS ERROR: the lane returned {!r}; a lane may"
                       " return only None (reconcile the executed set and judge the"
                       " verdict) or 2 (a harness error the lane reported itself)."
                       " Fail closed (cannot evaluate).".format(code), file=sys.stderr)
+            definite = _definite_findings(FAILURES, CANNOT_EVALUATE, TIMEOUT_CAUSED)
+            if definite:
+                print("SELF-TEST FAIL:")
+                for failure in definite:
+                    print("  - " + failure)
+                print("  also cannot evaluate (the lane reported a harness error before it"
+                      " finished, so its executed set was not reconciled)")
+                return 1
             return 2
     finally:
         shutil.rmtree(raw, ignore_errors=True)
