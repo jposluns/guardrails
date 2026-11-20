@@ -7530,6 +7530,14 @@ expected-check-ids = [
   "input/size-at-bound-read",
   "input/size-over-bound-refused",
   "input/draft-over-bound-refused",
+  # the report bound on the lines built for one document, and the copy bound counted in bytes
+  "report/bound-reached-on-expanded-references",
+  "report/bound-reached-on-expanded-references/red-when-reverted",
+  "report/within-bound-unchanged",
+  "report/bound-reached-on-hidden-references",
+  "copy-bound/multibyte-counted-in-bytes",
+  "copy-bound/same-bytes-ascii-evaluated",
+  "copy-bound/same-characters-fewer-bytes-refused",
   "input/draft-type-checked-on-descriptor",
   "input/draft-symlink-refused",
   "input/draft-fifo-refused-without-blocking",
@@ -7561,6 +7569,9 @@ expected-check-ids = [
   "apply/read-error-first-preimage-cannot-evaluate",
   "apply/read-error-second-preimage-cannot-evaluate",
   "apply/reads-restored-written",
+  # the applier reads an existing destination up to its own bound, not the check's
+  "apply/oversized-existing-record-replaced",
+  "apply/existing-record-over-own-bound-refused",
   # the applier keeps the target's mode and refuses a symlinked parent directory
   "apply/mode-kept-0644",
   "apply/mode-kept-0640",

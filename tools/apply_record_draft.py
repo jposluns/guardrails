@@ -11,7 +11,10 @@ is read ONCE; those bytes are judged by tools/check_pending_pr_claims.py (live p
 same bytes are written. The destination's preimage (its SHA-256, or its absence) is taken before the
 judgement and taken again just before the write: a changed preimage withholds the write and asks for a
 re-evaluation. A destination that is not a regular file (a FIFO, device or directory) is refused
-(exit 2) without waiting on it or reading it, and a read error is exit 2. The destination's parent directory is opened component by component from the root
+(exit 2) without waiting on it or reading it, and a read error is exit 2. The draft is held to the
+check's MAX_BYTES (64 KiB); the existing destination is read for its preimage up to its own bound,
+EXISTING_MAX_BYTES (4 MiB; larger is exit 2), so an older record too large to judge can still be
+replaced by a draft within the check's bound. The destination's parent directory is opened component by component from the root
 without following symlinks (a symlinked or missing parent is refused, exit 2) and that descriptor is
 held: every read and the write are relative to it, and a parent that no longer resolves to the held
 directory just before the write withholds it. The write goes to a temporary file in that directory,
@@ -51,6 +54,11 @@ import _pr_state  # noqa: E402
 import check_pending_pr_claims as claims  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
+# The size bound on reading the existing destination (its preimage hash): larger is cannot-evaluate
+# (exit 2). It is its own bound, not the check's MAX_BYTES (64 KiB, applied to the draft that is judged),
+# so a record written under the earlier 4 MiB bound and now too large to judge can still be replaced by a
+# draft within MAX_BYTES.
+EXISTING_MAX_BYTES = 4 * 1024 * 1024
 
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
@@ -119,13 +127,14 @@ def _preimage(dir_fd, name, label):
         if not stat.S_ISREG(st.st_mode):
             raise claims.InputError("{}: is not a regular file (a FIFO, device or directory is refused)".format(
                 label))
-        data = _read_descriptor(handle, claims.MAX_BYTES + 1)
+        data = _read_descriptor(handle, EXISTING_MAX_BYTES + 1)
     except OSError as exc:
         raise claims.InputError("{}: cannot be read ({})".format(label, exc.strerror or type(exc).__name__))
     finally:
         os.close(handle)
-    if len(data) > claims.MAX_BYTES:
-        raise claims.InputError("{}: larger than {} bytes".format(label, claims.MAX_BYTES))
+    if len(data) > EXISTING_MAX_BYTES:
+        raise claims.InputError("{}: the existing file is larger than {} bytes (EXISTING_MAX_BYTES)".format(
+            label, EXISTING_MAX_BYTES))
     return hashlib.sha256(data).hexdigest(), stat.S_IMODE(st.st_mode)
 
 

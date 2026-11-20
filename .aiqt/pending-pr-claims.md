@@ -253,18 +253,25 @@ bounds (State source).
    a URL the markdown-link step does not read whole, as in `[a]( [x)]`, is given back in full), the copied
    text is read and quoted as written, so n uses of a URL of length L cost n * L. Those copies are
    bounded: a document whose reference links would copy more than eight characters of URL per byte of
-   the document, plus 65,536, is cannot-evaluate (exit 2). Two growth rows reach that bound on each copy
+   the document (its UTF-8 bytes, not its characters), plus 65,536, is cannot-evaluate (exit 2). Two growth rows reach that bound on each copy
    path, and their red legs (the bound removed) grow more.
-2. Defence in depth for a superlinear path no row has found: a declared surface, draft or staged blob
-   larger than 64 KiB is cannot-evaluate (exit 2). The bound was set from the real records the check
-   reads: the largest declared surface at any commit of this repository was 24,834 bytes (`TODO.md`;
-   `changelog.toml` at most 2,728 bytes), and 64 KiB is 2.6 times that. The self-test fails when a
-   declared surface grows past half the bound, so that the bound is measured again first. The slowest
-   residual known is the report itself: each finding, warning and cannot-evaluate line quotes its whole
-   clause, built in memory, so n references bound in one clause of length L (n claims, or one claim
-   naming n joined references, a Status cell included) give n * L characters. At 64 KiB that shape took
-   about 3 seconds on the host it was measured on (2026-11-20) to build about 860 million characters
-   of report, not counting the time to print it. A path not yet found can be slower than that.
+2. Hard bounds on input and report. A declared surface, draft or staged blob larger than 64 KiB is
+   cannot-evaluate (exit 2), a defence in depth for a superlinear path no row has found. The bound was
+   set from the real records the check reads: the largest declared surface at any commit of this
+   repository was 24,834 bytes (`TODO.md`; `changelog.toml` at most 2,728 bytes), and 64 KiB is 2.6
+   times that. The self-test fails when a declared surface grows past half the bound, so that the bound
+   is measured again first. `apply_record_draft.py` reads the existing destination (for its preimage
+   hash only) up to its own bound of 4 MiB, so an older record over 64 KiB can still be replaced by a
+   draft within 64 KiB. Each finding, warning and cannot-evaluate line quotes its whole clause or line,
+   so n references bound in one clause of length L (n claims, one claim naming n joined references, a
+   Status cell included, or n uses of one reference link) would give n * L characters. The lines built
+   for one document are bounded instead: past 4 Mi characters (`REPORT_MAX_CHARS`; 16 MiB at four
+   bytes a character) the document is cannot-evaluate (exit 2), with a line naming the bound, and its
+   later lines are not built. Self-test rows reach that bound through the draft entry point (a
+   reference link to a long pull URL used 3,000 times in one claim, 15,145 bytes) and on hidden
+   references, and the red leg (the bound removed) builds past it. On the worst shapes known at
+   64 KiB a whole run peaked at about 32 MiB resident on the host it was measured on (2026-11-20);
+   before the report bound the same shapes needed more than 2 GiB. A path not yet found can need more.
 
 ## Residuals
 
@@ -346,7 +353,9 @@ bounds (State source).
   full are grammar exemptions and are not scanned.
 - The running-time bounds refuse rather than read: a record over 64 KiB, or one whose reference links
   would copy definition URLs past the copy bound (Running time), is cannot-evaluate (exit 2), and none
-  of its claims is evaluated. The time stated for the size bound is one measurement on one host.
+  of its claims is evaluated. A record whose report would pass the report bound is cannot-evaluate too,
+  and its findings and warnings past the bound are not reported. The memory stated for the bounds is
+  one measurement on one host.
 - A named backlog item is not resolved to a pull request: only explicit references bind.
 - State can change after it is read (a closed pull request can be reopened); the API read and the file
   write are not one transaction.

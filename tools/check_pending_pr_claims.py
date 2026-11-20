@@ -75,20 +75,25 @@ link reference definitions serves all its units and scanned lines, so a definiti
 Where a URL is still copied into the text (a definition URL holding a parenthesis, a square bracket or
 a backtick, copied into each use, or a placeholder the markdown-link step leaves, as in `[a]( [x)]`, given
 its URL back), n uses of a URL of length L read n * L characters, and the clause they land in is quoted
-as copied. Those copies are bounded instead: past eight characters of URL per byte of the document plus
-65,536 the document is cannot-evaluate (exit 2), and two growth rows show that bound reached on each
+as copied. Those copies are bounded instead: past eight characters of URL per byte of the document (its
+UTF-8 bytes) plus 65,536 the document is cannot-evaluate (exit 2), and two growth rows show that bound reached on each
 copy path, with their red legs (the bound removed) growing more.
 
-Second, a defence in depth for a superlinear path no row has found: a declared surface, a draft or a
-staged blob larger than MAX_BYTES (64 KiB) is cannot-evaluate (exit 2). The bound was set from the real
-records: the largest declared surface at any commit of this repository was 24,834 bytes (TODO.md), and
-64 KiB is 2.6 times that; the self-test fails when a declared surface passes half the bound. The
-slowest residual known: each finding, warning and cannot-evaluate line quotes its whole clause or line,
-built in memory, so n references bound in one clause of length L (n claims, or one claim naming n
-joined references, a Status cell included) give n * L characters and take time in proportion
-(quadratic). At the bound that shape took about 3 seconds on the host it was measured on (2026-11-20)
-to build its report of about 860 million characters, not counting the time to print it; a path no one
-has found can be slower. Reading pull request state (tools/_pr_state.py) is outside these bounds.
+Second, hard bounds on input and report. A declared surface, a draft or a staged blob larger than
+MAX_BYTES (64 KiB) is cannot-evaluate (exit 2), a defence in depth for a superlinear path no row has
+found. The bound was set from the real records: the largest declared surface at any commit of this
+repository was 24,834 bytes (TODO.md), and 64 KiB is 2.6 times that; the self-test fails when a
+declared surface passes half the bound. Each finding, warning and cannot-evaluate line quotes its whole
+clause or line, so n references bound in one clause of length L (n claims, one claim naming n joined
+references, or n uses of one reference link) would give n * L characters; the lines built for one
+document are bounded instead: past REPORT_MAX_CHARS (4 Mi characters; 16 MiB at four bytes a
+character) the document is cannot-evaluate (exit 2), with a line naming the bound, and its later lines
+are not built (a line is built only when the clause it quotes fits in what is left).
+On the worst shapes known at 64 KiB (n uses of a long pull URL reference link, joined claims, hidden
+references on one line) a whole run peaked at about 32 MiB resident on the host it was measured on
+(2026-11-20; before the report bound, more than 2 GiB, and a 1 GiB limit ended the run with an
+uncaught MemoryError); a path no one has found can need more. Reading pull request state
+(tools/_pr_state.py), whose reasons can quote the response, is outside these bounds.
 """
 import sys
 
@@ -121,10 +126,11 @@ CONFIG_REL = ".aiqt/pending-pr-claims.toml"
 # The size bound on a declared surface, a draft and a staged blob: larger is cannot-evaluate (exit 2). It
 # is set from the real records, not from what the reader could take: the largest declared surface at
 # any commit of this repository was 24,834 bytes (TODO.md; changelog.toml at most 2,728), and 64 KiB is
-# 2.6 times that. The bound caps the residual superlinear paths (module docstring, RUNNING TIME): the
-# slowest known, n references joined in one clause, took about 3 seconds at this size on the
-# host it was measured on (2026-11-20), building its report (printing it not counted). The self-test fails when a declared surface grows past half the
-# bound, so the bound is measured again before a record outgrows its margin.
+# 2.6 times that. With the report bound (REPORT_MAX_CHARS) it caps the residual superlinear paths (module
+# docstring, RUNNING TIME). The self-test fails when a declared surface grows past half the bound, so the
+# bound is measured again before a record outgrows its margin. tools/apply_record_draft.py reads an
+# existing destination up to its own bound (EXISTING_MAX_BYTES there), so an older, larger record can
+# still be replaced.
 MAX_BYTES = 64 * 1024
 FORMATS = ("toml-strings", "markdown")
 ROLES = ("source", "generated-view")
@@ -362,7 +368,8 @@ URL_COPY_BOUNDED = True
 
 
 class _CopyBudget:
-    """The characters of definition URL a document's reference links may still copy (URL_COPY_FACTOR)."""
+    """The characters of definition URL a document's reference links may still copy: URL_COPY_FACTOR per
+    byte of the document (size, its UTF-8 bytes, not its characters) plus URL_COPY_FLOOR."""
 
     def __init__(self, label, size):
         self.label, self.limit = label, URL_COPY_FACTOR * size + URL_COPY_FLOOR
@@ -1066,6 +1073,7 @@ def markdown_units(text, label, status_column=None, hidden=None):
     carriage return is a line ending, not text. When hidden is a list, the unevaluated_references
     entries of the document are appended to it."""
     units = []
+    size = len(text.encode("utf-8"))   # the document's bytes, as the copy bound counts them
     if text.startswith("\ufeff"):
         text = text[1:]
     lines = [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
@@ -1073,7 +1081,7 @@ def markdown_units(text, label, status_column=None, hidden=None):
         blocks = block_context(lines)
     except InputError as exc:
         raise InputError("{}: {}".format(label, exc))
-    definitions = _Definitions(budget=_CopyBudget(label, len(text)))
+    definitions = _Definitions(budget=_CopyBudget(label, size))
     para, para_line = [], 0
     quote, quote_line = [], 0
     quote_numbers = []    # the line numbers of the open blockquote
@@ -1972,6 +1980,51 @@ class Result:
         return 2 if self.unknown else (1 if self.hard else 0)
 
 
+# The report bound: the finding, warning and cannot-evaluate lines built for one document (a declared
+# surface, draft or staged blob) hold at most REPORT_MAX_CHARS characters in all. Each line quotes its
+# whole clause or line, so n references bound in one clause of length L would need n * L characters; a
+# line that would pass the bound is not built (it is refused before building when its clause alone would
+# pass it), the document's later lines are not built either, and one cannot-evaluate line naming the
+# bound is added in their place (exit 2). The real records never come near it.
+REPORT_MAX_CHARS = 4 * 1024 * 1024
+# The report bound is enforced (True). The self-test sets it False, building every line, for a red leg.
+REPORT_BOUNDED = True
+
+
+class _ReportBudget:
+    """The characters of report lines built so far for each document (by its path), at most
+    REPORT_MAX_CHARS each; past that, result.unknown gets one cannot-evaluate line naming the bound."""
+
+    def __init__(self, result):
+        self.result, self.used, self.over = result, {}, set()
+
+    def room(self, path, quoted):
+        """False when no more lines are built for path: it is past the bound, or a line quoting quoted
+        (at least as long as quoted) would pass it."""
+        if not REPORT_BOUNDED:
+            return True
+        if path not in self.over and self.used.get(path, 0) + len(quoted) > REPORT_MAX_CHARS:
+            self._refuse(path)
+        return path not in self.over
+
+    def add(self, lines, path, line):
+        """Append line to lines, unless it passes path's bound."""
+        if REPORT_BOUNDED:
+            used = self.used.get(path, 0) + len(line)
+            if used > REPORT_MAX_CHARS:
+                self._refuse(path)
+                return
+            self.used[path] = used
+        lines.append(line)
+
+    def _refuse(self, path):
+        self.over.add(path)
+        self.result.unknown.append(
+            "{}: its report would pass {} characters (REPORT_MAX_CHARS), a bound on memory; the lines "
+            "past it were not built, so this document's findings and warnings are incomplete".format(
+                path, REPORT_MAX_CHARS))
+
+
 def collect(surfaces_with_bytes):
     """[(surface, location, kind, phrase, ref, clause)] over (surface, bytes) pairs, with a HIDDEN entry
     (phrase: the block kind or not evaluated; clause: the line) for each unevaluated-reference entry; InputError
@@ -1991,50 +2044,59 @@ def evaluate(candidates, config, root, transport=None, git_runner=_pr_state.run_
     """The Result of judging the candidates against live pull request state."""
     result = Result()
     result.candidates = sum(1 for candidate in candidates if candidate[2] != HIDDEN)
+    budget = _ReportBudget(result)
     origin_cache = {}
     keyed = []
     for surface, location, kind, phrase, ref, clause in candidates:
+        path = surface["path"]
         if kind == HIDDEN:
-            result.warnings.append(_hidden_warning(location, phrase, ref, clause))
+            if budget.room(path, clause):
+                budget.add(result.warnings, path, _hidden_warning(location, phrase, ref, clause))
             continue
         if kind == AMBIGUOUS:
-            result.unknown.append("{}: {!r}: a pending or open phrase whose pull request is not named; "
-                                  "the binding is ambiguous".format(location, clause))
+            if budget.room(path, clause):
+                budget.add(result.unknown, path, "{}: {!r}: a pending or open phrase whose pull request is "
+                           "not named; the binding is ambiguous".format(location, clause))
             continue
         if kind == CUED_AMBIGUOUS:
-            result.warnings.append("{}: {!r}: a pending or open phrase whose pull request is not named, "
-                                   "after the cue {!r} (negated, past, conditional or a question); no "
-                                   "pull request was read; review it".format(location, clause, phrase))
+            if budget.room(path, clause):
+                budget.add(result.warnings, path, "{}: {!r}: a pending or open phrase whose pull request is "
+                           "not named, after the cue {!r} (negated, past, conditional or a question); no "
+                           "pull request was read; review it".format(location, clause, phrase))
             continue
         if kind == QUOTE:
-            result.unknown.append("{}: {!r}: a claim inside a blockquote with no historical lead-in "
-                                  "(Earlier note: or Previously recorded:); review it".format(
-                                      location, clause))
+            if budget.room(path, clause):
+                budget.add(result.unknown, path, "{}: {!r}: a claim inside a blockquote with no historical "
+                           "lead-in (Earlier note: or Previously recorded:); review it".format(
+                               location, clause))
             continue
         repo, number, text = ref
         if repo is None:
             repo, why = _surface_repo(surface, root, origin_cache, git_runner)
             if repo is None:
-                result.unknown.append("{}: {!r}: {} cannot be bound to a repository: {}".format(
-                    location, clause, text, why))
+                if budget.room(path, clause):
+                    budget.add(result.unknown, path, "{}: {!r}: {} cannot be bound to a repository: {}".format(
+                        location, clause, text, why))
                 continue
-        keyed.append(((repo, number), location, kind, phrase, clause))
+        keyed.append(((repo, number), location, kind, phrase, clause, path))
     limits = config["limits"]
     states = _pr_state.read_states([key for key, *_rest in keyed], transport=transport,
                                    max_prs=limits["max-prs"],
                                    call_timeout=limits["call-timeout-seconds"],
                                    deadline=limits["deadline-seconds"]) if keyed else {}
-    for (repo, number), location, kind, phrase, clause in keyed:
+    for (repo, number), location, kind, phrase, clause, path in keyed:
         state, why, when = states[(repo, number)]
         name = "{}#{}".format(repo, number)
         read = " (read {})".format(when) if when else ""
+        if state == _pr_state.OPEN or not budget.room(path, clause):
+            continue
         if state == _pr_state.UNKNOWN:
-            result.unknown.append("{}: {!r}: {} state cannot be evaluated: {}{}".format(
+            budget.add(result.unknown, path, "{}: {!r}: {} state cannot be evaluated: {}{}".format(
                 location, clause, name, why, read))
-        elif state != _pr_state.OPEN:
+        else:
             line = "{}: {!r}: says {} is {}, but it is {}{}".format(location, clause, name, phrase,
                                                                      state, read)
-            (result.hard if kind == HARD else result.warnings).append(line)
+            budget.add(result.hard if kind == HARD else result.warnings, path, line)
     return result
 
 
@@ -2106,8 +2168,16 @@ def check_inputs(root):
     except InputError as exc:
         print("CANNOT EVALUATE: {}".format(exc), file=sys.stderr)
         return 2
-    hidden = [_hidden_warning(location, phrase, ref, clause)
-              for _surface, location, kind, phrase, ref, clause in candidates if kind == HIDDEN]
+    built = Result()
+    budget = _ReportBudget(built)
+    for surface, location, kind, phrase, ref, clause in candidates:
+        if kind == HIDDEN and budget.room(surface["path"], clause):
+            budget.add(built.warnings, surface["path"], _hidden_warning(location, phrase, ref, clause))
+    if built.unknown:
+        for line in built.unknown:
+            print("CANNOT EVALUATE: {}".format(line), file=sys.stderr)
+        return 2
+    hidden = built.warnings
     for line in hidden:
         print("WARNING: " + line)
     print("PASS: {} declared surface(s) parse; {} candidate claim(s) found; {} unevaluated-reference "
@@ -3658,6 +3728,53 @@ def _self_test():
     check("input/draft-over-bound-refused", got == 2 and "draft larger than {} bytes".format(MAX_BYTES)
           in err.getvalue(), (got, err.getvalue()))
 
+    # The report bound (REPORT_MAX_CHARS), end to end through the draft entry point: one reference link
+    # to a long pull URL used n times in one claim gives n findings, each quoting the clause with every
+    # use expanded. At 3,000 uses (15,145 bytes) that report would need about 1.1 billion characters; it
+    # is cannot-evaluate naming the bound, with what was built held under it. With the bound removed,
+    # 200 uses already build more than the bound (the red leg); 20 uses are within it and unchanged.
+    long_repo = "a/" + "b" * 100
+
+    def expanded(n):
+        return ("[x]: https://github.com/" + long_repo + "/pull/17\n\npending " + "[x], " * n + "\n").encode()
+
+    def judged_draft(data):
+        sink = io.StringIO()
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            code = judge_draft_bytes(ROOT, "TODO.md", data, FakeTransport({(long_repo, 17): "merged"}), _origin_ok)
+        return code, sink.getvalue()
+    bound_named = "{} characters (REPORT_MAX_CHARS)".format(REPORT_MAX_CHARS)
+    code, out = judged_draft(expanded(3000))
+    check("report/bound-reached-on-expanded-references", code == 2 and bound_named in out
+          and len(out) <= REPORT_MAX_CHARS + 4096, (code, len(out), out[-300:]))
+    code, out = _with_globals({"REPORT_BOUNDED": False}, lambda: judged_draft(expanded(200)))
+    check("report/bound-reached-on-expanded-references/red-when-reverted", code == 1 and len(out) > REPORT_MAX_CHARS,
+          (code, len(out)))
+    code, out = judged_draft(expanded(20))
+    check("report/within-bound-unchanged", code == 1 and out.count("FINDING: ") == 20 and bound_named not in out,
+          (code, out[-300:]))
+    # The same bound on the lines no pull request state is read for: n distinct references on one line
+    # in a fence give n hidden-reference warnings, each quoting the line.
+    code, res, t = _judge("```\n" + " ".join("#{}".format(i) for i in range(1, 9001)) + "\n```\n", m)
+    check("report/bound-reached-on-hidden-references", code == 2 and t.calls == []
+          and any(bound_named in line for line in res.unknown)
+          and sum(len(line) for line in res.warnings + res.unknown) <= REPORT_MAX_CHARS + 4096,
+          (code, len(res.warnings), res.unknown[-1:]))
+
+    # The copy bound counts the document's UTF-8 bytes, not its characters: a document whose bytes allow
+    # its copies is evaluated, as is its twin of the same byte count in ASCII; the twin of the same
+    # character count (fewer bytes) is refused.
+    def copying(tail):
+        return "[x]: " + "a" * 1000 + "(b)\n\n" + "[x] " * 60 + "\n\n" + tail + "\n"
+    for name, tail, want in (("copy-bound/multibyte-counted-in-bytes", "\U0001f600" * 5000, 0),
+                             ("copy-bound/same-bytes-ascii-evaluated", "aaaa" * 5000, 0),
+                             ("copy-bound/same-characters-fewer-bytes-refused", "a" * 5000, "refused")):
+        try:
+            got = _judge(copying(tail), m)[0]
+        except InputError as exc:
+            got = "refused" if "a bound on running time" in str(exc) else str(exc)
+        check(name, got == want, got)
+
     # --- real processes: a stub gh executable behind the production transport ---
     with tempfile.TemporaryDirectory(prefix="pending-pr-claims-gh-") as tmp:
         stub = Path(tmp) / "gh"
@@ -3915,6 +4032,20 @@ def _self_test_adapters(tempfile, contextlib, io):
                                            _origin_ok)
         check("apply/reads-restored-written", got == 0 and target.read_bytes() == b"PR #17 remains pending.\n",
               got)
+
+        # The existing destination is read up to its own bound (apply_record_draft.EXISTING_MAX_BYTES,
+        # 4 MiB), not the check's MAX_BYTES: a record past MAX_BYTES is replaced by a smaller draft, and
+        # one past EXISTING_MAX_BYTES is refused and left as it was.
+        for name, size, want in (("apply/oversized-existing-record-replaced", MAX_BYTES + 1, 0),
+                                 ("apply/existing-record-over-own-bound-refused",
+                                  apply_record_draft.EXISTING_MAX_BYTES + 1, 2)):
+            old = b"a" * (size - 1) + b"\n"
+            target.write_bytes(old)
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                got = apply_record_draft.apply(root, str(draft), "NOTES.md", FakeTransport({(REPO, 17): "open"}),
+                                               _origin_ok)
+            check(name, got == want and target.read_bytes() == (b"PR #17 remains pending.\n" if want == 0 else old),
+                  got)
 
         # The target's permission bits survive the replace (0644 and 0640 both kept).
         for name, mode in (("apply/mode-kept-0644", 0o644), ("apply/mode-kept-0640", 0o640)):
