@@ -5781,14 +5781,21 @@ def _watchdog_completion_case(mode, tree=None):
         real_run = emit.run_bounded
         unestablished = object()
 
-        def flipped(case):
-            # Each mutant below is red on a check that holds whether or not
-            # the subject reached its stall point (the cancel latency, the
-            # census window, the cleanup bound), so an unestablished run (no
-            # verdict) means that check did not see the mutant. It is no
-            # verdict on this flip, never read as the mutant detected.
+        def flipped(case, decided=False):
+            # An unestablished run (the subject never reached its stall point
+            # and every check held) is never read as the mutant detected.
+            # Where the mutant's check is exercised only when the subject ran
+            # (the drain the cleanup bound times, the census window), it is
+            # no verdict on this flip. Where the check is decided whatever
+            # the subject reached (decided: the late parent deadline, whose
+            # first SIGKILL run_bounded sends only once that 6 s deadline has
+            # passed, so the cancel latency is over its 5 s bound in every
+            # run), an unestablished run is that check not seeing the
+            # mutant: definite.
             got = _watchdog_deadline_case(case, unestablished=unestablished)
             if got is unestablished:
+                assert not decided, ("completion/deadline-flips: deadline/%s held every "
+                                     "check under a mutant no load can hide" % case)
                 raise _WatchdogBoundReached(
                     "completion/deadline-flips: deadline/%s never reached its stall "
                     "point and no check saw the mutant" % case)
@@ -5802,7 +5809,7 @@ def _watchdog_completion_case(mode, tree=None):
             return real_run(thunk, **dict(
                 kwargs, timeout_s=_DEADLINE_EXECUTION_BOUND + 1))
         with patch.object(emit, "run_bounded", late):
-            assert flipped("pipe-stall") == EXIT_FINDING
+            assert flipped("pipe-stall", decided=True) == EXIT_FINDING
         import time
         with patch.object(emit, "_fixture_cleanup_deadline",
                           side_effect=lambda deadline=None: time.monotonic() - 1):
@@ -16087,7 +16094,8 @@ def _watchdog_load_route_vectors():
     one flat 180 s, which a check case reached under CPU contention). cleanup-cancel: a
     launch bound reached before the cancel is raised is no verdict, one reached after it
     (the cancellation did not end the launch) fails the leg. deadline-flips: a mutant run
-    that was never established is no verdict on the flip, never read as detected."""
+    that was never established is never read as detected: no verdict on a flip whose check
+    needs the subject to run, a failure of the late-deadline flip, whose check does not."""
     import contextlib
     import io
     import subprocess
@@ -16298,11 +16306,19 @@ def _watchdog_load_route_vectors():
             misses.append("cleanup-cancel over a %s launch bound -> %r, want %r" % (script, got, want))
 
     # deadline-flips: the real leg, run in process over a scripted deadline
-    # case. A mutant run that was never established (no check saw the
-    # mutant) is no verdict on the flip (pre-fix: read as the mutant
-    # detected), a detected mutant passes and an undetected one fails.
-    def flips(outcome):
+    # case, one outcome per flip in the leg's order (late parent deadline,
+    # past cleanup deadline, swallowed census send). A mutant run that was
+    # never established is no verdict on the flip whose check needs the
+    # subject to run (pre-fix: read as the mutant detected), but fails the
+    # late-deadline flip, whose check no load can hide (pre-fix: no
+    # verdict); a detected mutant passes and an undetected one fails.
+    def flips(outcomes):
+        scripted = iter(outcomes)
+
         def case(mode, unestablished=None):
+            # A flip past the scripted ones detects its mutant, so a leg that
+            # runs on past a scripted outcome is a miss here, never a crash.
+            outcome = next(scripted, EXIT_FINDING)
             return unestablished if outcome == "unestablished" else outcome
 
         out = io.StringIO()
@@ -16314,11 +16330,14 @@ def _watchdog_load_route_vectors():
                 return "fail"
         return _watchdog_completion_verdict(rc, out.getvalue())
 
-    for outcome, want in (("unestablished", "cannot-evaluate"), (EXIT_FINDING, "pass"),
-                          (EXIT_OK, "fail")):
-        got = flips(outcome)
+    for outcomes, want in ((("unestablished",), "fail"),
+                           ((EXIT_FINDING, "unestablished"), "cannot-evaluate"),
+                           ((EXIT_FINDING, EXIT_FINDING, "unestablished"), "cannot-evaluate"),
+                           ((EXIT_FINDING,) * 3, "pass"), ((EXIT_OK,), "fail"),
+                           ((EXIT_FINDING, EXIT_OK), "fail")):
+        got = flips(outcomes)
         if got != want:
-            misses.append("deadline-flips over a %r mutant run -> %r, want %r" % (outcome, got, want))
+            misses.append("deadline-flips over %r mutant runs -> %r, want %r" % (outcomes, got, want))
     return misses
 
 

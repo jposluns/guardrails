@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "0e81e02835604ca23c0651e64ce63a563803b31f566f07dae22eb6879cef0dc4"
+tree-sha256 = "f4c0bf5b94dc189388b0446ec8ca6ddcecdab0c1e9424f6229ab52149df6139e"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -3562,8 +3562,8 @@ sha256 = "5f13d71937d37efa09894c7176e98c1a94dbb2271143f155a56e051562b121bc"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1472891
-sha256 = "15e08b43715b26e74e097445d91f91d7d941768307dfa7399d54a455274325cd"
+bytes = 1474243
+sha256 = "1d16774176a1904cc778ac86239d671a53495646643fff340d702b237a2f18d5"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
