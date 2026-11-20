@@ -8756,9 +8756,10 @@ def _citecheck_cd_sound_cases(tmp):
     with quotes or run by a trap. The directory allowlist (_CITECHK_SHAPE_WHY) decides first: the controls
     within it are still judged (cd to a literal relative or absolute path, plain commands joined by && or ;,
     git -C with a literal path, and a raw command of the one plain shape), while each form the walk alone
-    judged outside it (a cd ~ under the inherited HOME alone, a cd in a pipeline element a '|' follows, set -e
-    and set -euo pipefail, cd -P --, an expansion after the cd, pushd, a subshell, export) is now named as not
-    judged with its shape. The reproduced forms, a ${ cmd; } or ${| cmd; } substitution on the commit command
+    judged outside it (a cd ~ under the inherited HOME alone, a cd in a pipeline element a '|' follows, a set
+    after another command, cd -P --, an expansion after the cd, pushd, a subshell, export) is now named as not
+    judged with its shape; a leading set -e or set -euo pipefail is in its directory-neutral class
+    (_citecheck_cd_neutral_cases). The reproduced forms, a ${ cmd; } or ${| cmd; } substitution on the commit command
     itself and time -p or time -- before cd, eval or source (and before a cd in a command scanned as written),
     are each named as not judged, and under a variant without the allowlist each gives the walk's own result:
     the root's msg.txt read and the command allowed."""
@@ -8858,8 +8859,8 @@ def _citecheck_cd_sound_cases(tmp):
         funsub = "a ${ cmd; } or ${| cmd; } substitution, which runs its commands in this shell"
         outside_forms = {
             "cd sub | cat && git commit -F msg.txt": outside("a '|' after a command"),
-            "set -e && cd sub && git commit -F msg.txt": outside(builtin("set")),
-            "set -euo pipefail && cd sub && git commit -F msg.txt": outside(builtin("set")),
+            # a set after another command is outside the directory-neutral class, which only leads the line
+            "cd sub && set -e && git commit -F msg.txt": outside(builtin("set")),
             "cd -P -- sub && git commit -F msg.txt": outside("a cd other than cd and one literal path"),
             "cd sub && git commit -F msg.txt --author \"$A\"": outside(word("$A")),
             "pushd sub && git commit -F msg.txt": outside(builtin("pushd")),
@@ -8945,6 +8946,137 @@ def _citecheck_cd_sound_cases(tmp):
         found = None if plain is None else plain.match(text)
         taken.append((plain is not None, (found is not None) == want, time.perf_counter() - began < 1.0))
     check("citeledger/cd-allowlist-raw-linear", taken, [(True, True, True)] * 4)
+
+
+def _citecheck_cd_neutral_cases(tmp):
+    """The directory-neutral class of the directory allowlist (the comment above _CITECHK_NEUTRAL_OPEN): a git
+    commit -m or -F value that is "$(cat <<'EOF' ... EOF)" with its delimiter single-quoted, and a leading set
+    of -e, -u, -o errexit, -o nounset or -o pipefail. Bash 5.3 runs each such command in the session's
+    directory (a $( ) substitution runs in a subshell; errexit and nounset only end the shell; pipefail only
+    changes a pipeline's status) and gives git the here-document's body less its trailing newlines. So the
+    common commit form is judged, its message read as that body, and a cited file read this session covers
+    it; a -F value of the class names the file read. Repository r holds tools/a.py, a msg.txt that cites
+    nothing and a sub/msg.txt that cites tools/a.py:1; session neutral-read has read tools/a.py, session
+    neutral has read nothing. The controls stay not judged: an unquoted, double-quoted or <<- delimiter, any
+    other command or word in the substitution (a cd among them), a body line that begins with the delimiter,
+    an unquoted, attached or embedded substitution, a long option, and a set with another option or after
+    another command. Under a variant without the widening, each judged form here is not judged again."""
+    repo = _CiteRepo(tmp / "citecheck-cd-neutral", {
+        "tools/a.py": b"a1\na2\n", "msg.txt": b"plain message\n", "sub/msg.txt": b"see tools/a.py:1\n"})
+    a_py = os.path.realpath(str(repo.root / "tools" / "a.py"))
+    repo.call("Read", {"file_path": a_py}, {"type": "text", "file": {
+        "filePath": a_py, "content": "a1\na2", "startLine": 1, "numLines": 2}}, "neutral-read")
+
+    def seen(command, session="neutral"):
+        verdict, note, rows = _citecheck_run(repo.root, command, session)
+        return (verdict, [(c["cite"], c["class"]) for r in rows for c in r["detail"]["citations"]],
+                [r["detail"]["sources"] for r in rows], [r["detail"].get("directory_unknown") for r in rows],
+                "was not judged: the directory its command runs in is not established" in note)
+
+    def heredoc(body, option="-m", delim="'EOF'", close="EOF"):
+        return "git commit {} \"$(cat <<{}\n{}{}\n)\"".format(option, delim, body, close)
+    common = heredoc("see tools/a.py:1\n")
+    unread_m = ("warn", [("tools/a.py:1", "unread")], [["-m value"]], [None], False)
+    unread_sub = ("warn", [("tools/a.py:1", "unread")], [["-F msg.txt"]], [None], False)
+    judged = {
+        common: unread_m,
+        (common, "neutral-read"): ("allow", [("tools/a.py:1", "covered")], [["-m value"]], [None], False),
+        heredoc("Subject line\n\nsee tools/a.py:1 (x) 1) $HOME `id`\n\n"): unread_m,
+        "cd sub && " + heredoc("msg.txt\n", option="-F"): unread_sub,
+        ("cd sub && " + heredoc("msg.txt\n", option="-F"), "neutral-read"):
+            ("allow", [("tools/a.py:1", "covered")], [["-F msg.txt"]], [None], False),
+        "git -C sub commit -F \"$(cat <<'EOF'\nmsg.txt\nEOF\n)\"": unread_sub,
+        heredoc("msg.txt\n", option="-F"): ("allow", [], [["-F msg.txt"]], [None], False),
+        "set -e && cd sub && git commit -F msg.txt": unread_sub,
+        "set -u; cd sub && git commit -F msg.txt": unread_sub,
+        "set -o pipefail\ncd sub && git commit -F msg.txt": unread_sub,
+        "set -euo pipefail && cd sub && git commit -F msg.txt": unread_sub,
+        "set -eu -o pipefail -o errexit -o nounset && set -e && cd sub && git commit -F msg.txt": unread_sub,
+        "set -euo pipefail && " + common: unread_m,
+    }
+
+    def run(cases):
+        return {case: seen(*case) if isinstance(case, tuple) else seen(case) for case in cases}
+    check("citeledger/cd-neutral-judged", run(judged), judged)
+    # The text the check reads for a value of the class is what bash 5.3 gives git for it: the body less its
+    # trailing newlines, nothing in it expanded; any other substitution gives None.
+    body = getattr(aiqt_hooks, "_citechk_neutral_body", lambda word: "absent")
+    texts = {
+        "$(cat <<'EOF'\nsee tools/a.py:1\nEOF\n)": "see tools/a.py:1",
+        "$(cat <<'EOF'\nit's (x) 1) $HOME `id` $(cd sub)\n  indented\ttab\n\n\nEOF\n\n  )":
+            "it's (x) 1) $HOME `id` $(cd sub)\n  indented\ttab",
+        "$(cat << 'M_1'\nline\r\nM_1\n)": "line\r",
+        "$(cat <<'EOF'\nEOF\n)": "",
+        "$(cat <<EOF\nx\nEOF\n)": None,
+        "$(cat <<\"EOF\"\nx\nEOF\n)": None,
+        "$(cat <<-'EOF'\nx\nEOF\n)": None,
+        "$(cat <<'EOF'\nx\nEOF)": None,
+        "$(cat <<'EOF'\nEOF)\nx\nEOF\n)": None,
+        "$(cat <<'EOF'\nx\nEOF \n)": None,
+        "$(cat <<'EOF'\nsay \"x\"\nEOF\n)": None,
+        "$(cat <<'EOF'\na\\b\nEOF\n)": None,
+        "$(cat -n <<'EOF'\nx\nEOF\n)": None,
+        "$(cd sub && cat <<'EOF'\nx\nEOF\n)": None,
+        "$(cat <<'EOF'\nx\nEOF\ncd sub\n)": None,
+        "$(cat <<'EOF' | tr x y\nx\nEOF\n)": None,
+    }
+    check("citeledger/cd-neutral-body-text", {word: body(word) for word in texts}, texts)
+    # The controls: each stays not judged, and a relative -F file in it is not read.
+    unjudged_m = ("warn", [("tools/a.py:1", "unjudged")], True)
+
+    def brief(command):
+        verdict, cites, _sources, _why, note = seen(command)
+        return verdict, cites, note
+    controls = {
+        heredoc("see tools/a.py:1\n", delim="EOF"): unjudged_m,
+        heredoc("see tools/a.py:1\n", delim="\"EOF\""): unjudged_m,
+        heredoc("see tools/a.py:1\n", delim="-'EOF'"): unjudged_m,
+        "git commit -m \"$(cd sub && cat <<'EOF'\nsee tools/a.py:1\nEOF\n)\"": unjudged_m,
+        "git commit -m \"$(echo x; cat <<'EOF'\nsee tools/a.py:1\nEOF\n)\"": unjudged_m,
+        "git commit -m \"$(cat <<'EOF'\nsee tools/a.py:1\nEOF\ncd sub\n)\"": unjudged_m,
+        "git commit -m \"$(cat <<'EOF'\nsee tools/a.py:1\nEOF)\"": unjudged_m,
+        heredoc("EOF) tools/a.py:1\n"): unjudged_m,
+        # unquoted, bash splits and globs the result; the lexer reads no citation from this form
+        "git commit -m $(cat <<'EOF'\nsee tools/a.py:1\nEOF\n)": ("warn", [], True),
+        "git commit --message \"$(cat <<'EOF'\nsee tools/a.py:1\nEOF\n)\"": unjudged_m,
+        "git commit -m\"$(cat <<'EOF'\nsee tools/a.py:1\nEOF\n)\"": unjudged_m,
+        "git commit -m \"x $(cat <<'EOF'\nsee tools/a.py:1\nEOF\n)\"": unjudged_m,
+        "cd sub && git commit -F \"$(cat <<EOF\nmsg.txt\nEOF\n)\"": ("warn", [], True),
+        "cd sub && git commit -F \"$(cd .. && cat <<'EOF'\nmsg.txt\nEOF\n)\"": ("warn", [], True),
+        "cd sub && set -e && git commit -F msg.txt": ("warn", [], True),
+        "git status && set -e && cd sub && git commit -F msg.txt": ("warn", [], True),
+        "set -P && cd sub && git commit -F msg.txt": ("warn", [], True),
+        "set -x && cd sub && git commit -F msg.txt": ("warn", [], True),
+        "set -o posix && cd sub && git commit -F msg.txt": ("warn", [], True),
+        "set -e x && cd sub && git commit -F msg.txt": ("warn", [], True),
+        "set +e && cd sub && git commit -F msg.txt": ("warn", [], True),
+        "set -- && cd sub && git commit -F msg.txt": ("warn", [], True),
+        "set -eo && cd sub && git commit -F msg.txt": ("warn", [], True),
+        "set -e > out.txt && cd sub && git commit -F msg.txt": ("warn", [], True),
+        "set -e | cat && cd sub && git commit -F msg.txt": ("warn", [], True),
+    }
+    check("citeledger/cd-neutral-controls", {command: brief(command) for command in controls}, controls)
+    # Without the widening (_citechk_neutral_words and _citechk_set_neutral made to admit nothing), each judged
+    # form above is named as not judged again, so the widening is what judges each of them.
+    saved = {name: getattr(aiqt_hooks, name, None) for name in ("_citechk_neutral_words", "_citechk_set_neutral")}
+    try:
+        aiqt_hooks._citechk_neutral_words = lambda seg: frozenset()
+        aiqt_hooks._citechk_set_neutral = lambda seg: False
+        unwidened = {case: run([case])[case][4] for case in judged}
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                delattr(aiqt_hooks, name)
+            else:
+                setattr(aiqt_hooks, name, value)
+    check("citeledger/cd-neutral-unwidened-variant", unwidened, {case: True for case in judged})
+    # The body search is linear: a 1 MiB body, and one of 2^19 short lines, each read under a second.
+    taken = []
+    for text in ("$(cat <<'EOF'\n" + "x" * (1 << 20) + "\nEOF\n)", "$(cat <<'EOF'\n" + "E\n" * (1 << 19) + "EOF\n)"):
+        began = time.perf_counter()
+        got = body(text)
+        taken.append((got is not None and got != "absent", time.perf_counter() - began < 1.0))
+    check("citeledger/cd-neutral-body-linear", taken, [(True, True), (True, True)])
 
 
 class _CiteCutPattern:
@@ -10303,16 +10435,16 @@ _CITECHK_COST_SHAPES = (
 # row; a command read both ways, whose lexed reading's row judges the citation and whose reading as written
 # warns too (its text is outside the one plain shape a scan as written is judged in, _CITECHK_RAW_PLAIN, or
 # it names an expansion); one read both ways whose text cites the range on every line of a here-document,
-# whose lexed reading's row names it not judged as often as the citation cap allows (_CITECHK_MAX_CITES), its
-# -m value a substitution outside the directory allowlist, and whose reading as written warns for the
-# citations past that cap; and a command scanned as written, whose row names the citation not judged (its
-# text is outside _CITECHK_RAW_PLAIN) or names an expansion of a here-document.
+# whose lexed reading's row judges it as often as the citation cap allows (_CITECHK_MAX_CITES), its -m value
+# a "$(cat <<'EOF' ... EOF)" substitution of the directory allowlist's directory-neutral class, and whose
+# reading as written warns for the citations past that cap; and a command scanned as written, whose row names
+# the citation not judged (its text is outside _CITECHK_RAW_PLAIN) or names an expansion of a here-document.
 _CITECHK_COST_CITED = [("tools/a.py:1", "unread")]
 _CITECHK_COST_UNJUDGED = [("tools/a.py:1", "unjudged")]
 _CITECHK_COST_ROWS = {"lexed": [("warn", "lexed", _CITECHK_COST_CITED)],
                       "both": [("warn", "both", _CITECHK_COST_CITED), ("warn", "both", [])],
                       "both, both warn": [("warn", "both", _CITECHK_COST_CITED), ("warn", "both", [])],
-                      "both, capped": [("warn", "both", _CITECHK_COST_UNJUDGED * aiqt_hooks._CITECHK_MAX_CITES),
+                      "both, capped": [("warn", "both", _CITECHK_COST_CITED * aiqt_hooks._CITECHK_MAX_CITES),
                                        ("warn", "both", [])],
                       "raw": [("warn", "raw", _CITECHK_COST_UNJUDGED)],
                       "raw, expanded": [("warn", "raw", [])]}
@@ -24665,6 +24797,7 @@ def _main_isolated(report_path=None):
             _citecheck_suffix_cases(tmp)
             _citecheck_cd_cases(tmp)
             _citecheck_cd_sound_cases(tmp)
+            _citecheck_cd_neutral_cases(tmp)
             _citeledger_walk_cases(tmp)
             _citecheck_step_cases(tmp)
             _citecheck_split_oracle_cases(tmp)

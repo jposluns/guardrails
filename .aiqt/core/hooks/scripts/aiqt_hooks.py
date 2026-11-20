@@ -31946,7 +31946,35 @@ _CITECHK_PLAIN_SEPS = frozenset(("&&", ";", ""))  # '' is a newline, which bash 
 _CITECHK_PLAIN_CD_BAD = frozenset("*?[]{}~")
 _CITECHK_SHAPE_WHY = ("the command line, up to and including this command, holds {}, a shape outside those this "
                       "check resolves exactly as bash does (plain words, git -C with a literal path, cd to one "
-                      "literal path, and && or ; between such commands)")
+                      "literal path, a leading set of -e, -u or -o pipefail, a git commit -m or -F value of "
+                      "\"$(cat <<'EOF' ... EOF)\" with its delimiter single-quoted, and && or ; between such "
+                      "commands)")
+# The directory-neutral class, two shapes added to the allowlist above. Each is shown from the bash manual and a
+# bash 5.3 run to leave the shell's working directory where it is, and for (a), to give git exactly the text
+# this check reads (the self-test's cd-neutral-* checks):
+#   (a) the value of a git commit -m or -F, as its own word after the option, that is one double-quoted command
+#       substitution holding only cat and one here-document whose delimiter is single-quoted:
+#       "$(cat <<'D'<newline>BODY D<newline>)", D of letters, digits and underscores, BODY empty or whole lines
+#       holding no double quote and no backslash, no line of BODY beginning with D, and only blanks and newlines
+#       between the delimiter line and the ')'. A $( ) substitution runs in a subshell, so nothing in it moves
+#       this shell (a ${ cmd; } one, which does not, is excluded above); with its delimiter quoted, bash expands
+#       nothing in the body; in double quotes the result is neither split nor globbed; and bash deletes its
+#       trailing newlines. So git is given BODY less its trailing newlines, which is the text this check reads
+#       for that value (_citechk_neutral_value), and for -F the file it names. A body line that begins with D (a
+#       line "D)", for one) can end the here-document in bash 5.3, so that body is outside the class, as is an
+#       unquoted delimiter (bash expands the body, $( ) and ${ cmd; } included), a double-quoted one, a <<-, any
+#       other command or word in the substitution, an unquoted or attached substitution and a long option.
+#   (b) set at the start of the line, before any other command, whose words are only -e, -u, -o errexit,
+#       -o nounset or -o pipefail, or a cluster of e and u that may end in an o taking one of those names
+#       (set -euo pipefail), with no redirection: errexit and nounset can only end the shell before a later
+#       command runs, and pipefail only changes a pipeline's status, a shape the allowlist never holds, so none
+#       moves the shell or changes what a later cd resolves (_citechk_set_neutral). Every other set option is
+#       outside it (-P makes cd resolve links, -x expands PS4 before each command, -k, -a and posix change how
+#       later words act), and so is a set after another command.
+_CITECHK_NEUTRAL_OPEN = re.compile(r"\$\(cat[ \t]+<<[ \t]*'([A-Za-z0-9_]+)'[ \t]*\n")
+_CITECHK_NEUTRAL_OPTIONS = ("-m", "-F")
+_CITECHK_NEUTRAL_SET_LETTERS = frozenset("eu")
+_CITECHK_NEUTRAL_SET_NAMES = frozenset(("errexit", "nounset", "pipefail"))
 # A command scanned as written is not lexed, so the walk never reads it: its directory counts as established
 # only where its text, read with each backslash-newline removed, is a git commit or gh pr create or edit at its
 # very start, then plain words, one here-document operator with a plain delimiter and plain words to the end of
@@ -31964,15 +31992,98 @@ _CITECHK_RAW_SHAPE_WHY = ("the command is scanned as written, not lexed, and its
                           "backquote after that line, so this check cannot show that its directory is the session's")
 
 
+def _citechk_neutral_body(word):
+    """The text bash gives for word where word, as the lexer read it from inside double quotes, is a
+    $(cat <<'D' ... D) substitution of the directory-neutral class (a) (the comment above
+    _CITECHK_NEUTRAL_OPEN): the here-document's body less its trailing newlines. None for any other word.
+    Linear in its length."""
+    found = _CITECHK_NEUTRAL_OPEN.match(word)
+    if found is None or not word.endswith(")"):
+        return None
+    delim = found.group(1)
+    inner = word[found.end():-1]
+    end = inner.rstrip(" \t\n")
+    if not inner[len(end):].startswith("\n"):
+        return None  # the delimiter line must end at a newline, with nothing after D on it
+    if end == delim:
+        body = ""
+    elif end.endswith("\n" + delim):
+        body = end[:-len(delim)]
+    else:
+        return None
+    if '"' in body or "\\" in body or any(line.startswith(delim) for line in body.split("\n")):
+        return None
+    return body.rstrip("\n")
+
+
+def _citechk_neutral_value(seg, value):
+    """The text bash gives git for value, the value of a git commit -m or -F in segment seg, where it is of the
+    directory-neutral class (a): its own word, written once in the segment, double-quoted exactly as the lexer
+    read it (so no quote or escape of the lexing changed it). None otherwise."""
+    if value is None:
+        return None
+    body = _citechk_neutral_body(value)
+    if body is None or seg.argv.count(value) != 1 or seg.raw.count('"' + value + '"') != 1:
+        return None
+    return body
+
+
+def _citechk_neutral_words(seg):
+    """The words of segment seg, a git commit, that are the value of its -m or -F option and of the
+    directory-neutral class (a), as a set (empty where there are none or seg is no git commit)."""
+    words = seg.argv
+    if not words or words[0] != "git":
+        return frozenset()
+    sub, args = _git_sub_and_args(words)
+    if sub != "commit":
+        return frozenset()
+    return frozenset(value for name, value in _citechk_options(args, _CITECHK_GIT_SHORT, _CITECHK_GIT_OPTIONAL,
+                                                               _CITECHK_GIT_LONG)
+                     if name in _CITECHK_NEUTRAL_OPTIONS and _citechk_neutral_value(seg, value) is not None)
+
+
+def _citechk_set_neutral(seg):
+    """Whether segment seg is a set of the directory-neutral class (b) (the comment above
+    _CITECHK_NEUTRAL_OPEN): set and one or more option words, each -e, -u, -o NAME or a cluster of e and u that
+    may end in an o taking NAME, NAME one of _CITECHK_NEUTRAL_SET_NAMES; no other word, no expansion, no
+    redirection and no ${ cmd; } text. Whether it leads the line is for _citechk_dirs."""
+    words = seg.argv
+    if len(words) < 2 or words[0] != "set" or any(seg.argv_opaque) or seg.redirects or _CITECHK_FUNSUB_RE.search(
+            seg.raw):
+        return False
+    i = 1
+    while i < len(words):
+        word = words[i]
+        if len(word) < 2 or word[0] != "-":
+            return False
+        letters = word[1:]
+        if letters.endswith("o"):
+            if i + 1 >= len(words) or words[i + 1] not in _CITECHK_NEUTRAL_SET_NAMES:
+                return False
+            letters = letters[:-1]
+            i += 1
+        if not set(letters) <= _CITECHK_NEUTRAL_SET_LETTERS:
+            return False
+        i += 1
+    return True
+
+
 def _citechk_plain(seg):
     """Why one segment of a lexing is outside the shapes the walk resolves exactly as bash does
     (_CITECHK_SHAPE_WHY, the comment above _CITECHK_BUILTINS), as the text _CITECHK_SHAPE_WHY names, or None
-    where it is one of them. Its separator is judged by _citechk_dirs, not here."""
+    where it is one of them. Its separator is judged by _citechk_dirs, not here, and so is a leading set of
+    the directory-neutral class (b). A word that is a git commit -m or -F value of the directory-neutral class
+    (a) is no expansion here (_citechk_neutral_words)."""
     words, aop = seg.argv, seg.argv_opaque
     if _CITECHK_FUNSUB_RE.search(seg.raw):
         return "a ${ cmd; } or ${| cmd; } substitution, which runs its commands in this shell"
+    neutral = None
     for word, opaque in zip(words, aop):
         if opaque:
+            if neutral is None:
+                neutral = _citechk_neutral_words(seg)
+            if word in neutral:
+                continue
             return "a word holding an expansion, a substitution, a ~ or a pattern ({})".format(_citechk_short(word))
     if any(red.target_class == "opaque" for red in seg.redirects):
         return "a redirection whose target this check cannot resolve"
@@ -32129,8 +32240,9 @@ def _citechk_dirs(segments, cwd):
     segment in order: directory cwd, or the one the cd and pushd segments before it establish (None with reason
     None where that is cwd and cwd is None), or (None, reason) where the walk cannot establish one directory;
     off is True where the segment, or one before it, is outside the allowlist (_citechk_plain, a separator
-    other than '&&', ';' or a newline before it), and then the directory is never established, with the
-    walk's own reason where it has one and _CITECHK_SHAPE_WHY otherwise, and no git -C overrides it. The
+    other than '&&', ';' or a newline before it; a set of the directory-neutral class that only sets of
+    that class precede, _citechk_set_neutral, is inside it), and then the directory is never established,
+    with the walk's own reason where it has one and _CITECHK_SHAPE_WHY otherwise, and no git -C overrides it. The
     allowlist is the rule; the walk below only narrows it further, so every reason it names still applies.
     Bash's and-or lists are followed: after 'cd D &&' the next command runs in D, and a command reached
     past a cd through ';', a newline, '||' or a later '||' or '&&' that a failed or skipped cd can reach may
@@ -32174,8 +32286,10 @@ def _citechk_dirs(segments, cwd):
     # one, judged BEFORE that segment's own directory is given, so a segment outside it (a ${ cmd; } on the
     # commit itself) is not judged either, nor any later one. It only adds to what the walk leaves unknown.
     shape = None
+    leading = True  # no command yet but sets of the directory-neutral class (b), which pass while this holds
     for seg in segments:
-        if shape is None:
+        if shape is None and not (leading and _citechk_set_neutral(seg)):
+            leading = leading and not seg.argv
             shape = _citechk_plain(seg)
         off = shape is not None
         if looped is None and seg.argv and (opens(seg.argv) or (
@@ -32319,6 +32433,10 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True, scan
         for name, value in options:
             if value is None:
                 continue
+            if evaluate and kind == "git-commit" and name in _CITECHK_NEUTRAL_OPTIONS:
+                # a value of the directory-neutral class (a) is read as the text bash gives git for it
+                body = _citechk_neutral_value(seg, value)
+                value = value if body is None else body
             if name in ("-B", "--base") and kind != "git-commit":
                 item["base"] = value
             elif not evaluate:
