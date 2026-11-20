@@ -9079,6 +9079,147 @@ def _citecheck_cd_neutral_cases(tmp):
     check("citeledger/cd-neutral-body-linear", taken, [(True, True), (True, True)])
 
 
+# _ansi_c_decode's text for each ANSI-C quote text, None where it gives none: each text below is what bash 5.3.9
+# printed for printf '%s' $'...' (a value past 0x7f, a NUL and an invalid code point aside, which bash prints as a
+# raw byte, ends the word at, or drops, and which the check does not read).
+_CITECHK_ANSI_C_TEXTS = {
+    "see tools/a.py:1\\n": "see tools/a.py:1\n",
+    "a\\tb\\r\\n": "a\tb\r\n",
+    "\\x41\\x4g\\x": "A\x04g\\x",
+    "\\101\\0101\\7\\8": "A\b1\a\\8",
+    "\\u0041\\U00000042\\u\\Ux": "AB\\u\\Ux",
+    "\\cA\\c?\\c\\\\x\\cz": "\x01\x7f\x1cx\x1a",
+    "\\x{41}\\x{000042}\\e\\E\\q": "AB\x1b\x1b\\q",
+    "\\'\\\"\\?\\\\\\a\\b\\f\\v": "'\"?\\\a\b\f\v",
+    "a\\c": "a\\c",
+    "$HOME `id` * ~": "$HOME `id` * ~",
+    "\\0": None,
+    "a\\x00b": None,
+    "\\400": None,
+    "\\xe9": None,
+    "\\u00e9": None,
+    "\\U0001F600": None,
+    "\\c@": None,
+    "\\cé": None,
+}
+
+
+def _citecheck_ansi_c_cases(tmp):
+    """An ANSI-C quote $'...' in a word the citation check reads. The lexer outside the check keeps each escaped
+    character as the character itself ($'c\\x64' read as cx64), while bash decodes it (cd), so the directory walk
+    and the message reading saw other words than bash runs: a command name, a cd or git -C operand or a -F path
+    spelled so read the wrong directory or file and allowed silently, and an -m value lost its newline or tab and,
+    with it, the citation git records. The check now lexes inside _AnsiCQuotes: a word with a part spelled through
+    an ANSI-C quote is outside the directory allowlist wherever it stands, so that command and every later one
+    are not judged and no relative message file they name is read; a git commit -m or --message value decoded
+    exactly as bash 5.3 decodes it (_ansi_c_decode) is read as that text and judged; and a value with an escape
+    not decoded exactly is not read. Repository r holds tools/a.py, a msg.txt that cites nothing, a sub/msg.txt
+    that cites tools/a.py:1 and a decoy sx75b/msg.txt that cites nothing; session ansi-read has read tools/a.py,
+    session ansi has read nothing. Then the guards of the directory-neutral class that no case pinned: each case
+    of citeledger/neutral-guards fails with that one guard removed."""
+    repo = _CiteRepo(tmp / "citecheck-ansi-c", {
+        "tools/a.py": b"a1\na2\n", "msg.txt": b"plain message\n", "sub/msg.txt": b"see tools/a.py:1\n",
+        "sx75b/msg.txt": b"decoy, cites nothing\n"})
+    a_py = os.path.realpath(str(repo.root / "tools" / "a.py"))
+    repo.call("Read", {"file_path": a_py}, {"type": "text", "file": {
+        "filePath": a_py, "content": "a1\na2", "startLine": 1, "numLines": 2}}, "ansi-read")
+
+    def seen(command, session="ansi"):
+        verdict, note, rows = _citecheck_run(repo.root, command, session)
+        return (verdict, [(c["cite"], c["class"]) for r in rows for c in r["detail"]["citations"]],
+                [r["detail"]["sources"] for r in rows],
+                [[entry.partition(": ")[0] for entry in r["detail"]["sources_unread"]] for r in rows],
+                "was not judged: the directory its command runs in is not established" in note)
+
+    def run(cases):
+        return {case: seen(*case) if isinstance(case, tuple) else seen(case) for case in cases}
+    # The review's reproductions: bash 5.3.9 ran each in sub (or read sub/msg.txt), whose message cites an unread
+    # file; each was allowed with no note. Each is now named as not judged, with no relative file read.
+    not_judged = ("warn", [], [[]], [["-F msg.txt"]], True)
+    reproductions = {
+        "$'c\\x64' sub && git commit -F msg.txt": not_judged,
+        "$'\\x63d' sub && git commit -F msg.txt": not_judged,
+        "$'\\u0063d' sub && git commit -F msg.txt": not_judged,
+        "$'\\145val' 'cd sub' && git commit -F msg.txt": not_judged,
+        "set -e && $'c\\x64' sub && git commit -F msg.txt": not_judged,
+        "cd $'s\\x75b' && git commit -F msg.txt": not_judged,
+        "git -C $'s\\x75b' commit -F msg.txt": not_judged,
+        "git commit -F $'s\\x75b/msg.txt'": ("warn", [], [[]], [["-F sub/msg.txt"]], True),
+        "set $'-e' && cd sub && git commit -F msg.txt": not_judged,
+        "cd sub && git commit -F $'msg.txt'": not_judged,
+        "git commit -m 'see tools/a.py:1' && cd $'s\\x75b' && git commit -F msg.txt":
+            ("warn", [("tools/a.py:1", "unread")], [["-m value"], []], [[], ["-F msg.txt"]], True),
+        "$'git' commit -m 'see tools/a.py:1'": ("warn", [("tools/a.py:1", "unjudged")], [["-m value"]], [[]], True),
+        "git $'commit' -m 'see tools/a.py:1'": ("warn", [("tools/a.py:1", "unjudged")], [["-m value"]], [[]], True),
+        "git commit -m 'see tools/a.py:1' > $'o\\x75t'":
+            ("warn", [("tools/a.py:1", "unjudged")], [["-m value"]], [[]], True),
+    }
+    check("citeledger/ansi-c-not-judged", run(reproductions), reproductions)
+    # An -m or --message value decoded exactly is read as the text bash gives git, and judged: bash 5.3.9 gave git
+    # "see tools/a.py:1\n" for the first, which the old reading took as "see tools/a.py:1n" and allowed.
+    unread_m = ("warn", [("tools/a.py:1", "unread")], [["-m value"]], [[]], False)
+    judged = {
+        "git commit -m $'see tools/a.py:1\\n'": unread_m,
+        ("git commit -m $'see tools/a.py:1\\n'", "ansi-read"):
+            ("allow", [("tools/a.py:1", "covered")], [["-m value"]], [[]], False),
+        "git commit -m $'Subject\\n\\nsee tools/a.py:1\\nmore'": unread_m,
+        "git commit -m $'see tools/a.py:1\\tok'": unread_m,
+        "git commit -m $'it\\'s tools/a\\x2epy:1'": unread_m,
+        "git commit -m$'see tools/a.py:1\\n'": unread_m,
+        "git commit -am $'see tools/a.py:1\\n'": unread_m,
+        "git commit --message=$'see tools/a.py:1\\n'":
+            ("warn", [("tools/a.py:1", "unread")], [["--message value"]], [[]], False),
+        "git commit --message $'see tools/a.py:1\\n'":
+            ("warn", [("tools/a.py:1", "unread")], [["--message value"]], [[]], False),
+        "cd sub && git commit -F msg.txt -m $'x\\n'":
+            ("warn", [("tools/a.py:1", "unread")], [["-F msg.txt", "-m value"]], [[]], False),
+    }
+    check("citeledger/ansi-c-message-judged", run(judged), judged)
+    # A value with an escape not decoded exactly (a byte or character past 0x7f, a NUL) is not read, and its
+    # command is not judged: no misread text is ever judged.
+    inexact = ("warn", [], [[]], [["-m value"]], True)
+    inexact_cases = {
+        "git commit -m $'see tools/a.py:1 \\xe9'": inexact,
+        "git commit -m $'see tools/a.py:1\\u00e9'": inexact,
+        "git commit -m $'see tools/a.py:1\\0more'": inexact,
+        "git commit -F $'/no\\xe9/msg.txt'": ("warn", [], [[]], [["-F /noxe9/msg.txt"]], True),
+    }
+    check("citeledger/ansi-c-inexact-unread", run(inexact_cases), inexact_cases)
+    decode = getattr(aiqt_hooks, "_ansi_c_decode", lambda raw: "absent")
+    check("citeledger/ansi-c-decode", {raw: decode(raw) for raw in _CITECHK_ANSI_C_TEXTS}, _CITECHK_ANSI_C_TEXTS)
+    # The guards of the directory-neutral class (the comment above _CITECHK_NEUTRAL_OPEN) that no case pinned, one
+    # case each, each failing with its one guard removed:
+    #   - the value written once among the words (argv.count): a double-quoted value and a single-quoted word of
+    #     the same text, which bash passes literally, leave the command not judged;
+    #   - the value double-quoted in the raw text (raw.count): a single-quoted word of the class's text is a
+    #     literal path, not a file the body names, so the file read is not sub/msg.txt;
+    #   - the substitution ending at ')' and the delimiter on its own line: the body text is None;
+    #   - the set option name: set -o noglob, which the walk follows, is outside the class;
+    #   - the set's opaque words and ${ cmd; } text: a set whose words are all read while a '${' is open, and one
+    #     whose raw text holds ${ in a comment, are no set of the class.
+    literal = "'$(cat <<'\"'\"'EOF'\"'\"'\nmsg.txt\nEOF\n)'"
+    as_written = "-F $(cat <<'EOF'\nmsg.txt\nEOF\n)"  # the value as a path, relative, so not read
+    guards = {
+        "git commit -F \"$(cat <<'EOF'\nmsg.txt\nEOF\n)\" -F " + literal:
+            ("warn", [], [[]], [[as_written, as_written]], True),
+        "cd sub && git commit -F " + literal: ("warn", [], [[]], [[as_written]], False),
+        "set -o noglob && cd sub && git commit -F msg.txt": ("warn", [], [[]], [["-F msg.txt"]], True),
+    }
+    got = run(guards)
+    body = getattr(aiqt_hooks, "_citechk_neutral_body", lambda word: "absent")
+    for word in ("$(cat <<'EOF'\nx\nEOF\nQ", "$(cat <<'EOF'\nxEOF\n)"):
+        got[word] = body(word)
+        guards[word] = None
+    neutral_set = getattr(aiqt_hooks, "_citechk_set_neutral", lambda seg: "absent")
+    for command, at, words in (("echo ${x:-; set -u -e\n}", 1, (["set", "-u", "-e"], [True, True, True])),
+                               ("set -e # ${ cd sub; }\ncd sub && git commit -F msg.txt", 0,
+                                (["set", "-e"], [False, False]))):
+        segs = aiqt_hooks._lex_command(command, heredocs=[], spans=[], nested=False, split_delims=True)
+        got[command] = (segs[at].argv, segs[at].argv_opaque, neutral_set(segs[at]))
+        guards[command] = words + (False,)
+    check("citeledger/neutral-guards", got, guards)
+
+
 class _CiteCutPattern:
     """Stands in for a compiled pattern of aiqt_hooks: match() is the pattern's own, and its cut-th call moves
     the stand-in clock set as clock on, so a scan that matches the pattern once per line reaches the
@@ -24798,6 +24939,7 @@ def _main_isolated(report_path=None):
             _citecheck_cd_cases(tmp)
             _citecheck_cd_sound_cases(tmp)
             _citecheck_cd_neutral_cases(tmp)
+            _citecheck_ansi_c_cases(tmp)
             _citeledger_walk_cases(tmp)
             _citecheck_step_cases(tmp)
             _citecheck_split_oracle_cases(tmp)

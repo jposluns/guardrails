@@ -649,6 +649,135 @@ class _WordSpellings:
         return False
 
 
+class _AnsiCSpelling(_WordSpelling):
+    """The _WordSpelling of a word read inside _AnsiCQuotes (and _WordSpellings) any part of which is spelled through
+    an ANSI-C quote $'...': its fields are those every other record has, so a reader that reads only them reads it as
+    before. _AnsiCExact marks a word whose every ANSI-C part was decoded exactly as bash 5.3 decodes it
+    (_ansi_c_decode); _AnsiCInexact one with a part that could not be (its text then holds that part as the word
+    reader reads it outside _AnsiCQuotes, which is not the text bash passes)."""
+
+    __slots__ = ()
+
+
+class _AnsiCExact(_AnsiCSpelling):
+    __slots__ = ()
+
+
+class _AnsiCInexact(_AnsiCSpelling):
+    __slots__ = ()
+
+
+class _AnsiCQuotes:
+    """A context in which the word reader decodes the text of each ANSI-C quote $'...' exactly as bash 5.3 does
+    (_ansi_c_decode), where it can, and, inside _WordSpellings too, records each word that holds one with an
+    _AnsiCSpelling (_AnsiCExact or _AnsiCInexact), and each redirect target that holds one as opaque. Outside it
+    the reader keeps each escaped character as the character itself (\\n read as n), the reading every other caller
+    relies on. Only the citation check lexes inside it (_citechk_commands). It restores the previous setting on
+    exit, as _WordSpellings does."""
+
+    on = False
+
+    def __enter__(self):
+        self.was_on = _AnsiCQuotes.on
+        _AnsiCQuotes.on = True
+        return self
+
+    def __exit__(self, *exc_info):
+        _AnsiCQuotes.on = self.was_on
+        return False
+
+
+# _ansi_c_decode reads the one-character escapes of an ANSI-C quote from _ANSI_C_NAMED (beside _ansi_c_decoded), as
+# bash 5.3 decodes them (lib/sh/strtrans.c, ansicstr, with the flags $'...' passes): \a \b \e \E \f \n \r \t \v, and
+# \\ \' \" \? as the character itself. Any other character after a backslash keeps the backslash (\z is \z), and so
+# does \x, \u or \U followed by no hex digit.
+_ANSI_C_HEX = frozenset("0123456789abcdefABCDEF")
+_ANSI_C_OCTAL = frozenset("01234567")
+
+
+def _ansi_c_decode(raw):
+    """The text bash 5.3 passes for an ANSI-C quote whose text between $' and the closing quote is raw, or None
+    where it cannot be given exactly. Decoded as ansicstr does: the one-character escapes above; \\NNN, one to
+    three octal digits; \\xHH, one or two hex digits, and \\x{H...}, any number of them up to a '}' (consumed when
+    present); \\uHHHH and \\UHHHHHHHH, one to four and one to eight hex digits; \\cX, the control character of X
+    (X upper-cased, its low five bits; \\c? is DEL), where a \\c\\\\ takes both backslashes as X, and a \\c ending
+    the quote is kept as written. Each octal or \\x value keeps its low eight bits. None where a value is NUL
+    (bash ends the word's text there), is past 0x7f (an octal or \\x value is one raw byte, and a \\u or \\U value
+    is encoded in the locale's character set, neither of which this check reads as text), or where a \\c takes a
+    character past 0x7f, so a value read here is the one bash passes, never a guess. Linear in the length of raw. It differs from
+    _ansi_c_decoded, which reads every quote of a command for a parse-failure fallback where an extra reading can
+    only add a match, and so gives a character for a NUL or a value past 0x7f and has no \\x{...} form."""
+    out = []
+    i, n = 0, len(raw)
+    while i < n:
+        c = raw[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        if i + 1 >= n:
+            return None  # a backslash before the closing quote escapes it, so the word reader never gives this
+        e = raw[i + 1]
+        i += 2
+        if e in _ANSI_C_NAMED:
+            out.append(_ANSI_C_NAMED[e])
+            continue
+        if e in _ANSI_C_OCTAL:
+            value, more = int(e), 2
+            while more and i < n and raw[i] in _ANSI_C_OCTAL:
+                value = value * 8 + int(raw[i])
+                i += 1
+                more -= 1
+            value &= 0xFF
+        elif e == "x":
+            if i < n and raw[i] == "{":
+                i += 1
+                value = 0
+                while i < n and raw[i] in _ANSI_C_HEX:
+                    value = value * 16 + int(raw[i], 16)
+                    i += 1
+                if i < n and raw[i] == "}":
+                    i += 1
+            else:
+                value, more = 0, 2
+                while more and i < n and raw[i] in _ANSI_C_HEX:
+                    value = value * 16 + int(raw[i], 16)
+                    i += 1
+                    more -= 1
+                if more == 2:
+                    out.append("\\x")
+                    continue
+            value &= 0xFF
+        elif e in "uU":
+            value, more = 0, 4 if e == "u" else 8
+            digits = more
+            while more and i < n and raw[i] in _ANSI_C_HEX:
+                value = value * 16 + int(raw[i], 16)
+                i += 1
+                more -= 1
+            if more == digits:
+                out.append("\\" + e)
+                continue
+        elif e == "c":
+            if i >= n:
+                out.append("\\c")  # bash 5.3 passes a \c that ends the quote as written
+                continue
+            x = raw[i]
+            i += 1
+            if x == "\\" and i < n and raw[i] == "\\":
+                i += 1
+            if ord(x) > 0x7F:
+                return None
+            value = 0x7F if x == "?" else ord(x.upper()) & 0x1F
+        else:
+            out.append("\\" + e)
+            continue
+        if value == 0 or value > 0x7F:
+            return None
+        out.append(chr(value))
+    return "".join(out)
+
+
 class _LexStops:
     """A context in which every partial lex that stops before the end of the command records, in seen, one (start,
     words) pair per pass that stops: start, the index of the token it could not read, where the text it read no word
@@ -1478,6 +1607,7 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
     started = False
     all_digits = True
     leading_tilde = False
+    ansi_c = 0  # inside _AnsiCQuotes: 1 once an ANSI-C quote is read and decoded exactly, 2 once one is not
     # The index just past the last unquoted, unescaped '$' (a '{' read there opens '${') and just past the last
     # backquote that may open a substitution (a '#' read there is cannot-evaluate). Recording where each ends,
     # set only on those characters, leaves every other character free of this bookkeeping (COST above).
@@ -1622,6 +1752,7 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
                 literal = sum(map(len, chars))
             unquoted = True
             i += 2
+            ansi_at, ansi_from = i, len(chars)
             while True:
                 if i >= n:
                     raise ValueError("unterminated ANSI-C ($'...') quote")
@@ -1635,6 +1766,17 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
                     break
                 chars.append(d)
                 i += 1
+            if _AnsiCQuotes.on:
+                # Inside _AnsiCQuotes the quote's text is bash's where it decodes exactly; where it does not, the
+                # reading above stays and the word is marked inexact (_AnsiCInexact), so no reader takes it as
+                # the text bash passes.
+                decoded = _ansi_c_decode(command[ansi_at:i - 1])
+                if decoded is None:
+                    ansi_c = 2
+                else:
+                    del chars[ansi_from:]
+                    chars.append(decoded)
+                    ansi_c = ansi_c or 1
             all_digits = False
             continue
         if c == "\\":  # unquoted escape: the next character is literal (a backslash-newline continuation
@@ -1708,6 +1850,8 @@ def _read_word(command, i, n, nest=None, glued=False, hash_reading=None, locale=
         literal = len(text) if literal < 0 else literal
         spelling[0] = (_WORD_SPELLINGS[4 * literal + 2 * brace + unquoted] if literal < 64
                        else _WordSpelling(literal, brace, unquoted))
+        if ansi_c:
+            spelling[0] = (_AnsiCExact if ansi_c == 1 else _AnsiCInexact)(*spelling[0])
     return text, opaque, started, all_digits, leading_tilde, i
 
 
@@ -3038,12 +3182,15 @@ def _lex_pass(command, partial, hash_reading, locale, subst_heredocs, skip_empty
         if (k >= n or command[k] == "\n" or command[k] in _METACHARS
                 or (command[k] == "#" and not hash_target)):
             raise ValueError("malformed redirect: no target")
+        t_spelled = [None] if _AnsiCQuotes.on else None
         target, t_opaque, started, _digits, t_ltilde, k2 = _read_word(command, k, n, nest,
                                                                       hash_reading=hash_reading, locale=locale,
-                                                                      heredoc=subst_heredocs, spans=spans,
-                                                                      nested=nested, marks=True)
+                                                                      heredoc=subst_heredocs, spelling=t_spelled,
+                                                                      spans=spans, nested=nested, marks=True)
         if not started:
             raise ValueError("malformed redirect target")
+        if t_spelled is not None and isinstance(t_spelled[0], _AnsiCSpelling):
+            t_opaque = True  # inside _AnsiCQuotes a target spelled through an ANSI-C quote is one not resolved
         redirects.append(_classify_redirect(op, src_fd, target, t_opaque, t_ltilde))
         return k2
 
@@ -31129,11 +31276,13 @@ _CITECHK_BLIND = (".ipynb", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp")  #
 _CITECHK_FLAGGED = frozenset(("unread", "stale", "nofile", "unrecordable", "unjudged"))
 
 
-def _citechk_options(args, short, optional, long_names):
+def _citechk_options(args, short, optional, long_names, indexed=False):
     """The (name, value) pairs of a command's value-taking options, in order, up to a '--' word: a long option
     written --name=VALUE, a long name in long_names followed by its value word, and a short option in short,
     attached (-mVALUE) or followed by its value word, alone or ending a cluster of flags (-am VALUE). A short
-    option in optional takes only an attached value. A value missing at the end of the words is None."""
+    option in optional takes only an attached value. A value missing at the end of the words is None. With
+    indexed True each is a (name, value, at) triple, at the index in args of the word that holds the value (None
+    where the value is missing)."""
     out, i = [], 0
     while i < len(args):
         word = args[i]
@@ -31143,9 +31292,9 @@ def _citechk_options(args, short, optional, long_names):
         if word.startswith("--"):
             name, eq, value = word.partition("=")
             if eq:
-                out.append((name, value))
+                out.append((name, value, i - 1))
             elif word in long_names:
-                out.append((word, args[i] if i < len(args) else None))
+                out.append((word, args[i] if i < len(args) else None, i if i < len(args) else None))
                 i += 1
         elif word.startswith("-"):
             for j in range(1, len(word)):
@@ -31153,12 +31302,23 @@ def _citechk_options(args, short, optional, long_names):
                     break
                 if word[j] in short:
                     if j + 1 < len(word):
-                        out.append(("-" + word[j], word[j + 1:]))
+                        out.append(("-" + word[j], word[j + 1:], i - 1))
                     else:
-                        out.append(("-" + word[j], args[i] if i < len(args) else None))
+                        out.append(("-" + word[j], args[i] if i < len(args) else None, i if i < len(args) else None))
                         i += 1
                     break
-    return out
+    return out if indexed else [(name, value) for name, value, _at in out]
+
+
+def _citechk_ansi_c(words, at):
+    """The ANSI-C spelling of word at of words, a segment's argv as the citation check lexes it (inside
+    _WordSpellings and _AnsiCQuotes): _AnsiCExact where a part of it is spelled through an ANSI-C quote $'...' and
+    every such part was decoded exactly as bash 5.3 decodes it, _AnsiCInexact where one could not be, and None
+    where no part is (or at is None, or words carries no spelling record)."""
+    spelling = getattr(words, "spelling", None)
+    if spelling is None or at is None or at >= len(spelling) or not isinstance(spelling[at], _AnsiCSpelling):
+        return None
+    return type(spelling[at])
 
 
 def _citechk_short(path):
@@ -31728,8 +31888,12 @@ def _citechk_commands(command, cwd, deadline):
     for nested in nestings:
         heredocs, spans = [], []
         try:
-            readings.append((_lex_command(command, heredocs=heredocs, spans=spans, nested=nested,
-                                          split_delims=True), heredocs, spans))
+            # Each word's spelling is recorded, and each ANSI-C quote decoded as bash 5.3 decodes it where it can
+            # be (_AnsiCQuotes): a word that holds one is outside the directory allowlist (_citechk_plain), and a
+            # message, body or file value that holds one not decoded exactly is not read (_citechk_items).
+            with _WordSpellings(), _AnsiCQuotes():
+                readings.append((_lex_command(command, heredocs=heredocs, spans=spans, nested=nested,
+                                              split_delims=True), heredocs, spans))
         except ValueError:
             continue
     if not readings:
@@ -31930,7 +32094,14 @@ _CITECHK_RAW_DIR_WHY = ("the command is scanned as written, and its text, read w
 #     what a later cd or command word does (set, shopt, export, declare, read, printf -v, alias, enable, hash);
 #   - a cd is exactly cd and one literal operand that is no option, no '-' and holds no pattern or brace
 #     character, so cd -P, cd -- and cd ~ are outside it;
-#   - a git -C with a literal path is a plain word of the git command, resolved by _citechk_items.
+#   - a git -C with a literal path is a plain word of the git command, resolved by _citechk_items;
+#   - no word, and no redirection target, holds a part spelled through an ANSI-C quote $'...', whose escapes the
+#     walk would otherwise read as other text than bash passes ($'c\x64' is cd to bash): such a word is outside
+#     the allowlist wherever it stands (a command name, a cd or git -C operand, a -F path, a set option), so that
+#     command and every later one are not judged and no relative message file they name is read. The one
+#     exception is the value of a git commit -m or --message whose every ANSI-C part decodes exactly as bash 5.3
+#     decodes it (_ansi_c_decode, _citechk_message_words): it is text git records, read as the text bash passes.
+#     A message, body or file value with a part that does not decode exactly is not read (_CITECHK_ANSI_C_INEXACT).
 # Bash's builtins (5.3), each named so that none outside the plain few is taken for a program that moves nothing.
 _CITECHK_BUILTINS = frozenset((
     ".", ":", "[", "alias", "bg", "bind", "break", "builtin", "caller", "cd", "command", "compgen", "complete",
@@ -31949,6 +32120,10 @@ _CITECHK_SHAPE_WHY = ("the command line, up to and including this command, holds
                       "literal path, a leading set of -e, -u or -o pipefail, a git commit -m or -F value of "
                       "\"$(cat <<'EOF' ... EOF)\" with its delimiter single-quoted, and && or ; between such "
                       "commands)")
+_CITECHK_ANSI_C_SHAPE = "a word spelled through an ANSI-C quote $'...' ({})"
+_CITECHK_ANSI_C_INEXACT = ("it is spelled through an ANSI-C quote $'...' with an escape this check does not decode "
+                           "exactly as bash does (a NUL, a byte past 0x7f, or a \\u or \\U character past 0x7f, "
+                           "which bash encodes in the locale's character set), so the text bash passes is not known")
 # The directory-neutral class, two shapes added to the allowlist above. Each is shown from the bash manual and a
 # bash 5.3 run to leave the shell's working directory where it is, and for (a), to give git exactly the text
 # this check reads (the self-test's cd-neutral-* checks):
@@ -32037,9 +32212,34 @@ def _citechk_neutral_words(seg):
     sub, args = _git_sub_and_args(words)
     if sub != "commit":
         return frozenset()
-    return frozenset(value for name, value in _citechk_options(args, _CITECHK_GIT_SHORT, _CITECHK_GIT_OPTIONAL,
-                                                               _CITECHK_GIT_LONG)
-                     if name in _CITECHK_NEUTRAL_OPTIONS and _citechk_neutral_value(seg, value) is not None)
+    offset = len(words) - len(args)
+    # A word spelled through an ANSI-C quote is never of the class (_citechk_ansi_c): its text is not the one the
+    # class reads from inside double quotes.
+    return frozenset(value for name, value, at in _citechk_options(args, _CITECHK_GIT_SHORT, _CITECHK_GIT_OPTIONAL,
+                                                                   _CITECHK_GIT_LONG, indexed=True)
+                     if name in _CITECHK_NEUTRAL_OPTIONS and _citechk_neutral_value(seg, value) is not None
+                     and (at is None or _citechk_ansi_c(words, offset + at) is None))
+
+
+def _citechk_message_words(seg):
+    """The indices in segment seg's argv of the words that hold the value of a git commit -m or --message option
+    (its own word, or attached: -mVALUE, -amVALUE, --message=VALUE), as a set (empty where seg is no git commit
+    whose command word is its first word). Such a value is text git records and runs nothing, so where it is
+    spelled through an ANSI-C quote decoded exactly (_AnsiCExact) it is no shape outside the directory allowlist
+    (_citechk_plain); the word that names the option is the same word only in the attached forms, whose option
+    letters bash passes as written."""
+    words = seg.argv
+    if not words or words[0] != "git" or _citechk_ansi_c(words, 0) is not None:
+        return frozenset()
+    sub, args = _git_sub_and_args(words)
+    if sub != "commit":
+        return frozenset()
+    offset = len(words) - len(args)
+    if _citechk_ansi_c(words, offset - 1) is not None:
+        return frozenset()  # the subcommand word itself spelled through an ANSI-C quote
+    return frozenset(offset + at for name, _value, at in _citechk_options(
+        args, _CITECHK_GIT_SHORT, _CITECHK_GIT_OPTIONAL, _CITECHK_GIT_LONG, indexed=True)
+        if name in ("-m", "--message") and at is not None)
 
 
 def _citechk_set_neutral(seg):
@@ -32051,6 +32251,8 @@ def _citechk_set_neutral(seg):
     if len(words) < 2 or words[0] != "set" or any(seg.argv_opaque) or seg.redirects or _CITECHK_FUNSUB_RE.search(
             seg.raw):
         return False
+    if any(_citechk_ansi_c(words, at) is not None for at in range(len(words))):
+        return False  # a word spelled through an ANSI-C quote is outside the allowlist (_citechk_plain)
     i = 1
     while i < len(words):
         word = words[i]
@@ -32077,6 +32279,13 @@ def _citechk_plain(seg):
     words, aop = seg.argv, seg.argv_opaque
     if _CITECHK_FUNSUB_RE.search(seg.raw):
         return "a ${ cmd; } or ${| cmd; } substitution, which runs its commands in this shell"
+    spelling = getattr(words, "spelling", None)
+    if spelling is not None and any(isinstance(record, _AnsiCSpelling) for record in spelling):
+        message = _citechk_message_words(seg)
+        for at, word in enumerate(words):
+            kind = _citechk_ansi_c(words, at)
+            if kind is not None and not (kind is _AnsiCExact and at in message):
+                return _CITECHK_ANSI_C_SHAPE.format(_citechk_short(word))
     neutral = None
     for word, opaque in zip(words, aop):
         if opaque:
@@ -32412,14 +32621,18 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True, scan
                     else:
                         repo = os.path.join(repo, target) if repo else None
                 i += 2 if "=" not in argv[i] and argv[i] in _GIT_ARG_OPTS else 1
-            options = _citechk_options(args, _CITECHK_GIT_SHORT, _CITECHK_GIT_OPTIONAL, _CITECHK_GIT_LONG)
+            options = _citechk_options(args, _CITECHK_GIT_SHORT, _CITECHK_GIT_OPTIONAL, _CITECHK_GIT_LONG,
+                                       indexed=True)
+            base = len(seg.argv) - len(args)  # where args begins in seg.argv, whose words carry their spelling
         elif word == "gh":
             rest = argv[at + 1:]
             if len(rest) < 2 or rest[0] != "pr" or rest[1] not in ("create", "edit"):
                 continue
             kind = "gh-pr-" + rest[1]
-            options = [(name, value[1:] if len(name) == 2 and value and value.startswith("=") else value)
-                       for name, value in _citechk_options(rest[2:], _CITECHK_GH_SHORT, "", _CITECHK_GH_LONG)]
+            options = [(name, value[1:] if len(name) == 2 and value and value.startswith("=") else value, place)
+                       for name, value, place in _citechk_options(rest[2:], _CITECHK_GH_SHORT, "", _CITECHK_GH_LONG,
+                                                                  indexed=True)]
+            base = len(seg.argv) - len(rest) + 2
         else:
             continue
         inline_names, file_names = _CITECHK_SOURCES[kind]
@@ -32430,10 +32643,17 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True, scan
                                     for red in seg.redirects[here[0]:]):
             here = None  # a later redirect of fd 0 replaces the here-document, unless it is fd 0 onto itself
         taken = False  # whether standard input has been taken
-        for name, value in options:
+        for name, value, place in options:
             if value is None:
                 continue
-            if evaluate and kind == "git-commit" and name in _CITECHK_NEUTRAL_OPTIONS:
+            ansi = _citechk_ansi_c(seg.argv, base + place)
+            if evaluate and ansi is _AnsiCInexact and (name in inline_names or name in file_names
+                                                       or (name in ("-B", "--base") and kind != "git-commit")):
+                # a value holding an ANSI-C quote that does not decode exactly is never read as bash's text
+                label = "{} value".format(name) if name in inline_names else "{} {}".format(name, _citechk_short(value))
+                item["unread"].append((label, _CITECHK_ANSI_C_INEXACT))
+                continue
+            if evaluate and kind == "git-commit" and name in _CITECHK_NEUTRAL_OPTIONS and ansi is None:
                 # a value of the directory-neutral class (a) is read as the text bash gives git for it
                 body = _citechk_neutral_value(seg, value)
                 value = value if body is None else body
