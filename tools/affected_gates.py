@@ -41,7 +41,8 @@ to REV only (no working tree), for judging a past change. Every git call is chec
 --no-renames (both sides of a rename are changed paths), with external diff and textconv off, the
 inherited GIT_* environment dropped, the global and system git configuration and the user-wide
 excludes file suppressed, and nothing is fetched. Additions, deletions, mode changes and type
-changes are all changed paths; a submodule (gitlink) change selects the whole roster. A missing or
+changes are all changed paths; a submodule (gitlink) change, and an untracked embedded repository
+(which git lists as one "dir/" entry, never its files), select the whole roster. A missing or
 ambiguous revision, a shallow repository, no or several merge bases, an unmerged index entry, a
 failed git call, an unreadable declaration and a path that is not strict UTF-8 are cannot-evaluate.
 NOT MEASURED: ignored files and the external environment are not part of the change set, so a
@@ -451,7 +452,7 @@ def select(gates, manifest, changes):
             for path in uncovered]
     for change in changes:
         if change.gitlink:
-            full.append("submodule change {}".format(change.path))
+            full.append("submodule or embedded repository change {}".format(change.path))
         for pattern, rx in manifest.full_roster:
             if rx.fullmatch(change.path):
                 full.append("full-roster: {} matches {}".format(change.path, pattern))
@@ -566,7 +567,10 @@ def collect_changes(root, base, head_rev=None, env=None):
         changes += parse_raw_diff(_git(root, diff + ["--"], env)[0], "unstaged")
         out, _err = _git(root, ["ls-files", "-z", "--others", "--exclude-standard"], env)
         for raw_path in [p for p in out.split(b"\0") if p]:
-            changes.append(Change(_decode_path(raw_path), ("untracked",), False))
+            # ls-files names an untracked embedded repository as one "dir/" entry, never its files, so
+            # no glob can match what it holds: like a gitlink, it selects the whole roster.
+            path = _decode_path(raw_path)
+            changes.append(Change(path, ("untracked",), path.endswith("/")))
     merged = {}
     for change in changes:
         if change.path in merged:
@@ -1442,11 +1446,18 @@ def _self_test_selection(gates, manifest):
     check("miss/hooks-test-helper-selects-dangerous-api", sel is not None and "dangerous-api" in sel, sel)
     sel = _selected_names(gates, manifest, [".aiqt/core/hooks/ORCHESTRATION.md"])
     check("miss/aiqt-markdown-selects-links", sel is not None and "links" in sel, sel)
+    # The #1309 miss: a change to the hooks self-test alone whose member checks did not run the
+    # git-fixture-env-core suite, which reruns that self-test under poisoned host git configuration.
+    sel = _selected_names(gates, manifest, ["tools/selftest_aiqt_hooks.py"])
+    check("miss/hooks-test-helper-selects-git-fixture-env-core",
+          sel is not None and "git-fixture-env-core" in sel, sel)
     # Each row fails once its own mapping is narrowed to the gate's script alone (a mutation).
     for check_id, path, name in (
             ("flip/review-labels-missed-without-mapping", "tools/check_release_build.py", "review-labels"),
             ("flip/dangerous-api-missed-without-mapping", "tools/selftest_aiqt_hooks.py", "dangerous-api"),
-            ("flip/links-missed-without-mapping", ".aiqt/core/hooks/ORCHESTRATION.md", "links")):
+            ("flip/links-missed-without-mapping", ".aiqt/core/hooks/ORCHESTRATION.md", "links"),
+            ("flip/git-fixture-env-core-missed-without-mapping", "tools/selftest_aiqt_hooks.py",
+             "git-fixture-env-core")):
         flipped = _selected_names(gates, _narrowed(manifest, name), [path])
         check(check_id, flipped is not None and name not in flipped, flipped)
     # Lower bounds of the change classes, also independent of the declarations under test.
@@ -1722,6 +1733,21 @@ def _self_test_git(work):
           (code, doc.get("status"), doc.get("uncovered")))
     (repo / "newdir/notes.md").unlink()
     (repo / "newdir").rmdir()
+    # An untracked embedded repository inside a reviewed domain is listed as one "dir/" entry that no
+    # glob matches: it selects the whole roster, as its gitlink would once staged.
+    embedded = repo / "tools/embedded"
+    _write(embedded / "check_inner.py", "x = 1\n")
+    _fixture_git(embedded, ["init", "-q"], env)
+    _fixture_git(embedded, ["add", "-A"], env)
+    _fixture_git(embedded, ["commit", "-q", "-m", "inner"], env)
+    code, out, _err = _launch(repo, ["--base", base, "--json"], env)
+    doc = _json_selection(out) or {}
+    marked = [c for c in doc.get("changed") or [] if c["path"] == "tools/embedded/"]
+    check("git/untracked-embedded-repository-selects-full-roster",
+          code == 0 and [s["gate"] for s in doc.get("selected") or []] == every
+          and len(marked) == 1 and marked[0]["submodule"] is True,
+          (code, marked, len(doc.get("selected") or [])))
+    shutil.rmtree(embedded)
 
     repo2, base2 = _fixture_repo(work, "r2", env)
     _fixture_git(repo2, ["mv", "tools/selftest_aiqt_hooks.py", "docs/moved.py"], env)
@@ -1755,6 +1781,13 @@ def _self_test_git(work):
     always = [n for n in out.split("\n") if n]
     check("git/empty-change-set-exit-0", code == 0 and always and "child-status" in always
           and "links" not in always, always[:5])
+    # The #1309 change end to end: one commit touching the hooks self-test alone, judged with --head.
+    _write(repo3 / "tools/selftest_aiqt_hooks.py", "def helper():\n    return 3\n")
+    _fixture_git(repo3, ["commit", "-q", "-am", "hooks helper"], env)
+    code, out, _err = _launch(repo3, ["--base", base3, "--head", "HEAD"], env)
+    check("git/hooks-helper-commit-selects-git-fixture-env-core",
+          code == 0 and "git-fixture-env-core" in out.split("\n") and "dangerous-api" in out.split("\n"),
+          (code, out[:200]))
     _write(repo3 / MANIFEST_REL, _read_bounded(repo3 / MANIFEST_REL) + b"\n")
     code, out, _err = _launch(repo3, ["--base", base3], env)
     check("git/declaration-change-selects-roster", code == 0 and "links" in out.split("\n")
@@ -1862,8 +1895,9 @@ def self_test():
         return 1
     print("SELF-TEST PASS: affected_gates {} checks (the roster is read through the parity loader with "
           "baseline-pin as one gate and the inline gitleaks scan named; declarations equal the roster; the "
-          "three named misses are selected and each is missed once its mapping is narrowed; a path no "
-          "declaration covers selects the full roster; bad revisions, shallow history, unmerged entries, git "
+          "named misses (git-fixture-env-core for a hooks self-test change among them) are selected and each "
+          "is missed once its mapping is narrowed; a path no declaration covers and an untracked embedded "
+          "repository select the full roster; bad revisions, shallow history, unmerged entries, git "
           "failures and non-UTF-8 paths exit 2 with no selection; the observation copy is the index exactly "
           "and metadata-only reads are held by the declarations)".format(len(EXECUTED)))
     return 0
