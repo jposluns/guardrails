@@ -1546,9 +1546,47 @@ def _watchdog_timer_case(label, mode, bounded=None, clock=None):
     return EXIT_OK
 
 
-# The watchdog isolation self-test's per-case process bound: each of its
-# timer cases is one fixture call with this timeout.
+# The watchdog isolation self-test's per-case process bounds. Each timer case
+# is one fixture call; a call killed at its bound is no verdict (the distinct
+# CANNOT-EVALUATE), never a failure, so the bound decides only how long a
+# hung fixture is waited for, never a case's verdict. Each label's bound is
+# MEASURED BASE x MARGIN, with the former flat bound as its floor:
+#   bound(label) = max(_WATCHDOG_ISOLATION_TIMEOUT,
+#                      _WATCHDOG_ISOLATION_MARGIN * measured worst for label)
+# A case's cost is its label's module self-test, so its duration grows as
+# the fixture's CPU share shrinks, and the flat 180 s alone was reachable:
+# check/single took 197.34 s under the load below.
+# Measured 2026-11-20 on a 96-CPU host, each case launched exactly as
+# below (run_status_owned, fresh fixture process), seconds per label as
+# "alone (unpinned), 8 busy loops on 4 CPUs, 8 busy loops on 1 CPU" (under
+# load the test is pinned to its loops' CPUs; the first two cover every
+# mode, the 1-CPU runs the mode slowest at 4 CPUs, and views/inactive):
+#   changelog 2.35, 2.86, 9.21    views 27.23, 39.39, 88.83
+#   store     5.18, 12.44, 38.93  check 18.49, 45.44, 197.34
+#   emit     23.23, 39.16, 124.54 window 2.80, 4.60, 8.58
+# The table holds each label's worst; the margin covers heavier load than
+# measured and the modes not measured at 1 CPU (at 4 CPUs a label's
+# slowest mode took up to 2.1 times its fastest: changelog, 1.36 to 2.86 s).
 _WATCHDOG_ISOLATION_TIMEOUT = 180
+_WATCHDOG_ISOLATION_MARGIN = 5
+_WATCHDOG_ISOLATION_MEASURED = {
+    "changelog": 9.21, "views": 88.83, "store": 38.93,
+    "check": 197.34, "emit": 124.54, "window": 8.58,
+}
+
+
+def _watchdog_isolation_timeout(label):
+    """One isolation case's process bound: its label's measured worst
+    duration times the margin, never under the former flat bound."""
+    return max(_WATCHDOG_ISOLATION_TIMEOUT,
+               _WATCHDOG_ISOLATION_MARGIN * _WATCHDOG_ISOLATION_MEASURED[label])
+
+
+def _watchdog_isolation_budget():
+    """The isolation matrix's declared budget: every case charged its
+    allowance at its own measured bound."""
+    return sum(_deadline_case_budget(_watchdog_isolation_timeout(label))
+               for label, _mode in _watchdog_isolation_cases())
 
 
 def _watchdog_isolation_cases():
@@ -1587,7 +1625,7 @@ def _watchdog_isolation_self_test(launch=None):
         return run_status_owned([sys.executable, "-I", "-B", "-c", code],
                                 fixture_id="timer/" + label + "/" + mode,
                                 capture_output=True, text=True,
-                                timeout=_WATCHDOG_ISOLATION_TIMEOUT)
+                                timeout=_watchdog_isolation_timeout(label))
 
     launch = real_launch if launch is None else launch
     failed = False
@@ -1609,7 +1647,7 @@ def _watchdog_isolation_self_test(launch=None):
             unevaluated.append(label + "/" + mode)
             print("opf watchdog isolation: CANNOT EVALUATE", label, mode,
                   "fixture reached its %ss process bound (no verdict)"
-                  % _WATCHDOG_ISOLATION_TIMEOUT, file=sys.stderr)
+                  % _watchdog_isolation_timeout(label), file=sys.stderr)
             continue
         if verdict == "cannot-evaluate":
             # The fixture exited clean with the exact marker: its exercise
@@ -15975,7 +16013,9 @@ def _watchdog_load_route_vectors():
     _PREMATURE_EXIT_LAUNCH_TIMEOUT. escalate-degraded: _watchdog_bounded_await reads an
     expired setup wait as no verdict (pre-fix: an AssertionError), an expired guarded wait
     as an AssertionError, and the guarded wait whose kill is observed pending as no
-    verdict."""
+    verdict. blocked-isolation: every isolation case is launched at its label's measured
+    bound, never under the margin times that label's recorded worst duration (pre-fix:
+    one flat 180 s, which a check case reached under CPU contention)."""
     import contextlib
     import io
     import subprocess
@@ -16047,6 +16087,47 @@ def _watchdog_load_route_vectors():
         got = awaited(*args)
         if got != want:
             misses.append("bounded await %r -> %r, want %r" % (args[:1] + args[2:], got, want))
+
+    # blocked-isolation: the real isolation self-test, run in process over a
+    # scripted run_status_owned, launches every case at its label's measured
+    # bound, and each bound covers the margin over that label's recorded
+    # worst duration (pre-fix: one flat _WATCHDOG_ISOLATION_TIMEOUT for every
+    # case, under the margin times the measured worst of four labels).
+    launched = []
+
+    def isolation_owned(argv, *, fixture_id, timeout, **kwargs):
+        launched.append((fixture_id, timeout))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    with patch.object(emit, "run_status_owned", isolation_owned), \
+            contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        rc = _watchdog_isolation_self_test()
+    cases = _watchdog_isolation_cases()
+    want = [("timer/%s/%s" % (label, mode), _watchdog_isolation_timeout(label))
+            for label, mode in cases]
+    if rc != EXIT_OK or launched != want:
+        misses.append("isolation launches %r (exit %r), want %r" % (launched, rc, want))
+    labels = set(label for label, _mode in cases)
+    if set(_WATCHDOG_ISOLATION_MEASURED) != labels:
+        misses.append("isolation measurements %r do not cover exactly the labels %r"
+                      % (sorted(_WATCHDOG_ISOLATION_MEASURED), sorted(labels)))
+    for label in sorted(labels & set(_WATCHDOG_ISOLATION_MEASURED)):
+        measured = _WATCHDOG_ISOLATION_MEASURED[label]
+        if not (_watchdog_finite_seconds(measured) and measured > 0
+                and _watchdog_isolation_timeout(label) >= _WATCHDOG_ISOLATION_MARGIN * measured
+                and _watchdog_isolation_timeout(label) >= _WATCHDOG_ISOLATION_TIMEOUT):
+            misses.append("isolation bound %r for %s is under %r x its measured %r s"
+                          % (_watchdog_isolation_timeout(label), label,
+                             _WATCHDOG_ISOLATION_MARGIN, measured))
+    if not _WATCHDOG_ISOLATION_MARGIN >= 5:
+        misses.append("isolation margin %r below 5" % (_WATCHDOG_ISOLATION_MARGIN,))
+    if all(_WATCHDOG_ISOLATION_TIMEOUT >= _WATCHDOG_ISOLATION_MARGIN * seconds
+           for seconds in _WATCHDOG_ISOLATION_MEASURED.values()):
+        misses.append("the isolation bound vector does not discriminate the pre-fix flat bound")
+    if _watchdog_isolation_budget() != sum(_deadline_case_budget(timeout)
+                                           for _fixture, timeout in want):
+        misses.append("isolation budget %r does not charge each case at its bound"
+                      % (_watchdog_isolation_budget(),))
     return misses
 
 
@@ -16306,14 +16387,14 @@ def _watchdog_regression_self_test():
         ("poll-collected", 1266), ("close-cancel", 1014), ("escalate-degraded", 784),
         ("poll-masked", 2954), ("unpinned-kill", 600), ("census-verify", 630),
         ("census-exception", 780), ("receipt-high-fd", 10)))
-    # The isolation matrix in this leg: 31 timer cases, each one 180 s
-    # fixture call, charged its allowance by the leg's ledger. A call that
-    # overruns that allowance overruns the leg, which its process bound then
-    # ends; the top-level run of the same matrix has no such bound (each of
-    # its calls is bounded on its own, and a call killed at that bound is
-    # the distinct CANNOT-EVALUATE there).
-    budgets["blocked-isolation"] = (len(_watchdog_isolation_cases())
-                                    * _deadline_case_budget(_WATCHDOG_ISOLATION_TIMEOUT))
+    # The isolation matrix in this leg: 31 timer cases, each one fixture call
+    # at its label's measured bound (_watchdog_isolation_timeout), charged its
+    # allowance by the leg's ledger. A call that overruns that allowance
+    # overruns the leg, which its process bound then ends; the top-level run
+    # of the same matrix has no such bound (each of its calls is bounded on
+    # its own, and a call killed at that bound is the distinct
+    # CANNOT-EVALUATE there).
+    budgets["blocked-isolation"] = _watchdog_isolation_budget()
     # The ledger concurrency vectors: the declared budget IS the vector
     # leg's own (the fixture passes it through), so the kill-bound rule
     # (budget + launch margin) prices each vector exactly.
