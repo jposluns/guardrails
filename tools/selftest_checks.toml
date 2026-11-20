@@ -7001,7 +7001,7 @@ expected-check-ids = [
 
 [[suite]]
 id = "dispatch-marker-selftest"
-runner = "tools/orch_dispatch_marker.py"
+runner = "tools/selftest_orch_dispatch_marker.py"
 expected-check-ids = [
   # wait: a result is accepted only when it carries the expected dispatch id
   "wait/incident-stale-id-4",
